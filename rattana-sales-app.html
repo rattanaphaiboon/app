@@ -869,7 +869,7 @@ font-family: inherit;
 /* ─── PRODUCT MODAL ─── */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 200; display: none; align-items: flex-end; overflow: hidden; }
 .modal-backdrop.active { display: flex; }
-.modal { background: var(–card-bg); width: 100%; max-width: 480px; margin: 0 auto; border-radius: 20px 20px 0 0; padding: 18px 16px 16px; max-height: 86dvh; overflow-y: auto; overscroll-behavior: contain; animation: slideUp .3s ease; box-shadow: 0 -200px 0 0 var(–card-bg); position: relative; }
+.modal { background: var(–card-bg); width: 100%; max-width: 480px; margin: 0 auto; border-radius: 20px 20px 0 0; padding: 18px 16px 16px; max-height: 86dvh; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; animation: slideUp .3s ease; box-shadow: 0 -200px 0 0 var(–card-bg); position: relative; }
 @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
 .modal-handle { width: 42px; height: 4px; background: var(–border); border-radius: 2px; margin: -8px auto 12px; }
 .modal-title { font-size: 17px; font-weight: 700; margin-bottom: 4px; padding-right: 38px; }
@@ -879,12 +879,13 @@ font-family: inherit;
 
 /* Product image banner at top of product order modal (Surat 2026-05-10 v4.3) */
 .modal-photo-banner {
-width: calc(100% + 32px);   /* bleed to modal edges (padding 16px each side) */
+width: calc(100% + 32px);
 margin: -4px -16px 14px;
-height: 200px;
+height: 160px;
 overflow: hidden;
 position: relative;
 background: linear-gradient(135deg, var(–navy) 0%, var(–navy-mid) 100%);
+flex-shrink: 0;
 }
 .modal-product-photo {
 width: 100%; height: 100%;
@@ -3199,13 +3200,22 @@ function searchSheetProducts(query, limit=50) {
 function visibleSheetCustomers() {
   if (!currentUser) return [];
   const list = SHEET_DATA.customers || [];
-  // Role 6+ = Manager/Executive: see ALL customers
-  if (currentUser.role >= 6) return list;
-  // Role 5 = Supervisor: see own warehouse
-  if (currentUser.role >= 5) return list.filter(c => c['WH'] === currentUser.warehouse);
-  // Role 3-4: own customers only
-  const myName = (currentUser.name || '').toLowerCase();
-  return list.filter(c => String(c['เซลล์ผู้ดูแล']||'').toLowerCase().includes(myName));
+  const role = currentUser.role || 0;
+  // Role 7+ = ผู้บริหาร: see ALL customers company-wide (Surat 2026-05-10 v4.3)
+  if (role >= 7) return list;
+  // Role 6 = ผู้จัดการ: see ALL customers (same as 7)
+  if (role >= 6) return list;
+  // Role 5 = หัวหน้าคลัง: see all customers in OWN warehouse (WH column)
+  if (role >= 5) {
+    const myWh = String(currentUser.warehouse || '').trim().toUpperCase();
+    return list.filter(c => {
+      const wh = String(c['WH']||c['คลัง']||'').trim().toUpperCase();
+      return !myWh || wh === myWh;
+    });
+  }
+  // Role 3-4: own customers only (เซลล์ผู้ดูแล matches name exactly)
+  const myName = String(currentUser.name || '').trim();
+  return list.filter(c => String(c['เซลล์ผู้ดูแล']||'').trim() === myName);
 }
 
 function getDayNameThai() {
@@ -3260,13 +3270,26 @@ function isSaleRow(row) {
 // Get sales rows for a salesman (own data)
 function mySalesRows() {
   if (!SHEET_DATA.orders || !SHEET_DATA.orders.length) return [];
-  const myCode = (currentUser && currentUser.salesmanCode) || SALESMAN.code || '';
-  const myEmail = ((currentUser && currentUser.email) || SALESMAN.email || '').toLowerCase();
-  if (!myCode && !myEmail) return [];
+  const myCode  = String((currentUser && currentUser.salesmanCode) || SALESMAN.code || '').trim();
+  const myEmail = String((currentUser && currentUser.email) || SALESMAN.email || '').toLowerCase().trim();
+  const myName  = String((currentUser && currentUser.name) || SALESMAN.name || '').trim();
+  // If we have no identifier at all, return all rows (Role 7 bypass mode)
+  if (!myCode && !myEmail && !myName) return SHEET_DATA.orders;
   return SHEET_DATA.orders.filter(r => {
-    const rCode = String(r['รหัสเซลล์']||r['รหัสเซล']||'').trim();
-    const rEmail = String(r['email']||'').trim().toLowerCase();
-    return (myCode && rCode === myCode) || (myEmail && rEmail === myEmail);
+    if (myCode) {
+      const rCode = String(r['รหัสเซลล์']||r['รหัสเซล']||'').trim();
+      if (rCode && rCode === myCode) return true;
+    }
+    if (myEmail) {
+      const rEmail = String(r['email']||'').trim().toLowerCase();
+      if (rEmail && rEmail === myEmail) return true;
+    }
+    if (myName) {
+      // Match column "ชื่อ-สกุล" (order tab) against user's name
+      const rName = String(r['ชื่อ-สกุล']||r['ชื่อ - สกุล']||'').trim();
+      if (rName && rName === myName) return true;
+    }
+    return false;
   });
 }
 
@@ -3731,11 +3754,12 @@ function showScreen(id) {
 function goHome() { renderHomeDashboard(); showScreen('screenHome'); updateCartBar(); }
 function goRoute() { renderShopList(); showScreen('screenRoute'); updateCartBar(); }
 function goOrders() {
-  // Set default scope per role before rendering (per Surat 2026-05-10 v4.3)
+  // Set default scope per role (per Surat 2026-05-10 v4.3)
   const level = SALESMAN.level || 0;
-  if (level >= 6 && ordersView === 'me') ordersView = 'company';
+  if (level >= 7) ordersView = 'company';        // Role 7: ทั้งบริษัท by default
+  else if (level >= 6 && ordersView === 'me') ordersView = 'company';
   else if (level === 5 && ordersView === 'me') ordersView = 'warehouse';
-  // Role 3-4: keep 'me'
+  // Role 3-4: stay 'me'
   renderOrdersList(); showScreen('screenOrders'); updateCartBar();
 }
 
