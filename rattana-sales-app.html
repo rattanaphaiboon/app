@@ -1581,6 +1581,8 @@ body.dark .text-gold { color: var(--gold-light); }
   .modal { max-width: 480px !important; }
 }
 </style>
+  <!-- Google Identity Services (v5.0 — real OAuth login) -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
@@ -1597,17 +1599,20 @@ body.dark .text-gold { color: var(--gold-light); }
   <div style="font-size:28px;font-weight:800;margin-bottom:6px;letter-spacing:2px">RATTANA <span style="color:#c9a84c">SALES</span></div>
   <div style="font-size:12px;opacity:.85;margin-bottom:24px;text-align:center">บริษัท รัตนไพบูลย์ สมุทรสงคราม 2555 จำกัด</div>
 
-  <div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:22px;width:100%;max-width:380px;backdrop-filter:blur(10px)">
-    <div style="font-size:16px;font-weight:700;margin-bottom:6px;color:#e8c86a;text-align:center">🔐 เลือกผู้ใช้งาน</div>
-    <div style="font-size:11px;opacity:.75;margin-bottom:16px;text-align:center" id="loginSubtitle">กำลังโหลดรายชื่อ...</div>
+  <div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:28px 22px;width:100%;max-width:380px;backdrop-filter:blur(10px);text-align:center">
+    <div style="font-size:16px;font-weight:700;margin-bottom:8px;color:#e8c86a">🔐 เข้าสู่ระบบ</div>
+    <div style="font-size:12px;opacity:.75;margin-bottom:24px">ใช้บัญชี Google ของบริษัท</div>
 
-    <select id="userPicker" style="width:100%;padding:14px;border-radius:10px;border:1px solid rgba(201,168,76,.35);background:rgba(255,255,255,.08);color:#fff;font-size:14px;font-family:inherit;font-weight:600;outline:none;margin-bottom:12px" onchange="onUserPicked()">
-      <option value="">— กรุณาเลือก —</option>
-    </select>
+    <!-- Google Sign-In button rendered here by GSI -->
+    <div id="googleSignInBtn" style="display:flex;justify-content:center;margin-bottom:14px"></div>
 
-    <button id="loginBtn" onclick="loginWithPicker()" disabled style="width:100%;padding:14px;border-radius:10px;border:none;background:#c9a84c;color:#0d1b3e;font-size:15px;font-weight:800;font-family:inherit;cursor:pointer;opacity:.5">เข้าสู่ระบบ →</button>
+    <!-- Spinner shown while verifying -->
+    <div id="loginSpinner" style="display:none;padding:14px;font-size:13px;opacity:.8">
+      <span style="animation:spin 1s linear infinite;display:inline-block;margin-right:6px">🔄</span>
+      กำลังตรวจสอบบัญชี...
+    </div>
 
-    <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:12px;font-size:12px;display:none"></div>
+    <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
   <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v5.0 · 2026-05-11</div>
 </div>
@@ -2333,6 +2338,12 @@ function decodeJwtPayload(token) {
   return JSON.parse(new TextDecoder('utf-8').decode(bytes));
 }
 
+// ─── v5.0 Google OAuth Login ───────────────────────────────────────────
+// Uses Google Identity Services (GIS) One Tap + button
+// Flow: Google popup → credential JWT → decode email → match User Sheet → enterApp()
+
+let _allUsers = []; // loaded fresh on showLogin()
+
 function showLoginError(msg) {
   const el = document.getElementById('loginError');
   if (!el) return;
@@ -2340,74 +2351,81 @@ function showLoginError(msg) {
   el.style.display = 'block';
 }
 
-// User picker — fetches User Sheet on showLogin(), populates dropdown
-let _allUsers = [];
-async function populateUserPicker() {
-  const sub = document.getElementById('loginSubtitle');
-  const sel = document.getElementById('userPicker');
-  if (sub) sub.textContent = 'กำลังโหลดรายชื่อ...';
+function initGoogleSignIn() {
+  if (!window.google || !window.google.accounts) {
+    // GSI not ready yet — retry
+    setTimeout(initGoogleSignIn, 300);
+    return;
+  }
+  google.accounts.id.initialize({
+    client_id: CONFIG.clientId,
+    callback: handleGoogleCredential,
+    auto_select: false,
+    cancel_on_tap_outside: true,
+  });
+  // Render the button
+  const btnEl = document.getElementById('googleSignInBtn');
+  if (btnEl) {
+    google.accounts.id.renderButton(btnEl, {
+      type: 'standard',
+      theme: 'outline',
+      size: 'large',
+      text: 'signin_with',
+      shape: 'rectangular',
+      logo_alignment: 'left',
+      width: 300,
+    });
+  }
+  // Also prompt One Tap (optional — works on repeat visits)
+  google.accounts.id.prompt();
+}
+
+async function handleGoogleCredential(response) {
+  const el = document.getElementById('loginSpinner');
+  const errEl = document.getElementById('loginError');
+  if (el) el.style.display = 'block';
+  if (errEl) errEl.style.display = 'none';
+
   try {
-    _allUsers = await fetchSheet(CONFIG.usersSheetId, CONFIG.usersSheetTab);
-    console.log('[login] User Sheet loaded:', _allUsers.length, 'rows');
+    // Decode JWT payload (no verification needed — Google already verified it)
+    const jwt = response.credential;
+    const payload = JSON.parse(atob(jwt.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
+    const email = normalizeEmail(payload.email || '');
+    console.log('[login] Google OAuth email:', email);
 
-    // Filter Active + role >= 3, sort by warehouse then name
-    const active = _allUsers
-      .filter(u => String(u['Status']||'').trim().toLowerCase() === 'active')
-      .filter(u => (parseInt(u['User Role'])||0) >= 3)
-      .sort((a,b) => {
-        const wa = String(a['W']||'').localeCompare(String(b['W']||''));
-        if (wa !== 0) return wa;
-        return String(a['ชื่อ - สกุล']||'').localeCompare(String(b['ชื่อ - สกุล']||''));
-      });
+    if (!email) throw new Error('ไม่พบ email จาก Google');
 
-    if (sel) {
-      sel.innerHTML = '<option value="">— กรุณาเลือก —</option>' +
-        active.map((u,i) => {
-          const name = u['ชื่อ - สกุล'] || u['ชื่อเล่น'] || u['E-mail'] || '?';
-          const wh = u['W'] || '?';
-          const role = parseInt(u['User Role'])||0;
-          const roleLabel = role >= 7 ? '👑' : role >= 6 ? '📊' : role >= 5 ? '📈' : '🛒';
-          return `<option value="${i}">${roleLabel} ${name} · ${wh} · Role ${role}</option>`;
-        }).join('');
-      // Store filtered list for picker
-      sel._activeUsers = active;
+    // Load User Sheet if not yet loaded
+    if (!_allUsers.length) {
+      _allUsers = await fetchSheet(CONFIG.usersSheetId, CONFIG.usersSheetTab);
     }
-    if (sub) sub.textContent = `${active.length} ผู้ใช้ใน Sheet — เลือกเพื่อทดสอบ`;
+
+    // Match email → user row
+    const user = _allUsers.find(u => {
+      const uEmail = normalizeEmail(u['E-mail'] || u['Email'] || u['email'] || '');
+      return uEmail && uEmail === email;
+    });
+
+    if (!user) {
+      throw new Error(
+        `ไม่พบบัญชี ${email} ในระบบ\n` +
+        `กรุณาติดต่อผู้ดูแลระบบเพื่อเพิ่มอีเมลใน User Sheet`
+      );
+    }
+
+    const role = parseInt(user['User Role']) || 3;
+    currentUser = buildUserFromRow(user, email, role);
+    saveSharedSession(currentUser);
+    await enterApp();
+
   } catch (e) {
-    console.error('[login] User Sheet fetch failed:', e);
-    if (sub) sub.textContent = '❌ โหลด User Sheet ไม่ได้';
-    showLoginError('โหลด User Sheet ไม่ได้: ' + e.message + '\nตรวจ Sheet permission "Anyone with link"');
+    console.error('[login] OAuth error:', e);
+    showLoginError(e.message || 'เข้าสู่ระบบไม่สำเร็จ');
+    if (el) el.style.display = 'none';
   }
 }
 
-function onUserPicked() {
-  const sel = document.getElementById('userPicker');
-  const btn = document.getElementById('loginBtn');
-  const has = sel && sel.value !== '';
-  if (btn) {
-    btn.disabled = !has;
-    btn.style.opacity = has ? '1' : '0.5';
-  }
-}
-
-async function loginWithPicker() {
-  const sel = document.getElementById('userPicker');
-  if (!sel || sel.value === '') return;
-  const idx = parseInt(sel.value);
-  const user = (sel._activeUsers || [])[idx];
-  if (!user) return;
-
-  console.log('[login] picked:', user);
-
-  const email = normalizeEmail(user['E-mail'] || user['Email'] || user['email']) || ('user'+idx+'@rattana.local');
-  const role = parseInt(user['User Role']) || 3;
-
-  currentUser = buildUserFromRow(user, email, role);
-  // Save to all session keys (per master prompt 2026-05-08): shared SSO + legacy
-  saveSharedSession(currentUser);
-  await enterApp();
-}
-
+// Keep buildUserFromRow (used by OAuth + legacy SSO restore)
 function buildUserFromRow(user, email, role) {
   return {
     email,
@@ -2422,6 +2440,16 @@ function buildUserFromRow(user, email, role) {
     salesmanCode:user['รหัสเซล'] || '',
   };
 }
+
+// Called by showLogin() to init GSI button
+function populateUserPicker() {
+  // Legacy function name kept for compatibility — now just inits Google Sign-In
+  initGoogleSignIn();
+}
+
+// Legacy stubs (no longer used but kept to avoid reference errors)
+function onUserPicked() {}
+async function loginWithPicker() {}
 
 // ─── IndexedDB cache (v4.5+ — handles >5MB unlike localStorage) ───
 const IDB_NAME = 'rattana_cache_v1';
@@ -2677,7 +2705,7 @@ function checkSession() {
     console.log('[Rattana Sales] Auto-login from Hub session:', sharedSession.email);
     currentUser = {
       email:        sharedSession.email,
-      name:         sharedSession.name || '',           // ชื่อ - สกุล (no fallback per Section 5)
+      name:         sharedSession.name || '',
       nickname:     sharedSession.nickname || '',
       role:         parseInt(sharedSession.role) || 3,
       dept:         sharedSession.dept || '',
@@ -2692,27 +2720,18 @@ function checkSession() {
     return;
   }
 
-  // 2. BYPASS LOGIN — auto-enter as Role 7 viewing W1 stock (testing mode)
-  // HQ users default to viewing W1 (สมุทรสงคราม) — same view as field sales
-  // TODO: re-enable login later via showLogin()
-  currentUser = {
-    email: 'surat.rat@rattanaphaiboon.com',
-    name: 'สุรัตน์ รัตนไพบูลย์',
-    nickname: 'ภูมิ',
-    role: 7,
-    dept: 'IT',
-    company: 'รัตนไพบูลย์',
-    warehouse: 'W1',
-    empId: 'AUTO',
-    bplusCode: '',
-    salesmanCode: '',
-  };
-  enterApp();
+  // 2. No session found → show real Google login
+  console.log('[Rattana Sales] No session found — showing login screen');
+  showLogin();
 }
 
 function showLogin() {
-  // Disabled in testing mode — redirect to auto-login
-  checkSession();
+  const loginEl = document.getElementById('loginScreen');
+  const appEl   = document.getElementById('appScreen');
+  if (loginEl) { loginEl.style.display = 'flex'; loginEl.classList.add('show'); }
+  if (appEl)   { appEl.style.display = 'none'; }
+  // Init Google Sign-In button
+  populateUserPicker();
 }
 
 function showProfile() {
@@ -2751,8 +2770,10 @@ function logout() {
   localStorage.removeItem('rattana_session');
   localStorage.removeItem('rattanaUser');
   localStorage.removeItem('rattanaSalesUser');
-  localStorage.removeItem('rattana_sheet_cache_v2');  // clear data cache on logout
+  localStorage.removeItem('rattana_sheet_cache_v2');
   cacheClear();
+  // v5.0: also revoke Google session so next user sees account picker
+  try { if (window.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect(); } catch {}
   location.reload();
 }
 
@@ -7112,6 +7133,9 @@ function confirmOrder() {
     synced: false,
   });
 
+  // v5.0: Inject into SHEET_DATA.orders immediately so KPIs + Orders tab update without waiting
+  _injectSubmittedOrdersIntoSheetData();
+
   const isReorder = !!(v && v.checkOutTime);
   showToast(`✅ ${isReorder ? 'สั่งเพิ่มเรียบร้อย' : 'ส่งออเดอร์เรียบร้อย'} ฿${total.toLocaleString(undefined,{maximumFractionDigits:0})}`, 'success');
 
@@ -7120,6 +7144,11 @@ function confirmOrder() {
     .then(() => {
       const o = submittedOrders.find(x => x.id === orderId);
       if (o) o.synced = true;
+      // v5.0 FIX: clear orders cache so next refresh fetches fresh from Sheet
+      try { localStorage.removeItem('rsa_orders'); } catch {}
+      // Also inject the new rows into SHEET_DATA.orders immediately
+      // so Orders tab + Home screen reflect the order without waiting for next fetch
+      _injectSubmittedOrdersIntoSheetData();
       if (typeof rerenderCurrentScreen === 'function') rerenderCurrentScreen();
     })
     .catch(e => console.warn('Order sync error:', e));
@@ -7130,6 +7159,55 @@ function confirmOrder() {
   const notesElAfter = document.getElementById('orderNotes');
   if (notesElAfter) notesElAfter.value = '';
   setTimeout(() => goOrders(), 700);
+}
+
+// v5.0: Inject locally-submitted orders into SHEET_DATA.orders immediately after push
+// So Orders tab and Home KPIs reflect the order without waiting for next Sheet fetch.
+// Rows are built in the same format as Sheet rows so buildOrdersList() works correctly.
+function _injectSubmittedOrdersIntoSheetData() {
+  if (!submittedOrders.length) return;
+  SHEET_DATA.orders = SHEET_DATA.orders || [];
+
+  for (const o of submittedOrders) {
+    for (const c of o.items) {
+      const p = findProduct(c.productId) ||
+                (SHEET_DATA.products||[]).find(x =>
+                  x['CODE EA']===c.productId || x['CODE CS']===c.productId || x['PRODUCT NAME']===c.productId);
+      const productName = p ? (p.name || p['PRODUCT NAME']) : c.productId;
+      const unitMap = { piece:'ชิ้น', pack:'แพ็ค', bigpack:'แพ็คใหญ่', case:'ลัง' };
+      const unitLabel = (p && p.unitLabels && p.unitLabels[c.unit]) || unitMap[c.unit] || c.unit;
+      const codeMap = { piece:'CODE EA', pack:'CODE PA', bigpack:'CODE BP', case:'CODE CS' };
+      const barcode = (p && p[codeMap[c.unit]]) || (p && p['CODE EA']) || c.productId;
+
+      // Check if already injected (avoid duplicates on re-call)
+      const alreadyIn = SHEET_DATA.orders.some(r =>
+        r['orderId'] === o.id &&
+        String(r['Barcode']||'') === String(barcode)
+      );
+      if (alreadyIn) continue;
+
+      SHEET_DATA.orders.unshift({
+        'วัน':         o.date,
+        'เวลา':        o.time,
+        'email':      (currentUser && currentUser.email) || SALESMAN.email || '',
+        'ชื่อ-สกุล':   (currentUser && currentUser.name) || SALESMAN.name || '',
+        'รหัสเซลล์':   (currentUser && currentUser.salesmanCode) || SALESMAN.code || '',
+        'คลัง':        SALESMAN.warehouseId || '',
+        'ชื่อร้าน':    o.shopName,
+        'รหัสร้าน':    o.shopId,
+        'รูปแบบ':      (c.isFree || c.isPromo) ? 'แถม' : 'ขาย',
+        'Barcode':    barcode,
+        'ชื่อสินค้า':  c.isFree && c.giftName && !p ? c.giftName : productName,
+        'จำนวน':       c.qty,
+        'หน่วย':       unitLabel,
+        'ราคา':        c.price,
+        'ยอดเงินรวม': c.qty * c.price,
+        'orderId':    o.id,
+        'หมายเหตุ':   o.notes || '',
+      });
+    }
+  }
+  console.log('[Rattana Sales] Injected submitted orders into SHEET_DATA.orders. Total rows:', SHEET_DATA.orders.length);
 }
 
 async function pushOrderToSheet(orderId, shop, items, now, notes) {
