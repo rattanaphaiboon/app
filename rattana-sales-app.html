@@ -2532,11 +2532,16 @@ async function enterApp() {
   SALESMAN.email       = currentUser.email;
   SALESMAN.nickname    = currentUser.nickname;
 
-  console.log('[enterApp] user hydrated:', SALESMAN.name, 'role=', SALESMAN.level);
+  console.log('[enterApp] user hydrated:', SALESMAN.name, 'email:', SALESMAN.email, 'role=', SALESMAN.level);
+
+  // v5.0 FIX: Always clear orders cache on login — orders must be fresh every session
+  // idb 'all' cache has 24h TTL so it serves yesterday's orders → today filter shows 0
+  try { localStorage.removeItem('rsa_orders'); } catch {}
+  console.log('[enterApp] orders cache cleared — will fetch fresh from Sheet');
 
   initAppUI();
 
-  // ─── v4.5 FAST BOOT — try IndexedDB cache first (instant UI) ───
+  // ─── v4.5 FAST BOOT — try IndexedDB cache first (instant UI for non-orders data) ───
   let hadCache = false;
   try {
     const cached = await idbGet('all');
@@ -2544,7 +2549,8 @@ async function enterApp() {
       if (cached.customers)   { SHEET_DATA.customers   = cached.customers;   window._loadingState.customers = 'loaded'; }
       if (cached.products)    { SHEET_DATA.products    = cached.products;    window._loadingState.products = 'loaded'; }
       if (cached.promotions)  { SHEET_DATA.promotions  = cached.promotions;  window._loadingState.promotions = 'loaded'; }
-      if (cached.orders)      { SHEET_DATA.orders      = cached.orders;      window._loadingState.orders = 'loaded'; }
+      // v5.0: Do NOT restore orders from idb — always fetch fresh (idb orders are stale by design)
+      // if (cached.orders) ...  ← intentionally skipped
       if (cached.users)       { SHEET_DATA.users       = cached.users;       window._loadingState.users = 'loaded'; }
       if (cached.dataCenter)  { SHEET_DATA.dataCenter  = cached.dataCenter;  window._loadingState.dataCenter = 'loaded'; }
       if (cached.groupTargets){ SHEET_DATA.groupTargets= cached.groupTargets;window._loadingState.groupTargets = 'loaded'; }
@@ -2553,7 +2559,7 @@ async function enterApp() {
       rerenderCurrentScreen();
       if (typeof initStockHeartbeat === 'function') initStockHeartbeat();
       hadCache = true;
-      console.log('[enterApp] IndexedDB cache loaded (age:', Math.round((Date.now()-cached.ts)/60000), 'min)');
+      console.log('[enterApp] IndexedDB cache loaded (age:', Math.round((Date.now()-cached.ts)/60000), 'min) — orders will be fetched fresh');
     }
   } catch (e) { console.warn('idb cache read error:', e); }
 
@@ -2563,10 +2569,6 @@ async function enterApp() {
   }
 
   // ─── PROGRESSIVE LOADING — 3 waves, no blocking ───
-  // Wave 1 (~1s): Customer + Users (most critical for shop list)
-  // Wave 2 (~3s): Orders + Promotions + DataCenter (dashboard data)
-  // Wave 3 (~5-10s): Products 12K + DashboardConfig + GroupTargets (heaviest)
-  // Each tab marks itself loaded → triggers re-render in current screen
   loadProgressively();
 }
 
@@ -2590,8 +2592,8 @@ async function loadProgressively() {
     fetchWithCache('dataCenter', () => fetchSheet(CONFIG.backendSheetId, CONFIG.tabs.dataCenter), CONFIG.cacheTTLShort)
       .then(d => { SHEET_DATA.dataCenter = parseDataCenter(d); markLoaded('dataCenter'); })
       .catch(e => { console.warn('dataCenter:', e.message); markLoaded('dataCenter'); }),
-    fetchWithCache('orders', () => fetchSheet(CONFIG.backendSheetId, CONFIG.tabs.order), 5*60*1000)
-      .then(d => { SHEET_DATA.orders = d; markLoaded('orders'); console.log('[boot] Orders loaded:', d.length, 'rows'); })
+    fetchWithCache('orders', () => fetchSheet(CONFIG.backendSheetId, CONFIG.tabs.order), 2*60*1000)
+      .then(d => { SHEET_DATA.orders = d; markLoaded('orders'); console.log('[boot] Orders loaded:', d.length, 'rows for', SALESMAN.email); })
       .catch(e => { console.warn('orders:', e.message); markLoaded('orders'); }),
     fetchWithCache('syncStatus', () => fetchSheet(CONFIG.backendSheetId, CONFIG.tabs.syncStatus), 60*1000)
       .then(d => { SHEET_DATA.syncStatus = d || []; markLoaded('syncStatus'); })
@@ -7670,15 +7672,21 @@ function renderOrdersList() {
 
   if (allOrders.length === 0) {
     const filterDesc = describeDateFilter();
+    const myEmail = ((currentUser&&currentUser.email)||SALESMAN.email||'').toLowerCase();
+    const myName  = (currentUser&&currentUser.name)||SALESMAN.name||'';
+    const totalOrderRows = (SHEET_DATA.orders||[]).length;
     const noDataHint = (!SHEET_DATA.orders || SHEET_DATA.orders.length === 0)
       ? `<div style="margin-top:10px"><button class="btn btn-outline btn-sm" onclick="forceReloadOrders()">🔄 โหลดออเดอร์ใหม่</button></div><div style="font-size:10px;color:var(--muted);margin-top:6px">ถ้าเห็นข้อความนี้บ่อย แจ้งทีม IT</div>`
       : `<div style="margin-top:8px;font-size:11px;color:var(--muted)">ลองเปลี่ยนช่วงวันที่ด้านบน</div>`;
+    const debugInfo = `<div style="margin-top:10px;font-size:10px;color:var(--muted);text-align:left;background:var(--row-alt);border-radius:8px;padding:8px 10px;line-height:1.6">
+      🔍 Debug: email=${myEmail||'?'} · name=${myName||'?'} · Sheet rows=${totalOrderRows}
+    </div>`;
     const emptyMsg = ordersView === 'me'
       ? `ยังไม่มีออเดอร์ของคุณใน "${escapeHtml(filterDesc)}"`
       : ordersView === 'warehouse'
         ? `ยังไม่มีออเดอร์ในคลัง${SALESMAN.warehouse||SALESMAN.warehouseId} ใน "${escapeHtml(filterDesc)}"`
         : `ยังไม่มีออเดอร์ทั้งบริษัทใน "${escapeHtml(filterDesc)}"`;
-    list.innerHTML = `<div class="card text-center" style="color:var(--muted);padding:40px 20px">📋 ${emptyMsg}${noDataHint}</div>`;
+    list.innerHTML = `<div class="card text-center" style="color:var(--muted);padding:40px 20px">📋 ${emptyMsg}${noDataHint}${debugInfo}</div>`;
     return;
   }
 
