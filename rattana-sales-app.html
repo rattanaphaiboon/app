@@ -2204,9 +2204,9 @@ function parseCsv(text) {
 }
 
 async function fetchSheet(sheetId, sheetName) {
-  // Use JSON endpoint (Rattana Mart pattern) — faster + handles dates/numbers natively
-  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`;
-  // 45-sec timeout — gviz of huge tabs (Order/Product Detail) can stall on slow connections
+  // Use JSON endpoint — faster + handles dates/numbers natively
+  // headers=1 forces gviz to treat row 1 as column headers (prevents A,B,C column id fallback)
+  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}&headers=1`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 45000);
   let res, text;
@@ -2223,22 +2223,40 @@ async function fetchSheet(sheetId, sheetName) {
   // Strip JSONP wrapper: google.visualization.Query.setResponse({...});
   const json = JSON.parse(text.replace(/^[^(]+\(/, '').replace(/\);?\s*$/, ''));
   if (!json.table || !json.table.cols) return [];
-  const cols = json.table.cols.map(c => c.label || c.id || '');
-  return (json.table.rows || []).map(row => {
+
+  let cols = json.table.cols.map(c => c.label || c.id || '');
+  let rows = json.table.rows || [];
+
+  // Fallback: if all cols are single letters (A,B,C...) → labels not detected
+  // Use first data row as headers instead
+  const allLetters = cols.every(c => /^[A-Z]$/.test(c));
+  if (allLetters && rows.length > 0) {
+    console.warn('[fetchSheet] gviz returned column letters for', sheetName, '— extracting headers from row 0');
+    const headerRow = rows[0];
+    cols = cols.map((_, i) => {
+      const cell = headerRow.c && headerRow.c[i];
+      if (!cell) return '';
+      return String(cell.v || cell.f || '').trim();
+    });
+    rows = rows.slice(1); // skip header row from data
+  }
+
+  console.log('[fetchSheet]', sheetName, '— cols:', cols.slice(0,6).join(','), '— rows:', rows.length);
+
+  return rows.map(row => {
     const o = {};
     cols.forEach((h, i) => {
       if (!h) return;
       const cell = row.c && row.c[i];
       if (!cell || (cell.v === null && !cell.f)) { o[h] = ''; return; }
-      // Prefer formatted value (handles dates / numbers nicely)
       if (cell.f !== undefined && cell.f !== null && cell.f !== '') { o[h] = String(cell.f).trim(); return; }
       const v = cell.v;
-      // Handle Date(...) string format
+      // Handle Date(...) string format from gviz
       if (typeof v === 'string' && /^Date\(/.test(v)) {
         const m = v.match(/Date\((-?\d+),(\d+),(\d+)/);
         if (m) {
           const Y = +m[1], M = +m[2], D = +m[3];
-          o[h] = String(D).padStart(2,'0') + '/' + String(M+1).padStart(2,'0') + '/' + Y;
+          o[h] = `${Y}/${String(M+1).padStart(2,'0')}/${String(D).padStart(2,'0')}`;
           return;
         }
       }
