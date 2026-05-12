@@ -188,7 +188,11 @@ header {
 .ps-btn:active { background: #d4edda; }
 .ps-btn:disabled { color: #ccc; cursor: not-allowed; }
 .ps-val { min-width: 34px; text-align: center; font-size: 14px; font-weight: 900; color: var(--text); border-left: 1px solid #c8e6cc; border-right: 1px solid #c8e6cc; height: 34px; line-height: 34px; }
-/* v5.0 CAT chips in modal header */
+/* v5.0: PC layout — dropdowns beside date chips on wide screens */
+@media (min-width: 600px) {
+  .filter-bar-inner { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+  .filter-bar-inner .filter-dropdowns { display: flex; gap: 6px; margin-top: 0 !important; }
+}
 .cat-chips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
 .cat-chip { padding: 2px 7px; border-radius: 5px; font-size: 10px; font-weight: 700; }
 .cat-chip.vendor { background: rgba(30,127,255,.1); color: #1e7fff; }
@@ -6264,6 +6268,12 @@ function openProductModal(productId, editIdx = -1) {
   if (editIdx >= 0) {
     initialQty = cart[editIdx].qty;
     initialPrice = cart[editIdx].price;
+  } else {
+    // v5.0: Auto-fill S03 price on first open
+    const sheet = p._sheet || p;
+    const unitCode = initialUnit === 'piece' ? 'EA' : initialUnit === 'pack' ? 'PA' : initialUnit === 'bigpack' ? 'BP' : 'CS';
+    const pr = productPrices(sheet, unitCode);
+    initialPrice = pr.S03 || pr.S02 || pr.S01 || '';
   }
 
   const ownStock = p.stock[SALESMAN.warehouseId] || 0;  // total EA
@@ -6390,7 +6400,7 @@ function openProductModal(productId, editIdx = -1) {
         <label class="modal-label">💰 ราคาต่อหน่วย <span style="font-weight:400;color:var(--muted);text-transform:none">(รวม VAT · ว่าง=ปกติ)</span></label>
         <div class="price-input-wrap">
           <span class="price-prefix">฿</span>
-          <input class="price-input" type="number" inputmode="decimal" id="modalPrice" value="${initialPrice}" placeholder="${defaultPriceForInit}" step="0.5" oninput="updateModalTotal()">
+          <input class="price-input" type="number" inputmode="decimal" id="modalPrice" value="${initialPrice}" placeholder="${defaultPriceForInit}" step="0.5" oninput="this._userEdited=true;updateModalTotal()">
         </div>
         <div class="price-hint" id="modalPriceHint"></div>
       </div>
@@ -6423,15 +6433,58 @@ function getCartItemPieces(idx) {
   return c.qty * mult;
 }
 
+// v5.0: Get suggested price tier based on qty + unit
+// Rules: EA → always S03 | qty≥20 CS → S01 | qty≥10 PA/BP/CS → S02 | else → S03
+// Returns { tier:'S03'|'S02'|'S01', price: number }
+function getSuggestedTierPrice(p, unit, qty) {
+  const sheet = p._sheet || p;
+  // Map internal unit names to Sheet price column suffix
+  const unitCode = unit === 'piece' ? 'EA' : unit === 'pack' ? 'PA' : unit === 'bigpack' ? 'BP' : 'CS';
+  const pr = productPrices(sheet, unitCode);
+  // Cap = Math.floor(S03 × 1.05) — applies to ALL units, no decimal
+  const s03 = pr.S03 || pr.S02 || pr.S01 || 0;
+  const priceCap = s03 > 0 ? Math.floor(s03 * 1.05) : 0;
+
+  let tier = 'S03';
+  let suggestedPrice = s03;
+
+  if (unit !== 'piece') { // EA always S03
+    if (unit === 'case' && qty >= 20 && pr.S01) {
+      tier = 'S01'; suggestedPrice = pr.S01;
+    } else if (qty >= 10 && pr.S02) {
+      tier = 'S02'; suggestedPrice = pr.S02;
+    }
+  }
+  return { tier, price: suggestedPrice, cap: priceCap, s03 };
+}
+
 function setUnit(unit) {
   if (!currentModalProduct) return;
   document.querySelectorAll('.unit-tab').forEach(t => t.classList.remove('active'));
   event.target.closest('.unit-tab').classList.add('active');
-  // Update placeholder (default price for this unit) — DON'T pre-fill the input
+  const p = currentModalProduct;
+  const qty = parseInt((document.getElementById('modalQty')||{}).value) || 1;
+  const { price } = getSuggestedTierPrice(p, unit, qty);
   const priceInput = document.getElementById('modalPrice');
-  priceInput.placeholder = currentModalProduct.price[unit];
-  // Clear value so placeholder shows again (unless user already typed something)
-  priceInput.value = '';
+  // Always auto-fill price when switching unit (unit change = new context)
+  if (priceInput) {
+    priceInput.value = price || '';
+    priceInput._userEdited = false;
+  }
+  updateModalTotal();
+}
+
+function adjQty(delta) {
+  const inp = document.getElementById('modalQty');
+  const v = Math.max(1, (parseInt(inp.value) || 1) + delta);
+  inp.value = v;
+  // Auto-update price tier only if user hasn't manually edited price
+  const priceInput = document.getElementById('modalPrice');
+  if (priceInput && !priceInput._userEdited && currentModalProduct) {
+    const unit = getCurrentUnit();
+    const { price } = getSuggestedTierPrice(currentModalProduct, unit, v);
+    if (price) priceInput.value = price;
+  }
   updateModalTotal();
 }
 
@@ -6439,13 +6492,6 @@ function getCurrentUnit() {
   const active = document.querySelector('.unit-tab.active');
   if (!active) return 'piece';
   return active.getAttribute('data-unit') || 'piece';
-}
-
-function adjQty(delta) {
-  const inp = document.getElementById('modalQty');
-  const v = Math.max(1, (parseInt(inp.value) || 1) + delta);
-  inp.value = v;
-  updateModalTotal();
 }
 
 function updateModalTotal() {
@@ -6456,35 +6502,45 @@ function updateModalTotal() {
   const qty = qtyRaw === '' ? 1 : (parseInt(qtyRaw) || 1);
   const priceInput = document.getElementById('modalPrice');
   const priceRaw = priceInput.value.trim();
-  // If input is empty → use default S03 VAT-inclusive; if user typed something → use that (already VAT-inclusive)
-  const price = priceRaw === '' ? withVat(p.price[unit]) : (parseFloat(priceRaw) || 0);
-  const minPrice = withVat(p.minPrice[unit]);
-  const total = qty * price;
 
+  // Get suggested tier + cap
+  const { tier, price: suggestedPrice, cap, s03 } = getSuggestedTierPrice(p, unit, qty);
+
+  // If price box empty → auto-fill suggested tier price (S03 on open, tier on qty change)
+  if (priceRaw === '' || priceRaw === '0') {
+    priceInput.value = suggestedPrice || '';
+  }
+
+  let price = parseFloat(priceInput.value) || 0;
+
+  // Enforce cap: if price > Math.floor(S03 × 1.05), clamp to cap
+  if (cap > 0 && price > cap) {
+    price = cap;
+    priceInput.value = cap;
+    priceInput.style.borderColor = 'var(--warning)';
+  } else {
+    priceInput.style.borderColor = '';
+  }
+
+  const total = qty * price;
   document.getElementById('modalTotal').textContent = `฿ ${total.toLocaleString(undefined,{minimumFractionDigits:0,maximumFractionDigits:0})}`;
 
   // qty hint — total pieces
   let mult = 1;
   if (unit === 'pack') mult = p.packSize;
+  else if (unit === 'bigpack') mult = p.bpSize || (p.packSize * p.caseSize);
   else if (unit === 'case') mult = p.packSize * p.caseSize;
   const totalPieces = qty * mult;
-  document.getElementById('modalQtyHint').textContent = `= ${totalPieces} ชิ้น`;
+  document.getElementById('modalQtyHint').textContent = `= ${totalPieces.toLocaleString()} ชิ้น`;
 
-  // price hint — show available tier prices (per Surat 2026-05-06)
-  // Layout:
-  //   EA=฿55  PA=฿630  BP=  1CS=฿635
-  //   10CS=฿631  >20CS=฿625  ควบคุม ฿620
-  // Skip rows where price is 0/empty.
+  // price hint — show tier info + cap
   const hint = document.getElementById('modalPriceHint');
   const addBtn = document.getElementById('modalAddBtn');
   const isManager = (currentUser?.role || SALESMAN.level) >= 5;
-
-  // Determine if this is a Sheet product (has CODE EA/CS) or mock (has p.price object)
   const isSheetProduct = !!(p['PRODUCT NAME'] && (p['CODE EA'] || p['CODE CS']));
 
   let hintHTML = '';
   if (isSheetProduct) {
-    // Use Sheet pricing — productPrices() with CC fallback
     const pEA = productPrices(p, 'EA');
     const pPA = productPrices(p, 'PA');
     const pBP = productPrices(p, 'BP');
@@ -6494,44 +6550,35 @@ function updateModalTotal() {
     if (pPA.S03) lines.push(`<span style="color:var(--muted)">PA</span> <strong>฿${pPA.S03.toLocaleString()}</strong>`);
     if (pBP.S03) lines.push(`<span style="color:var(--muted)">BP</span> <strong>฿${pBP.S03.toLocaleString()}</strong>`);
     if (pCS.S03) lines.push(`<span style="color:var(--muted)">1CS</span> <strong>฿${pCS.S03.toLocaleString()}</strong>`);
-    let row1 = lines.join(' &nbsp; ');
     const lines2 = [];
-    if (pCS.S02) lines2.push(`<span style="color:var(--muted)">10CS</span> <strong>฿${pCS.S02.toLocaleString()}</strong>`);
-    if (pCS.S01) lines2.push(`<span style="color:var(--muted)">&gt;20CS</span> <strong>฿${pCS.S01.toLocaleString()}</strong>`);
+    if (pCS.S02) lines2.push(`<span style="color:var(--muted)">≥10CS</span> <strong>฿${pCS.S02.toLocaleString()}</strong>`);
+    if (pCS.S01) lines2.push(`<span style="color:var(--muted)">≥20CS</span> <strong>฿${pCS.S01.toLocaleString()}</strong>`);
     if (isManager && pCS.S00) lines2.push(`<span style="color:var(--danger);font-weight:700">ควบคุม ฿${pCS.S00.toLocaleString()}</span>`);
-    let row2 = lines2.join(' &nbsp; ');
+    // Tier indicator + cap notice
+    const tierLabel = { S03:'ปกติ', S02:'10+CS', S01:'20+CS' }[tier] || tier;
+    const capNote = cap > 0 ? `<span style="color:var(--warning)"> · สูงสุด ฿${cap.toLocaleString()}</span>` : '';
     hintHTML = `
       <div style="font-size:11px;line-height:1.7">
-        ${row1 ? `<div>${row1}</div>` : ''}
-        ${row2 ? `<div>${row2}</div>` : ''}
+        ${lines.length ? `<div>${lines.join(' &nbsp; ')}</div>` : ''}
+        ${lines2.length ? `<div>${lines2.join(' &nbsp; ')}</div>` : ''}
+        <div style="margin-top:2px">
+          <span style="color:var(--accent);font-weight:700">⚡ Tier: ${tierLabel} → ฿${suggestedPrice.toLocaleString()}</span>${capNote}
+        </div>
       </div>
     `;
   } else {
-    // Mock product — old UI (display VAT-inclusive)
-    hintHTML = `<span class="text-muted">ราคาปกติ ฿${withVat(p.price[unit])} (รวม VAT)</span>`;
+    const pr = p.price || {};
+    const lines = Object.entries(pr).map(([k,v]) => v ? `<span style="color:var(--muted)">${k}</span> <strong>฿${numv(v).toLocaleString()}</strong>` : '').filter(Boolean);
+    hintHTML = lines.length ? `<div style="font-size:11px">${lines.join(' &nbsp; ')}</div>` : '';
   }
-  hint.innerHTML = hintHTML;
-  hint.classList.remove('error');
-  priceInput.classList.remove('error');
-  addBtn.disabled = false;
+  if (hint) hint.innerHTML = hintHTML;
 
-  // Stock check — WARN ONLY, don't block
-  const ownStock = p.stock[SALESMAN.warehouseId] || 0;
-  const reserved = getReservedQty(p.id) - (editingCartIdx >= 0 ? getCartItemPieces(editingCartIdx) : 0);
-  const avail = ownStock - reserved;  // total EA
-  const csSize = p.csSize || 1;
-  const availDisp = formatEaToCsEa(avail, csSize);
-  const stockWarn = document.getElementById('modalStockWarn');
-  // v5.0: over-stock warning removed — user doesn't need it, always clear
-  if (stockWarn) stockWarn.innerHTML = '';
-
-  // ── Promotion hint (real-time check including this draft item) ──
-  updateModalPromoHint(p, qty, unit, price);
+  const isOverMin = price > 0;
+  if (addBtn) addBtn.disabled = !isOverMin;
+  showPromoHintInModal();
 }
 
-// Show promo progress hint in product modal — always shows promo info if applicable
-// Per Surat 2026-05-08 (v4.1): always describe the promo when product matches a promo
-//   ของแถม + เงื่อนไข + ความคืบหน้า + ปุ่มรับของแถม (ถ้าครบ)
+// Show promo progress hint in product modal
 function updateModalPromoHint(p, qty, unit, price) {
   const el = document.getElementById('modalPromoHint');
   if (!el) return;
@@ -7631,7 +7678,7 @@ function renderOrdersList() {
         </select>
       `;
 
-      extraFilters = `<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">${whFilter}${smFilter}</div>`;
+      extraFilters = `<div class="filter-dropdowns" style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">${whFilter}${smFilter}</div>`;
     }
 
     // Active filter summary + clear button
@@ -7642,12 +7689,14 @@ function renderOrdersList() {
 
     filterEl.innerHTML = `
       <div class="filter-bar">
-        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-          ${dateChips}
-          ${clearBtn}
+        <div class="filter-bar-inner">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            ${dateChips}
+            ${clearBtn}
+          </div>
+          ${customInputs}
+          ${extraFilters}
         </div>
-        ${customInputs}
-        ${extraFilters}
       </div>
     `;
   }
@@ -7732,13 +7781,15 @@ function renderOrdersList() {
     const salesmanLine = showSalesman && o.salesman
       ? `<span style="color:var(--muted);font-size:10px">👤 ${escapeHtml(o.salesman)}${o.warehouse?` • 🏭 ${o.warehouse}`:''}</span><br>`
       : '';
-    const clickable = o.source === 'local';
-    const localIdx = clickable ? submittedOrders.findIndex(x => x.id === o.id) : -1;
-    const onClick = clickable && localIdx >= 0
-      ? `viewOrderDetail(${localIdx})`
-      : `viewSheetOrderDetail('${o.id}')`;
-    const shareBtn = clickable && localIdx >= 0
-      ? `<button class="btn btn-line btn-sm" style="padding:8px 10px;min-height:36px;flex-shrink:0" onclick="event.stopPropagation();shareLine(${localIdx})" title="ส่ง LINE">📱</button>`
+    // v5.0: ALL cards clickable — show transaction detail + delete row
+    const onClick = `viewSheetOrderDetail('${o.id}')`;
+    const shareBtn = (o.source === 'local' && submittedOrders.findIndex(x=>x.id===o.id) >= 0)
+      ? `<button class="btn btn-line btn-sm" style="padding:8px 10px;min-height:36px;flex-shrink:0" onclick="event.stopPropagation();shareLine(${submittedOrders.findIndex(x=>x.id===o.id)})" title="ส่ง LINE">📱</button>`
+      : '';
+    // Date badge — show on multi-day views inside the card
+    const showDateInCard = !showDateHeaders && o.date;
+    const dateBadge = showDateInCard
+      ? `<span style="font-size:10px;color:var(--muted);margin-left:4px">📅 ${escapeHtml(o.date)}</span>`
       : '';
     return `
       <div class="order-row" style="background:var(--card-bg);border:1px solid var(--border);border-left:3px solid ${borderColor};border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px;box-shadow:var(--shadow-sm)">
@@ -7749,7 +7800,7 @@ function renderOrdersList() {
           </div>
           ${salesmanLine}
           <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted)">
-            <span>${escapeHtml(o.id)} • ⏰ ${escapeHtml(checkedIn)} • ${itemCount} รายการ</span>
+            <span>${escapeHtml(o.id)} • ⏰ ${escapeHtml(checkedIn)}${dateBadge} • ${itemCount} รายการ</span>
             <span style="font-size:14px;font-weight:800;color:var(--gold)">฿${Math.round(o.total||0).toLocaleString()}</span>
           </div>
         </div>
@@ -7825,28 +7876,136 @@ window.openCustomDatePicker = function() {
 
 // View order detail for orders that came from Sheet (read-only)
 window.viewSheetOrderDetail = function(orderId) {
-  const orders = buildTodayOrdersList(ordersView);
-  const o = orders.find(x => x.id === orderId);
-  if (!o) { showToast('ไม่พบออเดอร์', 'error'); return; }
-  const lines = [];
-  lines.push(`📋 ${o.id}`);
-  lines.push(`🏪 ${o.shopName} (${o.shopId||''})`);
-  if (o.salesman) lines.push(`👤 ${o.salesman} • 🏭 ${o.warehouse||''}`);
-  lines.push(`⏰ ${o.date} ${o.time}`);
-  lines.push('');
-  lines.push('รายการ:');
-  o.items.forEach((r,i) => {
-    const qty = numv(r['จำนวน']);
-    const unit = r['หน่วย']||'';
-    const price = numv(r['ราคา']);
-    const total = numv(r['ยอดเงินรวม']);
-    const isFree = String(r['รูปแบบ']||'').trim() === 'แถม';
-    lines.push(`${i+1}. ${isFree?'🎁 ':''}${r['ชื่อสินค้า']||r['Barcode']||'?'}`);
-    lines.push(`   ${qty} ${unit} × ฿${price} = ฿${Math.round(total).toLocaleString()}`);
+  // Collect all rows for this orderId from SHEET_DATA.orders
+  const allRows = (SHEET_DATA.orders || []).filter(r => String(r['orderId']||'').trim() === orderId);
+  if (!allRows.length) { showToast('ไม่พบข้อมูลออเดอร์', 'error'); return; }
+  const first = allRows[0];
+  const shopName = String(first['ชื่อร้าน']||'');
+  const shopId   = String(first['รหัสร้าน']||'');
+  const salesman = String(first['ชื่อ-สกุล']||first['ชื่อ - สกุล']||'');
+  const warehouse= String(first['คลัง']||'');
+  const date     = String(first['วัน']||'');
+  const time     = String(first['เวลา']||'');
+
+  // Separate ขาย vs แถม vs ยกเลิก rows
+  const saleRows   = allRows.filter(r => String(r['รูปแบบ']||'ขาย').trim() === 'ขาย');
+  const freeRows   = allRows.filter(r => String(r['รูปแบบ']||'').trim() === 'แถม');
+  const cancelRows = allRows.filter(r => String(r['รูปแบบ']||'').trim() === 'ยกเลิก');
+  const cancelledBarcodes = new Set(cancelRows.map(r => String(r['Barcode']||'').trim()));
+
+  const total = saleRows
+    .filter(r => !cancelledBarcodes.has(String(r['Barcode']||'').trim()))
+    .reduce((s, r) => s + numv(r['ยอดเงินรวม']), 0);
+
+  const rowHtml = (r, idx) => {
+    const barcode  = String(r['Barcode']||'').trim();
+    const name     = String(r['ชื่อสินค้า']||barcode||'?');
+    const qty      = numv(r['จำนวน']);
+    const unit     = String(r['หน่วย']||'');
+    const price    = numv(r['ราคา']);
+    const rowTotal = numv(r['ยอดเงินรวม']);
+    const isFree   = String(r['รูปแบบ']||'').trim() === 'แถม';
+    const isCancelled = cancelledBarcodes.has(barcode);
+    const style = isCancelled ? 'opacity:.45;text-decoration:line-through' : '';
+    const canDelete = !isCancelled && !isFree;
+    const deleteBtn = canDelete
+      ? `<button onclick="deleteOrderRow('${orderId}','${escapeAttr(barcode)}','${escapeAttr(name)}')" style="padding:3px 8px;border:1.5px solid var(--danger);border-radius:6px;background:none;color:var(--danger);font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;font-family:inherit">🗑️</button>`
+      : (isCancelled ? '<span style="font-size:10px;color:var(--danger)">ยกเลิกแล้ว</span>' : '');
+    return `
+      <div style="${style};display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:700;color:var(--text)">${isFree?'🎁 ':''}${escapeHtml(name)}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">
+            ${qty} ${escapeHtml(unit)} × ฿${price.toLocaleString()} ${isFree?'':` = <strong style="color:var(--gold)">฿${Math.round(rowTotal).toLocaleString()}</strong>`}
+          </div>
+        </div>
+        ${deleteBtn}
+      </div>
+    `;
+  };
+
+  const bodyHtml = `
+    <div style="padding:2px 0 8px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">
+        📅 ${escapeHtml(date)} ${escapeHtml(time)}
+        ${warehouse ? ` • 🏭 ${escapeHtml(warehouse)}` : ''}
+        ${salesman && ordersView !== 'me' ? `<br>👤 ${escapeHtml(salesman)}` : ''}
+      </div>
+      ${[...saleRows, ...freeRows].map(rowHtml).join('')}
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0 0;font-size:14px;font-weight:800">
+        <span>ยอดรวม</span>
+        <span style="color:var(--gold)">฿${Math.round(total).toLocaleString()}</span>
+      </div>
+    </div>
+  `;
+
+  openModal({
+    title: `🏪 ${shopName}`,
+    subtitle: `${orderId} • ${saleRows.length} รายการ`,
+    body: bodyHtml,
+    showAdd: false,
   });
-  lines.push('');
-  lines.push(`💰 รวม: ฿${Math.round(o.total||0).toLocaleString()}`);
-  alert(lines.join('\n'));
+};
+
+// v5.0: Generic modal opener for non-product content (order detail, etc.)
+function openModal({ title, subtitle, body, showAdd = false }) {
+  const backdrop = document.getElementById('productModal');
+  if (!backdrop) return;
+  document.getElementById('modalContent').innerHTML = `
+    <div class="modal-head">
+      <div class="modal-head-info" style="flex:1">
+        <div class="modal-title">${title}</div>
+        ${subtitle ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">${subtitle}</div>` : ''}
+      </div>
+      <button type="button" class="modal-close-x" onclick="closeModal()" aria-label="ปิด">✕</button>
+    </div>
+    <div class="modal-body">${body}</div>
+  `;
+  backdrop.classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+// v5.0: Delete a single order row by appending "ยกเลิก" row via Apps Script
+window.deleteOrderRow = async function(orderId, barcode, productName) {
+  if (!confirm(`ยืนยันยกเลิก:\n"${productName}"\nออเดอร์ ${orderId}?`)) return;
+  showToast('กำลังยกเลิกรายการ...', 'info');
+  try {
+    // Find the original row to copy its data
+    const origRow = (SHEET_DATA.orders || []).find(r =>
+      String(r['orderId']||'').trim() === orderId &&
+      String(r['Barcode']||'').trim() === barcode &&
+      String(r['รูปแบบ']||'ขาย').trim() === 'ขาย'
+    );
+    if (!origRow) throw new Error('ไม่พบข้อมูล row เดิม');
+
+    const now = new Date();
+    const cancelRow = {
+      ...origRow,
+      'รูปแบบ':   'ยกเลิก',
+      'เวลา':     formatTimeThai(now),
+      'หมายเหตุ': `ยกเลิกโดย ${(currentUser&&currentUser.name)||SALESMAN.name} เวลา ${formatTimeThai(now)}`,
+    };
+    await submitOrderRow(cancelRow);
+
+    // Update in-memory SHEET_DATA.orders immediately
+    SHEET_DATA.orders = SHEET_DATA.orders || [];
+    SHEET_DATA.orders.unshift(cancelRow);
+
+    // Clear orders cache so next refresh fetches fresh
+    try { localStorage.removeItem('rsa_orders'); } catch {}
+
+    showToast('✓ ยกเลิกรายการแล้ว', 'success');
+    closeModal();
+
+    // Re-open the modal with updated data so user sees the change
+    setTimeout(() => {
+      viewSheetOrderDetail(orderId);
+      renderOrdersList();
+    }, 400);
+  } catch (e) {
+    console.error('deleteOrderRow:', e);
+    showToast('ยกเลิกไม่สำเร็จ: ' + (e.message||e), 'error');
+  }
 };
 
 function buildOrderText(orderIdx) {
