@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>Rattana Attendance v1.2</title>
+<title>Rattana Attendance v1.3</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -586,7 +586,7 @@ body.dark .alert-warn { background:rgba(243,156,18,.15); color:#f7c873; }
   <div class="login-card">
     <div class="login-logo">R</div>
     <div class="login-title">Rattana Attendance</div>
-    <div class="login-sub">v1.2 · ลงเวลาด้วยใบหน้า + ลา + แดชบอร์ด</div>
+    <div class="login-sub">v1.3 · ลงเวลาด้วยใบหน้า + ลา + แดชบอร์ด</div>
 
     <!-- Google Sign-In View -->
     <div id="loginGoogleView">
@@ -656,7 +656,7 @@ body.dark .alert-warn { background:rgba(243,156,18,.15); color:#f7c873; }
       </div>
     </div>
 
-    <div class="text-sm text-muted mt-12">v1.2 · 13 พ.ค. 2569</div>
+    <div class="text-sm text-muted mt-12">v1.3 · 13 พ.ค. 2569</div>
   </div>
 </div>
 
@@ -1706,6 +1706,107 @@ function getCurrentIdToken() {
   return token;
 }
 
+/* v1.3 — ตรวจว่า token ใกล้หมดอายุไหม (เหลือน้อยกว่า 5 นาที) */
+function isTokenExpiringSoon() {
+  const exp = +sessionStorage.getItem('rfc3_idTokenExp') || 0;
+  if (!exp) return false;
+  const remainingMs = (exp * 1000) - Date.now();
+  return remainingMs < (5 * 60 * 1000);  // < 5 นาที
+}
+
+/* v1.3 — refresh idToken แบบ silent (ไม่แสดง popup ถ้าทำได้) */
+let _refreshInFlight = null;
+function refreshIdToken() {
+  // ถ้ามี request กำลังทำอยู่ → รอตัวเดียวกัน (ป้องกัน race)
+  if (_refreshInFlight) return _refreshInFlight;
+
+  _refreshInFlight = new Promise((resolve, reject) => {
+    if (typeof google === 'undefined' || !google.accounts || !google.accounts.id) {
+      reject(new Error('Google Sign-In SDK ยังไม่พร้อม'));
+      _refreshInFlight = null;
+      return;
+    }
+    // ใช้ google.accounts.id.prompt() เพื่อ trigger silent re-auth
+    // ถ้า user ยัง consent อยู่ จะได้ token ใหม่โดยไม่ต้องคลิกอะไร
+    const timeout = setTimeout(() => {
+      reject(new Error('Refresh timeout — token ใหม่ไม่มาภายใน 8 วินาที'));
+      _refreshInFlight = null;
+    }, 8000);
+
+    // hook callback ชั่วคราว — รอ idToken ตัวใหม่ผ่าน handleGoogleCredential
+    const origHandler = window.handleGoogleCredential;
+    let resolved = false;
+    window.handleGoogleCredential = function(response) {
+      try {
+        const payload = decodeJwtPayload(response.credential);
+        sessionStorage.setItem('rfc3_idToken', response.credential);
+        sessionStorage.setItem('rfc3_idTokenExp', String(payload.exp || 0));
+        resolved = true;
+        clearTimeout(timeout);
+        window.handleGoogleCredential = origHandler;  // คืน handler เดิม
+        _refreshInFlight = null;
+        console.log('✓ idToken refreshed silently (exp +1hr)');
+        resolve(response.credential);
+      } catch (e) {
+        clearTimeout(timeout);
+        window.handleGoogleCredential = origHandler;
+        _refreshInFlight = null;
+        reject(e);
+      }
+    };
+
+    try {
+      google.accounts.id.prompt((notification) => {
+        if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
+          if (!resolved) {
+            // Silent fail — user ต้อง login ใหม่ manual
+            clearTimeout(timeout);
+            window.handleGoogleCredential = origHandler;
+            _refreshInFlight = null;
+            reject(new Error('Silent refresh ไม่สำเร็จ — ต้อง login ใหม่'));
+          }
+        }
+      });
+    } catch (e) {
+      clearTimeout(timeout);
+      window.handleGoogleCredential = origHandler;
+      _refreshInFlight = null;
+      reject(e);
+    }
+  });
+
+  return _refreshInFlight;
+}
+
+/* v1.3 — ensureValidToken: เรียกก่อนทุก API call ที่ต้องใช้ idToken */
+async function ensureValidToken() {
+  const token = getCurrentIdToken();
+  if (token && !isTokenExpiringSoon()) return token;  // ยังใช้ได้สบาย
+  // ลอง refresh silently
+  try {
+    const newToken = await refreshIdToken();
+    return newToken;
+  } catch (e) {
+    console.warn('Token refresh failed:', e.message);
+    // แสดง banner เตือน user
+    showSessionExpiredBanner();
+    return null;
+  }
+}
+
+/* v1.3 — Banner แจ้งเตือน session หมดอายุ + ปุ่ม login ใหม่ */
+function showSessionExpiredBanner() {
+  if (document.getElementById('sessionExpiredBanner')) return;  // มีอยู่แล้ว ไม่ซ้ำ
+  const banner = document.createElement('div');
+  banner.id = 'sessionExpiredBanner';
+  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#e74c3c;color:#fff;padding:12px 16px;z-index:99998;display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,.2)';
+  banner.innerHTML = `
+    <div>⚠️ Session หมดอายุ — กรุณา login ใหม่เพื่อใช้งานต่อ</div>
+    <button onclick="location.reload()" style="background:#fff;color:#e74c3c;border:0;padding:8px 14px;border-radius:6px;font-weight:700;cursor:pointer;white-space:nowrap">Login ใหม่</button>
+  `;
+  document.body.appendChild(banner);
+}
+
 async function authorizeUser(email, googleName, picture) {
   // Load Users Sheet if not yet loaded
   if (!allUsers || allUsers.length === 0) {
@@ -2045,8 +2146,8 @@ async function callAppsScript(action, payload = {}) {
   if (!config.appsScriptUrl) {
     throw new Error('ยังไม่ได้ตั้ง Apps Script URL — ไปที่ Setup Wizard');
   }
-  // เพิ่ม idToken เพื่อให้ Apps Script verify identity
-  const idToken = getCurrentIdToken();
+  // v1.3: ใช้ ensureValidToken — auto-refresh ถ้าใกล้หมดอายุ
+  const idToken = await ensureValidToken();
   if (!idToken) {
     throw new Error('Session หมดอายุ — กรุณา login ใหม่');
   }
@@ -4249,6 +4350,9 @@ function initApp() {
   renderFaceReg(); renderSystemInfo(); renderTodayStatus(); renderDashboard(); renderTeamList();
   renderQuickStart();
 
+  // v1.3: เริ่ม timer เช็ค token expiry ทุก 5 นาที — refresh proactively
+  startTokenRefreshTimer();
+
   // Background: load all sheets (FaceData, Settings, Locations, etc.)
   setTimeout(async () => {
     await loadAllSheets();
@@ -5016,7 +5120,7 @@ function exportLateReport() {
 }
 
 // Version log + cache check
-console.log('%c Rattana Attendance v1.2 ', 'background:#0d1b3e;color:#c9a84c;font-weight:bold;padding:4px 8px;border-radius:4px');
+console.log('%c Rattana Attendance v1.3 ', 'background:#0d1b3e;color:#c9a84c;font-weight:bold;padding:4px 8px;border-radius:4px');
 
 /* ============================================================
    v1.0 — LEAVE QUOTA / MY FEED / INCOMPLETE PAIRS
@@ -5217,6 +5321,34 @@ async function approveTimeAdjust(id, decision) {
     renderApprovalsPage();
   } catch (e) { toast('❌ ' + e.message, 'error'); }
   finally { hideSpinner(); }
+}
+
+/* v1.3 — Proactive token refresh timer */
+let _tokenRefreshTimer = null;
+function startTokenRefreshTimer() {
+  if (_tokenRefreshTimer) clearInterval(_tokenRefreshTimer);
+  _tokenRefreshTimer = setInterval(async () => {
+    const token = getCurrentIdToken();
+    if (!token) {
+      // Token หมดอายุไปแล้ว — show banner
+      showSessionExpiredBanner();
+      clearInterval(_tokenRefreshTimer);
+      _tokenRefreshTimer = null;
+      return;
+    }
+    if (isTokenExpiringSoon()) {
+      // ใกล้หมด → refresh silently
+      try {
+        await refreshIdToken();
+        // success — silent, no toast
+      } catch (e) {
+        console.warn('Proactive refresh failed:', e.message);
+        showSessionExpiredBanner();
+        clearInterval(_tokenRefreshTimer);
+        _tokenRefreshTimer = null;
+      }
+    }
+  }, 5 * 60 * 1000);  // เช็คทุก 5 นาที
 }
 
 /* ============================================================
