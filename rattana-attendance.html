@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>Rattana Attendance v1.3</title>
+<title>Rattana Attendance v1.4</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -586,7 +586,7 @@ body.dark .alert-warn { background:rgba(243,156,18,.15); color:#f7c873; }
   <div class="login-card">
     <div class="login-logo">R</div>
     <div class="login-title">Rattana Attendance</div>
-    <div class="login-sub">v1.3 · ลงเวลาด้วยใบหน้า + ลา + แดชบอร์ด</div>
+    <div class="login-sub">v1.4 · ลงเวลาด้วยใบหน้า + ลา + แดชบอร์ด</div>
 
     <!-- Google Sign-In View -->
     <div id="loginGoogleView">
@@ -656,7 +656,7 @@ body.dark .alert-warn { background:rgba(243,156,18,.15); color:#f7c873; }
       </div>
     </div>
 
-    <div class="text-sm text-muted mt-12">v1.3 · 13 พ.ค. 2569</div>
+    <div class="text-sm text-muted mt-12">v1.4 · 13 พ.ค. 2569</div>
   </div>
 </div>
 
@@ -1582,6 +1582,46 @@ function loadAll() {
 }
 function saveLocations(){ LS.set('locations', locations); }
 function saveLogs(){ LS.set('logs', logs); }
+
+/* v1.4 — Sync local `logs` กับ Sheet ลงเวลาApp + CheckinLog 
+   - เรียกหลัง login + ก่อน evaluate next action บน Home
+   - Sheet เป็น source of truth — ถ้า admin ลบจาก Sheet → local sync ตาม */
+async function syncLogsFromSheet() {
+  if (!currentUser || !currentUser.empId) return;
+  if (!config.appsScriptUrl) return;
+  try {
+    const todayThai = todayKey();   // YYYY-MM-DD ISO
+    const tdate = new Date();
+    const ddmmyyyy = `${String(tdate.getDate()).padStart(2,'0')}/${String(tdate.getMonth()+1).padStart(2,'0')}/${tdate.getFullYear()+543}`;
+
+    // เรียก CheckinLog ของวันนี้ของ user คนนี้ (raw events)
+    const res = await callAppsScript('getCheckinLog', { empId: currentUser.empId, date: ddmmyyyy, limit: 50 });
+    const remoteLogs = (res.logs || []).filter(l => String(l.empId) === String(currentUser.empId));
+
+    // เคลียร์ local logs ของวันนี้ออก แล้วใส่ตาม Sheet
+    logs = logs.filter(l => l.dateKey !== todayThai || String(l.empId) !== String(currentUser.empId));
+    remoteLogs.forEach(r => {
+      logs.unshift({
+        ts: new Date(r.timestamp).getTime() || Date.now(),
+        dateKey: todayThai,
+        timeStr: r.time || '',
+        type: r.type === 'out' ? 'out' : 'in',
+        empId: String(r.empId),
+        name: r.name || '',
+        branch: r.branch || '',
+        lat: r.lat || null, lng: r.lng || null,
+        distance: r.distance || null,
+        faceDist: r.faceDist || null,
+        scannedBy: r.scannedBy || 'self',
+        synced: true,
+      });
+    });
+    saveLogs();
+    console.log(`✓ Synced ${remoteLogs.length} logs from Sheet for ${currentUser.empId}`);
+  } catch (e) {
+    console.warn('syncLogsFromSheet failed:', e.message);
+  }
+}
 function saveTeam(){
   LS.set('team', team.map(m => ({...m, descriptor: m.descriptor ? Array.from(m.descriptor) : null})));
 }
@@ -4207,13 +4247,16 @@ function showSpinner(msg, withProgress=false) {
 }
 function hideSpinner(){ document.getElementById('spinner').style.display='none'; }
 function setProgress(p){ document.getElementById('progressFill').style.width = p+'%'; }
-function refreshAll() {
+async function refreshAll() {
   const b = document.getElementById('btnRefresh');
   b.style.animation='spin .6s linear'; b.disabled=true;
   loadAll();
+  // v1.4: sync logs จาก Sheet ก่อน render
+  try { await syncLogsFromSheet(); } catch(_) {}
   if (lastGps) renderGpsCard();
   renderTodayStatus(); renderTodayPage(); renderHistory(); renderLocations();
   renderTeamList(); renderDashboard(); renderSystemInfo(); fillKioskBranches();
+  evaluateAction();
   setTimeout(()=>{ b.style.animation=''; b.disabled=false; toast('รีเฟรชเรียบร้อย','success'); }, 600);
 }
 function openModal(id){ document.getElementById(id).classList.add('active'); }
@@ -4356,13 +4399,17 @@ function initApp() {
   // Background: load all sheets (FaceData, Settings, Locations, etc.)
   setTimeout(async () => {
     await loadAllSheets();
+    // v1.4: Sync local logs กับ Sheet เพื่อให้ next-action ถูก (Sheet = source of truth)
+    await syncLogsFromSheet();
     // Re-build team with fresh face data
     if (currentUser.role === 'supervisor') {
       buildTeamFromSheet();
     }
-    // Re-render
+    // Re-render หน้าทั้งหมดหลัง sync
     renderTeamList(); renderDashboard(); renderHistory(); renderLocations(); renderSystemInfo();
     fillKioskBranches();
+    renderTodayStatus();
+    evaluateAction();   // refresh ปุ่ม "เข้างาน/ออกงาน" ตาม logs ใหม่
   }, 200);
 
   // Update time + button state every second (only when home tab active)
@@ -5120,7 +5167,7 @@ function exportLateReport() {
 }
 
 // Version log + cache check
-console.log('%c Rattana Attendance v1.3 ', 'background:#0d1b3e;color:#c9a84c;font-weight:bold;padding:4px 8px;border-radius:4px');
+console.log('%c Rattana Attendance v1.4 ', 'background:#0d1b3e;color:#c9a84c;font-weight:bold;padding:4px 8px;border-radius:4px');
 
 /* ============================================================
    v1.0 — LEAVE QUOTA / MY FEED / INCOMPLETE PAIRS
