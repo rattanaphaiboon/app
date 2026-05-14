@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>Rattana Attendance v1.8</title>
+<title>Rattana Attendance v1.9</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -586,7 +586,7 @@ body.dark .alert-warn { background:rgba(243,156,18,.15); color:#f7c873; }
   <div class="login-card">
     <div class="login-logo">R</div>
     <div class="login-title">Rattana Attendance</div>
-    <div class="login-sub">v1.8 · ลงเวลาด้วยใบหน้า + ลา + แดชบอร์ด</div>
+    <div class="login-sub">v1.9 · ลงเวลาด้วยใบหน้า + ลา + แดชบอร์ด</div>
 
     <!-- Google Sign-In View -->
     <div id="loginGoogleView">
@@ -656,7 +656,7 @@ body.dark .alert-warn { background:rgba(243,156,18,.15); color:#f7c873; }
       </div>
     </div>
 
-    <div class="text-sm text-muted mt-12">v1.8 · 13 พ.ค. 2569</div>
+    <div class="text-sm text-muted mt-12">v1.9 · 13 พ.ค. 2569</div>
   </div>
 </div>
 
@@ -1757,147 +1757,34 @@ function decodeJwtPayload(token) {
 
 function normalizeEmail(e) { return String(e || '').trim().toLowerCase(); }
 
-/* Helper: ดึง idToken — ตรวจ expiry ก่อน */
+/* v1.9 — Simple token: ไม่มี auto-refresh ไม่มี popup ไม่มี loop */
 function getCurrentIdToken() {
   const token = sessionStorage.getItem('rfc3_idToken');
-  const exp = +sessionStorage.getItem('rfc3_idTokenExp') || 0;
   if (!token) return null;
+  const exp = +sessionStorage.getItem('rfc3_idTokenExp') || 0;
   if (exp && (exp * 1000) < Date.now()) {
-    // Token หมดอายุ
     sessionStorage.removeItem('rfc3_idToken');
     sessionStorage.removeItem('rfc3_idTokenExp');
     return null;
   }
   return token;
 }
-
-/* v1.3 — ตรวจว่า token ใกล้หมดอายุไหม (เหลือน้อยกว่า 5 นาที) */
-function isTokenExpiringSoon() {
-  const exp = +sessionStorage.getItem('rfc3_idTokenExp') || 0;
-  if (!exp) return false;
-  const remainingMs = (exp * 1000) - Date.now();
-  return remainingMs < (5 * 60 * 1000);  // < 5 นาที
-}
-
-/* v1.3 — refresh idToken แบบ silent (ไม่แสดง popup ถ้าทำได้) */
+function isTokenExpiringSoon() { return false; }
+async function ensureValidToken() { return getCurrentIdToken(); }
+async function refreshIdToken() { return getCurrentIdToken(); }
 let _refreshInFlight = null;
-function refreshIdToken() {
-  // ถ้ามี request กำลังทำอยู่ → รอตัวเดียวกัน (ป้องกัน race)
-  if (_refreshInFlight) return _refreshInFlight;
-
-  _refreshInFlight = new Promise((resolve, reject) => {
-    if (typeof google === 'undefined' || !google.accounts || !google.accounts.id) {
-      reject(new Error('Google Sign-In SDK ยังไม่พร้อม'));
-      _refreshInFlight = null;
-      return;
-    }
-    // ใช้ google.accounts.id.prompt() เพื่อ trigger silent re-auth
-    // ถ้า user ยัง consent อยู่ จะได้ token ใหม่โดยไม่ต้องคลิกอะไร
-    const timeout = setTimeout(() => {
-      reject(new Error('Refresh timeout — token ใหม่ไม่มาภายใน 8 วินาที'));
-      _refreshInFlight = null;
-    }, 8000);
-
-    // hook callback ชั่วคราว — รอ idToken ตัวใหม่ผ่าน handleGoogleCredential
-    const origHandler = window.handleGoogleCredential;
-    let resolved = false;
-    window.handleGoogleCredential = function(response) {
-      try {
-        const payload = decodeJwtPayload(response.credential);
-        sessionStorage.setItem('rfc3_idToken', response.credential);
-        sessionStorage.setItem('rfc3_idTokenExp', String(payload.exp || 0));
-        resolved = true;
-        clearTimeout(timeout);
-        window.handleGoogleCredential = origHandler;  // คืน handler เดิม
-        _refreshInFlight = null;
-        console.log('✓ idToken refreshed silently (exp +1hr)');
-        resolve(response.credential);
-      } catch (e) {
-        clearTimeout(timeout);
-        window.handleGoogleCredential = origHandler;
-        _refreshInFlight = null;
-        reject(e);
-      }
-    };
-
-    try {
-      google.accounts.id.prompt((notification) => {
-        if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
-          if (!resolved) {
-            // Silent fail — user ต้อง login ใหม่ manual
-            clearTimeout(timeout);
-            window.handleGoogleCredential = origHandler;
-            _refreshInFlight = null;
-            reject(new Error('Silent refresh ไม่สำเร็จ — ต้อง login ใหม่'));
-          }
-        }
-      });
-    } catch (e) {
-      clearTimeout(timeout);
-      window.handleGoogleCredential = origHandler;
-      _refreshInFlight = null;
-      reject(e);
-    }
-  });
-
-  return _refreshInFlight;
-}
-
-/* v1.8 — ensureValidToken: ไม่เรียก showSessionExpiredBanner เอง
-   ให้ caller (callAppsScript) ตัดสินใจว่าจะแจ้ง user หรือไม่ */
-async function ensureValidToken() {
-  const token = getCurrentIdToken();
-  if (token && !isTokenExpiringSoon()) return token;
-  // ลอง refresh silently
-  try {
-    const newToken = await refreshIdToken();
-    return newToken;
-  } catch (e) {
-    console.warn('Token refresh failed (silent):', e.message);
-    return null;  // คืน null เงียบๆ — ไม่ popup
-  }
-}
-
-/* v1.6 — Banner แจ้งเตือน session หมดอายุ + auto-reload (debounced) */
 let _sessionExpiredHandled = false;
 function showSessionExpiredBanner() {
-  if (_sessionExpiredHandled) return;  // เรียกได้แค่ครั้งเดียว
+  if (_sessionExpiredHandled) return;
   _sessionExpiredHandled = true;
-
-  // clear session ทันที
   sessionStorage.removeItem('rfc3_user');
   sessionStorage.removeItem('rfc3_idToken');
   sessionStorage.removeItem('rfc3_idTokenExp');
-  if (_tokenRefreshTimer) { clearInterval(_tokenRefreshTimer); _tokenRefreshTimer = null; }
-
-  // แสดง popup countdown 3 วินาที แล้ว reload อัตโนมัติ
-  if (document.getElementById('sessionExpiredBanner')) return;
-  const banner = document.createElement('div');
-  banner.id = 'sessionExpiredBanner';
-  banner.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px';
-  banner.innerHTML = `
-    <div style="background:#0d1b3e;border:2px solid #c9a84c;border-radius:16px;padding:28px 24px;max-width:340px;width:100%;text-align:center;color:#fff">
-      <div style="font-size:40px;margin-bottom:12px">⏰</div>
-      <div style="font-size:18px;font-weight:700;color:#c9a84c;margin-bottom:8px">Session หมดอายุ</div>
-      <div style="font-size:14px;color:#ccc;margin-bottom:20px;line-height:1.5">
-        ต้อง Login ใหม่ทุก 1 ชั่วโมง<br>เพื่อความปลอดภัยของข้อมูล
-      </div>
-      <div id="sessionCountdown" style="font-size:13px;color:#c9a84c;margin-bottom:12px">กำลัง reload ใน 3 วินาที...</div>
-      <button onclick="location.reload()" style="background:#c9a84c;color:#0d1b3e;border:0;padding:14px 28px;border-radius:10px;font-weight:700;font-size:16px;cursor:pointer;width:100%">
-        🔐 Login ใหม่ทันที
-      </button>
-    </div>`;
-  document.body.appendChild(banner);
-
-  // Auto reload countdown
-  let count = 3;
-  const cd = setInterval(() => {
-    count--;
-    const el = document.getElementById('sessionCountdown');
-    if (el) el.textContent = count > 0 ? `กำลัง reload ใน ${count} วินาที...` : 'กำลัง reload...';
-    if (count <= 0) { clearInterval(cd); location.reload(); }
-  }, 1000);
+  toast('⏰ Session หมดอายุ — กด logout แล้ว login ใหม่', 'warning');
 }
+let _tokenRefreshTimer = null;
+function startTokenRefreshTimer() { /* v1.9: ปิด */ }
+
 
 async function authorizeUser(email, googleName, picture) {
   // Load Users Sheet if not yet loaded
@@ -5258,7 +5145,7 @@ function exportLateReport() {
 }
 
 // Version log + cache check
-console.log('%c Rattana Attendance v1.8 ', 'background:#0d1b3e;color:#c9a84c;font-weight:bold;padding:4px 8px;border-radius:4px');
+console.log('%c Rattana Attendance v1.9 ', 'background:#0d1b3e;color:#c9a84c;font-weight:bold;padding:4px 8px;border-radius:4px');
 
 /* ============================================================
    v1.0 — LEAVE QUOTA / MY FEED / INCOMPLETE PAIRS
@@ -5462,18 +5349,7 @@ async function approveTimeAdjust(id, decision) {
 }
 
 /* v1.3 — Proactive token refresh timer */
-let _tokenRefreshTimer = null;
-function startTokenRefreshTimer() {
-  if (_tokenRefreshTimer) clearInterval(_tokenRefreshTimer);
-  _tokenRefreshTimer = setInterval(async () => {
-    const token = getCurrentIdToken();
-    if (!token) return;  // v1.7: ไม่ trigger banner จาก background timer
-    if (isTokenExpiringSoon()) {
-      try { await refreshIdToken(); }
-      catch (e) { console.warn('Proactive refresh failed:', e.message); }
-    }
-  }, 5 * 60 * 1000);
-}
+// _tokenRefreshTimer declared above
 
 /* ============================================================
    v1.1 — DEBUG AUTH (ดูได้ที่หน้า Setup → ปุ่ม Debug Auth)
