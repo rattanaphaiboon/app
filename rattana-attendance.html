@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>Rattana Attendance v1.4</title>
+<title>Rattana Attendance v1.5</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -586,7 +586,7 @@ body.dark .alert-warn { background:rgba(243,156,18,.15); color:#f7c873; }
   <div class="login-card">
     <div class="login-logo">R</div>
     <div class="login-title">Rattana Attendance</div>
-    <div class="login-sub">v1.4 · ลงเวลาด้วยใบหน้า + ลา + แดชบอร์ด</div>
+    <div class="login-sub">v1.5 · ลงเวลาด้วยใบหน้า + ลา + แดชบอร์ด</div>
 
     <!-- Google Sign-In View -->
     <div id="loginGoogleView">
@@ -656,7 +656,7 @@ body.dark .alert-warn { background:rgba(243,156,18,.15); color:#f7c873; }
       </div>
     </div>
 
-    <div class="text-sm text-muted mt-12">v1.4 · 13 พ.ค. 2569</div>
+    <div class="text-sm text-muted mt-12">v1.5 · 13 พ.ค. 2569</div>
   </div>
 </div>
 
@@ -799,6 +799,11 @@ body.dark .alert-warn { background:rgba(243,156,18,.15); color:#f7c873; }
           </div>
           <div class="btn-row mt-12">
             <button class="btn btn-outline" onclick="cancelCheckinFlow()">↩ กลับหน้าเริ่ม</button>
+            <button class="btn btn-outline" onclick="forceInOutToggle()">🔄 สลับ เข้า ⇄ ออก</button>
+          </div>
+          <div class="btn-row mt-12">
+            <button class="btn btn-outline" onclick="resetTodayLogs()" style="color:var(--danger)">🗑 ล้างข้อมูลวันนี้ในเครื่อง</button>
+            <button class="btn btn-outline" onclick="syncLogsFromSheet().then(evaluateAction)">🔄 Sync จาก Sheet</button>
           </div>
         </details>
       </div>
@@ -1583,23 +1588,31 @@ function loadAll() {
 function saveLocations(){ LS.set('locations', locations); }
 function saveLogs(){ LS.set('logs', logs); }
 
-/* v1.4 — Sync local `logs` กับ Sheet ลงเวลาApp + CheckinLog 
-   - เรียกหลัง login + ก่อน evaluate next action บน Home
-   - Sheet เป็น source of truth — ถ้า admin ลบจาก Sheet → local sync ตาม */
-async function syncLogsFromSheet() {
+/* v1.5 — Sync local `logs` กับ Sheet ลงเวลาApp + CheckinLog 
+   - เคลียร์ local logs ของวันนี้ "ทันทีเสมอ" (ไม่ว่า sync จะสำเร็จไหม)
+   - ใส่ toast feedback ทุกครั้ง (เห็นได้ว่าทำงาน)
+   - ถ้า sync fail → ปุ่มจะ default เป็น "in" เพราะ logs ว่าง */
+async function syncLogsFromSheet(opts = {}) {
   if (!currentUser || !currentUser.empId) return;
   if (!config.appsScriptUrl) return;
-  try {
-    const todayThai = todayKey();   // YYYY-MM-DD ISO
-    const tdate = new Date();
-    const ddmmyyyy = `${String(tdate.getDate()).padStart(2,'0')}/${String(tdate.getMonth()+1).padStart(2,'0')}/${tdate.getFullYear()+543}`;
+  const showToasts = opts.silent !== true;
 
-    // เรียก CheckinLog ของวันนี้ของ user คนนี้ (raw events)
+  const todayThai = todayKey();   // YYYY-MM-DD ISO
+  const tdate = new Date();
+  const ddmmyyyy = `${String(tdate.getDate()).padStart(2,'0')}/${String(tdate.getMonth()+1).padStart(2,'0')}/${tdate.getFullYear()+543}`;
+
+  // v1.5: เคลียร์ logs ของวันนี้ของ user ก่อนเสมอ (ไม่ว่า sync จะสำเร็จไหม)
+  // ป้องกัน stale data ค้างใน localStorage
+  const before = logs.length;
+  logs = logs.filter(l => l.dateKey !== todayThai || String(l.empId) !== String(currentUser.empId));
+  const cleared = before - logs.length;
+  saveLogs();
+  console.log(`🧹 Cleared ${cleared} stale logs of ${currentUser.empId} for today`);
+
+  try {
     const res = await callAppsScript('getCheckinLog', { empId: currentUser.empId, date: ddmmyyyy, limit: 50 });
     const remoteLogs = (res.logs || []).filter(l => String(l.empId) === String(currentUser.empId));
 
-    // เคลียร์ local logs ของวันนี้ออก แล้วใส่ตาม Sheet
-    logs = logs.filter(l => l.dateKey !== todayThai || String(l.empId) !== String(currentUser.empId));
     remoteLogs.forEach(r => {
       logs.unshift({
         ts: new Date(r.timestamp).getTime() || Date.now(),
@@ -1618,8 +1631,18 @@ async function syncLogsFromSheet() {
     });
     saveLogs();
     console.log(`✓ Synced ${remoteLogs.length} logs from Sheet for ${currentUser.empId}`);
+    if (showToasts) {
+      if (remoteLogs.length === 0 && cleared > 0) {
+        toast(`✓ Sync: ลบ ${cleared} ค้าง · ไม่มีข้อมูลใน Sheet วันนี้`, 'info');
+      } else if (remoteLogs.length > 0) {
+        toast(`✓ Sync ${remoteLogs.length} รายการ จาก Sheet`, 'success');
+      }
+    }
+    return remoteLogs.length;
   } catch (e) {
     console.warn('syncLogsFromSheet failed:', e.message);
+    if (showToasts) toast(`⚠ Sync ล้มเหลว: ${e.message} · ใช้ค่าในเครื่อง`, 'warning');
+    return -1;
   }
 }
 function saveTeam(){
@@ -3071,9 +3094,36 @@ function todayLogsForUser(empId) {
   return logs.filter(l => l.dateKey === todayKey() && l.empId === empId);
 }
 function nextActionType(empId) {
+  // v1.5: ถ้า user override → ใช้ตามที่กดสลับ (ไม่ดู logs)
+  if (window._forceNextType === 'in' || window._forceNextType === 'out') {
+    return window._forceNextType;
+  }
   const tl = todayLogsForUser(empId);
   if (tl.length === 0) return 'in';
-  return tl[tl.length-1].type === 'in' ? 'out' : 'in';
+  // logs.unshift() เก็บล่าสุดที่ index 0 — หา punch ล่าสุดจาก timestamp
+  const sorted = tl.slice().sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  const lastType = sorted[0].type;
+  return lastType === 'in' ? 'out' : 'in';
+}
+
+/* v1.5 — สลับ เข้า ⇄ ออก ด้วยมือ (กรณี auto-detect ผิด) */
+function forceInOutToggle() {
+  const current = nextActionType(currentUser.empId);
+  window._forceNextType = (current === 'in') ? 'out' : 'in';
+  evaluateAction();
+  toast(`สลับเป็น: ${window._forceNextType === 'in' ? '📥 บันทึกเข้างาน' : '📤 บันทึกออกงาน'}`, 'info');
+}
+
+/* v1.5 — ล้าง logs ของวันนี้ในเครื่อง (emergency reset) */
+function resetTodayLogs() {
+  if (!confirm('ล้างประวัติเช็คอินวันนี้ในเครื่อง? (ของใน Sheet ไม่ถูกแตะ)')) return;
+  const today = todayKey();
+  const before = logs.length;
+  logs = logs.filter(l => l.dateKey !== today || String(l.empId) !== String(currentUser.empId));
+  saveLogs();
+  window._forceNextType = null;  // เคลียร์ override
+  toast(`ลบ ${before - logs.length} รายการแล้ว`, 'success');
+  evaluateAction();
 }
 function evaluateAction() {
   const btn = document.getElementById('btnAction');
@@ -3165,6 +3215,12 @@ async function doSelfCheckIn() {
     (synced ? ' · ☁️ Sheet' : (config.appsScriptUrl ? ' · ⚠️ Sheet sync ล้มเหลว (เก็บในเครื่อง)' : '')),
     synced ? 'success' : (config.appsScriptUrl ? 'warning' : 'success')
   );
+
+  // v1.5: clear force override + re-sync จาก Sheet
+  window._forceNextType = null;
+  if (synced) {
+    syncLogsFromSheet({ silent: true }).then(() => evaluateAction()).catch(()=>{});
+  }
 
   // ปิดกล้อง + กลับ start screen
   setTimeout(() => {
@@ -5167,7 +5223,7 @@ function exportLateReport() {
 }
 
 // Version log + cache check
-console.log('%c Rattana Attendance v1.4 ', 'background:#0d1b3e;color:#c9a84c;font-weight:bold;padding:4px 8px;border-radius:4px');
+console.log('%c Rattana Attendance v1.5 ', 'background:#0d1b3e;color:#c9a84c;font-weight:bold;padding:4px 8px;border-radius:4px');
 
 /* ============================================================
    v1.0 — LEAVE QUOTA / MY FEED / INCOMPLETE PAIRS
