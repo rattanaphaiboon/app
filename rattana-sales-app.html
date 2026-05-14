@@ -12,7 +12,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v6.5.2 Multi-Promo Bars + UX Fixes</title>
+<title>Rattana Sales — v6.5.4 Promo Math Fix</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -1669,7 +1669,26 @@ body.dark .oc-depot-bar-track { background: rgba(255,255,255,.1); }
   min-width: 0;
   overflow: hidden;
   height: 40px;
+  transition: border-color .2s, box-shadow .2s;
 }
+/* v6.5.3: price guardrails — warn (over ceiling), danger (under floor / tier-locked) */
+.oc-price-wrap.warn {
+  border-color: var(--warning);
+  box-shadow: 0 0 0 1px rgba(232,178,58,.3);
+}
+.oc-price-wrap.danger {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 1px rgba(214,58,58,.3);
+}
+.oc-price-warn {
+  margin-top: 5px;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 0 2px;
+  color: var(--warning);
+}
+.oc-price-warn.danger { color: var(--danger); }
+.oc-price-warn.warn { color: var(--warning); }
 .oc-price-prefix {
   padding: 0 4px 0 9px;
   display: flex; align-items: center;
@@ -2383,7 +2402,7 @@ body.dark .text-gold { color: var(--gold-light); }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v6.5.2 · 2026-05-14</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v6.5.4 · 2026-05-14</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -2394,7 +2413,7 @@ body.dark .text-gold { color: var(--gold-light); }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag">v6.5.2</span>
+  <span class="demo-tag">v6.5.4</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -2471,7 +2490,7 @@ body.dark .text-gold { color: var(--gold-light); }
   </button>
 
   <div class="drawer-footer">
-    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v6.5.2<br>2026-05-14<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
+    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v6.5.4<br>2026-05-14<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
   </div>
 </aside>
 
@@ -4094,12 +4113,20 @@ function cartMatchesPromo(promo, draftItem) {
   const matchValue = String(promo['ชื่อ']||'').trim();
   if (!measureBy || !matchValue) return { matches: false };
 
-  let totalPieces = 0;   // total pieces from matching cart lines (for unit-based promos)
+  let totalPieces = 0;   // total pieces (EA) from matching cart lines — used for legacy ratio path
   let totalBaht = 0;     // total baht from matching cart lines (for baht-based promos)
+  let totalInTargetUnit = 0;  // v6.5.4: total qty converted to promo's target unit, per-SKU correctly
   const matchingLines = [];
 
   // Combine cart with optional draft line (so modal hint works in real-time)
   const allLines = draftItem ? [...cart, draftItem] : cart;
+
+  // v6.5.4 — read promo's target unit FIRST so we can convert each line correctly per-SKU.
+  // Avoids the v6.5.x bug of dividing through one sample SKU's CS-size (which gave 165 instead of 100).
+  const _threshold = numv(promo['จำนวน']);
+  const _sellMode = String(promo['รูปแบบขาย']||'').trim().toUpperCase();
+  const _targetUnit = (_sellMode === 'EA' || _sellMode === 'PA' || _sellMode === 'BP' || _sellMode === 'CS')
+    ? _sellMode : null;
 
   for (const c of allLines) {
     const p = findProductForCart(c);
@@ -4117,34 +4144,35 @@ function cartMatchesPromo(promo, draftItem) {
       return '';
     })().trim();
     if (pVal !== matchValue) continue;
-    // Convert qty to pieces (so EA/PA/BP/CS can sum together)
+    // Convert qty to pieces (so EA/PA/BP/CS can sum together) — legacy path, kept for baht calc
     const piecesPerUnit = unitToPieces(p, c.unit);
     const linePieces = (c.qty || 0) * piecesPerUnit;
     totalPieces += linePieces;
     totalBaht   += (c.qty || 0) * (c.price || 0);
+    // v6.5.4: convert THIS line's qty → target unit using THIS SKU's own QTY ratios.
+    // Each SKU has its own QTY EA/PA/BP/CS — using a sample SKU's ratios is wrong when SKUs differ
+    // (e.g. 320ml has 24 EA/CS, 620ml has 12 EA/CS — they can't share one conversion).
+    if (_targetUnit) {
+      const piecesPerTarget = unitToPieces(p, _targetUnit);
+      if (piecesPerTarget > 0) {
+        totalInTargetUnit += linePieces / piecesPerTarget;
+      }
+    }
     matchingLines.push({ p, c, pieces: linePieces, baht: (c.qty||0)*(c.price||0) });
   }
 
   // Now compare against threshold based on รูปแบบขาย
-  const threshold = numv(promo['จำนวน']);
-  const sellMode = String(promo['รูปแบบขาย']||'').trim().toUpperCase();
+  const threshold = _threshold;
+  const sellMode = _sellMode;
 
   let currentValue, currentUnit, ratio;
   if (sellMode === 'บาท' || sellMode === 'BAHT') {
     currentValue = totalBaht;
     currentUnit = 'บาท';
-  } else if (sellMode === 'EA' || sellMode === 'PA' || sellMode === 'BP' || sellMode === 'CS') {
-    // Convert totalPieces → target unit using ANY product in matching lines
-    // (assume products in same group have similar EA/PA/BP/CS structure for the target unit)
-    const sample = matchingLines[0]?.p;
-    if (!sample) {
-      currentValue = 0;
-      currentUnit = sellMode;
-    } else {
-      const piecesPerTarget = unitToPieces(sample, sellMode.toLowerCase() === 'ea' ? 'EA' : sellMode);
-      currentValue = piecesPerTarget > 0 ? totalPieces / piecesPerTarget : 0;
-      currentUnit = sellMode;
-    }
+  } else if (_targetUnit) {
+    // v6.5.4: use per-SKU sum (was: divide totalPieces by sample SKU's ratio — wrong for mixed SKUs)
+    currentValue = totalInTargetUnit;
+    currentUnit = sellMode;
   } else {
     return { matches: false };
   }
@@ -6692,22 +6720,35 @@ function _buildPromoBarsHtml(p, productId, safeId, unit, qty) {
   if (!allPromos.length) return '';
 
   const draft = window._orderDraft[productId] || {};
-  const selectedIdx = (typeof draft.selectedPromoIdx === 'number') ? draft.selectedPromoIdx : null;
+  // v6.5.4: auto-pick when only 1 promo matches. Multi-promo still requires manual pick.
+  let selectedIdx = (typeof draft.selectedPromoIdx === 'number') ? draft.selectedPromoIdx : null;
+  if (allPromos.length === 1 && selectedIdx === null) {
+    selectedIdx = 0;  // auto-pick the single promo (no user action needed)
+    // Persist to draft so cart line carries the selection on confirm
+    draft.selectedPromoIdx = 0;
+    window._orderDraft[productId] = draft;
+  }
 
   // Build cart line snapshot for cartMatchesPromo (includes current draft qty as "preview")
   const draftLine = qty > 0 ? {
     productId, unit, qty, price: 0, shopId: currentShopId, isDraft: true,
   } : null;
 
+  // v6.5.4: pass isMulti so _buildOnePromoBar can hide progress for unselected promos
+  // when multiple match (user must pick first — Q2 in plan).
+  const isMulti = allPromos.length > 1;
+
   return allPromos.map((promo, idx) => {
     const isSelected = (selectedIdx === idx);
-    return _buildOnePromoBar(promo, p, productId, safeId, idx, isSelected, draftLine, unit);
+    return _buildOnePromoBar(promo, p, productId, safeId, idx, isSelected, draftLine, unit, isMulti);
   }).join('');
 }
 window._buildPromoBarsHtml = _buildPromoBarsHtml;
 
 // Single promo bar — shown stacked when SKU has multiple promos
-function _buildOnePromoBar(promo, p, productId, safeId, idx, isSelected, draftLine, unit) {
+// v6.5.4: isMulti=true means SKU has 2+ promos → unselected bars don't show progress
+// (per user spec: "ต้องรอ user พิจารณา / กดเลือก promo ก่อน ถึงจะปลดล็อก")
+function _buildOnePromoBar(promo, p, productId, safeId, idx, isSelected, draftLine, unit, isMulti) {
   const promoName = String(promo['ชื่อโปร'] || 'โปรโมชั่น').trim();
   const measureBy = String(promo['วิธีวัด'] || '').trim();
   const threshold = numv(promo['จำนวน']) || 1;
@@ -6736,6 +6777,31 @@ function _buildOnePromoBar(promo, p, productId, safeId, idx, isSelected, draftLi
     `;
   }
 
+  // Selection chip — radio-style, user must pick
+  const pickerHtml = `
+    <button class="oc-promo-pick ${isSelected ? 'on' : ''}"
+            onclick="orderPromoPick('${safeId}', ${idx})"
+            title="${isSelected ? 'กำลังใช้โปรนี้' : 'แตะเพื่อเลือกโปรนี้'}">
+      ${isSelected ? '✓ ใช้โปรนี้' : 'เลือก'}
+    </button>
+  `;
+
+  // v6.5.4: when SKU has multiple promos AND this one is not selected → static info only.
+  // Don't run cartMatchesPromo (would give wrong/misleading numbers before user commits to a promo).
+  if (isMulti && !isSelected) {
+    return `
+      <div class="oc-promo-bar" data-promo-idx="${idx}">
+        <div class="oc-promo-bar-emoji">🎁</div>
+        <div class="oc-promo-bar-text">
+          <span class="name">${escapeHtml(promoName)}</span>
+          ซื้อ <b>${threshold} ${escapeHtml(sellMode || 'หน่วย')}</b> → <span class="gift">${rewardText}</span>
+          <span class="meta-tag">${escapeHtml(measureBy)} · เลือกโปรนี้เพื่อดูความคืบหน้า</span>
+        </div>
+        ${pickerHtml}
+      </div>
+    `;
+  }
+
   // Step 2: compute progress via cartMatchesPromo (handles stacking, baht mode, CAT-based)
   let currentValue = 0;
   let currentUnit = sellMode;
@@ -6755,15 +6821,6 @@ function _buildOnePromoBar(promo, p, productId, safeId, idx, isSelected, draftLi
     : remaining;
   const totalGifts = tiersEarned * giftQty;
   const giftDisplay = giftName ? `${escapeHtml(giftName)} × ${totalGifts}` : rewardText;
-
-  // Selection chip — radio-style, user must pick
-  const pickerHtml = `
-    <button class="oc-promo-pick ${isSelected ? 'on' : ''}"
-            onclick="orderPromoPick('${safeId}', ${idx})"
-            title="${isSelected ? 'กำลังใช้โปรนี้' : 'แตะเพื่อเลือกโปรนี้'}">
-      ${isSelected ? '✓ ใช้โปรนี้' : 'เลือก'}
-    </button>
-  `;
 
   // Step 3: render based on state
   const fmtVal = (v) => Number.isInteger(v) ? v.toString() : v.toFixed(1);
@@ -6996,6 +7053,8 @@ function buildOrderCardV6(p, idx) {
         </div>
       </div>
 
+      <div class="oc-price-warn" style="display:none"></div>
+
       <div class="oc-sub-row">
         <span>${subLeft}</span>
         <span>${subRight}</span>
@@ -7151,6 +7210,39 @@ window.orderConfirm = function(safeId) {
     showToast('❌ ราคาต้องมากกว่า 0', 'error');
     return;
   }
+
+  // v6.5.3: enforce price guardrails restored from v5
+  //   Ceiling = Math.floor(S03 × 1.10) per unit — cap if exceeded
+  //   Floor   = PRICE S00 per unit — fallback to suggested if below
+  //   Tier lock — allowBelowSuggest=false users can't drop below suggested tier
+  const sheet = p._sheet || p;
+  const s00 = numv(sheet[`PRICE S00 ${unitCode}`]) || 0;
+  const s03 = pr.S03 || pr.S02 || pr.S01 || 0;
+  const ceiling = s03 > 0 ? Math.floor(s03 * 1.10) : 0;
+  const floor = s00;
+  const allowBelow = !currentUser || currentUser.allowBelowSuggest !== false;
+  let priceAdjusted = false;
+  let adjustMsg = '';
+
+  if (ceiling > 0 && price > ceiling) {
+    price = ceiling;
+    priceAdjusted = true;
+    adjustMsg = `⚠️ ลดราคาเป็น ฿${ceiling.toLocaleString()} (เพดานสูงสุด)`;
+  } else if (floor > 0 && price < floor) {
+    price = suggestedPrice;
+    priceAdjusted = true;
+    adjustMsg = `⚠️ ปรับเป็น ฿${Math.round(suggestedPrice).toLocaleString()} (ต่ำกว่า S00)`;
+  } else if (!allowBelow && suggestedPrice > 0 && price < suggestedPrice) {
+    price = suggestedPrice;
+    priceAdjusted = true;
+    adjustMsg = `🔒 ปรับเป็น ฿${Math.round(suggestedPrice).toLocaleString()} (ไม่มีสิทธิ์ต่ำกว่า ${suggestedTierKey})`;
+  }
+  if (priceAdjusted) {
+    // Sync draft back so user sees corrected price
+    d.price = price;
+    showToast(adjustMsg, 'warning');
+  }
+
   // Apply VAT-inclusive (existing cart convention: price is VAT-inclusive)
   const priceVat = withVat(price);
   const suggestedPriceVat = withVat(suggestedPrice);
@@ -7292,6 +7384,87 @@ function _updateCardLive(safeId) {
   // Disable [-] button at qty 0
   const minusBtn = el.querySelector('.oc-qty-btn');
   if (minusBtn) minusBtn.disabled = qtyNum <= 0;
+
+  // v6.5.3: Run price guardrails — visual feedback on price input + warning text below action row
+  _runPriceGuardrails(el, p, d, unitCode);
+}
+
+// v6.5.3 — Price guardrails (restored from v5; lost in v6 inline rewrite).
+// Rules:
+//   • Ceiling = floor(S03 × 1.10) — no user can exceed this; cap on confirm.
+//   • Floor   = PRICE S00 of unit — no user can go below; silent fallback to S03 default on confirm.
+//   • Tier lock — if currentUser.allowBelowSuggest === false AND price < suggestedTier → bump up.
+// Returns { state, ceiling, floor, suggested, message } where state ∈ 'ok'|'warn'|'danger'|'locked'.
+function _getPriceGuardrails(p, unit, qty, typedPrice, pickedTier) {
+  const sheet = p._sheet || p;
+  const unitCode = unit === 'piece' ? 'EA' : unit === 'pack' ? 'PA' : unit === 'bigpack' ? 'BP' : 'CS';
+  const pr = productPrices(sheet, unitCode);
+  const s00 = numv(sheet[`PRICE S00 ${unitCode}`]) || 0;
+  const s03 = pr.S03 || pr.S02 || pr.S01 || 0;
+  const ceiling = s03 > 0 ? Math.floor(s03 * 1.10) : 0;
+  const floor = s00;
+  const allowBelow = !currentUser || currentUser.allowBelowSuggest !== false;
+
+  // Compute suggested tier price (auto for current qty)
+  const { activeKey, autoKey } = getOrderTiers(p, unitCode, qty, pickedTier || null);
+  const suggestKey = activeKey || autoKey;
+  let suggested;
+  if (suggestKey === 'S03') suggested = pr.S03;
+  else if (suggestKey === 'S02') suggested = pr.S02;
+  else if (suggestKey === 'S01+2') suggested = Math.min((pr.S01||0)+2, pr.S02 || ((pr.S01||0)+2));
+  else suggested = pr.S01;
+  suggested = parseFloat(suggested) || 0;
+
+  // No typed price → nothing to validate
+  if (typedPrice === '' || typedPrice === null || typedPrice === undefined) {
+    return { state: 'ok', ceiling, floor, suggested, message: '' };
+  }
+  const price = parseFloat(typedPrice) || 0;
+
+  // Order of checks: tier lock first (most restrictive for some users), then ceiling, then floor
+  if (!allowBelow && suggested > 0 && price < suggested && qty > 0) {
+    return {
+      state: 'locked', ceiling, floor, suggested,
+      message: `🔒 คุณไม่ได้รับสิทธิ์ลดต่ำกว่า ${suggestKey} (฿${Math.round(suggested).toLocaleString()})`,
+    };
+  }
+  if (ceiling > 0 && price > ceiling) {
+    return {
+      state: 'warn', ceiling, floor, suggested,
+      message: `⚠️ เกินราคาสูงสุด ฿${ceiling.toLocaleString()} — กดยืนยันจะถูกลดเป็น ฿${ceiling.toLocaleString()}`,
+    };
+  }
+  if (floor > 0 && price < floor) {
+    return {
+      state: 'danger', ceiling, floor, suggested,
+      message: `❌ ต่ำกว่าราคาต่ำสุด ฿${floor.toLocaleString()} — กดยืนยันจะใช้ราคา ${suggestKey} (฿${Math.round(suggested).toLocaleString()})`,
+    };
+  }
+  return { state: 'ok', ceiling, floor, suggested, message: '' };
+}
+window._getPriceGuardrails = _getPriceGuardrails;
+
+function _runPriceGuardrails(cardEl, p, d, unitCode) {
+  if (!cardEl || !p || !d) return;
+  const priceWrap = cardEl.querySelector('.oc-price-wrap');
+  const warnEl = cardEl.querySelector('.oc-price-warn');
+  if (!priceWrap) return;
+  const result = _getPriceGuardrails(p, d.unit, d.qty || 0, d.price, d.pickedTier);
+  // Reset classes
+  priceWrap.classList.remove('warn', 'danger');
+  if (result.state === 'warn') priceWrap.classList.add('warn');
+  else if (result.state === 'danger' || result.state === 'locked') priceWrap.classList.add('danger');
+  // Update warning text
+  if (warnEl) {
+    if (result.message) {
+      warnEl.textContent = result.message;
+      warnEl.className = 'oc-price-warn ' + (result.state === 'warn' ? 'warn' : 'danger');
+      warnEl.style.display = '';
+    } else {
+      warnEl.style.display = 'none';
+      warnEl.textContent = '';
+    }
+  }
 }
 
 function renderProductList(filterText = '') {
@@ -8551,9 +8724,26 @@ function buildPromoGroups() {
   const promos = SHEET_DATA.promotions || [];
   if (!promos.length) return [];
 
+  // v6.5.4 — only consider promos that at least ONE cart line explicitly selected via Order screen.
+  // (Cart line carries c.selectedPromoName + c.selectedPromoMeasureBy from orderConfirm.)
+  // This prevents showing two competing promos for the same brand when user picked just one.
+  const selectedSet = new Set();
+  for (const c of cart) {
+    if (c && c.selectedPromoName) {
+      selectedSet.add(`${c.selectedPromoMeasureBy||''}|${c.selectedPromoName}`);
+    }
+  }
+
   // Evaluate every promo against cart (no draft)
   const evaluated = [];
   for (const promo of promos) {
+    // v6.5.4: filter to selected promos only (key = วิธีวัด|ชื่อโปร).
+    // If selectedSet is empty (no Order-screen selection happened yet → legacy carts) → fall back to old
+    // behavior (evaluate everything) so existing flows don't break.
+    if (selectedSet.size > 0) {
+      const key = `${promo['วิธีวัด']||''}|${promo['ชื่อโปร']||''}`;
+      if (!selectedSet.has(key)) continue;
+    }
     const progress = cartMatchesPromo(promo, null);
     if (!progress.matches) continue;
     const tiersEarned = progress.threshold > 0
