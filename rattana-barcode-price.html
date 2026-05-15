@@ -348,6 +348,26 @@ body.dark .kv-item{background:rgba(255,255,255,.04)}
 .login-card .gsi-wrap{display:flex;justify-content:center;margin-bottom:16px}
 .login-err{color:var(--danger);font-size:12px;margin-top:12px;min-height:18px}
 
+/* ── Batch Price Progress Modal ── */
+.bpm-overlay{display:none;position:fixed;inset:0;background:rgba(5,8,15,.78);z-index:99990;align-items:center;justify-content:center;padding:16px;backdrop-filter:blur(4px)}
+.bpm-overlay.open{display:flex}
+.bpm-box{background:var(--card-bg);border-radius:var(--radius-lg);max-width:420px;width:100%;border-top:4px solid var(--gold);box-shadow:var(--shadow-lg);animation:slideUp .22s ease}
+.bpm-head{padding:16px 20px;border-bottom:1px solid var(--border)}
+.bpm-head h3{font-size:16px;font-weight:700;margin-bottom:3px}
+.bpm-head p{font-size:12px;color:var(--muted)}
+.bpm-body{padding:14px 20px}
+.bpm-stat{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px}
+.bpm-stat:last-of-type{border-bottom:none}
+.bpm-stat .lbl{color:var(--muted);font-size:12px}
+.bpm-stat .val{font-weight:700}
+.bpm-stat .val.gold{color:var(--gold)}
+.bpm-progress-wrap{height:10px;background:var(--border);border-radius:5px;overflow:hidden;margin:14px 0 6px}
+.bpm-progress-bar{height:100%;background:linear-gradient(90deg,var(--gold),var(--gold-light));border-radius:5px;transition:width .4s ease;width:0%}
+.bpm-progress-label{font-size:11px;color:var(--muted);text-align:center;margin-bottom:4px;min-height:16px}
+.bpm-foot{padding:12px 20px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px}
+.bpm-foot-row{display:flex;gap:8px}
+.bpm-cache-note{font-size:11px;color:var(--muted);padding:7px 10px;background:var(--row-alt);border-radius:var(--radius-sm);margin-top:6px;border:1px solid var(--border)}
+
 /* ── Spinner ── */
 .spinner-overlay{display:none;position:fixed;inset:0;background:rgba(13,27,62,.55);align-items:center;justify-content:center;z-index:99999;backdrop-filter:blur(3px)}
 .spinner-overlay.show{display:flex}
@@ -464,9 +484,10 @@ footer{padding:20px 16px;text-align:center;font-size:11px;color:var(--muted)}
       <div class="card card-gold">
         <div class="card-head">
           <h3>ใส่ / สแกนบาร์โค้ด</h3>
-          <button class="btn btn-sm btn-outline" onclick="exportSkuList()" title="Export SKU ทั้งหมด" style="gap:4px">
-            📊 Export SKU
-          </button>
+          <div style="display:flex;gap:5px">
+            <button class="btn btn-sm btn-outline" onclick="exportSkuList()" title="Export SKU (ไม่มีราคาตลาด)" id="btnExportBasic">📊 SKU</button>
+            <button class="btn btn-sm btn-gold" onclick="exportSkuWithPrices()" title="Export + ดึงราคาตลาดรายไตรมาส" id="btnExportFull">🌐 + ราคาตลาด</button>
+          </div>
         </div>
         <div class="card-body">
           <div class="search-box">
@@ -2077,7 +2098,7 @@ function saveClaudeKey() {
 // ═══════════════════════════════════════════════
 //  EXPORT SKU LIST TO EXCEL
 // ═══════════════════════════════════════════════
-async function exportSkuList() {
+async function exportSkuList(allPrices = null) {
   const btn = event?.target?.closest('button');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ กำลังโหลด...'; }
   try {
@@ -2148,9 +2169,25 @@ async function exportSkuList() {
         row['PRICE CC00 CS']        || '',
         row['PRICE CC01 CS']        || '',
         row['PRICE CC02 CS']        || '',
-        // Online prices — intentionally blank
-        '', '', '',
-        '', '', '',
+        // Online prices — from batch cache if available
+        ...(() => {
+          const key = (row['CODE EA'] || '').trim();
+          const mp = allPrices ? (allPrices[key] || {}) : {};
+          const mEA = mp.EA != null ? String(mp.EA) : '';
+          const mPA = mp.PA != null ? String(mp.PA) : '';
+          const mCS = mp.CS != null ? String(mp.CS) : '';
+          const pct = (cc03, mkt) => {
+            const a = parseFloat(cc03), b = parseFloat(mkt);
+            if (!a || !b || isNaN(a) || isNaN(b)) return '';
+            return ((b - a) / a * 100).toFixed(1) + '%';
+          };
+          return [
+            mEA, mPA, mCS,
+            pct(row['PRICE CC03 EA'], mEA),
+            pct(row['PRICE CC03 PA'], mPA),
+            pct(row['PRICE CC03 CS'], mCS),
+          ];
+        })(),
         // Stock
         row['STOCK W1'] || '',
         row['STOCK W4'] || '',
@@ -2192,8 +2229,180 @@ async function exportSkuList() {
     toast('Export ล้มเหลว: ' + e.message, 'error');
     hideSpinner();
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '📊 Export SKU'; }
+    if (btn) { btn.disabled = false; btn.textContent = '📊 SKU'; }
   }
+}
+
+// ═══════════════════════════════════════════════
+//  BATCH MARKET PRICE FETCH — Quarterly use
+//  ~฿1–2 for 500 SKUs, 90-day cache
+// ═══════════════════════════════════════════════
+const MKT_CACHE_KEY = 'rattana_mkt_price_cache';
+const BATCH_SIZE    = 15; // SKUs per Claude call
+
+function getMktPriceCache() {
+  try {
+    const raw = localStorage.getItem(MKT_CACHE_KEY);
+    if (!raw) return { prices: {} };
+    const obj = JSON.parse(raw);
+    return (obj && obj.prices) ? obj : { prices: {} };
+  } catch { return { prices: {} }; }
+}
+
+function saveMktPriceCache(newPrices, existingCache) {
+  const merged = Object.assign({}, (existingCache || {}).prices || {}, newPrices);
+  localStorage.setItem(MKT_CACHE_KEY, JSON.stringify({ ts: Date.now(), prices: merged }));
+}
+
+async function exportSkuWithPrices() {
+  showSpinner('กำลังโหลดข้อมูล SKU...');
+  let allRows;
+  try { allRows = await getStockData(); }
+  catch(e) { hideSpinner(); toast('โหลดข้อมูลล้มเหลว: ' + e.message, 'error'); return; }
+  hideSpinner();
+  if (!allRows || !allRows.length) { toast('ไม่มีข้อมูล SKU', 'error'); return; }
+
+  const validRows = allRows.filter(r => r['PRODUCT NAME'] || r['CODE EA']);
+  const cache = getMktPriceCache();
+  const cachedPrices = cache.prices || {};
+  const cachedCount = validRows.filter(r => cachedPrices[(r['CODE EA'] || '').trim()]).length;
+  const newCount = validRows.length - cachedCount;
+  const batchCount = Math.ceil(newCount / BATCH_SIZE);
+
+  // Cost estimate: ~$0.0012 per batch of 15
+  const estUSD = (batchCount * 0.0012).toFixed(3);
+  const estTHB = (batchCount * 0.0012 * 35).toFixed(1);
+
+  $('bpmTotal').textContent = validRows.length + ' SKU';
+  $('bpmCached').textContent = cachedCount + ' SKU';
+  $('bpmNew').textContent = newCount + ' SKU';
+  $('bpmCost').textContent = newCount === 0 ? 'ฟรี (ใช้ cache)' : `~$${estUSD}  (~${estTHB} บาท)`;
+
+  const note = $('bpmCacheNote');
+  if (cache.ts) {
+    const ageDays = Math.round((Date.now() - cache.ts) / (24 * 3600 * 1000));
+    note.style.display = 'block';
+    note.textContent = `💾 Cache อายุ ${ageDays} วัน — ดึงราคาใหม่ได้ทุกไตรมาส (ลบ cache แล้วเปิดใหม่)`;
+  } else {
+    note.style.display = 'none';
+  }
+
+  $('bpmProgressWrap').style.display = 'none';
+  $('bpmLabel').style.display = 'none';
+  $('bpmBar').style.width = '0%';
+  $('bpmStartBtn').disabled = false;
+  $('bpmStartBtn').textContent = newCount === 0 ? '📥 Export จาก Cache' : '🚀 เริ่มดึงราคา + Export';
+  $('bpmCancelBtn').textContent = 'ยกเลิก';
+
+  window._bpmRows  = validRows;
+  window._bpmCache = cache;
+  $('bpmOverlay').classList.add('open');
+}
+
+function closeBatchModal() {
+  $('bpmOverlay').classList.remove('open');
+}
+
+async function startBatchExport() {
+  const apiKey = localStorage.getItem('rattana_claude_key');
+  const rows   = window._bpmRows  || [];
+  const cache  = window._bpmCache || { prices: {} };
+  const cachedPrices = cache.prices || {};
+  const toFetch = rows.filter(r => !cachedPrices[(r['CODE EA'] || '').trim()]);
+
+  if (toFetch.length > 0 && !apiKey) {
+    toast('กรุณาใส่ Claude API Key ในแท็บ เกี่ยวกับ', 'error');
+    return;
+  }
+
+  $('bpmStartBtn').disabled = true;
+  $('bpmCancelBtn').textContent = '—';
+
+  let newPrices = {};
+
+  if (toFetch.length > 0) {
+    $('bpmProgressWrap').style.display = 'block';
+    $('bpmLabel').style.display = 'block';
+
+    const chunks = [];
+    for (let i = 0; i < toFetch.length; i += BATCH_SIZE) chunks.push(toFetch.slice(i, i + BATCH_SIZE));
+
+    for (let ci = 0; ci < chunks.length; ci++) {
+      $('bpmBar').style.width = Math.round((ci / chunks.length) * 100) + '%';
+      $('bpmLabel').textContent = `Batch ${ci + 1} / ${chunks.length}  •  ${ci * BATCH_SIZE} / ${toFetch.length} SKU`;
+      try {
+        const batchResult = await fetchBatchPrices(chunks[ci], apiKey);
+        if (batchResult) Object.assign(newPrices, batchResult);
+      } catch(e) { console.warn('Batch chunk error', ci, e); }
+      if (ci < chunks.length - 1) await new Promise(r => setTimeout(r, 350));
+    }
+    $('bpmBar').style.width = '100%';
+    $('bpmLabel').textContent = 'ดึงราคาเสร็จสิ้น — กำลัง Export Excel...';
+    saveMktPriceCache(newPrices, cache);
+  }
+
+  const allPrices = Object.assign({}, cachedPrices, newPrices);
+  closeBatchModal();
+  await exportSkuList(allPrices);
+}
+
+async function fetchBatchPrices(rows, apiKey) {
+  const lines = rows.map((row, i) => {
+    const name  = row['SHORT NAME'] || row['PRODUCT NAME'] || '';
+    const parts = [];
+    if (row['PRICE CC03 EA']) parts.push(`EA=${row['PRICE CC03 EA']}฿`);
+    if (row['PRICE CC03 PA']) parts.push(`PA=${row['PRICE CC03 PA']}฿`);
+    if (row['PRICE CC03 CS']) parts.push(`CS=${row['PRICE CC03 CS']}฿`);
+    return `${i}: ${name}${parts.length ? ' [' + parts.join(', ') + ']' : ''}`;
+  }).join('\n');
+
+  const prompt = `ประมาณราคาตลาดไทย (บาท/หน่วย) สำหรับสินค้าต่อไปนี้ ตอบ JSON array เท่านั้น ห้ามอธิบายนอก JSON:
+${lines}
+
+[{"i":0,"EA":6,"PA":null,"CS":null},{"i":1,"EA":48,"PA":290,"CS":null},...]
+• EA/PA/CS = ราคาต่อหน่วยนั้น (ไม่ใช่ต่อ EA) • null ถ้าไม่มีหน่วยนั้นในตลาดหรือไม่ทราบ`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 400,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(28000),
+    });
+    if (!res.ok) {
+      if (res.status === 401) { toast('Claude API Key ไม่ถูกต้อง', 'error'); localStorage.removeItem('rattana_claude_key'); }
+      return null;
+    }
+    const data = await res.json();
+    const text  = data.content?.[0]?.text || '';
+    const match = text.match(/\[[\s\S]*\]/);
+    if (!match) return null;
+    const arr = JSON.parse(match[0]);
+    const result = {};
+    arr.forEach(item => {
+      const row = rows[item.i];
+      if (!row) return;
+      const key = (row['CODE EA'] || '').trim();
+      if (!key) return;
+      result[key] = {
+        EA: item.EA ?? null,
+        PA: item.PA ?? null,
+        CS: item.CS ?? null,
+        name: row['SHORT NAME'] || row['PRODUCT NAME'] || '',
+        ts: Date.now(),
+      };
+    });
+    return result;
+  } catch(e) { console.warn('fetchBatchPrices:', e.message); return null; }
 }
 
 function savePrScriptUrl() {
@@ -2455,5 +2664,34 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 });
 </script>
+<!-- ── Batch Market Price Modal ── -->
+<div class="bpm-overlay" id="bpmOverlay">
+  <div class="bpm-box">
+    <div class="bpm-head">
+      <h3>🌐 Export + ราคาตลาด</h3>
+      <p>ดึงราคาโดยประมาณจาก Claude AI แล้วรวมลง Excel (ใช้รายไตรมาส)</p>
+    </div>
+    <div class="bpm-body">
+      <div class="bpm-stat"><span class="lbl">SKU ทั้งหมด</span><span class="val" id="bpmTotal">—</span></div>
+      <div class="bpm-stat"><span class="lbl">มีราคา cache แล้ว</span><span class="val" id="bpmCached">—</span></div>
+      <div class="bpm-stat"><span class="lbl">ต้องดึงใหม่</span><span class="val" id="bpmNew">—</span></div>
+      <div class="bpm-stat"><span class="lbl">ค่าใช้จ่ายโดยประมาณ</span><span class="val gold" id="bpmCost">—</span></div>
+      <div class="bpm-cache-note" id="bpmCacheNote" style="display:none"></div>
+      <div class="bpm-progress-wrap" id="bpmProgressWrap" style="display:none">
+        <div class="bpm-progress-bar" id="bpmBar"></div>
+      </div>
+      <div class="bpm-progress-label" id="bpmLabel" style="display:none"></div>
+    </div>
+    <div class="bpm-foot">
+      <div class="bpm-foot-row">
+        <button class="btn btn-gold btn-block" id="bpmStartBtn" onclick="startBatchExport()">🚀 เริ่มดึงราคา + Export</button>
+      </div>
+      <div class="bpm-foot-row">
+        <button class="btn btn-outline" style="flex:1;font-size:12px" onclick="closeBatchModal();exportSkuList()">📊 Export แบบไม่มีราคา</button>
+        <button class="btn btn-outline" style="flex-shrink:0" id="bpmCancelBtn" onclick="closeBatchModal()">ยกเลิก</button>
+      </div>
+    </div>
+  </div>
+</div>
 </body>
 </html>
