@@ -1076,7 +1076,10 @@ function renderStockCard(row) {
   const shortName = row['SHORT NAME']   || '';
   const brand     = row['CAT BRAND']    || '';
   const imgUrl    = toImgUrl(row['SKU_USAGE'] || '');
-  const cc00ea    = row['PRICE CC00 EA'] || '';
+  // Detect primary unit (first unit that has a barcode)
+  const PRIMARY_UNIT = ['EA','PA','BP','CS'].find(u => row[`CODE ${u}`]) || 'EA';
+  const unitLabel = row[`RATTANA UNIT ${PRIMARY_UNIT}`] || row[`UNIT ${PRIMARY_UNIT}`] || PRIMARY_UNIT;
+  const unitQty   = row[`QTY ${PRIMARY_UNIT}`] || '';
 
   const WH_KEYS   = ['STOCK W1','STOCK W2','STOCK W3','STOCK W4','STOCK C4'];
   const WH_LABELS = ['W1','W2','W3','W4','C4'];
@@ -1107,9 +1110,20 @@ function renderStockCard(row) {
     </div>
   </div>`;
 
-  if (cc00ea) {
-    html += `<div style="font-size:12px;color:var(--muted);margin-bottom:8px">
-      ราคา CC00 EA: <strong style="color:var(--gold);font-size:15px">${escapeHtml(cc00ea)}</strong> บาท
+  // Price band CC00–CC03 for primary unit
+  const ccPrices = ['CC00','CC01','CC02','CC03'].map(cc => ({
+    cc, val: row[`PRICE ${cc} ${PRIMARY_UNIT}`] || ''
+  })).filter(x => x.val);
+  if (ccPrices.length) {
+    const cc03val = (ccPrices.find(x=>x.cc==='CC03')||ccPrices.at(-1)).val;
+    html += `<div style="margin-bottom:10px">
+      <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:5px">ราคา${unitQty?' ('+unitQty+' '+escapeHtml(unitLabel)+')':' '+escapeHtml(unitLabel)} ต่อ ${PRIMARY_UNIT}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${ccPrices.map(({cc,val})=>`<div style="background:var(--row-alt);border:1px solid var(--border);border-radius:6px;padding:5px 10px;text-align:center${cc==='CC03'?';border-color:var(--gold);background:rgba(201,168,76,.08)':''}">
+          <div style="font-size:9px;font-weight:700;color:var(--muted)">${cc}</div>
+          <div style="font-size:15px;font-weight:700;color:${cc==='CC03'?'var(--gold)':'var(--text)'}">${escapeHtml(String(val))}</div>
+        </div>`).join('')}
+      </div>
     </div>`;
   }
 
@@ -1562,9 +1576,17 @@ async function loadMarketPrices(query, barcode, productName) {
     tops:   `https://www.tops.co.th/th/search?keyword=${qEnc}`,
   };
 
+  // Extract unit context from Rattana sheet row
+  const row = currentStockRow || {};
+  const primaryUnit = ['EA','PA','BP','CS'].find(u => row[`CODE ${u}`]) || 'EA';
+  const unitQtyCtx  = row[`QTY ${primaryUnit}`] || '';
+  const unitLblCtx  = row[`RATTANA UNIT ${primaryUnit}`] || row[`UNIT ${primaryUnit}`] || '';
+  const cc03price   = row[`PRICE CC03 ${primaryUnit}`] || '';
+  const unitCtx = { unit: primaryUnit, qty: unitQtyCtx, label: unitLblCtx, cc03: cc03price };
+
   // Fire Claude + direct API calls in parallel
   const [claudeResult, bigcResult, lotusResult] = await Promise.all([
-    fetchClaudePrices(productName || query).catch(() => null),
+    fetchClaudePrices(productName || query, unitCtx).catch(() => null),
     fetchBigCPrice(query, barcode).catch(() => null),
     fetchLotusPrice(query, barcode).catch(() => null),
   ]);
@@ -1612,15 +1634,20 @@ async function loadMarketPrices(query, barcode, productName) {
   const recEl = document.getElementById('mkt-recommend');
   if (recEl && claudeResult?.recommend) {
     const rec = claudeResult.recommend;
+    const vsHtml = rec.vs_cc03
+      ? `<div style="display:inline-block;margin-top:5px;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:700;background:${rec.vs_cc03.includes('-')?'rgba(46,204,113,.15)':'rgba(231,76,60,.12)'};color:${rec.vs_cc03.includes('-')?'var(--success)':'var(--danger)'}">เทียบ CC03: ${escapeHtml(rec.vs_cc03)}</div>`
+      : '';
+    const unitTag = unitCtx.unit ? `<span style="font-size:12px;font-weight:400;color:var(--muted);margin-left:4px">/ ${unitCtx.unit}</span>` : '';
     recEl.innerHTML = `
       <div class="rc-label">⭐ ราคาอ้างอิงที่แนะนำ</div>
-      <div class="rc-price">${escapeHtml(String(rec.price))}<span class="rc-unit">฿</span></div>
+      <div class="rc-price">${escapeHtml(String(rec.price))}<span class="rc-unit">฿</span>${unitTag}</div>
+      ${vsHtml}
       <div class="rc-note">${escapeHtml(rec.note || '')}</div>`;
     recEl.style.display = 'block';
   }
 }
 
-async function fetchClaudePrices(productName) {
+async function fetchClaudePrices(productName, unitCtx = {}) {
   const apiKey = localStorage.getItem('rattana_claude_key');
   if (!apiKey) return null;
   try {
@@ -1637,7 +1664,13 @@ async function fetchClaudePrices(productName) {
         max_tokens: 600,
         messages: [{
           role: 'user',
-          content: `ราคาปลีกปัจจุบันของ "${productName}" ในประเทศไทย ตอบเป็น JSON object เดียวเท่านั้น ห้ามอธิบายนอก JSON:\n{"prices":[{"store":"BigC","price":"XX"},{"store":"Lotus's","price":"XX"},{"store":"Makro","price":"XX"},{"store":"Lazada","price":"XX"},{"store":"Shopee","price":"XX"},{"store":"Tops","price":"XX"}],"recommend":{"price":"XX","note":"เหตุผล 1-2 ประโยค ว่าทำไมราคานี้เป็นราคาอ้างอิงที่ดีที่สุด เช่น คนนิยมซื้อที่ไหน ราคาที่พบบ่อยสุด"}}\nราคาต่อหน่วยเป็นบาท ประมาณจากความรู้ที่มี ห้ามใส่ "?" ให้ประมาณใกล้เคียงเสมอ recommend.price คือราคาที่คนส่วนใหญ่ซื้อได้จริงในชีวิตประจำวัน`
+          content: (() => {
+            const { unit='EA', qty='', label='', cc03='' } = unitCtx;
+            const unitDesc = qty ? `${unit} (${qty}${label?' '+label:''}/หน่วย)` : unit;
+            const cc03line = cc03 ? `\nราคา CC03 ของ Rattana: ${cc03} บาท/${unit}` : '';
+            const vsLine   = cc03 ? `\nrecommend.vs_cc03 = เปรียบเทียบกับ CC03 เช่น "+12% แพงกว่า Rattana CC03" หรือ "-8% ถูกกว่า CC03"` : '';
+            return `สินค้า: "${productName}"\nหน่วยขาย Rattana: ${unitDesc}${cc03line}\n\nค้นหาราคาตลาดสำหรับหน่วย ${unit} เดียวกันที่ร้านค้าไทย ตอบเป็น JSON object เดียวเท่านั้น ห้ามอธิบายนอก JSON:\n{"prices":[{"store":"BigC","price":"XX"},{"store":"Lotus's","price":"XX"},{"store":"Makro","price":"XX"},{"store":"Lazada","price":"XX"},{"store":"Shopee","price":"XX"},{"store":"Tops","price":"XX"}],"recommend":{"price":"XX","vs_cc03":"XX","note":"เหตุผล 1-2 ประโยค ว่าทำไมราคานี้เป็นราคาอ้างอิงที่ดีที่สุด"}}\nราคาต่อ${unit}เป็นบาท ประมาณจากความรู้ที่มี ห้ามใส่ "?" recommend.price คือราคาที่คนส่วนใหญ่ซื้อหน่วย${unit}ได้จริง${vsLine}`;
+          })()
         }]
       }),
       signal: AbortSignal.timeout(20000),
