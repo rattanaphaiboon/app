@@ -459,6 +459,17 @@ footer{padding:20px 16px;text-align:center;font-size:11px;color:var(--muted)}
             <li>ประวัติเก็บใน browser นี้เท่านั้น</li>
           </ul>
 
+          <!-- Claude API Key setting -->
+          <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+            <h4 style="font-weight:700;margin-bottom:8px;color:var(--gold)">🤖 Claude API Key</h4>
+            <p style="font-size:12px;color:var(--muted);margin-bottom:10px">ใส่ key เพื่อดึงราคาตลาดไทยอัตโนมัติ (BigC, Lotus, Makro, Lazada, Shopee, Tops)</p>
+            <div style="display:flex;gap:8px;margin-bottom:6px">
+              <input type="password" class="input" id="claudeKeyInput" placeholder="sk-ant-api03-..." style="height:38px;font-size:13px">
+              <button class="btn btn-gold btn-sm" onclick="saveClaudeKey()" style="white-space:nowrap">บันทึก</button>
+            </div>
+            <div style="font-size:11px;color:var(--muted)">Key เก็บใน browser เครื่องนี้เท่านั้น ไม่ส่งออกไปไหน</div>
+          </div>
+
           <div style="margin-top:20px;padding-top:14px;border-top:1px solid var(--border);font-size:11px;color:var(--muted);text-align:center">
             Rattana Barcode Price <strong>v2.0</strong> · รัตนไพบูลย์
           </div>
@@ -839,6 +850,10 @@ function initApp() {
 
   // Pre-load stock sheet in background
   preloadStockSheet();
+
+  // Pre-fill saved Claude key
+  const savedKey = localStorage.getItem('rattana_claude_key');
+  if (savedKey && $('claudeKeyInput')) $('claudeKeyInput').value = savedKey;
 
   setTimeout(() => $('bcInput').focus(), 200);
 }
@@ -1467,20 +1482,23 @@ function renderResult(r) {
   }
 
   // Inline Thai market prices with async loading
+  const hasKey = !!localStorage.getItem('rattana_claude_key');
   html += `<div class="market-prices">
-    <h4>ราคาตลาดไทย</h4>
+    <h4>ราคาตลาดไทย${hasKey ? ' <span style="font-size:10px;font-weight:400;color:var(--muted)">🤖 AI</span>' : ''}</h4>
     <div id="mkt-prices-list">
       ${mkPfiRow('bigc',  '🏬', 'BigC',        'load', `https://www.bigc.co.th/search?q=${query}`)}
       ${mkPfiRow('lotus', '🌿', "Lotus's",      'load', `https://www.lotuss.com/th/search?keyword=${query}`)}
-      ${mkPfiRow('lazada','🛒', 'Lazada',       'link', `https://www.lazada.co.th/catalog/?q=${query}`)}
-      ${mkPfiRow('shopee','🛍', 'Shopee',       'link', `https://shopee.co.th/search?keyword=${query}`)}
-      ${mkPfiRow('tops',  '🏪', 'Tops',         'link', `https://www.tops.co.th/th/search?keyword=${query}`)}
+      ${mkPfiRow('makro', '🏭', 'Makro',        'load', `https://www.makro.pro/search?q=${query}`)}
+      ${mkPfiRow('lazada','🛒', 'Lazada',       'load', `https://www.lazada.co.th/catalog/?q=${query}`)}
+      ${mkPfiRow('shopee','🛍', 'Shopee',       'load', `https://shopee.co.th/search?keyword=${query}`)}
+      ${mkPfiRow('tops',  '🏪', 'Tops',         'load', `https://www.tops.co.th/th/search?keyword=${query}`)}
       ${mkPfiRow('google','🔍', 'Google ราคา', 'link', `https://www.google.com/search?q=${queryThai}`)}
     </div>
+    ${!hasKey ? `<div style="font-size:11px;color:var(--muted);margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">💡 ใส่ Claude API Key ในแท็บ "เกี่ยวกับ" เพื่อดูราคาอัตโนมัติ</div>` : ''}
   </div>`;
 
   $('resultContent').innerHTML = html;
-  loadMarketPrices(rawQ, r.code);
+  loadMarketPrices(rawQ, r.code, r.name || rawQ);
 }
 
 function mkPfiRow(id, icon, store, mode, fallbackUrl) {
@@ -1499,61 +1517,124 @@ function mkPfiRow(id, icon, store, mode, fallbackUrl) {
   </div>`;
 }
 
-async function loadMarketPrices(query, barcode) {
-  const stores = [
-    { id: 'bigc',  fn: () => fetchBigCPrice(query, barcode),  fallback: `https://www.bigc.co.th/search?q=${encodeURIComponent(query)}` },
-    { id: 'lotus', fn: () => fetchLotusPrice(query, barcode), fallback: `https://www.lotuss.com/th/search?keyword=${encodeURIComponent(query)}` },
-  ];
-  await Promise.all(stores.map(async s => {
-    const result = await s.fn().catch(() => null);
-    const nameEl  = document.getElementById(`pfi-${s.id}-name`);
-    const rightEl = document.getElementById(`pfi-${s.id}-right`);
-    if (!nameEl || !rightEl) return;
-    if (result?.price) {
-      nameEl.textContent = result.name || '';
-      rightEl.innerHTML  = `<span class="pfi-price">${escapeHtml(String(result.price))} ฿</span>`;
-    } else if (result?.url) {
-      nameEl.textContent = result.name || '';
-      rightEl.innerHTML  = `<a class="pfi-link" href="${escapeHtml(result.url)}" target="_blank" rel="noopener">ดูราคา →</a>`;
-    } else {
-      nameEl.textContent = '';
-      rightEl.innerHTML  = `<a class="pfi-link" href="${escapeHtml(s.fallback)}" target="_blank" rel="noopener">เปิด →</a>`;
+async function loadMarketPrices(query, barcode, productName) {
+  const qEnc = encodeURIComponent(query);
+  const STORE_FALLBACKS = {
+    bigc:   `https://www.bigc.co.th/search?q=${qEnc}`,
+    lotus:  `https://www.lotuss.com/th/search?keyword=${qEnc}`,
+    makro:  `https://www.makro.pro/search?q=${qEnc}`,
+    lazada: `https://www.lazada.co.th/catalog/?q=${qEnc}`,
+    shopee: `https://shopee.co.th/search?keyword=${qEnc}`,
+    tops:   `https://www.tops.co.th/th/search?keyword=${qEnc}`,
+  };
+
+  // Fire Claude + direct API calls in parallel
+  const [claudePrices, bigcResult, lotusResult] = await Promise.all([
+    fetchClaudePrices(productName || query).catch(() => null),
+    fetchBigCPrice(query, barcode).catch(() => null),
+    fetchLotusPrice(query, barcode).catch(() => null),
+  ]);
+
+  // Build Claude price map keyed by lowercase store name
+  const aiMap = {};
+  if (claudePrices) {
+    claudePrices.forEach(p => {
+      const k = (p.store||'').toLowerCase().replace(/['\s.]/g,'');
+      if (p.price && p.price !== '?') aiMap[k] = p.price;
+    });
+  }
+
+  function setRow(id, realResult, aiKey) {
+    const nameEl  = document.getElementById(`pfi-${id}-name`);
+    const rightEl = document.getElementById(`pfi-${id}-right`);
+    if (!rightEl) return;
+    const fallback = STORE_FALLBACKS[id] || '#';
+
+    if (realResult?.price) {
+      if (nameEl) nameEl.textContent = realResult.name || '';
+      const href = realResult.url || fallback;
+      rightEl.innerHTML = `<a class="pfi-link" href="${escapeHtml(href)}" target="_blank" rel="noopener"><span class="pfi-price">${escapeHtml(String(realResult.price))} ฿</span></a>`;
+      return;
     }
-  }));
+    const aiPrice = aiMap[aiKey] || aiMap[id];
+    if (aiPrice) {
+      if (nameEl) nameEl.textContent = '';
+      rightEl.innerHTML = `<a class="pfi-link" href="${escapeHtml(fallback)}" target="_blank" rel="noopener"><span class="pfi-price">~${escapeHtml(String(aiPrice))} ฿ <span style="font-size:9px;opacity:.55">AI</span></span></a>`;
+      return;
+    }
+    if (nameEl) nameEl.textContent = '';
+    rightEl.innerHTML = `<a class="pfi-link" href="${escapeHtml(fallback)}" target="_blank" rel="noopener">เปิด →</a>`;
+  }
+
+  setRow('bigc',   bigcResult,  'bigc');
+  setRow('lotus',  lotusResult, "lotuss");
+  setRow('makro',  null,        'makro');
+  setRow('lazada', null,        'lazada');
+  setRow('shopee', null,        'shopee');
+  setRow('tops',   null,        'tops');
+}
+
+async function fetchClaudePrices(productName) {
+  const apiKey = localStorage.getItem('rattana_claude_key');
+  if (!apiKey) return null;
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 400,
+        messages: [{
+          role: 'user',
+          content: `ราคาปลีกปัจจุบันของ "${productName}" ในร้านค้าไทย ตอบเฉพาะ JSON array เท่านั้น ห้ามอธิบาย:\n[{"store":"BigC","price":"XX"},{"store":"Lotus's","price":"XX"},{"store":"Makro","price":"XX"},{"store":"Lazada","price":"XX"},{"store":"Shopee","price":"XX"},{"store":"Tops","price":"XX"}]\nราคาต่อหน่วยเป็นบาท ถ้าไม่รู้ให้ price เป็น "?"`
+        }]
+      }),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const text = data.content?.[0]?.text || '';
+    const match = text.match(/\[[\s\S]*?\]/);
+    return match ? JSON.parse(match[0]) : null;
+  } catch(e) { console.warn('Claude prices:', e.message); return null; }
 }
 
 async function fetchBigCPrice(query, barcode) {
   try {
     const q = barcode && isBarcode(barcode) ? barcode : query;
-    const res = await fetch(`https://www.bigc.co.th/api/search/keyword?q=${encodeURIComponent(q)}&page_number=1&page_size=3`, { signal: AbortSignal.timeout(7000) });
+    const res = await fetch(`https://www.bigc.co.th/api/search/keyword?q=${encodeURIComponent(q)}&page_number=1&page_size=3`, { signal: AbortSignal.timeout(6000) });
     if (!res.ok) return null;
     const data = await res.json();
     const items = data?.products?.items || data?.items || data?.result?.products || [];
     if (!items.length) return null;
     const it = items[0];
-    return {
-      name:  it.name || it.title || '',
-      price: it.price || it.selling_price || it.price_promotion || '',
-      url:   it.canonical_url ? `https://www.bigc.co.th${it.canonical_url}` : null,
-    };
+    return { name: it.name||'', price: it.price||it.selling_price||it.price_promotion||'', url: it.canonical_url ? `https://www.bigc.co.th${it.canonical_url}` : null };
   } catch { return null; }
 }
 
 async function fetchLotusPrice(query, barcode) {
   try {
     const q = barcode && isBarcode(barcode) ? barcode : query;
-    const res = await fetch(`https://www.lotuss.com/th/api/2.0/catalog/search?query=${encodeURIComponent(q)}&page=0&pageSize=3`, { signal: AbortSignal.timeout(7000) });
+    const res = await fetch(`https://www.lotuss.com/th/api/2.0/catalog/search?query=${encodeURIComponent(q)}&page=0&pageSize=3`, { signal: AbortSignal.timeout(6000) });
     if (!res.ok) return null;
     const data = await res.json();
     const items = data?.products || data?.items || data?.data?.products || [];
     if (!items.length) return null;
     const it = items[0];
-    return {
-      name:  it.name || it.title || '',
-      price: it.price || it.normalPrice || it.promotionPrice || '',
-      url:   it.url ? `https://www.lotuss.com${it.url}` : null,
-    };
+    return { name: it.name||'', price: it.price||it.normalPrice||it.promotionPrice||'', url: it.url ? `https://www.lotuss.com${it.url}` : null };
   } catch { return null; }
+}
+
+function saveClaudeKey() {
+  const key = ($('claudeKeyInput')?.value || '').trim();
+  if (!key) { toast('กรุณาใส่ API Key', 'error'); return; }
+  localStorage.setItem('rattana_claude_key', key);
+  toast('บันทึก Claude API Key แล้ว ✓', 'success');
 }
 
 // ═══════════════════════════════════════════════
