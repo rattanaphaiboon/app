@@ -2503,8 +2503,8 @@ async function openMakroBatchModal() {
   const newCount    = validRows.length - cachedCount;
   const batchCount  = Math.ceil(newCount / MAKRO_BATCH_SIZE);
 
-  $('bpmTitle').textContent = '🏭 Export + ข้อมูล Makro';
-  $('bpmDesc').textContent  = 'ดึงชื่อ รหัส คำอธิบาย โภชนาการ ราคา EA/PA/CS จาก Makro (ใช้รายไตรมาส)';
+  $('bpmTitle').textContent = '🏭 Export + ราคาค้าส่ง (AI ประมาณ)';
+  $('bpmDesc').textContent  = 'Claude AI ประมาณราคา PA/CS ค้าส่ง + ลิงก์ค้นหา Makro — ใช้รายไตรมาส';
   _showBatchModal(validRows, cache, startMakroBatchExport,
     newCount === 0 ? '📥 Export จาก Cache' : '🚀 เริ่มดึงข้อมูล Makro + Export',
     true /* showLimit */);
@@ -2558,13 +2558,15 @@ async function batchFetchMakroInfo(rows, apiKey) {
     return `${i}: ${name}${parts.length ? ' [' + parts.join(',') + ']' : ''}`;
   }).join('\n');
 
-  const prompt = `ค้นหาข้อมูลสินค้าเหล่านี้ที่ Makro Thailand (สยามแม็คโคร) ตอบ JSON array เท่านั้น ห้ามอธิบายนอก JSON:
+  const prompt = `สินค้าเหล่านี้คือสินค้า FMCG ที่จำหน่ายในไทย ให้ประมาณราคาขายส่ง/Makro-style โดยใช้ราคา Rattana (CC03) เป็น reference ตอบ JSON array เท่านั้น ห้ามอธิบายนอก JSON:
 ${lines}
 
-[{"i":0,"ok":true,"n":"ชื่อที่ Makro","c":"รหัส Makro","d":"คำอธิบายสั้น","PA":{"p":32,"q":6},"CS":{"p":145,"q":30},"w":"น้ำหนัก","dim":"ขนาด","nut":"fat:3g,pro:2g,carb:14g,sod:800mg","ing":"ส่วนประกอบหลัก...","al":"แป้งสาลี,ไข่","st":"การเก็บรักษา"},{"i":1,"ok":false},...]
-• ok:false ถ้าไม่มีสินค้านี้ที่ Makro หรือไม่ทราบ
-• PA/CS = {"p":ราคาต่อหน่วยนั้น,"q":จำนวน EA} — null ถ้าไม่ขาย
-• nut ให้ compact string "fat:Xg,pro:Xg,carb:Xg,sod:Xmg" — null ถ้าไม่ทราบ`;
+format: [{"i":0,"cat":"เครื่องดื่ม","PA":{"p":55,"q":6},"CS":{"p":240,"q":24},"margin":"ต่ำ/กลาง/สูง","note":"ประมาณจากราคา CC03"},{"i":1,...},...]
+กฎ:
+• ทุก item ต้องมีข้อมูล (ห้าม skip)
+• PA/CS = {"p":ราคาประมาณที่ channel ค้าส่งขาย,"q":จำนวน EA ต่อหน่วย} — ถ้าไม่มีขาย PA ให้ใส่ null
+• ประมาณ margin ของ channel ค้าส่งเทียบกับ CC03: ต่ำ=<10%, กลาง=10-20%, สูง=>20%
+• cat = หมวดสินค้าสั้นๆ ภาษาไทย`;
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -2597,7 +2599,7 @@ ${lines}
       if (!row) return;
       const key = (row['CODE EA'] || '').trim();
       if (!key) return;
-      result[key] = { ...item, ts: Date.now() };
+      result[key] = { ...item, ok: true, ts: Date.now() };
     });
     return result;
   } catch(e) { console.warn('batchFetchMakroInfo:', e.message); return null; }
@@ -2611,16 +2613,19 @@ async function exportMakroExcel(allRows, makroData) {
       // Rattana
       'ชื่อสินค้า','SHORT NAME','แบรนด์','CODE EA','CODE PA','CODE CS',
       'ราคา CC03 EA','ราคา CC03 PA','ราคา CC03 CS',
-      // Makro
-      'พบที่ Makro','ชื่อที่ Makro','รหัส Makro','คำอธิบาย',
-      'ราคา Makro PA','จำนวน PA (EA)','ราคา Makro CS','จำนวน CS (EA)',
-      'น้ำหนัก','ขนาด','โภชนาการ','ส่วนประกอบ','สารก่อภูมิแพ้','การเก็บรักษา',
+      // Wholesale estimate
+      'หมวดสินค้า',
+      'ราคาค้าส่ง PA (ประมาณ)','จำนวน PA (EA)',
+      'ราคาค้าส่ง CS (ประมาณ)','จำนวน CS (EA)',
+      'margin ค้าส่ง','หมายเหตุ','ลิงก์ค้นหา Makro',
     ];
     const data = [headers];
     allRows.forEach(row => {
       if (!row['PRODUCT NAME'] && !row['CODE EA']) return;
-      const key = (row['CODE EA'] || '').trim();
-      const mk  = makroData[key] || {};
+      const key  = (row['CODE EA'] || '').trim();
+      const mk   = makroData[key] || {};
+      const name = row['SHORT NAME'] || row['PRODUCT NAME'] || '';
+      const makroUrl = `https://www.siam.makro.co.th/search?text=${encodeURIComponent(name)}`;
       data.push([
         row['PRODUCT NAME']   || '',
         row['SHORT NAME']     || '',
@@ -2631,21 +2636,15 @@ async function exportMakroExcel(allRows, makroData) {
         row['PRICE CC03 EA']  || '',
         row['PRICE CC03 PA']  || '',
         row['PRICE CC03 CS']  || '',
-        // Makro
-        mk.ok === false ? 'ไม่พบ' : (mk.ok ? 'ใช่' : ''),
-        mk.n  || '',
-        mk.c  || '',
-        mk.d  || '',
+        // Wholesale estimate
+        mk.cat || '',
         mk.PA?.p != null ? mk.PA.p : '',
         mk.PA?.q != null ? mk.PA.q : '',
         mk.CS?.p != null ? mk.CS.p : '',
         mk.CS?.q != null ? mk.CS.q : '',
-        mk.w   || '',
-        mk.dim || '',
-        mk.nut || '',
-        mk.ing || '',
-        mk.al  || '',
-        mk.st  || '',
+        mk.margin || '',
+        mk.note   || '',
+        makroUrl,
       ]);
     });
 
@@ -2653,18 +2652,17 @@ async function exportMakroExcel(allRows, makroData) {
     const ws = XLSX.utils.aoa_to_sheet(data);
     ws['!cols'] = [
       {wch:30},{wch:20},{wch:14},{wch:16},{wch:16},{wch:16},
-      {wch:10},{wch:10},{wch:10},
-      {wch:8},{wch:30},{wch:12},{wch:40},
-      {wch:12},{wch:12},{wch:12},{wch:12},
-      {wch:10},{wch:18},{wch:30},{wch:50},{wch:30},{wch:30},
+      {wch:12},{wch:12},{wch:12},
+      {wch:16},{wch:16},{wch:12},{wch:16},{wch:12},
+      {wch:14},{wch:30},{wch:50},
     ];
     ws['!freeze'] = { xSplit:0, ySplit:1, topLeftCell:'A2', activePane:'bottomLeft', state:'frozen' };
     XLSX.utils.book_append_sheet(wb, ws, 'Makro Info');
     const today = new Date();
     const d = `${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
     XLSX.writeFile(wb, `Rattana_Makro_${d}.xlsx`);
-    const found = Object.values(makroData).filter(v => v.ok).length;
-    toast(`Export เสร็จ — พบที่ Makro ${found} SKU จาก ${allRows.length} ✓`, 'success');
+    const estimated = Object.values(makroData).filter(v => v.ok).length;
+    toast(`Export เสร็จ — ประมาณราคา ${estimated} SKU จาก ${allRows.length} ✓`, 'success');
   } catch(e) { toast('Export ล้มเหลว: ' + e.message, 'error'); }
   finally { hideSpinner(); }
 }
