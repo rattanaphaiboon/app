@@ -521,7 +521,7 @@ footer{padding:20px 16px;text-align:center;font-size:11px;color:var(--muted)}
         <div class="card-head">
           <h3>ใส่ / สแกนบาร์โค้ด</h3>
           <div style="display:flex;align-items:center;gap:5px">
-            <button class="btn btn-sm" id="makroHeaderBtn" onclick="openMakroSheet()" title="ดูข้อมูลและราคา Makro" style="display:inline-flex;background:#e8121c;color:#fff;border-color:#e8121c;white-space:nowrap">🏭 Makro</button>
+            <button class="btn btn-sm" id="makroHeaderBtn" onclick="openMakroBatchModal()" title="Export ข้อมูล Makro ทุก SKU เป็น Excel" style="display:inline-flex;background:#e8121c;color:#fff;border-color:#e8121c;white-space:nowrap">🏭 Makro</button>
             <div style="display:none;gap:5px" id="exportBtnsWrap">
               <button class="btn btn-sm btn-outline" onclick="exportSkuList()" title="Export SKU (ไม่มีราคาตลาด)" id="btnExportBasic">📊 SKU</button>
               <button class="btn btn-sm btn-gold" onclick="exportSkuWithPrices()" title="Export + ดึงราคาตลาดรายไตรมาส" id="btnExportFull">🌐 + ราคาตลาด</button>
@@ -1905,6 +1905,7 @@ function renderResult(r) {
     </div>
     <div class="recommend-card" id="mkt-recommend" style="display:none"></div>
     ${!hasKey ? `<div style="font-size:11px;color:var(--muted);margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">💡 ใส่ Claude API Key ในแท็บ "เกี่ยวกับ" เพื่อดูราคาอัตโนมัติ</div>` : ''}
+    ${hasKey ? `<div style="padding-top:10px;border-top:1px solid var(--border);margin-top:6px"><button onclick="openMakroSheet()" style="background:none;border:none;color:#e8121c;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:5px;padding:0">🏭 ดูข้อมูลสินค้านี้ที่ Makro</button></div>` : ''}
   </div>`;
 
   $('resultContent').innerHTML = html;
@@ -2460,6 +2461,212 @@ function saveMktPriceCache(newPrices, existingCache) {
   localStorage.setItem(MKT_CACHE_KEY, JSON.stringify({ ts: Date.now(), prices: merged }));
 }
 
+// ═══════════════════════════════════════════════
+//  MAKRO BATCH INFO EXPORT — Quarterly use
+//  Gets full Makro product info for every SKU
+// ═══════════════════════════════════════════════
+const MAKRO_CACHE_KEY  = 'rattana_makro_info_cache';
+const MAKRO_BATCH_SIZE = 8; // smaller batch, richer output
+
+function getMakroCache() {
+  try {
+    const raw = localStorage.getItem(MAKRO_CACHE_KEY);
+    if (!raw) return { data: {} };
+    const obj = JSON.parse(raw);
+    return (obj && obj.data) ? obj : { data: {} };
+  } catch { return { data: {} }; }
+}
+
+function saveMakroCache(newData, existingCache) {
+  const merged = Object.assign({}, (existingCache || {}).data || {}, newData);
+  localStorage.setItem(MAKRO_CACHE_KEY, JSON.stringify({ ts: Date.now(), data: merged }));
+}
+
+async function openMakroBatchModal() {
+  showSpinner('กำลังโหลดข้อมูล SKU...');
+  let allRows;
+  try { allRows = await getStockData(); }
+  catch(e) { hideSpinner(); toast('โหลดข้อมูลล้มเหลว: ' + e.message, 'error'); return; }
+  hideSpinner();
+  if (!allRows || !allRows.length) { toast('ไม่มีข้อมูล SKU', 'error'); return; }
+
+  const validRows  = allRows.filter(r => r['PRODUCT NAME'] || r['CODE EA']);
+  const cache      = getMakroCache();
+  const cachedData = cache.data || {};
+  const cachedCount = validRows.filter(r => cachedData[(r['CODE EA'] || '').trim()]).length;
+  const newCount    = validRows.length - cachedCount;
+  const batchCount  = Math.ceil(newCount / MAKRO_BATCH_SIZE);
+
+  // ~$0.0042 per batch of 8 (output richer than price-only)
+  const estUSD = (batchCount * 0.0042).toFixed(2);
+  const estTHB = (batchCount * 0.0042 * 35).toFixed(0);
+
+  $('bpmTitle').textContent = '🏭 Export + ข้อมูล Makro';
+  $('bpmDesc').textContent  = 'ดึงชื่อ รหัส คำอธิบาย โภชนาการ ราคา EA/PA/CS จาก Makro (ใช้รายไตรมาส)';
+  _showBatchModal(validRows, cache, newCount, batchCount, estUSD, estTHB,
+    startMakroBatchExport,
+    newCount === 0 ? '📥 Export จาก Cache' : '🚀 เริ่มดึงข้อมูล Makro + Export');
+}
+
+async function startMakroBatchExport() {
+  const apiKey = localStorage.getItem('rattana_claude_key');
+  const rows   = window._bpmRows  || [];
+  const cache  = window._bpmCache || { data: {} };
+  const cachedData = cache.data || {};
+  const toFetch = rows.filter(r => !cachedData[(r['CODE EA'] || '').trim()]);
+
+  if (toFetch.length > 0 && !apiKey) { toast('กรุณาใส่ Claude API Key', 'error'); return; }
+
+  $('bpmStartBtn').disabled = true;
+  $('bpmCancelBtn').textContent = '—';
+  let newData = {};
+
+  if (toFetch.length > 0) {
+    $('bpmProgressWrap').style.display = 'block';
+    $('bpmLabel').style.display = 'block';
+    const chunks = [];
+    for (let i = 0; i < toFetch.length; i += MAKRO_BATCH_SIZE) chunks.push(toFetch.slice(i, i + MAKRO_BATCH_SIZE));
+
+    for (let ci = 0; ci < chunks.length; ci++) {
+      $('bpmBar').style.width = Math.round((ci / chunks.length) * 100) + '%';
+      $('bpmLabel').textContent = `Batch ${ci + 1} / ${chunks.length}  •  ${ci * MAKRO_BATCH_SIZE} / ${toFetch.length} SKU`;
+      try {
+        const result = await batchFetchMakroInfo(chunks[ci], apiKey);
+        if (result) Object.assign(newData, result);
+      } catch(e) { console.warn('Makro batch error', ci, e); }
+      if (ci < chunks.length - 1) await new Promise(r => setTimeout(r, 400));
+    }
+    $('bpmBar').style.width = '100%';
+    $('bpmLabel').textContent = 'ดึงข้อมูลเสร็จสิ้น — กำลัง Export Excel...';
+    saveMakroCache(newData, cache);
+  }
+
+  const allData = Object.assign({}, cachedData, newData);
+  closeBatchModal();
+  exportMakroExcel(rows, allData);
+}
+
+async function batchFetchMakroInfo(rows, apiKey) {
+  const lines = rows.map((row, i) => {
+    const name  = row['SHORT NAME'] || row['PRODUCT NAME'] || '';
+    const parts = [];
+    if (row['PRICE CC03 EA']) parts.push(`EA=${row['PRICE CC03 EA']}฿`);
+    if (row['PRICE CC03 PA']) parts.push(`PA=${row['PRICE CC03 PA']}฿(${row['QTY PA']||'?'}EA)`);
+    if (row['PRICE CC03 CS']) parts.push(`CS=${row['PRICE CC03 CS']}฿(${row['QTY CS']||'?'}EA)`);
+    return `${i}: ${name}${parts.length ? ' [' + parts.join(',') + ']' : ''}`;
+  }).join('\n');
+
+  const prompt = `ค้นหาข้อมูลสินค้าเหล่านี้ที่ Makro Thailand (สยามแม็คโคร) ตอบ JSON array เท่านั้น ห้ามอธิบายนอก JSON:
+${lines}
+
+[{"i":0,"ok":true,"n":"ชื่อที่ Makro","c":"รหัส Makro","d":"คำอธิบายสั้น","PA":{"p":32,"q":6},"CS":{"p":145,"q":30},"w":"น้ำหนัก","dim":"ขนาด","nut":"fat:3g,pro:2g,carb:14g,sod:800mg","ing":"ส่วนประกอบหลัก...","al":"แป้งสาลี,ไข่","st":"การเก็บรักษา"},{"i":1,"ok":false},...]
+• ok:false ถ้าไม่มีสินค้านี้ที่ Makro หรือไม่ทราบ
+• PA/CS = {"p":ราคาต่อหน่วยนั้น,"q":จำนวน EA} — null ถ้าไม่ขาย
+• nut ให้ compact string "fat:Xg,pro:Xg,carb:Xg,sod:Xmg" — null ถ้าไม่ทราบ`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1200,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!res.ok) {
+      if (res.status === 401) { toast('Claude API Key ไม่ถูกต้อง', 'error'); localStorage.removeItem('rattana_claude_key'); }
+      return null;
+    }
+    const data  = await res.json();
+    const text  = data.content?.[0]?.text || '';
+    const match = text.match(/\[[\s\S]*\]/);
+    if (!match) return null;
+    const arr = JSON.parse(match[0]);
+    const result = {};
+    arr.forEach(item => {
+      const row = rows[item.i];
+      if (!row) return;
+      const key = (row['CODE EA'] || '').trim();
+      if (!key) return;
+      result[key] = { ...item, ts: Date.now() };
+    });
+    return result;
+  } catch(e) { console.warn('batchFetchMakroInfo:', e.message); return null; }
+}
+
+async function exportMakroExcel(allRows, makroData) {
+  if (typeof XLSX === 'undefined') { toast('กำลังโหลด SheetJS...', 'info'); await new Promise(r => setTimeout(r, 1000)); }
+  showSpinner('กำลังสร้าง Excel...');
+  try {
+    const headers = [
+      // Rattana
+      'ชื่อสินค้า','SHORT NAME','แบรนด์','CODE EA','CODE PA','CODE CS',
+      'ราคา CC03 EA','ราคา CC03 PA','ราคา CC03 CS',
+      // Makro
+      'พบที่ Makro','ชื่อที่ Makro','รหัส Makro','คำอธิบาย',
+      'ราคา Makro PA','จำนวน PA (EA)','ราคา Makro CS','จำนวน CS (EA)',
+      'น้ำหนัก','ขนาด','โภชนาการ','ส่วนประกอบ','สารก่อภูมิแพ้','การเก็บรักษา',
+    ];
+    const data = [headers];
+    allRows.forEach(row => {
+      if (!row['PRODUCT NAME'] && !row['CODE EA']) return;
+      const key = (row['CODE EA'] || '').trim();
+      const mk  = makroData[key] || {};
+      data.push([
+        row['PRODUCT NAME']   || '',
+        row['SHORT NAME']     || '',
+        row['CAT BRAND']      || '',
+        row['CODE EA']        || '',
+        row['CODE PA']        || '',
+        row['CODE CS']        || '',
+        row['PRICE CC03 EA']  || '',
+        row['PRICE CC03 PA']  || '',
+        row['PRICE CC03 CS']  || '',
+        // Makro
+        mk.ok === false ? 'ไม่พบ' : (mk.ok ? 'ใช่' : ''),
+        mk.n  || '',
+        mk.c  || '',
+        mk.d  || '',
+        mk.PA?.p != null ? mk.PA.p : '',
+        mk.PA?.q != null ? mk.PA.q : '',
+        mk.CS?.p != null ? mk.CS.p : '',
+        mk.CS?.q != null ? mk.CS.q : '',
+        mk.w   || '',
+        mk.dim || '',
+        mk.nut || '',
+        mk.ing || '',
+        mk.al  || '',
+        mk.st  || '',
+      ]);
+    });
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    ws['!cols'] = [
+      {wch:30},{wch:20},{wch:14},{wch:16},{wch:16},{wch:16},
+      {wch:10},{wch:10},{wch:10},
+      {wch:8},{wch:30},{wch:12},{wch:40},
+      {wch:12},{wch:12},{wch:12},{wch:12},
+      {wch:10},{wch:18},{wch:30},{wch:50},{wch:30},{wch:30},
+    ];
+    ws['!freeze'] = { xSplit:0, ySplit:1, topLeftCell:'A2', activePane:'bottomLeft', state:'frozen' };
+    XLSX.utils.book_append_sheet(wb, ws, 'Makro Info');
+    const today = new Date();
+    const d = `${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
+    XLSX.writeFile(wb, `Rattana_Makro_${d}.xlsx`);
+    const found = Object.values(makroData).filter(v => v.ok).length;
+    toast(`Export เสร็จ — พบที่ Makro ${found} SKU จาก ${allRows.length} ✓`, 'success');
+  } catch(e) { toast('Export ล้มเหลว: ' + e.message, 'error'); }
+  finally { hideSpinner(); }
+}
+
 async function exportSkuWithPrices() {
   showSpinner('กำลังโหลดข้อมูล SKU...');
   let allRows;
@@ -2479,29 +2686,31 @@ async function exportSkuWithPrices() {
   const estUSD = (batchCount * 0.0012).toFixed(3);
   const estTHB = (batchCount * 0.0012 * 35).toFixed(1);
 
-  $('bpmTotal').textContent = validRows.length + ' SKU';
-  $('bpmCached').textContent = cachedCount + ' SKU';
-  $('bpmNew').textContent = newCount + ' SKU';
-  $('bpmCost').textContent = newCount === 0 ? 'ฟรี (ใช้ cache)' : `~$${estUSD}  (~${estTHB} บาท)`;
+  $('bpmTitle').textContent = '🌐 Export + ราคาตลาด';
+  $('bpmDesc').textContent  = 'ดึงราคาโดยประมาณจาก Claude AI แล้วรวมลง Excel (ใช้รายไตรมาส)';
+  _showBatchModal(validRows, cache, newCount, batchCount, estUSD, estTHB, startBatchExport, newCount === 0 ? '📥 Export จาก Cache' : '🚀 เริ่มดึงราคา + Export');
+}
 
+function _showBatchModal(validRows, cache, newCount, batchCount, estUSD, estTHB, startFn, btnLabel) {
+  $('bpmTotal').textContent   = validRows.length + ' SKU';
+  $('bpmCached').textContent  = (validRows.length - newCount) + ' SKU';
+  $('bpmNew').textContent     = newCount + ' SKU';
+  $('bpmCost').textContent    = newCount === 0 ? 'ฟรี (ใช้ cache)' : `~$${estUSD}  (~${estTHB} บาท)`;
   const note = $('bpmCacheNote');
   if (cache.ts) {
     const ageDays = Math.round((Date.now() - cache.ts) / (24 * 3600 * 1000));
     note.style.display = 'block';
-    note.textContent = `💾 Cache อายุ ${ageDays} วัน — ดึงราคาใหม่ได้ทุกไตรมาส (ลบ cache แล้วเปิดใหม่)`;
-  } else {
-    note.style.display = 'none';
-  }
-
+    note.textContent = `💾 Cache อายุ ${ageDays} วัน — ดึงใหม่ได้ทุกไตรมาส`;
+  } else { note.style.display = 'none'; }
   $('bpmProgressWrap').style.display = 'none';
   $('bpmLabel').style.display = 'none';
   $('bpmBar').style.width = '0%';
   $('bpmStartBtn').disabled = false;
-  $('bpmStartBtn').textContent = newCount === 0 ? '📥 Export จาก Cache' : '🚀 เริ่มดึงราคา + Export';
+  $('bpmStartBtn').textContent = btnLabel;
   $('bpmCancelBtn').textContent = 'ยกเลิก';
-
-  window._bpmRows  = validRows;
-  window._bpmCache = cache;
+  window._bpmRows     = validRows;
+  window._bpmCache    = cache;
+  window._bpmStartFn  = startFn;
   $('bpmOverlay').classList.add('open');
 }
 
@@ -2893,16 +3102,16 @@ window.addEventListener('DOMContentLoaded', () => {
   </div>
 </div>
 
-<!-- ── Batch Market Price Modal ── -->
+<!-- ── Batch Modal (shared for market price + Makro) ── -->
 <div class="bpm-overlay" id="bpmOverlay">
   <div class="bpm-box">
     <div class="bpm-head">
-      <h3>🌐 Export + ราคาตลาด</h3>
-      <p>ดึงราคาโดยประมาณจาก Claude AI แล้วรวมลง Excel (ใช้รายไตรมาส)</p>
+      <h3 id="bpmTitle">🌐 Export + ราคาตลาด</h3>
+      <p id="bpmDesc">ดึงราคาโดยประมาณจาก Claude AI แล้วรวมลง Excel (ใช้รายไตรมาส)</p>
     </div>
     <div class="bpm-body">
       <div class="bpm-stat"><span class="lbl">SKU ทั้งหมด</span><span class="val" id="bpmTotal">—</span></div>
-      <div class="bpm-stat"><span class="lbl">มีราคา cache แล้ว</span><span class="val" id="bpmCached">—</span></div>
+      <div class="bpm-stat"><span class="lbl">มีข้อมูล cache แล้ว</span><span class="val" id="bpmCached">—</span></div>
       <div class="bpm-stat"><span class="lbl">ต้องดึงใหม่</span><span class="val" id="bpmNew">—</span></div>
       <div class="bpm-stat"><span class="lbl">ค่าใช้จ่ายโดยประมาณ</span><span class="val gold" id="bpmCost">—</span></div>
       <div class="bpm-cache-note" id="bpmCacheNote" style="display:none"></div>
@@ -2913,10 +3122,10 @@ window.addEventListener('DOMContentLoaded', () => {
     </div>
     <div class="bpm-foot">
       <div class="bpm-foot-row">
-        <button class="btn btn-gold btn-block" id="bpmStartBtn" onclick="startBatchExport()">🚀 เริ่มดึงราคา + Export</button>
+        <button class="btn btn-gold btn-block" id="bpmStartBtn" onclick="window._bpmStartFn && window._bpmStartFn()">🚀 เริ่ม</button>
       </div>
       <div class="bpm-foot-row">
-        <button class="btn btn-outline" style="flex:1;font-size:12px" onclick="closeBatchModal();exportSkuList()">📊 Export แบบไม่มีราคา</button>
+        <button class="btn btn-outline" style="flex:1;font-size:12px" onclick="closeBatchModal();exportSkuList()">📊 Export แบบไม่มีข้อมูล</button>
         <button class="btn btn-outline" style="flex-shrink:0" id="bpmCancelBtn" onclick="closeBatchModal()">ยกเลิก</button>
       </div>
     </div>
