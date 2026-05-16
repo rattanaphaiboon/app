@@ -403,6 +403,12 @@ body.dark .mks-allergen{background:rgba(231,76,60,.15);color:#ff8a7e}
 .bpm-foot{padding:12px 20px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px}
 .bpm-foot-row{display:flex;gap:8px}
 .bpm-cache-note{font-size:11px;color:var(--muted);padding:7px 10px;background:var(--row-alt);border-radius:var(--radius-sm);margin-top:6px;border:1px solid var(--border)}
+.bpm-limit-row{display:flex;align-items:center;gap:6px;padding:8px 0;border-top:1px solid var(--border);margin-top:4px}
+.bpm-limit-row .lbl{font-size:12px;color:var(--muted);flex-shrink:0}
+.bpm-limit-btns{display:flex;gap:4px;flex-wrap:wrap}
+.bpm-lbtn{background:var(--row-alt);border:1.5px solid var(--border);color:var(--text);border-radius:var(--radius-sm);padding:4px 10px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;transition:all .15s}
+.bpm-lbtn.active{background:var(--navy);color:#fff;border-color:var(--navy)}
+.bpm-lbtn:hover:not(.active){background:var(--border)}
 
 /* ── Spinner ── */
 .spinner-overlay{display:none;position:fixed;inset:0;background:rgba(13,27,62,.55);align-items:center;justify-content:center;z-index:99999;backdrop-filter:blur(3px)}
@@ -2466,7 +2472,7 @@ function saveMktPriceCache(newPrices, existingCache) {
 //  Gets full Makro product info for every SKU
 // ═══════════════════════════════════════════════
 const MAKRO_CACHE_KEY  = 'rattana_makro_info_cache';
-const MAKRO_BATCH_SIZE = 8; // smaller batch, richer output
+const MAKRO_BATCH_SIZE = 12; // 12 per call = cheaper per-SKU
 
 function getMakroCache() {
   try {
@@ -2497,15 +2503,11 @@ async function openMakroBatchModal() {
   const newCount    = validRows.length - cachedCount;
   const batchCount  = Math.ceil(newCount / MAKRO_BATCH_SIZE);
 
-  // ~$0.0042 per batch of 8 (output richer than price-only)
-  const estUSD = (batchCount * 0.0042).toFixed(2);
-  const estTHB = (batchCount * 0.0042 * 35).toFixed(0);
-
   $('bpmTitle').textContent = '🏭 Export + ข้อมูล Makro';
   $('bpmDesc').textContent  = 'ดึงชื่อ รหัส คำอธิบาย โภชนาการ ราคา EA/PA/CS จาก Makro (ใช้รายไตรมาส)';
-  _showBatchModal(validRows, cache, newCount, batchCount, estUSD, estTHB,
-    startMakroBatchExport,
-    newCount === 0 ? '📥 Export จาก Cache' : '🚀 เริ่มดึงข้อมูล Makro + Export');
+  _showBatchModal(validRows, cache, startMakroBatchExport,
+    newCount === 0 ? '📥 Export จาก Cache' : '🚀 เริ่มดึงข้อมูล Makro + Export',
+    true /* showLimit */);
 }
 
 async function startMakroBatchExport() {
@@ -2575,7 +2577,7 @@ ${lines}
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1200,
+        max_tokens: 900,
         messages: [{ role: 'user', content: prompt }],
       }),
       signal: AbortSignal.timeout(30000),
@@ -2682,36 +2684,85 @@ async function exportSkuWithPrices() {
   const newCount = validRows.length - cachedCount;
   const batchCount = Math.ceil(newCount / BATCH_SIZE);
 
-  // Cost estimate: ~$0.0012 per batch of 15
-  const estUSD = (batchCount * 0.0012).toFixed(3);
-  const estTHB = (batchCount * 0.0012 * 35).toFixed(1);
-
   $('bpmTitle').textContent = '🌐 Export + ราคาตลาด';
   $('bpmDesc').textContent  = 'ดึงราคาโดยประมาณจาก Claude AI แล้วรวมลง Excel (ใช้รายไตรมาส)';
-  _showBatchModal(validRows, cache, newCount, batchCount, estUSD, estTHB, startBatchExport, newCount === 0 ? '📥 Export จาก Cache' : '🚀 เริ่มดึงราคา + Export');
+  _showBatchModal(validRows, cache, startBatchExport,
+    newCount === 0 ? '📥 Export จาก Cache' : '🚀 เริ่มดึงราคา + Export',
+    false /* showLimit */);
 }
 
-function _showBatchModal(validRows, cache, newCount, batchCount, estUSD, estTHB, startFn, btnLabel) {
-  $('bpmTotal').textContent   = validRows.length + ' SKU';
-  $('bpmCached').textContent  = (validRows.length - newCount) + ' SKU';
-  $('bpmNew').textContent     = newCount + ' SKU';
-  $('bpmCost').textContent    = newCount === 0 ? 'ฟรี (ใช้ cache)' : `~$${estUSD}  (~${estTHB} บาท)`;
+// ── cost per batch constants (used by live recalc) ──
+const _BPM_COST_MAKRO = 0.0028; // per batch of 12 at 900 tokens
+const _BPM_COST_MKT   = 0.0012; // per batch of 15
+
+function _showBatchModal(validRows, cache, startFn, btnLabel, showLimit) {
+  window._bpmAllRows    = validRows;   // full list, never trimmed
+  window._bpmCache      = cache;
+  window._bpmStartFn    = startFn;
+  window._bpmShowLimit  = showLimit;
+  window._bpmIsMakro    = showLimit;
+
+  // limit row
+  $('bpmLimitRow').style.display = showLimit ? 'flex' : 'none';
+  if (showLimit) {
+    // default to 100
+    window._bpmSkuLimit = 100;
+    document.querySelectorAll('.bpm-lbtn').forEach(b => b.classList.remove('active'));
+    document.querySelector('.bpm-lbtn').classList.add('active'); // first = 100
+  } else {
+    window._bpmSkuLimit = 0; // 0 = all
+  }
+
+  _bpmRefreshStats();
+
   const note = $('bpmCacheNote');
   if (cache.ts) {
     const ageDays = Math.round((Date.now() - cache.ts) / (24 * 3600 * 1000));
     note.style.display = 'block';
     note.textContent = `💾 Cache อายุ ${ageDays} วัน — ดึงใหม่ได้ทุกไตรมาส`;
   } else { note.style.display = 'none'; }
+
   $('bpmProgressWrap').style.display = 'none';
   $('bpmLabel').style.display = 'none';
   $('bpmBar').style.width = '0%';
   $('bpmStartBtn').disabled = false;
   $('bpmStartBtn').textContent = btnLabel;
   $('bpmCancelBtn').textContent = 'ยกเลิก';
-  window._bpmRows     = validRows;
-  window._bpmCache    = cache;
-  window._bpmStartFn  = startFn;
   $('bpmOverlay').classList.add('open');
+}
+
+function _bpmSetLimit(n) {
+  window._bpmSkuLimit = n;
+  document.querySelectorAll('.bpm-lbtn').forEach(b => {
+    const v = b.textContent === 'ทั้งหมด' ? 0 : parseInt(b.textContent);
+    b.classList.toggle('active', v === n);
+  });
+  _bpmRefreshStats();
+}
+
+function _bpmRefreshStats() {
+  const all      = window._bpmAllRows  || [];
+  const limit    = window._bpmSkuLimit || 0;
+  const rows     = limit > 0 ? all.slice(0, limit) : all;
+  const cache    = window._bpmCache    || {};
+  const isMakro  = window._bpmIsMakro;
+
+  const cachedData  = isMakro ? (cache.data   || {}) : (cache.prices || {});
+  const cachedCount = rows.filter(r => cachedData[(r['CODE EA'] || '').trim()]).length;
+  const newCount    = rows.length - cachedCount;
+  const batchSize   = isMakro ? MAKRO_BATCH_SIZE : BATCH_SIZE;
+  const costPerBatch = isMakro ? _BPM_COST_MAKRO : _BPM_COST_MKT;
+  const batchCount  = Math.ceil(newCount / batchSize);
+  const estUSD = (batchCount * costPerBatch).toFixed(2);
+  const estTHB = (batchCount * costPerBatch * 35).toFixed(0);
+
+  $('bpmTotal').textContent   = rows.length + ' SKU' + (limit > 0 && all.length > limit ? ` (จาก ${all.length})` : '');
+  $('bpmCached').textContent  = cachedCount + ' SKU';
+  $('bpmNew').textContent     = newCount + ' SKU';
+  $('bpmCost').textContent    = newCount === 0 ? 'ฟรี (ใช้ cache)' : `~$${estUSD}  (~${estTHB} บาท)`;
+
+  // pass trimmed rows to start functions
+  window._bpmRows = rows;
 }
 
 function closeBatchModal() {
@@ -3115,6 +3166,15 @@ window.addEventListener('DOMContentLoaded', () => {
       <div class="bpm-stat"><span class="lbl">ต้องดึงใหม่</span><span class="val" id="bpmNew">—</span></div>
       <div class="bpm-stat"><span class="lbl">ค่าใช้จ่ายโดยประมาณ</span><span class="val gold" id="bpmCost">—</span></div>
       <div class="bpm-cache-note" id="bpmCacheNote" style="display:none"></div>
+      <div class="bpm-limit-row" id="bpmLimitRow" style="display:none">
+        <span class="lbl">จำนวน SKU</span>
+        <div class="bpm-limit-btns" id="bpmLimitBtns">
+          <button class="bpm-lbtn active" onclick="_bpmSetLimit(100)">100</button>
+          <button class="bpm-lbtn" onclick="_bpmSetLimit(200)">200</button>
+          <button class="bpm-lbtn" onclick="_bpmSetLimit(500)">500</button>
+          <button class="bpm-lbtn" onclick="_bpmSetLimit(0)">ทั้งหมด</button>
+        </div>
+      </div>
       <div class="bpm-progress-wrap" id="bpmProgressWrap" style="display:none">
         <div class="bpm-progress-bar" id="bpmBar"></div>
       </div>
