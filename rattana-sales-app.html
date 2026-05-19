@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v6.5.175</title>
+<title>Rattana Sales — v6.5.176</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -3774,7 +3774,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v6.5.175 · 2026-05-19</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v6.5.176 · 2026-05-19</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -3785,7 +3785,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag">v6.5.175</span>
+  <span class="demo-tag">v6.5.176</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -3880,7 +3880,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
   </button>
 
   <div class="drawer-footer">
-    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v6.5.175<br>2026-05-19 🔄<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
+    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v6.5.176<br>2026-05-19 🔄<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
   </div>
 </aside>
 
@@ -15112,6 +15112,21 @@ function promoKeyOf(promo) {
 }
 window.promoKeyOf = promoKeyOf;
 
+// v6.5.176: Pin the SINGLE most-specific promo for a product at add-to-cart time.
+// Uses getAllPromotionsFor (already specificity-sorted: PRODUCT NAME > CAT SIZE > CAT BRAND > ...).
+// What gets written to sheet's "โปรที่ใช้" column — frozen at the moment user added the line.
+// This decouples promo display (UI) from promo persistence (sheet) — they were drifting before.
+function pickBestPromoForProduct(p) {
+  if (!p) return null;
+  if (typeof getAllPromotionsFor !== 'function') return null;
+  const matches = getAllPromotionsFor(p);
+  if (!matches || !matches.length) return null;
+  const pr = matches[0];
+  const name = String(pr['ชื่อโปร']||pr['รายละเอียดโปร']||'').trim();
+  return { key: promoKeyOf(pr), name };
+}
+window.pickBestPromoForProduct = pickBestPromoForProduct;
+
 // Apply a promo: add free item line(s) to cart and mark as applied. Per Surat 2026-05-08.
 window.applyPromoFromModal = function(safeKey) {
   const promoKey = decodeURIComponent(safeKey);
@@ -15270,11 +15285,16 @@ function addToCart() {
   }
   if (qty <= 0) return;
 
+  // v6.5.176: pin most-specific promo NOW (not at submit) — fixes "wrong promo name on wrong line"
+  // What user saw == what goes to sheet, frozen at add-to-cart click moment.
+  const _pin = (typeof pickBestPromoForProduct === 'function') ? pickBestPromoForProduct(p) : null;
+  const _promoFields = _pin ? { promoUsedKey: _pin.key, promoUsedName: _pin.name } : { promoUsedKey: '', promoUsedName: '' };
+
   if (editingCartIdx >= 0) {
-    cart[editingCartIdx] = { productId: p.id, unit, qty, price, shopId: currentShopId };
+    cart[editingCartIdx] = { productId: p.id, unit, qty, price, shopId: currentShopId, ..._promoFields };
     showToast('✓ แก้ไขเรียบร้อย', 'success');
   } else {
-    cart.push({ productId: p.id, unit, qty, price, shopId: currentShopId });
+    cart.push({ productId: p.id, unit, qty, price, shopId: currentShopId, ..._promoFields });
     showToast(`✓ ใส่ ${p.name} แล้ว`, 'success');
   }
   closeModal();
@@ -15846,23 +15866,15 @@ async function pushOrderToSheet(orderId, shop, items, now, notes, deliveryDate) 
   const allPromos = (SHEET_DATA.promotions || []);
   const promoByKey = new Map();
   allPromos.forEach(pr => { const k = promoKeyOf(pr); if (k) promoByKey.set(k, pr); });
-  // For each sale line, find FIRST promo whose matchValue matches this product's CAT*/PRODUCT NAME
+  // v6.5.176: use the SAME matcher as UI (getAllPromotionsFor → _promoMatches, prefix-tolerant, specificity-sorted)
+  // Old code used exact === match here while UI used prefix-match — they drifted. This was the root cause of
+  // "promo missing on sheet" + "wrong promo name on wrong product". Now: returns the most-specific match,
+  // same as what user saw. Only used as FALLBACK when cart line has no pinned promoUsedKey.
   const _findPromoForLine = (p) => {
     if (!p) return null;
-    const sheet = p._sheet || p;
-    for (const pr of allPromos) {
-      const measureBy  = String(pr['วิธีวัด']||'').trim();
-      const matchValue = String(pr['ชื่อ']||'').trim();
-      if (!measureBy || !matchValue) continue;
-      let pVal = '';
-      if (measureBy === 'CAT BU')        pVal = String(sheet['CAT BU']||'');
-      else if (measureBy === 'CAT BRAND')     pVal = String(sheet['CAT BRAND']||'');
-      else if (measureBy === 'CAT VENDOR')    pVal = String(sheet['CAT VENDOR']||'');
-      else if (measureBy === 'CAT SIZE')      pVal = String(sheet['CAT SIZE']||'');
-      else if (measureBy === 'CAT TYPE')      pVal = String(sheet['CAT TYPE']||'');
-      else if (measureBy === 'CAT GROUP')     pVal = String(sheet['CAT GROUP']||'');
-      else if (measureBy === 'PRODUCT NAME')  pVal = String(sheet['PRODUCT NAME']||p.name||'');
-      if (pVal.trim() === matchValue) return pr;
+    if (typeof getAllPromotionsFor === 'function') {
+      const sorted = getAllPromotionsFor(p);
+      return (sorted && sorted.length) ? sorted[0] : null;
     }
     return null;
   };
@@ -15880,17 +15892,30 @@ async function pushOrderToSheet(orderId, shop, items, now, notes, deliveryDate) 
       || (p && p['CODE EA'])
       || (c.productId === '__GIFT__' ? '' : c.productId);
 
-    // v6.5.102: resolve โปรที่ใช้ — for gift lines use stored promoKey; for sale lines lookup by matchValue
+    // v6.5.176: resolve โปรที่ใช้ — PIN-FIRST policy
+    // Priority (sale lines):
+    //   1. c.promoUsedKey — pinned at add-to-cart (frozen, what user saw)
+    //   2. c.promoUsedName — pinned name fallback
+    //   3. c.selectedPromoName — explicit override (legacy field)
+    //   4. _findPromoForLine(p) — recompute (now correct, uses same matcher as UI)
+    // Priority (gift lines): c.promoKey (set by applyPromoFromModal — already correct)
     let promoDesc = '';
     if (c.isFree && c.promoKey && promoByKey.has(c.promoKey)) {
       const pr = promoByKey.get(c.promoKey);
       promoDesc = String(pr['รายละเอียดโปร']||pr['ชื่อโปร']||'').trim();
     } else if (!c.isFree) {
-      const pr = _findPromoForLine(p);
-      if (pr) promoDesc = String(pr['รายละเอียดโปร']||pr['ชื่อโปร']||'').trim();
+      if (c.promoUsedKey && promoByKey.has(c.promoUsedKey)) {
+        const pr = promoByKey.get(c.promoUsedKey);
+        promoDesc = String(pr['รายละเอียดโปร']||pr['ชื่อโปร']||c.promoUsedName||'').trim();
+      } else if (c.promoUsedName) {
+        promoDesc = String(c.promoUsedName).trim();
+      } else if (c.selectedPromoName) {
+        promoDesc = String(c.selectedPromoName).trim();
+      } else {
+        const pr = _findPromoForLine(p);
+        if (pr) promoDesc = String(pr['รายละเอียดโปร']||pr['ชื่อโปร']||'').trim();
+      }
     }
-    // Override with explicit user pick if present
-    if (!c.isFree && c.selectedPromoName && !promoDesc) promoDesc = c.selectedPromoName;
 
     // v6.5.102: ส่วนต่างราคา = ราคา - ราคาแนะนำ (gift lines = 0)
     const suggested = c.suggestedPrice || c.price || 0;
@@ -15939,18 +15964,43 @@ async function pushOrderToSheet(orderId, shop, items, now, notes, deliveryDate) 
       'เวลาอนุมัติ':  '',
       'เหตุผลที่ขอ':  c.approvalReason || '',
       'ราคาขอขาย':   c.needsApproval ? askedPrice : '',  // only set when approval needed
+      // v6.5.176: stable unique line ID — used for surgical delete (fixes "delete wrong row" bug
+      // when same orderId has same barcode on 2+ lines, e.g. same product at different prices)
+      'lineId':      '',  // placeholder — filled in below with index after .map()
     };
   });
+  // v6.5.176: assign lineId AFTER mapping (so we have the array index)
+  // Format: ORD-0001234-001, ORD-0001234-002, ... — guaranteed unique within an order
+  rows.forEach((r, i) => {
+    r.lineId = orderId + '-' + String(i + 1).padStart(3, '0');
+  });
 
-  // v6.5.127: ONE POST — all rows atomic; return real {ok, written} so caller knows truth
+  // v6.5.176: ONE POST + READ-BACK VERIFY — Surat agreed 2-3s slower is fine for 100% accuracy
+  // Step 1: Batch append
+  // Step 2: Wait 1.5s for Sheet to settle
+  // Step 3: Read back count — must equal rows.length, otherwise flag as not-fully-synced
   try {
     const res = await postToAppsScript({ action: 'appendOrderBatch', rows });
     console.log('[Rattana Sales] Batch pushed:', orderId, rows.length, 'rows →', res);
-    // Apps Script returns { ok:true, appended:N } on success
-    if (res && res.ok !== false) {
-      return { ok: true, written: rows.length, mode: 'batch' };
+    if (!res || res.ok === false) {
+      throw new Error('Batch response not ok: ' + JSON.stringify(res));
     }
-    throw new Error('Batch response not ok: ' + JSON.stringify(res));
+
+    // v6.5.176: read-back verify (1.5s settle delay) — proves data landed correctly
+    await new Promise(r => setTimeout(r, 1500));
+    try {
+      const verify = await postToAppsScript({ action: 'verifyOrder', orderId, expectedCount: rows.length });
+      if (verify && verify.ok && verify.actualCount === rows.length) {
+        console.log('[Rattana Sales] ✓ Verified', orderId, '—', verify.actualCount, '/', rows.length, 'rows in sheet');
+        return { ok: true, written: rows.length, mode: 'batch+verified' };
+      }
+      console.warn('[Rattana Sales] ✗ Verify mismatch:', orderId, 'expected', rows.length, 'got', verify?.actualCount);
+      return { ok: false, written: verify?.actualCount || 0, total: rows.length, mode: 'verify-mismatch' };
+    } catch (verifyErr) {
+      // verifyOrder endpoint not deployed yet → treat as success (don't punish users for Apps Script lag)
+      console.warn('[Rattana Sales] verifyOrder unavailable — assuming success:', verifyErr.message);
+      return { ok: true, written: rows.length, mode: 'batch-unverified' };
+    }
   } catch (e) {
     console.warn('[Rattana Sales] Batch push failed — falling back to row-by-row:', e.message);
     // Fallback: try per-row so at least some rows land if batch endpoint not yet deployed
@@ -16578,6 +16628,7 @@ function renderOrdersList() {
         const apprStatus  = String(r['สถานะอนุมัติ']||'').trim();
         const name        = String(r['ชื่อสินค้า']||r['Barcode']||'?');
         const barcode     = String(r['Barcode']||'').trim();
+        const lineIdStr   = String(r['lineId']||'').trim();  // v6.5.176: stable line ID for surgical delete
         const qty         = numv(r['จำนวน']);
         const unit        = String(r['หน่วย']||'');
         const price       = numv(r['ราคา']);
@@ -16600,10 +16651,10 @@ function renderOrdersList() {
         const diffSpan = !isFree && sug > 0 && price > 0 && price < sug
           ? ` <span style="color:#9C27B0;font-weight:700">·-฿${Math.round(sug-price)}</span>`
           : '';
-        // v6.5.127: cancel button back — opens confirm popup, calls deleteOrderRow
+        // v6.5.176: pass lineId as 5th arg so cancel targets THIS specific row, not any row with same barcode
         const canDelete = !isCancelled && !isFree;
         const cancelBtn = canDelete
-          ? `<button onclick="event.stopPropagation();confirmCancelLine(this,'${escapeAttr(o.id)}','${escapeAttr(barcode)}','${escapeAttr(name).replace(/'/g,'')}')" style="padding:4px 8px;border:1.5px solid #DC2626;border-radius:6px;background:none;color:#DC2626;font-size:10px;font-weight:700;cursor:pointer;flex-shrink:0;font-family:inherit;white-space:nowrap">🗑️ ยกเลิก</button>`
+          ? `<button onclick="event.stopPropagation();confirmCancelLine(this,'${escapeAttr(o.id)}','${escapeAttr(barcode)}','${escapeAttr(name).replace(/'/g,'')}','${escapeAttr(lineIdStr)}')" style="padding:4px 8px;border:1.5px solid #DC2626;border-radius:6px;background:none;color:#DC2626;font-size:10px;font-weight:700;cursor:pointer;flex-shrink:0;font-family:inherit;white-space:nowrap">🗑️ ยกเลิก</button>`
           : '';
         // v6.5.175: ลบ ขออีกครั้ง feature (Phase 5) ออก — confusing UX
         return `
@@ -16790,6 +16841,7 @@ window.viewSheetOrderDetail = function(orderId) {
 
   const rowHtml = (r, idx) => {
     const barcode  = String(r['Barcode']||'').trim();
+    const lineIdStr = String(r['lineId']||'').trim();  // v6.5.176
     const name     = String(r['ชื่อสินค้า']||barcode||'?');
     const qty      = numv(r['จำนวน']);
     const unit     = String(r['หน่วย']||'');
@@ -16799,8 +16851,9 @@ window.viewSheetOrderDetail = function(orderId) {
     const isCancelled = isRowCancelled(r);
     const style = isCancelled ? 'opacity:.45;text-decoration:line-through' : '';
     const canDelete = !isCancelled && !isFree;
+    // v6.5.176: pass lineId so delete targets THIS specific row (no barcode collision when same product added twice)
     const deleteBtn = canDelete
-      ? `<button onclick="deleteOrderRow(this,'${orderId}','${escapeAttr(barcode)}','${escapeAttr(name)}')" style="padding:3px 8px;border:1.5px solid var(--danger);border-radius:6px;background:none;color:var(--danger);font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;font-family:inherit">🗑️</button>`
+      ? `<button onclick="deleteOrderRow(this,'${orderId}','${escapeAttr(barcode)}','${escapeAttr(name)}','${escapeAttr(lineIdStr)}')" style="padding:3px 8px;border:1.5px solid var(--danger);border-radius:6px;background:none;color:var(--danger);font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;font-family:inherit">🗑️</button>`
       : (isCancelled ? '<span style="font-size:10px;color:var(--danger);font-weight:700">✕ ยกเลิกแล้ว</span>' : '');
     return `
       <div style="${style};display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
@@ -16935,6 +16988,11 @@ function recalcPromoForRows(remainingRows, templateRow) {
     console.log(`[recalcPromo] ${measureBy}="${matchValue}" → ${matchedCount} matched, totalQty=${totalQty}, threshold=${threshold} (${sellMode}), tiersEarned=${tiersEarned}`);
     if (tiersEarned <= 0) continue;
 
+    // v6.5.176: generate unique lineId for recalc promo rows (suffix R-### to distinguish from original lines)
+    const _recalcOrderId = String(templateRow['orderId']||'').trim();
+    const _recalcLineId = _recalcOrderId
+      ? _recalcOrderId + '-R' + String(newPromoRows.length + 1).padStart(3, '0')
+      : '';
     newPromoRows.push({
       ...templateRow,
       'รูปแบบ':     'แถม',
@@ -16947,6 +17005,7 @@ function recalcPromoForRows(remainingRows, templateRow) {
       'เวลา':        formatTimeThai(now),
       'หมายเหตุ':    `คำนวณใหม่หลังยกเลิก (${tiersEarned} ชุด × ${giftQtyPer})`,
       'ยกเลิก':      '',
+      'lineId':      _recalcLineId,
     });
     console.log(`[recalcPromo] → APPENDED gift "${giftName}" qty=${tiersEarned*giftQtyPer}`);
   }
@@ -16956,17 +17015,17 @@ function recalcPromoForRows(remainingRows, templateRow) {
 
 // v6.5.23: Cancel a line — optimistic UI + write ยกเลิก to col V + recalc promo
 // v6.5.127: confirm popup before cancelling a line from inline detail
-window.confirmCancelLine = function(btnEl, orderId, barcode, productName) {
+window.confirmCancelLine = function(btnEl, orderId, barcode, productName, lineId) {
+  // v6.5.176: 5th arg `lineId` — when present, passed through to deleteOrderRow for surgical match
   const modal = document.getElementById('productModal');
   if (!modal) {
-    // Fallback to native confirm if modal not available
     if (confirm(`ยืนยันการยกเลิกรายการ:\n${productName}\n\nออเดอร์ ${orderId}`)) {
-      window.deleteOrderRow(btnEl, orderId, barcode, productName);
+      window.deleteOrderRow(btnEl, orderId, barcode, productName, lineId);
     }
     return;
   }
-  // Stash the original button so deleteOrderRow can still update its visual state
   window._pendingCancelBtn = btnEl;
+  window._pendingCancelLineId = String(lineId || '');
   document.getElementById('modalContent').innerHTML = `
     <button type="button" class="modal-close-x" onclick="closeModal()">✕</button>
     <div class="modal-head" style="background:linear-gradient(135deg,#DC2626,#991B1B);color:#fff">
@@ -16978,7 +17037,7 @@ window.confirmCancelLine = function(btnEl, orderId, barcode, productName) {
     <div class="modal-body" style="padding:18px">
       <div style="background:#fef2f2;border-left:3px solid #DC2626;padding:12px 14px;border-radius:8px;margin-bottom:14px">
         <div style="font-size:14px;font-weight:800;color:var(--text);margin-bottom:4px">${escapeHtml(productName)}</div>
-        <div style="font-size:11px;color:var(--muted)">${escapeHtml(barcode)}</div>
+        <div style="font-size:11px;color:var(--muted)">${escapeHtml(barcode)}${lineId ? ' · '+escapeHtml(lineId) : ''}</div>
       </div>
       <div style="font-size:13px;color:var(--text);line-height:1.55;margin-bottom:14px">
         การยกเลิกจะ:<br>
@@ -16988,14 +17047,16 @@ window.confirmCancelLine = function(btnEl, orderId, barcode, productName) {
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-outline" style="flex:1" onclick="closeModal()">ไม่ยกเลิก</button>
-        <button class="btn" style="flex:2;font-weight:800;background:linear-gradient(135deg,#DC2626,#991B1B);color:#fff" onclick="closeModal();window.deleteOrderRow(window._pendingCancelBtn,'${escapeAttr(orderId)}','${escapeAttr(barcode)}','${escapeAttr(productName).replace(/'/g,'')}')">🗑️ ยืนยันยกเลิก</button>
+        <button class="btn" style="flex:2;font-weight:800;background:linear-gradient(135deg,#DC2626,#991B1B);color:#fff" onclick="closeModal();window.deleteOrderRow(window._pendingCancelBtn,'${escapeAttr(orderId)}','${escapeAttr(barcode)}','${escapeAttr(productName).replace(/'/g,'')}', window._pendingCancelLineId||'')">🗑️ ยืนยันยกเลิก</button>
       </div>
     </div>`;
   modal.classList.add('active');
   document.body.style.overflow = 'hidden';
 };
 
-window.deleteOrderRow = async function(btnEl, orderId, barcode, productName) {
+window.deleteOrderRow = async function(btnEl, orderId, barcode, productName, lineId) {
+  // v6.5.176: 5th arg `lineId` — when present, surgical delete by lineId (no barcode collision risk).
+  //   When absent (old sheet rows have no lineId column) → fallback to barcode-match (legacy behavior).
   // v6.5.127: confirmation now handled by confirmCancelLine() popup — direct callers must confirm first
 
   // Optimistic UI — show strikethrough instantly, don't wait for API
@@ -17012,11 +17073,15 @@ window.deleteOrderRow = async function(btnEl, orderId, barcode, productName) {
   showToast('กำลังยกเลิกรายการ...', 'info');
   try {
     const allRows = (SHEET_DATA.orders || []).filter(r => String(r['orderId']||'').trim() === orderId);
-    const targetRow = allRows.find(r =>
-      String(r['Barcode']  ||'').trim() === barcode &&
-      String(r['รูปแบบ']  ||'ขาย').trim() === 'ขาย' &&
-      !isCancelledRow(r)
-    );
+    // v6.5.176: prefer lineId — exact match, no collision possible
+    const _lineIdStr = String(lineId||'').trim();
+    const targetRow = _lineIdStr
+      ? allRows.find(r => String(r['lineId']||'').trim() === _lineIdStr && !isCancelledRow(r))
+      : allRows.find(r =>
+          String(r['Barcode']  ||'').trim() === barcode &&
+          String(r['รูปแบบ']  ||'ขาย').trim() === 'ขาย' &&
+          !isCancelledRow(r)
+        );
     if (!targetRow) throw new Error('ไม่พบข้อมูล row เดิม');
 
     // Active แถม rows — will be voided
@@ -17026,21 +17091,24 @@ window.deleteOrderRow = async function(btnEl, orderId, barcode, productName) {
     );
 
     // Remaining ขาย rows after this cancellation (for promo recalc)
-    const remainingRows = allRows.filter(r =>
-      String(r['รูปแบบ']||'ขาย').trim() === 'ขาย' &&
-      String(r['Barcode'] ||'').trim()    !== barcode &&
-      !isCancelledRow(r)
-    );
+    // v6.5.176: exclude by lineId when available (so same barcode on a 2nd line is kept), else by barcode
+    const remainingRows = allRows.filter(r => {
+      if (String(r['รูปแบบ']||'ขาย').trim() !== 'ขาย') return false;
+      if (isCancelledRow(r)) return false;
+      if (_lineIdStr) return String(r['lineId']||'').trim() !== _lineIdStr;
+      return String(r['Barcode']||'').trim() !== barcode;
+    });
 
     // Recalculate promo from remaining rows
     const newPromoRows = recalcPromoForRows(remainingRows, targetRow);
 
     // Send to Apps Script — update col V + append new promo rows
-    // v6.5.127: check response — if Apps Script returned error, do NOT mark cancelled locally
+    // v6.5.176: send lineId when available — Apps Script matches by lineId (no barcode collision)
     const res = await postToAppsScript({
       action:            'updateOrderCancel',
       orderId,
-      cancelledBarcodes: [barcode],
+      cancelLineIds:     _lineIdStr ? [_lineIdStr] : undefined,
+      cancelledBarcodes: _lineIdStr ? undefined : [barcode],
       cancelAllPromos:   true,
       newPromoRows,
     });
