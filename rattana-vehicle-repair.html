@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Vehicle Repair v4.0</title>
+<title>Rattana Vehicle Repair v4.1</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
@@ -370,7 +370,7 @@ body.dark .ai-ocr-text strong{color:var(--gold)}
 <div class="login-screen" id="loginScreen">
   <div class="login-card">
     <div class="login-logo">RATTANA<span> · </span>REPAIR</div>
-    <div class="login-title">ระบบแจ้งซ่อมรถบริษัท · v4.0</div>
+    <div class="login-title">ระบบแจ้งซ่อมรถบริษัท · v4.1</div>
     <div id="g_id_onload"
          data-client_id="615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com"
          data-callback="handleGoogleLogin"
@@ -1475,19 +1475,18 @@ function applyOcrResult(data) {
     filled.push(`ยอดเงิน <strong>฿${data.totalAmount.toLocaleString('th-TH')}</strong>`);
   }
 
-  // 2. ศูนย์ซ่อม — ลอง match กับรายการที่มี
+  // 2. ศูนย์ซ่อม — match แบบ keyword
   if (data.vendor) {
-    const matched = vendors.find(v =>
-      v.name === data.vendor ||
-      v.name.toLowerCase().includes(data.vendor.toLowerCase()) ||
-      data.vendor.toLowerCase().includes(v.name.toLowerCase())
-    );
+    const vName = data.vendor.toLowerCase().replace(/\s+/g, '');
+    const matched = vendors.find(v => {
+      const n = v.name.toLowerCase().replace(/\s+/g, '');
+      return n === vName || n.includes(vName) || vName.includes(n);
+    });
     if (matched) {
       const idx = vendors.indexOf(matched);
       selectVendor(idx);
       filled.push(`ศูนย์ซ่อม <strong>${matched.name}</strong>`);
     } else {
-      // ใช้ "อื่นๆ" + พิมพ์ชื่อเอง
       selectedVendor = { __other: true };
       $('ddVendorLabel').textContent = '✏️ ' + data.vendor;
       $('customVendorWrap').classList.remove('hidden');
@@ -1497,58 +1496,77 @@ function applyOcrResult(data) {
     }
   }
 
-  // 3. รายการซ่อม — match กับ REPAIR_CATEGORIES
+  // 3. รายการซ่อม — ใช้ keyword match ที่ฉลาดขึ้น + ใส่ทั้งหมดในหมายเหตุ
   if (Array.isArray(data.items) && data.items.length) {
     const allItems = REPAIR_CATEGORIES.flatMap(c => c.items);
     const matchedItems = [];
-    const customItems = [];
-    data.items.forEach(item => {
-      const exact = allItems.find(x => x === item);
-      if (exact) {
-        selectedRepairItems.add(exact);
-        matchedItems.push(exact);
-        return;
-      }
-      // fuzzy match
-      const fuzzy = allItems.find(x =>
-        x.toLowerCase().includes(item.toLowerCase()) ||
-        item.toLowerCase().includes(x.toLowerCase())
-      );
-      if (fuzzy) {
-        selectedRepairItems.add(fuzzy);
-        matchedItems.push(fuzzy);
+    const unmatchedItems = [];
+
+    data.items.forEach(billItem => {
+      const billLower = billItem.toLowerCase();
+      // หา keywords สำคัญในรายการบิล (ตัด "เปลี่ยน", "ซ่อม" ออก)
+      const keywords = billItem
+        .replace(/^(เปลี่ยน|ซ่อม|ใส่|ติดตั้ง|ถอด|ค่า)/, '')
+        .replace(/\([^)]*\)/g, '')  // ตัดวงเล็บออก
+        .replace(/[\-/]/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length >= 3); // คำที่ยาว ≥ 3 ตัวอักษร
+
+      // หา item ที่ match keyword มากที่สุด
+      let bestMatch = null, bestScore = 0;
+      allItems.forEach(item => {
+        const itemLower = item.toLowerCase();
+        let score = 0;
+        keywords.forEach(kw => {
+          if (itemLower.includes(kw.toLowerCase())) score++;
+        });
+        // bonus ถ้า substring ตรงกัน
+        if (itemLower.includes(billLower) || billLower.includes(itemLower)) score += 2;
+        if (score > bestScore) { bestScore = score; bestMatch = item; }
+      });
+
+      // ต้อง match อย่างน้อย 1 keyword + score >= 1
+      if (bestMatch && bestScore >= 1) {
+        selectedRepairItems.add(bestMatch);
+        matchedItems.push(`✓ ${billItem} → ${bestMatch}`);
       } else {
-        customItems.push(item);
+        unmatchedItems.push(billItem);
       }
     });
     syncRepairUI();
-    // รายการที่ไม่ match → ใส่ใน หมายเหตุเพิ่มเติม
-    if (customItems.length) {
-      const noteEl = $('inIssueNote');
-      const existing = noteEl.value.trim();
-      noteEl.value = (existing ? existing + '\n' : '') + customItems.join(', ');
-    }
-    if (matchedItems.length) filled.push(`รายการซ่อม <strong>${matchedItems.length}</strong> รายการ`);
-    if (customItems.length)  filled.push(`พบรายการเพิ่ม <strong>${customItems.length}</strong> รายการในหมายเหตุ`);
+
+    // ใส่ "รายการเดิมจากบิล" ทั้งหมดใน "หมายเหตุเพิ่มเติม" — เพื่อให้ user เห็นข้อความต้นฉบับ
+    const noteEl = $('inIssueNote');
+    const billNote = '📋 รายการจากบิล:\n' + data.items.map((it, i) => `${i+1}. ${it}`).join('\n');
+    const existing = noteEl.value.trim();
+    noteEl.value = (existing ? existing + '\n\n' : '') + billNote;
+
+    if (matchedItems.length) filled.push(`เลือกรายการให้แล้ว <strong>${matchedItems.length}/${data.items.length}</strong> รายการ`);
+    if (unmatchedItems.length) filled.push(`<strong>${unmatchedItems.length}</strong> รายการต้องตรวจในหมายเหตุ`);
   }
 
-  // แสดง banner สำเร็จ
+  // แสดง banner สำเร็จ — รวมรายการ AI อ่านได้
   const oldBanner = document.querySelector('.ai-result-banner');
   if (oldBanner) oldBanner.remove();
   const banner = document.createElement('div');
   banner.className = 'ai-result-banner';
+  let itemListHtml = '';
+  if (Array.isArray(data.items) && data.items.length) {
+    itemListHtml = '<div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--success)"><strong style="font-size:12px;color:var(--success)">รายการที่ AI อ่านได้จากบิล (' + data.items.length + ' รายการ):</strong><ol style="margin:6px 0 0;padding-left:20px;font-size:11px;color:var(--text);line-height:1.6">' + data.items.map(it => '<li>' + escapeHtml(it) + '</li>').join('') + '</ol></div>';
+  }
   banner.innerHTML = `
     <div class="arb-icon">🎯</div>
     <div class="arb-text">
-      <strong>AI กรอกข้อมูลให้แล้ว — ตรวจสอบและแก้ไขก่อนกดส่ง</strong><br>
+      <strong>AI กรอกข้อมูลให้แล้ว — กรุณาตรวจสอบและเลือกรายการซ่อมในระบบให้ตรงก่อนกดส่ง</strong><br>
       ${filled.length ? filled.join(' · ') : 'ไม่พบข้อมูลที่อ่านได้'}
+      ${itemListHtml}
     </div>
     <button class="arb-close" onclick="this.parentElement.remove()">×</button>
   `;
   const wrap = document.querySelector('.ai-ocr-wrap');
   wrap.appendChild(banner);
 
-  showToast('✓ AI กรอกข้อมูลให้แล้ว ตรวจสอบก่อนกดส่ง', 'success');
+  showToast('✓ AI กรอกแล้ว ตรวจรายการในหมายเหตุก่อนส่ง', 'success');
 }
 
 function updateApprovalHint() {
