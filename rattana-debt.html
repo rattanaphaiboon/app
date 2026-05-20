@@ -521,6 +521,9 @@ body.dark .di-cn{background:rgba(46,204,113,.12);color:#7be0a3}
 /* รอตรวจสอบ chip in table */
 .badge-pending{display:inline-flex;align-items:center;gap:3px;background:rgba(150,150,150,.15);color:#666;border:1px solid rgba(150,150,150,.4);border-radius:12px;padding:2px 8px;font-size:10px;font-weight:700;white-space:nowrap}
 body.dark .badge-pending{color:#aaa;background:rgba(200,200,200,.1)}
+/* ยอดไม่เต็ม chip — accounting marked partial */
+.badge-partial{display:inline-flex;align-items:center;gap:3px;background:rgba(231,76,60,.12);color:#c0392b;border:1px solid rgba(231,76,60,.4);border-radius:12px;padding:2px 8px;font-size:10px;font-weight:700;white-space:nowrap;margin-left:4px;cursor:help}
+body.dark .badge-partial{color:#ff8070;background:rgba(231,76,60,.15)}
 /* Collection plan chip — green if upcoming, orange if past */
 .badge-plan{display:inline-flex;align-items:center;gap:3px;background:rgba(46,204,113,.15);color:#1e8449;border:1px solid rgba(46,204,113,.4);border-radius:12px;padding:2px 8px;font-size:10px;font-weight:700;white-space:nowrap;margin-left:4px;cursor:help}
 .badge-plan-late{display:inline-flex;align-items:center;gap:3px;background:rgba(243,156,18,.18);color:#b07000;border:1px solid rgba(243,156,18,.4);border-radius:12px;padding:2px 8px;font-size:10px;font-weight:700;white-space:nowrap;margin-left:4px;cursor:help}
@@ -1118,6 +1121,8 @@ let currentUser = null;
 let allRows = [];        // raw rows from sheet (already filtered by role)
 let viewRows = [];       // filtered + sorted rows
 let pendingDocNos = new Set(); // doc nos in Payment Log (รอตรวจสอบ)
+let partialDocNos = new Set(); // doc nos marked "ยอดไม่เต็ม" — don't grey out
+let payLogRowIndex = new Map(); // docNo → first matching row's _rowIdx (for status display)
 let onlyUncollected = false; // toggle chip: show only debts still owed
 let collectionPlans = new Map();  // docNo → {reason, planDate, note, savedByName, savedByEmail, timestamp}
 let planReasonOptions = [];        // dropdown options from Plan Reasons sheet
@@ -1731,17 +1736,23 @@ async function loadPaymentLog(){
   try {
     const rows = await loadFromSheets(CONFIG.payLogSheetId, CONFIG.payLogSheetName);
     pendingDocNos = new Set();
-    rows.forEach(r => {
+    partialDocNos = new Set();
+    rows.forEach((r, i) => {
       // Try both column name variants + read raw values by any key containing เลข
       let docCell = r['เลขเอกสาร'] || r['เลขที่เอกสาร'] || '';
-      // Fallback: scan all keys for one containing เลข and เอกสาร
       if (!docCell){
         const key = Object.keys(r).find(k => k.includes('เลข') && k.includes('เอกสาร'));
         if (key) docCell = r[key] || '';
       }
-      docCell.split(',').map(d => d.trim()).filter(Boolean).forEach(d => pendingDocNos.add(d));
+      // Read partial status — column "เต็มยอด" (value "ไม่เต็ม" = partial)
+      const partialStatus = String(r['เต็มยอด'] || '').trim();
+      const isPartial = partialStatus === 'ไม่เต็ม' || partialStatus.toLowerCase() === 'partial';
+      docCell.split(',').map(d => d.trim()).filter(Boolean).forEach(d => {
+        pendingDocNos.add(d);
+        if (isPartial) partialDocNos.add(d);
+      });
     });
-    console.log('Payment Log loaded:', pendingDocNos.size, 'pending docs:', [...pendingDocNos].slice(0,5));
+    console.log('Payment Log loaded:', pendingDocNos.size, 'pending,', partialDocNos.size, 'partial');
     if (viewRows.length > 0) renderTable();
   } catch(e){
     console.error('Payment Log load failed:', e.message, e);
@@ -2681,7 +2692,9 @@ function renderTable(){
     const idx = start + i;
     const counts = rowShouldCount(r);
     const reason = rowExcludeReason(r);
-    const isPending = pendingDocNos.has(r.docNo);   // รอตรวจสอบ from Payment Log
+    const hasSlip   = pendingDocNos.has(r.docNo);
+    const isPartial = partialDocNos.has(r.docNo);
+    const isPending = hasSlip && !isPartial;   // partial = don't grey out
     const excludeBadge = reason === 'dman'
       ? `<span class="badge badge-dman" title="D-MAN: ${escapeAttr(r.dman)}">🚚 รอตัดบัญชี</span>`
       : reason === 'note'
@@ -2689,6 +2702,9 @@ function renderTable(){
       : '';
     const pendingBadge = isPending
       ? `<span class="badge-pending">🕐 รอตรวจสอบ</span>`
+      : '';
+    const partialBadge = isPartial
+      ? `<span class="badge-partial" title="บัญชี mark ว่ายอดไม่เต็ม — ตามเก็บเพิ่ม">⚠️ ยอดไม่เต็ม</span>`
       : '';
     // Collection plan chip
     const plan = collectionPlans.get(r.docNo);
@@ -2716,7 +2732,7 @@ function renderTable(){
       <td style="text-align:center">${planBtn}</td>
       <td>${escapeHtml(r.custName)}</td>
       <td class="num">${fmtBaht(r.amount)}</td>
-      <td class="aging">${agingBadge(r.overdue)}${excludeBadge}${pendingBadge}${planBadge}</td>
+      <td class="aging">${agingBadge(r.overdue)}${excludeBadge}${pendingBadge}${partialBadge}${planBadge}</td>
       <td class="code">${escapeHtml(r.docNo)}</td>
       <td>${escapeHtml(r.docDate)}</td>
       <td class="num" style="text-align:center">${r.aging}</td>
@@ -4715,7 +4731,80 @@ function openSlipModal(idx){
     saveBtn.style.display  = 'none';
   }
 
+  // Partial payment toggle — only for accounting OR role >= 5, and only if slip has docNo
+  const canMarkPartial = docNo && currentUser && (
+    (currentUser.dept || '').includes('บัญชี') || (currentUser.role || 0) >= 5
+  );
+  const partialSection = $('slipPartialSection');
+  const partialBtn = $('slipPartialBtn');
+  if (canMarkPartial){
+    partialSection.style.display = '';
+    const isPartial = String(r['เต็มยอด'] || '').trim() === 'ไม่เต็ม';
+    updateSlipPartialBtn(isPartial);
+  } else {
+    partialSection.style.display = 'none';
+  }
+
   $('slipModal').classList.add('show');
+}
+
+function updateSlipPartialBtn(isPartial){
+  const btn = $('slipPartialBtn');
+  if (!btn) return;
+  btn.disabled = false;
+  if (isPartial){
+    btn.textContent = '⚠️ ยอดไม่เต็ม (ค้างเก็บต่อ) — กดเพื่อเปลี่ยนเป็น "ยอดเต็ม"';
+    btn.style.background = 'rgba(231,76,60,.12)';
+    btn.style.color = '#c0392b';
+    btn.style.borderColor = 'rgba(231,76,60,.5)';
+  } else {
+    btn.textContent = '✅ ยอดเต็ม (ปิดบิล) — กดเพื่อเปลี่ยนเป็น "ยอดไม่เต็ม"';
+    btn.style.background = 'rgba(46,204,113,.12)';
+    btn.style.color = '#1e8449';
+    btn.style.borderColor = 'rgba(46,204,113,.5)';
+  }
+  btn.dataset.partial = isPartial ? '1' : '0';
+}
+
+async function toggleSlipPartial(){
+  if (slipModalSlipIdx == null) return;
+  const r = allPayRows[slipModalSlipIdx];
+  if (!r) return;
+  const btn = $('slipPartialBtn');
+  const wasPartial = btn.dataset.partial === '1';
+  const makePartial = !wasPartial;
+
+  btn.disabled = true;
+  btn.textContent = '⏳ กำลังบันทึก...';
+
+  const docNo = (r['เลขเอกสาร'] || r['เลขที่เอกสาร'] || '').trim();
+
+  try {
+    await fetch(CONFIG.scriptUrl, {
+      method: 'POST', mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({
+        action:    'markSlipPartial',
+        rowIndex:  r._rowIdx,
+        isPartial: makePartial,
+        user:      currentUser ? (currentUser.name || '') : '',
+        email:     currentUser ? (currentUser.email || '') : '',
+      }),
+    });
+    // Update local state
+    r['เต็มยอด'] = makePartial ? 'ไม่เต็ม' : '';
+    // Update partialDocNos set so renderTable greys/un-greys correctly
+    docNo.split(',').map(d => d.trim()).filter(Boolean).forEach(d => {
+      if (makePartial) partialDocNos.add(d);
+      else partialDocNos.delete(d);
+    });
+    renderTable();
+    updateSlipPartialBtn(makePartial);
+    showToast(makePartial ? '⚠️ Mark ยอดไม่เต็มแล้ว' : '✅ เปลี่ยนกลับเป็นยอดเต็มแล้ว', 'success');
+  } catch(e){
+    showToast('บันทึกไม่สำเร็จ: ' + e.message, 'error');
+    updateSlipPartialBtn(wasPartial);
+  }
 }
 
 function closeSlipModal(e){
@@ -4850,6 +4939,11 @@ window.addEventListener('load', () => {
           <option value="">— เลือกบิล —</option>
         </select>
       </div>
+    </div>
+    <!-- Partial payment toggle — accounting + Role 5+ only -->
+    <div id="slipPartialSection" style="display:none;border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:6px">สถานะการชำระ:</div>
+      <button id="slipPartialBtn" onclick="toggleSlipPartial()" style="width:100%;padding:10px;border-radius:8px;border:1.5px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit">⏳ กำลังโหลด...</button>
     </div>
     <div style="display:flex;gap:8px;margin-top:14px">
       <button class="btn outline" onclick="closeSlipModal()" style="flex:1">ปิด</button>
