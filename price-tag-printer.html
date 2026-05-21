@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Price Tag Printer v2.4</title>
+<title>Price Tag Printer v2.5</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
 <style>
@@ -220,7 +220,7 @@
 <body>
 <div class="app">
   <header>
-    <h1>🏷️ Price Tag Printer <span class="version">v2.4</span></h1>
+    <h1>🏷️ Price Tag Printer <span class="version">v2.5</span></h1>
   </header>
 
   <div class="grid">
@@ -572,14 +572,20 @@ async function loadStocksync() {
     const missing = required.filter(c => !(c in headerIdx));
     if (missing.length) throw new Error('คอลัมน์ขาด: ' + missing.join(', '));
 
-    // Build barcode → {row, unit} index for fast lookup
+    // Build barcode → {row, unit} index. Also index leading-zero-stripped variant
+    // because Stocksync often stores GTIN-14 (e.g. "08850124037480") while
+    // physical scanners output EAN-13 ("8850124037480") — both must lookup the same SKU.
     const byBarcode = new Map();
     const UNITS = ['EA', 'PA', 'BP', 'CS'];
     rows.forEach(row => {
       UNITS.forEach(u => {
         const col = headerIdx['CODE ' + u];
         const barcode = String(row[col] || '').trim();
-        if (barcode) byBarcode.set(barcode, { row, unit: u });
+        if (!barcode) return;
+        const info = { row, unit: u };
+        byBarcode.set(barcode, info);
+        const stripped = barcode.replace(/^0+/, '');
+        if (stripped && stripped !== barcode) byBarcode.set(stripped, info);
       });
     });
 
@@ -603,7 +609,20 @@ if (lastStocksyncUrl) {
 function findStockByBarcode(barcode) {
   if (!state.stocksync || !barcode) return null;
   const trimmed = String(barcode).trim();
-  return state.stocksync.byBarcode.get(trimmed) || null;
+  if (!trimmed) return null;
+  // Try exact match
+  let hit = state.stocksync.byBarcode.get(trimmed);
+  if (hit) return hit;
+  // Try without leading zeros (scanned EAN-13 → indexed GTIN-14 stripped variant)
+  const stripped = trimmed.replace(/^0+/, '');
+  if (stripped && stripped !== trimmed) {
+    hit = state.stocksync.byBarcode.get(stripped);
+    if (hit) return hit;
+  }
+  // Try padded with leading zero (scanned EAN-13 → indexed GTIN-14 with prefix)
+  hit = state.stocksync.byBarcode.get('0' + trimmed);
+  if (hit) return hit;
+  return null;
 }
 
 function stripUnitSuffix(unitLabel) {
