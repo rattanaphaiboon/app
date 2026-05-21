@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v7.12</title>
+<title>Rattana Sales — v7.13</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -4003,7 +4003,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v7.12 · 2026-05-22</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v7.13 · 2026-05-22</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -4014,7 +4014,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag">v7.12</span>
+  <span class="demo-tag">v7.13</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -4109,7 +4109,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
   </button>
 
   <div class="drawer-footer">
-    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v7.12<br>2026-05-22 🔄<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
+    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v7.13<br>2026-05-22 🔄<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
   </div>
 </aside>
 
@@ -6032,9 +6032,16 @@ function csEaToEa(csea, qtyEaPerCs) {
   return cs * qtyEaPerCs + ea;
 }
 
-// v7.9: compute non-moving status of a product in one warehouse
-//   Returns null if no IB data, else { ibDate, daysSince, received_EA, stock_EA, soldPct, isNonMoving }
-//   isNonMoving = (≥60 days since IB) AND (sold < 50% of received)
+// v7.13: rewritten non-moving check — handles "prior batches accumulated" case
+//   The IB column tracks the LATEST batch only, not cumulative inventory.
+//   When stock > latest-batch (e.g. W1 beer: 22 received, 78394 in stock), the
+//   "received - stock" formula yields 0 sold, falsely flagging fast-movers.
+//
+//   New logic — flag as non-moving if EITHER:
+//   (A) days_of_stock = stock / AVG60D > 30  (overstocked at current pace)
+//   (B) stock ≤ received AND ratio_left ≥ 50%  (this batch itself isn't selling)
+//   (C) stock > 0 AND no AVG60D data  (worst case: stock with zero recorded sales)
+//   Plus: IB date must be ≥ 60 days old (matured SKU, not a fresh delivery)
 function nonMovingInfo(p, wh) {
   if (!p || !wh) return null;
   const ib = parseIB(p[`IB ${wh}`]);
@@ -6043,8 +6050,28 @@ function nonMovingInfo(p, wh) {
   const qtyEaPerCs = numv(p['QTY CS']) || 1;
   const received_EA = csEaToEa(ib.volume, qtyEaPerCs) + csEaToEa(ib.free, qtyEaPerCs);
   const stock_EA = numv(p[`STOCK ${wh}`]) || 0;
-  const soldFromBatch = Math.max(0, received_EA - stock_EA);
-  const soldPct = received_EA > 0 ? (soldFromBatch / received_EA) : 0;
+  const avg60d_EA = numv(p[`AVERAGE 60D_${wh}`]) || numv(p[`AVERAGE 60D ${wh}`]) || 0;
+
+  // Compute possible signals
+  const daysOfStock = avg60d_EA > 0 ? stock_EA / avg60d_EA : null;
+  const ratioLeft = received_EA > 0 ? stock_EA / received_EA : null;
+
+  // Decision: only consider "non-moving" candidate if batch is matured (≥60d)
+  let isNonMoving = false;
+  let reason = '';
+  if (daysSince >= 60 && stock_EA > 0) {
+    if (daysOfStock !== null && daysOfStock > 30) {
+      isNonMoving = true;
+      reason = `${Math.round(daysOfStock)}d ของ stock`;
+    } else if (avg60d_EA <= 0 && stock_EA > 0) {
+      isNonMoving = true;
+      reason = 'ไม่มียอดขาย 60d';
+    } else if (ratioLeft !== null && stock_EA <= received_EA && ratioLeft >= 0.5) {
+      isNonMoving = true;
+      reason = `batch ${Math.round(ratioLeft*100)}% ค้าง`;
+    }
+  }
+
   return {
     ibDate: ib.date,
     daysSince,
@@ -6052,10 +6079,13 @@ function nonMovingInfo(p, wh) {
     received_CS: qtyEaPerCs > 0 ? received_EA / qtyEaPerCs : 0,
     stock_EA,
     stock_CS: qtyEaPerCs > 0 ? stock_EA / qtyEaPerCs : 0,
-    soldPct,
+    avg60d_EA,
+    daysOfStock,
+    ratioLeft,
     qtyEaPerCs,
     ibValue: ib.value,
-    isNonMoving: daysSince >= 60 && soldPct < 0.5 && received_EA > 0,
+    reason,
+    isNonMoving,
   };
 }
 
@@ -15697,14 +15727,48 @@ function renderProductList(filterText = '') {
     });
     if (products.length > 500) products = products.slice(0, 500);
   } else if (_productActiveFilter === 'nonMoving') {
-    // v7.10: IB ≥60 days ago + sold <50% of received qty (current user's warehouse)
+    // v7.13: search ALL warehouses, not just user's — many SKUs have IB only at W1/W4
+    //        and the salesman cares about company-wide stuck stock for push opportunities.
     if (!filterText || !filterText.trim()) products = SHEET_DATA.products || [];
-    const wh = (typeof _currentWh === 'function') ? _currentWh()
-              : String((SALESMAN && SALESMAN.warehouseId) || 'W1');
+    const userWh = (typeof _currentWh === 'function') ? _currentWh()
+                 : String((SALESMAN && SALESMAN.warehouseId) || 'W1');
+    const allWh = ['W1','W2','W3','W4','C4'];
     const enriched = products
-      .map(p => ({ p, info: nonMovingInfo(p, wh) }))
-      .filter(x => x.info && x.info.isNonMoving)
+      .map(p => {
+        // pick worst warehouse where this product is non-moving (prefer user's wh as tiebreaker)
+        let pick = null;
+        for (const w of allWh) {
+          const info = nonMovingInfo(p, w);
+          if (info && info.isNonMoving) {
+            if (!pick || info.stock_EA > pick.info.stock_EA || (w === userWh && pick.wh !== userWh)) {
+              pick = { p, info, wh: w };
+            }
+          }
+        }
+        return pick;
+      })
+      .filter(Boolean)
       .sort((a, b) => b.info.stock_EA - a.info.stock_EA);   // most stuck first
+    // Diagnostic when result is 0 — helps debug stale cache / missing IB columns / wrong wh
+    if (enriched.length === 0) {
+      const total = (SHEET_DATA.products || []).length;
+      const withIB = (SHEET_DATA.products || []).filter(p =>
+        allWh.some(w => parseIB(p[`IB ${w}`]))
+      ).length;
+      console.warn('[nonMoving] 0 results across ALL warehouses · total products:', total,
+        '· products with parseable IB:', withIB, '· user wh:', userWh);
+      if (withIB > 0) {
+        const sample = (SHEET_DATA.products || []).find(p =>
+          allWh.some(w => parseIB(p[`IB ${w}`])));
+        if (sample) {
+          console.warn('[nonMoving] Sample IB values for', sample['SHORT NAME'] || sample['PRODUCT NAME'],
+            '· today:', new Date().toISOString().slice(0,10),
+            allWh.map(w => `${w}: ${sample[`IB ${w}`] || '(empty)'}`).join('\n'));
+        }
+      } else {
+        console.warn('[nonMoving] No IB data at all — PDDT cache may be stale. Try Ctrl+Shift+R to force refresh.');
+      }
+    }
     products = enriched.map(x => x.p);
     if (products.length > 500) products = products.slice(0, 500);
   }
