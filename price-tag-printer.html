@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Price Tag Printer v1.6</title>
+<title>Price Tag Printer v2.0</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
 <style>
@@ -205,25 +205,38 @@
 <body>
 <div class="app">
   <header>
-    <h1>🏷️ Price Tag Printer <span class="version">v1.6</span></h1>
+    <h1>🏷️ Price Tag Printer <span class="version">v2.0</span></h1>
   </header>
 
   <div class="grid">
     <div>
       <div class="panel">
-        <h2>1. Load Google Sheet</h2>
+        <h2>1. Load Sheets</h2>
         <div class="info tip">
           <b>วิธีใช้:</b> เปิด Google Sheet → กด <b>Share</b> → ตั้งเป็น <b>"Anyone with the link"</b> → <b>Viewer</b> → Copy link → วางในช่องด้านล่าง
         </div>
+
+        <div style="font-size:12px; font-weight:600; color:#555; margin:4px 0;">📋 Scanner Sheet — รายการ barcode ที่จะพิมพ์ (col `Barcode` + col 2 = code/location)</div>
         <div class="row">
-          <input type="text" id="sheetUrl" class="url" placeholder="วาง URL Google Sheet ที่นี่ (เช่น https://docs.google.com/spreadsheets/d/.../edit?gid=0)">
+          <input type="text" id="sheetUrl" class="url" placeholder="วาง URL Scanner Sheet ที่นี่">
         </div>
         <div class="row">
-          <button id="loadBtn" onclick="loadGoogleSheet()">📥 Load</button>
+          <button id="loadBtn" onclick="loadGoogleSheet()">📥 Load Scanner</button>
           <button class="secondary" onclick="loadGoogleSheet()" id="refreshBtn">🔄 Refresh</button>
           <span id="sheetInfo" style="color: #666; font-size: 13px;"></span>
         </div>
         <div id="sheetError"></div>
+
+        <div style="font-size:12px; font-weight:600; color:#555; margin:12px 0 4px;">🗂 Stocksync (PDDT) — master ราคา + barcode ทุกหน่วย (lookup target)</div>
+        <div class="row">
+          <input type="text" id="stocksyncUrl" class="url" placeholder="วาง URL Stocksync ที่นี่ — tab PDDT auto" value="https://docs.google.com/spreadsheets/d/16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I/edit">
+        </div>
+        <div class="row">
+          <button id="loadStocksyncBtn" onclick="loadStocksync()">📥 Load Stocksync</button>
+          <span id="stocksyncInfo" style="color: #666; font-size: 13px;"></span>
+        </div>
+        <div id="stocksyncError"></div>
+
         <div id="excelPreview" class="excel-preview" style="display:none;"></div>
       </div>
 
@@ -321,8 +334,11 @@
 <script>
 const PX_PER_MM = 8;
 const LS_LAST_URL = 'priceTagLastSheetUrl';
+const LS_LAST_STOCKSYNC_URL = 'priceTagLastStocksyncUrl';
+const PRICE_TIER = 'CC03'; // default tier for big price + multi-pack list
 const state = {
-  sheet: null,           // { headers, rows, sourceUrl, gid, id }
+  sheet: null,           // Scanner Sheet { headers, rows, sourceUrl, gid, id }
+  stocksync: null,       // Stocksync PDDT { headers, rows, byBarcode: Map<barcode, {row, unit}>, headerIdx: {...} }
   tag: { width: 76, height: 36 },
   fields: [],
   selectedFieldId: null
@@ -481,6 +497,194 @@ if (lastUrl) {
   setTimeout(() => loadGoogleSheet(), 100);
 }
 
+// ============ STOCKSYNC (PDDT) ============
+const stocksyncUrlInput = document.getElementById('stocksyncUrl');
+const lastStocksyncUrl = localStorage.getItem(LS_LAST_STOCKSYNC_URL);
+if (lastStocksyncUrl) stocksyncUrlInput.value = lastStocksyncUrl;
+
+function buildStocksyncCsvUrl(id) {
+  // PDDT tab — use sheet name (gviz fetches by sheet name)
+  return `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv&sheet=PDDT`;
+}
+
+async function loadStocksync() {
+  const url = stocksyncUrlInput.value;
+  const parsed = parseSheetUrl(url);
+  const errDiv = document.getElementById('stocksyncError');
+  const infoEl = document.getElementById('stocksyncInfo');
+  errDiv.innerHTML = '';
+
+  if (!parsed) {
+    errDiv.innerHTML = `<div class="info error">URL Stocksync ไม่ถูกต้อง</div>`;
+    return;
+  }
+
+  const btn = document.getElementById('loadStocksyncBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> โหลด...';
+  infoEl.textContent = '';
+
+  try {
+    const csvUrl = buildStocksyncCsvUrl(parsed.id);
+    const resp = await fetch(csvUrl);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const csv = await resp.text();
+    if (csv.trim().startsWith('<') || csv.trim().startsWith('{')) {
+      throw new Error('Stocksync ไม่ public — ตั้ง Share = "Anyone with the link" ก่อน');
+    }
+    const wb = XLSX.read(csv, { type: 'string', raw: false });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const arr = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
+    if (arr.length < 2) throw new Error('PDDT tab ว่าง');
+
+    const headers = arr[0].map((h, i) => h ? String(h).trim() : `Col${i+1}`);
+    const rows = arr.slice(1).filter(r => r.some(c => c !== '' && c !== null));
+
+    // Build header index for O(1) column lookup
+    const headerIdx = {};
+    headers.forEach((h, i) => { headerIdx[h] = i; });
+
+    // Verify required columns exist
+    const required = ['CODE EA', 'CODE PA', 'CODE BP', 'CODE CS', 'PRODUCT NAME'];
+    const missing = required.filter(c => !(c in headerIdx));
+    if (missing.length) throw new Error('คอลัมน์ขาด: ' + missing.join(', '));
+
+    // Build barcode → {row, unit} index for fast lookup
+    const byBarcode = new Map();
+    const UNITS = ['EA', 'PA', 'BP', 'CS'];
+    rows.forEach(row => {
+      UNITS.forEach(u => {
+        const col = headerIdx['CODE ' + u];
+        const barcode = String(row[col] || '').trim();
+        if (barcode) byBarcode.set(barcode, { row, unit: u });
+      });
+    });
+
+    state.stocksync = { headers, rows, byBarcode, headerIdx };
+    localStorage.setItem(LS_LAST_STOCKSYNC_URL, url);
+    infoEl.textContent = `✓ ${rows.length} SKUs, ${byBarcode.size} barcodes indexed @ ${new Date().toLocaleTimeString('th-TH')}`;
+    refreshDesigner();
+  } catch (err) {
+    errDiv.innerHTML = `<div class="info error"><b>โหลด Stocksync ไม่สำเร็จ:</b> ${escapeHtml(err.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '📥 Load Stocksync';
+  }
+}
+
+if (lastStocksyncUrl) {
+  setTimeout(() => loadStocksync(), 200);
+}
+
+// ============ LOOKUP HELPERS ============
+function findStockByBarcode(barcode) {
+  if (!state.stocksync || !barcode) return null;
+  const trimmed = String(barcode).trim();
+  return state.stocksync.byBarcode.get(trimmed) || null;
+}
+
+function stripUnitSuffix(unitLabel) {
+  // "ชิ้นx1(EA)" → "ชิ้นx1" ; "ลังx12(CS)" → "ลังx12"
+  return String(unitLabel || '').replace(/\s*\([A-Z]+\)\s*$/, '').trim();
+}
+
+function getStockField(stockRow, colName) {
+  if (!state.stocksync) return '';
+  const idx = state.stocksync.headerIdx[colName];
+  return (idx === undefined || idx < 0) ? '' : String(stockRow[idx] ?? '').trim();
+}
+
+function getPrice(stockRow, tier, unit) {
+  return getStockField(stockRow, `PRICE ${tier} ${unit}`);
+}
+
+function formatPrice(p) {
+  const n = Number(p);
+  if (isNaN(n) || n === 0) return '';
+  return n.toFixed(2);
+}
+
+function buildMultiPackList(stockRow, scannedUnit, tier) {
+  // Show OTHER units (not scannedUnit) that have a price
+  const UNITS = ['EA', 'PA', 'BP', 'CS'];
+  const lines = [];
+  UNITS.forEach(u => {
+    if (u === scannedUnit) return;
+    const price = getPrice(stockRow, tier, u);
+    if (!price || price === '0') return;
+    const unitLabel = stripUnitSuffix(getStockField(stockRow, 'UNIT ' + u));
+    if (!unitLabel) return;
+    lines.push(`1 ${unitLabel}   ${formatPrice(price)}`);
+  });
+  return lines.join('\n');
+}
+
+function todayStr() {
+  // Asia/Bangkok DD/MM/YYYY
+  const d = new Date();
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
+// Compute value for a smart field given a scanner-sheet row (or null for designer preview)
+function computeSmartValue(field, scannerRow) {
+  if (!field.smartType) return null;
+  // Designer preview when no scanner row: try first row
+  const row = scannerRow || (state.sheet && state.sheet.rows[0]) || null;
+  if (!row) {
+    // No data at all — return placeholder
+    const placeholders = {
+      productName: '[ชื่อสินค้า]',
+      bigPrice: '0.00',
+      bigPriceUnit: '[หน่วย]',
+      multiPackList: '[multi-pack list]',
+      codeLine: '[code/location]',
+      dateStamp: todayStr(),
+      scannedBarcode: '1234567890123'
+    };
+    return placeholders[field.smartType] || '';
+  }
+  const barcode = String(row[0] ?? '').trim();
+  const stock = findStockByBarcode(barcode);
+  const stockRow = stock ? stock.row : null;
+  const scannedUnit = stock ? stock.unit : null;
+
+  switch (field.smartType) {
+    case 'productName':
+      if (!stockRow) return '(ไม่พบ ' + barcode + ')';
+      return getStockField(stockRow, 'SHORT NAME') || getStockField(stockRow, 'PRODUCT NAME') || '(ชื่อว่าง)';
+    case 'bigPrice':
+      if (!stockRow || !scannedUnit) return '?';
+      const p = formatPrice(getPrice(stockRow, PRICE_TIER, scannedUnit));
+      return p || '?';
+    case 'bigPriceUnit':
+      if (!stockRow || !scannedUnit) return '';
+      return stripUnitSuffix(getStockField(stockRow, 'UNIT ' + scannedUnit));
+    case 'multiPackList':
+      if (!stockRow || !scannedUnit) return '';
+      return buildMultiPackList(stockRow, scannedUnit, PRICE_TIER);
+    case 'codeLine':
+      return String(row[1] ?? '').trim();
+    case 'dateStamp':
+      return todayStr();
+    case 'scannedBarcode':
+      return barcode;
+    default:
+      return '';
+  }
+}
+
+// Auto-detect barcode format for scannedBarcode field
+function detectBarcodeFormat(value) {
+  const v = String(value).trim();
+  if (/^\d{13}$/.test(v)) return 'EAN13';
+  if (/^\d{8}$/.test(v)) return 'EAN8';
+  if (/^\d{12}$/.test(v)) return 'UPC';
+  return 'CODE128';
+}
+
 // ============ TAG SIZE ============
 document.getElementById('tagW').addEventListener('input', () => {
   state.tag.width = Math.max(10, +document.getElementById('tagW').value || 50);
@@ -540,16 +744,19 @@ function createFieldElement(field) {
     svg.classList.add('barcode');
     el.appendChild(svg);
     const rawValue = getRawValue(field);
+    const fmt = field.smartType === 'scannedBarcode'
+      ? detectBarcodeFormat(rawValue)
+      : (field.barcodeFormat || 'CODE128');
     if (rawValue) {
       try {
         JsBarcode(svg, String(rawValue), {
-          format: field.barcodeFormat || 'CODE128',
+          format: fmt,
           width: 2, height: 40,
           displayValue: field.showBarcodeText !== false,
           fontSize: 12, margin: 0
         });
       } catch (e) {
-        svg.innerHTML = `<text x="2" y="14" font-size="9" fill="#c00">Bad ${field.barcodeFormat}: ${escapeHtml(String(rawValue).slice(0,20))}</text>`;
+        svg.innerHTML = `<text x="2" y="14" font-size="9" fill="#c00">Bad ${fmt}: ${escapeHtml(String(rawValue).slice(0,20))}</text>`;
       }
     } else {
       svg.innerHTML = `<text x="2" y="14" font-size="9" fill="#aaa">(empty)</text>`;
@@ -561,10 +768,19 @@ function createFieldElement(field) {
     content.style.fontSize = ptToDesignerPx(field.fontSize) + 'px';
     content.style.fontWeight = field.bold ? 'bold' : 'normal';
     content.style.fontStyle = field.italic ? 'italic' : 'normal';
-    content.style.justifyContent =
-      field.align === 'right' ? 'flex-end' :
-      field.align === 'center' ? 'center' : 'flex-start';
-    content.style.alignItems = 'center';
+    if (field.wrap) {
+      content.style.whiteSpace = 'pre-line';
+      content.style.display = 'block';
+      content.style.textAlign = field.align || 'left';
+      content.style.lineHeight = '1.15';
+      content.style.alignItems = '';
+      content.style.justifyContent = '';
+    } else {
+      content.style.justifyContent =
+        field.align === 'right' ? 'flex-end' :
+        field.align === 'center' ? 'center' : 'flex-start';
+      content.style.alignItems = 'center';
+    }
     el.appendChild(content);
   }
 
@@ -583,6 +799,11 @@ function createFieldElement(field) {
 }
 
 function getRawValue(field) {
+  // Smart field: dispatch to lookup logic
+  if (field.smartType) {
+    const v = computeSmartValue(field, null);
+    return v == null ? '' : v;
+  }
   if (field.type === 'static') return field.staticValue || '';
   if (!state.sheet || state.sheet.rows.length === 0) {
     return field.type === 'barcode' ? '1234567890' : '[Col ' + (field.colIndex+1) + ']';
@@ -696,7 +917,9 @@ function addField(type) {
     barcodeFormat: 'CODE128',
     showBarcodeText: true,
     bgColor: '',
-    printBg: true
+    printBg: true,
+    smartType: '',
+    wrap: false
   };
   state.fields.push(f);
   state.selectedFieldId = id;
@@ -754,9 +977,25 @@ function renderProps() {
   panel.style.display = 'block';
 
   const headers = state.sheet ? state.sheet.headers : [];
-  let html = `<div class="row"><label>Type:</label> <strong style="text-transform:capitalize;">${f.type}</strong></div>`;
+  let html = `<div class="row"><label>Type:</label> <strong style="text-transform:capitalize;">${f.type}</strong>`;
+  if (f._label) html += ` <span style="font-size:11px; color:#888;">— ${escapeHtml(f._label)}</span>`;
+  html += `</div>`;
 
-  if (f.type === 'static') {
+  if (f.smartType) {
+    const smartLabels = {
+      productName: 'lookup → SHORT NAME / PRODUCT NAME',
+      bigPrice: 'lookup → PRICE ' + PRICE_TIER + ' [scanned unit]',
+      bigPriceUnit: 'lookup → UNIT [scanned unit] (strip suffix)',
+      multiPackList: 'lookup → other units\' prices (list)',
+      codeLine: 'Scanner Sheet col 2 (after Barcode)',
+      dateStamp: 'auto today (DD/MM/YYYY)',
+      scannedBarcode: 'Scanner Sheet col 1 (Barcode) + auto-detect format'
+    };
+    html += `<div class="info tip" style="margin:6px 0; padding:8px 10px; font-size:11px;">
+      🔮 <b>Smart binding:</b> ${escapeHtml(smartLabels[f.smartType] || f.smartType)}
+      <br><span style="color:#666;">Column ของ Sheet ไม่ใช้กับ field นี้ — auto-compute</span>
+    </div>`;
+  } else if (f.type === 'static') {
     html += `<div class="row"><label>Text:</label> <input type="text" value="${escapeAttr(f.staticValue)}" onchange="updateField('${f.id}', 'staticValue', this.value)" style="flex:1; min-width:140px;"></div>`;
   } else {
     html += `<div class="row"><label>Column:</label> <select onchange="updateField('${f.id}', 'colIndex', +this.value)" style="flex:1;">`;
@@ -811,6 +1050,13 @@ function renderProps() {
         <button class="${f.align==='center'?'active':''}" onclick="updateField('${f.id}', 'align', 'center')">≡</button>
         <button class="${f.align==='right'?'active':''}" onclick="updateField('${f.id}', 'align', 'right')">➡</button>
       </div>
+    </div>
+    <div class="row">
+      <label></label>
+      <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#555; cursor:pointer;">
+        <input type="checkbox" ${f.wrap ? 'checked' : ''} onchange="updateField('${f.id}', 'wrap', this.checked)">
+        Wrap (หลายบรรทัด) <span style="color:#888;">— ใช้กับชื่อสินค้ายาวๆ</span>
+      </label>
     </div>
     <div class="row">
       <label>Prefix:</label><input type="text" value="${escapeAttr(f.prefix)}" onchange="updateField('${f.id}', 'prefix', this.value)" style="width:55px;" placeholder="฿">
@@ -874,8 +1120,13 @@ function buildPrintPages(from, to, copies) {
 }
 
 function validatePrint() {
-  if (!state.sheet || state.sheet.rows.length === 0) { alert('กรุณา Load Google Sheet ก่อน'); return null; }
+  if (!state.sheet || state.sheet.rows.length === 0) { alert('กรุณา Load Scanner Sheet ก่อน'); return null; }
   if (state.fields.length === 0) { alert('กรุณาเพิ่ม field อย่างน้อย 1 รายการ'); return null; }
+  const hasSmart = state.fields.some(f => f.smartType);
+  if (hasSmart && !state.stocksync) {
+    alert('Template มี Smart fields แต่ยังไม่ได้โหลด Stocksync — กดปุ่ม "📥 Load Stocksync" ก่อน');
+    return null;
+  }
   const from = +document.getElementById('rowFrom').value || 1;
   const to = +document.getElementById('rowTo').value || 1;
   const copies = +document.getElementById('copies').value || 1;
@@ -951,13 +1202,18 @@ function createPrintPage(rowData) {
     }
 
     if (f.type === 'barcode') {
-      const raw = String(rowData[f.colIndex] ?? '');
+      const raw = f.smartType
+        ? String(computeSmartValue(f, rowData) ?? '')
+        : String(rowData[f.colIndex] ?? '');
+      const fmt = f.smartType === 'scannedBarcode'
+        ? detectBarcodeFormat(raw)
+        : (f.barcodeFormat || 'CODE128');
       const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
       svg.style.width = '100%';
       svg.style.height = '100%';
       try {
         JsBarcode(svg, raw, {
-          format: f.barcodeFormat || 'CODE128',
+          format: fmt,
           width: 2, height: 50,
           displayValue: f.showBarcodeText !== false,
           fontSize: 12, margin: 0
@@ -967,21 +1223,35 @@ function createPrintPage(rowData) {
       }
       fieldEl.appendChild(svg);
     } else {
-      let value = f.type === 'static' ? (f.staticValue || '') : String(rowData[f.colIndex] ?? '');
+      let value;
+      if (f.smartType) {
+        value = String(computeSmartValue(f, rowData) ?? '');
+      } else if (f.type === 'static') {
+        value = f.staticValue || '';
+      } else {
+        value = String(rowData[f.colIndex] ?? '');
+      }
       if (f.prefix) value = f.prefix + value;
       if (f.suffix) value = value + f.suffix;
       const span = document.createElement('div');
       span.style.fontSize = f.fontSize + 'pt';
       span.style.fontWeight = f.bold ? 'bold' : 'normal';
       span.style.fontStyle = f.italic ? 'italic' : 'normal';
-      span.style.lineHeight = '1';
       span.style.width = '100%';
       span.style.height = '100%';
-      span.style.display = 'flex';
-      span.style.alignItems = 'center';
-      span.style.justifyContent = f.align === 'right' ? 'flex-end' : f.align === 'center' ? 'center' : 'flex-start';
-      span.style.whiteSpace = 'nowrap';
       span.style.overflow = 'hidden';
+      if (f.wrap) {
+        span.style.whiteSpace = 'pre-line';
+        span.style.lineHeight = '1.15';
+        span.style.display = 'block';
+        span.style.textAlign = f.align || 'left';
+      } else {
+        span.style.lineHeight = '1';
+        span.style.display = 'flex';
+        span.style.alignItems = 'center';
+        span.style.justifyContent = f.align === 'right' ? 'flex-end' : f.align === 'center' ? 'center' : 'flex-start';
+        span.style.whiteSpace = 'nowrap';
+      }
       span.textContent = value;
       fieldEl.appendChild(span);
     }
@@ -1026,9 +1296,64 @@ function loadTemplate() {
 
 // ============ BUILT-IN TEMPLATES ============
 const BUILTIN_TEMPLATES = {
+  scannerShelf: {
+    name: '🔮 Smart Scanner Shelf Tag (76×36)',
+    description: 'ใช้ Scanner Sheet (barcode list) + Stocksync (master) — ทุก field auto-compute',
+    tag: { width: 76, height: 36 },
+    fields: [
+      // 1. Yellow background strip — design guide only (paper already yellow)
+      { type: 'static', staticValue: '', x: 53, y: 0, w: 23, h: 36,
+        colIndex: 0, fontSize: 8, bold: false, italic: false, align: 'left',
+        prefix: '', suffix: '', barcodeFormat: 'CODE128', showBarcodeText: true,
+        bgColor: '#FBBF24', printBg: false, smartType: '', wrap: false,
+        _label: 'แถบเหลือง (paper guide)' },
+      // 2. Product name — wrap 2 lines
+      { type: 'text', staticValue: '', x: 1, y: 1, w: 51, h: 9,
+        colIndex: 0, fontSize: 8, bold: true, italic: false, align: 'left',
+        prefix: '', suffix: '', barcodeFormat: 'CODE128', showBarcodeText: true,
+        bgColor: '', printBg: true, smartType: 'productName', wrap: true,
+        _label: 'ชื่อสินค้า (auto wrap)' },
+      // 3. Multi-pack price list — other units' prices
+      { type: 'text', staticValue: '', x: 1, y: 12, w: 51, h: 14,
+        colIndex: 0, fontSize: 8, bold: false, italic: false, align: 'left',
+        prefix: '', suffix: '', barcodeFormat: 'CODE128', showBarcodeText: true,
+        bgColor: '', printBg: true, smartType: 'multiPackList', wrap: true,
+        _label: 'รายการ multi-pack' },
+      // 4. Date stamp (left-bottom line 1)
+      { type: 'text', staticValue: '', x: 1, y: 27, w: 24, h: 4,
+        colIndex: 0, fontSize: 7, bold: false, italic: false, align: 'left',
+        prefix: '', suffix: '', barcodeFormat: 'CODE128', showBarcodeText: true,
+        bgColor: '', printBg: true, smartType: 'dateStamp', wrap: false,
+        _label: 'วันที่ (auto today)' },
+      // 5. Code line (left-bottom line 2) — col after Barcode in Scanner Sheet
+      { type: 'text', staticValue: '', x: 1, y: 31, w: 51, h: 4,
+        colIndex: 0, fontSize: 7, bold: false, italic: false, align: 'left',
+        prefix: '', suffix: '', barcodeFormat: 'CODE128', showBarcodeText: true,
+        bgColor: '', printBg: true, smartType: 'codeLine', wrap: false,
+        _label: 'รหัส/ที่อยู่ (col 2)' },
+      // 6. Barcode (yellow strip, top)
+      { type: 'barcode', staticValue: '', x: 54, y: 1, w: 21, h: 12,
+        colIndex: 0, fontSize: 10, bold: false, italic: false, align: 'left',
+        prefix: '', suffix: '', barcodeFormat: 'CODE128', showBarcodeText: true,
+        bgColor: '', printBg: true, smartType: 'scannedBarcode', wrap: false,
+        _label: 'Barcode (auto-detect format)' },
+      // 7. Big price (yellow strip, middle) — scanned unit's CC03 price
+      { type: 'text', staticValue: '', x: 54, y: 15, w: 21, h: 12,
+        colIndex: 0, fontSize: 22, bold: true, italic: false, align: 'center',
+        prefix: '', suffix: '', barcodeFormat: 'CODE128', showBarcodeText: true,
+        bgColor: '', printBg: true, smartType: 'bigPrice', wrap: false,
+        _label: 'ราคาใหญ่ (CC03)' },
+      // 8. Big price unit label (yellow strip, bottom)
+      { type: 'text', staticValue: '', x: 54, y: 29, w: 21, h: 5,
+        colIndex: 0, fontSize: 8, bold: false, italic: false, align: 'center',
+        prefix: '', suffix: '', barcodeFormat: 'CODE128', showBarcodeText: true,
+        bgColor: '', printBg: true, smartType: 'bigPriceUnit', wrap: false,
+        _label: 'หน่วย (ชิ้น/แพ็ค/ลัง)' }
+    ]
+  },
   yellowShelf: {
-    name: 'Yellow Shelf Tag (76×36)',
-    description: 'ป้ายชั้นวางสไตล์ supermarket — แถบเหลืองด้านขวา + barcode + ราคาใหญ่',
+    name: 'Yellow Shelf Tag — Legacy (76×36, manual column bind)',
+    description: 'แบบเก่า — ผูก column ตรงๆ ใน Sheet เดียว (สำหรับ Sheet ที่ไม่ใช่ Scanner Sheet)',
     tag: { width: 76, height: 36 },
     fields: [
       // 1. Yellow background strip — DESIGN GUIDE ONLY, doesn't print (paper already yellow)
@@ -1123,8 +1448,8 @@ function autoBindColumns() {
 }
 
 function resetToDefaultTemplate() {
-  if (state.fields.length > 0 && !confirm('ล้างทุก field ปัจจุบันแล้วโหลด Yellow Shelf Tag ใหม่ทั้งหมด?')) return;
-  const t = BUILTIN_TEMPLATES.yellowShelf;
+  if (state.fields.length > 0 && !confirm('ล้างทุก field ปัจจุบันแล้วโหลด Smart Scanner Shelf Tag ใหม่ทั้งหมด?')) return;
+  const t = BUILTIN_TEMPLATES.scannerShelf;
   state.tag = { ...t.tag };
   state.fields = t.fields.map(f => ({ ...f, id: 'f' + (++fieldIdCounter) }));
   document.getElementById('tagW').value = t.tag.width;
@@ -1176,9 +1501,9 @@ function escapeAttr(s) {
   return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
 
-// Init — auto-load Yellow Shelf template on first run (when canvas empty)
+// Init — auto-load Smart Scanner template on first run (when canvas empty)
 function autoLoadDefaultTemplate() {
-  const t = BUILTIN_TEMPLATES.yellowShelf;
+  const t = BUILTIN_TEMPLATES.scannerShelf;
   state.tag = { ...t.tag };
   state.fields = t.fields.map(f => ({ ...f, id: 'f' + (++fieldIdCounter) }));
   document.getElementById('tagW').value = t.tag.width;
