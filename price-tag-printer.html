@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Price Tag Printer v2.3</title>
+<title>Price Tag Printer v2.4</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
 <style>
@@ -220,7 +220,7 @@
 <body>
 <div class="app">
   <header>
-    <h1>🏷️ Price Tag Printer <span class="version">v2.3</span></h1>
+    <h1>🏷️ Price Tag Printer <span class="version">v2.4</span></h1>
   </header>
 
   <div class="grid">
@@ -628,7 +628,8 @@ function formatPrice(p) {
 }
 
 function buildMultiPackList(stockRow, scannedUnit, tier) {
-  // Show OTHER units (not scannedUnit) that have a price
+  // Show OTHER units (not scannedUnit) that have a price.
+  // Use multiple spaces between unit label and price for visual gap (rendered with white-space: pre-wrap)
   const UNITS = ['EA', 'PA', 'BP', 'CS'];
   const lines = [];
   UNITS.forEach(u => {
@@ -637,7 +638,7 @@ function buildMultiPackList(stockRow, scannedUnit, tier) {
     if (!price || price === '0') return;
     const unitLabel = stripUnitSuffix(getStockField(stockRow, 'UNIT ' + u));
     if (!unitLabel) return;
-    lines.push(`1 ${unitLabel}   ${formatPrice(price)}`);
+    lines.push(`1 ${unitLabel}    ${formatPrice(price)}`);
   });
   return lines.join('\n');
 }
@@ -699,13 +700,55 @@ function computeSmartValue(field, scannerRow) {
   }
 }
 
-// Auto-detect barcode format for scannedBarcode field
+// Auto-detect barcode format for scannedBarcode field — tries EAN/UPC by length, falls back to CODE128
 function detectBarcodeFormat(value) {
   const v = String(value).trim();
   if (/^\d{13}$/.test(v)) return 'EAN13';
   if (/^\d{8}$/.test(v)) return 'EAN8';
   if (/^\d{12}$/.test(v)) return 'UPC';
   return 'CODE128';
+}
+
+// Try barcode formats in order — first format that JsBarcode accepts wins
+function renderBarcodeWithFallback(svg, value, primaryFormat, options) {
+  const tries = primaryFormat === 'CODE128' ? ['CODE128'] : [primaryFormat, 'CODE128'];
+  for (const fmt of tries) {
+    try {
+      JsBarcode(svg, value, Object.assign({}, options, { format: fmt }));
+      return fmt;
+    } catch (e) {
+      // keep trying
+    }
+  }
+  // All formats failed — show error
+  svg.innerHTML = `<text x="2" y="14" font-size="9" fill="#c00">Bad: ${escapeHtml(String(value).slice(0,20))}</text>`;
+  return null;
+}
+
+// Measure text width in CSS pixels at given pt size (uses temporary hidden span)
+function measureTextPx(text, fontSizePt, bold) {
+  const m = document.createElement('span');
+  m.style.cssText = `position:absolute;visibility:hidden;white-space:nowrap;font-family:inherit;font-size:${fontSizePt}pt;font-weight:${bold?'bold':'normal'};letter-spacing:normal`;
+  m.textContent = text;
+  document.body.appendChild(m);
+  const w = m.getBoundingClientRect().width;
+  document.body.removeChild(m);
+  return w;
+}
+
+// Find largest fontSize (in pt) where `text` fits within widthMm at given style
+function fitFontPt(text, widthMm, basePt, bold) {
+  if (!text) return basePt;
+  const widthCssPx = widthMm * 3.7795;
+  let size = basePt;
+  // Quick check at base size first
+  if (measureTextPx(text, size, bold) <= widthCssPx * 0.95) return size;
+  // Step down by 0.5pt until fits OR hit floor
+  while (size > 6) {
+    size -= 0.5;
+    if (measureTextPx(text, size, bold) <= widthCssPx * 0.95) return size;
+  }
+  return 6;
 }
 
 // ============ TAG SIZE ============
@@ -771,28 +814,29 @@ function createFieldElement(field) {
       ? detectBarcodeFormat(rawValue)
       : (field.barcodeFormat || 'CODE128');
     if (rawValue) {
-      try {
-        JsBarcode(svg, String(rawValue), {
-          format: fmt,
-          width: 2, height: 40,
-          displayValue: field.showBarcodeText !== false,
-          fontSize: 12, margin: 0
-        });
-      } catch (e) {
-        svg.innerHTML = `<text x="2" y="14" font-size="9" fill="#c00">Bad ${fmt}: ${escapeHtml(String(rawValue).slice(0,20))}</text>`;
-      }
+      renderBarcodeWithFallback(svg, String(rawValue), fmt, {
+        width: 2, height: 40,
+        displayValue: field.showBarcodeText !== false,
+        fontSize: 12, margin: 0
+      });
     } else {
       svg.innerHTML = `<text x="2" y="14" font-size="9" fill="#aaa">(empty)</text>`;
     }
   } else {
     const content = document.createElement('div');
     content.className = 'field-content';
-    content.textContent = getDisplayValue(field);
-    content.style.fontSize = ptToDesignerPx(field.fontSize) + 'px';
+    const displayVal = getDisplayValue(field);
+    content.textContent = displayVal;
+    // Auto-shrink fontSize if fitText enabled and text overflows
+    let effectiveFontPt = field.fontSize;
+    if (field.fitText && !field.wrap) {
+      effectiveFontPt = fitFontPt(displayVal, field.w, field.fontSize, field.bold);
+    }
+    content.style.fontSize = ptToDesignerPx(effectiveFontPt) + 'px';
     content.style.fontWeight = field.bold ? 'bold' : 'normal';
     content.style.fontStyle = field.italic ? 'italic' : 'normal';
     if (field.wrap) {
-      content.style.whiteSpace = 'pre-line';
+      content.style.whiteSpace = 'pre-wrap';
       content.style.display = 'block';
       content.style.textAlign = field.align || 'left';
       content.style.lineHeight = '1.15';
@@ -942,7 +986,8 @@ function addField(type) {
     bgColor: '',
     printBg: true,
     smartType: '',
-    wrap: false
+    wrap: false,
+    fitText: false
   };
   state.fields.push(f);
   state.selectedFieldId = id;
@@ -1106,6 +1151,13 @@ function renderProps() {
       </label>
     </div>
     <div class="row">
+      <label></label>
+      <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#555; cursor:pointer;">
+        <input type="checkbox" ${f.fitText ? 'checked' : ''} onchange="updateField('${f.id}', 'fitText', this.checked)" ${f.wrap ? 'disabled' : ''}>
+        Auto-fit (ลดขนาดถ้าล้น) <span style="color:#888;">— ใช้กับราคาใหญ่</span>
+      </label>
+    </div>
+    <div class="row">
       <label>Prefix:</label><input type="text" value="${escapeAttr(f.prefix)}" onchange="updateField('${f.id}', 'prefix', this.value)" style="width:55px;" placeholder="฿">
       <label>Suffix:</label><input type="text" value="${escapeAttr(f.suffix)}" onchange="updateField('${f.id}', 'suffix', this.value)" style="width:55px;" placeholder="บาท">
     </div>`;
@@ -1258,15 +1310,12 @@ function createPrintPage(rowData) {
       const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
       svg.style.width = '100%';
       svg.style.height = '100%';
-      try {
-        JsBarcode(svg, raw, {
-          format: fmt,
+      if (raw) {
+        renderBarcodeWithFallback(svg, raw, fmt, {
           width: 2, height: 50,
           displayValue: f.showBarcodeText !== false,
           fontSize: 12, margin: 0
         });
-      } catch (e) {
-        svg.innerHTML = `<text x="2" y="14" font-size="9" fill="#c00">Bad: ${escapeHtml(raw.slice(0,20))}</text>`;
       }
       fieldEl.appendChild(svg);
     } else {
@@ -1281,14 +1330,18 @@ function createPrintPage(rowData) {
       if (f.prefix) value = f.prefix + value;
       if (f.suffix) value = value + f.suffix;
       const span = document.createElement('div');
-      span.style.fontSize = f.fontSize + 'pt';
+      let effectiveFontPt = f.fontSize;
+      if (f.fitText && !f.wrap) {
+        effectiveFontPt = fitFontPt(value, f.w, f.fontSize, f.bold);
+      }
+      span.style.fontSize = effectiveFontPt + 'pt';
       span.style.fontWeight = f.bold ? 'bold' : 'normal';
       span.style.fontStyle = f.italic ? 'italic' : 'normal';
       span.style.width = '100%';
       span.style.height = '100%';
       span.style.overflow = 'hidden';
       if (f.wrap) {
-        span.style.whiteSpace = 'pre-line';
+        span.style.whiteSpace = 'pre-wrap';
         span.style.lineHeight = '1.15';
         span.style.display = 'block';
         span.style.textAlign = f.align || 'left';
@@ -1384,12 +1437,12 @@ const BUILTIN_TEMPLATES = {
         prefix: '', suffix: '', barcodeFormat: 'CODE128', showBarcodeText: true,
         bgColor: '', printBg: true, smartType: 'scannedBarcode', wrap: false,
         _label: 'Barcode (auto-detect format)' },
-      // 7. Big price (yellow strip, middle) — scanned unit's CC03 price
-      { type: 'text', staticValue: '', x: 54, y: 15, w: 21, h: 12,
+      // 7. Big price (yellow strip, middle) — scanned unit's CC03 price (full strip width + auto-fit)
+      { type: 'text', staticValue: '', x: 53, y: 15, w: 23, h: 13,
         colIndex: 0, fontSize: 22, bold: true, italic: false, align: 'center',
         prefix: '', suffix: '', barcodeFormat: 'CODE128', showBarcodeText: true,
-        bgColor: '', printBg: true, smartType: 'bigPrice', wrap: false,
-        _label: 'ราคาใหญ่ (CC03)' },
+        bgColor: '', printBg: true, smartType: 'bigPrice', wrap: false, fitText: true,
+        _label: 'ราคาใหญ่ (CC03 + auto-fit)' },
       // 8. Big price unit label (yellow strip, bottom)
       { type: 'text', staticValue: '', x: 54, y: 29, w: 21, h: 5,
         colIndex: 0, fontSize: 8, bold: false, italic: false, align: 'center',
