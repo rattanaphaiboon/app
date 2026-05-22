@@ -1541,6 +1541,44 @@ async function loadFromSheets(sheetId, sheetName, opts = {}) {
   return parseCsv(await res.text(), opts);
 }
 
+// gviz JSON endpoint — predictable structure, ใช้กับชีทที่มี header row ชัดเจน (เช่น "New salary")
+// JSON wrapper: /*O_o*/google.visualization.Query.setResponse({...});
+async function loadFromSheetsJson(sheetId, sheetName) {
+  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}&headers=1`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('fetch failed: ' + res.status);
+  const text = await res.text();
+  // Strip wrapper
+  const match = text.match(/setResponse\(([\s\S]+)\);?\s*$/);
+  if (!match) throw new Error('cannot parse gviz JSON wrapper');
+  const data = JSON.parse(match[1]);
+  if (!data.table || !data.table.cols) throw new Error('invalid gviz JSON structure');
+
+  // Extract column labels (header row)
+  const cols = data.table.cols.map((c, i) => {
+    const label = (c.label || '').trim();
+    return label || c.id || `col_${i}`;
+  });
+
+  // Map each row to object using col labels as keys
+  const rows = (data.table.rows || []).map(r => {
+    const obj = {};
+    (r.c || []).forEach((cell, i) => {
+      const key = cols[i];
+      if (!key) return;
+      let val = '';
+      if (cell && cell.v !== undefined && cell.v !== null) {
+        // Prefer formatted value (f) for dates/numbers; fallback to raw value (v)
+        val = cell.f !== undefined && cell.f !== null ? cell.f : cell.v;
+      }
+      obj[key] = val;
+    });
+    return obj;
+  }).filter(r => Object.values(r).some(v => v !== '' && v !== null && v !== undefined));
+
+  return rows;
+}
+
 // V.1 header columns ที่คาดหวัง (ใช้ auto-detect ว่า header อยู่แถวไหน)
 const EVAL_EXPECTED_HEADERS = ['W','Position','Dep.','Name','Nickname','ID','KPI','RTN/Way','วินัย','จิตพิสัย','ใบเตือน','หมายเหตุ'];
 
@@ -3079,12 +3117,12 @@ const SAL_EXPECTED_HEADERS = ['Emp ID','ID','Name','salary','Salary','Adjust','N
 async function loadSalaryData(showSpinner = true) {
   if (showSpinner) renderSalaryLoading();
   try {
-    // ชีท "New salary" header อยู่แถว 1 (row index 0) — บังคับ headerRow เพื่อไม่ให้ auto-detect ผิด
-    const rows = await loadFromSheets(CONFIG.evalSheetId, CONFIG.salarySheetName, { headerRow: 0 });
+    // ใช้ JSON endpoint — predictable headers (CSV endpoint detect header row ผิด)
+    const rows = await loadFromSheetsJson(CONFIG.evalSheetId, CONFIG.salarySheetName);
     allSalary = rows;
     if (rows.length) {
       console.log('[Salary] loaded:', rows.length, 'rows');
-      console.log('[Salary] sample keys:', Object.keys(rows[0]).join(', '));
+      console.log('[Salary] keys:', Object.keys(rows[0]).join(', '));
       console.log('[Salary] sample row[0]:', JSON.stringify(rows[0]));
     } else {
       console.warn('[Salary] no rows loaded');
