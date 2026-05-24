@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v7.48</title>
+<title>Rattana Sales — v7.49</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -4404,7 +4404,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v7.48 · 2026-05-24</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v7.49 · 2026-05-24</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -4415,7 +4415,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag">v7.48</span>
+  <span class="demo-tag">v7.49</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -4528,7 +4528,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
   </button>
 
   <div class="drawer-footer">
-    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v7.48<br>2026-05-24 🔄<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
+    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v7.49<br>2026-05-24 🔄<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
   </div>
 </aside>
 
@@ -14387,32 +14387,66 @@ function classifyDemand(p, wh) {
 }
 window.classifyDemand = classifyDemand;
 
+// v7.49: extracted helper — computes suggested CS with PO subtraction + pallet rounding
+//   Returns { suggestCs, palletCount, roundedToPallet, csPallet, rank, coverDays, poInCover, ... }
+//   Reused by _buildDemandRecommend (card) + downloadDemandCSV (export) so they agree.
+function _computeSuggestCs(r) {
+  const p = r.p || {};
+  const blendedRate = SUGGEST_WEIGHT_RECENT * (r.recentAvg || 0) + SUGGEST_WEIGHT_LONG * (r.longAvg || 0);
+  const lt = r.leadTimeDays || 0;
+  const coverDays = SUGGEST_BASE_DAYS + lt;
+  const demandCover = blendedRate * coverDays;
+  const poInCover = (r.poDaysUntil !== null && r.poDaysUntil <= coverDays && r.poEa > 0);
+  const poEffectiveEa = poInCover ? r.poEa : 0;
+  const shortfallEa = demandCover - r.stockEa - poEffectiveEa;
+  let suggestCs = shortfallEa > 0
+    ? Math.max(10, Math.ceil(shortfallEa / Math.max(r.csSize, 1)))
+    : 0;
+
+  // v7.49: pallet rounding for fast-mover (RANK A/B/C) — round UP to full pallets
+  //   ใช้ CS PALLET column · skip ถ้า rank = F/0/blank หรือ CS PALLET = 0
+  const rank = String(p[`RANK ${r.wh}`] || '').trim().toUpperCase();
+  const csPallet = numv(p['CS PALLET']) || 0;
+  let palletCount = 0;
+  let roundedToPallet = false;
+  if (suggestCs > 0 && csPallet > 0 && ['A', 'B', 'C'].includes(rank)) {
+    palletCount = Math.ceil(suggestCs / csPallet);
+    suggestCs = palletCount * csPallet;
+    roundedToPallet = true;
+  }
+
+  return {
+    suggestCs,
+    palletCount,
+    roundedToPallet,
+    csPallet,
+    rank,
+    coverDays,
+    leadTime: lt,
+    blendedRate,
+    poInCover,
+    poEffectiveEa,
+    shortfallEa,
+    demandCover,
+  };
+}
+window._computeSuggestCs = _computeSuggestCs;
+
 function _buildDemandRecommend(r) {
-  // Returns { color, text } per recommendation rules (v7.42 base + v7.44 OOS + v7.45 blend/LT + v7.46 PO subtract)
+  // Returns { color, text } per recommendation rules (v7.42 base + v7.44 OOS + v7.45 blend/LT + v7.46 PO subtract + v7.49 pallet)
   const t = r.type;
   const dRec = r.daysAtRecent;
   const stockCs = r.csSize > 0 ? Math.floor(r.stockEa / r.csSize) : 0;
   const poCs    = r.csSize > 0 ? Math.floor(r.poEa    / r.csSize) : 0;
 
-  // v7.45/46: blended suggested order with PO subtraction
-  //   blendedRate     = 0.3 × recentAvg + 0.7 × longAvg  (ลด over-order จาก noise 7D)
-  //   coverDays       = 14 + SKU_LEAD_TIME (per SKU)
-  //   demandDuringCover = blendedRate × coverDays
-  //   poInCoverEa     = PO ที่มาทัน (daysUntil ≤ coverDays)
-  //   shortfall       = demandDuringCover − currentStock − poInCoverEa
-  //   suggestCs       = max(10, ceil(shortfall ÷ csSize))  ถ้า shortfall > 0
-  //                   = 0                                   ถ้า shortfall ≤ 0 (stock+PO เพียงพอ)
-  const blendedRate = SUGGEST_WEIGHT_RECENT * (r.recentAvg || 0) + SUGGEST_WEIGHT_LONG * (r.longAvg || 0);
-  const lt = r.leadTimeDays || 0;
-  const coverDays = SUGGEST_BASE_DAYS + lt;
-  const demandCover = blendedRate * coverDays;
-  // PO นับเป็น available stock เฉพาะถ้ามาทันใน cover window
-  const poInCover = (r.poDaysUntil !== null && r.poDaysUntil <= coverDays && r.poEa > 0);
-  const poEffectiveEa = poInCover ? r.poEa : 0;
-  const shortfallEa = demandCover - r.stockEa - poEffectiveEa;
-  const suggestCs = shortfallEa > 0
-    ? Math.max(10, Math.ceil(shortfallEa / Math.max(r.csSize, 1)))
-    : 0;
+  const sc = _computeSuggestCs(r);
+  const suggestCs = sc.suggestCs;
+  const coverDays = sc.coverDays;
+  const poInCover = sc.poInCover;
+  const poEffectiveEa = sc.poEffectiveEa;
+  const lt = sc.leadTime;
+  const blendedRate = sc.blendedRate;
+  const palletTag = sc.roundedToPallet ? ` (${sc.palletCount} พาเลท)` : '';
   const coverLabel = lt > 0 ? `cover ${coverDays}d (14+LT${lt})` : `cover ${coverDays}d`;
   const poText = poCs > 0 && r.poDaysUntil !== null
     ? ` · PO ${poCs}CS อีก ${r.poDaysUntil}d${poInCover ? '' : ' (มาช้ากว่า cover)'}`
@@ -14425,7 +14459,7 @@ function _buildDemandRecommend(r) {
         text: `🟠 ของหมด · PO เพียงพอ ${coverLabel}${poText} · ไม่ต้องสั่งเพิ่ม` };
     }
     return { color: '#DC2626', bg: 'rgba(220,38,38,.10)',
-      text: `🔴 สั่งด่วน ~${suggestCs} CS · ของหมด ขายยังมี (${r.recentAvg.toFixed(1)} EA/d)${poText || ' · ไม่มี PO'} · ${coverLabel}` };
+      text: `🔴 สั่งด่วน ~${suggestCs} CS${palletTag} · ของหมด ขายยังมี (${r.recentAvg.toFixed(1)} EA/d)${poText || ' · ไม่มี PO'} · ${coverLabel}` };
   }
   if (t === 'SPIKE') {
     if (suggestCs === 0) {
@@ -14437,14 +14471,14 @@ function _buildDemandRecommend(r) {
     }
     if (dRec !== null && dRec < 7) {
       return { color: '#DC2626', bg: 'rgba(220,38,38,.10)',
-        text: `🔴 รีบสั่งเพิ่ม ~${suggestCs} CS · จะหมดใน ${dRec.toFixed(1)} วัน${poText} · ${coverLabel}` };
+        text: `🔴 รีบสั่งเพิ่ม ~${suggestCs} CS${palletTag} · จะหมดใน ${dRec.toFixed(1)} วัน${poText} · ${coverLabel}` };
     }
     if (dRec !== null && dRec < 14) {
       return { color: '#EA580C', bg: 'rgba(234,88,12,.10)',
-        text: `🟠 ใกล้หมด · พอใช้ ${dRec.toFixed(1)} วัน · สั่งเพิ่ม ${suggestCs} CS${poText}` };
+        text: `🟠 ใกล้หมด · พอใช้ ${dRec.toFixed(1)} วัน · สั่งเพิ่ม ${suggestCs} CS${palletTag}${poText}` };
     }
     return { color: '#16A34A', bg: 'rgba(34,197,94,.10)',
-      text: `🟢 ขายดี · stock พอ ${dRec ? dRec.toFixed(0) : '∞'} วัน · เพิ่ม ${suggestCs} CS เผื่อ ${coverLabel}` };
+      text: `🟢 ขายดี · stock พอ ${dRec ? dRec.toFixed(0) : '∞'} วัน · เพิ่ม ${suggestCs} CS${palletTag} เผื่อ ${coverLabel}` };
   }
   if (t === 'DROP') {
     if (dRec !== null && dRec > 60) {
@@ -22498,21 +22532,32 @@ function downloadDemandCSV() {
     return;
   }
 
-  // v7.48: + vendor columns (ผู้ผลิต + ผู้กระจายสินค้า + รหัส vendor)
+  // v7.49: column order revamped — actionable info (สั่งกี่ CS · พาเลท · RANK) ขึ้นด้านหน้า
+  //         รหัส CS = text formula (Excel preserves leading zero + barcode length)
   const headers = [
-    'ประเภท','คลัง','ชื่อสินค้า','รหัส CS','แบรนด์','กลุ่ม',
+    'ประเภท','คลัง',
+    'แนะนำสั่ง (CS)','พาเลท (จำนวน)','CS/พาเลท','RANK',   // v7.49: actionable first
+    'ชื่อสินค้า','รหัส CS','แบรนด์','กลุ่ม',
     'ผู้ผลิต (CAT VENDOR)','ผู้กระจาย (VENDOR NAME)','รหัส vendor',
     'ขาย 7D (EA/d)','ขาย 60D (EA/d)','ratio',
     'stock (CS)','stock (EA)','จะหมดใน (วัน)',
     'PO รอเข้า (CS)','PO อีกกี่วัน','LT (วัน)',
     'รับเข้าครั้งล่าสุด','วันตั้งแต่รับเข้า','เกินอายุ 30 วัน',
-    'แนะนำสั่ง (CS)','ข้อแนะนำ'
+    'ข้อแนะนำ'
   ];
 
   const csvEscape = (v) => {
     if (v === null || v === undefined) return '';
     const s = String(v).replace(/"/g, '""');
     return /[",\n\r]/.test(s) ? `"${s}"` : s;
+  };
+
+  // v7.49: force Excel to treat as text (preserve barcodes from being auto-converted to 8.85E+12)
+  //   Uses Excel formula syntax ="<value>" — works in Excel, LibreOffice, Google Sheets
+  const csvAsText = (v) => {
+    const s = String(v ?? '');
+    if (!s) return '';
+    return `="${s.replace(/"/g, '""')}"`;
   };
 
   const csvRows = [headers.map(csvEscape).join(',')];
@@ -22524,15 +22569,9 @@ function downloadDemandCSV() {
     // Strip emoji + extra whitespace from recommendation text for CSV cleanliness
     const recText = String(rec.text || '').replace(/\s+/g, ' ').trim();
 
-    // Compute suggested CS via same formula (consistent with card display)
-    const blendedRate = SUGGEST_WEIGHT_RECENT * (r.recentAvg || 0) + SUGGEST_WEIGHT_LONG * (r.longAvg || 0);
-    const lt = r.leadTimeDays || 0;
-    const coverDays = SUGGEST_BASE_DAYS + lt;
-    const poInCoverEa = (r.poDaysUntil !== null && r.poDaysUntil <= coverDays && r.poEa > 0) ? r.poEa : 0;
-    const shortfallEa = blendedRate * coverDays - r.stockEa - poInCoverEa;
-    const suggestCs = shortfallEa > 0
-      ? Math.max(10, Math.ceil(shortfallEa / Math.max(r.csSize, 1)))
-      : 0;
+    // v7.49: use shared helper (consistent with card display · includes pallet rounding)
+    const sc = _computeSuggestCs(r);
+    const suggestCs = sc.suggestCs;
 
     // IB info for current WH
     const ib = parseIB(p[`IB ${r.wh}`]);
@@ -22543,31 +22582,36 @@ function downloadDemandCSV() {
       staleFlag = daysSinceIB > 30 ? 'YES' : 'NO';
     }
 
+    const codeCs = String(p['CODE CS'] || p['CODE EA'] || '').trim();
+    // Build row — most fields csvEscape, แต่ "รหัส CS" และ "รหัส vendor" force text via csvAsText
     csvRows.push([
-      r.type,
-      r.wh,
-      p['PRODUCT NAME'] || p['SHORT NAME'] || '',
-      p['CODE CS'] || p['CODE EA'] || '',
-      p['CAT BRAND'] || '',
-      p['CAT GROUP'] || '',
-      p['CAT VENDOR'] || '',     // v7.48: ผู้ผลิตเต็ม (เช่น บจก. เดอเบล)
-      p['VENDOR NAME'] || '',    // v7.48: ผู้กระจายสินค้า (อาจต่างจาก CAT VENDOR)
-      p['VENDOR CODE'] || '',    // v7.48: รหัส vendor ในระบบ (เช่น CR06200044)
-      (r.recentAvg || 0).toFixed(1),
-      (r.longAvg || 0).toFixed(1),
-      r.ratio !== null ? r.ratio.toFixed(2) : '',
-      r.csSize > 0 ? Math.floor(r.stockEa / r.csSize) : 0,
-      r.stockEa,
-      r.daysAtRecent !== null ? r.daysAtRecent.toFixed(1) : '',
-      r.csSize > 0 ? Math.floor(r.poEa / r.csSize) : 0,
-      r.poDaysUntil !== null ? r.poDaysUntil : '',
-      lt,
-      ibDateStr,
-      daysSinceIB,
-      staleFlag,
-      suggestCs,
-      recText,
-    ].map(csvEscape).join(','));
+      csvEscape(r.type),
+      csvEscape(r.wh),
+      csvEscape(suggestCs),                        // v7.49: order qty front
+      csvEscape(sc.roundedToPallet ? sc.palletCount : 0),
+      csvEscape(sc.csPallet || 0),
+      csvEscape(sc.rank || ''),
+      csvEscape(p['PRODUCT NAME'] || p['SHORT NAME'] || ''),
+      csvAsText(codeCs),                           // v7.49: รหัส CS as TEXT (preserves barcode)
+      csvEscape(p['CAT BRAND'] || ''),
+      csvEscape(p['CAT GROUP'] || ''),
+      csvEscape(p['CAT VENDOR'] || ''),
+      csvEscape(p['VENDOR NAME'] || ''),
+      csvAsText(String(p['VENDOR CODE'] || '').trim()),  // v7.49: vendor code as text too
+      csvEscape((r.recentAvg || 0).toFixed(1)),
+      csvEscape((r.longAvg || 0).toFixed(1)),
+      csvEscape(r.ratio !== null ? r.ratio.toFixed(2) : ''),
+      csvEscape(r.csSize > 0 ? Math.floor(r.stockEa / r.csSize) : 0),
+      csvEscape(r.stockEa),
+      csvEscape(r.daysAtRecent !== null ? r.daysAtRecent.toFixed(1) : ''),
+      csvEscape(r.csSize > 0 ? Math.floor(r.poEa / r.csSize) : 0),
+      csvEscape(r.poDaysUntil !== null ? r.poDaysUntil : ''),
+      csvEscape(sc.leadTime),
+      csvEscape(ibDateStr),
+      csvEscape(daysSinceIB),
+      csvEscape(staleFlag),
+      csvEscape(recText),
+    ].join(','));
   }
 
   // BOM for Excel UTF-8 (so Thai characters display correctly)
