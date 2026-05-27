@@ -3093,6 +3093,12 @@ async function enterApp(){
     const rows=await fetchSheet(CONFIG.PROD_SHEET_ID,CONFIG.PROD_TAB);
     allData=rows.filter(r=>r['PRODUCT NAME']||BC_COLS.some(k=>r[k]));
     setStat('โหลดสำเร็จ — พบ '+allData.length.toLocaleString('th-TH')+' รายการ','ok');
+    /* v12.0: restore draft นับสต็อค ที่ค้างจาก session ก่อน */
+    const restored=scLoadDraft();
+    if(restored>0){
+      scRenderSession();
+      setTimeout(()=>{toast('📦 ดึงรายการนับค้าง '+restored+' รายการกลับมาแล้ว','success');},800);
+    }
     /* v11.0: เริ่ม auto-refresh background ทุก 2 ชม. */
     startAutoRefresh();
   }catch(e){
@@ -4249,6 +4255,49 @@ let _scCurProd=null;
 let _scCurUnit='CS';
 let _scCurMultipliers={EA:1,PA:1,BP:1,CS:1};
 
+/* v12.0: localStorage draft — กันข้อมูลหายเมื่อ refresh/iOS kill app */
+const SC_DRAFT_KEY='rattana_mart_sc_draft_v1';
+const SC_DRAFT_MAX_AGE_MS=30*24*60*60*1000;  /* 30 วัน */
+
+function scSaveDraft(){
+  try{
+    if(!_scSession||_scSession.length===0){
+      localStorage.removeItem(SC_DRAFT_KEY);
+      return;
+    }
+    /* strip prod object (heavy + จะ re-link จาก allData ตอน load) */
+    const minimal=_scSession.map(x=>({
+      name:x.name,codeEA:x.codeEA,codeCS:x.codeCS,qtyPerCS:x.qtyPerCS,
+      qtyEA:x.qtyEA,systemEA:x.systemEA,diff:x.diff,time:x.time,
+      locC4:x.locC4,expiryDate:x.expiryDate,priceCheck:x.priceCheck,
+      entries:x.entries,_unknown:x._unknown
+    }));
+    localStorage.setItem(SC_DRAFT_KEY,JSON.stringify({ts:Date.now(),items:minimal}));
+  }catch(e){/* quota or private mode — ignore */}
+}
+
+function scLoadDraft(){
+  try{
+    const raw=localStorage.getItem(SC_DRAFT_KEY);
+    if(!raw)return 0;
+    const data=JSON.parse(raw);
+    if(!data||!Array.isArray(data.items)||data.items.length===0)return 0;
+    /* expired? */
+    if(Date.now()-(data.ts||0)>SC_DRAFT_MAX_AGE_MS){
+      localStorage.removeItem(SC_DRAFT_KEY);
+      return 0;
+    }
+    /* re-link prod object จาก allData (ถ้าหาไม่เจอ — เก็บ item ไว้ทำต่อได้ ใช้ fake prod ในตัว) */
+    _scSession=data.items.map(item=>{
+      let prod=null;
+      if(item.codeEA){prod=allData.find(p=>String(p['CODE EA']||'').trim()===item.codeEA);}
+      if(!prod&&item.codeCS){prod=allData.find(p=>String(p['CODE CS']||'').trim()===item.codeCS);}
+      return {...item,prod:prod||{'PRODUCT NAME':item.name,'CODE EA':item.codeEA,'CODE CS':item.codeCS,'QTY CS':item.qtyPerCS,_unknown:!prod}};
+    });
+    return _scSession.length;
+  }catch(e){return 0;}
+}
+
 function scUpdateTopbarSub(){
   /* v11.0: แสดง version แทนชื่อสาขา */
   document.getElementById('sc-topbar-sub').textContent='รัตนมาร์ท v12.0';
@@ -4709,6 +4758,8 @@ function updateSessionBar(){
 window.updateSessionBar=updateSessionBar;
 
 function scRenderSession(){
+  /* v12.0: auto-save draft ทุกครั้งที่ render — กันข้อมูลหายเมื่อ refresh */
+  scSaveDraft();
   /* v11.0: update sticky session bar */
   updateSessionBar();
   const list=document.getElementById('sc-session-list');
@@ -4877,6 +4928,8 @@ async function scCommit(){
 
   scShowMsg('sc-commit-msg','✅ บันทึก '+rows.length+' รายการเข้า Sheet แล้ว!','var(--green)');
   toast('บันทึกนับสต็อค '+rows.length+' รายการ ✓','success');
+  /* v12.0: clear draft ทันที (กัน user refresh ก่อน timer ทำงาน → ไม่ถูกดึงกลับมา) */
+  try{localStorage.removeItem(SC_DRAFT_KEY);}catch(e){}
   /* เก็บ session ไว้ดูต่อ แต่ mark ว่าส่งแล้ว */
   setTimeout(()=>{
     _scSession=[];
