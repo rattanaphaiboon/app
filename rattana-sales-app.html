@@ -16649,30 +16649,55 @@ window.sharePriceListLine = async function(productId) {
     return false;
   }
 
-  if (photoCandidates.length) {
-    const result = await _tryShareWithFile(photoCandidates, text);
-    if (result === true) return;
-    if (result === 'aborted') return;
+  // v8.0: platform-split — Android ส่งรูป+ข้อความพร้อมกันไม่ได้ (share sheet ทิ้ง text เมื่อแนบ file)
+  //   iOS  → รูป + ข้อความพร้อมกัน · Android → 2 จังหวะ (กด1 ข้อความ · กด2 รูป) · Desktop → text + photo link
+  const _photoLink = photoCandidates.length ? photoCandidates[0] : '';
+  const textWithPhoto = _photoLink ? `${text}\n\n📷 ${_photoLink}` : text;
+  const ua = navigator.userAgent || '';
+  const isIOS = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isAndroid = /Android/.test(ua);
+
+  // share text only (native → LINE deep link)
+  const _shareTextOnly = async () => {
+    try { if (navigator.share) { await navigator.share({ text: textWithPhoto }); return; } }
+    catch (err) { if (err && err.name === 'AbortError') return; console.warn('[share] text failed:', err); }
+    if (typeof openLineDeepLink === 'function') openLineDeepLink(textWithPhoto);
+    else window.open(`https://line.me/R/msg/text/?${encodeURIComponent(textWithPhoto)}`, '_blank');
+  };
+
+  // ── iOS: รูป + ข้อความพร้อมกัน (เดิม) ──
+  if (isIOS) {
+    if (photoCandidates.length) {
+      const result = await _tryShareWithFile(photoCandidates, text);
+      if (result === true || result === 'aborted') return;
+    }
+    await _shareTextOnly();
+    return;
   }
 
-  // Native share text-only (no file support)
-  try {
-    if (navigator.share) {
-      await navigator.share({ text });
+  // ── Android: 2 จังหวะ — กด1 ส่งข้อความ · กด2 ส่งรูป (state keyed by productId) ──
+  if (isAndroid) {
+    window._androidShareStep = window._androidShareStep || {};
+    const key = String(productId);
+    const step = window._androidShareStep[key] || 0;
+    if (step === 0) {
+      await _shareTextOnly();
+      window._androidShareStep[key] = 1;
+      showToast('✅ ส่งข้อความแล้ว · กด "📱 ส่งข้อมูล" อีกครั้งเพื่อส่งรูป 📷', 'info');
       return;
     }
-  } catch (err) {
-    if (err && err.name === 'AbortError') return;
-    console.warn('[priceList share] navigator.share failed, falling back', err);
+    window._androidShareStep[key] = 0;   // reset for next time
+    if (photoCandidates.length) {
+      const result = await _tryShareWithFile(photoCandidates, '');   // รูปอย่างเดียว (text ส่งไปแล้ว)
+      if (result === true) { showToast('✅ ส่งรูปแล้ว', 'success'); return; }
+      if (result === 'aborted') return;
+    }
+    showToast('ส่งรูปไม่ได้ — สินค้านี้ไม่มีรูป หรือเบราว์เซอร์ไม่รองรับ', 'warning');
+    return;
   }
 
-  // Final fallback — LINE deep link (text only); append photo URL so customer can tap to view
-  const textWithPhoto = photoUrl ? `${text}\n\n📷 ${photoUrl}` : text;
-  if (typeof openLineDeepLink === 'function') {
-    openLineDeepLink(textWithPhoto);
-  } else {
-    window.open(`https://line.me/R/msg/text/?${encodeURIComponent(textWithPhoto)}`, '_blank');
-  }
+  // ── Desktop / อื่นๆ: text + photo link ──
+  await _shareTextOnly();
 };
 
 window.openProcurementModal = function(productId, mode) {
