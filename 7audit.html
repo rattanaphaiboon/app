@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0d1b3e">
-<title>7 Audit v2.0</title>
+<title>7 Audit v2.1</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=block" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -713,7 +713,7 @@ body.dark .status-pill.done{background:#1a3a25;color:#7be0a3}
   </main>
 
   <footer>
-    <div>7 Audit · <span class="gold">v2.0</span> · 2026-05-28</div>
+    <div>7 Audit · <span class="gold">v2.1</span> · 2026-05-28</div>
     <div style="margin-top:4px">รัตนไพบูลย์ Co., Ltd. · ข้อมูลปลอดภัยตาม PDPA</div>
   </footer>
 </div>
@@ -2184,9 +2184,13 @@ async function handleFixPhotoUpload(e) {
   if (!file) return;
   showSpinner('กำลังย่อรูป...');
   try {
-    const b64 = await resizeImage(file, 1024, 0.7);
+    // ย่อลงให้เล็กกว่ารูป Before (เพราะ Apps Script POST text payload มี limit ~50MB
+    // แต่ network จะล้มก่อนที่ ~5-10MB) — 800px / quality 0.55 ได้ ~150-300KB
+    const b64 = await resizeImage(file, 800, 0.55);
     currentFixPhoto = b64;
     showFixPhotoAfter(b64);
+    const sizeKB = Math.round(b64.length * 0.75 / 1024);
+    toast(`เพิ่มรูปแล้ว (~${sizeKB} KB)`, 'ok', 1500);
   } catch(err) {
     toast('ย่อรูปไม่สำเร็จ: '+err.message, 'err');
   } finally { hideSpinner(); }
@@ -2213,36 +2217,61 @@ async function submitFix() {
   if (!owner) { toast('กรอกผู้รับผิดชอบ', 'warn'); $('fixOwner').focus(); return; }
   if (!CONFIG.appsScriptUrl) { toast('ยังไม่ได้ตั้งค่า Apps Script URL', 'err'); return; }
 
-  showSpinner('กำลังส่งงานแก้ไข...');
+  const payload = {
+    action: 'submit_fix',
+    fixer: { email: currentUser.email, name: currentUser.name, branch: currentUser.branch },
+    items: [{
+      'ครั้งที่': colRound(currentFix),
+      'สาขา': colBranch(currentFix),
+      'จุดตรวจสอบ': colCheck(currentFix),
+      fix: fixText,
+      dueDate: $('fixDueDate').value,
+      owner,
+      photo_after: currentFixPhoto
+    }]
+  };
+  const payloadStr = JSON.stringify(payload);
+  const sizeMB = (payloadStr.length / 1024 / 1024).toFixed(2);
+  showSpinner(`กำลังส่งงานแก้ไข (${sizeMB} MB)...`);
+
   try {
-    const payload = {
-      action: 'submit_fix',
-      fixer: { email: currentUser.email, name: currentUser.name, branch: currentUser.branch },
-      items: [{
-        'ครั้งที่': colRound(currentFix),
-        'สาขา': colBranch(currentFix),
-        'จุดตรวจสอบ': colCheck(currentFix),
-        fix: fixText,
-        dueDate: $('fixDueDate').value,
-        owner,
-        photo_after: currentFixPhoto
-      }]
-    };
-    const res = await fetch(CONFIG.appsScriptUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(payload)
-    });
-    const json = await res.json();
+    let json;
+    // ลอง 2 วิธี: text/plain ก่อน — ถ้าล้ม fallback ไป FormData (avoid CORS preflight)
+    try {
+      const res = await fetch(CONFIG.appsScriptUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: payloadStr,
+        redirect: 'follow'
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      const text = await res.text();
+      try { json = JSON.parse(text); }
+      catch { throw new Error('Backend ตอบไม่ใช่ JSON: ' + text.slice(0,150)); }
+    } catch (firstErr) {
+      console.warn('text/plain fetch failed, retry with FormData:', firstErr);
+      // Fallback: FormData (multipart) — Apps Script รับผ่าน e.parameter.payload
+      const fd = new FormData();
+      fd.append('payload', payloadStr);
+      const res2 = await fetch(CONFIG.appsScriptUrl, {
+        method: 'POST',
+        body: fd,
+        redirect: 'follow'
+      });
+      if (!res2.ok) throw new Error(`HTTP ${res2.status} (fallback ก็ล้ม)`);
+      const text2 = await res2.text();
+      try { json = JSON.parse(text2); }
+      catch { throw new Error('Fallback ตอบไม่ใช่ JSON: ' + text2.slice(0,150)); }
+    }
+
     if (!json.ok) throw new Error(json.error || 'submit failed');
     if (json.notFound) throw new Error('ไม่พบรายการในชีท Results — ลองรีเฟรชแล้วส่งใหม่');
     toast('ส่งงานแก้ไขสำเร็จ!', 'ok');
-    // refresh data + กลับรายการ
     closeFix();
     await reloadData();
   } catch(e) {
-    console.error(e);
-    toast('ส่งงานไม่สำเร็จ: '+e.message, 'err', 6000);
+    console.error('submitFix error:', e, 'payloadSize:', sizeMB+'MB');
+    toast(`ส่งงานไม่สำเร็จ (${sizeMB}MB): ${e.message}`, 'err', 8000);
   } finally { hideSpinner(); }
 }
 
