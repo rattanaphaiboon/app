@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Rattana Bills v1.6</title>
+<title>Rattana Bills v1.9</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
@@ -213,6 +213,11 @@ const AUTH_CONFIG={clientId:'615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.
 const ALLOWLIST=['pavena.sam@rattanaphaiboon.com'];
 const PAID_KEY='rattana_bills_paid';
 const GO_LIVE=new Date(2026,5,1);  // เริ่มใช้งาน 1 มิ.ย. 2026 — ไม่นับค้างจ่ายก่อนวันนี้
+/* ===== ซิงก์สถานะจ่าย/ค้าง ให้ทุกคนเห็นตรงกัน ผ่าน Google Sheet (Apps Script) =====
+   วางลิงก์ Web App (/exec) ที่ deploy แล้วตรงนี้ (เว้นว่าง = เก็บเฉพาะเครื่องนี้) */
+const GAS_URL='https://script.google.com/macros/s/AKfycby2QKPccRy4v3xFMjfDySqlx1ko1-Yd4d5iQlJETfowo5d1KYM_p16SXdn663Ga5FVe/exec';   // เช่น 'https://script.google.com/macros/s/AKfyc.../exec'
+const cloudOn=()=>!!GAS_URL;
+let cloudOK=false;
 let ITEMS=[];          // normalized items
 let currentTab='week';
 let companyFilter='all';
@@ -280,16 +285,44 @@ function occ(item,ref,dir){ // dir:'next' (>=ref) or 'prev' (<=ref)
     return null;
   }
 }
-/* ===== Paid store ===== */
-function loadPaid(){try{return JSON.parse(localStorage.getItem(PAID_KEY))||{};}catch{return{};}}
-function savePaid(o){localStorage.setItem(PAID_KEY,JSON.stringify(o));}
+/* ===== Paid store (in-memory map ← Google Sheet via Apps Script ↔ localStorage cache) ===== */
+let paidMap={};
+function loadCache(){try{paidMap=JSON.parse(localStorage.getItem(PAID_KEY))||{};}catch{paidMap={};}}
+function saveCache(){try{localStorage.setItem(PAID_KEY,JSON.stringify(paidMap));}catch{}}
 function paidKey(item,due){return item.id+'|'+dateKey(due);}
-function isPaid(item,due){return !!loadPaid()[paidKey(item,due)];}
+function isPaid(item,due){return !!paidMap[paidKey(item,due)];}
+
+/* read all paid rows from the Sheet (Apps Script doGet) */
+async function cloudFetchAll(){
+  const res=await fetch(GAS_URL+'?action=list&t='+Date.now());
+  if(!res.ok)throw new Error('gas '+res.status);
+  const data=await res.json();const m={};
+  (data.rows||[]).forEach(r=>{if(r.pay_key)m[r.pay_key]={by:r.paid_by||''};});return m;
+}
+/* writes: simple POST (text/plain body → no CORS preflight). We don't depend on
+   reading the response — a follow-up sync reconciles the true state. */
+function cloudPost(payload){
+  return fetch(GAS_URL,{method:'POST',body:JSON.stringify(payload)});
+}
+async function cloudSet(key,by){await cloudPost({action:'set',key,by:by||''});}
+async function cloudDel(key){await cloudPost({action:'del',key});}
+/* pull shared state from the Sheet, then re-render */
+async function syncPaid(silent){
+  if(!cloudOn()){loadCache();cloudOK=false;if(!silent)render();return;}
+  try{paidMap=await cloudFetchAll();saveCache();cloudOK=true;}
+  catch(e){cloudOK=false;if(!Object.keys(paidMap).length)loadCache();}
+  if(!silent)render();
+}
+/* after a write, reconcile with the Sheet so failures self-heal */
+function reconcileSoon(){if(cloudOn())setTimeout(()=>syncPaid(false),1600);}
+function whoEmail(){return (typeof currentUser!=='undefined'&&currentUser&&currentUser.email)||'';}
 function togglePaid(id,dueIso){
   const item=ITEMS.find(x=>x.id===id);if(!item)return;
-  const due=new Date(dueIso);const p=loadPaid();const k=paidKey(item,due);
-  if(p[k]){delete p[k];toast('ยกเลิกการชำระแล้ว','warning');}else{p[k]={ts:Date.now()};toast('บันทึกว่าชำระแล้ว ✓','success');}
-  savePaid(p);render();
+  const due=new Date(dueIso);const k=paidKey(item,due);const nowPaid=!paidMap[k];
+  if(nowPaid)paidMap[k]={by:whoEmail()};else delete paidMap[k];
+  saveCache();render();
+  toast(nowPaid?'บันทึกว่าชำระแล้ว ✓':'ยกเลิกการชำระแล้ว',nowPaid?'success':'warning');
+  if(cloudOn()){(nowPaid?cloudSet(k,whoEmail()):cloudDel(k)).catch(()=>{});reconcileSoon();}
 }
 
 /* ===== Bill card HTML ===== */
@@ -422,8 +455,10 @@ function gotoThisMonth(){const t=today();sumYear=t.getFullYear();sumMonth=t.getM
 /* mark unpaid from summary -> bounces item back to the alert/unpaid list */
 function unmarkPaid(id,dueIso){
   const item=ITEMS.find(x=>x.id===id);if(!item)return;
-  const due=new Date(dueIso);const p=loadPaid();delete p[paidKey(item,due)];savePaid(p);
-  toast('ย้ายกลับเป็น “ยังไม่จ่าย” แล้ว ↩︎','warning');render();
+  const due=new Date(dueIso);const k=paidKey(item,due);
+  delete paidMap[k];saveCache();render();
+  toast('ย้ายกลับเป็น “ยังไม่จ่าย” แล้ว ↩︎','warning');
+  if(cloudOn()){cloudDel(k).catch(()=>{});reconcileSoon();}
 }
 /* compact row used in summary lists */
 function sumRowHtml(item,due,paid){
@@ -513,9 +548,13 @@ function renderAll(){
 }
 
 function dataNotice(){
+  const sync=!cloudOn()
+    ? '⚪ สถานะจ่าย/ค้าง เก็บเฉพาะเครื่องนี้ (ยังไม่ได้ตั้งค่าซิงก์ส่วนกลาง)'
+    : (cloudOK?'🟢 สถานะจ่าย/ค้าง ซิงก์ผ่าน Google Sheet แล้ว (ทุกคนเห็นตรงกัน)':'🟡 เชื่อมต่อ Google Sheet ไม่ได้ ใช้สถานะในเครื่องชั่วคราว');
   return '<div class="notice">'+(dataLive?'🟢 ข้อมูลสดจาก Google Sheet':'🟡 ใช้ข้อมูลสำรอง (เชื่อมต่อชีทไม่ได้ — เปิดสิทธิ์ดู “ทุกคนที่มีลิงก์” เพื่อซิงก์สด)')
     +' · <a href="'+SHEET_URL+'" target="_blank">เปิดชีท</a></div>'
-    +'<div class="foot">Rattana Bills v1.6 · 2026-06-01 · คำนวณวันครบกำหนดอัตโนมัติ</div>';
+    +'<div class="notice" style="margin-top:-2px">'+sync+'</div>'
+    +'<div class="foot">Rattana Bills v1.9 · 2026-06-01 · คำนวณวันครบกำหนดอัตโนมัติ</div>';
 }
 
 /* ===== Company filter (uses column E "บริษัท") ===== */
@@ -575,7 +614,7 @@ async function loadData(initial){
   }
   render();
 }
-async function refreshData(){showSpinner('กำลังซิงก์ข้อมูล...');await loadData(false);hideSpinner();}
+async function refreshData(){showSpinner('กำลังซิงก์ข้อมูล...');await loadData(false);await syncPaid(true);render();hideSpinner();}
 
 /* ===== Auth (Rattana SSO) ===== */
 function checkRattanaSession(){
@@ -616,7 +655,17 @@ async function handleGoogleLogin(r){
   }catch(e){$('loginErr').textContent='เกิดข้อผิดพลาด ลองใหม่อีกครั้ง';}
   finally{hideSpinner();}
 }
-function enterApp(){$('loginScreen').style.display='none';$('appScreen').style.display='block';loadData(true);}
+function enterApp(){
+  $('loginScreen').style.display='none';$('appScreen').style.display='block';
+  loadCache();
+  loadData(true);
+  syncPaid(false);
+  if(cloudOn()){
+    setInterval(()=>{if(document.visibilityState==='visible')syncPaid(false);},45000);
+    document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')syncPaid(false);});
+    window.addEventListener('focus',()=>syncPaid(false));
+  }
+}
 function boot(){
   const s=checkRattanaSession();
   if(s){currentUser=s;enterApp();}
