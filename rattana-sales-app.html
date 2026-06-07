@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.89</title>
+<title>Rattana Sales — v8.90</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -4807,7 +4807,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.89 · 2026-06-07</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.90 · 2026-06-07</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -4818,7 +4818,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag">v8.89</span>
+  <span class="demo-tag">v8.90</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -4939,7 +4939,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
   </button>
 
   <div class="drawer-footer">
-    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v8.89<br>2026-06-07 📱 (กันจอเลื่อนซ้าย-ขวาบน iOS ทั้งแอป: app-shell ใช้ overflow-x:clip — ไม่พัง sticky · แถบชิปกัน scroll ลามทั้งจอ)<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
+    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v8.90<br>2026-06-07 📍 (แก้พิกัดเช็คอินค้างที่เดิมบน iPhone: ใช้ watchPosition จับ fix สดจริง แทน getCurrentPosition ที่คืน cache เก่า · เตือนถ้าตำแหน่งหยาบ/Precise Location ปิด)<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
   </div>
 </aside>
 
@@ -9451,14 +9451,45 @@ function haversine(lat1, lng1, lat2, lng2) {
 }
 
 // Get current GPS — returns Promise
+// v8.90: ใช้ watchPosition แทน getCurrentPosition — บน iOS Safari `getCurrentPosition` มักคืน
+//   "fix cache เก่า" ทันทีแม้ตั้ง maximumAge:0 → พิกัดค้างที่เดิมทุกครั้งที่เช็คอิน (บั๊คที่เซลเจอ).
+//   watchPosition บังคับให้ GPS ทำงานจริงและส่ง fix ใหม่เรื่อยๆ → เราเลือกเฉพาะ fix "สด" (อายุ ≤10 วิ)
+//   ที่แม่นพอ (±≤50m) แล้วจบทันที · ถ้าไม่ได้ภายใน 12 วิ → คืน fix สดที่แม่นสุดที่เจอ (fallback)
 function getMyGPS() {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) return reject('Browser ไม่รองรับ GPS');
-    navigator.geolocation.getCurrentPosition(
-      pos => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }),
-      err => reject(err.message || 'ไม่สามารถเปิด GPS'),
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }  // maximumAge:0 = always fresh, never stale
-    );
+    let bestFresh = null, bestAny = null, watchId = null, settled = false;
+    const MAX_WAIT = 12000, FRESH_MS = 10000, ACC_OK = 50;
+    const done = (val, err) => {
+      if (settled) return; settled = true;
+      clearTimeout(timer);
+      if (watchId != null) { try { navigator.geolocation.clearWatch(watchId); } catch (e) {} }
+      if (val) resolve(val); else reject(err || 'ไม่สามารถเปิด GPS');
+    };
+    const onPos = (pos) => {
+      const age = Date.now() - (pos.timestamp || 0);
+      const c = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy, age };
+      if (!bestAny || c.accuracy < bestAny.accuracy) bestAny = c;
+      if (age <= FRESH_MS) {
+        if (!bestFresh || c.accuracy < bestFresh.accuracy) bestFresh = c;
+        if (pos.coords.accuracy <= ACC_OK) done(c);   // สด + แม่นพอ → ใช้เลย
+      }
+    };
+    const onErr = (err) => { if (!bestFresh && !bestAny) done(null, (err && (err.message || err)) || 'ไม่สามารถเปิด GPS'); };
+    const timer = setTimeout(() => {
+      const pick = bestFresh || bestAny;
+      done(pick, pick ? null : 'GPS หมดเวลา (สัญญาณอ่อน)');
+    }, MAX_WAIT);
+    try {
+      watchId = navigator.geolocation.watchPosition(onPos, onErr, { enableHighAccuracy: true, timeout: MAX_WAIT, maximumAge: 0 });
+    } catch (e) {
+      // เครื่อง/เบราว์เซอร์เก่าที่ไม่มี watchPosition → fallback getCurrentPosition
+      navigator.geolocation.getCurrentPosition(
+        p => done({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy, age: 0 }),
+        e2 => done(null, (e2 && (e2.message || e2)) || 'ไม่สามารถเปิด GPS'),
+        { enableHighAccuracy: true, timeout: MAX_WAIT, maximumAge: 0 }
+      );
+    }
   });
 }
 
@@ -9484,6 +9515,8 @@ async function refreshGPS(silent = false) {
     SALESMAN.currentLng = loc.lng;
     SALESMAN.gpsEnabled = true;
     SALESMAN.gpsStamp = Date.now();   // v8.80: เวลาที่ได้พิกัดสดล่าสุด
+    // v8.90: log ไว้ debug พิกัดค้าง — ดู accuracy + age (ถ้า age สูงทุกครั้ง = ยังได้ fix เก่า)
+    try { console.log('[GPS]', loc.lat.toFixed(5) + ',' + loc.lng.toFixed(5), '±' + Math.round(loc.accuracy) + 'm', 'age=' + Math.round((loc.age || 0) / 1000) + 's'); } catch (e) {}
     if (!silent) showToast(`📍 GPS อัพเดทแล้ว (±${Math.round(loc.accuracy)}m)`, 'success');
     return loc;
   } catch (err) {
@@ -16112,6 +16145,8 @@ function doCheckIn(shopId) {
     .then(loc => {
       // v8.80: GPS ปิด/ไม่อนุญาต/จับไม่ได้ → ไม่ใช้พิกัดเก่าค้าง · บังคับเปิด GPS (มีทางออกฉุกเฉิน)
       if (!loc) { _showGpsRequiredModal(shopId); return; }
+      // v8.90: ตำแหน่งหยาบมาก (มักเพราะ iPhone ปิด "ตำแหน่งที่แน่นอน / Precise Location") → เตือน แต่ไปต่อได้
+      if (loc.accuracy > 150) showToast(`📍 ตำแหน่งหยาบ ±${Math.round(loc.accuracy)}m — iPhone: เปิด "ตำแหน่งที่แน่นอน" (Precise Location) ให้ Safari`, 'warning');
       const distance = distanceToShop(s);
       const inRange  = distance !== null && distance <= 50;
       if (!inRange && distance !== null) {
