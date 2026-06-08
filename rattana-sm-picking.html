@@ -159,13 +159,13 @@ body.dark .spin-box{background:var(--card-bg)}
     </div></div>
   </div>
 
-  <div class="foot">Rattana จัดสินค้า SM · v1.5 · ข้อมูลสินค้าจาก PDDT (Stocksync)</div>
+  <div class="foot">Rattana จัดสินค้า SM · v1.6 · ข้อมูลสินค้าจาก PDDT (Stocksync)</div>
 </div>
 
 <button id="backTop" onclick="scrollTo({top:0,behavior:'smooth'})">↑</button>
 
 <script>
-const VERSION='1.5';
+const VERSION='1.6';
 const DEFAULT_ORDER_ID='1mUQtnOfwQDMEfXP_eqRUiJPUOf5gQzhxyeDHbTqcU0w';
 const DEFAULT_ORDER_GID='1935764970';
 const PDDT_ID='16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
@@ -350,38 +350,49 @@ function renderAll(){
   }else $('noCard').style.display='none';
 }
 
-// ── Excel export (flat, CAT GROUP + คนจัด on every row, barcode as text) ──
+// ── Excel export — หลายชีท: รวม (เรียง คนจัด→หมวด) + แยกตามคนจัด 1/2/3 + ไม่มีหมวด ──
 function exportExcel(){
   if(!lastBuild){toast('ยังไม่มีข้อมูล','error');return;}
   const B=lastBuild;const brCols=B.branchList;
   const head=['คนจัด','CAT GROUP','บาร์โค้ด','ชื่อสินค้า','หน่วย','รวม CS','ราคา/CS','มูลค่า',...brCols.map(b=>b+' '+(B.branchName[b]||''))];
-  const aoa=[['ใบจัดสินค้า SM — วันที่ '+(B.date||'')+'  (สร้างจาก Rattana จัดสินค้า v'+VERSION+')'],head];
-  const refs=[];// remember which cells are barcodes (col index 2) to force text
-  let rowIdx=2;
-  for(const g of B.groups){
-    for(const r of g.rows){
-      const row=[g.picker||'',g.catGroup,r.barcode,r.name,r.unit,r.total,r.priceCS||'',r.value||'',...brCols.map(b=>r.per[b]||'')];
-      aoa.push(row);refs.push({r:rowIdx,c:2});rowIdx++;
+  const cols=[{wch:8},{wch:20},{wch:18},{wch:34},{wch:12},{wch:8},{wch:9},{wch:11},...brCols.map(()=>({wch:10}))];
+  const pnum=p=>{const n=parseInt(p,10);return isNaN(n)?9999:n;};
+  const byCat=(a,b)=>(a.catGroup||'zzz').localeCompare(b.catGroup||'zzz','th')||(a.name||'').localeCompare(b.name||'','th');
+
+  // flatten: ในระบบ (มี catGroup/picker/ราคา) + ไม่มีในระบบ (→ ไม่มีหมวด)
+  const inRows=[];for(const g of B.groups)for(const r of g.rows)inRows.push(r);
+  const noSys=B.noRows.map(r=>({picker:'',catGroup:'(ไม่มีในระบบ)',barcode:r.smCode||'',name:r.name,unit:r.unit,total:r.total,priceCS:'',value:'',per:r.per}));
+  const hasPk=r=>String(r.picker||'').trim()!=='';
+  const withP=inRows.filter(hasPk);
+  const noP=[...inRows.filter(r=>!hasPk(r)),...noSys];  // ในระบบแต่ไม่มีคนจัด/หมวด + ไม่มีในระบบ
+
+  function mkSheet(title,rows){
+    const aoa=[[title],head];const refs=[];let ri=2,tcs=0,tval=0,tper={};
+    for(const r of rows){
+      aoa.push([r.picker||'',r.catGroup||'',r.barcode||'',r.name||'',r.unit||'',r.total||0,r.priceCS||'',r.value||'',...brCols.map(b=>r.per[b]||'')]);
+      refs.push({r:ri,c:2});ri++;tcs+=Number(r.total)||0;tval+=Number(r.value)||0;for(const b in r.per)tper[b]=(tper[b]||0)+r.per[b];
     }
+    aoa.push([]);aoa.push(['','','','','รวม',tcs,'',tval,...brCols.map(b=>tper[b]||'')]);
+    const ws=XLSX.utils.aoa_to_sheet(aoa);
+    refs.forEach(({r,c})=>{const ad=XLSX.utils.encode_cell({r,c});if(ws[ad]&&ws[ad].v!=='')ws[ad].t='s',ws[ad].z='@';});
+    ws['!cols']=cols;return ws;
   }
-  // totals
-  const tot=['','','','','รวมทั้งหมด',B.totals.cs,'',B.totals.value,...brCols.map(b=>B.totals.perBranch[b]||'')];
-  aoa.push([]);aoa.push(tot);rowIdx+=2;
-  // not in system
-  if(B.noRows.length){
-    aoa.push([]);aoa.push(['❌ ไม่มีในระบบ (จัดเอง)']);
-    aoa.push(['','กลุ่ม SM','รหัส SM','ชื่อสินค้า','หน่วย','รวม','','',...brCols.map(b=>b+' '+(B.branchName[b]||''))]);
-    rowIdx+=3;
-    B.noRows.forEach(r=>{aoa.push(['',r.smGroup,r.smCode,r.name,r.unit,r.total,'','',...brCols.map(b=>r.per[b]||'')]);refs.push({r:rowIdx,c:2});rowIdx++;});
+  const safe=s=>s.replace(/[\\\/?*\[\]:]/g,' ').slice(0,31);
+  const dt=B.date||'';
+  const wb=XLSX.utils.book_new();
+  // 1) ชีทรวม — เรียงตาม คนจัด แล้ว หมวด
+  const combined=[...withP,...noP].slice().sort((a,b)=>pnum(a.picker)-pnum(b.picker)||byCat(a,b));
+  XLSX.utils.book_append_sheet(wb,mkSheet('ใบจัดรวม — วันที่ '+dt,combined),'รวม');
+  // 2) แยกชีทตามคนจัด
+  const pickers=[...new Set(withP.map(r=>String(r.picker).trim()))].sort((a,b)=>pnum(a)-pnum(b));
+  for(const p of pickers){
+    const rows=withP.filter(r=>String(r.picker).trim()===p).slice().sort(byCat);
+    XLSX.utils.book_append_sheet(wb,mkSheet('คนจัด '+p+' — วันที่ '+dt,rows),safe('คนจัด '+p));
   }
-  const ws=XLSX.utils.aoa_to_sheet(aoa);
-  // force barcode + SM code cells to text
-  refs.forEach(({r,c})=>{const ad=XLSX.utils.encode_cell({r,c});if(ws[ad]){ws[ad].t='s';ws[ad].z='@';}});
-  ws['!cols']=[{wch:14},{wch:20},{wch:18},{wch:34},{wch:12},{wch:9},{wch:10},{wch:12},...brCols.map(()=>({wch:11}))];
-  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'ใบจัด');
-  const fn=`Rattana_ใบจัด_SM_${B.date?B.date.replace(/\//g,'-'):'today'}.xlsx`;
-  XLSX.writeFile(wb,fn);
-  toast('Export Excel แล้ว','success');
+  // 3) ชีทไม่มีหมวด/ไม่มีคนจัด (รวมสินค้าไม่มีในระบบ)
+  if(noP.length)XLSX.utils.book_append_sheet(wb,mkSheet('สินค้าไม่มีหมวด / ไม่มีคนจัด — วันที่ '+dt,noP.slice().sort(byCat)),'ไม่มีหมวด');
+  XLSX.writeFile(wb,`Rattana_ใบจัด_SM_${dt?dt.replace(/\//g,'-'):'today'}.xlsx`);
+  toast(`Export แล้ว · รวม + ${pickers.length} คนจัด`+(noP.length?' + ไม่มีหมวด':''),'success');
 }
 
 // ── BK12 export (bplus) — generate เลขที่เอกสาร (คอลัมน์ B) ──
