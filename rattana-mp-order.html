@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rattana จัดของ Pre-Order v1.12</title>
+<title>Rattana จัดของ Pre-Order v1.13</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -145,6 +145,10 @@
   td.bccell.fbb{color:var(--warn);background:#fef3c7}
   td.ucell{text-align:center;font-weight:700;font-size:11px;color:#1d4ed8}
   td.ucell.fb{color:var(--warn);background:#fef3c7}
+  .scan-reject{background:#fef2f2;border:1.5px solid #fecaca;color:var(--red);border-radius:12px;padding:16px;font-size:15px;font-weight:700;text-align:center;line-height:1.7;max-width:480px}
+  .scan-reject span{font-size:13px;font-weight:400;color:var(--muted)}
+  .dup-note{background:#fef3c7;border:1px solid #fcd34d;color:var(--warn);border-radius:8px;padding:7px 11px;font-size:13px;font-weight:600;margin-bottom:10px}
+  .cap-warn{background:#fef2f2;border:1px solid #fecaca;color:var(--red);border-radius:8px;padding:7px 11px;font-size:13px;font-weight:600;margin-bottom:6px}
 </style>
 </head>
 <body>
@@ -158,7 +162,7 @@
     <div id="googleSignInBtn"></div>
     <div id="loginSpinner">⏳ กำลังเข้าสู่ระบบ…</div>
     <div id="loginError"></div>
-    <div class="login-ver">เวอร์ชัน v1.12</div>
+    <div class="login-ver">เวอร์ชัน v1.13</div>
   </div>
 </div>
 
@@ -166,7 +170,7 @@
 <div id="app">
   <div class="topbar">
   <header class="appbar">
-    <div class="title">📦 จัดของ Pre-Order <span class="ver">v1.12</span></div>
+    <div class="title">📦 จัดของ Pre-Order <span class="ver">v1.13</span></div>
     <div class="spacer"></div>
     <div class="who" id="whoBox"></div>
     <a class="hub-btn" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">
@@ -244,7 +248,7 @@
 <script>
 /* ================= CONFIG ================= */
 const CONFIG = {
-  version: 'v1.12',
+  version: 'v1.13',
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
   backendId: '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI',
   orderGid: '691743937',
@@ -940,13 +944,22 @@ function scanLookup(raw){
   const prod=DATA.prodIdx[code]||null;
   const pk=prod?(prod.codeCS||prod.name):code;
   const meta=(MODEL&&MODEL.scanMeta&&MODEL.scanMeta[pk])||null;
-  const name=prod?cleanName(prod.short||prod.name):(meta?meta.name:code);
-  const eaPerCS=prod?(prod.qtyCS||0):(meta?meta.eaPerCS:0);
-  const eaPerPA=prod?(prod.qtyPA||0):(meta?meta.eaPerPA:0);
-  const orderedEA=meta?meta.orderedEA:0;
-  const dist=(MODEL&&MODEL.scanDist&&MODEL.scanDist[pk])||null;
+  if(!meta || meta.orderedEA<=0){          // ❌ ไม่อยู่ในบิลที่เลือก → ไม่รับ (เหมือน SMR)
+    scanCur=null;
+    beep(true); vibrate([200]);
+    const r=document.getElementById('scanResult');
+    if(r) r.innerHTML=`<div class="scan-reject">❌ ไม่อยู่ในบิลที่เลือก: <b>${esc(code)}</b><br><span>ยิงได้เฉพาะสินค้าที่อยู่ในบิลที่ติ๊กไว้</span></div>`;
+    const i=document.getElementById('scanInput'); if(i){ i.value=''; i.focus(); }
+    toast('❌ ไม่อยู่ในบิล: '+code);
+    return;
+  }
+  const name=prod?cleanName(prod.short||prod.name):meta.name;
+  const eaPerCS=prod?(prod.qtyCS||0):(meta.eaPerCS||0);
+  const eaPerPA=prod?(prod.qtyPA||0):(meta.eaPerPA||0);
+  const orderedEA=meta.orderedEA;
+  const dist=(MODEL.scanDist&&MODEL.scanDist[pk])||null;
   const ex=scanPicked.find(p=>p.barcode===code);
-  scanCur={barcode:code,name,orderedEA,eaPerCS,eaPerPA,dist,qty:ex?ex.qty:'',transfer:ex?!!ex.transfer:false};
+  scanCur={barcode:code,name,orderedEA,eaPerCS,eaPerPA,dist,dup:!!ex,_capped:false,qty:(ex?ex.qty:orderedEA),transfer:ex?!!ex.transfer:false};  // default = ครบตามสั่ง
   beep(); vibrate();
   const i=document.getElementById('scanInput'); if(i) i.value='';
   renderScanResult();
@@ -973,22 +986,23 @@ function renderScanResult(){
   const r=document.getElementById('scanResult'); if(!r) return;
   if(!scanCur){ r.innerHTML=''; return; }
   const c=scanCur;
-  const ord = c.orderedEA>0
-    ? `${esc(fmtFromEA(c.orderedEA,c.eaPerCS,c.eaPerPA))} <span class="muted">(${c.orderedEA} ชิ้น)</span>`
-    : '<span style="color:var(--warn)">ไม่อยู่ในบิลที่เลือก (ยิงเพิ่มได้)</span>';
+  const ord = `${esc(fmtFromEA(c.orderedEA,c.eaPerCS,c.eaPerPA))} <span class="muted">(${c.orderedEA} ชิ้น)</span>`;
+  const dupNote = c.dup ? `<div class="dup-note">⚠️ ยิงซ้ำ! สินค้านี้เพิ่มไปแล้ว — แก้จำนวนได้</div>` : '';
   r.innerHTML=`<div class="scan-card">
     <div class="pname">${esc(c.name)}</div>
     <div class="pbar">บาร์โค้ด: ${esc(c.barcode)}</div>
     <div class="ord">📋 สั่งไว้: <b>${ord}</b></div>
+    ${dupNote}
     ${scanDistHtml(c.dist)}
-    <label style="font-size:13px;color:var(--muted);font-weight:700">จำนวนที่จัดจริง</label>
+    <label style="font-size:13px;color:var(--muted);font-weight:700">จำนวนที่จัดจริง <span class="muted">(ห้ามเกิน ${c.orderedEA})</span></label>
     <div class="recv-box">
       <button class="stp" onclick="scanRecvStep(-1)">−</button>
-      <input id="scanQty" type="number" inputmode="numeric" value="${c.qty}" oninput="scanCur.qty=this.value" placeholder="0">
+      <input id="scanQty" type="number" inputmode="numeric" value="${c.qty}" oninput="scanQtyInput(this)" placeholder="0">
       <button class="stp" onclick="scanRecvStep(1)">+</button>
     </div>
-    <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
-      ${c.orderedEA>0?`<button class="chip" onclick="scanRecvSet(${c.orderedEA})">ครบตามสั่ง (${c.orderedEA})</button>`:''}
+    <div id="scanCapWarn" class="cap-warn" style="display:${c._capped?'block':'none'}">⚠️ รับเกินยอดสั่งไม่ได้ — สูงสุด ${c.orderedEA}</div>
+    <div style="display:flex;gap:6px;margin:8px 0 10px;flex-wrap:wrap">
+      <button class="chip" onclick="scanRecvSet(${c.orderedEA})">ครบตามสั่ง (${c.orderedEA})</button>
       <button class="chip" onclick="scanRecvSet(0)">ล้างจำนวน</button>
     </div>
     <button class="scan-btn ${c.transfer?'gold':'gray'}" onclick="toggleScanTransfer()" style="width:100%;margin-bottom:8px">${c.transfer?'✓ โอนย้าย (กดเพื่อยกเลิก)':'🔁 สินค้านี้ต้องโอนย้ายด้วย'}</button>
@@ -998,12 +1012,14 @@ function renderScanResult(){
     </div></div>`;
   setTimeout(()=>{ const q=document.getElementById('scanQty'); if(q){ q.focus(); q.select(); } },50);
 }
-function scanRecvStep(d){ if(!scanCur) return; scanCur.qty=Math.max(0,(parseInt(scanCur.qty)||0)+d); renderScanResult(); }
-function scanRecvSet(v){ if(!scanCur) return; scanCur.qty=v; renderScanResult(); }
+function scanClamp(v){ let n=parseInt(v); if(!isFinite(n)||n<0) n=0; const max=(scanCur&&scanCur.orderedEA)||0; if(max&&n>max){ n=max; if(scanCur) scanCur._capped=true; } else if(scanCur) scanCur._capped=false; return n; }
+function scanQtyInput(el){ if(!scanCur) return; scanCur.qty=scanClamp(el.value); if(scanCur._capped) el.value=scanCur.qty; const w=document.getElementById('scanCapWarn'); if(w) w.style.display=scanCur._capped?'block':'none'; }
+function scanRecvStep(d){ if(!scanCur) return; scanCur.qty=scanClamp((parseInt(scanCur.qty)||0)+d); renderScanResult(); }
+function scanRecvSet(v){ if(!scanCur) return; scanCur.qty=scanClamp(v); renderScanResult(); }
 function toggleScanTransfer(){ if(!scanCur) return; scanCur.transfer=!scanCur.transfer; renderScanResult(); }
 function confirmScan(){
   if(!scanCur) return;
-  const qty=parseInt(scanCur.qty)||0;
+  const qty=scanClamp(scanCur.qty);    // กันเกินยอดสั่ง
   if(qty<=0){ toast('ใส่จำนวนก่อน'); return; }
   const i=scanPicked.findIndex(p=>p.barcode===scanCur.barcode);
   const row={barcode:scanCur.barcode,name:scanCur.name,qty,transfer:!!scanCur.transfer};
