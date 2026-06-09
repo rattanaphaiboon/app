@@ -373,13 +373,13 @@ body.dark .spin-box{background:var(--card-bg)}
   <div id="tabMap" class="hidden">
   <div class="card"><div class="card-body">
     <h2>🔗 จับคู่สินค้า — เทียบชื่อ SMR ↔ เรา (ผ่านบาร์โค้ด)</h2>
-    <p class="hint" style="margin-bottom:12px">ดึงใบสั่งซื้อ SMR → เช็คบาร์โค้ดกับ master (ชีทบาร์โค้ดเรา) → ออก Excel <b>3 ชีท</b>: <b>สินค้าตรง</b> (บาร์อยู่ใน master) · <b>ไม่เจอบาร์</b> (ได้สินค้า ชื่อต่าง — บาร์ยังไม่มีใน master) · <b>ไม่เจอสินค้า</b> (ไม่มีบาร์) · ราคา CS S01→CC03</p>
+    <p class="hint" style="margin-bottom:12px">ดึงใบสั่งซื้อ SMR → เช็คบาร์โค้ดกับ master → Excel <b>3 ชีท</b>: <b>สินค้าตรง</b> · <b>ไม่เจอบาร์</b> (ได้สินค้า) · <b>ไม่เจอสินค้า</b> · โชว์บาร์เค้า+บาร์เรา · ราคา S01→CC03 · <b>ตัวไม่เจอบาร์ → เพิ่มลง master อัตโนมัติ</b> (ครบทุกคอลัมน์ กันซ้ำ)</p>
     <button class="btn btn-navy" id="btnMap" onclick="exportMap()">🔗 ดึง + Export (เจอ / ไม่เจอ)</button>
     <div class="hint" id="mapResult" style="margin-top:10px"></div>
   </div></div>
   </div>
 
-  <div class="foot">SMR Picker · v4.7 · ใบจัด + BK08 + แสกน + โอนย้าย + สรุป + จับคู่ · ข้อมูลจาก PDDT (Stocksync)</div>
+  <div class="foot">SMR Picker · v4.8 · ใบจัด + BK08 + แสกน + โอนย้าย + สรุป + จับคู่ · ข้อมูลจาก PDDT (Stocksync)</div>
 </div>
 
 <button id="backTop" onclick="window.scrollTo(0,0)">↑</button>
@@ -394,7 +394,7 @@ body.dark .spin-box{background:var(--card-bg)}
 </nav>
 
 <script>
-const VERSION='4.7';
+const VERSION='4.8';
 const DEFAULT_ORDER_ID='1mUQtnOfwQDMEfXP_eqRUiJPUOf5gQzhxyeDHbTqcU0w';
 const DEFAULT_ORDER_GID='1935764970';
 const PDDT_ID='16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
@@ -967,35 +967,47 @@ async function exportMap(){
     await loadPddt();
     const rows=parseCsvRaw(await fetchCsv(gvizUrl(DEFAULT_ORDER_ID,{gid:DEFAULT_ORDER_GID})));
     hideSpin();
-    // โหลด master บาร์โค้ดของเรา (gid 884942323 · คอลัมน์ barcode = index 4) — เช็คว่า SMR มีบาร์เหมือนเราไหม
+    // master บาร์โค้ดเรา (gid 884942323 · barcode=4 · itemCode=0 · supplier=3) — เช็ค SMR มีบาร์เหมือนเราไหม (กัน 0 นำหน้าหาย)
     showSpin('โหลด master บาร์โค้ด...');
     const refRows=parseCsvRaw(await fetchCsv(gvizUrl(DEFAULT_PICKER_ID,{gid:'884942323'})));
     hideSpin();
-    const refExact=new Set(),refNorm=new Set();
-    for(let i=1;i<refRows.length;i++){const b=clean(refRows[i][4]);if(b){refExact.add(b);refNorm.add(b.replace(/^0+/,''));}}
-    const inRef=code=>refExact.has(code)||refNorm.has(code.replace(/^0+/,''));
-    const match=[],noBar=[],noItem=[];
+    const refExact=new Set(),refNormMap={};let supplier='';
+    for(let i=1;i<refRows.length;i++){const b=clean(refRows[i][4]);if(b){refExact.add(b);const s=b.replace(/^0+/,'');if(!(s in refNormMap))refNormMap[s]=b;if(!supplier)supplier=clean(refRows[i][3]);}}
+    const refMatch=code=>refExact.has(code)?code:(refNormMap[code.replace(/^0+/,'')]||'');  // คืนบาร์ master ที่ตรง หรือ ''
+    const match=[],noBar=[],noItem=[],addRows=[],addSeen={};
     for(const r of rows){
       if(!/^\d{3,}$/.test(clean(r[C.branch])))continue;          // เฉพาะแถวข้อมูล (รหัสสาขาเป็นเลข)
       const smrName=clean(r[C.smName]);if(smrName==='')continue;  // ต้องมีรายการสินค้า SMR (คอลัมน์ I)
-      const branch=clean(r[C.branchName]),qty=clean(r[C.qty]),code=clean(r[C.barcode]),ourSheet=clean(r[C.name]);
-      if(code===''){noItem.push([branch,qty,code,smrName,ourSheet,'']);continue;}  // ไม่มีบาร์ (เช่น รีเจนซี่)
-      const pd=pddtMap[code];const price=pd?(pd.pS01>0?pd.pS01:(pd.pC03>0?pd.pC03:'')):'';
-      const row=[branch,qty,code,smrName,(pd&&pd.shortName)||ourSheet,price];
-      if(inRef(code))match.push(row);else noBar.push(row);  // บาร์อยู่ใน master = ตรง · ไม่อยู่ = ไม่เจอบาร์(ได้สินค้า)
+      const branch=clean(r[C.branchName]),qty=clean(r[C.qty]),code=clean(r[C.barcode]),ourSheet=clean(r[C.name]),itemCode=clean(r[7]);
+      const pd=code?pddtMap[code]:null;const price=pd?(pd.pS01>0?pd.pS01:(pd.pC03>0?pd.pC03:'')):'';
+      const our=(pd&&pd.shortName)||ourSheet;
+      if(code===''){noItem.push([branch,qty,'','',smrName,our,'']);continue;}  // ไม่มีบาร์ (รีเจนซี่)
+      const mb=refMatch(code);
+      if(mb)match.push([branch,qty,code,mb,smrName,our,price]);  // บาร์อยู่ใน master = ตรง (mb=บาร์ master)
+      else{noBar.push([branch,qty,code,'',smrName,our,price]);   // ไม่อยู่ใน master = ไม่เจอบาร์(ได้สินค้า) → เก็บไปเขียน master
+        if(!addSeen[code]){addSeen[code]=1;addRows.push([itemCode,our,'Active',supplier||'บริษัทรัตนไพบูลย์สมุทรสงคราม2555จำกัด.vat',code,'Y']);}}
     }
     if(!match.length&&!noBar.length&&!noItem.length){toast('ไม่พบรายการในใบสั่งซื้อ — เช็คว่าโหลดชีทได้','error');btn.disabled=false;return;}
-    const head=['สาขา','จำนวน (CS)','รหัสสินค้าเรา','ชื่อสินค้า SMR','ชื่อสินค้าเรา','ราคา CS'];
-    const cols=[{wch:20},{wch:11},{wch:18},{wch:34},{wch:34},{wch:10}];
-    const mk=rs=>{const ws=XLSX.utils.aoa_to_sheet([head,...(rs.length?rs:[['— ไม่มี —','','','','','']])]);const rng=XLSX.utils.decode_range(ws['!ref']);for(let R=1;R<=rng.e.r;R++){const ad=XLSX.utils.encode_cell({r:R,c:2});const c=ws[ad];if(c&&c.v!==''){c.t='s';c.z='@';c.v=String(c.v);}}ws['!cols']=cols;return ws;};
+    const head=['สาขา','จำนวน (CS)','บาร์เค้า','บาร์เรา (master)','ชื่อสินค้า SMR','ชื่อสินค้าเรา','ราคา CS'];
+    const cols=[{wch:20},{wch:10},{wch:17},{wch:17},{wch:32},{wch:32},{wch:9}];
+    const mk=rs=>{const ws=XLSX.utils.aoa_to_sheet([head,...(rs.length?rs:[['— ไม่มี —','','','','','','']])]);const rng=XLSX.utils.decode_range(ws['!ref']);for(let R=1;R<=rng.e.r;R++)[2,3].forEach(cc=>{const ad=XLSX.utils.encode_cell({r:R,c:cc});const c=ws[ad];if(c&&c.v!==''){c.t='s';c.z='@';c.v=String(c.v);}});ws['!cols']=cols;return ws;};
     const wb=XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb,mk(match),'สินค้าตรง');
     XLSX.utils.book_append_sheet(wb,mk(noBar),'ไม่เจอบาร์(ได้สินค้า)');
     XLSX.utils.book_append_sheet(wb,mk(noItem),'ไม่เจอสินค้า');
     const di=parseISO($('pickDate').value);
     XLSX.writeFile(wb,`จับคู่สินค้า_${di.iso}.xlsx`);
-    $('mapResult').textContent=`✓ ตรง ${match.length} · ไม่เจอบาร์ ${noBar.length} · ไม่เจอสินค้า ${noItem.length}`;
-    toast(`Export — ตรง ${match.length} · ไม่เจอบาร์ ${noBar.length} · ไม่เจอสินค้า ${noItem.length}`,'success');
+    // auto เพิ่มบาร์โค้ดที่ไม่เจอลง master (gid 884942323) ครบทุกคอลัมน์ — GAS dedupe กันซ้ำ
+    let addMsg='';
+    if(addRows.length&&GAS_URL){
+      try{showSpin('เพิ่มบาร์โค้ดลง master...');
+        const res=await fetch(GAS_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'addMaster',rows:addRows})});
+        const j=JSON.parse((await res.text()).trim());hideSpin();
+        addMsg=(j&&j.ok)?` · เพิ่ม master ${j.added} (ข้ามซ้ำ ${j.skipped||0})`:' · ⚠️เพิ่ม master ไม่สำเร็จ';
+      }catch(e){hideSpin();addMsg=' · ⚠️เพิ่ม master ไม่ได้ (อัปเดต GAS?)';}
+    }
+    $('mapResult').textContent=`✓ ตรง ${match.length} · ไม่เจอบาร์ ${noBar.length} · ไม่เจอสินค้า ${noItem.length}${addMsg}`;
+    toast(`Export — ตรง ${match.length}·ไม่เจอบาร์ ${noBar.length}·ไม่เจอสินค้า ${noItem.length}${addMsg}`,'success');
   }catch(e){hideSpin();toast('ดึงไม่สำเร็จ: '+(e.message||e),'error');console.error(e);}
   finally{btn.disabled=false;}
 }
