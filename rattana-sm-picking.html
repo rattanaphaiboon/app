@@ -432,7 +432,7 @@ body.dark .spin-box{background:var(--card-bg)}
 </nav>
 
 <script>
-const VERSION='5.9';
+const VERSION='5.10';
 const DEFAULT_ORDER_ID='1ZOS3vAPbizWCG_Y7A6rODjIznSMf1_FDSGZ_ZUr_RjQ';
 const DEFAULT_ORDER_GID='1632859410';
 const PDDT_ID='16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
@@ -447,6 +447,7 @@ const PRICE_TIER3='CC03';  // ราคา fallback ตัวที่ 3 ("CS 03
 const C={date:0,branch:1,branchName:2,doc:3,form:4,smGroup:6,smCode:7,smName:8,qty:9,unit:10,barcode:13,name:14,unitCS:15,price:16,total:17,flag:18};
 
 let pddtMap=null;        // barcode -> {catGroup,catType,shortName}
+let pddtNorm=null;       // บาร์โค้ดตัด 0 นำหน้า -> entry (กันยิงบาร์ที่ 0 นำหน้าต่างจาก PDDT)
 let masterByItem=null;   // SMR item code (H) -> บาร์โค้ดรัตน (จาก WMS_barcode_SMR gid 884942323)
 let lastBuild=null;      // {branchList, branchName, inGroups, noRows, totals}
 
@@ -514,14 +515,14 @@ async function loadPddt(force){
   const cG=idx('CAT GROUP'),cT=idx('CAT TYPE'),cS=idx('SHORT NAME'),cN=idx('PRODUCT NAME');
   const pS01=idx('PRICE S01 CS'),pC01=idx('PRICE CC01 CS'),pC03=idx('PRICE CC03 CS'),pS03=idx('PRICE S03 CS');
   const sW4=idx('STOCK W4'),sC4=idx('STOCK C4');
-  const m={};
+  const m={},mn={};
   for(let i=1;i<rows.length;i++){const r=rows[i];if(!r)continue;
     const info={catGroup:clean(r[cG]),catType:clean(r[cT]),shortName:clean(r[cS]),productName:cN>=0?clean(r[cN]):'',
       pS01:numv(r[pS01]),pC01:numv(r[pC01]),pC03:numv(r[pC03]),pS03:numv(r[pS03]),
       stockW4:numv(r[sW4]),stockC4:numv(r[sC4])};
-    [cEA,cPA,cBP,cCS].forEach(ci=>{if(ci<0)return;const code=clean(r[ci]);if(code&&!m[code])m[code]=info;});
+    [cEA,cPA,cBP,cCS].forEach(ci=>{if(ci<0)return;const code=clean(r[ci]);if(code&&!m[code]){m[code]=info;const s=code.replace(/^0+/,'');if(s&&!(s in mn))mn[s]=info;}});
   }
-  pddtMap=m;return m;
+  pddtMap=m;pddtNorm=mn;return m;
 }
 
 // ── picker map: CAT GROUP -> คนจัด (ลิงก์ตายตัว gid 0; auto-detect คอลัมน์ค่า ข้ามคอลัมน์ว่าง) ──
@@ -557,6 +558,8 @@ function shortBranch(name){const m=clean(name).match(/\(([^)]+)\)/);return m?m[1
 function csPrice(pd){if(!pd)return 0;const t3=PRICE_TIER3==='S03'?pd.pS03:pd.pC03;for(const v of [pd.pS01,pd.pC01,t3])if(v>0)return v;return 0;}
 // ชื่อรัตนจาก PDDT: SHORT NAME → ถ้าว่าง PRODUCT NAME (ชื่อ/บาร์ต้องเป็นของรัตนเสมอ ไม่ใช้ชื่อ SMR)
 function pddtName(pd){return pd?(clean(pd.shortName)||clean(pd.productName)):'';}
+// หา PDDT จากบาร์โค้ด: ตรงเป๊ะ → ถ้าไม่เจอ ลองตัด 0 นำหน้า (ยิงบาร์จริงอาจมี/ไม่มี 0 ต่างจากในระบบ)
+function pddtLookup(code){if(!code)return null;code=clean(code);return (pddtMap&&pddtMap[code])||(pddtNorm&&pddtNorm[code.replace(/^0+/,'')])||null;}
 
 async function run(forcePddt){
   const btn=$('btnLoad');btn.disabled=true;
@@ -861,9 +864,10 @@ function onScanFound(code){
   const item=scanMap[code];
   if(!item){
     $('manual-bc').value='';lastScanned='';
+    const pd=pddtLookup(code),nm=pddtName(pd);   // เจอใน PDDT ไหม → บอกว่าคือสินค้าอะไรของรัตน
     const hasNoSys=lastBuild&&lastBuild.noRows&&lastBuild.noRows.some(r=>!r.linkedBc);
-    if(hasNoSys){beep(true);vibrate([120]);setScanStatus('❓ ไม่อยู่ในออเดอร์: '+code+' — เลือกจับคู่กับสินค้า SMR ได้','err');openLinkPanel(code);}
-    else{setScanStatus('❌ ไม่อยู่ในออเดอร์วันนี้: '+code,'err');beep(true);vibrate([200]);}
+    if(hasNoSys){beep(true);vibrate([120]);setScanStatus('❓ '+(nm?'นี่คือ '+nm+' ':'')+'— ไม่อยู่ในออเดอร์วันนี้'+(nm?'':' · ไม่มีใน PDDT')+' → เลือกจับคู่ SMR ด้านล่าง','err');openLinkPanel(code);}
+    else{beep(true);vibrate([200]);setScanStatus(nm?('❓ นี่คือ '+nm+' — มีใน PDDT แต่ไม่ได้สั่งวันนี้ (บาร์ '+code+')'):('❌ ไม่รู้จักบาร์ '+code+' — ไม่อยู่ในออเดอร์ และไม่มีใน PDDT'),'err');}
     return;
   }
   const dupp=picked.find(p=>p.barcode===item.barcode);
@@ -922,7 +926,7 @@ const linkKey=()=>'smr_links_'+sDoc;
 function loadLinks(){try{const a=JSON.parse(localStorage.getItem(linkKey())||'[]');return Array.isArray(a)?a:[];}catch(e){return[];}}
 function saveLink(bc,row){try{const a=loadLinks().filter(l=>l.bc!==bc);a.push({bc,smCode:row.smCode,smName:row.name});localStorage.setItem(linkKey(),JSON.stringify(a));}catch(e){}}
 function mkLinkedEntry(bc,row){
-  const pd=pddtMap?pddtMap[bc]:null;
+  const pd=pddtLookup(bc);
   const price=(row.priceCS>0?row.priceCS:csPrice(pd))||0;
   const ourName=pddtName(pd);
   // ชื่อหลัก = ชื่อจริงของรัตน (PDDT) → ลงชีท/Excel/BK เป็นข้อมูลรัตน · เก็บชื่อ SMR ไว้โชว์เทียบ
@@ -935,8 +939,8 @@ function applyLinks(){
 function openLinkPanel(code){
   pendingLinkCode=code;scannerActive=false;
   $('resultPanel').style.display='none';
-  const pd=pddtMap?pddtMap[code]:null;
-  $('lkBc').textContent='บาร์โค้ด '+code+(pddtName(pd)?' · ของรัตน: '+pddtName(pd):' · ไม่พบใน PDDT');
+  const pd=pddtLookup(code),nm=pddtName(pd);
+  $('lkBc').innerHTML=nm?('🏷️ นี่คือ <b>'+esc(nm)+'</b> <span class="sub">· บาร์ '+esc(code)+' · ไม่อยู่ในออเดอร์วันนี้</span>'):('บาร์โค้ด '+esc(code)+' <span class="sub">· ไม่พบใน PDDT</span>');
   $('lkSearch').value='';renderLinkList();
   $('linkPanel').style.display='block';$('linkPanel').scrollIntoView({behavior:'smooth',block:'start'});
   setTimeout(()=>{try{$('lkSearch').focus({preventScroll:true});}catch(e){}},380);
