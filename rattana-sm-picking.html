@@ -349,7 +349,8 @@ body.dark .spin-box{background:var(--card-bg)}
         <button class="btn btn-success" onclick="exportSummary()">📊 Export สรุป (Excel)</button>
         <button class="btn btn-outline btn-sm" onclick="renderSummary()">🔄 คำนวณใหม่</button>
       </div>
-      <p class="hint" style="margin:0 0 10px">สรุปจากการแสกนวันนี้ · เปิดแท็บนี้คำนวณอัตโนมัติ · Export ได้ทั้ง 4 ส่วน (4 ชีท)</p>
+      <p class="hint" style="margin:0 0 6px">สรุปจากการแสกนวันนี้ · เปิดแท็บนี้คำนวณอัตโนมัติ · Export ได้ทั้ง 4 ส่วน (4 ชีท)</p>
+      <p class="hint" id="sumSrc" style="margin:0 0 10px;font-weight:600">📡 อ่านจากชีทเช็คสินค้าออก — ทุกเครื่องเห็นตรงกัน</p>
       <div id="sumStats" class="stat-grid"></div>
     </div></div>
     <div class="card"><div class="card-body">
@@ -394,7 +395,7 @@ body.dark .spin-box{background:var(--card-bg)}
 </nav>
 
 <script>
-const VERSION='5.1';
+const VERSION='5.2';
 const DEFAULT_ORDER_ID='1ZOS3vAPbizWCG_Y7A6rODjIznSMf1_FDSGZ_ZUr_RjQ';
 const DEFAULT_ORDER_GID='1632859410';
 const PDDT_ID='16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
@@ -953,7 +954,7 @@ function switchTab(t){
   $('tabBtnTf').classList.toggle('active',t==='tf');
   $('tabBtnSum').classList.toggle('active',t==='sum');
   $('tabBtnMap').classList.toggle('active',t==='map');
-  if(t==='sum'){try{renderSummary();}catch(e){console.error('renderSummary',e);}}
+  if(t==='sum'){renderSummary().catch(e=>console.error('renderSummary',e));}
   if(t!=='scan'&&typeof camOpen!=='undefined'&&camOpen){try{stopScan();}catch(e){}}
   if(t==='scan'){setTimeout(()=>{try{$('manual-bc').focus();}catch(e){}},100);}
   window.scrollTo(0,0);
@@ -1012,35 +1013,73 @@ async function exportMap(){
   finally{btn.disabled=false;}
 }
 
-// ── Export สรุป เป็น Excel 4 ชีท (ได้ไม่ครบ · ยังไม่ได้ยิง · โอนย้าย · เปิดบิล) ──
-function exportSummary(){
-  const pb={};picked.forEach(p=>pb[p.barcode]=p);
-  const short=[];picked.forEach(p=>{const o=scanMap[p.barcode];if(!o)return;const rec=p.received||0;if(rec<o.total){const ps=sBL.filter(b=>((o.per[b]||0)-(p.alloc[b]||0))>0).map(b=>(sShort[b]||b)+' '+fmt((o.per[b]||0)-(p.alloc[b]||0)));short.push([p.name,o.total,rec,o.total-rec,ps.join(', ')]);}});
-  const notSc=[];Object.values(scanMap).forEach(o=>{if(!pb[o.barcode])notSc.push([o.name,o.total,sBL.filter(b=>(o.per[b]||0)>0).map(b=>(sShort[b]||b)+' '+fmt(o.per[b])).join(', ')]);});
-  const tf=picked.filter(p=>p.transfer);const tfCases=tf.reduce((s,p)=>s+(p.received||0),0);
-  const bills=[];let tS=0,tC=0,tB=0;sBL.forEach(b=>{let sku=0,cs=0,bt=0;picked.forEach(p=>{const q=p.alloc[b]||0;if(q>0){sku++;cs+=q;bt+=q*(p.priceCS||0);}});if(sku>0){bills.push([scanBranchFull[b]||sShort[b],sku,cs,Math.round(bt)]);tS+=sku;tC+=cs;tB+=bt;}});
-  if(!short.length&&!notSc.length&&!tf.length&&!bills.length){toast('ยังไม่มีข้อมูลสรุป — ยิงก่อน','warning');return;}
+// ── ดึง "ที่ยิงแล้ว/โอนแล้ว" จากชีทโดยตรง — ทำให้สรุปตรงกันทุกเครื่อง ไม่ขึ้นกับ localStorage ของเครื่องที่ยิง ──
+function _shopName(code){return scanBranchFull[code]||sShort[code]||code;}
+async function gatherScanned(){
+  const todayDoc=sDoc||buildDocNumber();const dateBase=todayDoc.split('/')[0];  // เช่น BK08690610
+  let scRows=[],tfRows=[];
+  try{const s=parseSheetUrl($('bkUrl').value)||{id:DEFAULT_SMR_ID,gid:DEFAULT_SMR_GID};
+    const r=parseCsvRaw(await fetchCsv(gvizUrl(s.id,{gid:s.gid})));scRows=r.length>1?r.slice(1):[];}catch(e){console.error('sum/smr',e);}
+  try{const t=parseSheetUrl($('tfUrl').value)||{id:DEFAULT_PICKER_ID,gid:TRANSFER_SRC_GID};
+    const r=parseCsvRaw(await fetchCsv(gvizUrl(t.id,{gid:t.gid})));tfRows=r.length>1?r.slice(1):[];}catch(e){console.error('sum/tf',e);}
+  // กรองเฉพาะเอกสารวันนี้ (คอลัมน์ B) — เผื่อชีทไม่ได้เคลียร์: เอกสารตรง → เลขเดียวกันทั้งวัน → date เดียวกัน → ทั้งหมด
+  let dr=scRows.filter(r=>clean(r[1])===todayDoc);
+  if(!dr.length)dr=scRows.filter(r=>clean(r[1]).indexOf(dateBase)===0);
+  if(!dr.length)dr=scRows;
+  // เช็คสินค้าออก: 1 แถว = สินค้า × สาขา · barcode=10 จำนวน=11 ราคา=13 ชื่อร้าน=20 ชื่อสินค้า=21
+  const scM={};
+  dr.forEach(r=>{const bc=clean(r[10]);if(!bc)return;const q=numv(r[11]);if(q<=0)return;const price=numv(r[13]),shop=clean(r[20])||'(ไม่ระบุสาขา)',nm=clean(r[21]);
+    const o=scM[bc]||(scM[bc]={barcode:bc,name:nm,received:0,perShop:{},priceCS:price});
+    o.received+=q;o.perShop[shop]=(o.perShop[shop]||0)+q;if(price)o.priceCS=price;if(nm&&!o.name)o.name=nm;});
+  let scList=Object.values(scM);
+  let tfList=tfRows.map(r=>({barcode:clean(r[0]),name:clean(r[1]),received:numv(r[2])})).filter(x=>x.barcode||x.received);
+  let src='sheet';
+  // fallback: ชีทยังไม่มี (ยังไม่บันทึก/ออฟไลน์) แต่เครื่องนี้มี picked → ใช้ของในเครื่อง
+  if(!scList.length&&!tfList.length&&picked.length){
+    src='local';const m={};
+    picked.forEach(p=>{const o=m[p.barcode]||(m[p.barcode]={barcode:p.barcode,name:p.name,received:p.received||0,perShop:{},priceCS:p.priceCS||0});sBL.forEach(b=>{const q=p.alloc[b]||0;if(q>0)o.perShop[_shopName(b)]=(o.perShop[_shopName(b)]||0)+q;});});
+    scList=Object.values(m);tfList=picked.filter(p=>p.transfer).map(p=>({barcode:p.barcode,name:p.name,received:p.received||0}));
+  }
+  return {scList,tfList,src};
+}
+function buildSummarySections(scList,tfList){
+  const scBy={};scList.forEach(s=>scBy[s.barcode]=s);
+  // 1) ได้ไม่ครบ (ยิงแล้ว แต่ได้ < สั่ง)
+  const short=[];scList.forEach(s=>{const o=scanMap[s.barcode];if(!o)return;if(s.received<o.total){const ps=[];sBL.forEach(b=>{const sh=(o.per[b]||0)-(s.perShop[_shopName(b)]||0);if(sh>0)ps.push(esc(sShort[b])+' '+fmt(sh));});short.push({name:o.name||s.name,ordered:o.total,rec:s.received,sh:o.total-s.received,ps});}});
+  // 2) ยังไม่ได้ยิง (มีในออเดอร์ แต่ไม่มีในที่ยิง)
+  const notSc=[];Object.values(scanMap).forEach(o=>{if(!scBy[o.barcode])notSc.push(o);});
+  // 3) โอนย้าย (จากชีทโอนย้าย)
+  const transfer=tfList;const tfCases=tfList.reduce((a,x)=>a+(x.received||0),0);
+  // 4) เปิดบิล (1 ชื่อร้าน = 1 ใบ) — เรียงตามลำดับสาขาในออเดอร์ก่อน แล้วต่อท้ายสาขาที่ไม่อยู่ในออเดอร์
+  const shops=[],seen=new Set();sBL.forEach(b=>{const nm=_shopName(b);if(!seen.has(nm)){seen.add(nm);shops.push(nm);}});
+  scList.forEach(s=>Object.keys(s.perShop).forEach(nm=>{if(!seen.has(nm)){seen.add(nm);shops.push(nm);}}));
+  const bills=[];shops.forEach(nm=>{let sku=0,cs=0,bt=0;scList.forEach(s=>{const q=s.perShop[nm]||0;if(q>0){sku++;cs+=q;bt+=q*(s.priceCS||0);}});if(sku>0)bills.push({name:nm,sku,cs,bt});});
+  return {short,notSc,transfer,tfCases,bills};
+}
+
+// ── Export สรุป เป็น Excel 4 ชีท (ได้ไม่ครบ · ยังไม่ได้ยิง · โอนย้าย · เปิดบิล) — อ่านจากชีท ──
+async function exportSummary(){
+  let g;try{showSpin('โหลดข้อมูลที่ยิงจากชีท...');g=await gatherScanned();}catch(e){g={scList:[],tfList:[]};console.error(e);}finally{hideSpin();}
+  const {short,notSc,transfer,tfCases,bills}=buildSummarySections(g.scList,g.tfList);
+  if(!short.length&&!notSc.length&&!transfer.length&&!bills.length){toast('ยังไม่มีข้อมูลสรุป — ยิงก่อน','warning');return;}
+  let tS=0,tC=0,tB=0;bills.forEach(x=>{tS+=x.sku;tC+=x.cs;tB+=x.bt;});
   const wb=XLSX.utils.book_new(),S=(n,aoa)=>XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),n);
-  S('ได้ไม่ครบ',[['สินค้า','สั่ง','ได้','ขาด','สาขาที่ขาด'],...(short.length?short:[['— ได้ครบทุกตัวที่ยิง —','','','','']])]);
-  S('ยังไม่ได้ยิง',[['สินค้า','สั่ง (ลัง)','แยกสาขา'],...(notSc.length?notSc:[['— ยิงครบแล้ว —','','']])]);
-  S('โอนย้าย',[['สินค้า','ลัง'],...(tf.length?tf.map(p=>[p.name,p.received||0]):[['— ไม่มี —','']]),['รวม '+tf.length+' SKU',tfCases]]);
-  S('เปิดบิล',[['บิล (สาขา)','SKU','ลัง','บาท'],...(bills.length?bills:[['— ไม่มี —','','','']]),['รวม '+bills.length+' ใบ',tS,tC,Math.round(tB)]]);
+  S('ได้ไม่ครบ',[['สินค้า','สั่ง','ได้','ขาด','สาขาที่ขาด'],...(short.length?short.map(s=>[s.name,s.ordered,s.rec,s.sh,s.ps.join(', ')]):[['— ได้ครบทุกตัวที่ยิง —','','','','']])]);
+  S('ยังไม่ได้ยิง',[['สินค้า','สั่ง (ลัง)','แยกสาขา'],...(notSc.length?notSc.map(o=>[o.name,o.total,sBL.filter(b=>(o.per[b]||0)>0).map(b=>(sShort[b]||b)+' '+fmt(o.per[b])).join(', ')]):[['— ยิงครบแล้ว —','','']])]);
+  S('โอนย้าย',[['สินค้า','ลัง'],...(transfer.length?transfer.map(p=>[p.name,p.received||0]):[['— ไม่มี —','']]),['รวม '+transfer.length+' SKU',tfCases]]);
+  S('เปิดบิล',[['บิล (สาขา)','SKU','ลัง','บาท'],...(bills.length?bills.map(x=>[x.name,x.sku,x.cs,Math.round(x.bt)]):[['— ไม่มี —','','','']]),['รวม '+bills.length+' ใบ',tS,tC,Math.round(tB)]]);
   const di=parseISO($('pickDate').value);
   XLSX.writeFile(wb,`สรุปเช็ค_${di.iso}.xlsx`);
   toast('Export สรุป (4 ชีท) แล้ว ✓','success');
 }
 
-// ── หน้าสรุป: ได้ไม่ครบ · ไม่ได้ยิง · โอนย้าย · เปิดบิลแยกสาขา ──
-function renderSummary(){
-  const pb={};picked.forEach(p=>pb[p.barcode]=p);
-  // 1) ได้ไม่ครบ (ยิงแล้ว แต่ได้ < สั่ง)
-  const short=[];picked.forEach(p=>{const o=scanMap[p.barcode];if(!o)return;const rec=p.received||0;if(rec<o.total){const ps=[];sBL.forEach(b=>{const sh=(o.per[b]||0)-(p.alloc[b]||0);if(sh>0)ps.push(esc(sShort[b])+' '+fmt(sh));});short.push({name:p.name,ordered:o.total,rec,sh:o.total-rec,ps});}});
-  // 2) ยังไม่ได้ยิงเช็ค (มีในออเดอร์ แต่ไม่อยู่ใน picked)
-  const notSc=[];Object.values(scanMap).forEach(o=>{if(!pb[o.barcode])notSc.push(o);});
-  // 3) โอนย้าย
-  const tf=picked.filter(p=>p.transfer);const tfSku=tf.length,tfCases=tf.reduce((s,p)=>s+(p.received||0),0);
-  // 4) เปิดบิล (1 สาขา = 1 ใบ)
-  const bills=[];sBL.forEach(b=>{let sku=0,cs=0,bt=0;picked.forEach(p=>{const q=p.alloc[b]||0;if(q>0){sku++;cs+=q;bt+=q*(p.priceCS||0);}});if(sku>0)bills.push({name:scanBranchFull[b]||sShort[b],sku,cs,bt});});
+// ── หน้าสรุป: ได้ไม่ครบ · ไม่ได้ยิง · โอนย้าย · เปิดบิลแยกสาขา — อ่านจากชีท (ทุกเครื่องเห็นตรงกัน) ──
+async function renderSummary(){
+  $('sumStats').innerHTML='<div style="grid-column:1/-1;padding:14px;text-align:center;color:var(--muted)">⏳ กำลังโหลดข้อมูลที่ยิงจากชีท…</div>';
+  let g;try{g=await gatherScanned();}catch(e){console.error('renderSummary',e);g={scList:[],tfList:[],src:'err'};}
+  const sn=$('sumSrc');if(sn)sn.textContent=g.src==='local'?'💻 ข้อมูลจากเครื่องนี้ (ยังไม่พบในชีท — ลองกดบันทึก/รอ sync)':g.src==='err'?'⚠️ โหลดชีทไม่สำเร็จ — กด 🔄 คำนวณใหม่':'📡 อ่านจากชีทเช็คสินค้าออก — ทุกเครื่องเห็นตรงกัน';
+  const {short,notSc,transfer,tfCases,bills}=buildSummarySections(g.scList,g.tfList);
+  const tf=transfer,tfSku=transfer.length;
   let tS=0,tC=0,tB=0;bills.forEach(x=>{tS+=x.sku;tC+=x.cs;tB+=x.bt;});
 
   $('sumStats').innerHTML=[['ได้ไม่ครบ',short.length+' ตัว','danger'],['ยังไม่ได้ยิง',notSc.length+' ตัว','danger'],['โอนย้าย',tfSku+' SKU',''],['เปิดบิล',bills.length+' ใบ','green']].map(a=>`<div class="stat-card ${a[2]}"><div class="s-label">${a[0]}</div><div class="s-value">${a[1]}</div></div>`).join('');
