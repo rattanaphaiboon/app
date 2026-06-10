@@ -417,7 +417,7 @@ body.dark .spin-box{background:var(--card-bg)}
 </nav>
 
 <script>
-const VERSION='5.6';
+const VERSION='5.7';
 const DEFAULT_ORDER_ID='1ZOS3vAPbizWCG_Y7A6rODjIznSMf1_FDSGZ_ZUr_RjQ';
 const DEFAULT_ORDER_GID='1632859410';
 const PDDT_ID='16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
@@ -432,6 +432,7 @@ const PRICE_TIER3='CC03';  // ราคา fallback ตัวที่ 3 ("CS 03
 const C={date:0,branch:1,branchName:2,doc:3,form:4,smGroup:6,smCode:7,smName:8,qty:9,unit:10,barcode:13,name:14,unitCS:15,price:16,total:17,flag:18};
 
 let pddtMap=null;        // barcode -> {catGroup,catType,shortName}
+let masterByItem=null;   // SMR item code (H) -> บาร์โค้ดรัตน (จาก WMS_barcode_SMR gid 884942323)
 let lastBuild=null;      // {branchList, branchName, inGroups, noRows, totals}
 
 // ── helpers ──
@@ -525,6 +526,16 @@ async function loadPickerMap(){
   }catch(e){toast('โหลดชีทคนจัดไม่สำเร็จ — ข้ามไปก่อน','warning');return{};}
 }
 
+// ── master WMS_barcode_SMR (gid 884942323): itemCode(0) -> barcode(4) — สะพาน รหัส SMR (ช่อง H ออเดอร์) → บาร์โค้ดรัตน → PDDT ──
+async function loadMasterMap(){
+  try{
+    const rows=parseCsvRaw(await fetchCsv(gvizUrl(DEFAULT_PICKER_ID,{gid:'884942323'})));
+    // กรองบาร์ปลอม: บางแถว master ใส่รหัส SMR แทนบาร์โค้ด (สั้น 6-8 หลัก / ซ้ำ itemCode) — ไม่ใช่บาร์จริง ยิงเช็คไม่ได้
+    const m={};for(let i=1;i<rows.length;i++){const ic=clean(rows[i][0]),bc=clean(rows[i][4]);if(ic&&bc&&bc!==ic&&bc.length>=12&&!m[ic])m[ic]=bc;}
+    masterByItem=m;return m;
+  }catch(e){console.error('master',e);toast('โหลด master บาร์โค้ดไม่สำเร็จ — สินค้าอาจขึ้น (ไม่มีในระบบ)','warning');masterByItem=masterByItem||{};return masterByItem;}
+}
+
 // ── core: build consolidated picking data ──
 function shortBranch(name){const m=clean(name).match(/\(([^)]+)\)/);return m?m[1]:clean(name);}
 // ราคา/CS จาก PDDT: PRICE S01 CS → ถ้าไม่มี PRICE CC01 CS → ถ้าไม่มี (CC03/S03 ตาม PRICE_TIER3) CS
@@ -537,8 +548,11 @@ async function run(forcePddt){
     const src={id:DEFAULT_ORDER_ID,gid:DEFAULT_ORDER_GID};  // ลิงก์ตายตัว: ชีทวางใบสั่งซื้อ
     await loadPddt(forcePddt);
     showSpin('โหลดใบสั่งซื้อ...');
-    const rows=parseCsvRaw(await fetchCsv(gvizUrl(src.id,{gid:src.gid})));
-    const pickerMap=await loadPickerMap();
+    const [rows,pickerMap]=await Promise.all([
+      fetchCsv(gvizUrl(src.id,{gid:src.gid})).then(parseCsvRaw),
+      loadPickerMap(),
+      loadMasterMap()
+    ]);
 
     const lines=rows.filter(r=>/^\d{3,}$/.test(clean(r[C.branch]))&&clean(r[C.qty])!=='');
     if(!lines.length){toast('ไม่พบรายการสั่งซื้อในชีทนี้','error');hideSpin();btn.disabled=false;return;}
@@ -546,14 +560,17 @@ async function run(forcePddt){
     const branchName={},agg={};scanBranchFull={};
     for(const r of lines){
       const br=clean(r[C.branch]);branchName[br]=shortBranch(r[C.branchName]);scanBranchFull[br]=clean(r[C.branchName]);
-      const barcode=clean(r[C.barcode]);const flag=clean(r[C.flag]);
+      // บาร์โค้ด: คอลัมน์ N (ไฟล์เก่า) → ไม่มี → รหัส SMR (H) เปิดจาก master itemCode→barcode
+      let barcode=clean(r[C.barcode]);
+      if(!barcode&&masterByItem)barcode=masterByItem[clean(r[C.smCode])]||'';
+      const flag=clean(r[C.flag]);
       const inSys=barcode!==''&&!/ไม่มี/.test(flag);
       const qty=numv(r[C.qty]);
       const key=inSys?('B|'+barcode):('S|'+clean(r[C.smCode])+'|'+clean(r[C.smName]));
       if(!agg[key]){
         const pd=inSys?pddtMap[barcode]:null;
         agg[key]={inSys,barcode:inSys?barcode:'',
-          name:inSys?(clean(r[C.name])||(pd&&pd.shortName)||''):clean(r[C.smName]),
+          name:inSys?(clean(r[C.name])||(pd&&pd.shortName)||clean(r[C.smName])):clean(r[C.smName]),
           unit:clean(r[C.unitCS])||clean(r[C.unit]),
           catGroup:pd?pd.catGroup:'',catType:pd?pd.catType:'',
           smGroup:clean(r[C.smGroup]),smCode:clean(r[C.smCode]),
@@ -1096,8 +1113,8 @@ async function exportMap(){
     showSpin('โหลด master บาร์โค้ด...');
     const refRows=parseCsvRaw(await fetchCsv(gvizUrl(DEFAULT_PICKER_ID,{gid:'884942323'})));
     hideSpin();
-    const refExact=new Set(),refNormMap={};let supplier='';
-    for(let i=1;i<refRows.length;i++){const b=clean(refRows[i][4]);if(b){refExact.add(b);const s=b.replace(/^0+/,'');if(!(s in refNormMap))refNormMap[s]=b;if(!supplier)supplier=clean(refRows[i][3]);}}
+    const refExact=new Set(),refNormMap={},refByItem={};let supplier='';
+    for(let i=1;i<refRows.length;i++){const b=clean(refRows[i][4]),ic=clean(refRows[i][0]);if(b){refExact.add(b);const s=b.replace(/^0+/,'');if(!(s in refNormMap))refNormMap[s]=b;if(ic&&b!==ic&&b.length>=12&&!refByItem[ic])refByItem[ic]=b;if(!supplier)supplier=clean(refRows[i][3]);}}
     const refMatch=code=>refExact.has(code)?code:(refNormMap[code.replace(/^0+/,'')]||'');  // คืนบาร์ master ที่ตรง หรือ ''
     // สินค้าที่จับคู่โดยยิง (scan-to-link): อ่านชีทเช็คสินค้าออก (หมายเหตุ 'SMR <รหัส>' — เห็นทุกเครื่อง) + ลิงก์ในเครื่องนี้
     showSpin('เช็คสินค้าที่จับคู่ยิงแล้ว...');
@@ -1116,6 +1133,10 @@ async function exportMap(){
       const our=(pd&&pd.shortName)||ourSheet;
       const lk=linkedBySm[itemCode];
       if(lk&&lk.bc){match.push([branch,qty,code,lk.bc,'จับคู่(ยิง)',smrName,lk.name||our,lk.price||price]);continue;}  // จับคู่โดยยิงแล้ว → สินค้าตรง ไม่ลง "ไม่เจอสินค้า"
+      // ไม่มีบาร์ในออเดอร์ (ไฟล์ใหม่) → เปิดจากรหัสสินค้า H ใน master itemCode→barcode
+      if(code===''&&itemCode&&refByItem[itemCode]){
+        const mb2=refByItem[itemCode],pd2=pddtMap[mb2],price2=pd2?(pd2.pS01>0?pd2.pS01:(pd2.pC03>0?pd2.pC03:'')):'';
+        match.push([branch,qty,'',mb2,'ตรง (รหัสสินค้า)',smrName,(pd2&&pd2.shortName)||our,price2]);continue;}
       if(code===''){noItem.push([branch,qty,'','','',smrName,our,'']);continue;}  // ไม่มีบาร์ (รีเจนซี่)
       const mb=refMatch(code);
       if(mb)match.push([branch,qty,code,mb,code===mb?'ตรง':'ไม่ตรง',smrName,our,price]);  // เทียบบาร์เค้ากับ master: ตรงเป๊ะ / ไม่ตรง(0 ต่าง)
