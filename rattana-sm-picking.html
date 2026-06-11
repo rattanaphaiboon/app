@@ -373,6 +373,7 @@ body.dark .spin-box{background:var(--card-bg)}
       <div class="tbl-wrap"><table class="tbl" id="pickTbl"></table></div>
       <div class="btn-row" style="margin-top:10px">
         <button class="btn btn-success" id="btnSave" onclick="saveToSheet()">💾 บันทึกลงชีท</button>
+        <button class="btn btn-outline" onclick="hydrateFromSheet(true)" title="ดึงรายการล่าสุดจากชีท (รวมทุกเครื่อง)">🔄 ดึงจากชีท</button>
         <button class="btn btn-navy" onclick="exportSmrExcel()">📊 Excel</button>
         <button class="btn btn-outline" onclick="clearPicked()">🗑️ ล้าง</button>
       </div>
@@ -433,7 +434,7 @@ body.dark .spin-box{background:var(--card-bg)}
 </nav>
 
 <script>
-const VERSION='5.16';
+const VERSION='5.17';
 const DEFAULT_ORDER_ID='1ZOS3vAPbizWCG_Y7A6rODjIznSMf1_FDSGZ_ZUr_RjQ';
 const DEFAULT_ORDER_GID='1632859410';
 const PDDT_ID='16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
@@ -855,7 +856,7 @@ function initScan(){
   for(const g of lastBuild.groups)for(const r of g.rows){if(r.inSys&&r.barcode&&!pddtLookup(r.barcode))lastBuild.matchable.push(r);}
   sOrderDate=lastBuild.date||'';sDoc=buildDocNumber();
   applyLinks();restorePicked();renderScanInfo();renderPicked();
-  if(!picked.length)hydrateFromSheet();   // เครื่องอื่นยิงไว้ → ดึงจากชีทมาโชว์
+  hydrateFromSheet();   // ดึงจากชีท (รวมทุกเครื่อง) มา merge ทุกครั้งที่โหลด — เห็นของทุกเครื่อง
 }
 function renderScanInfo(){
   const skuN=Object.keys(scanMap).length;let totCS=0;Object.values(scanMap).forEach(x=>totCS+=x.total);
@@ -1014,17 +1015,18 @@ const pickKey=()=>'smr_pick_'+sDoc;
 function savePicked(){if(!sDoc)return;try{localStorage.setItem(pickKey(),JSON.stringify({picked,dirty:sDirty}));}catch(e){}}
 function restorePicked(){try{const o=JSON.parse(localStorage.getItem(pickKey())||'null');if(o&&Array.isArray(o.picked)){picked=o.picked;sDirty=!!o.dirty;}else{picked=[];sDirty=false;}}catch(e){picked=[];sDirty=false;}}
 
-// ── เครื่องนี้ยังไม่มีรายการ (เปิดดูจากเครื่องอื่น) → ดึง "ที่ยิงแล้ว" จากชีทมาแสดง/แก้ต่อได้ ──
-async function hydrateFromSheet(){
-  if(picked.length)return;
+// ── ดึง "ที่ยิงแล้ว" จากชีท (รวมทุกเครื่อง) → merge กับตัวในเครื่องที่ยังไม่ได้ save · เรียกทุกครั้งที่โหลด + ปุ่มดึงเอง ──
+async function hydrateFromSheet(manual){
   try{
     const src=parseSheetUrl($('bkUrl').value)||{id:DEFAULT_SMR_ID,gid:DEFAULT_SMR_GID};
+    if(manual)showSpin('ดึงจากชีท...');
     const rows=parseCsvRaw(await fetchCsv(gvizUrl(src.id,{gid:src.gid})));
-    if(rows.length<2||picked.length)return;
+    if(manual)hideSpin();
+    if(rows.length<2){if(manual)toast('ชีทว่าง','info');return;}
     const dateBase=sDoc.split('/')[0];
     let dr=rows.slice(1).filter(r=>clean(r[1])===sDoc);
     if(!dr.length)dr=rows.slice(1).filter(r=>clean(r[1]).indexOf(dateBase)===0);
-    if(!dr.length)return;
+    if(!dr.length){if(manual)toast('ยังไม่มีรายการในชีทวันนี้','info');return;}
     const rev={};sBL.forEach(b=>{rev[scanBranchFull[b]||'']=b;rev[sShort[b]||'']=b;});
     let tfSet=new Set();
     try{const t=parseCsvRaw(await fetchCsv(gvizUrl(DEFAULT_PICKER_ID,{gid:TRANSFER_SRC_GID})));for(let i=1;i<t.length;i++){const b=clean(t[i][0]);if(b)tfSet.add(b);}}catch(e){}
@@ -1037,8 +1039,8 @@ async function hydrateFromSheet(){
       if(b)o.alloc[b]=(o.alloc[b]||0)+q;else unmapped++;
       o.received+=q;
     });
-    const list=Object.values(m);if(!list.length)return;
-    // เติมยอดสั่ง/หน่วย: ตัวในระบบจาก scanMap · ตัวจับคู่จาก noRows (พร้อม mark ✅ จับคู่แล้ว)
+    const list=Object.values(m);if(!list.length){if(manual)toast('ไม่มีรายการในชีท','info');return;}
+    // เติมยอดสั่ง/หน่วย: ตัวในระบบจาก scanMap · ตัวจับคู่จาก matchable (พร้อม mark ✅ จับคู่แล้ว)
     list.forEach(o=>{
       const sm=scanMap[o.barcode];
       if(sm){o.per=sm.per;o.total=sm.total;o.unit=sm.unit;if(!o.name)o.name=sm.name;if(!o.priceCS)o.priceCS=sm.priceCS;return;}
@@ -1048,10 +1050,13 @@ async function hydrateFromSheet(){
       else{o.per=Object.assign({},o.alloc);o.total=o.received;}
       scanMap[o.barcode]={barcode:o.barcode,name:o.name,unit:o.unit,priceCS:o.priceCS,per:o.per,total:o.total,smr:o.smr,smCode:o.smCode,smrName:o.smrName};
     });
-    picked=list;sDirty=false;renderPicked();
-    $('saveHint').textContent='📡 ดึงจากชีท '+list.length+' รายการ (ยิงจากเครื่องไหนก็เห็น)'+(unmapped?' · ⚠️ '+unmapped+' แถว map สาขาไม่ได้':'');
-    toast('📡 ดึงรายการที่ยิงแล้วจากชีท '+list.length+' รายการ','info');
-  }catch(e){console.error('hydrate',e);}
+    // MERGE: ชีท (ทุกเครื่อง) + ตัวในเครื่องที่ยังไม่ขึ้นชีท (กันงานหายถ้า save ไม่ทัน/ออฟไลน์)
+    const sheetBc=new Set(list.map(o=>o.barcode));
+    const localOnly=picked.filter(p=>!sheetBc.has(p.barcode));
+    picked=list.concat(localOnly);sDirty=localOnly.length>0;renderPicked();
+    $('saveHint').textContent='📡 ดึงจากชีท '+list.length+' รายการ (ทุกเครื่อง)'+(localOnly.length?' + เครื่องนี้ '+localOnly.length+' (ยังไม่ขึ้นชีท)':'')+(unmapped?' · ⚠️ '+unmapped+' แถว map สาขาไม่ได้':'');
+    toast('📡 ดึงจากชีท '+list.length+' รายการ (รวมทุกเครื่อง)'+(localOnly.length?' + '+localOnly.length+' ในเครื่อง':''),'info');
+  }catch(e){console.error('hydrate',e);if(manual){hideSpin();toast('ดึงจากชีทไม่สำเร็จ: '+(e.message||e),'error');}}
 }
 let pickBranchFilter='';
 function setPickBranch(b){pickBranchFilter=(pickBranchFilter===b)?'':b;renderPicked();}
