@@ -431,7 +431,7 @@ body.dark .spin-box{background:var(--card-bg)}
 </nav>
 
 <script>
-const VERSION='5.13';
+const VERSION='5.14';
 const DEFAULT_ORDER_ID='1ZOS3vAPbizWCG_Y7A6rODjIznSMf1_FDSGZ_ZUr_RjQ';
 const DEFAULT_ORDER_GID='1632859410';
 const PDDT_ID='16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
@@ -846,6 +846,9 @@ function initScan(){
   sColor={};sBL.forEach((b,i)=>sColor[b]=BRANCH_COLORS[i%BRANCH_COLORS.length]);
   scanMap={};
   for(const g of lastBuild.groups)for(const r of g.rows){if(r.inSys&&r.barcode&&!scanMap[r.barcode])scanMap[r.barcode]={barcode:r.barcode,name:r.name,unit:simpleUnit(r.unit),priceCS:r.priceCS||0,per:r.per,total:r.total};}
+  // matchable = ที่รัตนระบุไม่ได้: ไม่มีบาร์ (noRows) + ในระบบแต่บาร์(จาก master)ไม่อยู่ PDDT (— ไม่ระบุหมวด —) → ยิงบาร์จริงมาจับคู่ได้
+  lastBuild.matchable=(lastBuild.noRows||[]).slice();
+  for(const g of lastBuild.groups)for(const r of g.rows){if(r.inSys&&r.barcode&&!pddtLookup(r.barcode))lastBuild.matchable.push(r);}
   sOrderDate=lastBuild.date||'';sDoc=buildDocNumber();
   applyLinks();restorePicked();renderScanInfo();renderPicked();
   if(!picked.length)hydrateFromSheet();   // เครื่องอื่นยิงไว้ → ดึงจากชีทมาโชว์
@@ -876,7 +879,7 @@ function onScanFound(code){
   if(!item){
     $('manual-bc').value='';lastScanned='';
     const pd=pddtLookup(code),nm=pddtName(pd);   // เจอใน PDDT ไหม → บอกว่าคือสินค้าอะไรของรัตน
-    const hasNoSys=lastBuild&&lastBuild.noRows&&lastBuild.noRows.some(r=>!r.linkedBc);
+    const hasNoSys=lastBuild&&lastBuild.matchable&&lastBuild.matchable.some(r=>!r.linkedBc);
     if(hasNoSys){beep(true);vibrate([120]);setScanStatus('❓ '+(nm?'นี่คือ '+nm+' ':'')+'— ไม่อยู่ในออเดอร์วันนี้'+(nm?'':' · ไม่มีใน PDDT')+' → เลือกจับคู่ SMR ด้านล่าง','err');openLinkPanel(code);}
     else{beep(true);vibrate([200]);setScanStatus(nm?('❓ นี่คือ '+nm+' — มีใน PDDT แต่ไม่ได้สั่งวันนี้ (บาร์ '+code+')'):('❌ ไม่รู้จักบาร์ '+code+' — ไม่อยู่ในออเดอร์ และไม่มีใน PDDT'),'err');}
     return;
@@ -944,8 +947,15 @@ function mkLinkedEntry(bc,row){
   return {barcode:bc,name:ourName||row.name,unit:simpleUnit(row.unit),priceCS:price,per:row.per,total:row.total,smr:true,smCode:row.smCode,smrName:row.name};
 }
 function applyLinks(){
-  if(!lastBuild||!lastBuild.noRows)return;
-  loadLinks().forEach(l=>{const row=lastBuild.noRows.find(r=>r.smCode===l.smCode&&r.name===l.smName);if(!row)return;row.linkedBc=l.bc;if(!scanMap[l.bc])scanMap[l.bc]=mkLinkedEntry(l.bc,row);});
+  if(!lastBuild||!lastBuild.matchable)return;
+  let any=false;
+  loadLinks().forEach(l=>{const row=lastBuild.matchable.find(r=>r.smCode===l.smCode&&r.name===l.smName);if(!row||row.linkedBc)return;
+    const entry=mkLinkedEntry(l.bc,row);
+    if(row.inSys&&row.barcode&&row.barcode!==l.bc)delete scanMap[row.barcode];   // ลบ key บาร์เก่า (กันนับซ้ำ)
+    scanMap[l.bc]=entry;row.linkedBc=l.bc;
+    if(row.inSys){row.barcode=l.bc;row.name=entry.name;row.priceCS=entry.priceCS;row.value=(entry.priceCS||0)*(row.total||0);}
+    any=true;});
+  if(any)try{renderResultTables();}catch(e){}
 }
 function openLinkPanel(code){
   pendingLinkCode=code;scannerActive=false;
@@ -958,22 +968,28 @@ function openLinkPanel(code){
 }
 function renderLinkList(){
   const q=clean($('lkSearch').value).toLowerCase();
-  const rows=(lastBuild&&lastBuild.noRows)||[];
+  const rows=(lastBuild&&lastBuild.matchable)||[];
   const items=rows.map((r,i)=>({r,i})).filter(x=>!q||x.r.name.toLowerCase().indexOf(q)>=0||String(x.r.smCode).indexOf(q)>=0);
   items.sort((a,b)=>(a.r.linkedBc?1:0)-(b.r.linkedBc?1:0)||(String(b.r.smCode)===pendingLinkCode?1:0)-(String(a.r.smCode)===pendingLinkCode?1:0));
   $('lkList').innerHTML=items.length?items.map(({r,i})=>{
     const chips=sBL.filter(b=>(r.per[b]||0)>0).map(b=>`<span class="chip" style="background:${sColor[b]}">${esc(sShort[b])} <span class="c-qty">${fmt(r.per[b])}</span></span>`).join(' ');
     const hit=String(r.smCode)===pendingLinkCode?' hit':'';
     if(r.linkedBc)return `<div class="lk-item done"><div class="lk-main"><div class="lk-name">✅ ${esc(r.name)}</div><div class="lk-sub">จับคู่แล้ว → ${esc(r.linkedBc)} · รหัส SMR ${esc(r.smCode)}</div></div></div>`;
-    return `<div class="lk-item${hit}" onclick="linkSmr(${i})"><div class="lk-main"><div class="lk-name">${esc(r.name)}</div><div class="lk-sub">รหัส SMR ${esc(r.smCode)} · สั่งรวม <b>${fmt(r.total)}</b> ${esc(simpleUnit(r.unit))}</div><div class="chips" style="margin-top:6px">${chips}</div></div><div class="lk-pick">เลือก ›</div></div>`;
-  }).join(''):'<div style="color:var(--muted);text-align:center;padding:12px">— ไม่พบ / ไม่มีสินค้า "(ไม่มีในระบบ)" เหลือให้จับคู่ —</div>';
+    const note=r.inSys?` · <span style="color:#b91c1c">บาร์รัตนเดิม …${esc(String(r.barcode).slice(-6))} ไม่ตรง PDDT</span>`:'';
+    return `<div class="lk-item${hit}" onclick="linkSmr(${i})"><div class="lk-main"><div class="lk-name">${esc(r.name)}</div><div class="lk-sub">รหัส SMR ${esc(r.smCode)} · สั่งรวม <b>${fmt(r.total)}</b> ${esc(simpleUnit(r.unit))}${note}</div><div class="chips" style="margin-top:6px">${chips}</div></div><div class="lk-pick">เลือก ›</div></div>`;
+  }).join(''):'<div style="color:var(--muted);text-align:center;padding:12px">— ไม่พบ / ไม่มีตัวให้จับคู่ —</div>';
 }
 function linkSmr(i){
-  const row=lastBuild&&lastBuild.noRows&&lastBuild.noRows[i];
+  const row=lastBuild&&lastBuild.matchable&&lastBuild.matchable[i];
   if(!row||row.linkedBc||!pendingLinkCode)return;
   const code=pendingLinkCode;
   const entry=mkLinkedEntry(code,row);
-  scanMap[code]=entry;row.linkedBc=code;saveLink(code,row);
+  const oldBc=row.inSys?row.barcode:'';
+  if(oldBc&&oldBc!==code)delete scanMap[oldBc];   // ออเดอร์นี้ผูกบาร์ใหม่ → ลบ key บาร์เก่า (กันนับซ้ำ/ขึ้น "ยังไม่ได้ยิง")
+  scanMap[code]=entry;
+  saveLink(code,row);            // เซฟด้วยชื่อ SMR เดิม (ก่อนแก้ display)
+  row.linkedBc=code;
+  if(row.inSys){row.barcode=code;row.name=entry.name;row.priceCS=entry.priceCS;row.value=(entry.priceCS||0)*(row.total||0);try{renderResultTables();}catch(e){}}
   closeLinkPanel(true);
   beep();vibrate([60,40,60]);
   setScanStatus('✓ จับคู่: '+entry.name+' ↔ SMR '+row.name+' — ใส่จำนวน แล้วกด บันทึก','ok');
