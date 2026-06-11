@@ -646,14 +646,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v7.0.0</div>
+<div class="version-badge">SupplyLink v7.1.0</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    SupplyLink v6.6.6 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v7.0.0';
+const VERSION = 'v7.1.0';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -3872,6 +3872,7 @@ function renderGRToday() {
     const addBtn = $('#addLineBtn');
     if (addBtn) addBtn.addEventListener('click', addFOCRow);
     wireExtraFees();
+    wireGRInvoice();
     restoreGRDraft();
   }
 
@@ -4025,6 +4026,7 @@ function grDetailHTML(a) {
     '</div>' +
   '</div>' +
   extraFeesCardHTML(a) +
+  grInvoiceCardHTML(a) +
   '<div class="card mt-12">' +
     '<div class="card-head"><h3>บันทึก / ข้อสังเกต</h3></div>' +
     '<div class="card-body" style="display:flex;flex-direction:column;gap:10px">' +
@@ -4036,6 +4038,105 @@ function grDetailHTML(a) {
       '</div>' +
     '</div>' +
   '</div>';
+}
+
+/* ── GR: ใบกำกับ/ใบส่งของ — ขนส่งลงของเสร็จ ต้องถ่ายเอกสารแนบ + เช็คยอด ก่อนปิดงาน ── */
+function _grInv(id) {
+  if (!S._grInv) S._grInv = {};
+  if (!S._grInv[id]) S._grInv[id] = { imgs: [], docType: 'ใบกำกับภาษี', total: '', match: false, touched: false, notes: '', uploaded: false };
+  return S._grInv[id];
+}
+// ยอดรวม PO ของนัด (จาก PO line จริงใน ERP) · null = ยังโหลดอยู่
+function grPoValue(a) {
+  const lines = (S._grLines && S._grLines[a.id]) || null;
+  if (!lines) return null;
+  return Math.round(lines.reduce((s, l) => s + (Number(l.value) || 0), 0) * 100) / 100;
+}
+function grInvDiffBox(a, inv) {
+  const pv = grPoValue(a);
+  const t = Number(inv.total);
+  if (!inv.total || isNaN(t)) return '<div style="font-size:11px;color:var(--ink-4)">พิมพ์ยอดรวมในใบกำกับ — ระบบเทียบกับยอด PO ให้อัตโนมัติ'+(pv == null ? ' (ยอด PO กำลังโหลด…)' : ' · ยอด PO ฿'+fmtMoney(pv))+'</div>';
+  if (pv == null) return '<div style="font-size:11px;color:var(--ink-4)">ยอด PO กำลังโหลด…</div>';
+  const d = Math.round((t - pv) * 100) / 100;
+  if (Math.abs(d) < 0.01) return '<div style="background:var(--ok-bg);color:var(--ok);border-radius:8px;padding:8px 12px;font-size:12.5px;font-weight:700">✓ ตรงกับยอด PO (฿'+fmtMoney(pv)+') พอดี</div>';
+  return '<div style="background:var(--warn-bg);color:var(--warn);border-radius:8px;padding:8px 12px;font-size:12.5px;font-weight:700">△ ต่างจากยอด PO (฿'+fmtMoney(pv)+') <span class="num">'+(d > 0 ? '+' : '')+fmtMoney(d)+' ฿</span></div>';
+}
+// ย่อรูปฝั่ง client (ยาวสุด 1280px · JPEG q0.78) → base64 — อัปเร็ว ไม่เปลือง Drive
+function resizeImageToJpeg(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        const MAX = 1280;
+        let w = img.width, h = img.height;
+        if (Math.max(w, h) > MAX) { const k = MAX / Math.max(w, h); w = Math.round(w * k); h = Math.round(h * k); }
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        cv.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve({ data: cv.toDataURL('image/jpeg', 0.78), mime: 'image/jpeg' });
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+function grInvoiceCardHTML(a) {
+  const inv = _grInv(a.id);
+  const dis = inv.uploaded ? ' disabled' : '';
+  const thumbs = inv.imgs.map((im, i) =>
+    '<div style="position:relative;width:86px;height:86px;border-radius:8px;overflow:hidden;border:1px solid var(--line);flex-shrink:0">' +
+      '<img src="'+im.data+'" style="width:100%;height:100%;object-fit:cover;display:block">' +
+      (inv.uploaded ? '' : '<button type="button" class="gri-rm" data-i="'+i+'" style="position:absolute;top:3px;right:3px;width:20px;height:20px;border-radius:50%;border:0;background:rgba(11,19,34,.65);color:#fff;font-size:11px;line-height:1;cursor:pointer">✕</button>') +
+    '</div>').join('');
+  const opt = v => '<option'+(inv.docType === v ? ' selected' : '')+'>'+v+'</option>';
+  return '<div class="card mt-12">' +
+    '<div class="card-head"><div><h3>📎 ใบกำกับ / ใบส่งของ <span style="color:var(--err)">*</span></h3><div class="sub">ขนส่งลงของเสร็จ → ถ่ายเอกสารแนบ + เช็คยอด — ปิดงานไม่ได้ถ้ายังไม่แนบ</div></div>' +
+      (inv.uploaded ? '<span class="chip chip-ok">✓ อัปขึ้น Drive แล้ว</span>' : (inv.imgs.length ? '<span class="chip chip-ok chip-sm">'+inv.imgs.length+' รูป</span>' : '<span class="chip chip-warn chip-sm">ยังไม่แนบ</span>')) +
+    '</div>' +
+    '<div class="card-body">' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start">' + thumbs +
+        (inv.imgs.length < 10 && !inv.uploaded ? '<button type="button" id="griAdd" style="width:86px;height:86px;border:1.5px dashed var(--brand);border-radius:8px;background:var(--brand-tint);color:var(--brand);font-weight:700;font-size:11px;cursor:pointer"><span style="font-size:18px;display:block;line-height:1.2">＋</span>เพิ่มรูป</button>' : '') +
+      '</div>' +
+      '<input type="file" id="griFile" accept="image/*" multiple style="display:none">' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px">' +
+        '<div><label class="label-plain">ประเภทเอกสาร</label><select class="select" id="griType"'+dis+'>'+opt('ใบกำกับภาษี')+opt('ใบส่งสินค้า')+opt('ใบกำกับภาษี + ใบส่งสินค้า')+'</select></div>' +
+        '<div><label class="label-plain">ยอดรวมในใบกำกับ (฿)</label><input type="number" inputmode="decimal" class="input num" id="griTotal" value="'+esc(inv.total)+'" min="0" step="any" placeholder="0.00"'+dis+'></div>' +
+      '</div>' +
+      '<div id="griDiff" style="margin-top:10px">'+grInvDiffBox(a, inv)+'</div>' +
+      '<label style="display:inline-flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;font-weight:600;cursor:pointer"><input type="checkbox" id="griMatch" style="width:16px;height:16px;accent-color:var(--ok)"'+(inv.match ? ' checked' : '')+dis+'> ยอดตรงกับ PO</label>' +
+      '<div style="margin-top:10px"><label class="label-plain">หมายเหตุ</label><input class="input" id="griNotes" value="'+esc(inv.notes)+'" placeholder="เช่น ราคาบางตัวไม่ตรง / มีของแถมไม่อยู่ในบิล"'+dis+'></div>' +
+      (inv.uploaded ? '' : '<div style="font-size:10.5px;color:var(--ink-4);margin-top:8px">รูปจะอัปขึ้น Google Drive ตอนกด "บันทึก GR"</div>') +
+    '</div></div>';
+}
+function wireGRInvoice() {
+  const a = _currentAppt(); if (!a) return;
+  const inv = _grInv(a.id);
+  const add = $('#griAdd'), file = $('#griFile');
+  if (add && file) {
+    add.addEventListener('click', () => file.click());
+    file.addEventListener('change', async () => {
+      const files = Array.from(file.files || []).slice(0, 10 - inv.imgs.length);
+      if (!files.length) return;
+      showAppLoading('กำลังย่อรูป…');
+      for (const f of files) { try { inv.imgs.push(await resizeImageToJpeg(f)); } catch (e) { console.error(e); } }
+      hideAppLoading();
+      renderContentOnly();
+    });
+  }
+  $$('.gri-rm').forEach(b => b.addEventListener('click', () => { inv.imgs.splice(Number(b.dataset.i), 1); renderContentOnly(); }));
+  const t = $('#griType'); if (t) t.addEventListener('change', () => { inv.docType = t.value; });
+  const tot = $('#griTotal');
+  if (tot) tot.addEventListener('input', () => {
+    inv.total = tot.value;
+    const pv = grPoValue(a), n = Number(inv.total);
+    if (pv != null && inv.total && !isNaN(n) && !inv.touched) { inv.match = Math.abs(n - pv) < 0.01; const ck = $('#griMatch'); if (ck) ck.checked = inv.match; } // auto-ติ๊กถ้าตรง จนกว่าผู้ใช้แตะเอง
+    const d = $('#griDiff'); if (d) d.innerHTML = grInvDiffBox(a, inv);
+  });
+  const ck = $('#griMatch'); if (ck) ck.addEventListener('change', () => { inv.match = ck.checked; inv.touched = true; });
+  const nt = $('#griNotes'); if (nt) nt.addEventListener('input', () => { inv.notes = nt.value; });
 }
 
 function wirePOLineHandlers() {
@@ -4481,6 +4582,29 @@ async function handleGRSubmit() {
   if (missingExpected.length) {
     toast('ค้างส่งต้องระบุวันที่จะมาส่ง', missingExpected.length+' รายการขาดวันที่', 'err');
     return;
+  }
+
+  // ── ใบกำกับ/ใบส่งของ: ต้องแนบรูป + อัปขึ้น Drive สำเร็จก่อน ถึงปิดงานได้ ──
+  const inv = _grInv(a.id);
+  if (!inv.uploaded) {
+    if (!inv.imgs.length) { toast('ต้องแนบรูปใบกำกับ/ใบส่งของก่อนปิดงาน', 'ถ่ายเอกสารจากขนส่ง แนบในการ์ด 📎 ด้านล่าง', 'err'); return; }
+    if (!(Number(inv.total) > 0)) { toast('กรอกยอดรวมในใบกำกับ', 'ช่องยอดรวมในการ์ด 📎 ใบกำกับ/ใบส่งของ', 'err'); return; }
+    const pv = grPoValue(a);
+    showAppLoading('กำลังอัปรูปใบกำกับขึ้น Drive… ('+inv.imgs.length+' รูป)');
+    let invRes = null;
+    try {
+      invRes = await callAPI('submitInvoice', { invoice: {
+        apptId: a.id, poRef: (a.pos || []).join(', '), ibRef: '',
+        vendorCode: (a.vendor && a.vendor.code) || '', vendorName: (a.vendor && (a.vendor.name || a.vendor.short)) || '',
+        wlCode: a.wh || '', receivedDate: a.date || '',
+        docType: inv.docType, poValue: pv || 0, invoiceTotal: Number(inv.total) || 0,
+        amountMatch: !!inv.match, notes: inv.notes || '',
+        images: inv.imgs.map(im => ({ data: im.data, mime: im.mime }))
+      } });
+    } catch (e) { console.error('[submitInvoice]', e); }
+    hideAppLoading();
+    if (!invRes || !invRes.ok) { toast('อัปรูปไม่สำเร็จ — ยังไม่ปิดงาน', (invRes && invRes.error) || 'ลองใหม่อีกครั้ง', 'err'); return; }
+    inv.uploaded = true; // กันอัปซ้ำ ถ้า submitGR ล้มแล้วกดใหม่
   }
 
   // Auto-create backorder records in DATA
