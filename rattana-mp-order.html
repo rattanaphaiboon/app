@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rattana จัดของ Pre-Order v1.13</title>
+<title>Rattana จัดของ Pre-Order v1.14</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -149,6 +149,10 @@
   .scan-reject span{font-size:13px;font-weight:400;color:var(--muted)}
   .dup-note{background:#fef3c7;border:1px solid #fcd34d;color:var(--warn);border-radius:8px;padding:7px 11px;font-size:13px;font-weight:600;margin-bottom:10px}
   .cap-warn{background:#fef2f2;border:1px solid #fecaca;color:var(--red);border-radius:8px;padding:7px 11px;font-size:13px;font-weight:600;margin-bottom:6px}
+  .alloc-tbl{width:100%;border-collapse:collapse;font-size:13px}
+  .alloc-tbl th{position:sticky;top:0;background:#f8fafc;color:var(--navy);font-size:12px;font-weight:600;padding:5px 8px;text-align:left}
+  .alloc-tbl td{padding:5px 8px;border-bottom:1px solid var(--border)}
+  .alloc-cut{color:var(--red);font-weight:700}
 </style>
 </head>
 <body>
@@ -162,7 +166,7 @@
     <div id="googleSignInBtn"></div>
     <div id="loginSpinner">⏳ กำลังเข้าสู่ระบบ…</div>
     <div id="loginError"></div>
-    <div class="login-ver">เวอร์ชัน v1.13</div>
+    <div class="login-ver">เวอร์ชัน v1.14</div>
   </div>
 </div>
 
@@ -170,7 +174,7 @@
 <div id="app">
   <div class="topbar">
   <header class="appbar">
-    <div class="title">📦 จัดของ Pre-Order <span class="ver">v1.13</span></div>
+    <div class="title">📦 จัดของ Pre-Order <span class="ver">v1.14</span></div>
     <div class="spacer"></div>
     <div class="who" id="whoBox"></div>
     <a class="hub-btn" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">
@@ -248,7 +252,7 @@
 <script>
 /* ================= CONFIG ================= */
 const CONFIG = {
-  version: 'v1.13',
+  version: 'v1.14',
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
   backendId: '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI',
   orderGid: '691743937',
@@ -655,11 +659,15 @@ function process(){
 
   excluded.sort((a,b)=> String(a.salesman).localeCompare(String(b.salesman)) || String(a.note).localeCompare(String(b.note)));
 
-  // scan reference — ยอดสั่งรวม (EA) ต่อสินค้า (ใช้แสดง "สั่งไว้" ตอนยิงบาร์โค้ดในแท็บเช็คสินค้า)
+  // scan reference — ยอดสั่งรวม (EA) + รายร้าน (พร้อม keyTS) ต่อสินค้า (ใช้แสดง "สั่งไว้" + allocate รายร้านในแท็บเช็คสินค้า)
   const scanMeta={};
   for(const l of lines){
-    if(!scanMeta[l.productKey]) scanMeta[l.productKey]={name:l.productShort||l.productName, eaPerCS:l.eaPerCS, eaPerPA:l.eaPerPA, orderedEA:0};
-    scanMeta[l.productKey].orderedEA += l.eaTotal;
+    if(!scanMeta[l.productKey]) scanMeta[l.productKey]={name:l.productShort||l.productName, eaPerCS:l.eaPerCS, eaPerPA:l.eaPerPA, orderedEA:0, stores:{}};
+    const m=scanMeta[l.productKey]; m.orderedEA += l.eaTotal;
+    const sk=l.storeKey||l.store;
+    if(!m.stores[sk]) m.stores[sk]={salesman:l.salesman,salesmanName:l.name,store:l.store,storeKey:sk,ea:0,keyTS:l.keyTS||0};
+    m.stores[sk].ea += l.eaTotal;
+    if(l.keyTS && (!m.stores[sk].keyTS || l.keyTS<m.stores[sk].keyTS)) m.stores[sk].keyTS=l.keyTS;   // คีย์เร็วสุด = ได้ก่อน
   }
 
   // scan distribution — "ยิงแล้วไปเซลไหน": เต็มลังรายเซล (cellMap) + เต็มลังรวมแบ่งกลับ (scrap)
@@ -957,31 +965,27 @@ function scanLookup(raw){
   const eaPerCS=prod?(prod.qtyCS||0):(meta.eaPerCS||0);
   const eaPerPA=prod?(prod.qtyPA||0):(meta.eaPerPA||0);
   const orderedEA=meta.orderedEA;
-  const dist=(MODEL.scanDist&&MODEL.scanDist[pk])||null;
+  const stores=Object.values(meta.stores||{});
   const ex=scanPicked.find(p=>p.barcode===code);
-  scanCur={barcode:code,name,orderedEA,eaPerCS,eaPerPA,dist,dup:!!ex,_capped:false,qty:(ex?ex.qty:orderedEA),transfer:ex?!!ex.transfer:false};  // default = ครบตามสั่ง
+  scanCur={barcode:code,name,orderedEA,eaPerCS,eaPerPA,stores,dup:!!ex,_capped:false,qty:(ex?ex.qty:orderedEA),transfer:ex?!!ex.transfer:false};  // default = ครบตามสั่ง
   beep(); vibrate();
   const i=document.getElementById('scanInput'); if(i) i.value='';
   renderScanResult();
 }
-function scanDistHtml(d){
-  if(!d || !d.rows || !d.rows.length) return '';
-  const smMap={};
-  d.rows.filter(r=>r.type==='sm').forEach(r=>{ const k=r.salesman||'?';
-    if(!smMap[k]) smMap[k]={name:r.name,cases:0,eaOnly:0,stores:[]};
-    smMap[k].cases+=r.cases||0; smMap[k].eaOnly+=r.eaOnly||0; if(r.store) smMap[k].stores.push(r.store); });
-  let lines='';
-  Object.keys(smMap).sort().forEach(sm=>{ const x=smMap[sm]; const amt=[]; if(x.cases) amt.push(x.cases+' ลัง'); if(x.eaOnly) amt.push(x.eaOnly+' ชิ้น');
-    const st=[...new Set(x.stores)];
-    lines+=`<div class="dist-row"><span class="dist-sm">${esc(sm)} ${esc(x.name||'')}</span><span class="dist-amt">${amt.join(' + ')||'-'}</span><span class="dist-st">${esc(st.slice(0,4).join(', '))}${st.length>4?' …':''}</span></div>`; });
-  const pool=d.rows.filter(r=>r.type==='pool');
-  let poolHtml='';
-  if(pool.length){
-    const chips=pool.map(r=>`<span class="dist-chip">${esc(r.salesman||'')} ${esc(r.store)} <b>${r.pa}${r.ea?'.'+r.ea:''}</b></span>`).join('');
-    poolHtml=`<div class="dist-row pool"><span class="dist-sm">📦 เต็มลังรวม ${d.shipCases} ลัง → แบ่งกลับ (แพ็ค)</span></div><div class="dist-chips">${chips}</div>`;
-  }
-  return `<div class="dist"><div class="dist-h">📍 จัดไปเซลไหน</div>${lines}${poolHtml}</div>`;
+/* เฉลี่ยรายร้าน — ร้านคีย์ก่อนได้ก่อน · ของไม่พอตัดร้านที่คีย์ทีหลังสุด (กฎเดียวกับตัดเศษ) */
+function allocByKey(stores, received){
+  const sorted=[...(stores||[])].sort((a,b)=> (a.keyTS||0)-(b.keyTS||0) || String(a.store).localeCompare(String(b.store)));
+  let left=Math.max(0,Math.round(received||0));
+  return sorted.map(s=>{ const give=Math.min(s.ea,left); left-=give; return {salesman:s.salesman,salesmanName:s.salesmanName,store:s.store,ea:s.ea,give}; });
 }
+function allocTableHtml(c){
+  if(!c.stores || !c.stores.length) return '';
+  const alloc=allocByKey(c.stores, c.qty);
+  const rows=alloc.map(s=>`<tr class="${s.give===0?'cut-row':''}"><td>${esc(s.salesman||'')} ${esc(s.store)}</td><td class="num">${esc(fmtFromEA(s.ea,c.eaPerCS,c.eaPerPA))}</td><td class="num">${s.give? '<b>'+esc(fmtFromEA(s.give,c.eaPerCS,c.eaPerPA))+'</b>' : '<span class="alloc-cut">✂ ตัด</span>'}</td></tr>`).join('');
+  return `<div class="dist"><div class="dist-h">📍 จัดให้ร้านไหน <span class="muted" style="font-weight:400">(คีย์ก่อนได้ก่อน · ไม่พอตัดร้านคีย์ทีหลัง)</span></div>
+    <div class="tbl-wrap" style="max-height:240px"><table class="alloc-tbl"><thead><tr><th>เซล · ร้าน</th><th class="num">สั่ง</th><th class="num">จัดให้</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
+function nowStamp(){ try{ return new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Bangkok',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date()).replace('T',' '); }catch(e){ return ''; } }
 function renderScanResult(){
   const r=document.getElementById('scanResult'); if(!r) return;
   if(!scanCur){ r.innerHTML=''; return; }
@@ -993,7 +997,7 @@ function renderScanResult(){
     <div class="pbar">บาร์โค้ด: ${esc(c.barcode)}</div>
     <div class="ord">📋 สั่งไว้: <b>${ord}</b></div>
     ${dupNote}
-    ${scanDistHtml(c.dist)}
+    <div id="scanAlloc">${allocTableHtml(c)}</div>
     <label style="font-size:13px;color:var(--muted);font-weight:700">จำนวนที่จัดจริง <span class="muted">(ห้ามเกิน ${c.orderedEA})</span></label>
     <div class="recv-box">
       <button class="stp" onclick="scanRecvStep(-1)">−</button>
@@ -1013,7 +1017,7 @@ function renderScanResult(){
   setTimeout(()=>{ const q=document.getElementById('scanQty'); if(q){ q.focus(); q.select(); } },50);
 }
 function scanClamp(v){ let n=parseInt(v); if(!isFinite(n)||n<0) n=0; const max=(scanCur&&scanCur.orderedEA)||0; if(max&&n>max){ n=max; if(scanCur) scanCur._capped=true; } else if(scanCur) scanCur._capped=false; return n; }
-function scanQtyInput(el){ if(!scanCur) return; scanCur.qty=scanClamp(el.value); if(scanCur._capped) el.value=scanCur.qty; const w=document.getElementById('scanCapWarn'); if(w) w.style.display=scanCur._capped?'block':'none'; }
+function scanQtyInput(el){ if(!scanCur) return; scanCur.qty=scanClamp(el.value); if(scanCur._capped) el.value=scanCur.qty; const w=document.getElementById('scanCapWarn'); if(w) w.style.display=scanCur._capped?'block':'none'; const a=document.getElementById('scanAlloc'); if(a) a.innerHTML=allocTableHtml(scanCur); }
 function scanRecvStep(d){ if(!scanCur) return; scanCur.qty=scanClamp((parseInt(scanCur.qty)||0)+d); renderScanResult(); }
 function scanRecvSet(v){ if(!scanCur) return; scanCur.qty=scanClamp(v); renderScanResult(); }
 function toggleScanTransfer(){ if(!scanCur) return; scanCur.transfer=!scanCur.transfer; renderScanResult(); }
@@ -1021,8 +1025,9 @@ function confirmScan(){
   if(!scanCur) return;
   const qty=scanClamp(scanCur.qty);    // กันเกินยอดสั่ง
   if(qty<=0){ toast('ใส่จำนวนก่อน'); return; }
+  const alloc=allocByKey(scanCur.stores||[], qty).filter(s=>s.give>0);   // เฉลี่ยรายร้าน คีย์ก่อนได้ก่อน
   const i=scanPicked.findIndex(p=>p.barcode===scanCur.barcode);
-  const row={barcode:scanCur.barcode,name:scanCur.name,qty,transfer:!!scanCur.transfer};
+  const row={barcode:scanCur.barcode,name:scanCur.name,qty,eaPerCS:scanCur.eaPerCS,eaPerPA:scanCur.eaPerPA,alloc,ts:nowStamp(),transfer:!!scanCur.transfer};
   if(i>=0) scanPicked[i]=row; else scanPicked.push(row);
   scanDirty=true; scanCur=null; saveScanLS(); renderScanResult(); renderScanList();
   toast('✓ เพิ่มแล้ว — ยิงตัวต่อไปได้เลย');
@@ -1045,8 +1050,8 @@ function renderScanList(){
     </div></div>`;
   if(!n){ w.innerHTML=bar+'<div class="empty">ยังไม่มีรายการ — ยิงบาร์โค้ดเพื่อเริ่ม</div>'; return; }
   const body=scanPicked.map((p,i)=>`<tr><td>${i+1}</td><td>${esc(p.barcode)}</td>
-    <td>${esc(p.name)}${p.transfer?' <span class="tbadge">🔁</span>':''}</td>
-    <td class="num"><b>${p.qty}</b></td>
+    <td>${esc(p.name)}${p.transfer?' <span class="tbadge">🔁</span>':''}${p.alloc&&p.alloc.length?` <span class="muted">(${p.alloc.length} ร้าน)</span>`:''}</td>
+    <td class="num"><b>${esc(fmtFromEA(p.qty,p.eaPerCS,p.eaPerPA))}</b></td>
     <td style="white-space:nowrap"><button class="ico-btn" onclick="editScanPick(${i})">✎</button> <button class="ico-btn" onclick="delScanPick(${i})">✕</button></td></tr>`).join('');
   w.innerHTML=bar+`<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Barcode</th><th>ชื่อ</th><th>จำนวน</th><th></th></tr></thead><tbody>${body}</tbody></table></div>`;
 }
@@ -1055,10 +1060,14 @@ async function saveScan(){
   if(!scanPicked.length){ toast('ไม่มีรายการ'); return; }
   loading(true,'กำลังบันทึกลงชีท…');
   try{
-    const rows=scanPicked.map(p=>[p.barcode,p.name,String(p.qty)]);
-    const transferRows=scanPicked.filter(p=>p.transfer).map(p=>[p.barcode,p.name,String(p.qty)]);
-    const payload={action:'saveCheck', tab:'เช็คสินค้าออก', header:['Barcode','ชื่อ','จำนวน'], rows,
-      transferTab:'โอนย้าย', transferHeader:['Barcode','ชื่อ','จำนวน'], transferRows};
+    const rows=[];
+    scanPicked.forEach(p=>{
+      if(p.alloc && p.alloc.length) p.alloc.forEach(a=> rows.push([p.barcode,p.name,a.salesman||'',a.store||'',fmtFromEA(a.give,p.eaPerCS,p.eaPerPA),p.ts||'']));
+      else rows.push([p.barcode,p.name,'','',fmtFromEA(p.qty,p.eaPerCS,p.eaPerPA),p.ts||'']);
+    });
+    const transferRows=scanPicked.filter(p=>p.transfer).map(p=>[p.barcode,p.name,fmtFromEA(p.qty,p.eaPerCS,p.eaPerPA),p.ts||'']);
+    const payload={action:'saveCheck', tab:'เช็คสินค้าออก', header:['Barcode','ชื่อ','เซล','ร้าน','จำนวน','วันเวลาที่ยิง'], rows,
+      transferTab:'โอนย้าย', transferHeader:['Barcode','ชื่อ','จำนวน','วันเวลาที่ยิง'], transferRows};
     const res=await fetch(CONFIG.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});
     const txt=(await res.text()).trim(); let j={}; try{ j=JSON.parse(txt); }catch(e){}
     if(j.ok){ scanDirty=false; saveScanLS(); renderScanList(); toast(`✅ บันทึก ${j.saved} แถว`+(j.transfer?` · โอนย้าย ${j.transfer}`:'')); }
@@ -1068,10 +1077,13 @@ async function saveScan(){
 }
 function exportScanXlsx(){
   if(!scanPicked.length){ toast('ไม่มีรายการ'); return; }
-  const wb=XLSX.utils.book_new(), head=['Barcode','ชื่อ','จำนวน'];
-  const mk=arr=>{ const ws=XLSX.utils.aoa_to_sheet([head,...arr.map(p=>[p.barcode,p.name,String(p.qty)])]); ws['!cols']=[{wch:16},{wch:32},{wch:9}]; forceText(ws,arr.length,[0]); return ws; };
-  XLSX.utils.book_append_sheet(wb,mk(scanPicked),'เช็คสินค้าออก');
-  const trh=scanPicked.filter(p=>p.transfer); if(trh.length) XLSX.utils.book_append_sheet(wb,mk(trh),'โอนย้าย');
+  const wb=XLSX.utils.book_new();
+  const head=['Barcode','ชื่อ','เซล','ร้าน','จำนวน','วันเวลาที่ยิง'], rows=[];
+  scanPicked.forEach(p=>{ if(p.alloc&&p.alloc.length) p.alloc.forEach(a=>rows.push([p.barcode,p.name,a.salesman||'',a.store||'',fmtFromEA(a.give,p.eaPerCS,p.eaPerPA),p.ts||''])); else rows.push([p.barcode,p.name,'','',fmtFromEA(p.qty,p.eaPerCS,p.eaPerPA),p.ts||'']); });
+  const ws=XLSX.utils.aoa_to_sheet([head,...rows]); ws['!cols']=[{wch:16},{wch:30},{wch:10},{wch:24},{wch:16},{wch:16}]; forceText(ws,rows.length,[0]);
+  XLSX.utils.book_append_sheet(wb,ws,'เช็คสินค้าออก');
+  const trh=scanPicked.filter(p=>p.transfer);
+  if(trh.length){ const th=['Barcode','ชื่อ','จำนวน','วันเวลาที่ยิง']; const tr=trh.map(p=>[p.barcode,p.name,fmtFromEA(p.qty,p.eaPerCS,p.eaPerPA),p.ts||'']); const tws=XLSX.utils.aoa_to_sheet([th,...tr]); tws['!cols']=[{wch:16},{wch:30},{wch:16},{wch:16}]; forceText(tws,tr.length,[0]); XLSX.utils.book_append_sheet(wb,tws,'โอนย้าย'); }
   XLSX.writeFile(wb,`เช็คสินค้า-${todayBKK()}.xlsx`); toast('✅ ดาวน์โหลดแล้ว');
 }
 /* กล้อง html5-qrcode (config เดียวกับ Stock C4 / SMR) */
