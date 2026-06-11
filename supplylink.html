@@ -362,6 +362,8 @@ a { color: var(--brand); text-decoration: none; }
 .m-action.accent { background: var(--accent-tint); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
 .m-action .ic-wrap { width:32px; height:32px; border-radius:8px; background: var(--brand-tint); color: var(--brand); display:flex; align-items:center; justify-content:center; }
 .m-action.accent .ic-wrap { background: var(--accent); color: var(--brand-deep); }
+.m-action.green { background:#E8F5EE; border-color:rgba(31,122,74,.35); }
+.m-action.green .ic-wrap { background: var(--ok); color:#fff; }
 .m-action-lbl { font-size:12.5px; font-weight:700; }
 .m-action-sub { font-size:11px; color: var(--ink-3); margin-top:2px; }
 .m-section { font-size:11px; font-weight:700; color: var(--ink-3); letter-spacing:.06em; text-transform:uppercase; margin:4px 0 8px; }
@@ -646,14 +648,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v7.1.1</div>
+<div class="version-badge">SupplyLink v7.2.0</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    SupplyLink v6.6.6 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v7.1.1';
+const VERSION = 'v7.2.0';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -1304,7 +1306,9 @@ function fmtMoney(n) { return Number(n || 0).toLocaleString('en-US'); }
 function pad(n) { return String(n).padStart(2, '0'); }
 function toBE(iso) {
   if (!iso) return '—';
-  const [y, m, d] = iso.split('-');
+  const p = String(iso).slice(0, 10).split('-'); // ทน ISO datetime ("2026-06-11T17:00:00.000Z") → ตัดเอาเฉพาะวันที่
+  if (p.length !== 3) return String(iso);
+  const y = p[0], m = p[1], d = p[2];
   return d + '/' + m + '/' + (Number(y) + 543);
 }
 function thaiMonth(m) {
@@ -1682,6 +1686,24 @@ function ensureOpenPOs() {
   loadOpenPOs().then(() => { if (S.page === 'book') renderContentOnly(); });
 }
 
+// รายการสินค้าใน PO + cache localStorage (TTL 6 ชม.) — เปิดซ้ำติดทันที ไม่ต้องรอ GAS scan
+const PO_LINES_TTL = 6 * 3600 * 1000;
+function _poLinesKey(pos) { return 'sl_polines_' + pos.slice().sort().join('|'); }
+async function loadPOLinesCached(pos, force) {
+  const key = _poLinesKey(pos);
+  if (!force) {
+    try { const c = JSON.parse(localStorage.getItem(key)); if (c && (Date.now() - c.ts) < PO_LINES_TTL && Array.isArray(c.data)) return c.data; } catch (e) {}
+  }
+  let data = [];
+  try {
+    const res = await callAPI('getPOLines', { pos: pos });
+    data = (res && res.ok && Array.isArray(res.data)) ? res.data : [];
+  } catch (e) { console.error('[getPOLines]', e); }
+  if (data.length) { try { localStorage.setItem(key, JSON.stringify({ ts: Date.now(), data: data })); } catch (e) {} }
+  return data;
+}
+function clearPOLinesCache() { try { Object.keys(localStorage).filter(k => k.indexOf('sl_polines_') === 0).forEach(k => localStorage.removeItem(k)); } catch (e) {} }
+
 /* ───────────────── PO REVISIONS (ยืนยัน PO) — shared loaders (supplier + admin) ───────────────── */
 const REV_ACTIVE = { 'รอจัดซื้อ': 1, 'อนุมัติ': 1 }; // active = ยื่นซ้ำไม่ได้ · ปฏิเสธแล้วถึงยื่นใหม่ได้
 function revStatusChip(s) {
@@ -1763,7 +1785,9 @@ async function refreshData(silent) {
   // เคลียร์ cache ที่ prefetch ไว้ → โหลดสดทั้งหมด (กันข้อมูลเก่าค้าง เช่น block หลังเลื่อนแล้ว)
   S._defectsCache = null; S._overdue = null; S._extrasLoaded = false; S._overdueAdmin = null;
   S._revsLoaded = false; S._revDetail = {}; S._vp = null; S._revAdminEditing = false; S._revEditA = null; // ยืนยัน PO — โหลดสดรอบหน้า
+  S._grLines = {}; S._apptPoLines = {}; // รายการสินค้าใน PO — โหลดสดรอบหน้า
   clearOpenPOCache(); // ล้าง PO cache (localStorage) ด้วย
+  clearPOLinesCache(); // ล้าง cache รายการสินค้าใน PO
   try { await hydrateData(); } catch(e) { console.error('[refresh]', e); }
   if (S.view === 'login') { render(); return; }
   if (S.session && S.session.role === 'supplier') prefetchDefects();
@@ -3931,8 +3955,7 @@ async function loadGRLines(a) {
   if (S._grLines[a.id] || S._grLinesLoading === a.id) return;
   S._grLinesLoading = a.id;
   try {
-    const res = await callAPI('getPOLines', { pos: a.pos });
-    S._grLines[a.id] = (res && res.ok && Array.isArray(res.data)) ? res.data : [];
+    S._grLines[a.id] = await loadPOLinesCached(a.pos);
   } catch (e) { console.error('[getPOLines]', e); S._grLines[a.id] = []; }
   S._grLinesLoading = null;
   if (S.page === 'gr-today' && S.selectedApptId === a.id) renderContentOnly();
@@ -4902,6 +4925,19 @@ function wireSupplierBackorders() {
 }
 
 function wireSupplierApptDetail() {
+  // กดใบ PO → ขยายดูสินค้าข้างใน (โหลดจริงครั้งแรก + cache)
+  $$('#mContent .appt-po-row').forEach(b => b.addEventListener('click', async () => {
+    const po = b.dataset.po;
+    if (!S._apptPoOpen) S._apptPoOpen = {};
+    if (!S._apptPoLines) S._apptPoLines = {};
+    S._apptPoOpen[po] = !S._apptPoOpen[po];
+    if (S._apptPoOpen[po] && S._apptPoLines[po] === undefined) {
+      S._apptPoLines[po] = null; // loading
+      renderContentOnly();
+      S._apptPoLines[po] = await loadPOLinesCached([po]);
+    }
+    renderContentOnly();
+  }));
   const confirmBtn = $('#btnSupplierConfirm');
   const disputeBtn = $('#btnSupplierDispute');
   const qrBtn = $('#btnSupplierQR');
@@ -4997,7 +5033,7 @@ function supplierDashboard() {
   html += '<div class="m-section">ทางลัด</div>' +
     '<div class="m-actions">' +
       actionTile('truck', 'จองส่งสินค้า', 'เลือก PO และเวลา', true, 'book') +
-      actionTile('edit', 'ยืนยัน PO', pendingConfirm == null ? 'ตรวจ/แก้ใบสั่งซื้อ' : pendingConfirm + ' ใบรอยืนยัน', false, 'po-confirm') +
+      actionTile('edit', 'ยืนยัน PO', pendingConfirm == null ? 'ตรวจ/แก้ใบสั่งซื้อ' : pendingConfirm + ' ใบรอยืนยัน', 'green', 'po-confirm') +
       actionTile('inbox', 'ส่งเรื่อง', 'ราคา · Rebate · FOC · สัญญา ฯลฯ', false, 'hub') +
       actionTile('calendar', 'นัดของฉัน', myAppts.length+' นัดหมาย', false, 'my-appts') +
       actionTile('box', 'ของค้างส่ง', myBackorders.length+' รายการ', false, 'backorders') +
@@ -5016,7 +5052,8 @@ function miniTile(lbl, val, good) {
   return '<div class="card m-tile"><div class="m-tile-lbl">'+esc(lbl)+'</div><div class="m-tile-val'+(good?' ok':'')+'">'+esc(val)+'</div></div>';
 }
 function actionTile(icon, lbl, sub, accent, goTo) {
-  return '<button class="m-action'+(accent?' accent':'')+'" '+(goTo?'data-go="'+goTo+'"':'')+'>' +
+  const cls = accent === 'green' ? ' green' : accent ? ' accent' : '';
+  return '<button class="m-action'+cls+'" '+(goTo?'data-go="'+goTo+'"':'')+'>' +
     '<span class="ic-wrap">'+ic(icon,16,null,2)+'</span>' +
     '<div><div class="m-action-lbl">'+esc(lbl)+'</div><div class="m-action-sub">'+esc(sub)+'</div></div>' +
   '</button>';
@@ -5379,8 +5416,7 @@ async function startRevEditor(poId) {
     lines: null, discountType: 'none', discountValue: 0, discountNote: '', notes: '', deliveryDate: '', pickerOpen: false, pickQ: '', saving: false };
   nav('po-rev-edit');
   try {
-    const res = await callAPI('getPOLines', { pos: [String(poId)] });
-    const raw = (res && res.ok && Array.isArray(res.data)) ? res.data : [];
+    const raw = await loadPOLinesCached([String(poId)]);
     S._revEdit.lines = raw.map(l => {
       const qty = Number(l.qty) || 0, val = Number(l.value) || 0;
       const price = qty > 0 ? Math.round(val / qty * 10000) / 10000 : 0;
@@ -5824,7 +5860,9 @@ function wireWizard() {
       const id = b.dataset.po;
       const i = S.wizard.pos.indexOf(id);
       if (i >= 0) S.wizard.pos.splice(i, 1); else S.wizard.pos.push(id);
+      const mc = $('#mContent'); const sc = mc ? mc.scrollTop : 0; // จำตำแหน่ง scroll — เลือกแล้วไม่เด้งขึ้นบน
       render();
+      const mc2 = $('#mContent'); if (mc2) mc2.scrollTop = sc;
     }));
   }
   if (S.wizard.step === 2) {
@@ -5877,8 +5915,32 @@ function supplierApptDetail() {
     '</div>' +
   '</div></div>';
 
-  html += '<div class="card mb-12"><div class="card-head"><h3>รายการ PO ('+a.pos.length+')</h3></div><div class="card-body" style="display:flex;flex-direction:column;gap:8px">' +
-    a.pos.map(p => '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--surface-alt);border-radius:6px"><span class="num bold" style="font-size:12px">'+p+'</span><span class="muted" style="font-size:11px">3 บรรทัด</span></div>').join('') +
+  if (!S._apptPoOpen) S._apptPoOpen = {};
+  if (!S._apptPoLines) S._apptPoLines = {};
+  html += '<div class="card mb-12"><div class="card-head"><div><h3>รายการ PO ('+a.pos.length+')</h3><div class="sub">แตะใบเพื่อดูสินค้าข้างใน</div></div></div><div class="card-body" style="display:flex;flex-direction:column;gap:8px">' +
+    a.pos.map(p => {
+      const open = !!S._apptPoOpen[p];
+      const lines = S._apptPoLines[p]; // undefined=ยังไม่โหลด · null=กำลังโหลด
+      let inner = '';
+      if (open) {
+        if (lines == null) inner = '<div style="padding:10px;text-align:center"><span class="spinner"></span></div>';
+        else if (!lines.length) inner = '<div style="padding:10px;text-align:center;color:var(--ink-3);font-size:11.5px">ไม่พบรายการใน ERP</div>';
+        else inner = lines.map(l =>
+            '<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px dashed var(--divider);font-size:11.5px">' +
+              '<span style="flex:1;min-width:0;color:var(--ink-2)">'+esc(l.desc || l.sku)+'</span>' +
+              '<span class="num" style="white-space:nowrap">'+fmtMoney(l.qty)+' '+esc(l.unit || '')+'</span>' +
+              '<span class="num bold" style="white-space:nowrap;min-width:64px;text-align:right">฿'+fmtMoney(l.value || 0)+'</span>' +
+            '</div>').join('') +
+          '<div style="display:flex;justify-content:space-between;padding-top:7px;font-size:12px;font-weight:700"><span>รวม '+lines.length+' รายการ</span><span class="num">฿'+fmtMoney(lines.reduce((s, l) => s + (Number(l.value) || 0), 0))+'</span></div>';
+      }
+      return '<div style="background:var(--surface-alt);border-radius:8px;overflow:hidden">' +
+        '<button type="button" class="appt-po-row" data-po="'+esc(p)+'" style="display:flex;justify-content:space-between;align-items:center;width:100%;padding:9px 10px;border:0;background:transparent;cursor:pointer;text-align:left">' +
+          '<span class="num bold" style="font-size:12px">'+esc(p)+'</span>' +
+          '<span class="muted" style="font-size:11px">'+(open ? 'ซ่อน ▴' : 'ดูสินค้า ▾')+'</span>' +
+        '</button>' +
+        (open ? '<div style="padding:0 10px 9px">'+inner+'</div>' : '') +
+      '</div>';
+    }).join('') +
   '</div></div>';
 
   if (a.driver) {
