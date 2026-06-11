@@ -646,14 +646,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v6.9.0</div>
+<div class="version-badge">SupplyLink v7.0.0</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    SupplyLink v6.6.6 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v6.9.0';
+const VERSION = 'v7.0.0';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -1669,6 +1669,51 @@ function ensureOpenPOs() {
   loadOpenPOs().then(() => { if (S.page === 'book') renderContentOnly(); });
 }
 
+/* ───────────────── PO REVISIONS (ยืนยัน PO) — shared loaders (supplier + admin) ───────────────── */
+const REV_ACTIVE = { 'รอจัดซื้อ': 1, 'อนุมัติ': 1 }; // active = ยื่นซ้ำไม่ได้ · ปฏิเสธแล้วถึงยื่นใหม่ได้
+function revStatusChip(s) {
+  return ({
+    'รอจัดซื้อ': '<span class="chip chip-warn chip-sm">รอจัดซื้อ</span>',
+    'อนุมัติ':   '<span class="chip chip-ok chip-sm">อนุมัติแล้ว</span>',
+    'ปฏิเสธ':   '<span class="chip chip-err chip-sm">ปฏิเสธ</span>',
+  })[s] || '<span class="chip chip-sm">'+esc(s || '')+'</span>';
+}
+async function loadPORevisions(force) {
+  if ((S._revsLoaded && !force) || S._revsLoading) return;
+  S._revsLoading = true;
+  try {
+    const res = await callAPI('getPORevisions', {});
+    if (res && res.ok && Array.isArray(res.data)) DATA.poRevisions = res.data;
+  } catch (e) { console.error('[getPORevisions]', e); }
+  S._revsLoaded = true; S._revsLoading = false;
+}
+// revision ล่าสุดของ PO (backend เรียงล่าสุดก่อนแล้ว)
+function revLatestByPO(po) { return (DATA.poRevisions || []).find(r => String(r.po) === String(po)); }
+async function loadRevDetail(id, force) {
+  S._revDetail = S._revDetail || {};
+  if (S._revDetail[id] && !force) return S._revDetail[id];
+  if (S._revDetailLoading === id) return null;
+  S._revDetailLoading = id;
+  try {
+    const res = await callAPI('getPORevision', { id: id });
+    if (res && res.ok && res.data) S._revDetail[id] = res.data;
+  } catch (e) { console.error('[getPORevision]', e); }
+  S._revDetailLoading = null;
+  return S._revDetail[id] || null;
+}
+// สินค้าของ vendor จาก PDDT (picker เพิ่มบรรทัด) — cache ต่อ vendorCode ('self' = ตาม session)
+async function loadVendorProducts(vendorCode) {
+  S._vp = S._vp || {};
+  const key = vendorCode || 'self';
+  if (S._vp[key] || S._vpLoading === key) return;
+  S._vpLoading = key;
+  try {
+    const res = await callAPI('getVendorProducts', vendorCode ? { vendorCode: vendorCode } : {});
+    S._vp[key] = (res && res.ok && Array.isArray(res.data)) ? res.data : [];
+  } catch (e) { console.error('[getVendorProducts]', e); S._vp[key] = []; }
+  S._vpLoading = null;
+}
+
 // Supplier lazy-load — เรื่องที่ส่ง/เป้าหมาย (ไม่โหลดตอน login → login เร็ว · โหลดตอนเปิดหน้านั้น)
 async function loadSupplierExtras() {
   if (S._extrasLoaded || S._extrasLoading) return;
@@ -1704,6 +1749,7 @@ async function refreshData(silent) {
   }
   // เคลียร์ cache ที่ prefetch ไว้ → โหลดสดทั้งหมด (กันข้อมูลเก่าค้าง เช่น block หลังเลื่อนแล้ว)
   S._defectsCache = null; S._overdue = null; S._extrasLoaded = false; S._overdueAdmin = null;
+  S._revsLoaded = false; S._revDetail = {}; S._vp = null; S._revAdminEditing = false; S._revEditA = null; // ยืนยัน PO — โหลดสดรอบหน้า
   clearOpenPOCache(); // ล้าง PO cache (localStorage) ด้วย
   try { await hydrateData(); } catch(e) { console.error('[refresh]', e); }
   if (S.view === 'login') { render(); return; }
@@ -1873,6 +1919,7 @@ function renderDesktopShell() {
   const cPromos = bk((DATA.promoRequests||[]).filter(p=>p.status==='รอตรวจ').length);
   const cNewP = bk((DATA.newProducts||[]).filter(p=>p.status==='รอตรวจ').length);
   const cTargets = bk((DATA.salesTargets||[]).filter(t=>t.status==='รอตรวจ').length);
+  const cRevs = bk((DATA.poRevisions||[]).filter(r=>r.status==='รอจัดซื้อ').length);
   const navAdmin = [
     { sec:'ภาพรวม' },
     { id:'dashboard', ic:'dashboard', lbl:'หน้าหลัก' },
@@ -1886,6 +1933,7 @@ function renderDesktopShell() {
     { sec:'นัดคุยจัดซื้อ' },
     { id:'buyer-cal', ic:'handshake', lbl:'ปฏิทินจัดซื้อ' },
     { sec:'เรื่องจาก Supplier' },
+    { id:'po-revs', ic:'edit', lbl:'ยืนยัน PO', badge: cRevs },
     { id:'updates', ic:'inbox', lbl:'กล่องเรื่อง', badge: cSubs },
     { id:'promos', ic:'tag', lbl:'ขอจัดโปรโมชั่น', badge: cPromos },
     { id:'new-products', ic:'box', lbl:'เสนอสินค้าใหม่', badge: cNewP },
@@ -1951,6 +1999,8 @@ function adminTasks() {
   const tasks = [];
   const od = (S._overdueAdmin || []).length;
   if (od) tasks.push({ icon:'warn', tone:'err', lbl:'ของเสียเลยกำหนด — อนุมัติ', n:od, go:'overdue-defects' });
+  const revs = (DATA.poRevisions||[]).filter(r=>r.status==='รอจัดซื้อ').length;
+  if (revs) tasks.push({ icon:'edit', tone:'warn', lbl:'ยืนยัน PO จากซัพ — รอตรวจ', n:revs, go:'po-revs' });
   const subs = (DATA.submissions||[]).filter(s=>s.status==='รอตรวจ').length;
   if (subs) tasks.push({ icon:'inbox', tone:'warn', lbl:'เรื่องรอตรวจ (กล่องเรื่อง)', n:subs, go:'updates' });
   const promos = (DATA.promoRequests||[]).filter(p=>p.status==='รอตรวจ').length;
@@ -1982,6 +2032,7 @@ function renderTopbar() {
     'time-stats': ['สถิติเวลารับสินค้า', 'ประสิทธิภาพการรับสินค้า'],
     'book-for': ['จองให้ Supplier', 'จองนัดแทน supplier ที่ไม่สะดวกใช้แอป'],
     'buyer-cal': ['ปฏิทินจัดซื้อ', 'นัดคุยกับ supplier'],
+    'po-revs': ['ยืนยัน PO จากซัพ', 'ซัพแก้/ยืนยันใบสั่งซื้อ — ตรวจ diff · อนุมัติ · export ไปแก้ PO'],
     'updates': ['กล่องเรื่อง Supplier', 'FOC · POP · ปรับราคา · เลิกขาย'],
     'promos': ['ขอจัดโปรโมชั่น', 'พิจารณาก่อนปล่อยโปรเข้าตลาด'],
     'new-products': ['เสนอสินค้าใหม่', 'พิจารณาก่อนเปิด SKU + ก่อน GR'],
@@ -2082,6 +2133,8 @@ function renderContentOnly() {
 
 function afterDesktopRender() {
   $$('.sidebar-item').forEach(b => b.addEventListener('click', () => nav(b.dataset.page)));
+  // โหลด PO revisions เบื้องหลังครั้งแรก → badge sidebar + กระดิ่ง (guard กัน loop)
+  if (!S._revsLoaded && !S._revsLoading && S.session) loadPORevisions().then(() => { if (S.view === 'admin' || S.view === 'gr') render(); });
   $('#btnLogout') && $('#btnLogout').addEventListener('click', logout);
   wireSearchBar();
   if (typeof afterPage === 'function') afterPage();
@@ -2104,6 +2157,7 @@ function pageMap() {
     'time-stats': renderTimeStats,
     'book-for': renderBookFor,
     'buyer-cal': renderBuyerCal,
+    'po-revs': renderAdminPORevs,
     'updates': renderAdminUpdates,
     'promos': renderPromoRequests,
     'new-products': renderNewProducts,
@@ -2115,6 +2169,286 @@ function pageMap() {
     'settings': renderSettings,
     'gr-today': renderGRToday,
   };
+}
+
+/* ───────────────────────── ADMIN: ยืนยัน PO จากซัพ (ตรวจ diff · แก้ · อนุมัติ · export) ───────────────────────── */
+function renderAdminPORevs() {
+  afterPage = wireAdminPORevs;
+  if (!S._revsLoaded) {
+    if (!S._revsLoading) loadPORevisions().then(() => { if (S.page === 'po-revs') render(); });
+    return '<div style="flex:1;overflow:auto;padding:16px"><div style="padding:48px;text-align:center;color:var(--ink-3)">' +
+      '<span class="spinner" style="width:30px;height:30px;border-width:3px"></span><div style="margin-top:12px">กำลังโหลดรายการยืนยัน PO…</div></div></div>';
+  }
+  if (S._revAdminSel) return adminRevDetailHTML(S._revAdminSel);
+  const f = S._revFilter || 'รอจัดซื้อ';
+  const all = DATA.poRevisions || [];
+  const rows = f === 'all' ? all : all.filter(r => r.status === f);
+  const chip = (id, lbl, n) => '<button class="filter-chip rva-filter '+(f === id ? 'active' : '')+'" data-f="'+id+'">'+lbl+(n ? ' <span class="num">'+n+'</span>' : '')+'</button>';
+  let html = '<div style="flex:1;overflow:auto;padding:16px">';
+  html += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">' +
+    chip('รอจัดซื้อ', 'รอจัดซื้อ', all.filter(r => r.status === 'รอจัดซื้อ').length) +
+    chip('อนุมัติ', 'อนุมัติแล้ว', all.filter(r => r.status === 'อนุมัติ').length) +
+    chip('ปฏิเสธ', 'ปฏิเสธ', all.filter(r => r.status === 'ปฏิเสธ').length) +
+    chip('all', 'ทั้งหมด', all.length) +
+  '</div>';
+  if (!rows.length) {
+    html += '<div class="card" style="padding:40px;text-align:center;color:var(--ink-3)">ไม่มีรายการ' + (f === 'all' ? '' : ' "' + f + '"') + '</div>';
+  } else {
+    html += rows.map(r => {
+      const diff = Math.round((r.totalAfter - r.totalBefore) * 100) / 100;
+      return '<div class="card mb-12 rva-row" data-id="'+esc(r.id)+'" style="padding:13px 15px;cursor:pointer">' +
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+              '<span class="num" style="font-weight:800;font-size:13.5px">'+esc(r.po)+'</span>' + revStatusChip(r.status) +
+              (r.asIs ? '<span class="chip chip-sm">ยืนยันตามเดิม</span>' : '') +
+              (r.adminEdited ? '<span class="chip chip-info chip-sm">จัดซื้อแก้แล้ว</span>' : '') +
+              (r.exportedAt ? '<span class="chip chip-ok chip-sm">export แล้ว</span>' : '') +
+            '</div>' +
+            '<div style="font-size:11.5px;color:var(--ink-3);margin-top:4px">'+esc(r.vendorName || r.vendorCode)+(r.wh ? ' · คลัง '+esc(r.wh) : '')+' · <span class="num">'+r.linesCount+'</span> รายการ · ส่ง '+esc(r.submittedAt || '')+(r.deliveryDate ? ' · จะส่งของ '+esc(toBE(r.deliveryDate)) : '')+'</div>' +
+          '</div>' +
+          '<div style="text-align:right;flex-shrink:0">' +
+            '<div class="num" style="font-size:11px;color:var(--ink-3)">฿'+fmtMoney(r.totalBefore)+'</div>' +
+            '<div class="num bold" style="font-size:14px;color:'+(diff ? (diff > 0 ? 'var(--err)' : 'var(--ok)') : 'var(--ink)')+'">฿'+fmtMoney(r.totalAfter)+(diff ? ' ('+(diff > 0 ? '+' : '')+fmtMoney(diff)+')' : '')+'</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  }
+  html += '</div>';
+  return html;
+}
+
+function adminRevDetailHTML(id) {
+  const r = (S._revDetail || {})[id];
+  if (!r) {
+    loadRevDetail(id).then(() => { if (S.page === 'po-revs') renderContentOnly(); });
+    return '<div style="flex:1;overflow:auto;padding:16px"><div style="padding:48px;text-align:center;color:var(--ink-3)"><span class="spinner" style="width:28px;height:28px;border-width:3px"></span><div style="margin-top:12px">กำลังโหลดรายละเอียด…</div></div></div>';
+  }
+  const A = S._revAdminEditing ? S._revEditA : null;
+  const lines = A ? A.lines : (r.lines || []);
+  const dT = A ? A.discountType : r.discountType, dV = A ? A.discountValue : r.discountValue, dN = A ? A.discountNote : r.discountNote;
+  const net = A ? revEditNet(A) : r.totalAfter;
+  const typeTag = l => l.type === 'added' ? '<span class="chip chip-info chip-sm">เพิ่ม</span>' : l.type === 'edited' ? '<span class="chip chip-warn chip-sm">แก้</span>' : '<span style="font-size:10.5px;color:var(--ink-4)">เดิม</span>';
+
+  let html = '<div style="flex:1;overflow:auto;padding:16px">';
+  html += '<button class="btn btn-sm" id="rvaBack" style="margin-bottom:12px">'+ic('chevL', 14)+' กลับรายการ</button>';
+  html += '<div class="card mb-12" style="padding:15px">' +
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">' +
+      '<div>' +
+        '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="num" style="font-weight:800;font-size:16px">'+esc(r.po)+'</span>'+revStatusChip(r.status)+(r.asIs ? '<span class="chip chip-sm">ยืนยันตามเดิม</span>' : '')+(r.adminEdited ? '<span class="chip chip-info chip-sm">จัดซื้อแก้แล้ว</span>' : '')+'</div>' +
+        '<div style="font-size:12px;color:var(--ink-3);margin-top:4px">'+esc(r.vendorName || '')+' <span class="num">('+esc(r.vendorCode)+')</span>'+(r.wh ? ' · คลัง '+esc(r.wh) : '')+' · '+esc(r.id)+'</div>' +
+        '<div style="font-size:11.5px;color:var(--ink-3);margin-top:2px">ส่งโดย '+esc(r.submittedBy || '-')+' · '+esc(r.submittedAt || '')+(r.reviewedAt ? ' · ตรวจ '+esc(r.reviewedAt) : '')+(r.exportedAt ? ' · export '+esc(r.exportedAt) : '')+'</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+        (r.status === 'รอจัดซื้อ' && !A ? '<button class="btn" id="rvaEdit">'+ic('edit', 14)+' แก้ไข</button><button class="btn btn-primary" id="rvaApprove">'+ic('check', 14)+' อนุมัติ</button><button class="btn" id="rvaReject" style="color:var(--err);border-color:var(--err)">ปฏิเสธ</button>' : '') +
+        (A ? '<button class="btn btn-primary" id="rvaSave">'+ic('check', 14)+' บันทึกการแก้</button><button class="btn" id="rvaCancel">ยกเลิก</button>' : '') +
+        (r.status === 'อนุมัติ' ? '<button class="btn btn-primary" id="rvaExport">⬇ Export CSV (ไปแก้ PO)</button>' : '') +
+      '</div>' +
+    '</div>' +
+    (r.status === 'ปฏิเสธ' && r.rejectReason ? '<div class="alert alert-err" style="margin-top:10px;font-size:12px">เหตุผลปฏิเสธ: '+esc(r.rejectReason)+'</div>' : '') +
+  '</div>';
+
+  // ตารางบรรทัด — diff เดิม↔ใหม่ (edit mode = inputs)
+  html += '<div class="card mb-12" style="padding:0;overflow:hidden"><div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">' +
+    '<thead><tr style="background:var(--surface-alt);text-align:left">' +
+      '<th style="padding:9px 12px">สินค้า</th><th style="padding:9px 8px">หน่วย</th>' +
+      '<th style="padding:9px 8px;text-align:right">เดิม (จำนวน × ราคา)</th>' +
+      '<th style="padding:9px 8px;text-align:right">ใหม่ (จำนวน × ราคา)</th>' +
+      '<th style="padding:9px 8px;text-align:right">รวม</th><th style="padding:9px 8px"></th>' +
+    '</tr></thead><tbody>';
+  lines.forEach((l, i) => {
+    const lt = l.isFoc ? 0 : (A ? (Number(l.newQty) || 0) * (Number(l.newPrice) || 0) : l.newTotal);
+    html += '<tr style="border-top:1px solid var(--divider)">' +
+      '<td style="padding:8px 12px"><div style="font-weight:600">'+esc(l.name || l.sku)+(l.isFoc ? ' <span class="chip chip-ok chip-sm">แถม</span>' : '')+'</div><div class="num" style="font-size:10.5px;color:var(--ink-3)">'+esc(l.sku || l.barcode)+'</div></td>' +
+      '<td style="padding:8px">'+esc(l.unit || '')+'</td>' +
+      '<td style="padding:8px;text-align:right" class="num">'+(l.type === 'added' ? '<span style="color:var(--ink-4)">—</span>' : fmtMoney(l.origQty)+' × ฿'+fmtMoney(l.origPrice))+'</td>' +
+      (A
+        ? '<td style="padding:8px;text-align:right;white-space:nowrap"><input type="number" class="input num rva-qty" data-i="'+i+'" value="'+(l.newQty || '')+'" style="width:72px;display:inline-block;height:30px;padding:0 6px" min="0" step="any"> × <input type="number" class="input num rva-price" data-i="'+i+'" value="'+(l.isFoc ? 0 : (l.newPrice || ''))+'" style="width:84px;display:inline-block;height:30px;padding:0 6px" min="0" step="any"'+(l.isFoc ? ' disabled' : '')+'></td>'
+        : '<td style="padding:8px;text-align:right" class="num"'+(l.type !== 'original' ? ' style="padding:8px;text-align:right;font-weight:700;color:var(--brand)"' : '')+'>'+fmtMoney(l.newQty)+' × ฿'+fmtMoney(l.newPrice)+'</td>') +
+      '<td style="padding:8px;text-align:right" class="num bold rva-lt" data-i="'+i+'">฿'+fmtMoney(lt)+'</td>' +
+      '<td style="padding:8px;white-space:nowrap">'+typeTag(l)+(A ? ' <button type="button" class="rva-foc" data-i="'+i+'" style="border:1px solid '+(l.isFoc ? 'var(--ok)' : 'var(--line)')+';background:'+(l.isFoc ? '#E8F5EE' : '#fff')+';color:'+(l.isFoc ? 'var(--ok)' : 'var(--ink-3)')+';border-radius:6px;padding:2px 7px;font-size:10.5px;font-weight:700;cursor:pointer">FOC</button>'+(l.type === 'added' ? ' <button type="button" class="rva-del" data-i="'+i+'" style="border:0;background:transparent;color:var(--err);cursor:pointer;font-size:14px">✕</button>' : '') : '')+'</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table></div>';
+  if (A) {
+    html += '<div style="padding:10px 12px;border-top:1px solid var(--divider)">' +
+      '<button type="button" class="btn btn-sm" id="rvaAdd">+ เพิ่มสินค้า (PDDT ของ vendor นี้)</button>' +
+      '<div id="rvaPicker" style="margin-top:8px;border:1px solid var(--line);border-radius:8px;overflow:hidden'+(A.pickerOpen ? '' : ';display:none')+'">' +
+        '<div style="padding:8px"><input class="input" id="rvaPickSearch" placeholder="ค้นชื่อ / แบรนด์ / บาร์โค้ด" value="'+esc(A.pickQ || '')+'"></div>' +
+        '<div id="rvaPickList" style="max-height:260px;overflow:auto">'+revPickerHTML(r.vendorCode, A.pickQ)+'</div>' +
+      '</div>' +
+    '</div>';
+  }
+  html += '</div>';
+
+  // ส่วนลด + วันส่ง + หมายเหตุ + ยอด
+  html += '<div class="card mb-12" style="padding:15px">' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">' +
+      '<div>' +
+        '<div style="font-weight:700;font-size:12.5px;margin-bottom:6px">ส่วนลดท้ายบิล</div>' +
+        (A
+          ? '<div style="display:flex;gap:6px"><select class="select" id="rvaDcType" style="flex:1.2"><option value="none"'+(dT === 'none' ? ' selected' : '')+'>ไม่มี</option><option value="baht"'+(dT === 'baht' ? ' selected' : '')+'>บาท (฿)</option><option value="pct"'+(dT === 'pct' ? ' selected' : '')+'>%</option></select><input type="number" class="input num" id="rvaDcVal" style="flex:1" value="'+(dV || '')+'"'+(dT === 'none' ? ' disabled' : '')+' min="0" step="any"></div><input class="input" id="rvaDcNote" style="margin-top:6px" placeholder="หมายเหตุส่วนลด" value="'+esc(dN || '')+'">'
+          : '<div style="font-size:12.5px;color:var(--ink-2)">'+(dT === 'none' ? '— ไม่มี —' : (dT === 'pct' ? dV + '%' : '฿' + fmtMoney(dV)) + (dN ? ' · ' + esc(dN) : ''))+'</div>') +
+        '<div style="font-weight:700;font-size:12.5px;margin:12px 0 6px">วันที่ซัพจะส่งของ</div>' +
+        (A ? '<input type="date" class="input" id="rvaDelivery" value="'+esc(A.deliveryDate || '')+'">'
+           : '<div style="font-size:12.5px;color:var(--ink-2)">'+(r.deliveryDate ? esc(toBE(r.deliveryDate)) : '— ไม่ระบุ —')+'</div>') +
+        '<div style="font-weight:700;font-size:12.5px;margin:12px 0 6px">หมายเหตุจากซัพ</div>' +
+        (A ? '<input class="input" id="rvaNotes" value="'+esc(A.notes || '')+'">'
+           : '<div style="font-size:12.5px;color:var(--ink-2)">'+(r.notes ? esc(r.notes) : '— ไม่มี —')+'</div>') +
+      '</div>' +
+      '<div style="border-left:1px solid var(--divider);padding-left:14px;display:flex;flex-direction:column;justify-content:flex-end">' +
+        '<div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--ink-2)"><span>ยอดตาม PO เดิม</span><span class="num">฿'+fmtMoney(r.totalBefore)+'</span></div>' +
+        '<div style="display:flex;justify-content:space-between;font-size:16px;font-weight:800;margin-top:8px"><span>ยอดสุทธิใหม่</span><span class="num" id="rvaAfter" style="color:var(--brand)">฿'+fmtMoney(net)+'</span></div>' +
+        '<div style="font-size:11px;color:var(--ink-3);margin-top:10px">อนุมัติแล้ว → Export CSV เอาไปแก้ PO ใน Bplus → ERP sync แล้วซัพไปจองคิวส่งที่เมนูจองตามปกติ (เลข PO เดิม)</div>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+  html += '</div>';
+  return html;
+}
+
+// CSV (มี BOM — เปิดใน Excel ไทยไม่เพี้ยน) → ดาวน์โหลด + mark exported
+function exportRevCSV(r) {
+  const rows = [['PO', 'Revision', 'Vendor Code', 'Vendor', 'คลัง', 'วันส่ง(ซัพแจ้ง)', 'Barcode', 'SKU', 'สินค้า', 'หน่วย', 'จำนวนเดิม', 'ราคาเดิม', 'จำนวนใหม่', 'ราคาใหม่', 'แถม', 'ยอดรวม', 'ประเภทบรรทัด', 'หมายเหตุ']];
+  (r.lines || []).forEach(l => rows.push([r.po, r.id, r.vendorCode, r.vendorName, r.wh, r.deliveryDate, l.barcode, l.sku, l.name, l.unit, l.origQty, l.origPrice, l.newQty, l.newPrice, l.isFoc ? 'FOC' : '', l.isFoc ? 0 : l.newTotal, l.type, l.note || '']));
+  rows.push([]);
+  if (r.discountType !== 'none') rows.push(['', '', '', '', '', '', '', '', '', '', '', '', '', 'ส่วนลดท้ายบิล', r.discountType === 'pct' ? r.discountValue + '%' : r.discountValue, '', '', r.discountNote || '']);
+  rows.push(['', '', '', '', '', '', '', '', '', '', '', '', '', 'ยอดสุทธิ', '', r.totalAfter, '', '']);
+  if (r.notes) rows.push(['', '', '', '', '', '', '', '', '', '', '', '', '', 'หมายเหตุซัพ', '', '', '', r.notes]);
+  const csv = '﻿' + rows.map(row => row.map(c => '"' + String(c == null ? '' : c).replace(/"/g, '""') + '"').join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = r.id + '_' + r.po + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(a.href);
+}
+
+function wireAdminPORevs() {
+  // list
+  $$('.rva-filter').forEach(b => b.addEventListener('click', () => { S._revFilter = b.dataset.f; renderContentOnly(); }));
+  $$('.rva-row').forEach(c => c.addEventListener('click', () => { S._revAdminSel = c.dataset.id; S._revAdminEditing = false; S._revEditA = null; renderContentOnly(); }));
+  // detail
+  const back = $('#rvaBack'); if (back) back.addEventListener('click', () => { S._revAdminSel = null; S._revAdminEditing = false; S._revEditA = null; renderContentOnly(); });
+  const id = S._revAdminSel;
+  const r = id && (S._revDetail || {})[id];
+  if (!r) return;
+  const reloadAll = async () => {
+    S._revDetail = {}; S._revsLoaded = false;
+    await loadPORevisions(true); await loadRevDetail(id, true);
+    renderContentOnly();
+  };
+  const ap = $('#rvaApprove');
+  if (ap) ap.addEventListener('click', async () => {
+    if (!confirm('อนุมัติการยืนยัน PO ' + r.po + ' ?')) return;
+    showAppLoading('กำลังอนุมัติ…');
+    const res = await callAPI('approvePORevision', { id: id });
+    hideAppLoading();
+    if (!res || !res.ok) { toast('อนุมัติไม่สำเร็จ', (res && res.error) || '', 'err'); return; }
+    toast('อนุมัติแล้ว', 'Export CSV เพื่อเอาไปแก้ PO ใน Bplus ต่อ', 'ok');
+    await reloadAll();
+  });
+  const rj = $('#rvaReject');
+  if (rj) rj.addEventListener('click', async () => {
+    const reason = prompt('เหตุผลที่ปฏิเสธ (ซัพจะเห็น + แก้แล้วยื่นใหม่ได้):');
+    if (!reason) return;
+    showAppLoading('กำลังบันทึก…');
+    const res = await callAPI('rejectPORevision', { id: id, reason: reason });
+    hideAppLoading();
+    if (!res || !res.ok) { toast('ไม่สำเร็จ', (res && res.error) || '', 'err'); return; }
+    toast('ปฏิเสธแล้ว', 'ซัพจะเห็นเหตุผลและยื่นใหม่ได้', 'warn');
+    await reloadAll();
+  });
+  const ex = $('#rvaExport');
+  if (ex) ex.addEventListener('click', async () => {
+    exportRevCSV(r);
+    try { await callAPI('markRevisionExported', { id: id }); } catch (e) {}
+    toast('ดาวน์โหลด CSV แล้ว', 'เอาไปแก้ PO ใน Bplus ได้เลย', 'ok');
+    await reloadAll();
+  });
+  const ed = $('#rvaEdit');
+  if (ed) ed.addEventListener('click', () => {
+    S._revAdminEditing = true;
+    S._revEditA = {
+      lines: (r.lines || []).map(l => ({ type: l.type, sku: l.sku, barcode: l.barcode, name: l.name, unit: l.unit,
+        origQty: l.origQty, origPrice: l.origPrice, origTotal: l.origTotal, newQty: l.newQty, newPrice: l.newPrice, isFoc: l.isFoc, note: l.note || '' })),
+      deliveryDate: r.deliveryDate || '', discountType: r.discountType || 'none', discountValue: r.discountValue || 0,
+      discountNote: r.discountNote || '', notes: r.notes || '', pickerOpen: false, pickQ: ''
+    };
+    renderContentOnly();
+  });
+  const A = S._revEditA;
+  if (!S._revAdminEditing || !A) return;
+  const cancel = $('#rvaCancel'); if (cancel) cancel.addEventListener('click', () => { S._revAdminEditing = false; S._revEditA = null; renderContentOnly(); });
+  const recompute = () => { const el = $('#rvaAfter'); if (el) el.textContent = '฿' + fmtMoney(revEditNet(A)); };
+  const wirePicks = () => {
+    $$('#rvaPickList .rv-pick').forEach(b => b.addEventListener('click', () => {
+      A.lines.push({ type: 'added', sku: '', barcode: b.dataset.barcode, name: b.dataset.name, unit: b.dataset.unit,
+        origQty: 0, origPrice: 0, origTotal: 0, newQty: 0, newPrice: 0, isFoc: false, note: '' });
+      renderContentOnly();
+    }));
+  };
+  $$('.rva-qty').forEach(inp => inp.addEventListener('input', () => {
+    const i = Number(inp.dataset.i); if (!A.lines[i]) return;
+    A.lines[i].newQty = Number(inp.value) || 0;
+    const lt = $('.rva-lt[data-i="'+i+'"]'); if (lt) lt.textContent = '฿' + fmtMoney(A.lines[i].isFoc ? 0 : A.lines[i].newQty * (A.lines[i].newPrice || 0));
+    recompute();
+  }));
+  $$('.rva-price').forEach(inp => inp.addEventListener('input', () => {
+    const i = Number(inp.dataset.i); if (!A.lines[i]) return;
+    A.lines[i].newPrice = Number(inp.value) || 0;
+    const lt = $('.rva-lt[data-i="'+i+'"]'); if (lt) lt.textContent = '฿' + fmtMoney(A.lines[i].isFoc ? 0 : (A.lines[i].newQty || 0) * A.lines[i].newPrice);
+    recompute();
+  }));
+  $$('.rva-foc').forEach(b => b.addEventListener('click', () => {
+    const i = Number(b.dataset.i); if (!A.lines[i]) return;
+    A.lines[i].isFoc = !A.lines[i].isFoc;
+    if (A.lines[i].isFoc) A.lines[i].newPrice = 0;
+    renderContentOnly();
+  }));
+  $$('.rva-del').forEach(b => b.addEventListener('click', () => { A.lines.splice(Number(b.dataset.i), 1); renderContentOnly(); }));
+  const addB = $('#rvaAdd');
+  if (addB) addB.addEventListener('click', () => {
+    A.pickerOpen = !A.pickerOpen;
+    if (A.pickerOpen && !(S._vp || {})[r.vendorCode]) loadVendorProducts(r.vendorCode).then(() => { if (S.page === 'po-revs') renderContentOnly(); });
+    renderContentOnly();
+  });
+  const psA = $('#rvaPickSearch');
+  if (psA) psA.addEventListener('input', () => {
+    A.pickQ = psA.value;
+    const pl = $('#rvaPickList');
+    if (pl) { pl.innerHTML = revPickerHTML(r.vendorCode, A.pickQ); wirePicks(); }
+  });
+  wirePicks();
+  const dcT = $('#rvaDcType'); if (dcT) dcT.addEventListener('change', () => { A.discountType = dcT.value; if (A.discountType === 'none') A.discountValue = 0; renderContentOnly(); });
+  const dcV = $('#rvaDcVal'); if (dcV) dcV.addEventListener('input', () => { A.discountValue = Number(dcV.value) || 0; recompute(); });
+  const dcN = $('#rvaDcNote'); if (dcN) dcN.addEventListener('input', () => { A.discountNote = dcN.value; });
+  const dvA = $('#rvaDelivery'); if (dvA) dvA.addEventListener('change', () => { A.deliveryDate = dvA.value; });
+  const ntA = $('#rvaNotes'); if (ntA) ntA.addEventListener('input', () => { A.notes = ntA.value; });
+  const sv = $('#rvaSave');
+  if (sv) sv.addEventListener('click', async () => {
+    let bad = null;
+    const lines = A.lines.map(l => {
+      const changed = l.isFoc || Number(l.newQty) !== Number(l.origQty) || Number(l.newPrice) !== Number(l.origPrice);
+      if (!(Number(l.newQty) > 0)) bad = bad || 'ใส่จำนวน: ' + (l.name || l.sku);
+      else if (!l.isFoc && !(Number(l.newPrice) > 0)) bad = bad || 'ใส่ราคา (หรือ FOC): ' + (l.name || l.sku);
+      return { type: l.type === 'added' ? 'added' : (changed ? 'edited' : 'original'), sku: l.sku, barcode: l.barcode, name: l.name, unit: l.unit,
+        origQty: l.origQty, origPrice: l.origPrice, origTotal: l.origTotal, newQty: Number(l.newQty) || 0, newPrice: Number(l.newPrice) || 0, isFoc: !!l.isFoc, note: l.note || '' };
+    });
+    if (!lines.length) { toast('ไม่มีรายการสินค้า', '', 'err'); return; }
+    if (bad) { toast('ยังบันทึกไม่ได้', bad, 'err'); return; }
+    showAppLoading('กำลังบันทึกการแก้…');
+    const res = await callAPI('adminEditPORevision', { id: id, patch: {
+      deliveryDate: A.deliveryDate || '', discountType: A.discountType || 'none', discountValue: Number(A.discountValue) || 0,
+      discountNote: A.discountNote || '', notes: A.notes || '', lines: lines
+    } });
+    hideAppLoading();
+    if (!res || !res.ok) { toast('บันทึกไม่สำเร็จ', (res && res.error) || '', 'err'); return; }
+    toast('บันทึกการแก้แล้ว', 'อนุมัติต่อได้เลย', 'ok');
+    S._revAdminEditing = false; S._revEditA = null;
+    await reloadAll();
+  });
 }
 
 /* ───────────────────────── ADMIN: ของเสียเลยกำหนด (จัดซื้ออนุมัติ) ───────────────────────── */
@@ -4306,10 +4640,13 @@ function renderSupplierShell() {
     'backorders':'ของค้างส่ง',
     'defect-gate':'เคลียร์ของเสียก่อนจอง',
     'defect-block':'ของเสียเลยกำหนด',
+    'po-confirm':'ยืนยันใบสั่งซื้อ',
+    'po-rev-edit':'ยืนยัน / แก้ PO',
+    'po-rev-view':'รายละเอียดการยืนยัน',
     'schema-form': FORM_SCHEMAS[S.currentSchema]?.title || 'ฟอร์ม'
   };
-  const showBack = ['book','appt-detail','hub','new-product','new-promo','targets','schema-form','backorders','defect-gate','defect-block'].includes(S.page);
-  const hideTabs = ['book','new-product','new-promo','targets','schema-form','defect-gate','defect-block'].includes(S.page);
+  const showBack = ['book','appt-detail','hub','new-product','new-promo','targets','schema-form','backorders','defect-gate','defect-block','po-confirm','po-rev-edit','po-rev-view'].includes(S.page);
+  const hideTabs = ['book','new-product','new-promo','targets','schema-form','defect-gate','defect-block','po-rev-edit'].includes(S.page);
 
   const pageHTML = ({
     'dashboard': supplierDashboard,
@@ -4325,6 +4662,9 @@ function renderSupplierShell() {
     'backorders': supplierBackorders,
     'defect-gate': supplierDefectGate,
     'defect-block': supplierDefectBlock,
+    'po-confirm': supplierPOConfirm,
+    'po-rev-edit': supplierPORevEdit,
+    'po-rev-view': supplierPORevView,
     'schema-form': supplierSchemaForm,
   })[S.page] || supplierDashboard;
 
@@ -4358,7 +4698,7 @@ function afterSupplierRender() {
   $$('.tab-btn').forEach(b => b.addEventListener('click', () => nav(b.dataset.page)));
   const back = $('#mBack');
   if (back) back.addEventListener('click', () => {
-    const backMap = { 'book':'hub', 'appt-detail':'my-appts', 'hub':'dashboard', 'new-product':'hub', 'new-promo':'hub', 'targets':'hub', 'schema-form':'hub', 'backorders':'dashboard', 'defect-gate':'dashboard' };
+    const backMap = { 'book':'hub', 'appt-detail':'my-appts', 'hub':'dashboard', 'new-product':'hub', 'new-promo':'hub', 'targets':'hub', 'schema-form':'hub', 'backorders':'dashboard', 'defect-gate':'dashboard', 'po-confirm':'dashboard', 'po-rev-edit':'po-confirm', 'po-rev-view':'po-confirm' };
     nav(backMap[S.page] || 'dashboard');
   });
   const lo = $('#mLogout');
@@ -4371,6 +4711,9 @@ function afterSupplierRender() {
   }
   if (S.page === 'book') wireWizard();
   if (S.page === 'defect-gate') wireDefectGate();
+  if (S.page === 'po-confirm') wireSupplierPOConfirm();
+  if (S.page === 'po-rev-edit') wireSupplierPORevEdit();
+  if (S.page === 'po-rev-view') wireSupplierPORevView();
   if (S.page === 'my-appts') {
     $$('#mContent .m-appt').forEach(b => b.addEventListener('click', () => {
       S.selectedApptId = b.dataset.id; nav('appt-detail');
@@ -4486,10 +4829,13 @@ function supplierDashboard() {
   // เพิ่มเรื่องใหม่ตรงนี้: push เข้า notifs[] · go='book' → เข้า flow จอง (เช็ค gate/block) · go=<page> → ไปหน้านั้น
   const myBackorders = (DATA.backorders||[]).filter(b => b.vendorCode === vendor.code && b.status !== 'ปิดแล้ว' && b.status !== 'ยกเลิก');
   const returnsPending = DATA.returns.filter(r => r.vendor.code === vendor.code && !r.ack);
+  ensurePoConfirmData(); // โหลด openPOs + revisions เบื้องหลัง → นับ PO รอยืนยัน (เสร็จแล้ว re-render เอง)
+  const pendingConfirm = poPendingConfirmCount(); // null = ยังโหลดอยู่
   const notifs = [];
   const dc = S._defectsCache; // ของเสีย (prefetch ตอน login)
   if (dc && dc.overdueCount > 0) notifs.push({ icon:'warn', tone:'err', label:'ของเสียเลยกำหนด', detail: dc.overdueCount+' รายการ · ติดต่อจัดซื้อก่อนจอง', go:'book' });
   else if (dc && dc.pendingCount > 0) notifs.push({ icon:'rotate', tone:'warn', label:'ของเสียต้องเคลียร์', detail: dc.pendingCount+' รายการ · เคลียร์ก่อนจองส่ง', go:'book' });
+  if (pendingConfirm) notifs.push({ icon:'edit', tone:'warn', label:'PO รอยืนยัน', detail: pendingConfirm+' ใบ · ตรวจ/แก้ราคา-จำนวน ก่อนส่งของ', go:'po-confirm' });
   if (returnsPending.length) notifs.push({ icon:'rotate', tone:'err', label:'สินค้าต้องคืนรอยืนยัน', detail: returnsPending.length+' รายการ · ยืนยันก่อนจองครั้งถัดไป', go:'returns' });
   if (myBackorders.length) notifs.push({ icon:'box', tone:'warn', label:'ของค้างส่ง', detail: myBackorders.length+' รายการ · รวม '+myBackorders.reduce((s,b)=>s+b.pendingQty,0)+' หน่วย', go:'backorders' });
   if (notifs.length) {
@@ -4514,6 +4860,7 @@ function supplierDashboard() {
   html += '<div class="m-section">ทางลัด</div>' +
     '<div class="m-actions">' +
       actionTile('truck', 'จองส่งสินค้า', 'เลือก PO และเวลา', true, 'book') +
+      actionTile('edit', 'ยืนยัน PO', pendingConfirm == null ? 'ตรวจ/แก้ใบสั่งซื้อ' : pendingConfirm + ' ใบรอยืนยัน', false, 'po-confirm') +
       actionTile('inbox', 'ส่งเรื่อง', 'ราคา · Rebate · FOC · สัญญา ฯลฯ', false, 'hub') +
       actionTile('calendar', 'นัดของฉัน', myAppts.length+' นัดหมาย', false, 'my-appts') +
       actionTile('box', 'ของค้างส่ง', myBackorders.length+' รายการ', false, 'backorders') +
@@ -4829,6 +5176,328 @@ function wireDefectGate() {
     ensureOpenPOs();     // โหลด PO เบื้องหลัง
   });
 }
+
+/* ───────────────── SUPPLIER: ยืนยัน PO (ตรวจ/แก้ ก่อนส่งของ) ───────────────── */
+// โหลด openPOs + revisions พร้อมกันเบื้องหลัง — เสร็จแล้ว re-render หน้าที่เกี่ยว
+function ensurePoConfirmData() {
+  const rerender = () => { if (S.page === 'dashboard' || S.page === 'po-confirm') renderContentOnly(); };
+  if (!S._posLoaded && !S._posLoading) loadOpenPOs().then(rerender);
+  if (!S._revsLoaded && !S._revsLoading) loadPORevisions().then(rerender);
+}
+// จำนวน PO ที่ยังไม่ยืนยัน (หรือโดนปฏิเสธ ต้องยื่นใหม่) · null = ข้อมูลยังโหลดไม่ครบ
+function poPendingConfirmCount() {
+  if (!S._posLoaded || !S._revsLoaded) return null;
+  return (DATA.openPOs || []).filter(p => { const rv = revLatestByPO(p.id); return !rv || rv.status === 'ปฏิเสธ'; }).length;
+}
+
+function supplierPOConfirm() {
+  ensurePoConfirmData();
+  if (!S._posLoaded || !S._revsLoaded) {
+    return '<div style="padding:48px;text-align:center;color:var(--ink-3)"><span class="spinner" style="width:30px;height:30px;border-width:3px"></span><div style="margin-top:12px">กำลังโหลดใบสั่งซื้อ…</div></div>';
+  }
+  const items = (DATA.openPOs || []).map(p => ({ p: p, rv: revLatestByPO(p.id) }));
+  const pending = items.filter(x => !x.rv || x.rv.status === 'ปฏิเสธ');
+  const sent = items.filter(x => x.rv && x.rv.status !== 'ปฏิเสธ');
+  const row = x => {
+    const p = x.p, rv = x.rv;
+    const chip = !rv ? '<span class="chip chip-sm" style="background:#FAF1DC;color:#B5740E">รอยืนยัน</span>'
+      : (rv.status === 'ปฏิเสธ' ? '<span class="chip chip-err chip-sm">ปฏิเสธ — แก้แล้วยื่นใหม่</span>' : revStatusChip(rv.status));
+    return '<div class="card mb-12 rv-po" data-po="'+esc(p.id)+'" style="padding:13px;cursor:pointer">' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">' +
+        '<div style="flex:1;min-width:0">' +
+          '<div class="num" style="font-weight:800;font-size:14px">'+esc(p.id)+'</div>' +
+          '<div style="font-size:11px;color:var(--ink-3);margin-top:2px">'+(p.wh?'คลัง '+esc(p.wh)+' · ':'')+'<span class="num">'+(p.lines||0)+'</span> รายการ'+(p.due?' · กำหนดส่ง '+esc(toBE(p.due)):'')+'</div>' +
+        '</div>' + chip +
+      '</div>' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">' +
+        '<span style="font-size:11px;color:var(--ink-3)">มูลค่าตาม PO</span>' +
+        '<span class="num bold" style="font-size:14px">฿'+fmtMoney(p.value||0)+'</span>' +
+      '</div>' +
+    '</div>';
+  };
+  let html = '<div style="padding:14px 0 90px">';
+  if (!items.length) {
+    html += '<div class="card" style="padding:30px;text-align:center;color:var(--ink-3)">ไม่มี PO เปิดอยู่ตอนนี้</div>';
+  } else {
+    if (pending.length) html += '<div class="m-section">รอยืนยัน ('+pending.length+')</div>' + pending.map(row).join('');
+    if (sent.length) html += '<div class="m-section" style="margin-top:14px">ยืนยันแล้ว ('+sent.length+')</div>' + sent.map(row).join('');
+  }
+  html += '</div>';
+  return html;
+}
+function wireSupplierPOConfirm() {
+  $$('#mContent .rv-po').forEach(c => c.addEventListener('click', () => {
+    const po = c.dataset.po;
+    const rv = revLatestByPO(po);
+    if (rv && REV_ACTIVE[rv.status]) { S._revSel = rv.id; nav('po-rev-view'); }
+    else startRevEditor(po);
+  }));
+}
+
+// เปิด editor — สร้าง state จาก PO แล้วโหลดบรรทัดจริงจาก ERP
+async function startRevEditor(poId) {
+  const po = (DATA.openPOs || []).find(p => String(p.id) === String(poId)) || {};
+  const vendor = (S.session && S.session.vendor) || {};
+  S._revEdit = { po: String(poId), wh: po.wh || '', vendorCode: (po.vendor && po.vendor.code) || vendor.code || '',
+    lines: null, discountType: 'none', discountValue: 0, discountNote: '', notes: '', deliveryDate: '', pickerOpen: false, pickQ: '', saving: false };
+  nav('po-rev-edit');
+  try {
+    const res = await callAPI('getPOLines', { pos: [String(poId)] });
+    const raw = (res && res.ok && Array.isArray(res.data)) ? res.data : [];
+    S._revEdit.lines = raw.map(l => {
+      const qty = Number(l.qty) || 0, val = Number(l.value) || 0;
+      const price = qty > 0 ? Math.round(val / qty * 10000) / 10000 : 0;
+      return { type: 'original', sku: String(l.sku || ''), barcode: '', name: l.desc || '', unit: l.unit || '',
+        origQty: qty, origPrice: price, origTotal: val, newQty: qty, newPrice: price, isFoc: false, note: '' };
+    });
+  } catch (e) { console.error('[startRevEditor]', e); S._revEdit.lines = []; }
+  if (S.page === 'po-rev-edit') renderContentOnly();
+}
+
+// ยอดสุทธิจาก state editor (FOC ไม่คิดเงิน + ส่วนลดท้ายบิล)
+function revEditNet(E) {
+  let sum = 0;
+  (E.lines || []).forEach(l => { if (!l.isFoc) sum += (Number(l.newQty) || 0) * (Number(l.newPrice) || 0); });
+  if (E.discountType === 'baht') sum -= (Number(E.discountValue) || 0);
+  if (E.discountType === 'pct') sum *= (1 - (Number(E.discountValue) || 0) / 100);
+  return Math.round(sum * 100) / 100;
+}
+
+function rvLineCard(l, i) {
+  const changed = l.type === 'added' ? 'เพิ่ม' : (l.isFoc || Number(l.newQty) !== Number(l.origQty) || Number(l.newPrice) !== Number(l.origPrice)) ? 'แก้' : '';
+  const lt = l.isFoc ? 0 : (Number(l.newQty) || 0) * (Number(l.newPrice) || 0);
+  return '<div class="card mb-12" style="padding:12px'+(l.type === 'added' ? ';border-color:var(--accent)' : '')+'">' +
+    '<div style="display:flex;gap:8px;align-items:flex-start">' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="font-weight:700;font-size:13px">'+esc(l.name || l.sku)+'</div>' +
+        '<div class="num" style="font-size:10.5px;color:var(--ink-3);margin-top:1px">'+esc(l.sku || l.barcode)+(l.unit ? ' · '+esc(l.unit) : '')+'</div>' +
+      '</div>' +
+      (changed ? '<span class="chip chip-sm '+(l.type === 'added' ? 'chip-info' : 'chip-warn')+'">'+changed+'</span>' : '') +
+      (l.type === 'added' ? '<button type="button" class="rv-del" data-i="'+i+'" style="border:0;background:transparent;color:var(--err);font-size:16px;cursor:pointer;padding:0 2px;line-height:1">✕</button>' : '') +
+    '</div>' +
+    (l.type !== 'added' ? '<div style="font-size:10.5px;color:var(--ink-3);margin-top:6px">ตาม PO เดิม: <span class="num">'+fmtMoney(l.origQty)+' × ฿'+fmtMoney(l.origPrice)+' = ฿'+fmtMoney(l.origTotal)+'</span></div>' : '') +
+    '<div style="display:flex;gap:8px;margin-top:7px;align-items:flex-end">' +
+      '<div style="flex:1"><label class="label-plain" style="font-size:10.5px">จำนวน</label><input type="number" inputmode="decimal" class="input num rv-qty" data-i="'+i+'" value="'+(l.newQty || '')+'" min="0" step="any"></div>' +
+      '<div style="flex:1"><label class="label-plain" style="font-size:10.5px">ราคา/หน่วย'+(l.isFoc ? ' (แถม)' : '')+'</label><input type="number" inputmode="decimal" class="input num rv-price" data-i="'+i+'" value="'+(l.isFoc ? 0 : (l.newPrice || ''))+'" min="0" step="any"'+(l.isFoc ? ' disabled' : '')+'></div>' +
+      '<div style="flex:1;text-align:right;padding-bottom:4px"><div style="font-size:10.5px;color:var(--ink-3)">รวม</div><div class="num bold rv-lt" data-i="'+i+'" style="font-size:14px">฿'+fmtMoney(lt)+'</div></div>' +
+    '</div>' +
+    '<button type="button" class="rv-foc" data-i="'+i+'" style="margin-top:8px;border:1px solid '+(l.isFoc ? 'var(--ok)' : 'var(--line)')+';background:'+(l.isFoc ? '#E8F5EE' : '#fff')+';color:'+(l.isFoc ? 'var(--ok)' : 'var(--ink-3)')+';border-radius:7px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer">'+(l.isFoc ? '✓ ของแถม (FOC)' : 'ติ๊กเป็นของแถม (FOC)')+'</button>' +
+  '</div>';
+}
+
+// ลิสสินค้าใน picker (แชร์ ซัพ+จัดซื้อ) — กรองด้วยชื่อ/แบรนด์/บาร์โค้ด · โชว์สูงสุด 30
+function revPickerHTML(key, q) {
+  const list = (S._vp || {})[key];
+  if (!list) return '<div style="padding:20px;text-align:center;color:var(--ink-3)"><span class="spinner"></span><div style="margin-top:8px;font-size:12px">กำลังโหลดสินค้าของคุณ…</div></div>';
+  if (!list.length) return '<div style="padding:16px;text-align:center;color:var(--ink-3);font-size:12px">ไม่พบสินค้าของ vendor นี้ใน PDDT</div>';
+  const qq = String(q || '').toLowerCase().trim();
+  const hit = (!qq ? list : list.filter(p => (p.name + ' ' + p.fullName + ' ' + p.brand + ' ' + p.units.map(u => u.barcode).join(' ')).toLowerCase().indexOf(qq) !== -1)).slice(0, 30);
+  if (!hit.length) return '<div style="padding:16px;text-align:center;color:var(--ink-3);font-size:12px">ไม่พบ — ลองพิมพ์ชื่อ / แบรนด์ / บาร์โค้ด</div>';
+  return hit.map(p =>
+    '<div style="padding:9px 10px;border-bottom:1px solid var(--divider)">' +
+      '<div style="font-size:12.5px;font-weight:600">'+esc(p.name)+'</div>' +
+      (p.brand ? '<div style="font-size:10.5px;color:var(--accent);font-weight:600">'+esc(p.brand)+'</div>' : '') +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px">' +
+        p.units.map(u => '<button type="button" class="rv-pick" data-name="'+esc(p.name)+'" data-unit="'+esc(u.label || u.u)+'" data-barcode="'+esc(u.barcode)+'" style="border:1px solid var(--brand);color:var(--brand);background:#fff;border-radius:7px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer">+ '+esc(u.u)+(u.per > 1 ? ' ('+u.per+')' : '')+' <span class="num" style="font-weight:500;color:var(--ink-3)">'+esc(u.barcode)+'</span></button>').join('') +
+      '</div>' +
+    '</div>').join('');
+}
+
+function supplierPORevEdit() {
+  const E = S._revEdit;
+  if (!E) { setTimeout(() => nav('po-confirm'), 0); return '<div></div>'; }
+  let html = '<div style="padding:14px 0 110px">';
+  html += '<div class="card mb-12" style="padding:12px">' +
+    '<div class="num" style="font-weight:800;font-size:15px">'+esc(E.po)+'</div>' +
+    '<div style="font-size:11px;color:var(--ink-3);margin-top:2px">'+(E.wh ? 'คลัง '+esc(E.wh)+' · ' : '')+'แก้จำนวน/ราคา · เพิ่มสินค้า · ใส่ของแถม แล้วส่งให้จัดซื้อ</div>' +
+  '</div>';
+  if (E.lines === null) {
+    html += '<div style="padding:36px;text-align:center;color:var(--ink-3)"><span class="spinner" style="width:26px;height:26px;border-width:3px"></span><div style="margin-top:10px;font-size:12px">กำลังโหลดรายการสินค้าจาก PO…</div></div></div>';
+    return html;
+  }
+  html += '<div class="m-section">รายการสินค้า ('+E.lines.length+')</div>';
+  html += E.lines.map((l, i) => rvLineCard(l, i)).join('');
+  html += '<button type="button" class="btn btn-block" id="rvAddBtn" style="border:1.5px dashed var(--brand);color:var(--brand);background:var(--brand-tint)">+ เพิ่มสินค้า (เลือกจากสินค้าของคุณ)</button>';
+  html += '<div id="rvPicker" class="card" style="margin-top:10px;padding:0;overflow:hidden'+(E.pickerOpen ? '' : ';display:none')+'">' +
+    '<div style="padding:10px 10px 6px"><input class="input" id="rvPickSearch" placeholder="ค้นชื่อ / แบรนด์ / บาร์โค้ด" value="'+esc(E.pickQ || '')+'"></div>' +
+    '<div id="rvPickList" style="max-height:300px;overflow:auto">'+revPickerHTML('self', E.pickQ)+'</div>' +
+    '<div style="padding:9px 10px;border-top:1px solid var(--divider);font-size:11px;color:var(--ink-3);display:flex;justify-content:space-between;align-items:center;gap:8px"><span>สินค้าใหม่ที่ยังไม่มีในระบบ?</span><button type="button" class="btn btn-sm" id="rvGoNP">เสนอสินค้าใหม่</button></div>' +
+  '</div>';
+  html += '<div class="m-section" style="margin-top:16px">ส่วนลดท้ายบิล</div>' +
+    '<div class="card" style="padding:12px">' +
+      '<div style="display:flex;gap:8px">' +
+        '<select class="select" id="rvDcType" style="flex:1.2">' +
+          '<option value="none"'+(E.discountType === 'none' ? ' selected' : '')+'>ไม่มีส่วนลด</option>' +
+          '<option value="baht"'+(E.discountType === 'baht' ? ' selected' : '')+'>ลดเป็นบาท (฿)</option>' +
+          '<option value="pct"'+(E.discountType === 'pct' ? ' selected' : '')+'>ลดเป็น %</option>' +
+        '</select>' +
+        '<input type="number" inputmode="decimal" class="input num" id="rvDcVal" style="flex:1" placeholder="มูลค่า" value="'+(E.discountValue || '')+'" min="0" step="any"'+(E.discountType === 'none' ? ' disabled' : '')+'>' +
+      '</div>' +
+      '<input class="input" id="rvDcNote" style="margin-top:8px" placeholder="หมายเหตุส่วนลด (ถ้ามี)" value="'+esc(E.discountNote || '')+'">' +
+    '</div>';
+  html += '<div class="m-section" style="margin-top:16px">กำหนดส่ง + หมายเหตุ</div>' +
+    '<div class="card" style="padding:12px">' +
+      '<div class="field-group"><label class="label-plain">วันที่จะส่งสินค้า</label><input type="date" class="input" id="rvDelivery" value="'+esc(E.deliveryDate || '')+'"></div>' +
+      '<div class="field-group"><label class="label-plain">หมายเหตุถึงจัดซื้อ</label><input class="input" id="rvNotes" placeholder="เช่น ราคาขึ้นตามต้นทุน / สินค้าขาด ฯลฯ" value="'+esc(E.notes || '')+'"></div>' +
+    '</div>';
+  const before = E.lines.reduce((s, l) => s + (Number(l.origTotal) || 0), 0);
+  html += '<div class="card" style="margin-top:14px;padding:12px">' +
+    '<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--ink-2)"><span>ยอดตาม PO เดิม</span><span class="num" id="rvBefore">฿'+fmtMoney(before)+'</span></div>' +
+    '<div style="display:flex;justify-content:space-between;font-size:14px;font-weight:800;margin-top:6px"><span>ยอดใหม่ (หลังส่วนลด)</span><span class="num" id="rvAfter" style="color:var(--brand)">฿'+fmtMoney(revEditNet(E))+'</span></div>' +
+  '</div>';
+  html += '<button class="btn btn-primary btn-lg btn-block" id="rvSubmit" style="margin-top:12px;height:48px;font-size:14px">'+ic('check', 16)+' ส่งยืนยันให้จัดซื้อ</button>';
+  html += '<button class="btn btn-block" id="rvAsIs" style="margin-top:8px">ยืนยันตามเดิมทั้งใบ (ไม่แก้อะไร)</button>';
+  html += '</div>';
+  return html;
+}
+
+function wireSupplierPORevEdit() {
+  const E = S._revEdit;
+  if (!E) return;
+  const recompute = () => { const el = $('#rvAfter'); if (el) el.textContent = '฿' + fmtMoney(revEditNet(E)); };
+  const wirePicks = () => {
+    $$('#rvPickList .rv-pick').forEach(b => b.addEventListener('click', () => {
+      E.lines.push({ type: 'added', sku: '', barcode: b.dataset.barcode, name: b.dataset.name, unit: b.dataset.unit,
+        origQty: 0, origPrice: 0, origTotal: 0, newQty: 0, newPrice: 0, isFoc: false, note: '' });
+      toast('เพิ่มแล้ว', b.dataset.name + ' — ใส่จำนวน + ราคาด้วย', 'ok');
+      renderContentOnly();
+    }));
+  };
+  $$('#mContent .rv-qty').forEach(inp => inp.addEventListener('input', () => {
+    const i = Number(inp.dataset.i); if (!E.lines[i]) return;
+    E.lines[i].newQty = Number(inp.value) || 0;
+    const lt = $('.rv-lt[data-i="'+i+'"]');
+    if (lt) lt.textContent = '฿' + fmtMoney(E.lines[i].isFoc ? 0 : E.lines[i].newQty * (E.lines[i].newPrice || 0));
+    recompute();
+  }));
+  $$('#mContent .rv-price').forEach(inp => inp.addEventListener('input', () => {
+    const i = Number(inp.dataset.i); if (!E.lines[i]) return;
+    E.lines[i].newPrice = Number(inp.value) || 0;
+    const lt = $('.rv-lt[data-i="'+i+'"]');
+    if (lt) lt.textContent = '฿' + fmtMoney(E.lines[i].isFoc ? 0 : (E.lines[i].newQty || 0) * E.lines[i].newPrice);
+    recompute();
+  }));
+  $$('#mContent .rv-foc').forEach(b => b.addEventListener('click', () => {
+    const i = Number(b.dataset.i); if (!E.lines[i]) return;
+    E.lines[i].isFoc = !E.lines[i].isFoc;
+    if (E.lines[i].isFoc) E.lines[i].newPrice = 0;
+    renderContentOnly();
+  }));
+  $$('#mContent .rv-del').forEach(b => b.addEventListener('click', () => { E.lines.splice(Number(b.dataset.i), 1); renderContentOnly(); }));
+  const addBtn = $('#rvAddBtn');
+  if (addBtn) addBtn.addEventListener('click', () => {
+    E.pickerOpen = !E.pickerOpen;
+    if (E.pickerOpen && !(S._vp || {})['self']) loadVendorProducts().then(() => { if (S.page === 'po-rev-edit') renderContentOnly(); });
+    renderContentOnly();
+  });
+  const ps = $('#rvPickSearch');
+  if (ps) ps.addEventListener('input', () => {
+    E.pickQ = ps.value;
+    const pl = $('#rvPickList');
+    if (pl) { pl.innerHTML = revPickerHTML('self', E.pickQ); wirePicks(); }
+  });
+  wirePicks();
+  const np = $('#rvGoNP'); if (np) np.addEventListener('click', () => nav('new-product'));
+  const dcT = $('#rvDcType');
+  if (dcT) dcT.addEventListener('change', () => { E.discountType = dcT.value; if (E.discountType === 'none') E.discountValue = 0; renderContentOnly(); });
+  const dcV = $('#rvDcVal'); if (dcV) dcV.addEventListener('input', () => { E.discountValue = Number(dcV.value) || 0; recompute(); });
+  const dcN = $('#rvDcNote'); if (dcN) dcN.addEventListener('input', () => { E.discountNote = dcN.value; });
+  const dv = $('#rvDelivery'); if (dv) dv.addEventListener('change', () => { E.deliveryDate = dv.value; });
+  const nt = $('#rvNotes'); if (nt) nt.addEventListener('input', () => { E.notes = nt.value; });
+  const sb = $('#rvSubmit'); if (sb) sb.addEventListener('click', () => submitRevision(false));
+  const ai = $('#rvAsIs'); if (ai) ai.addEventListener('click', () => submitRevision(true));
+}
+
+async function submitRevision(asIs) {
+  const E = S._revEdit;
+  if (!E || E.saving || E.lines === null) return;
+  let lines;
+  if (asIs) {
+    const orig = E.lines.filter(l => l.type === 'original');
+    if (!orig.length) { toast('ใบนี้ไม่มีรายการเดิมให้ยืนยัน', '', 'err'); return; }
+    const touched = E.lines.some(l => l.type === 'added' || l.isFoc || Number(l.newQty) !== Number(l.origQty) || Number(l.newPrice) !== Number(l.origPrice));
+    if (touched && !confirm('ยืนยันตามเดิมทั้งใบ — รายการที่แก้/เพิ่มไว้จะไม่ถูกใช้ ต่อเลยไหม?')) return;
+    lines = orig.map(l => ({ type: 'original', sku: l.sku, barcode: l.barcode, name: l.name, unit: l.unit,
+      origQty: l.origQty, origPrice: l.origPrice, origTotal: l.origTotal, newQty: l.origQty, newPrice: l.origPrice, isFoc: false, note: '' }));
+  } else {
+    let bad = null;
+    lines = E.lines.map(l => {
+      const changed = l.isFoc || Number(l.newQty) !== Number(l.origQty) || Number(l.newPrice) !== Number(l.origPrice);
+      if (!(Number(l.newQty) > 0)) bad = bad || 'ใส่จำนวน: ' + (l.name || l.sku);
+      else if (!l.isFoc && !(Number(l.newPrice) > 0)) bad = bad || 'ใส่ราคา (หรือติ๊กแถม): ' + (l.name || l.sku);
+      return { type: l.type === 'added' ? 'added' : (changed ? 'edited' : 'original'), sku: l.sku, barcode: l.barcode, name: l.name, unit: l.unit,
+        origQty: l.origQty, origPrice: l.origPrice, origTotal: l.origTotal, newQty: Number(l.newQty) || 0, newPrice: Number(l.newPrice) || 0, isFoc: !!l.isFoc, note: l.note || '' };
+    });
+    if (!lines.length) { toast('ไม่มีรายการสินค้า', '', 'err'); return; }
+    if (bad) { toast('ยังส่งไม่ได้', bad, 'err'); return; }
+    if ((E.discountType || 'none') !== 'none' && !(Number(E.discountValue) > 0)) { toast('ใส่มูลค่าส่วนลด', 'หรือเลือก "ไม่มีส่วนลด"', 'err'); return; }
+  }
+  E.saving = true;
+  showAppLoading('กำลังส่งยืนยัน…');
+  const vendor = (S.session && S.session.vendor) || {};
+  let res = null;
+  try {
+    res = await callAPI('submitPORevision', { revision: {
+      poRef: E.po, vendorCode: E.vendorCode || vendor.code || '', vendorName: vendor.name || '',
+      wlCode: E.wh || '', deliveryDate: E.deliveryDate || '',
+      discountType: asIs ? 'none' : (E.discountType || 'none'),
+      discountValue: asIs ? 0 : (Number(E.discountValue) || 0),
+      discountNote: asIs ? '' : (E.discountNote || ''),
+      notes: E.notes || '', asIs: !!asIs, lines: lines
+    } });
+  } catch (e) { console.error('[submitPORevision]', e); }
+  hideAppLoading();
+  E.saving = false;
+  if (!res || !res.ok) { toast('ส่งไม่สำเร็จ', (res && res.error) || 'ลองใหม่อีกครั้ง', 'err'); return; }
+  toast(asIs ? 'ยืนยันตามเดิมแล้ว' : 'ส่งยืนยันแล้ว', 'รอจัดซื้อตรวจและอนุมัติ', 'ok');
+  S._revEdit = null; S._revDetail = {};
+  await loadPORevisions(true);
+  nav('po-confirm');
+}
+
+function supplierPORevView() {
+  const id = S._revSel;
+  const r = id && S._revDetail && S._revDetail[id];
+  if (!r) {
+    if (id) loadRevDetail(id).then(() => { if (S.page === 'po-rev-view') renderContentOnly(); });
+    return '<div style="padding:48px;text-align:center;color:var(--ink-3)"><span class="spinner" style="width:28px;height:28px;border-width:3px"></span><div style="margin-top:12px">กำลังโหลด…</div></div>';
+  }
+  const lineRow = l => {
+    const tag = l.type === 'added' ? '<span class="chip chip-info chip-sm">เพิ่ม</span>' : l.type === 'edited' ? '<span class="chip chip-warn chip-sm">แก้</span>' : '';
+    const foc = l.isFoc ? ' <span class="chip chip-ok chip-sm">แถม</span>' : '';
+    const oldTxt = l.type === 'added' ? '' : '<span style="color:var(--ink-3)">'+fmtMoney(l.origQty)+' × ฿'+fmtMoney(l.origPrice)+'</span>' + (l.type === 'edited' ? ' → ' : '');
+    const newTxt = (l.type === 'edited' || l.type === 'added') ? '<b>'+fmtMoney(l.newQty)+' × ฿'+fmtMoney(l.newPrice)+'</b>' : '';
+    return '<div style="padding:9px 0;border-bottom:1px solid var(--divider)">' +
+      '<div style="display:flex;gap:6px;align-items:flex-start"><div style="flex:1;font-size:12.5px;font-weight:600">'+esc(l.name || l.sku)+foc+'</div>'+tag+'</div>' +
+      '<div class="num" style="font-size:11px;margin-top:3px">'+oldTxt+newTxt+' <span style="float:right;font-weight:700">฿'+fmtMoney(l.isFoc ? 0 : l.newTotal)+'</span></div>' +
+    '</div>';
+  };
+  let html = '<div style="padding:14px 0 90px">';
+  html += '<div class="card mb-12" style="padding:13px">' +
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">' +
+      '<div><div class="num" style="font-weight:800;font-size:15px">'+esc(r.po)+'</div>' +
+      '<div style="font-size:11px;color:var(--ink-3);margin-top:2px">ส่งเมื่อ '+esc(r.submittedAt || '')+(r.asIs ? ' · ยืนยันตามเดิม' : '')+'</div></div>' +
+      revStatusChip(r.status) +
+    '</div>' +
+    (r.status === 'ปฏิเสธ' && r.rejectReason ? '<div class="alert alert-err" style="margin-top:10px;font-size:12px">เหตุผล: '+esc(r.rejectReason)+'</div>' : '') +
+    (r.adminEdited ? '<div style="font-size:11px;color:var(--warn);margin-top:8px">⚠ จัดซื้อมีแก้ไขรายการเพิ่มเติม</div>' : '') +
+  '</div>';
+  html += '<div class="card mb-12" style="padding:13px">' + (r.lines || []).map(lineRow).join('') +
+    '<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--ink-2);margin-top:10px"><span>ยอดตาม PO เดิม</span><span class="num">฿'+fmtMoney(r.totalBefore)+'</span></div>' +
+    (r.discountType !== 'none' ? '<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--ink-2);margin-top:4px"><span>ส่วนลดท้ายบิล'+(r.discountNote ? ' ('+esc(r.discountNote)+')' : '')+'</span><span class="num">'+(r.discountType === 'pct' ? r.discountValue + '%' : '฿' + fmtMoney(r.discountValue))+'</span></div>' : '') +
+    '<div style="display:flex;justify-content:space-between;font-size:14px;font-weight:800;margin-top:6px"><span>ยอดสุทธิ</span><span class="num" style="color:var(--brand)">฿'+fmtMoney(r.totalAfter)+'</span></div>' +
+  '</div>';
+  if (r.deliveryDate || r.notes) {
+    html += '<div class="card mb-12" style="padding:13px;font-size:12px;color:var(--ink-2)">' +
+      (r.deliveryDate ? '<div>จะส่งสินค้า: <b>'+esc(toBE(r.deliveryDate))+'</b></div>' : '') +
+      (r.notes ? '<div style="margin-top:4px">หมายเหตุ: '+esc(r.notes)+'</div>' : '') +
+    '</div>';
+  }
+  if (r.status === 'อนุมัติ') html += '<div class="alert" style="background:var(--brand-tint);border-color:var(--brand);font-size:12px;color:var(--ink-2)">อนุมัติแล้ว — จองคิวส่งเข้าคลังได้เลยที่เมนู "จองส่งสินค้า"</div>';
+  html += '</div>';
+  return html;
+}
+function wireSupplierPORevView() {}
 
 /* ───────────────── SUPPLIER: Booking wizard ───────────────── */
 function supplierBooking() {
