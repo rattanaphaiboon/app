@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rattana จัดของ Pre-Order v1.22</title>
+<title>Rattana จัดของ Pre-Order v1.23</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -119,6 +119,10 @@
   .scan-btn.gold{background:linear-gradient(135deg,var(--gold),var(--gold-d));color:var(--navy)}
   .scan-btn.green{background:linear-gradient(135deg,var(--green),var(--green-d));color:#fff}
   .scan-btn.gray{background:#64748b}
+  .mini-btn{font-family:inherit;font-size:11px;font-weight:600;padding:3px 8px;border:none;border-radius:6px;background:#e2e8f0;color:var(--navy);cursor:pointer;margin-left:6px;white-space:nowrap}
+  .mini-btn.done{background:var(--green);color:#fff}
+  .mini-btn:hover{filter:brightness(1.06)}
+  .done-tag{display:inline-block;font-size:11px;font-weight:700;color:var(--green);background:#dcfce7;border-radius:6px;padding:2px 7px;margin-right:4px}
   .scan-card{background:var(--card);border:2px solid var(--gold);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 8px 24px rgba(201,168,76,.18);max-width:480px}
   .scan-card .pname{font-size:18px;font-weight:700;color:var(--navy)}
   .scan-card .pbar{font-size:12.5px;color:var(--muted);margin:2px 0 10px}
@@ -180,7 +184,7 @@
     <div id="googleSignInBtn"></div>
     <div id="loginSpinner">⏳ กำลังเข้าสู่ระบบ…</div>
     <div id="loginError"></div>
-    <div class="login-ver">เวอร์ชัน v1.22</div>
+    <div class="login-ver">เวอร์ชัน v1.23</div>
   </div>
 </div>
 
@@ -188,7 +192,7 @@
 <div id="app">
   <div class="topbar">
   <header class="appbar">
-    <div class="title">📦 จัดของ Pre-Order <span class="ver">v1.22</span></div>
+    <div class="title">📦 จัดของ Pre-Order <span class="ver">v1.23</span></div>
     <div class="spacer"></div>
     <div class="who" id="whoBox"></div>
     <a class="hub-btn" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">
@@ -271,7 +275,7 @@
 <script>
 /* ================= CONFIG ================= */
 const CONFIG = {
-  version: 'v1.22',
+  version: 'v1.23',
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
   backendId: '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI',
   orderGid: '691743937',
@@ -324,6 +328,8 @@ let MODEL = null;                                        // processed result
 let selectedBills = new Set();                           // ตะกร้าบิลที่เลือก (ข้ามวันได้)
 let fSalesmen = new Set();                               // กรองชื่อเซล (ว่าง=ทั้งหมด · เลือกได้หลายคน)
 let billsInitialized = false;                            // auto-เลือกเมื่อวานครั้งแรก
+let DONE = {};                                            // บิลที่จัดแล้ว (orderId → {date,by,salesman,store}) จากหลังบ้าน แชร์ทุกเครื่อง
+let hideDone = true;                                      // ซ่อนบิลที่จัดแล้วในแท็บเลือกบิล (default ซ่อน)
 
 /* ================= helpers ================= */
 function normalizeEmail(e){ return String(e||'').trim().toLowerCase(); }
@@ -479,11 +485,12 @@ async function reload(){
     loading(true,'กำลังโหลด Users + เล่มเอกสาร…');
     DATA.usersByCode = await loadUsers();
     await loadDocBooks();
-    loading(true,'กำลังโหลดออเดอร์…');
-    DATA.orders = await loadOrders();
+    loading(true,'กำลังโหลดออเดอร์ + บิลที่จัดแล้ว…');
+    const [_ord, _done] = await Promise.all([loadOrders(), loadDone()]);
+    DATA.orders = _ord; DONE = _done;
     const _opts=[...new Set([...DATA.orders.map(o=>o.store), ...DATA.orders.map(o=>o.product)].filter(Boolean))].sort();
     document.getElementById('storeList').innerHTML=_opts.slice(0,1500).map(s=>`<option value="${esc(s)}"></option>`).join('');
-    if(!billsInitialized){ const _d=yesterdayBKK(); DATA.orders.forEach(o=>{ if(o.date===_d && o.orderId && !/ยกเลิก/.test(o.cancel)) selectedBills.add(o.orderId); }); billsInitialized=true; }
+    if(!billsInitialized){ const _d=yesterdayBKK(); DATA.orders.forEach(o=>{ if(o.date===_d && o.orderId && !/ยกเลิก/.test(o.cancel) && !DONE[o.orderId]) selectedBills.add(o.orderId); }); billsInitialized=true; }
     buildSmDrop();
     process();
     render();
@@ -534,6 +541,46 @@ async function loadOrders(){
     dueDate:toISO(r[OC.dueDate]), apprStatus:String(r[OC.apprStatus]||'').trim()
   }));
 }
+
+/* ================= บิลที่จัดแล้ว (done) — แชร์หลังบ้าน ทุกเครื่องเห็นตรงกัน ================= */
+async function loadDone(){
+  if(!CONFIG.gasUrl) return {};
+  try{
+    const sep = CONFIG.gasUrl.includes('?') ? '&' : '?';
+    const r = await fetch(CONFIG.gasUrl + sep + 'action=doneBills');
+    const j = await r.json();
+    const m = {};
+    (j.bills||[]).forEach(b=>{ if(b && b.orderId) m[String(b.orderId).trim()] = b; });
+    return m;
+  }catch(e){ console.warn('loadDone fail', e); return {}; }
+}
+/* mark/unmark — optimistic update local DONE ก่อน แล้วค่อยยิงหลังบ้าน */
+async function markDoneBackend(orderIds){
+  orderIds = (orderIds||[]).filter(id=> id && !DONE[id]);
+  if(!CONFIG.gasUrl || !orderIds.length) return 0;
+  const by = (currentUser && currentUser.name) || '';
+  const today = todayBKK();
+  const ts = nowStamp();
+  const bMap = {}; buildBills().forEach(b=> bMap[b.orderId]=b);
+  const rows = orderIds.map(id=>{ const b=bMap[id]||{}; return [id, today, by, b.salesman||'', b.store||'', ts]; });
+  orderIds.forEach(id=>{ const b=bMap[id]||{}; DONE[id]={orderId:id,date:today,by,salesman:b.salesman||'',store:b.store||'',ts}; });   // optimistic
+  selectedBills.forEach(id=>{ if(DONE[id]) selectedBills.delete(id); });   // จัดแล้ว = เอาออกจากตะกร้า
+  try{ await fetch(CONFIG.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'markDone',rows})}); }
+  catch(e){ console.warn('markDone fail', e); }
+  return orderIds.length;
+}
+async function unmarkDoneBackend(orderIds){
+  orderIds = (orderIds||[]).filter(id=> id && DONE[id]);
+  if(!CONFIG.gasUrl || !orderIds.length) return 0;
+  orderIds.forEach(id=>{ delete DONE[id]; });   // optimistic
+  try{ await fetch(CONFIG.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'unmarkDone',orderIds})}); }
+  catch(e){ console.warn('unmarkDone fail', e); }
+  return orderIds.length;
+}
+/* ปุ่มในแท็บเลือกบิล */
+async function markBillDone(id){ await markDoneBackend([id]); process(); render(); toast('🟢 ทำเครื่องหมายจัดแล้ว'); }
+async function unmarkBillDone(id){ await unmarkDoneBackend([id]); process(); render(); toast('↩️ คืนเป็นยังไม่จัด'); }
+function toggleHideDone(){ hideDone=!hideDone; renderBillSelect(); }
 
 /* ================= core processing ================= */
 function process(){
@@ -851,23 +898,35 @@ function buildBills(){
 }
 function renderBillSelect(){
   const _sc=(document.querySelector('#panel-bills .tbl-wrap')||{}).scrollTop||0;   // กันเด้งขึ้นบนตอนติ๊ก
-  const bills=buildBills();
+  const all=buildBills();
+  const doneN=all.filter(b=>DONE[b.orderId]).length, newN=all.length-doneN;
+  const shown = hideDone ? all.filter(b=>!DONE[b.orderId]) : all;
   const head=`<div class="row-sel">
     <button class="btn-load" style="padding:6px 12px;height:auto" onclick="selectAllBills(true)">✔ เลือกทั้งหมดที่แสดง</button>
     <button class="btn-load" style="padding:6px 12px;height:auto;background:#64748b" onclick="selectAllBills(false)">✖ ไม่เลือกที่แสดง</button>
-    <span class="muted">แสดง ${bills.length} บิล · <b style="color:var(--navy)">เลือกแล้ว ${selectedBills.size} บิล</b> (จะจัด + Export)</span></div>`;
-  if(!bills.length){ document.getElementById('panel-bills').innerHTML=head+'<div class="empty">ไม่มีบิลในวันที่เลือก — ลองสลับชิป "วัน"</div>'; return; }
-  const rows=bills.map(b=>`<tr class="${selectedBills.has(b.orderId)?'':'cut-row'}">
-    <td style="text-align:center"><input type="checkbox" ${selectedBills.has(b.orderId)?'checked':''} onchange="toggleBill('${esc(b.orderId)}',this.checked)" style="width:17px;height:17px;cursor:pointer"></td>
-    <td>${esc(b.date)}</td><td>${esc(b.time)}</td><td>${esc(b.salesman)} ${esc(b.salesmanName||'')}</td><td>${esc(b.store)}</td>
-    <td>${esc(b.wh)}</td><td>${esc(b.orderId)}</td><td class="num">${b.lines}</td><td class="num">${b.total.toLocaleString()}</td></tr>`).join('');
+    <button class="btn-load" style="padding:6px 12px;height:auto;background:${hideDone?'#64748b':'var(--green)'}" onclick="toggleHideDone()">${hideDone?'👁️ แสดงที่จัดแล้ว ('+doneN+')':'🙈 ซ่อนที่จัดแล้ว'}</button>
+    <span class="muted"><b style="color:var(--green)">ยังไม่จัด ${newN}</b> · จัดแล้ว ${doneN} · <b style="color:var(--navy)">เลือก ${selectedBills.size}</b> (จะจัด+Export)</span></div>`;
+  if(!shown.length){ document.getElementById('panel-bills').innerHTML=head+`<div class="empty">${all.length?'บิลในวันนี้จัดครบแล้ว 🎉 — ไม่มีบิลใหม่ที่ต้องจัด':'ไม่มีบิลในวันที่เลือก — ลองสลับชิป "วัน"'}</div>`; return; }
+  const rows=shown.map(b=>{
+    const d=DONE[b.orderId];
+    if(d) return `<tr style="opacity:.6;background:#f0fdf4">
+      <td style="text-align:center" title="จัดแล้ว ${esc(d.date)}${d.by?' · '+esc(d.by):''}">🟢</td>
+      <td>${esc(b.date)}</td><td>${esc(b.time)}</td><td>${esc(b.salesman)} ${esc(b.salesmanName||'')}</td><td>${esc(b.store)}</td>
+      <td>${esc(b.wh)}</td><td>${esc(b.orderId)}</td><td class="num">${b.lines}</td>
+      <td class="num"><span class="done-tag">จัดแล้ว ${esc(d.date)}</span><button class="mini-btn" onclick="unmarkBillDone('${esc(b.orderId)}')">↩️ ยังไม่จัด</button></td></tr>`;
+    return `<tr class="${selectedBills.has(b.orderId)?'':'cut-row'}">
+      <td style="text-align:center"><input type="checkbox" ${selectedBills.has(b.orderId)?'checked':''} onchange="toggleBill('${esc(b.orderId)}',this.checked)" style="width:17px;height:17px;cursor:pointer"></td>
+      <td>${esc(b.date)}</td><td>${esc(b.time)}</td><td>${esc(b.salesman)} ${esc(b.salesmanName||'')}</td><td>${esc(b.store)}</td>
+      <td>${esc(b.wh)}</td><td>${esc(b.orderId)}</td><td class="num">${b.lines}</td>
+      <td class="num">${b.total.toLocaleString()}<button class="mini-btn done" onclick="markBillDone('${esc(b.orderId)}')">✓ จัดแล้ว</button></td></tr>`;
+  }).join('');
   document.getElementById('panel-bills').innerHTML= head +
-    `<div class="note">ติ๊กบิลที่จะจัด — สลับชิป "วัน" เพื่อหยิบข้ามวัน (เมื่อวานทั้งหมด + เลือกบางบิลของวันนี้) · เฉพาะบิลที่ติ๊กเท่านั้นไป เต็มลัง/เศษ/Export</div>
-     <div class="tbl-wrap"><table><thead><tr><th>✓</th><th>วันคีย์</th><th>เวลา</th><th>เซล</th><th>ร้าน</th><th>คลัง</th><th>orderId</th><th>รายการ</th><th>ยอด</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    `<div class="note">ติ๊กบิลที่จะจัด → Export · 🟢 = จัดแล้ว (บันทึกหลังบ้าน ทุกเครื่องเห็นตรงกัน · พรุ่งนี้ไม่ขึ้นซ้ำ) · กด <b>✓ จัดแล้ว</b> ปิดเอง / <b>↩️</b> คืน · Export = ทำเครื่องหมายให้อัตโนมัติ</div>
+     <div class="tbl-wrap"><table><thead><tr><th>✓</th><th>วันคีย์</th><th>เวลา</th><th>เซล</th><th>ร้าน</th><th>คลัง</th><th>orderId</th><th>รายการ</th><th>ยอด / สถานะ</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   const _w=document.querySelector('#panel-bills .tbl-wrap'); if(_w) _w.scrollTop=_sc;   // คืนตำแหน่ง scroll
 }
-function toggleBill(id,on){ if(on) selectedBills.add(id); else selectedBills.delete(id); process(); render(); }
-function selectAllBills(on){ buildBills().forEach(b=>{ if(on) selectedBills.add(b.orderId); else selectedBills.delete(b.orderId); }); process(); render(); }
+function toggleBill(id,on){ if(on && !DONE[id]) selectedBills.add(id); else selectedBills.delete(id); process(); render(); }
+function selectAllBills(on){ buildBills().forEach(b=>{ if(on && !DONE[b.orderId]) selectedBills.add(b.orderId); else if(!on) selectedBills.delete(b.orderId); }); process(); render(); }   // ข้ามบิลที่จัดแล้ว
 
 function renderOrders(){
   const _sc=(document.querySelector('#panel-orders .tbl-wrap')||{}).scrollTop||0;   // กันเด้งบนตอนติ๊ก
@@ -1280,6 +1339,9 @@ function exportXlsx(){
 
   XLSX.writeFile(wb, `จัดของ-${MODEL.date}.xlsx`);
   toast('✅ ดาวน์โหลด Excel แล้ว');
+  // Export = "จัดบิลพวกนี้แล้ว" → mark done หลังบ้าน (พรุ่งนี้ไม่ขึ้นซ้ำ · ทุกเครื่องเห็นตรงกัน)
+  const _exp = Object.keys((MODEL&&MODEL.docNoByOrder)||{});
+  if(_exp.length) markDoneBackend(_exp).then(n=>{ if(n){ toast('🟢 ทำเครื่องหมาย '+n+' บิลว่าจัดแล้ว'); process(); render(); } });
 }
 /* force selected column indices to TEXT (กันบาร์โค้ด/รหัสเป็น scientific notation) */
 function forceText(ws, dataRows, colIdxs){
