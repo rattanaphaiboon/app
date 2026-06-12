@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v1.3</title>
+  <title>Rattana Stock Count v1.4</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -567,6 +567,7 @@
       <select id="countWh" class="input input-compact wh-bar-sel" onchange="onCountWhChange()"></select>
       <button class="btn-pull" onclick="forcePullDraft()" title="ดึงรายการที่เคยนับค้างไว้จากเครื่องอื่น" type="button">↻</button>
     </div>
+    <div id="savedBadge" style="display:none;font-size:11.5px;color:var(--muted);padding:4px 10px;margin-top:6px;font-weight:600;align-items:center;justify-content:flex-start"></div>
 
     <!-- Counter name picker (shown only when email has 2+ staff in Users sheet) -->
     <div class="wh-bar mt-8" id="counterBar" style="display:none">
@@ -670,7 +671,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v1.3';
+const APP_VERSION = 'v1.4';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // Apps Script Web App URL for saving count results (paste after deploying — see setup note)
@@ -1569,6 +1570,30 @@ function loadCountSession(wh) {
     const raw = JSON.parse(localStorage.getItem(countStoreKey(wh)));
     countSession = (raw && raw.warehouse === wh) ? raw : null;
   } catch { countSession = null; }
+  // Fallback: if no session under current counterTag (or it's empty),
+  // scan ALL keys for this warehouse and adopt the newest non-empty one.
+  // This rescues data when counterPick changes between refreshes.
+  if (!countSession || !Object.keys(countSession.items||{}).length) {
+    const prefix = `rattana_count_${wh}_`;
+    let best = null;
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(prefix)) continue;
+      try {
+        const s = JSON.parse(localStorage.getItem(k));
+        if (s && s.warehouse === wh && s.items && Object.keys(s.items).length) {
+          const t = new Date(s.lastEdit||0).getTime();
+          if (!best || t > best.t) best = { s, t, k };
+        }
+      } catch {}
+    }
+    if (best) {
+      countSession = best.s;
+      // Re-save under the CURRENT counterTag key so future loads find it directly
+      try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
+      console.log('[restore] adopted abandoned session from', best.k);
+    }
+  }
   if (!countSession) countSession = { warehouse: wh, startedAt: new Date().toISOString(), items: {}, lastEdit: 0 };
 }
 
@@ -1576,8 +1601,17 @@ function saveCountSession() {
   if (countSession) {
     countSession.lastEdit = new Date().toISOString();
     try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
+    updateSavedBadge();
     queueDraftSync();
   }
+}
+function updateSavedBadge() {
+  const el = document.getElementById('savedBadge'); if (!el) return;
+  if (!countSession || !Object.keys(countSession.items||{}).length) { el.style.display='none'; return; }
+  const t = countSession.lastEdit ? new Date(countSession.lastEdit) : new Date();
+  const hh = String(t.getHours()).padStart(2,'0'), mm = String(t.getMinutes()).padStart(2,'0');
+  el.innerHTML = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#1f9d57;box-shadow:0 0 4px #1f9d57;margin-right:5px"></span>บันทึกแล้ว · ${hh}.${mm} น.`;
+  el.style.display = 'inline-flex';
 }
 
 // ── Cross-device draft sync via Google Sheet ──
@@ -1957,6 +1991,7 @@ function piecesToCSEA(pieces, factorCS) {
 const liveOpen = new Set();   // one key at a time
 
 function renderCountList() {
+  updateSavedBadge();
   const card = document.getElementById('countListCard');
   const list = document.getElementById('countList');
   const items = countSession ? Object.values(countSession.items) : [];
