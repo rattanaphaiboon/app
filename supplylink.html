@@ -648,14 +648,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v7.2.3</div>
+<div class="version-badge">SupplyLink v7.3.0</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    SupplyLink v6.6.6 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v7.2.3';
+const VERSION = 'v7.3.0';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -1671,7 +1671,7 @@ async function loadOpenPOs(force) {
   S._posLoading = true;
   const ck = _poCacheKey();
   if (!force) { // ลอง client cache ก่อน (TTL 2 นาที) → ไม่ต้องรอ GAS
-    try { const c = JSON.parse(localStorage.getItem(ck)); if (c && (Date.now() - c.ts) < 120000 && Array.isArray(c.data)) { DATA.openPOs = c.data; S._posLoaded = true; S._posLoading = false; return; } } catch (e) {}
+    try { const c = JSON.parse(localStorage.getItem(ck)); if (c && (Date.now() - c.ts) < 120000 && Array.isArray(c.data)) { DATA.openPOs = c.data; S._posLoaded = true; S._posLoading = false; prefetchPOLines(DATA.openPOs.map(p => p.id)); return; } } catch (e) {}
   }
   try {
     const res = await callAPI('getOpenPOs', {});
@@ -1679,6 +1679,7 @@ async function loadOpenPOs(force) {
   } catch (e) { console.error('[loadOpenPOs]', e); }
   S._posLoaded = true;
   S._posLoading = false;
+  prefetchPOLines((DATA.openPOs || []).map(p => p.id)); // เตรียมรายการสินค้าทุกใบล่วงหน้า — เปิด editor ติดทันที
 }
 // โหลด PO เบื้องหลัง แล้ว re-render หน้าจอง (ไม่ block) — wizard โผล่ทันที PO เติมทีหลัง
 function ensureOpenPOs() {
@@ -1693,6 +1694,18 @@ async function loadPOLinesCached(pos, force) {
   const key = _poLinesKey(pos);
   if (!force) {
     try { const c = JSON.parse(localStorage.getItem(key)); if (c && (Date.now() - c.ts) < PO_LINES_TTL && Array.isArray(c.data)) return c.data; } catch (e) {}
+    // หลายใบ: ประกอบจาก cache รายใบ (prefetch เตรียมไว้) — ครบทุกใบ = ไม่ต้องยิง network
+    if (pos.length > 1) {
+      const parts = []; let ok = true;
+      for (let i = 0; i < pos.length; i++) {
+        try {
+          const c = JSON.parse(localStorage.getItem(_poLinesKey([String(pos[i])])));
+          if (c && (Date.now() - c.ts) < PO_LINES_TTL && Array.isArray(c.data)) parts.push.apply(parts, c.data);
+          else { ok = false; break; }
+        } catch (e) { ok = false; break; }
+      }
+      if (ok) return parts;
+    }
   }
   let data = [];
   try {
@@ -1703,6 +1716,25 @@ async function loadPOLinesCached(pos, force) {
   return data;
 }
 function clearPOLinesCache() { try { Object.keys(localStorage).filter(k => k.indexOf('sl_polines_') === 0).forEach(k => localStorage.removeItem(k)); } catch (e) {} }
+// prefetch รายการสินค้าของทุก PO ที่เปิดอยู่ แบบเงียบๆ (1 call รวบทุกใบ) → กดเปิดใบไหน editor ติดทันที
+async function prefetchPOLines(poIds) {
+  if (S._poPrefetching) return;
+  const missing = (poIds || []).map(String).filter(id => {
+    try { const c = JSON.parse(localStorage.getItem(_poLinesKey([id]))); return !(c && (Date.now() - c.ts) < PO_LINES_TTL && Array.isArray(c.data)); } catch (e) { return true; }
+  });
+  if (!missing.length) return;
+  S._poPrefetching = true;
+  try {
+    const res = await callAPI('getPOLines', { pos: missing.slice(0, 60) });
+    const data = (res && res.ok && Array.isArray(res.data)) ? res.data : [];
+    const byPo = {};
+    missing.slice(0, 60).forEach(id => byPo[id] = []); // ใบที่ไม่มีบรรทัดก็ cache [] — กันยิงซ้ำ
+    data.forEach(l => { const k = String(l.po || '').trim(); if (!byPo[k]) byPo[k] = []; byPo[k].push(l); });
+    const ts = Date.now();
+    Object.keys(byPo).forEach(id => { try { localStorage.setItem(_poLinesKey([id]), JSON.stringify({ ts: ts, data: byPo[id] })); } catch (e) {} });
+  } catch (e) { console.error('[prefetchPOLines]', e); }
+  S._poPrefetching = false;
+}
 
 /* ───────────────── PO REVISIONS (ยืนยัน PO) — shared loaders (supplier + admin) ───────────────── */
 const REV_ACTIVE = { 'รอจัดซื้อ': 1, 'อนุมัติ': 1 }; // active = ยื่นซ้ำไม่ได้ · ปฏิเสธแล้วถึงยื่นใหม่ได้
