@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.152</title>
+<title>Rattana Sales — v8.153</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -4899,7 +4899,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.152 · 2026-06-12</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.153 · 2026-06-12</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -4910,7 +4910,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag">v8.152</span>
+  <span class="demo-tag">v8.153</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -5039,7 +5039,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
   </button>
 
   <div class="drawer-footer">
-    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v8.152<br>2026-06-12 🔒 (popup สั่งของ ขยับลงเหนือกลางจอ การ์ดใหญ่ชิดบน · จออนุมัติ chip กรอง ราคา/CN)<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
+    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v8.153<br>2026-06-12 🔒 (รวม/แยกบิล — คอลัมน์ billId · ยืนยันออเดอร์ถามรวมบิลย้อนหลัง ≤3 วัน · Code.gs v8.85)<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
   </div>
 </aside>
 
@@ -24178,7 +24178,68 @@ function _recoverShopIdFromCart() {
   return currentShopId;
 }
 
-function confirmOrder() {
+// v8.153: ── รวม/แยกบิล (billId) ──────────────────────────────────────────
+//   ทุกออเดอร์มี billId เสมอ · default = orderId เอง (แยกบิล) · ตอนยืนยัน ถ้าร้านมีบิลย้อนหลัง ≤3 วัน → ถามรวม
+//   orderId เดิมยังรันเลขปกติ (ไม่แตะ) · ERP "ดึงออเดอร์" ต้อง group ตาม billId (ไม่ใช่ orderId) เพื่อรวมเป็นบิลเดียว
+function _recentShopBills(shopId, days){
+  var shop = (typeof SHOPS !== 'undefined' && SHOPS) ? SHOPS.find(function(s){ return s.id === shopId; }) : null;
+  var codes = new Set();   // match ทั้ง bplusCode (sheet จริง) และ id (แถวที่เพิ่ง inject local)
+  if (shop){ if (shop.bplusCode) codes.add(String(shop.bplusCode).trim()); if (shop.id) codes.add(String(shop.id).trim()); }
+  if (shopId) codes.add(String(shopId).trim());
+  var cutoff = Date.now() - days*86400000;
+  var seen = new Map();
+  (SHEET_DATA.orders || []).forEach(function(r){
+    if (!codes.has(String(r['รหัสร้าน']||'').trim())) return;
+    if (typeof isCancelledRow === 'function' && isCancelledRow(r)) return;
+    var d = (typeof _parseOrderDate === 'function') ? _parseOrderDate(r['วัน']) : null;
+    if (!d || d.getTime() < cutoff) return;
+    var bid = String(r['billId'] || r['orderId'] || '').trim(); if (!bid) return;
+    if (!seen.has(bid)) seen.set(bid, { billId: bid, date: String(r['วัน']||''), ts: d.getTime(), total: 0, n: 0 });
+    var g = seen.get(bid); g.total += numv(r['ยอดเงินรวม']); g.n++;
+  });
+  return Array.from(seen.values()).sort(function(a,b){ return b.ts - a.ts; });
+}
+function _resolveBillMerge(shop, shopId){
+  return new Promise(function(resolve){
+    var cands = _recentShopBills(shopId, 3);   // 3 วันย้อนหลัง
+    if (!cands.length){ resolve({ billId: null, mode: 'new' }); return; }   // ไม่มีบิลเก่า → บิลใหม่ (id ตัวเอง)
+    _openBillMergeModal(cands, shop, resolve);
+  });
+}
+function _openBillMergeModal(cands, shop, resolve){
+  var done = false, latest = cands[0];
+  var ov = document.createElement('div');
+  ov.className = 'modal-backdrop active';
+  ov.style.zIndex = '10080';
+  function finish(res){ if (done) return; done = true; try{ ov.remove(); }catch(e){} resolve(res); }
+  ov.addEventListener('click', function(e){ if (e.target === ov) finish({ billId: latest.billId, mode: 'auto' }); });   // แตะนอก = รวมล่าสุด auto
+  var listRows = cands.map(function(c,i){
+    return '<button type="button" class="bm-pick" data-bid="'+escapeAttr(c.billId)+'" style="display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;padding:10px 12px;margin-bottom:6px;border:1px solid var(--border);border-radius:9px;background:var(--card-bg);cursor:pointer;font-family:inherit">'
+      + '<span style="font-weight:800;color:var(--text)">🧾 '+escapeHtml(c.billId)+(i===0?' <span style="font-size:10px;color:#16A34A">ล่าสุด</span>':'')+'</span>'
+      + '<span style="font-size:11px;color:var(--muted);white-space:nowrap">'+escapeHtml(c.date)+' · '+c.n+' รายการ · ฿'+Math.round(c.total).toLocaleString()+'</span>'
+      + '</button>';
+  }).join('');
+  ov.innerHTML = '<div class="modal" style="max-width:420px;padding:0">'
+    + '<div class="modal-head" style="background:linear-gradient(135deg,#1d4ed8,#0d1b3e);color:#fff;padding:14px;border:none">'
+      + '<div class="modal-head-info"><div class="modal-title" style="color:#fff">🧾 รวมบิล หรือ แยกบิล?</div>'
+      + '<div class="modal-sub" style="color:rgba(255,255,255,.9)">'+escapeHtml((shop&&shop.name)||'ร้านนี้')+' · มีบิลย้อนหลัง ≤3 วัน '+cands.length+' บิล</div></div></div>'
+    + '<div style="padding:14px">'
+      + '<button type="button" id="bmLatest" style="width:100%;padding:12px;margin-bottom:8px;border:none;border-radius:10px;background:#16A34A;color:#fff;font-weight:800;font-size:14px;cursor:pointer;font-family:inherit">🔗 รวมบิลล่าสุด — '+escapeHtml(latest.billId)+'<div style="font-size:11px;font-weight:600;opacity:.92;margin-top:2px">'+escapeHtml(latest.date)+' · ฿'+Math.round(latest.total).toLocaleString()+'</div></button>'
+      + '<button type="button" id="bmPick" style="width:100%;padding:11px;margin-bottom:8px;border:1.5px solid #1d4ed8;border-radius:10px;background:var(--card-bg);color:#1d4ed8;font-weight:800;font-size:13px;cursor:pointer;font-family:inherit">📋 รวมแบบเลือกบิล ('+cands.length+')</button>'
+      + '<div id="bmList" style="display:none;margin:2px 0 8px">'+listRows+'</div>'
+      + '<button type="button" id="bmNew" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:10px;background:var(--row-alt);color:var(--text);font-weight:800;font-size:13px;cursor:pointer;font-family:inherit">➕ แยกบิลใหม่ (ไม่รวม)</button>'
+      + '<div style="font-size:10.5px;color:var(--muted);text-align:center;margin-top:10px">แตะนอกกรอบ = รวมบิลล่าสุดอัตโนมัติ</div>'
+    + '</div></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#bmLatest').onclick = function(){ finish({ billId: latest.billId, mode: 'latest' }); };
+  ov.querySelector('#bmNew').onclick = function(){ finish({ billId: null, mode: 'new' }); };
+  ov.querySelector('#bmPick').onclick = function(){ var l = ov.querySelector('#bmList'); l.style.display = (l.style.display === 'none' ? 'block' : 'none'); };
+  Array.prototype.forEach.call(ov.querySelectorAll('.bm-pick'), function(b){
+    b.onclick = function(){ finish({ billId: b.getAttribute('data-bid'), mode: 'pick' }); };
+  });
+}
+
+async function confirmOrder() {
   // v8.79: กู้ร้านก่อนทุกอย่าง — currentShopId อาจหลุดจากการนำทาง (แท็บสินค้า/หน้าหลัก) ระหว่างคีย์
   _recoverShopIdFromCart();
   // v6.5.226: BLOCK same-shop re-order while previous one is still pushing.
@@ -24217,7 +24278,10 @@ function confirmOrder() {
   const ddEl = document.getElementById('deliveryDateInput');
   const deliveryDate = ddEl ? (ddEl.value || '').trim() : '';
 
+  // v8.153: ถามรวม/แยกบิล ก่อนสร้าง id (เด้งเฉพาะร้านที่มีบิลย้อนหลัง ≤3 วัน)
+  const _billPick = await _resolveBillMerge(shop, currentShopId);
   const orderId = 'ORD' + Date.now().toString().slice(-7);
+  const billId = (_billPick && _billPick.billId) ? _billPick.billId : orderId;   // null/แยก → id ตัวเอง
   const now = new Date();
   // v8.72: เก็บธง "ข้อมูลไม่ครบ" keyed by orderId (retry-safe — row builder + retry อ่านค่าถูกตัว)
   window._orderIssues = window._orderIssues || {};
@@ -24236,6 +24300,8 @@ function confirmOrder() {
 
   submittedOrders.unshift({
     id: orderId,
+    billId: billId,                                            // v8.153: เลขบิลรวม (group ตอนดึง)
+    billMode: (_billPick && _billPick.mode) || 'new',          // new|latest|pick|auto
     shopId: currentShopId,
     shopName: shop?.name || '',
     items: [...cart],
@@ -24265,10 +24331,15 @@ function confirmOrder() {
   window._lastPushNow     = now;
   window._lastPushNotes   = orderNotes;
   window._lastPushDD      = deliveryDate;
+  window._lastPushBillId  = billId;                            // v8.153: retry ใช้ billId เดิม
 
   // v6.5.226: NO overlay — background push + per-card lock in Orders list.
   // The order card gets opacity:.55 + pointer-events:none while o.isPushing=true.
   // User can navigate freely + start new orders for OTHER customers.
+  // v8.153: บอกเซลว่าออเดอร์นี้รวมเข้าบิลไหน (auto = ใส่ออโต้)
+  if (_billPick && _billPick.billId && _billPick.mode !== 'new') {
+    showToast(`🔗 รวมเข้าบิล ${_billPick.billId}${_billPick.mode === 'auto' ? ' (ใส่ออโต้)' : ''}`, 'info');
+  }
   showToast(`⏳ กำลังบันทึก ฿${total.toLocaleString(undefined,{maximumFractionDigits:0})} — การ์ดออเดอร์จะปลดล็อกเมื่อลงชีทครบ`, 'info');
 
   // v6.5.226: 60s TIMEOUT SAFEGUARD — if push stays in-flight too long, force-unlock the card
@@ -24285,7 +24356,7 @@ function confirmOrder() {
     if (typeof rerenderCurrentScreen === 'function') rerenderCurrentScreen();
   }, 60 * 1000);
 
-  pushOrderToSheet(orderId, shop, cart, now, orderNotes, deliveryDate)
+  pushOrderToSheet(orderId, shop, cart, now, orderNotes, deliveryDate, billId)
     .then((result) => {
       // v6.5.226: clear timeout — push completed in time
       if (window[_timeoutKey]) { clearTimeout(window[_timeoutKey]); delete window[_timeoutKey]; }
@@ -24456,7 +24527,8 @@ window._retryPushLock = async function() {
       window._lastPushItems,
       window._lastPushNow,
       window._lastPushNotes,
-      window._lastPushDD
+      window._lastPushDD,
+      window._lastPushBillId
     );
     const o = submittedOrders.find(x => x.id === orderId);
     if (result && result.ok) {
@@ -24577,6 +24649,7 @@ function _injectSubmittedOrdersIntoSheetData() {
         'ราคา':        isFreeLine ? _giftEa03(barcode) : c.price,   // v8.83: แถม = ราคา EA03
         'ยอดเงินรวม': c.qty * c.price,
         'orderId':    o.id,
+        'billId':     o.billId || o.id,   // v8.153: ให้แถวที่เพิ่ง inject เป็น candidate รวมบิลได้ถูกต้อง
         'lineId':     lineId,                  // v6.5.226: stable unique ID per row
         'หมายเหตุ':   o.notes || '',
       });
@@ -24605,7 +24678,8 @@ function _giftEa03(barcode) {
 }
 window._giftEa03 = _giftEa03;
 
-async function pushOrderToSheet(orderId, shop, items, now, notes, deliveryDate) {
+async function pushOrderToSheet(orderId, shop, items, now, notes, deliveryDate, billId) {
+  billId = billId || orderId;   // v8.153: default = orderId เอง (reorder/direct-call ที่ไม่ส่ง billId มา)
   // v8.31: backstop identity gate — covers reorder / direct-call paths (main flow already blocked earlier)
   if (_blockSubmitIdentity()) return { ok: false, blocked: true, written: 0 };
   notes = notes || '';
@@ -24715,6 +24789,7 @@ async function pushOrderToSheet(orderId, shop, items, now, notes, deliveryDate) 
       'โปรที่ใช้':  promoDesc,
       'ยอดเงินรวม': c.qty * writePrice,   // v6.5.127: based on safe price
       'orderId':   orderId,
+      'billId':    billId,   // v8.153: เลขบิลรวม — ERP ดึงให้ group ตามคอลัมน์นี้ (รวมหลายออเดอร์เป็นบิลเดียว)
       'ข้อมูลไม่ครบ': (window._orderIssues && window._orderIssues[orderId]) || '',   // v8.72: ติดธงให้หัวหน้าตรวจ (Apps Script ensureHeaders เพิ่มคอลัมน์อัตโนมัติ)
       'หมายเหตุ':  combinedNotes,        // v6.5.127: shop's note + order's note combined
       'วันกำหนดส่ง': deliveryDate,
