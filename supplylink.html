@@ -648,14 +648,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v7.2.2</div>
+<div class="version-badge">SupplyLink v7.2.3</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    SupplyLink v6.6.6 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v7.2.2';
+const VERSION = 'v7.2.3';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -2166,6 +2166,15 @@ function renderContentOnly() {
     (pageMap()[S.page] || pageStub)() + '</div>';
   wireSearchBar();
   if (typeof afterPage === 'function') afterPage();
+}
+
+// re-render โดยคงตำแหน่ง scroll ของหน้า mobile (#mContent) — กันเด้งขึ้นบนสุดเวลากดปุ่มในฟอร์มยาว
+function renderKeepScroll() {
+  const mc = $('#mContent');
+  const sc = mc ? mc.scrollTop : 0;
+  renderContentOnly();
+  const mc2 = $('#mContent');
+  if (mc2) mc2.scrollTop = sc;
 }
 
 function afterDesktopRender() {
@@ -4933,10 +4942,10 @@ function wireSupplierApptDetail() {
     S._apptPoOpen[po] = !S._apptPoOpen[po];
     if (S._apptPoOpen[po] && S._apptPoLines[po] === undefined) {
       S._apptPoLines[po] = null; // loading
-      renderContentOnly();
+      renderKeepScroll();
       S._apptPoLines[po] = await loadPOLinesCached([po]);
     }
-    renderContentOnly();
+    renderKeepScroll();
   }));
   const confirmBtn = $('#btnSupplierConfirm');
   const disputeBtn = $('#btnSupplierDispute');
@@ -5302,7 +5311,7 @@ function wireDefectGate() {
     const bc = b.dataset.bc;
     if (S._dcSplit.indexOf(bc) === -1) S._dcSplit.push(bc);
     S._dcItem[bc] = { handle:S._dcMaster.handle, ret:S._dcMaster.ret, date:S._dcMaster.date, notes:'' };
-    renderContentOnly();
+    renderKeepScroll();
   }));
   // ↩ รวมรายการกลับกล่องหลัก
   $$('#mContent .dc-merge').forEach(b => b.addEventListener('click', () => {
@@ -5310,7 +5319,7 @@ function wireDefectGate() {
     const bc = b.dataset.bc;
     S._dcSplit = S._dcSplit.filter(x => x !== bc);
     delete S._dcItem[bc];
-    renderContentOnly();
+    renderKeepScroll();
   }));
 
   const btn = $('#btnDcSubmit');
@@ -5424,11 +5433,14 @@ async function startRevEditor(poId) {
   try {
     const raw = await loadPOLinesCached([String(poId)]);
     S._revEdit.lines = raw.map(l => {
-      const qty = Number(l.qty) || 0, val = Number(l.value) || 0;
+      const qty = Number(l.qty) || 0, free = Number(l.free) || 0, val = Number(l.value) || 0;
+      // บรรทัดของแถมจาก ERP: TRD_QTY=0 · จำนวนอยู่ TRD_Q_FREE · ยอด 0 → ติ๊ก FOC ให้อัตโนมัติ ใช้จำนวนแถมเป็นจำนวน
+      const isFreeLine = qty === 0 && free > 0;
+      const useQty = isFreeLine ? free : qty;
       // ราคา/หน่วย รวม VAT — backend ส่ง price มาให้ (TOTAL/QTY · fallback ครบ) · เผื่อ backend เก่า: คำนวณเอง
-      const price = Number(l.price) > 0 ? Math.round(Number(l.price) * 10000) / 10000 : (qty > 0 ? Math.round(val / qty * 10000) / 10000 : 0);
+      const price = isFreeLine ? 0 : (Number(l.price) > 0 ? Math.round(Number(l.price) * 10000) / 10000 : (qty > 0 ? Math.round(val / qty * 10000) / 10000 : 0));
       return { type: 'original', sku: String(l.sku || ''), barcode: '', name: l.desc || '', unit: l.unit || '',
-        origQty: qty, origPrice: price, origTotal: val, newQty: qty, newPrice: price, isFoc: false, note: '' };
+        origQty: useQty, origPrice: price, origTotal: val, newQty: useQty, newPrice: price, isFoc: isFreeLine, origFoc: isFreeLine, note: '' };
     });
   } catch (e) { console.error('[startRevEditor]', e); S._revEdit.lines = []; }
   if (S.page === 'po-rev-edit') renderContentOnly();
@@ -5444,7 +5456,8 @@ function revEditNet(E) {
 }
 
 function rvLineCard(l, i) {
-  const changed = l.type === 'added' ? 'เพิ่ม' : (l.isFoc || Number(l.newQty) !== Number(l.origQty) || Number(l.newPrice) !== Number(l.origPrice)) ? 'แก้' : '';
+  // ของแถมที่มากับ PO เดิม (origFoc) ไม่นับเป็น "แก้" — นับเฉพาะที่ผู้ใช้เปลี่ยนจริง
+  const changed = l.type === 'added' ? 'เพิ่ม' : ((!!l.isFoc !== !!l.origFoc) || Number(l.newQty) !== Number(l.origQty) || Number(l.newPrice) !== Number(l.origPrice)) ? 'แก้' : '';
   const lt = l.isFoc ? 0 : (Number(l.newQty) || 0) * (Number(l.newPrice) || 0);
   return '<div class="card mb-12" style="padding:12px'+(l.type === 'added' ? ';border-color:var(--accent)' : '')+'">' +
     '<div style="display:flex;gap:8px;align-items:flex-start">' +
@@ -5455,7 +5468,7 @@ function rvLineCard(l, i) {
       (changed ? '<span class="chip chip-sm '+(l.type === 'added' ? 'chip-info' : 'chip-warn')+'">'+changed+'</span>' : '') +
       (l.type === 'added' ? '<button type="button" class="rv-del" data-i="'+i+'" style="border:0;background:transparent;color:var(--err);font-size:16px;cursor:pointer;padding:0 2px;line-height:1">✕</button>' : '') +
     '</div>' +
-    (l.type !== 'added' ? '<div style="font-size:10.5px;color:var(--ink-3);margin-top:6px">ตาม PO เดิม: <span class="num">'+fmtMoney(l.origQty)+' × ฿'+fmtMoney(l.origPrice)+' = ฿'+fmtMoney(l.origTotal)+'</span></div>' : '') +
+    (l.type !== 'added' ? '<div style="font-size:10.5px;color:var(--ink-3);margin-top:6px">ตาม PO เดิม: <span class="num">'+(l.origFoc ? 'แถมฟรี '+fmtMoney(l.origQty)+' '+esc(l.unit || '') : fmtMoney(l.origQty)+' × ฿'+fmtMoney(l.origPrice)+' = ฿'+fmtMoney(l.origTotal))+'</span></div>' : '') +
     '<div style="display:flex;gap:8px;margin-top:7px;align-items:flex-end">' +
       '<div style="flex:1"><label class="label-plain" style="font-size:10.5px">จำนวน</label><input type="number" inputmode="decimal" class="input num rv-qty" data-i="'+i+'" value="'+(l.newQty || '')+'" min="0" step="any"></div>' +
       '<div style="flex:1"><label class="label-plain" style="font-size:10.5px">ราคา/หน่วย รวมVAT'+(l.isFoc ? ' (แถม)' : '')+'</label><input type="number" inputmode="decimal" class="input num rv-price" data-i="'+i+'" value="'+(l.isFoc ? 0 : (l.newPrice || ''))+'" min="0" step="any"'+(l.isFoc ? ' disabled' : '')+'></div>' +
@@ -5540,7 +5553,7 @@ function wireSupplierPORevEdit() {
       E.lines.push({ type: 'added', sku: '', barcode: b.dataset.barcode, name: b.dataset.name, unit: b.dataset.unit,
         origQty: 0, origPrice: 0, origTotal: 0, newQty: 0, newPrice: 0, isFoc: false, note: '' });
       toast('เพิ่มแล้ว', b.dataset.name + ' — ใส่จำนวน + ราคาด้วย', 'ok');
-      renderContentOnly();
+      renderKeepScroll();
     }));
   };
   $$('#mContent .rv-qty').forEach(inp => inp.addEventListener('input', () => {
@@ -5561,14 +5574,14 @@ function wireSupplierPORevEdit() {
     const i = Number(b.dataset.i); if (!E.lines[i]) return;
     E.lines[i].isFoc = !E.lines[i].isFoc;
     if (E.lines[i].isFoc) E.lines[i].newPrice = 0;
-    renderContentOnly();
+    renderKeepScroll();
   }));
-  $$('#mContent .rv-del').forEach(b => b.addEventListener('click', () => { E.lines.splice(Number(b.dataset.i), 1); renderContentOnly(); }));
+  $$('#mContent .rv-del').forEach(b => b.addEventListener('click', () => { E.lines.splice(Number(b.dataset.i), 1); renderKeepScroll(); }));
   const addBtn = $('#rvAddBtn');
   if (addBtn) addBtn.addEventListener('click', () => {
     E.pickerOpen = !E.pickerOpen;
-    if (E.pickerOpen && !(S._vp || {})['self']) loadVendorProducts().then(() => { if (S.page === 'po-rev-edit') renderContentOnly(); });
-    renderContentOnly();
+    if (E.pickerOpen && !(S._vp || {})['self']) loadVendorProducts().then(() => { if (S.page === 'po-rev-edit') renderKeepScroll(); });
+    renderKeepScroll();
   });
   const ps = $('#rvPickSearch');
   if (ps) ps.addEventListener('input', () => {
@@ -5579,7 +5592,7 @@ function wireSupplierPORevEdit() {
   wirePicks();
   const np = $('#rvGoNP'); if (np) np.addEventListener('click', () => nav('new-product'));
   const dcT = $('#rvDcType');
-  if (dcT) dcT.addEventListener('change', () => { E.discountType = dcT.value; if (E.discountType === 'none') E.discountValue = 0; renderContentOnly(); });
+  if (dcT) dcT.addEventListener('change', () => { E.discountType = dcT.value; if (E.discountType === 'none') E.discountValue = 0; renderKeepScroll(); });
   const dcV = $('#rvDcVal'); if (dcV) dcV.addEventListener('input', () => { E.discountValue = Number(dcV.value) || 0; recompute(); });
   const dcN = $('#rvDcNote'); if (dcN) dcN.addEventListener('input', () => { E.discountNote = dcN.value; });
   const dv = $('#rvDelivery'); if (dv) dv.addEventListener('change', () => { E.deliveryDate = dv.value; });
@@ -5602,7 +5615,7 @@ async function submitRevision(asIs) {
   } else {
     let bad = null;
     lines = E.lines.map(l => {
-      const changed = l.isFoc || Number(l.newQty) !== Number(l.origQty) || Number(l.newPrice) !== Number(l.origPrice);
+      const changed = (!!l.isFoc !== !!l.origFoc) || Number(l.newQty) !== Number(l.origQty) || Number(l.newPrice) !== Number(l.origPrice);
       if (!(Number(l.newQty) > 0)) bad = bad || 'ใส่จำนวน: ' + (l.name || l.sku);
       else if (!l.isFoc && !(Number(l.newPrice) > 0)) bad = bad || 'ใส่ราคา (หรือติ๊กแถม): ' + (l.name || l.sku);
       return { type: l.type === 'added' ? 'added' : (changed ? 'edited' : 'original'), sku: l.sku, barcode: l.barcode, name: l.name, unit: l.unit,
