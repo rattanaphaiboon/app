@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.1
+//  Rattana Stock Count — GAS Backend  v1.2
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 // ═══════════════════════════════════════════════════════
@@ -12,8 +12,7 @@ function doGet(e) {
   try {
     if (action === 'draft')      return json(getDraft(p));
     if (action === 'allDrafts')  return json(getAllDrafts(p));
-    if (action === 'getHistory') return json(getHistory(p));
-    if (action === 'history')    return json(getHistory(p));
+    if (action === 'getHistory' || action === 'history') return json(getHistory(p));
     return json({ ok: false, error: 'unknown action: ' + action });
   } catch (err) {
     return json({ ok: false, error: err.message });
@@ -25,8 +24,12 @@ function doPost(e) {
   try { body = JSON.parse(e.postData.contents); } catch (_) {}
   const action = body.action || '';
   try {
-    if (action === 'saveDraft') return json(saveDraft(body));
-    if (action === 'saveCount') return json(saveCount(body));
+    if (action === 'saveDraft')  return json(saveDraft(body));
+    if (action === 'clearDraft') return json(clearDraft(body));
+    // If no action but payload has `rows`, treat it as saveCount (legacy format)
+    if (action === 'saveCount' || (!action && Array.isArray(body.rows))) {
+      return json(saveCount(body));
+    }
     return json({ ok: false, error: 'unknown action: ' + action });
   } catch (err) {
     return json({ ok: false, error: err.message });
@@ -39,7 +42,6 @@ function json(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-// ── SHEET HELPERS ─────────────────────────────────────
 function getOrCreate(name, headers) {
   const ss = SpreadsheetApp.openById(SS_ID);
   let sh = ss.getSheetByName(name);
@@ -82,13 +84,26 @@ function saveDraft(b) {
   return { ok: true };
 }
 
+function clearDraft(b) {
+  const sh = SpreadsheetApp.openById(SS_ID).getSheetByName('Drafts');
+  if (!sh) return { ok: true };
+  const data = sh.getDataRange().getValues();
+  const key = (b.userKey || '') + '|' + (b.warehouse || '');
+  for (let i = 1; i < data.length; i++) {
+    if ((data[i][0] + '|' + data[i][1]) === key) {
+      sh.getRange(i + 1, 5).setValue('{}');
+      return { ok: true };
+    }
+  }
+  return { ok: true };
+}
+
 // ── GET ONE DRAFT (own) ───────────────────────────────
 function getDraft(p) {
   const sh = getOrCreate('Drafts',
     ['userKey','warehouse','sessionStart','updatedAt','itemsJson','name']);
   const data = sh.getDataRange().getValues();
   const key = (p.userKey || '') + '|' + (p.warehouse || '');
-
   for (let i = 1; i < data.length; i++) {
     if ((data[i][0] + '|' + data[i][1]) === key) {
       let items = {};
@@ -109,7 +124,7 @@ function getDraft(p) {
   return { ok: true, draft: null };
 }
 
-// ── GET ALL DRAFTS IN A WAREHOUSE (team aggregate) ────
+// ── GET ALL DRAFTS (live team aggregate) ──────────────
 function getAllDrafts(p) {
   const sh = SpreadsheetApp.openById(SS_ID).getSheetByName('Drafts');
   if (!sh) return { ok: true, drafts: [] };
@@ -131,22 +146,41 @@ function getAllDrafts(p) {
   return { ok: true, drafts: drafts };
 }
 
-// ── SAVE COUNT (final) ────────────────────────────────
-// Columns: savedAt | warehouse | empId | name | startedAt | totalItems | itemsJson
+// ── SAVE COUNT (final submit — writes flat rows) ──────
 function saveCount(b) {
-  const sh = getOrCreate('StockCount',
-    ['savedAt','warehouse','empId','name','startedAt','totalItems','itemsJson']);
+  const sh = getOrCreate('StockCount', [
+    'savedAt','warehouse','empId','name','email',
+    'sessionStart','รหัสสินค้า','ชื่อสินค้า',
+    'CS','BP','PA','EA','นับได้(ชิ้น)',
+    'สต็อกระบบ(CS.EA)','สต็อกระบบ(ชิ้น)',
+    'ต่าง(ชิ้น)','ต่าง(CS.EA)','สถานะ','วันหมดอายุ'
+  ]);
   const now = new Date().toISOString();
-  const items = b.items || {};
-  sh.appendRow([
+  const rows = Array.isArray(b.rows) ? b.rows : [];
+  if (!rows.length) return { ok: false, error: 'no rows' };
+
+  const out = rows.map(r => [
     now,
     b.warehouse || '',
     b.empId || '',
-    b.name || '',
-    b.startedAt || '',
-    Object.keys(items).length,
-    JSON.stringify(items)
+    b.counterName || b.name || '',
+    b.email || '',
+    b.sessionStart || b.startedAt || '',
+    r.key || '',
+    r.name || '',
+    r.cs || 0,
+    r.bp || 0,
+    r.pa || 0,
+    r.ea || 0,
+    r.countedPieces || 0,
+    r.systemRaw || '',
+    r.systemPieces || 0,
+    r.diffPieces || 0,
+    r.diffCSEA || '',
+    r.status || '',
+    r.expiryDate || ''
   ]);
+  sh.getRange(sh.getLastRow() + 1, 1, out.length, out[0].length).setValues(out);
 
   // Clear this user's draft after a final save
   try {
@@ -163,7 +197,7 @@ function saveCount(b) {
     }
   } catch (_) {}
 
-  return { ok: true };
+  return { ok: true, written: out.length };
 }
 
 // ── GET HISTORY ───────────────────────────────────────
@@ -173,19 +207,32 @@ function getHistory(p) {
   const data = sh.getDataRange().getValues();
   if (data.length < 2) return { ok: true, sessions: [] };
 
-  const sessions = [];
-  for (let i = data.length - 1; i >= 1; i--) {
-    let items = {};
-    try { items = JSON.parse(data[i][6] || '{}'); } catch (_) {}
-    sessions.push({
-      savedAt:   data[i][0] ? new Date(data[i][0]).getTime() : 0,
-      wh:        data[i][1],
-      empId:     data[i][2],
-      name:      data[i][3],
-      startedAt: data[i][4] ? new Date(data[i][4]).getTime() : 0,
-      items:     items
+  // Group by (savedAt, warehouse, empId)
+  const groups = new Map();
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    const savedAt = r[0] ? new Date(r[0]).getTime() : 0;
+    const wh = r[1], empId = r[2];
+    const k = savedAt + '|' + wh + '|' + empId;
+    if (!groups.has(k)) {
+      groups.set(k, {
+        savedAt, wh, empId,
+        name: r[3] || '', email: r[4] || '',
+        startedAt: r[5] ? new Date(r[5]).getTime() : 0,
+        rows: []
+      });
+    }
+    groups.get(k).rows.push({
+      key: r[6], name: r[7],
+      cs: r[8], bp: r[9], pa: r[10], ea: r[11],
+      countedPieces: r[12],
+      systemRaw: r[13], systemPieces: r[14],
+      diffPieces: r[15], diffCSEA: r[16], status: r[17],
+      expiryDate: r[18]
     });
-    if (sessions.length >= 100) break;
   }
-  return { ok: true, sessions: sessions };
+  const sessions = [...groups.values()]
+    .sort((a, b) => b.savedAt - a.savedAt)
+    .slice(0, 100);
+  return { ok: true, sessions };
 }
