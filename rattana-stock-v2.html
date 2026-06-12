@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v1.6</title>
+  <title>Rattana Stock Count v1.7</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -679,7 +679,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v1.6';
+const APP_VERSION = 'v1.7';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // Apps Script Web App URL for saving count results (paste after deploying — see setup note)
@@ -1862,13 +1862,29 @@ function renderPending() {
                value="" ${required ? 'required' : ''}>
       </div>`;
       })()}
+      <div class="field" style="margin-top:10px;padding:10px 12px;background:var(--bg);border-radius:14px;border:1.5px dashed var(--border)">
+        <label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;display:block">📍 ที่ตั้ง · กรุณาตรวจสอบและยืนยัน</label>
+        <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+          <input id="penLoc" class="input input-compact" autocomplete="off"
+                 value="${(countSession && (countSession.lastLocation||countSession.location)) ? String(countSession.lastLocation||countSession.location||'').replace(/"/g,'&quot;') : ''}"
+                 placeholder="พิมพ์หรือสแกน Location..."
+                 oninput="document.getElementById('locConfirm').checked=false;updateAddBtn()"
+                 style="flex:1;min-width:0">
+          <button type="button" onclick="openPendingLocCamera()" title="สแกน Location"
+                  style="height:42px;width:42px;flex-shrink:0;border-radius:11px;background:var(--blue-soft);color:var(--navy-mid);border:none;font-size:18px;cursor:pointer">📷</button>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;font-size:13px;font-weight:600;color:var(--navy-mid)">
+          <input type="checkbox" id="locConfirm" onchange="updateAddBtn()" style="width:18px;height:18px;accent-color:var(--navy-mid);cursor:pointer">
+          ✓ ยืนยันว่าที่ตั้งถูกต้องแล้ว
+        </label>
+      </div>
       <div class="pb-row">
         <button class="step-btn" onclick="bumpQty(-1)" type="button">−</button>
         <input id="qtyInput" class="pb-qty" type="text" inputmode="numeric" value="1"
                onfocus="this.select()" oninput="">
         <button class="step-btn" onclick="bumpQty(1)" type="button">+</button>
       </div>
-      <button class="btn btn-primary btn-block pb-add" onclick="confirmCount()" type="button">✓ เพิ่มเข้ารายการ</button>
+      <button id="pbAddBtn" class="btn btn-primary btn-block pb-add" onclick="confirmCount()" type="button" disabled>✓ ยืนยันโลเคชันก่อนเพิ่มเข้ารายการ</button>
       ${ibBadgeHtml(p, countSession && countSession.warehouse) ? `<div style="margin-top:8px">${ibBadgeHtml(p, countSession && countSession.warehouse)}</div>` : ''}
     </div>`;
   const q = document.getElementById('qtyInput');
@@ -1884,6 +1900,23 @@ function renderPending() {
 function bumpQty(d) {
   const q = document.getElementById('qtyInput');
   q.value = Math.max(0, (parseInt(q.value)||0) + d);
+}
+function updateAddBtn(){
+  const btn = document.getElementById('pbAddBtn');
+  const cb  = document.getElementById('locConfirm');
+  const loc = document.getElementById('penLoc');
+  if (!btn) return;
+  const ok = !!(cb && cb.checked) && !!(loc && String(loc.value||'').trim());
+  btn.disabled = !ok;
+  btn.textContent = ok ? '✓ เพิ่มเข้ารายการ' : '✓ ยืนยันโลเคชันก่อนเพิ่มเข้ารายการ';
+}
+function openPendingLocCamera(){
+  if (camStarting) return;
+  camMode = 'location-pending';
+  const title = document.querySelector('#camOv .cam-title');
+  if (title) title.textContent = '📍 สแกน Location';
+  if (countCamOpen) stopCountCamera();
+  startCountCamera();
 }
 function setQty(n) {
   const q = document.getElementById('qtyInput');
@@ -1919,23 +1952,37 @@ function confirmCount() {
   }
   const expEl = document.getElementById('expiryInput');
   const expVal = expEl ? (expEl.value || '') : '';
+  const locEl = document.getElementById('penLoc');
+  const locVal = locEl ? String(locEl.value || '').trim() : '';
+  const locConfirmed = !!document.getElementById('locConfirm')?.checked;
+  if (!locVal || !locConfirmed) {
+    showToast('กรุณายืนยันโลเคชันก่อนเพิ่มเข้ารายการ', 'warning');
+    if (locEl) { locEl.focus(); locEl.style.borderColor = 'var(--danger)'; setTimeout(()=>{ locEl.style.borderColor=''; }, 1500); }
+    return;
+  }
   const item = countSession.items[key];
+  item.location = locVal;
+  countSession.lastLocation = locVal;
   // Convert legacy single-counts to lots on first use
   if (!item.lots) {
-    item.lots = [{ counts: { ...item.counts }, expiryDate: item.expiryDate || '' }];
+    item.lots = [{ counts: { ...item.counts }, expiryDate: item.expiryDate || '', location: locVal }];
   }
-  // Find existing lot with same expiry date, or create new lot
-  const lotIdx = item.lots.findIndex(l => l.expiryDate === expVal);
+  // Find existing lot with same expiry date + location, or create new lot
+  const lotIdx = item.lots.findIndex(l => l.expiryDate === expVal && (l.location||'') === locVal);
   if (lotIdx >= 0) {
     item.lots[lotIdx].counts[u] = (item.lots[lotIdx].counts[u] || 0) + qty;
   } else {
     const newCounts = { EA:0, PA:0, BP:0, CS:0 };
     newCounts[u] = qty;
-    item.lots.push({ counts: newCounts, expiryDate: expVal });
+    item.lots.push({ counts: newCounts, expiryDate: expVal, location: locVal });
   }
   // Keep legacy counts in sync (sum of lots) for any code that still reads it
   item.counts = lotsToTotalCounts(item.lots);
   item.expiryDate = item.lots[0].expiryDate || '';
+  // Mirror to top location bar if present, for next quick scan
+  const topLoc = document.getElementById('locationInput');
+  if (topLoc) topLoc.value = locVal;
+  countSession.location = locVal;
   saveCountSession();
   pendingScan = null;
   document.getElementById('countPending').innerHTML = '';
@@ -2503,6 +2550,7 @@ async function saveCountToSheet() {
         const lotPieces = ['EA','PA','BP','CS'].reduce((s,u)=>s+(lc[u]||0)*(r.item.factors[u]||1),0);
         return {
           key: r.key, name: r.name,
+          location: r.item.location || countSession.location || '',
           cs: lc.CS||0, bp: lc.BP||0, pa: lc.PA||0, ea: lc.EA||0,
           countedPieces: lotPieces,
           systemRaw: li===0 ? r.systemRaw : '',
@@ -2840,6 +2888,17 @@ function startCountCamera() {
       if (navigator.vibrate) navigator.vibrate(80);
       const inp = document.getElementById('locationInput');
       if (inp) { inp.value = code; onLocationChange(); }
+      showToast(`Location: ${code}`, 'success');
+      stopCountCamera();
+      return;
+    }
+    if (camMode === 'location-pending') {
+      if (navigator.vibrate) navigator.vibrate(80);
+      const inp = document.getElementById('penLoc');
+      if (inp) { inp.value = code; }
+      const cb = document.getElementById('locConfirm');
+      if (cb) cb.checked = false;
+      updateAddBtn();
       showToast(`Location: ${code}`, 'success');
       stopCountCamera();
       return;

@@ -165,7 +165,7 @@ function saveCount(b) {
   const out = rows.map(r => [
     now,
     b.warehouse || '',
-    b.location || '',
+    r.location || b.location || '',
     b.empId || '',
     b.counterName || b.name || '',
     b.email || '',
