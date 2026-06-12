@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v1.4</title>
+  <title>Rattana Stock Count v1.5</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -671,7 +671,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v1.4';
+const APP_VERSION = 'v1.5';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // Apps Script Web App URL for saving count results (paste after deploying — see setup note)
@@ -738,8 +738,44 @@ function startDraftPoll() {
   draftPollTimer = setInterval(() => {
     if (currentMode === 'count' && countSession && !document.hidden && navigator.onLine !== false) {
       maybeAdoptRemoteDraft(countSession.warehouse);
+      fetchTeamDrafts(countSession.warehouse);
     }
   }, 5000);   // every 5 seconds — feels real-time without hammering the Sheet
+}
+
+// ── TEAM AGGREGATE — live sum of other counters in same warehouse ──
+let teamData = { wh:'', byKey:{} };   // byKey[productKey] = { team:{EA,PA,BP,CS}, by:[{name,counts}] }
+async function fetchTeamDrafts(wh){
+  if (!COUNT_SAVE_URL || !wh) return;
+  try {
+    const url = `${COUNT_SAVE_URL}?action=allDrafts&warehouse=${encodeURIComponent(wh)}`;
+    const r = await fetch(url, { cache:'no-store' });
+    const j = await r.json();
+    if (!j.ok || !Array.isArray(j.drafts)) return;
+    const myTag = userKey();
+    const byKey = {};
+    j.drafts.forEach(d => {
+      if (String(d.userKey||'').toLowerCase() === String(myTag||'').toLowerCase()) return;  // skip own draft
+      const name = d.name || d.userKey || '—';
+      Object.entries(d.items || {}).forEach(([k, it]) => {
+        const factors = it.factors || {EA:1,PA:1,BP:1,CS:1};
+        const counts  = it.lots ? lotsToTotalCounts(it.lots) : (it.counts || {EA:0,PA:0,BP:0,CS:0});
+        if (!byKey[k]) byKey[k] = { team:{EA:0,PA:0,BP:0,CS:0}, factors, by:[] };
+        ['EA','PA','BP','CS'].forEach(u => byKey[k].team[u] += (counts[u]||0));
+        byKey[k].by.push({ name, counts });
+        // adopt factors if missing locally
+        if (factors) byKey[k].factors = factors;
+      });
+    });
+    const changed = JSON.stringify(teamData.byKey) !== JSON.stringify(byKey) || teamData.wh !== wh;
+    teamData = { wh, byKey };
+    if (changed) renderCountList();
+  } catch {}
+}
+function teamPiecesFor(key, fallbackFactors){
+  const t = teamData.byKey[key]; if (!t) return 0;
+  const f = t.factors || fallbackFactors || {EA:1,PA:1,BP:1,CS:1};
+  return ['EA','PA','BP','CS'].reduce((s,u) => s + (t.team[u]||0) * (f[u]||1), 0);
 }
 function stopDraftPoll() { if (draftPollTimer) { clearInterval(draftPollTimer); draftPollTimer = null; } }
 
@@ -1555,6 +1591,7 @@ function initCountMode() {
   if (!countSession) loadCountSession(sel.value || visibleWh[0]);
   renderCountList();
   maybeAdoptRemoteDraft(countSession.warehouse);
+  fetchTeamDrafts(countSession.warehouse);
 }
 
 function onCountWhChange() {
@@ -1562,8 +1599,10 @@ function onCountWhChange() {
   pendingScan = null;
   document.getElementById('countPending').innerHTML = '';
   loadCountSession(wh);
+  teamData = { wh:'', byKey:{} };
   renderCountList();
   maybeAdoptRemoteDraft(wh);
+  fetchTeamDrafts(wh);
 }
 
 function loadCountSession(wh) {
@@ -2038,7 +2077,11 @@ function renderCountList() {
       <div class="lrow-main" onclick="toggleLiveRow('${key}')">
         <div class="lrow-info">
           <div class="lrow-name">${it.name}</div>
-          <div class="lrow-sub">${breakdownText(it)} = <b>${d.counted.toLocaleString()}</b> ชิ้น · ระบบ ${d.system.toLocaleString()}</div>
+          <div class="lrow-sub">${
+            d.team > 0
+              ? `คุณ <b>${d.mine.toLocaleString()}</b> + ทีม <b style="color:#2f6df0">${d.team.toLocaleString()}</b> = <b>${d.counted.toLocaleString()}</b> ชิ้น · ระบบ ${d.system.toLocaleString()}`
+              : `${breakdownText(it)} = <b>${d.counted.toLocaleString()}</b> ชิ้น · ระบบ ${d.system.toLocaleString()}`
+          }</div>
         </div>
         ${pill}
         <span class="lrow-chev">›</span>
@@ -2123,10 +2166,12 @@ function liveSet(encKey, unit, val) {
 
 // diff for one counted item vs system
 function itemDiff(it) {
-  const counted = countedPieces(it);
+  const mine = countedPieces(it);
+  const team = teamPiecesFor(it.key, it.factors);
+  const counted = mine + team;
   const sys = systemPiecesFor(it);
   const diff = counted - sys.pieces;
-  return { counted, system: sys.pieces, diff, raw: sys.raw, status: diff===0?'ok':(diff<0?'short':'over'), factorCS: it.factors.CS||1 };
+  return { counted, mine, team, system: sys.pieces, diff, raw: sys.raw, status: diff===0?'ok':(diff<0?'short':'over'), factorCS: it.factors.CS||1 };
 }
 
 function statusPill(d) {
