@@ -57,18 +57,19 @@ function getOrCreate(name, headers) {
 // Columns: userKey | warehouse | sessionStart | updatedAt | itemsJson | name
 function saveDraft(b) {
   const sh = getOrCreate('Drafts',
-    ['userKey','warehouse','sessionStart','updatedAt','itemsJson','name']);
+    ['userKey','warehouse','sessionStart','updatedAt','itemsJson','name','location']);
   const data = sh.getDataRange().getValues();
   const now = new Date().toISOString();
   const key = (b.userKey || '') + '|' + (b.warehouse || '');
 
   for (let i = 1; i < data.length; i++) {
     if ((data[i][0] + '|' + data[i][1]) === key) {
-      sh.getRange(i + 1, 3, 1, 4).setValues([[
+      sh.getRange(i + 1, 3, 1, 5).setValues([[
         b.sessionStart || data[i][2],
         now,
         JSON.stringify(b.items || {}),
-        b.name || data[i][5] || ''
+        b.name || data[i][5] || '',
+        b.location != null ? b.location : (data[i][6] || '')
       ]]);
       return { ok: true };
     }
@@ -79,7 +80,8 @@ function saveDraft(b) {
     b.sessionStart || '',
     now,
     JSON.stringify(b.items || {}),
-    b.name || ''
+    b.name || '',
+    b.location || ''
   ]);
   return { ok: true };
 }
@@ -101,7 +103,7 @@ function clearDraft(b) {
 // ── GET ONE DRAFT (own) ───────────────────────────────
 function getDraft(p) {
   const sh = getOrCreate('Drafts',
-    ['userKey','warehouse','sessionStart','updatedAt','itemsJson','name']);
+    ['userKey','warehouse','sessionStart','updatedAt','itemsJson','name','location']);
   const data = sh.getDataRange().getValues();
   const key = (p.userKey || '') + '|' + (p.warehouse || '');
   for (let i = 1; i < data.length; i++) {
@@ -116,7 +118,8 @@ function getDraft(p) {
           sessionStart: data[i][2],
           updatedAt:    data[i][3],
           items:        items,
-          name:         data[i][5] || ''
+          name:         data[i][5] || '',
+          location:     data[i][6] || ''
         }
       };
     }
@@ -149,7 +152,7 @@ function getAllDrafts(p) {
 // ── SAVE COUNT (final submit — writes flat rows) ──────
 function saveCount(b) {
   const sh = getOrCreate('StockCount', [
-    'savedAt','warehouse','empId','name','email',
+    'savedAt','warehouse','location','empId','name','email',
     'sessionStart','รหัสสินค้า','ชื่อสินค้า',
     'CS','BP','PA','EA','นับได้(ชิ้น)',
     'สต็อกระบบ(CS.EA)','สต็อกระบบ(ชิ้น)',
@@ -162,6 +165,7 @@ function saveCount(b) {
   const out = rows.map(r => [
     now,
     b.warehouse || '',
+    b.location || '',
     b.empId || '',
     b.counterName || b.name || '',
     b.email || '',
