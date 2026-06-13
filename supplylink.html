@@ -648,14 +648,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v7.3.1</div>
+<div class="version-badge">SupplyLink v7.4.0</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    SupplyLink v6.6.6 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v7.3.1';
+const VERSION = 'v7.4.0';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -1758,6 +1758,7 @@ async function loadPORevisions(force) {
 }
 // revision ล่าสุดของ PO (backend เรียงล่าสุดก่อนแล้ว)
 function revLatestByPO(po) { return (DATA.poRevisions || []).find(r => String(r.po) === String(po)); }
+function isPoApproved(po) { const rv = revLatestByPO(po); return !!(rv && rv.status === 'อนุมัติ'); } // จองได้เฉพาะใบที่จัดซื้ออนุมัติ
 async function loadRevDetail(id, force) {
   S._revDetail = S._revDetail || {};
   if (S._revDetail[id] && !force) return S._revDetail[id];
@@ -4908,7 +4909,8 @@ function afterSupplierRender() {
   // page-specific handlers
   if (S.page === 'dashboard') {
     $$('#mContent [data-go]').forEach(b => b.addEventListener('click', () => {
-      if (b.dataset.go === 'book') goBooking(); else nav(b.dataset.go);
+      const g = b.dataset.go;
+      if (g === 'book') goBooking(); else if (g === 'po-confirm') goPOConfirm(); else nav(g);
     }));
   }
   if (S.page === 'book') wireWizard();
@@ -5048,8 +5050,8 @@ function supplierDashboard() {
   const pendingConfirm = poPendingConfirmCount(); // null = ยังโหลดอยู่
   const notifs = [];
   const dc = S._defectsCache; // ของเสีย (prefetch ตอน login)
-  if (dc && dc.overdueCount > 0) notifs.push({ icon:'warn', tone:'err', label:'ของเสียเลยกำหนด', detail: dc.overdueCount+' รายการ · ติดต่อจัดซื้อก่อนจอง', go:'book' });
-  else if (dc && dc.pendingCount > 0) notifs.push({ icon:'rotate', tone:'warn', label:'ของเสียต้องเคลียร์', detail: dc.pendingCount+' รายการ · เคลียร์ก่อนจองส่ง', go:'book' });
+  if (dc && dc.overdueCount > 0) notifs.push({ icon:'warn', tone:'err', label:'ของเสียเลยกำหนด', detail: dc.overdueCount+' รายการ · ติดต่อจัดซื้อก่อนยืนยัน PO', go:'po-confirm' });
+  else if (dc && dc.pendingCount > 0) notifs.push({ icon:'rotate', tone:'warn', label:'ของเสียต้องเคลียร์', detail: dc.pendingCount+' รายการ · เคลียร์ก่อนยืนยัน PO', go:'po-confirm' });
   if (pendingConfirm) notifs.push({ icon:'edit', tone:'warn', label:'PO รอยืนยัน', detail: pendingConfirm+' ใบ · ตรวจ/แก้ราคา-จำนวน ก่อนส่งของ', go:'po-confirm' });
   if (returnsPending.length) notifs.push({ icon:'rotate', tone:'err', label:'สินค้าต้องคืนรอยืนยัน', detail: returnsPending.length+' รายการ · ยืนยันก่อนจองครั้งถัดไป', go:'returns' });
   if (myBackorders.length) notifs.push({ icon:'box', tone:'warn', label:'ของค้างส่ง', detail: myBackorders.length+' รายการ · รวม '+myBackorders.reduce((s,b)=>s+b.pendingQty,0)+' หน่วย', go:'backorders' });
@@ -5192,27 +5194,37 @@ function supplierBackorders() {
 const DEFECT_HANDLE = ['เอาของมาแลก','ทำ CN','เปิดบิลชื่อบริษัท'];
 const DEFECT_RETURN = ['คืนกับขนส่ง','เซลล์มาเก็บ','ทำลาย'];
 
+// จอง — ของเสียเคลียร์ตั้งแต่ขั้น "ยืนยัน PO" แล้ว → จองเช็คแค่ว่า PO จัดซื้ออนุมัติ (โหลด revision สด)
 async function goBooking() {
-  // ดึงสดทุกครั้ง — จัดซื้อเลื่อน/หักเงินแล้วต้องเห็นทันที (cache เก่าทำให้ block ค้าง)
+  S.wizard = { step:1, pos:[], wh:null, day:null, slot:null }; // เริ่มจองใหม่สะอาด
+  nav('book');
+  ensureOpenPOs();
+  S._revsLoaded = false; // โหลดสถานะอนุมัติสด — จัดซื้ออนุมัติคนละเครื่อง cache เก่าจะค้าง
+  loadPORevisions(true).then(() => { if (S.page === 'book') renderContentOnly(); });
+}
+window.goBooking = goBooking;
+// เข้า "ยืนยัน PO" — ขั้นนี้บังคับเคลียร์ของเสียก่อน (ย้ายมาจากตอนจอง)
+async function goPOConfirm() {
   showAppLoading('กำลังตรวจของเสียค้างเคลียร์…');
   let res;
   try { res = await callAPI('getDefects', {}); } catch(e) { console.error('[getDefects]', e); }
   hideAppLoading();
   const data = res && res.data;
-  S._defectsCache = data || null; // เก็บค่าล่าสุดให้ dashboard notif ใช้
+  S._defectsCache = data || null;
+  S._revsLoaded = false; // โหลดสถานะ revision สด (อนุมัติ/ปฏิเสธ จากจัดซื้อ)
   if (data && data.overdueCount > 0) {
     S._overdue = data.overdue;       // เลยกำหนดเคลียร์ → block ต้องให้จัดซื้ออนุมัติ
     nav('defect-block');
   } else if (data && data.pendingCount > 0) {
     S._defects = data.pending;
-    S._dcSplit = []; S._dcMaster = null; S._dcItem = {}; // reset bulk-clear state ทุกครั้งที่เข้าใหม่
+    S._dcSplit = []; S._dcMaster = null; S._dcItem = {};
     nav('defect-gate');
   } else {
-    nav('book');         // เปิด wizard ทันที — ไม่รอ PO
-    ensureOpenPOs();     // โหลด PO เบื้องหลัง แล้วเติมใน Step 1
+    nav('po-confirm');
+    ensurePoConfirmData();
   }
 }
-window.goBooking = goBooking;
+window.goPOConfirm = goPOConfirm;
 
 // ของเสียเลยกำหนด → จองไม่ได้ ต้องให้จัดซื้ออนุมัติก่อน (เลื่อน/หักเงิน)
 function supplierDefectBlock() {
@@ -5394,8 +5406,8 @@ function wireDefectGate() {
     toast('เคลียร์ของเสียแล้ว', 'จองส่งสินค้าต่อได้เลย', 'ok');
     S._defects = null; S._defectsCache = null;
     S._dcSplit = []; S._dcMaster = null; S._dcItem = {};
-    nav('book');         // เปิด wizard ทันที
-    ensureOpenPOs();     // โหลด PO เบื้องหลัง
+    nav('po-confirm');   // เคลียร์ของเสียเสร็จ → ไปยืนยัน PO ต่อ
+    ensurePoConfirmData();
   });
 }
 
@@ -5760,28 +5772,31 @@ function supplierBooking() {
 
 function wizStep1() {
   const w = S.wizard;
-  if (!S._posLoaded) {
+  if (!S._posLoaded || !S._revsLoaded) {
     ensureOpenPOs();
+    if (!S._revsLoaded && !S._revsLoading) loadPORevisions(true).then(() => { if (S.page === 'book') renderContentOnly(); });
     return '<div style="padding:48px 0;text-align:center;color:var(--ink-3)">' +
       '<span class="spinner" style="width:30px;height:30px;border-width:3px;margin-bottom:14px"></span>' +
       '<div style="font-size:13px">กำลังโหลดใบสั่งซื้อ…</div></div>';
   }
-  // ตัด PO ที่จองไปแล้ว (อยู่ในนัดของฉัน) ออก — กันจองซ้ำ
+  // จองได้เฉพาะ PO ที่จัดซื้ออนุมัติ revision แล้ว + ยังไม่จอง (ยกเว้นโหมดส่งของค้าง)
   const booked = new Set();
   (DATA.appointments || []).forEach(a => (a.pos || []).forEach(id => booked.add(String(id))));
-  const list = DATA.openPOs.filter(p => !booked.has(String(p.id)));
+  const list = DATA.openPOs.filter(p => !booked.has(String(p.id)) && (w.backorderId || isPoApproved(p.id)));
   let html = '<p style="font-size:12.5px;color:var(--ink-2);margin:0 0 14px">เลือกใบสั่งซื้อ (PO) ที่ต้องการจัดส่งในนัดเดียวกัน</p>';
   if (!list.length) {
-    return html + '<div class="card" style="padding:32px 16px;text-align:center;color:var(--ink-3)">' +
-      '<div style="font-size:13px;font-weight:600;color:var(--ink-2)">ไม่มีใบสั่งซื้อที่ต้องจอง</div>' +
-      '<div style="font-size:11.5px;margin-top:4px">PO ที่ยังไม่รับเข้า + ยังไม่จอง จะแสดงที่นี่</div></div>';
+    const waiting = DATA.openPOs.filter(p => !booked.has(String(p.id)) && !isPoApproved(p.id)).length;
+    return html + '<div class="card" style="padding:28px 16px;text-align:center;color:var(--ink-3)">' +
+      '<div style="font-size:13px;font-weight:700;color:var(--ink-2)">ยังไม่มีใบที่จองได้</div>' +
+      '<div style="font-size:11.5px;margin-top:6px;line-height:1.6">จองได้เฉพาะ PO ที่ <b>ยืนยัน + จัดซื้ออนุมัติ</b> แล้ว'+(waiting ? '<br>มี <b>'+waiting+'</b> ใบรอยืนยัน/อนุมัติ' : '')+'</div>' +
+      '<button class="btn btn-primary" style="margin-top:14px" onclick="goPOConfirm()">'+ic('edit',14)+' ไปยืนยัน PO</button></div>';
   }
   html += list.map(p => {
     const sel = w.pos.indexOf(p.id) !== -1;
     return '<button class="po-card'+(sel?' sel':'')+'" data-po="'+p.id+'">' +
       '<span class="po-check">'+(sel?ic('check',13,'#fff',2.6):'')+'</span>' +
       '<div style="flex:1;min-width:0">' +
-        '<div style="display:flex;justify-content:space-between;gap:6px"><span class="num" style="font-weight:700;font-size:13px">'+p.id+'</span><span class="chip chip-sm chip-brand">'+esc(whFriendly(p.wh))+'</span></div>' +
+        '<div style="display:flex;justify-content:space-between;gap:6px;align-items:center"><span class="num" style="font-weight:700;font-size:13px">'+p.id+'</span><span style="display:flex;gap:4px">'+(isPoApproved(p.id)?'<span class="chip chip-sm chip-ok">✓ อนุมัติ</span>':'')+'<span class="chip chip-sm chip-brand">'+esc(whFriendly(p.wh))+'</span></span></div>' +
         '<div style="font-size:11.5px;color:var(--ink-3);margin-top:3px">'+p.lines+' บรรทัด · มูลค่า <span class="num bold" style="color:var(--ink)">'+fmtMoney(p.value)+'</span> บาท</div>' +
         '<div style="font-size:11px;color:var(--ink-3);margin-top:3px">กำหนดส่ง '+toBE(p.due)+'</div>' +
       '</div>' +
