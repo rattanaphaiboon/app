@@ -648,14 +648,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v7.5.0</div>
+<div class="version-badge">SupplyLink v7.6.0</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    SupplyLink v6.6.6 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v7.5.0';
+const VERSION = 'v7.6.0';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -1695,7 +1695,7 @@ function ensureOpenPOs() {
 
 // รายการสินค้าใน PO + cache localStorage (TTL 6 ชม.) — เปิดซ้ำติดทันที ไม่ต้องรอ GAS scan
 const PO_LINES_TTL = 6 * 3600 * 1000;
-function _poLinesKey(pos) { return 'sl_polines2_' + pos.slice().sort().join('|'); } // v2 = มี sellPrice แล้ว (cache เก่าไม่ใช้)
+function _poLinesKey(pos) { return 'sl_polines3_' + pos.slice().sort().join('|'); } // v3 = sellUnits (EA/PA/CS+ตัวคูณ) · cache เก่าไม่ใช้
 async function loadPOLinesCached(pos, force) {
   const key = _poLinesKey(pos);
   if (!force) {
@@ -5498,7 +5498,7 @@ async function startRevEditor(poId) {
       const price = isFreeLine ? 0 : (Number(l.price) > 0 ? Math.round(Number(l.price) * 10000) / 10000 : (qty > 0 ? Math.round(val / qty * 10000) / 10000 : 0));
       return { type: 'original', sku: String(l.sku || ''), barcode: '', name: l.desc || '', unit: l.unit || '',
         origQty: useQty, origPrice: price, origTotal: val, newQty: useQty, newPrice: price, isFoc: isFreeLine, origFoc: isFreeLine, note: '',
-        sellPrice: Number(l.sellPrice) || 0, wholePrice: Number(l.wholePrice) || 0, unitCode: l.unitCode || '' };
+        sellPrice: Number(l.sellPrice) || 0, sellUnits: l.sellUnits || [], unitCode: l.unitCode || '' };
     });
   } catch (e) { console.error('[startRevEditor]', e); S._revEdit.lines = []; }
   if (S.page === 'po-rev-edit') renderContentOnly();
@@ -5513,11 +5513,31 @@ function revEditNet(E) {
   return Math.round(sum * 100) / 100;
 }
 
+// ขาดทุน = ต้นทุนที่กรอก ≥ ราคาขายรัตน (S03) ของหน่วยที่สั่ง · ไม่นับ FOC
+function lineIsLoss(l) { return !l.isFoc && l.sellPrice > 0 && (Number(l.newPrice) || 0) >= l.sellPrice; }
+// แถบราคาขายรัตน 1 บรรทัด — EA/PA/CS + ตัวคูณ QTY · แดงเมื่อขาดทุน
+function sellRefHTML(units, loss) {
+  const txt = (units || []).map(s => s.u + ' ฿' + fmtMoney(s.price) + (s.qty > 1 ? '<span style="opacity:.55">×' + s.qty + '</span>' : '')).join(' · ');
+  return ic(loss ? 'warn' : 'tag', 13, loss ? 'var(--err)' : 'var(--brand)') + '<span class="num" style="font-size:10.5px;line-height:1.4">ขาย รัตน · ' + txt + '</span>';
+}
+// อัปเดตสถานะขาดทุนสด (ตอนพิมพ์ต้นทุน) — ไม่ re-render กันหลุดโฟกัส
+function updateLossUI(i) {
+  const E = S._revEdit; if (!E || !E.lines[i]) return;
+  const l = E.lines[i], loss = lineIsLoss(l);
+  const ref = $('.rv-sellref[data-i="' + i + '"]');
+  if (ref) { ref.style.background = loss ? 'var(--err-bg)' : 'var(--brand-tint)'; ref.style.color = loss ? '#8a2727' : 'var(--ink-2)'; ref.innerHTML = sellRefHTML(l.sellUnits, loss); }
+  const price = $('.rv-price[data-i="' + i + '"]');
+  if (price) { price.style.borderColor = loss ? 'var(--err)' : ''; price.style.color = loss ? 'var(--err)' : ''; }
+  const card = $('.rv-card[data-i="' + i + '"]');
+  if (card) card.style.borderColor = loss ? 'var(--err)' : (l.type === 'added' ? 'var(--accent)' : 'var(--line)');
+}
+
 function rvLineCard(l, i) {
   // ของแถมที่มากับ PO เดิม (origFoc) ไม่นับเป็น "แก้" — นับเฉพาะที่ผู้ใช้เปลี่ยนจริง
   const changed = l.type === 'added' ? 'เพิ่ม' : ((!!l.isFoc !== !!l.origFoc) || Number(l.newQty) !== Number(l.origQty) || Number(l.newPrice) !== Number(l.origPrice)) ? 'แก้' : '';
   const lt = l.isFoc ? 0 : (Number(l.newQty) || 0) * (Number(l.newPrice) || 0);
-  return '<div class="card mb-12" style="padding:12px'+(l.type === 'added' ? ';border-color:var(--accent)' : '')+'">' +
+  const loss = lineIsLoss(l);
+  return '<div class="card mb-12 rv-card" data-i="'+i+'" style="padding:12px;border-color:'+(loss ? 'var(--err)' : (l.type === 'added' ? 'var(--accent)' : 'var(--line)'))+'">' +
     '<div style="display:flex;gap:8px;align-items:flex-start">' +
       '<div style="flex:1;min-width:0">' +
         '<div style="font-weight:700;font-size:13px">'+esc(l.name || l.sku)+'</div>' +
@@ -5529,11 +5549,11 @@ function rvLineCard(l, i) {
     (l.type !== 'added' ? '<div style="font-size:10.5px;color:var(--ink-3);margin-top:6px">ตาม PO เดิม: <span class="num">'+(l.origFoc ? 'แถมฟรี '+fmtMoney(l.origQty)+' '+esc(l.unit || '') : fmtMoney(l.origQty)+' × ฿'+fmtMoney(l.origPrice)+' = ฿'+fmtMoney(l.origTotal))+'</span></div>' : '') +
     '<div style="display:flex;gap:8px;margin-top:7px;align-items:flex-end">' +
       '<div style="flex:1"><label class="label-plain" style="font-size:10.5px">จำนวน</label><input type="number" inputmode="decimal" class="input num rv-qty" data-i="'+i+'" value="'+(l.newQty || '')+'" min="0" step="any"></div>' +
-      '<div style="flex:1"><label class="label-plain" style="font-size:10.5px">ราคา/หน่วย รวมVAT'+(l.isFoc ? ' (แถม)' : '')+'</label><input type="number" inputmode="decimal" class="input num rv-price" data-i="'+i+'" value="'+(l.newPrice || '')+'" min="0" step="any"'+(l.isFoc ? ' disabled' : '')+'></div>' +
+      '<div style="flex:1"><label class="label-plain" style="font-size:10.5px'+(loss ? ';color:var(--err)' : '')+'">ต้นทุน/หน่วย รวมVAT'+(l.isFoc ? ' (แถม)' : '')+'</label><input type="number" inputmode="decimal" class="input num rv-price" data-i="'+i+'" value="'+(l.newPrice || '')+'" min="0" step="any"'+(l.isFoc ? ' disabled' : '')+(loss ? ' style="border-color:var(--err);color:var(--err)"' : '')+'></div>' +
       '<div style="flex:1;text-align:right;padding-bottom:4px"><div style="font-size:10.5px;color:var(--ink-3)">รวม'+(l.isFoc ? ' (แถม)' : '')+'</div><div class="num bold rv-lt" data-i="'+i+'" style="font-size:14px">฿'+fmtMoney(lt)+'</div></div>' +
     '</div>' +
     '<div style="text-align:right;font-size:10px;color:var(--ink-4);margin-top:3px">ราคาก่อน VAT <span class="num rv-exvat" data-i="'+i+'">฿'+fmtMoney(priceExVat(l.newPrice))+'</span> / หน่วย</div>' +
-    (l.sellPrice ? '<div style="display:flex;align-items:center;gap:6px;margin-top:7px;background:var(--brand-tint);border-radius:7px;padding:6px 9px;font-size:11px;color:var(--ink-2)">'+ic('tag',13,'var(--brand)')+'<span>ราคาขาย รัตน '+(l.unitCode==='CS'?'(1 ลัง) ':'')+'<b class="num" style="color:var(--brand)">฿'+fmtMoney(l.sellPrice)+'</b>'+(l.wholePrice?' · ส่ง <b class="num">฿'+fmtMoney(l.wholePrice)+'</b>':'')+'</span></div>' : '') +
+    (l.sellPrice ? '<div class="rv-sellref" data-i="'+i+'" style="display:flex;align-items:flex-start;gap:6px;margin-top:7px;border-radius:7px;padding:6px 9px;font-weight:500;background:'+(loss ? 'var(--err-bg)' : 'var(--brand-tint)')+';color:'+(loss ? '#8a2727' : 'var(--ink-2)')+'">'+sellRefHTML(l.sellUnits, loss)+'</div>' : '') +
     '<button type="button" class="rv-foc" data-i="'+i+'" style="margin-top:8px;border:1px solid '+(l.isFoc ? 'var(--ok)' : 'var(--line)')+';background:'+(l.isFoc ? '#E8F5EE' : '#fff')+';color:'+(l.isFoc ? 'var(--ok)' : 'var(--ink-3)')+';border-radius:7px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer">'+(l.isFoc ? '✓ ของแถม (FOC)' : 'ติ๊กเป็นของแถม (FOC)')+'</button>' +
   '</div>';
 }
@@ -5630,6 +5650,7 @@ function wireSupplierPORevEdit() {
     if (lt) lt.textContent = '฿' + fmtMoney(E.lines[i].isFoc ? 0 : (E.lines[i].newQty || 0) * E.lines[i].newPrice);
     const ev = $('.rv-exvat[data-i="'+i+'"]'); // อัปเดตราคาก่อน VAT สดตามราคารวม VAT
     if (ev) ev.textContent = '฿' + fmtMoney(priceExVat(E.lines[i].newPrice));
+    updateLossUI(i); // เช็คขาดทุนสด (ต้นทุน ≥ ราคาขายรัตน)
     recompute();
   }));
   $$('#mContent .rv-foc').forEach(b => b.addEventListener('click', () => {
