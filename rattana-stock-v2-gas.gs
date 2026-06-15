@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.3
+//  Rattana Stock Count — GAS Backend  v1.4
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -9,8 +9,42 @@
 //         to the app (so app code is unchanged).
 // ═══════════════════════════════════════════════════════
 
-const SS_ID = '18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4';
+const SS_ID = '18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4';   // default file (W1, W2, W3, …)
 const TZ    = 'Asia/Bangkok';
+
+// ═════════════════════════════════════════════════════════════
+//  PER-WAREHOUSE SPREADSHEET ROUTING
+//  C4 and W4 each live in their own Google Sheet file.
+//  1) Run setupC4W4Sheets() once from the Apps Script editor —
+//     check the Logger output for the new spreadsheet IDs.
+//  2) Paste those IDs below.
+//  3) Anything not listed here falls back to the default SS_ID.
+// ═════════════════════════════════════════════════════════════
+const WAREHOUSE_SS_ID = {
+  'C4': '',   // ← paste the C4 spreadsheet ID here
+  'W4': ''    // ← paste the W4 spreadsheet ID here
+};
+
+function ssFor(wh) {
+  const id = WAREHOUSE_SS_ID[String(wh || '').toUpperCase()] || SS_ID;
+  return SpreadsheetApp.openById(id);
+}
+
+// Run this ONCE from the Apps Script editor. It creates two new Google
+// Sheets (one for C4, one for W4) in your Drive and prints the IDs +
+// URLs to the Logger. Copy the IDs into the WAREHOUSE_SS_ID map above.
+function setupC4W4Sheets() {
+  const c4 = SpreadsheetApp.create('Rattana Stock — C4');
+  const w4 = SpreadsheetApp.create('Rattana Stock — W4');
+  Logger.log('────── C4 ──────');
+  Logger.log('ID:  ' + c4.getId());
+  Logger.log('URL: ' + c4.getUrl());
+  Logger.log('────── W4 ──────');
+  Logger.log('ID:  ' + w4.getId());
+  Logger.log('URL: ' + w4.getUrl());
+  Logger.log('');
+  Logger.log('→ paste the IDs above into WAREHOUSE_SS_ID and redeploy.');
+}
 
 // ── TIME HELPERS ──────────────────────────────────────
 function thaiDateTime(input) {
@@ -94,8 +128,15 @@ function json(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-function getOrCreate(name, headers) {
-  const ss = SpreadsheetApp.openById(SS_ID);
+// getOrCreate(name, headers)              → default spreadsheet (back-compat)
+// getOrCreate(ss,   name, headers)         → a specific spreadsheet
+function getOrCreate(a, b, c) {
+  let ss, name, headers;
+  if (a && typeof a === 'object' && a.getSheetByName) {
+    ss = a; name = b; headers = c;
+  } else {
+    ss = SpreadsheetApp.openById(SS_ID); name = a; headers = b;
+  }
   let sh = ss.getSheetByName(name);
   if (!sh) {
     sh = ss.insertSheet(name);
@@ -109,7 +150,7 @@ function getOrCreate(name, headers) {
 // Columns: userKey | warehouse | sessionStart | updatedAt | itemsJson | name | location
 // Both sessionStart and updatedAt are written as Thai-formatted text.
 function saveDraft(b) {
-  const sh = getOrCreate('Drafts',
+  const sh = getOrCreate(ssFor(b.warehouse), 'Drafts',
     ['userKey','warehouse','sessionStart','updatedAt','itemsJson','name','location']);
   const data = sh.getDataRange().getValues();
   const nowThai = thaiDateTime(new Date());
@@ -141,7 +182,7 @@ function saveDraft(b) {
 }
 
 function clearDraft(b) {
-  const sh = SpreadsheetApp.openById(SS_ID).getSheetByName('Drafts');
+  const sh = ssFor(b.warehouse).getSheetByName('Drafts');
   if (!sh) return { ok: true };
   const data = sh.getDataRange().getValues();
   const key = (b.userKey || '') + '|' + (b.warehouse || '');
@@ -157,7 +198,7 @@ function clearDraft(b) {
 // ── GET ONE DRAFT (own) ───────────────────────────────
 // updatedAt is returned as epoch ms so the app can compare timestamps.
 function getDraft(p) {
-  const sh = getOrCreate('Drafts',
+  const sh = getOrCreate(ssFor(p.warehouse), 'Drafts',
     ['userKey','warehouse','sessionStart','updatedAt','itemsJson','name','location']);
   const data = sh.getDataRange().getValues();
   const key = (p.userKey || '') + '|' + (p.warehouse || '');
@@ -184,7 +225,7 @@ function getDraft(p) {
 
 // ── GET ALL DRAFTS (live team aggregate) ──────────────
 function getAllDrafts(p) {
-  const sh = SpreadsheetApp.openById(SS_ID).getSheetByName('Drafts');
+  const sh = ssFor(p.warehouse).getSheetByName('Drafts');
   if (!sh) return { ok: true, drafts: [] };
   const data = sh.getDataRange().getValues();
   const wh = String(p.warehouse || '');
@@ -206,7 +247,7 @@ function getAllDrafts(p) {
 
 // ── SAVE COUNT (final submit — writes flat rows) ──────
 function saveCount(b) {
-  const sh = getOrCreate('StockCount', [
+  const sh = getOrCreate(ssFor(b.warehouse), 'StockCount', [
     'savedAt','warehouse','location','empId','name','email',
     'sessionStart','รหัสสินค้า','ชื่อสินค้า',
     'CS','BP','PA','EA','นับได้(ชิ้น)',
@@ -244,9 +285,9 @@ function saveCount(b) {
   });
   sh.getRange(sh.getLastRow() + 1, 1, out.length, out[0].length).setValues(out);
 
-  // Clear this user's draft after a final save
+  // Clear this user's draft after a final save (in the same warehouse SS)
   try {
-    const ds = SpreadsheetApp.openById(SS_ID).getSheetByName('Drafts');
+    const ds = ssFor(b.warehouse).getSheetByName('Drafts');
     if (ds) {
       const dd = ds.getDataRange().getValues();
       const key = (b.userKey || '') + '|' + (b.warehouse || '');
@@ -295,12 +336,18 @@ function liveSheetName(wh) {
 }
 function liveSheetFor(wh) {
   if (!wh) return null;
-  return getOrCreate(liveSheetName(wh), LIVE_HEADERS);
+  return getOrCreate(ssFor(wh), liveSheetName(wh), LIVE_HEADERS);
 }
-// Backward-compat: if a row was written to the legacy "Live" sheet before
-// this split, also search it during reads/deletes so nothing gets orphaned.
-function legacyLiveSheet() {
-  return SpreadsheetApp.openById(SS_ID).getSheetByName('Live');
+// Backward-compat: search the legacy "Live" sheet in BOTH the warehouse's
+// own spreadsheet and the default one so historical rows still surface.
+function legacyLiveSheetsFor(wh) {
+  const out = [];
+  if (wh) {
+    const s1 = ssFor(wh).getSheetByName('Live'); if (s1) out.push(s1);
+  }
+  const s2 = SpreadsheetApp.openById(SS_ID).getSheetByName('Live');
+  if (s2 && (!out.length || out[0].getParent().getId() !== s2.getParent().getId())) out.push(s2);
+  return out;
 }
 function findLiveRow(sh, lotId) {
   if (!sh || !lotId) return -1;
@@ -352,16 +399,22 @@ function upsertLot(b) {
 
 function deleteLot(b) {
   if (!b.lotId) return { ok:false, error:'lotId required' };
-  // Prefer the warehouse-specific sheet; fall back to scanning every Live_* +
-  // legacy "Live" so we never leave an orphan row behind.
+  // Prefer the warehouse-specific sheet (in the warehouse's spreadsheet).
+  // Fall back to scanning every Live* sheet in both that spreadsheet and
+  // the default one so orphans get cleaned up wherever they landed.
   const tried = [];
-  if (b.warehouse) tried.push(liveSheetFor(b.warehouse));
-  const ss = SpreadsheetApp.openById(SS_ID);
-  ss.getSheets().forEach(s => {
-    const n = s.getName();
-    if (n === 'Live' || n.indexOf('Live_') === 0) {
-      if (!tried.some(t => t && t.getName() === n)) tried.push(s);
-    }
+  const seen = {};
+  function consider(sh) {
+    if (!sh) return;
+    const tag = sh.getParent().getId() + '::' + sh.getName();
+    if (seen[tag]) return; seen[tag] = 1; tried.push(sh);
+  }
+  if (b.warehouse) consider(liveSheetFor(b.warehouse));
+  [ssFor(b.warehouse), SpreadsheetApp.openById(SS_ID)].forEach(ss => {
+    ss.getSheets().forEach(s => {
+      const n = s.getName();
+      if (n === 'Live' || n.indexOf('Live_') === 0) consider(s);
+    });
   });
   for (const sh of tried) {
     const row = findLiveRow(sh, b.lotId);
@@ -375,7 +428,7 @@ function clearLiveForUser(b) {
   const uk = String(b.userKey || '').toLowerCase();
   const wh = String(b.warehouse || '');
   if (!wh) return { ok:false, error:'warehouse required' };
-  const sheetsToScan = [liveSheetFor(wh), legacyLiveSheet()].filter(Boolean);
+  const sheetsToScan = [liveSheetFor(wh)].concat(legacyLiveSheetsFor(wh)).filter(Boolean);
   sheetsToScan.forEach(sh => {
     const data = sh.getDataRange().getValues();
     for (let i = data.length - 1; i >= 1; i--) {
@@ -394,8 +447,8 @@ function getLiveLots(p) {
   const wh = String(p.warehouse || '');
   if (!wh) return { ok: true, lots: [] };
   const out = [];
-  const seen = {}; // dedupe by lotId if a row exists in both the per-wh sheet and the legacy Live sheet
-  const sheets = [liveSheetFor(wh), legacyLiveSheet()].filter(Boolean);
+  const seen = {}; // dedupe by lotId in case a row exists in both the per-wh sheet and a legacy "Live" sheet
+  const sheets = [liveSheetFor(wh)].concat(legacyLiveSheetsFor(wh)).filter(Boolean);
   sheets.forEach(sh => {
     const data = sh.getDataRange().getValues();
     if (data.length < 2) return;
@@ -428,7 +481,8 @@ function getLiveLots(p) {
 
 // ── GET HISTORY ───────────────────────────────────────
 function getHistory(p) {
-  const sh = SpreadsheetApp.openById(SS_ID).getSheetByName('StockCount');
+  // If a warehouse is given, look in its SS; otherwise default SS.
+  const sh = ssFor(p.warehouse).getSheetByName('StockCount');
   if (!sh) return { ok: true, sessions: [] };
   const data = sh.getDataRange().getValues();
   if (data.length < 2) return { ok: true, sessions: [] };
