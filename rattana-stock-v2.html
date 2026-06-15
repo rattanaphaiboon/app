@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v2.4</title>
+  <title>Rattana Stock Count v3.0</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -672,7 +672,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v2.4';
+const APP_VERSION = 'v3.0';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // Apps Script Web App URL for saving count results (paste after deploying — see setup note)
@@ -734,6 +734,59 @@ document.addEventListener('DOMContentLoaded', () => {
 // Background polling — keeps the open device in sync even when it never
 // leaves focus. Only runs while the count tab is visible and online.
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function uuid(){
+  if (window.crypto?.randomUUID) return crypto.randomUUID();
+  return 'l-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+function ensureLotId(lot){ if (lot && !lot.lotId) lot.lotId = uuid(); return lot ? lot.lotId : ''; }
+
+// ── LIVE LOT SYNC — each lot pushed to/from the sheet individually ──
+async function pushLot(item, lot){
+  if (!COUNT_SAVE_URL || !item || !lot) return;
+  ensureLotId(lot);
+  const body = {
+    action: 'upsertLot',
+    lotId: lot.lotId,
+    userKey: userKey(),
+    warehouse: countSession && countSession.warehouse,
+    sessionStart: countSession && countSession.startedAt,
+    empId: counterDisplayEmpId(),
+    counterName: counterDisplayName(),
+    key: item.key,
+    name: item.name,
+    productName: item.name,
+    factors: item.factors || { EA:1, PA:1, BP:1, CS:1 },
+    counts: lot.counts || { EA:0, PA:0, BP:0, CS:0 },
+    expiryDate: lot.expiryDate || '',
+    location: lot.location || item.location || ''
+  };
+  try {
+    await fetch(COUNT_SAVE_URL, {
+      method:'POST', mode:'no-cors',
+      headers:{ 'Content-Type':'text/plain;charset=utf-8' },
+      body: JSON.stringify(body)
+    });
+  } catch {}
+}
+async function deleteLotRemote(lotId){
+  if (!COUNT_SAVE_URL || !lotId) return;
+  try {
+    await fetch(COUNT_SAVE_URL, {
+      method:'POST', mode:'no-cors',
+      headers:{ 'Content-Type':'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action:'deleteLot', lotId })
+    });
+  } catch {}
+}
+function pushAllLotsOf(item){
+  if (!item || !item.lots) return;
+  item.lots.forEach(lot => { ensureLotId(lot); pushLot(item, lot); });
+}
+function deleteAllLotsOf(item){
+  if (!item || !item.lots) return;
+  item.lots.forEach(lot => { if (lot.lotId) deleteLotRemote(lot.lotId); });
+}
+
 let draftPollTimer = null;
 function startDraftPoll() {
   stopDraftPoll();
@@ -1985,16 +2038,21 @@ async function confirmCount() {
   countSession.lastLocation = locVal;
   // Convert legacy single-counts to lots on first use
   if (!item.lots) {
-    item.lots = [{ counts: { ...item.counts }, expiryDate: item.expiryDate || '', location: locVal }];
+    item.lots = [{ counts: { ...item.counts }, expiryDate: item.expiryDate || '', location: locVal, lotId: uuid() }];
   }
   // Find existing lot with same expiry date + location, or create new lot
   const lotIdx = item.lots.findIndex(l => l.expiryDate === expVal && (l.location||'') === locVal);
+  let changedLot = null;
   if (lotIdx >= 0) {
     item.lots[lotIdx].counts[u] = (item.lots[lotIdx].counts[u] || 0) + qty;
+    ensureLotId(item.lots[lotIdx]);
+    changedLot = item.lots[lotIdx];
   } else {
     const newCounts = { EA:0, PA:0, BP:0, CS:0 };
     newCounts[u] = qty;
-    item.lots.push({ counts: newCounts, expiryDate: expVal, location: locVal });
+    const newLot = { counts: newCounts, expiryDate: expVal, location: locVal, lotId: uuid() };
+    item.lots.push(newLot);
+    changedLot = newLot;
   }
   // Keep legacy counts in sync (sum of lots) for any code that still reads it
   item.counts = lotsToTotalCounts(item.lots);
@@ -2004,6 +2062,7 @@ async function confirmCount() {
   if (topLoc) topLoc.value = locVal;
   countSession.location = locVal;
   saveCountSession();
+  if (changedLot) pushLot(item, changedLot);
   pendingScan = null;
   document.getElementById('countPending').innerHTML = '';
   renderCountList();
@@ -2235,6 +2294,7 @@ function _liveSync(it, k) {
 function liveBump(encKey, unit, delta) {
   const k = decodeURIComponent(encKey);
   const it = countSession.items[k]; if (!it) return;
+  const prevIds = new Set((it.lots||[]).map(l => l.lotId).filter(Boolean));
   if (it.lots && it.lots.length > 1) {
     if (delta < 0) {
       // Deduct from lots without expiry first, then from lots with expiry
@@ -2252,7 +2312,10 @@ function liveBump(encKey, unit, delta) {
       }
       // Remove empty lots (all units = 0)
       it.lots = it.lots.filter(l => ['CS','BP','PA','EA'].some(u => l.counts[u] > 0));
-      if (!it.lots.length) { delete countSession.items[k]; liveOpen.delete(k); saveCountSession(); renderCountList(); return; }
+      if (!it.lots.length) {
+        prevIds.forEach(id => deleteLotRemote(id));
+        delete countSession.items[k]; liveOpen.delete(k); saveCountSession(); renderCountList(); return;
+      }
     } else {
       // Add to last lot (most recently added)
       it.lots[it.lots.length-1].counts[unit] = (it.lots[it.lots.length-1].counts[unit]||0) + delta;
@@ -2260,23 +2323,42 @@ function liveBump(encKey, unit, delta) {
     it.counts = lotsToTotalCounts(it.lots);
   } else {
     it.counts[unit] = Math.max(0, (it.counts[unit]||0) + delta);
-    _liveSync(it, k);
+    if (!_liveSync(it, k)) {
+      prevIds.forEach(id => deleteLotRemote(id));
+      saveCountSession(); renderCountList(); return;
+    }
   }
   saveCountSession();
+  syncItemLotsToRemote(it, prevIds);
   renderCountList();
 }
 function liveSet(encKey, unit, val) {
   const k = decodeURIComponent(encKey);
   const it = countSession.items[k]; if (!it) return;
+  const prevIds = new Set((it.lots||[]).map(l => l.lotId).filter(Boolean));
   if (it.lots && it.lots.length > 1) {
     it.lots[0].counts[unit] = Math.max(0, parseInt(val)||0);
     it.counts = lotsToTotalCounts(it.lots);
   } else {
     it.counts[unit] = Math.max(0, parseInt(val)||0);
-    _liveSync(it, k);
+    if (!_liveSync(it, k)) {
+      prevIds.forEach(id => deleteLotRemote(id));
+      saveCountSession(); renderCountList(); return;
+    }
   }
   saveCountSession();
+  syncItemLotsToRemote(it, prevIds);
   renderCountList();
+}
+function syncItemLotsToRemote(it, prevIds){
+  if (!it || !it.lots) return;
+  const currentIds = new Set();
+  it.lots.forEach(lot => {
+    ensureLotId(lot);
+    currentIds.add(lot.lotId);
+    pushLot(it, lot);
+  });
+  prevIds.forEach(id => { if (!currentIds.has(id)) deleteLotRemote(id); });
 }
 
 // diff for one counted item vs system
@@ -2301,6 +2383,7 @@ function removeCountItem(encKey) {
   const key = decodeURIComponent(encKey);
   if (!countSession.items[key]) return;
   if (!confirm(`ลบ "${countSession.items[key].name}" ออกจากการนับ?`)) return;
+  deleteAllLotsOf(countSession.items[key]);
   delete countSession.items[key];
   saveCountSession();
   renderCountList();
@@ -2408,7 +2491,8 @@ function saveEditItem() {
   if (!it) return closeEditItem();
   const ib = ibInfo(productByKey[it.key], countSession && countSession.warehouse);
   const lots = itemLots(it);
-  // Read back values from DOM into lots array
+  const prevIds = new Set(lots.map(l => l.lotId).filter(Boolean));
+  // Read back values from DOM into lots array (carry lotId by index)
   const newLots = lots.map((l, li) => {
     const counts = {};
     ['CS','BP','PA','EA'].forEach(u => {
@@ -2417,6 +2501,7 @@ function saveEditItem() {
     const expEl = document.getElementById(`lot_${li}_exp`);
     const locEl = document.getElementById(`lot_${li}_loc`);
     return {
+      lotId:      l.lotId || uuid(),
       counts,
       expiryDate: expEl ? (expEl.value||'') : (l.expiryDate||''),
       location:   locEl ? String(locEl.value||'').trim() : (l.location||'')
@@ -2433,13 +2518,17 @@ function saveEditItem() {
   }
   // Remove empty lots (all counts = 0)
   const validLots = newLots.filter(l => ['CS','BP','PA','EA'].some(u => l.counts[u] > 0));
-  if (!validLots.length) { delete countSession.items[editKey]; closeEditItem(); saveCountSession(); renderCountList(); return; }
+  if (!validLots.length) {
+    prevIds.forEach(id => deleteLotRemote(id));
+    delete countSession.items[editKey]; closeEditItem(); saveCountSession(); renderCountList(); return;
+  }
   it.lots = validLots;
   it.counts = lotsToTotalCounts(validLots);
   it.expiryDate = validLots[0].expiryDate || '';
   if (!countSession.items[editKey]) countSession.items[editKey] = it;
   else Object.assign(countSession.items[editKey], it);
   saveCountSession();
+  syncItemLotsToRemote(it, prevIds);
   closeEditItem();
   renderCountList();
 }
@@ -2460,32 +2549,70 @@ function buildSummaryRows() {
   }).sort((a,b) => Math.abs(b.diff) - Math.abs(a.diff));
 }
 
-function renderSummary() {
+// ── SHEET-FIRST SUMMARY (live aggregate across the whole team) ──
+const sumOpen = new Set();
+function toggleSumRow(k){ k = decodeURIComponent(k); if (sumOpen.has(k)) sumOpen.delete(k); else sumOpen.add(k); renderSummary(); }
+async function renderSummary() {
   const body = document.getElementById('summaryBody');
   const actions = document.getElementById('summaryActions');
-  if (!countSession || !Object.keys(countSession.items).length) {
-    body.innerHTML = `<div class="txt-center txt-muted" style="padding:32px 16px">ยังไม่มีรายการนับ — ไปที่แท็บ 📦 นับ เพื่อเริ่มนับสินค้า</div>`;
-    actions.style.display = 'none';
+  const wh = countSession && countSession.warehouse;
+  if (!wh) {
+    body.innerHTML = `<div class="txt-center txt-muted" style="padding:32px 16px">เลือกคลังก่อนดูสรุปผล</div>`;
+    actions.style.display = 'none'; return;
+  }
+  // Loading skeleton (preserves last render until fetch resolves)
+  if (!body.dataset.loaded) {
+    body.innerHTML = `<div class="txt-center txt-muted" style="padding:32px 16px">กำลังดึงข้อมูลจากชีท...</div>`;
+  }
+  let lots = [];
+  try {
+    const r = await fetch(`${COUNT_SAVE_URL}?action=liveLots&warehouse=${encodeURIComponent(wh)}`, { cache:'no-store' });
+    const j = await r.json();
+    lots = Array.isArray(j.lots) ? j.lots : [];
+  } catch {
+    body.innerHTML = `<div class="txt-center" style="padding:32px 16px;color:var(--danger)">ดึงข้อมูลจากชีทไม่สำเร็จ — เช็คเน็ตแล้วลองใหม่</div>`;
     return;
   }
+  body.dataset.loaded = '1';
+  // Group by product key — aggregate team total + per-counter breakdown
+  const groups = new Map();
+  lots.forEach(lot => {
+    const k = lot.key || ''; if (!k) return;
+    if (!groups.has(k)) groups.set(k, {
+      key: k, name: lot.productName || lot.name || '', factors: lot.factors || {EA:1,PA:1,BP:1,CS:1},
+      total: { EA:0, PA:0, BP:0, CS:0 }, byPerson: new Map(), lots: []
+    });
+    const g = groups.get(k);
+    ['EA','PA','BP','CS'].forEach(u => g.total[u] = (g.total[u]||0) + (lot.counts[u]||0));
+    if (lot.factors) g.factors = lot.factors;
+    const pkey = (lot.empId || lot.userKey || lot.name || '—') + '|' + (lot.name || '');
+    if (!g.byPerson.has(pkey)) g.byPerson.set(pkey, { name: lot.name || lot.empId || '—', counts: { EA:0, PA:0, BP:0, CS:0 } });
+    const bp = g.byPerson.get(pkey);
+    ['EA','PA','BP','CS'].forEach(u => bp.counts[u] += (lot.counts[u]||0));
+    g.lots.push(lot);
+  });
+  // Build summary rows with diff vs system stock
+  const rows = [];
+  groups.forEach(g => {
+    const counted = ['EA','PA','BP','CS'].reduce((s,u) => s + (g.total[u]||0) * (g.factors[u]||1), 0);
+    const prod = productByKey[g.key];
+    const sys = prod ? systemPiecesFor({ key: g.key, factors: g.factors }) : { pieces: 0, raw: '-' };
+    const diff = counted - sys.pieces;
+    rows.push({
+      key: g.key, name: g.name, counted, system: sys.pieces, diff, factorCS: g.factors.CS||1,
+      systemRaw: sys.raw, status: diff===0?'ok':(diff<0?'short':'over'),
+      byPerson: [...g.byPerson.values()], lots: g.lots, factors: g.factors
+    });
+  });
+  rows.sort((a,b) => Math.abs(b.diff) - Math.abs(a.diff));
+  if (!rows.length) {
+    body.innerHTML = `<div class="txt-center txt-muted" style="padding:32px 16px">ยังไม่มีรายการนับในคลัง ${wh} — ไปที่แท็บ 📦 นับ เพื่อเริ่มนับสินค้า</div>`;
+    actions.style.display = 'none'; return;
+  }
   actions.style.display = 'block';
-  const rows = buildSummaryRows();
-  const totCount = rows.reduce((s,r)=>s+r.counted,0);
-  const totSys   = rows.reduce((s,r)=>s+r.system,0);
-  const totDiff  = totCount - totSys;
   const nShort = rows.filter(r=>r.status==='short').length;
   const nOver  = rows.filter(r=>r.status==='over').length;
   const nOk    = rows.filter(r=>r.status==='ok').length;
-  const statusBadge = r => r.status==='ok'
-    ? '<span class="diff-ok">ตรง ✓</span>'
-    : r.status==='short' ? `<span class="diff-short">ขาด</span>` : `<span class="diff-over">เกิน</span>`;
-  const diffCell = r => {
-    const cls = r.status==='ok'?'diff-ok':(r.status==='short'?'diff-short':'diff-over');
-    const s = r.diff>0?'+':'';
-    return `<span class="${cls}">${s}${r.diff.toLocaleString()}</span>`;
-  };
-  // Short summary rows (Direction B): name + nb/system on the left,
-  // left border colored by status, CS.EA pill on the right.
   const sumRowsHtml = rows.map(r => {
     const a = Math.abs(r.diff), f = r.factorCS > 0 ? r.factorCS : 1;
     const cs = Math.floor(a / f), ea = a - cs * f;
@@ -2494,18 +2621,33 @@ function renderSummary() {
     const srp = r.status==='ok'
       ? `<span class="srp srp-ok">✓ ตรง</span>`
       : `<span class="srp srp-${r.status==='short'?'short':'over'}">${word} ${csea}</span>`;
-    return `<div class="sum-row sr-${r.status==='ok'?'ok':(r.status==='short'?'short':'over')}">
+    const isOpen = sumOpen.has(r.key);
+    const breakdown = r.byPerson.length > 1 ? `<span style="font-size:11px;color:var(--muted);margin-left:6px">${r.byPerson.length} คน</span>` : '';
+    const breakdownPanel = isOpen ? `
+      <div style="padding:10px 12px;background:var(--row-alt);border-top:1px dashed var(--border)">
+        <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;margin-bottom:6px">👥 ระบุอย่างชัด</div>
+        ${r.byPerson.map(p => {
+          const bd = ['CS','BP','PA','EA'].filter(u => (p.counts[u]||0) > 0).map(u => `${p.counts[u]} ${u}`).join(' + ') || '0';
+          const pieces = ['EA','PA','BP','CS'].reduce((s,u) => s + (p.counts[u]||0) * (r.factors[u]||1), 0);
+          return `<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:5px 0;border-bottom:1px dashed var(--border)">
+            <span style="font-weight:700;color:var(--navy-mid);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">👤 ${esc(p.name)}</span>
+            <span style="color:var(--text);font-weight:600">${bd}</span>
+            <span style="color:var(--muted);min-width:60px;text-align:right">${pieces.toLocaleString()} ชิ้น</span>
+          </div>`;
+        }).join('')}
+      </div>` : '';
+    return `<div class="sum-row sr-${r.status==='ok'?'ok':(r.status==='short'?'short':'over')}" style="cursor:pointer" onclick="toggleSumRow('${encodeURIComponent(r.key)}')">
       <div class="sr-main">
-        <div class="sr-name">${r.name}</div>
+        <div class="sr-name">${esc(r.name)}${breakdown}</div>
         <div class="sr-sub">นับ <b>${r.counted.toLocaleString()}</b> · ระบบ ${r.system.toLocaleString()} ชิ้น</div>
       </div>
       ${srp}
-    </div>`;
+    </div>${breakdownPanel}`;
   }).join('');
   body.innerHTML = `
-    <div style="font-size:13px;color:var(--muted);margin-bottom:12px">
-      คลัง <b>${countSession.warehouse} · ${WH_NAMES[countSession.warehouse]||''}</b> ·
-      ${rows.length} รายการ · เริ่มนับ ${formatThaiDateTime(countSession.startedAt)}
+    <div style="display:flex;align-items:center;justify-content:space-between;font-size:13px;color:var(--muted);margin-bottom:12px">
+      <div>คลัง <b>${countSession.warehouse} · ${WH_NAMES[countSession.warehouse]||''}</b> · ${rows.length} รายการ · รวมทุกคน</div>
+      <button class="btn btn-outline btn-sm" onclick="renderSummary()" type="button">↻ รีเฟรช</button>
     </div>
     <div class="stat3">
       <div class="stat stat-ok"><div class="st-v">${nOk}</div><div class="st-l">ตรง</div></div>
@@ -2637,6 +2779,14 @@ async function saveCountToSheet() {
     clearRemoteDraft(wh);
     // Belt + suspenders: try clearing again after 2s in case the first POST raced the save.
     setTimeout(() => clearRemoteDraft(wh), 2000);
+    // Clear live lot rows on the sheet for this user + warehouse
+    try {
+      await fetch(COUNT_SAVE_URL, {
+        method:'POST', mode:'no-cors',
+        headers:{ 'Content-Type':'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action:'clearLive', userKey: userKey(), warehouse: wh })
+      });
+    } catch {}
     const now = new Date().toISOString();
     countSession = { warehouse: wh, startedAt: now, items: {}, lastEdit: now };
     try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}

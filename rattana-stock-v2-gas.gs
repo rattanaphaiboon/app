@@ -61,6 +61,7 @@ function doGet(e) {
   try {
     if (action === 'draft')      return json(getDraft(p));
     if (action === 'allDrafts')  return json(getAllDrafts(p));
+    if (action === 'liveLots')   return json(getLiveLots(p));
     if (action === 'getHistory' || action === 'history') return json(getHistory(p));
     return json({ ok: false, error: 'unknown action: ' + action });
   } catch (err) {
@@ -75,6 +76,9 @@ function doPost(e) {
   try {
     if (action === 'saveDraft')  return json(saveDraft(body));
     if (action === 'clearDraft') return json(clearDraft(body));
+    if (action === 'upsertLot')  return json(upsertLot(body));
+    if (action === 'deleteLot')  return json(deleteLot(body));
+    if (action === 'clearLive')  return json(clearLiveForUser(body));
     if (action === 'saveCount' || (!action && Array.isArray(body.rows))) {
       return json(saveCount(body));
     }
@@ -256,6 +260,134 @@ function saveCount(b) {
   } catch (_) {}
 
   return { ok: true, written: out.length };
+}
+
+// ═══════════════════════════════════════════════════════
+//  LIVE LOT SHEET  (1 lot = 1 row, fully addressable by lotId)
+//  Columns:
+//   0  lotId         (uuid)
+//   1  เวลาบันทึก    (Thai-formatted)
+//   2  warehouse
+//   3  location
+//   4  empId
+//   5  ผู้นับ
+//   6  userKey        (machine — for filtering own rows)
+//   7  รหัสสินค้า
+//   8  ชื่อสินค้า
+//   9  factors_json   (so the app can compute pieces correctly)
+//  10  CS
+//  11  BP
+//  12  PA
+//  13  EA
+//  14  วันหมดอายุ    (DD/MM/YYYY BE)
+//  15  expiryISO      (YYYY-MM-DD — for parsing)
+//  16  sessionStart   (Thai-formatted)
+// ═══════════════════════════════════════════════════════
+const LIVE_HEADERS = [
+  'lotId','เวลาบันทึก','warehouse','location','empId','ผู้นับ','userKey',
+  'รหัสสินค้า','ชื่อสินค้า','factors_json',
+  'CS','BP','PA','EA','วันหมดอายุ','expiryISO','sessionStart'
+];
+
+function liveSheet() { return getOrCreate('Live', LIVE_HEADERS); }
+function findLiveRow(sh, lotId) {
+  if (!lotId) return -1;
+  const data = sh.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(lotId)) return i + 1; // 1-based row index
+  }
+  return -1;
+}
+
+// Upsert one lot by lotId. Body must include: lotId, warehouse, userKey,
+// key (product key), name, counts{EA,PA,BP,CS}, factors{...}, expiryDate,
+// location, empId, counterName (optional), sessionStart (optional).
+function upsertLot(b) {
+  if (!b.lotId) return { ok:false, error:'lotId required' };
+  const sh = liveSheet();
+  const c = b.counts || {EA:0,PA:0,BP:0,CS:0};
+  const f = b.factors || {EA:1,PA:1,BP:1,CS:1};
+  const expIso = b.expiryDate || '';
+  const expThai = expIso ? thaiDateTime(expIso + 'T00:00:00+07:00').split(' ')[0] : '';
+  const rowVals = [
+    b.lotId,
+    thaiDateTime(new Date()),
+    b.warehouse || '',
+    b.location || '',
+    b.empId || '',
+    b.counterName || b.name || '',
+    (b.userKey || '').toString().toLowerCase(),
+    b.key || '',
+    b.productName || b.name || '',
+    JSON.stringify(f),
+    c.CS || 0,
+    c.BP || 0,
+    c.PA || 0,
+    c.EA || 0,
+    expThai,
+    expIso,
+    b.sessionStart ? thaiDateTime(b.sessionStart) : ''
+  ];
+  const row = findLiveRow(sh, b.lotId);
+  if (row > 0) {
+    sh.getRange(row, 1, 1, rowVals.length).setValues([rowVals]);
+  } else {
+    sh.appendRow(rowVals);
+  }
+  return { ok: true };
+}
+
+function deleteLot(b) {
+  if (!b.lotId) return { ok:false, error:'lotId required' };
+  const sh = liveSheet();
+  const row = findLiveRow(sh, b.lotId);
+  if (row > 0) sh.deleteRow(row);
+  return { ok: true };
+}
+
+// Delete every live row for a given userKey + warehouse (called after final save).
+function clearLiveForUser(b) {
+  const sh = liveSheet();
+  const data = sh.getDataRange().getValues();
+  const uk = String(b.userKey || '').toLowerCase();
+  const wh = String(b.warehouse || '');
+  // Iterate bottom-up to keep row indices stable while deleting.
+  for (let i = data.length - 1; i >= 1; i--) {
+    if (String(data[i][6] || '').toLowerCase() === uk && String(data[i][2] || '') === wh) {
+      sh.deleteRow(i + 1);
+    }
+  }
+  return { ok: true };
+}
+
+// Return all live lots for a warehouse (everyone — team summary fans out from here)
+function getLiveLots(p) {
+  const sh = liveSheet();
+  const data = sh.getDataRange().getValues();
+  if (data.length < 2) return { ok: true, lots: [] };
+  const wh = String(p.warehouse || '');
+  const out = [];
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (wh && String(r[2] || '') !== wh) continue;
+    let factors = {EA:1,PA:1,BP:1,CS:1};
+    try { factors = JSON.parse(r[9] || '{}'); } catch (_) {}
+    out.push({
+      lotId:        r[0],
+      ts:           tsMs(r[1]),
+      warehouse:    r[2],
+      location:     r[3] || '',
+      empId:        r[4] || '',
+      name:         r[5] || '',
+      userKey:      r[6] || '',
+      key:          r[7] || '',
+      productName:  r[8] || '',
+      factors:      factors,
+      counts: { CS: r[10]||0, BP: r[11]||0, PA: r[12]||0, EA: r[13]||0 },
+      expiryDate:   r[15] || ''
+    });
+  }
+  return { ok: true, lots: out };
 }
 
 // ── GET HISTORY ───────────────────────────────────────
