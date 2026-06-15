@@ -1,11 +1,60 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.2
+//  Rattana Stock Count — GAS Backend  v1.3
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
+//
+//  v1.3 — All written timestamps are Thai-formatted text:
+//         "DD/MM/YYYY HH.mm.ss" with พ.ศ. year, Asia/Bangkok TZ.
+//         getDraft / getAllDrafts / getHistory still return epoch ms
+//         to the app (so app code is unchanged).
 // ═══════════════════════════════════════════════════════
 
 const SS_ID = '18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4';
+const TZ    = 'Asia/Bangkok';
 
+// ── TIME HELPERS ──────────────────────────────────────
+function thaiDateTime(input) {
+  let d = input;
+  if (!d) d = new Date();
+  else if (!(d instanceof Date)) d = new Date(d);
+  if (!d || isNaN(d)) return '';
+  const s = Utilities.formatDate(d, TZ, 'dd/MM/yyyy HH.mm.ss');
+  const parts = s.split(' ');
+  const dmy = parts[0].split('/');
+  const beYear = parseInt(dmy[2], 10) + 543;
+  return dmy[0] + '/' + dmy[1] + '/' + beYear + ' ' + parts[1];
+}
+
+// Accept Date object, ISO string, epoch ms, or Thai-formatted text.
+// Returns Date or null.
+function parseAnyTs(v) {
+  if (v == null || v === '') return null;
+  if (v instanceof Date) return isNaN(v) ? null : v;
+  if (typeof v === 'number') {
+    const d = new Date(v);
+    return isNaN(d) ? null : d;
+  }
+  const s = String(v).trim();
+  // Thai format: DD/MM/YYYY HH.MM.SS (year is BE)
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2})[.:](\d{2})(?:[.:](\d{2}))?$/);
+  if (m) {
+    const day   = m[1].length === 1 ? '0' + m[1] : m[1];
+    const month = m[2].length === 1 ? '0' + m[2] : m[2];
+    const year  = parseInt(m[3], 10) - 543;
+    const hh    = m[4].length === 1 ? '0' + m[4] : m[4];
+    const mm    = m[5];
+    const ss    = m[6] || '00';
+    // Build ISO with +07:00 — works in every modern engine
+    const d = new Date(year + '-' + month + '-' + day + 'T' + hh + ':' + mm + ':' + ss + '+07:00');
+    return isNaN(d) ? null : d;
+  }
+  // ISO or other parseable form
+  const d = new Date(s);
+  return isNaN(d) ? null : d;
+}
+function tsMs(v) { const d = parseAnyTs(v); return d ? d.getTime() : 0; }
+
+// ── ROUTING ───────────────────────────────────────────
 function doGet(e) {
   const p = e.parameter || {};
   const action = p.action || '';
@@ -26,7 +75,6 @@ function doPost(e) {
   try {
     if (action === 'saveDraft')  return json(saveDraft(body));
     if (action === 'clearDraft') return json(clearDraft(body));
-    // If no action but payload has `rows`, treat it as saveCount (legacy format)
     if (action === 'saveCount' || (!action && Array.isArray(body.rows))) {
       return json(saveCount(body));
     }
@@ -54,19 +102,21 @@ function getOrCreate(name, headers) {
 }
 
 // ── SAVE DRAFT ────────────────────────────────────────
-// Columns: userKey | warehouse | sessionStart | updatedAt | itemsJson | name
+// Columns: userKey | warehouse | sessionStart | updatedAt | itemsJson | name | location
+// Both sessionStart and updatedAt are written as Thai-formatted text.
 function saveDraft(b) {
   const sh = getOrCreate('Drafts',
     ['userKey','warehouse','sessionStart','updatedAt','itemsJson','name','location']);
   const data = sh.getDataRange().getValues();
-  const now = new Date().toISOString();
+  const nowThai = thaiDateTime(new Date());
+  const startThai = b.sessionStart ? thaiDateTime(b.sessionStart) : '';
   const key = (b.userKey || '') + '|' + (b.warehouse || '');
 
   for (let i = 1; i < data.length; i++) {
     if ((data[i][0] + '|' + data[i][1]) === key) {
       sh.getRange(i + 1, 3, 1, 5).setValues([[
-        b.sessionStart || data[i][2],
-        now,
+        startThai || data[i][2],
+        nowThai,
         JSON.stringify(b.items || {}),
         b.name || data[i][5] || '',
         b.location != null ? b.location : (data[i][6] || '')
@@ -77,8 +127,8 @@ function saveDraft(b) {
   sh.appendRow([
     b.userKey || '',
     b.warehouse || '',
-    b.sessionStart || '',
-    now,
+    startThai,
+    nowThai,
     JSON.stringify(b.items || {}),
     b.name || '',
     b.location || ''
@@ -101,6 +151,7 @@ function clearDraft(b) {
 }
 
 // ── GET ONE DRAFT (own) ───────────────────────────────
+// updatedAt is returned as epoch ms so the app can compare timestamps.
 function getDraft(p) {
   const sh = getOrCreate('Drafts',
     ['userKey','warehouse','sessionStart','updatedAt','itemsJson','name','location']);
@@ -115,8 +166,8 @@ function getDraft(p) {
         draft: {
           userKey:      data[i][0],
           warehouse:    data[i][1],
-          sessionStart: data[i][2],
-          updatedAt:    data[i][3],
+          sessionStart: tsMs(data[i][2]),
+          updatedAt:    tsMs(data[i][3]),
           items:        items,
           name:         data[i][5] || '',
           location:     data[i][6] || ''
@@ -142,7 +193,7 @@ function getAllDrafts(p) {
     drafts.push({
       userKey:   data[i][0],
       name:      data[i][5] || '',
-      updatedAt: data[i][3] ? new Date(data[i][3]).getTime() : 0,
+      updatedAt: tsMs(data[i][3]),
       items:     items
     });
   }
@@ -158,32 +209,35 @@ function saveCount(b) {
     'สต็อกระบบ(CS.EA)','สต็อกระบบ(ชิ้น)',
     'ต่าง(ชิ้น)','ต่าง(CS.EA)','สถานะ','วันหมดอายุ'
   ]);
-  const now = new Date().toISOString();
+  const now = thaiDateTime(new Date());
+  const startThai = thaiDateTime(b.sessionStart || b.startedAt || new Date());
   const rows = Array.isArray(b.rows) ? b.rows : [];
   if (!rows.length) return { ok: false, error: 'no rows' };
 
-  const out = rows.map(r => [
-    now,
-    b.warehouse || '',
-    r.location || b.location || '',
-    b.empId || '',
-    b.counterName || b.name || '',
-    b.email || '',
-    b.sessionStart || b.startedAt || '',
-    r.key || '',
-    r.name || '',
-    r.cs || 0,
-    r.bp || 0,
-    r.pa || 0,
-    r.ea || 0,
-    r.countedPieces || 0,
-    r.systemRaw || '',
-    r.systemPieces || 0,
-    r.diffPieces || 0,
-    r.diffCSEA || '',
-    r.status || '',
-    r.expiryDate || ''
-  ]);
+  const out = rows.map(function(r){
+    return [
+      now,
+      b.warehouse || '',
+      r.location || b.location || '',
+      b.empId || '',
+      b.counterName || b.name || '',
+      b.email || '',
+      startThai,
+      r.key || '',
+      r.name || '',
+      r.cs || 0,
+      r.bp || 0,
+      r.pa || 0,
+      r.ea || 0,
+      r.countedPieces || 0,
+      r.systemRaw || '',
+      r.systemPieces || 0,
+      r.diffPieces || 0,
+      r.diffCSEA || '',
+      r.status || '',
+      r.expiryDate ? thaiDateTime(r.expiryDate + 'T00:00:00+07:00').split(' ')[0] : ''
+    ];
+  });
   sh.getRange(sh.getLastRow() + 1, 1, out.length, out[0].length).setValues(out);
 
   // Clear this user's draft after a final save
@@ -212,31 +266,42 @@ function getHistory(p) {
   if (data.length < 2) return { ok: true, sessions: [] };
 
   // Group by (savedAt, warehouse, empId)
-  const groups = new Map();
+  const groups = {};
+  const order = [];
   for (let i = 1; i < data.length; i++) {
     const r = data[i];
-    const savedAt = r[0] ? new Date(r[0]).getTime() : 0;
-    const wh = r[1], empId = r[2];
+    // Header: savedAt(0) | warehouse(1) | location(2) | empId(3) | name(4) | email(5)
+    //       | sessionStart(6) | รหัสสินค้า(7) | ชื่อสินค้า(8)
+    //       | CS(9) | BP(10) | PA(11) | EA(12) | นับได้(13)
+    //       | สต็อกระบบ CS.EA(14) | สต็อกระบบ ชิ้น(15)
+    //       | ต่าง ชิ้น(16) | ต่าง CS.EA(17) | สถานะ(18) | วันหมดอายุ(19)
+    const savedAt = tsMs(r[0]);
+    const wh = r[1], empId = r[3];
     const k = savedAt + '|' + wh + '|' + empId;
-    if (!groups.has(k)) {
-      groups.set(k, {
-        savedAt, wh, empId,
-        name: r[3] || '', email: r[4] || '',
-        startedAt: r[5] ? new Date(r[5]).getTime() : 0,
+    if (!groups[k]) {
+      groups[k] = {
+        savedAt: savedAt,
+        wh: wh,
+        location: r[2] || '',
+        empId: empId,
+        name: r[4] || '',
+        email: r[5] || '',
+        startedAt: tsMs(r[6]),
         rows: []
-      });
+      };
+      order.push(k);
     }
-    groups.get(k).rows.push({
-      key: r[6], name: r[7],
-      cs: r[8], bp: r[9], pa: r[10], ea: r[11],
-      countedPieces: r[12],
-      systemRaw: r[13], systemPieces: r[14],
-      diffPieces: r[15], diffCSEA: r[16], status: r[17],
-      expiryDate: r[18]
+    groups[k].rows.push({
+      key: r[7], name: r[8],
+      cs: r[9], bp: r[10], pa: r[11], ea: r[12],
+      countedPieces: r[13],
+      systemRaw: r[14], systemPieces: r[15],
+      diffPieces: r[16], diffCSEA: r[17], status: r[18],
+      expiryDate: r[19]
     });
   }
-  const sessions = [...groups.values()]
-    .sort((a, b) => b.savedAt - a.savedAt)
+  const sessions = order.map(function(k){ return groups[k]; })
+    .sort(function(a,b){ return b.savedAt - a.savedAt; })
     .slice(0, 100);
-  return { ok: true, sessions };
+  return { ok: true, sessions: sessions };
 }
