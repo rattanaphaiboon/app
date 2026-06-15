@@ -52,7 +52,7 @@ function thaiDateTime(input) {
   if (!d) d = new Date();
   else if (!(d instanceof Date)) d = new Date(d);
   if (!d || isNaN(d)) return '';
-  const s = Utilities.formatDate(d, TZ, 'dd/MM/yyyy HH.mm.ss');
+  const s = Utilities.formatDate(d, TZ, 'dd/MM/yyyy HH:mm');
   const parts = s.split(' ');
   const dmy = parts[0].split('/');
   const beYear = parseInt(dmy[2], 10) + 543;
