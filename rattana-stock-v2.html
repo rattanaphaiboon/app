@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.4</title>
+  <title>Rattana Stock Count v3.5</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -657,7 +657,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.4';
+const APP_VERSION = 'v3.5';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // Apps Script Web App URL for saving count results (paste after deploying — see setup note)
@@ -2534,7 +2534,57 @@ function buildSummaryRows() {
 }
 
 // ── SHEET-FIRST SUMMARY (live aggregate across the whole team) ──
-const sumOpen = new Set();
+let sumLastRows = [];   // cache of last computed rows so the detail modal can find a key
+function openSumDetail(encKey){
+  const key = decodeURIComponent(encKey);
+  const r = sumLastRows.find(x => x.key === key);
+  if (!r) return;
+  // Group lots by counter
+  const byPersonLots = new Map();
+  (r.lots || []).forEach(lot => {
+    const pk = (lot.empId || lot.userKey || lot.name || '—') + '|' + (lot.name || '');
+    if (!byPersonLots.has(pk)) byPersonLots.set(pk, { name: lot.name || lot.empId || '—', lots: [] });
+    byPersonLots.get(pk).lots.push(lot);
+  });
+  const a = Math.abs(r.diff), f = r.factorCS > 0 ? r.factorCS : 1;
+  const csN = Math.floor(a / f), eaN = a - csN * f;
+  const csea = csN > 0 ? `${csN} CS ${eaN} EA` : `${eaN} EA`;
+  const statusWord = r.status==='ok' ? 'ตรง ✓' : (r.status==='short' ? `ขาด ${csea}` : `เกิน ${csea}`);
+  const statusCls  = r.status==='ok' ? 'srp-ok' : (r.status==='short' ? 'srp-short' : 'srp-over');
+  document.getElementById('sumDetailTitle').textContent = r.name;
+  document.getElementById('sumDetailBody').innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--row-alt);border:1px solid var(--border);border-radius:10px;margin-bottom:12px">
+      <div style="font-size:13px;color:var(--muted)">
+        นับ <b style="color:var(--text);font-size:15px">${r.counted.toLocaleString()}</b> ·
+        ระบบ <b style="color:var(--text);font-size:15px">${r.system.toLocaleString()}</b> ชิ้น
+      </div>
+      <span class="srp ${statusCls}" style="font-size:13px;padding:6px 14px">${statusWord}</span>
+    </div>
+    <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;margin-bottom:8px">
+      👥 ใครเช็คอะไรบ้าง · ${byPersonLots.size} คน · ${(r.lots||[]).length} lot
+    </div>
+    ${[...byPersonLots.values()].map(p => {
+      const pTotal = p.lots.reduce((s,l) => s + ['EA','PA','BP','CS'].reduce((s2,u) => s2 + (l.counts[u]||0) * (r.factors[u]||1), 0), 0);
+      return `<div style="margin-bottom:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:rgba(47,109,240,.06);border-bottom:1px solid var(--border);font-size:13px;font-weight:700;color:var(--navy-mid)">
+          <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">👤 ${esc(p.name)}</span>
+          <span style="color:var(--muted);font-weight:600;font-size:11px">${pTotal.toLocaleString()} ชิ้น</span>
+        </div>
+        <div>
+          ${p.lots.map(lot => {
+            const bd = ['CS','BP','PA','EA'].filter(u => (lot.counts[u]||0) > 0).map(u => `${lot.counts[u]} ${u}`).join(' + ') || '0';
+            return `<div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;padding:8px 12px;font-size:12.5px;border-bottom:1px dashed var(--border)">
+              <span style="color:var(--text);font-weight:700;min-width:80px">${bd}</span>
+              ${lot.location ? `<span style="color:#2f6df0;font-weight:600">📍 ${esc(lot.location)}</span>` : '<span style="color:var(--muted);font-style:italic">ไม่ระบุที่ตั้ง</span>'}
+              ${lot.expiryDate ? `<span style="color:var(--muted)">📅 ${formatThaiDate(lot.expiryDate)}</span>` : ''}
+            </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+    }).join('')}`;
+  document.getElementById('sumDetailModal').classList.add('open');
+}
+function closeSumDetail(){ document.getElementById('sumDetailModal').classList.remove('open'); }
 let summaryPollTimer = null;
 function startSummaryPoll(){
   stopSummaryPoll();
@@ -2545,7 +2595,6 @@ function startSummaryPoll(){
 function stopSummaryPoll(){
   if (summaryPollTimer) { clearInterval(summaryPollTimer); summaryPollTimer = null; }
 }
-function toggleSumRow(k){ k = decodeURIComponent(k); if (sumOpen.has(k)) sumOpen.delete(k); else sumOpen.add(k); renderSummary(); }
 function initSummaryMode(){
   const sel = document.getElementById('summaryWh');
   if (!sel) return;
@@ -2565,7 +2614,6 @@ function onSummaryWhChange(){
   const countSel = document.getElementById('countWh');
   if (countSel && countSel.value !== wh) countSel.value = wh;
   document.getElementById('summaryBody').dataset.loaded = '';
-  sumOpen.clear();
   renderSummary();
 }
 async function renderSummary() {
@@ -2632,6 +2680,7 @@ async function renderSummary() {
   const nShort = rows.filter(r=>r.status==='short').length;
   const nOver  = rows.filter(r=>r.status==='over').length;
   const nOk    = rows.filter(r=>r.status==='ok').length;
+  sumLastRows = rows;   // cache for the detail modal
   const sumRowsHtml = rows.map(r => {
     const a = Math.abs(r.diff), f = r.factorCS > 0 ? r.factorCS : 1;
     const cs = Math.floor(a / f), ea = a - cs * f;
@@ -2640,52 +2689,14 @@ async function renderSummary() {
     const srp = r.status==='ok'
       ? `<span class="srp srp-ok">✓ ตรง</span>`
       : `<span class="srp srp-${r.status==='short'?'short':'over'}">${word} ${csea}</span>`;
-    const isOpen = sumOpen.has(r.key);
     const breakdown = r.byPerson.length > 1 ? `<span style="font-size:11px;color:var(--muted);margin-left:6px">${r.byPerson.length} คน</span>` : '';
-    // Group lots by (person → lot rows)
-    const byPersonLots = new Map();
-    (r.lots || []).forEach(lot => {
-      const pk = (lot.empId || lot.userKey || lot.name || '—') + '|' + (lot.name || '');
-      if (!byPersonLots.has(pk)) byPersonLots.set(pk, { name: lot.name || lot.empId || '—', lots: [] });
-      byPersonLots.get(pk).lots.push(lot);
-    });
-    // Status pill markup for the expanded block (mirrors the row pill)
-    const statusWord = r.status==='ok' ? 'ตรง ✓' : (r.status==='short' ? `ขาด ${csea}` : `เกิน ${csea}`);
-    const statusCls  = r.status==='ok' ? 'srp-ok' : (r.status==='short' ? 'srp-short' : 'srp-over');
-    const breakdownPanel = isOpen ? `
-      <div style="padding:12px;background:var(--row-alt);border-top:1px dashed var(--border)">
-        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin-bottom:10px">
-          <div style="font-size:12px;color:var(--muted)">รวม <b style="color:var(--text)">${r.counted.toLocaleString()}</b> · ระบบ <b style="color:var(--text)">${r.system.toLocaleString()}</b> ชิ้น</div>
-          <span class="srp ${statusCls}">${statusWord}</span>
-        </div>
-        <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;margin-bottom:8px">👥 ใครเช็คอะไรบ้าง</div>
-        ${[...byPersonLots.values()].map(p => {
-          const pTotal = p.lots.reduce((s,l) => s + ['EA','PA','BP','CS'].reduce((s2,u) => s2 + (l.counts[u]||0) * (r.factors[u]||1), 0), 0);
-          return `<div style="margin-bottom:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:10px;overflow:hidden">
-            <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(47,109,240,.06);border-bottom:1px solid var(--border);font-size:13px;font-weight:700;color:var(--navy-mid)">
-              <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">👤 ${esc(p.name)}</span>
-              <span style="color:var(--muted);font-weight:600;font-size:11px">${pTotal.toLocaleString()} ชิ้น</span>
-            </div>
-            <div style="padding:4px 0">
-              ${p.lots.map(lot => {
-                const bd = ['CS','BP','PA','EA'].filter(u => (lot.counts[u]||0) > 0).map(u => `${lot.counts[u]} ${u}`).join(' + ') || '0';
-                return `<div style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;padding:6px 10px;font-size:12px;border-bottom:1px dashed var(--border)">
-                  <span style="color:var(--text);font-weight:700;min-width:80px">${bd}</span>
-                  ${lot.location ? `<span style="color:#2f6df0;font-weight:600">📍 ${esc(lot.location)}</span>` : '<span style="color:var(--muted);font-style:italic">ไม่ระบุที่ตั้ง</span>'}
-                  ${lot.expiryDate ? `<span style="color:var(--muted)">📅 ${formatThaiDate(lot.expiryDate)}</span>` : ''}
-                </div>`;
-              }).join('')}
-            </div>
-          </div>`;
-        }).join('')}
-      </div>` : '';
-    return `<div class="sum-row sr-${r.status==='ok'?'ok':(r.status==='short'?'short':'over')}" style="cursor:pointer" onclick="toggleSumRow('${encodeURIComponent(r.key)}')">
+    return `<div class="sum-row sr-${r.status==='ok'?'ok':(r.status==='short'?'short':'over')}" style="cursor:pointer" onclick="openSumDetail('${encodeURIComponent(r.key)}')" title="คลิกดูรายละเอียดที่เช็คทั้งหมด">
       <div class="sr-main">
-        <div class="sr-name">${esc(r.name)}${breakdown}</div>
+        <div class="sr-name">${esc(r.name)}${breakdown} <span style="color:var(--muted);font-size:13px;font-weight:500">›</span></div>
         <div class="sr-sub">นับ <b>${r.counted.toLocaleString()}</b> · ระบบ ${r.system.toLocaleString()} ชิ้น</div>
       </div>
       ${srp}
-    </div>${breakdownPanel}`;
+    </div>`;
   }).join('');
   body.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:13px;color:var(--muted);margin-bottom:12px">
@@ -3267,6 +3278,23 @@ document.addEventListener('DOMContentLoaded', ()=>{
     </div>
   </div>
 </div>
+
+<!-- ── Summary detail modal ── -->
+<div id="sumDetailModal" onclick="if(event.target===this)closeSumDetail()" style="display:none;position:fixed;inset:0;background:rgba(13,27,62,.55);z-index:9400;align-items:center;justify-content:center;padding:14px;backdrop-filter:blur(3px);overflow-y:auto">
+  <div style="background:var(--card-bg);border-radius:18px;max-width:520px;width:100%;border-top:4px solid var(--gold);box-shadow:var(--shadow-lg);overflow:hidden;animation:slideUp .22s ease;display:flex;flex-direction:column;max-height:90vh">
+    <div style="display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid var(--border);background:linear-gradient(to right,rgba(201,168,76,.07),transparent)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.3px;text-transform:uppercase;margin-bottom:2px">📊 รายละเอียดการเช็ค</div>
+        <div id="sumDetailTitle" style="font-size:15px;font-weight:800;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">—</div>
+      </div>
+      <button type="button" onclick="closeSumDetail()" style="background:rgba(13,27,62,.06);border:none;color:var(--muted);width:34px;height:34px;border-radius:50%;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0">✕</button>
+    </div>
+    <div id="sumDetailBody" style="padding:14px 16px;overflow-y:auto;flex:1">—</div>
+  </div>
+</div>
+<style>
+#sumDetailModal.open{display:flex !important}
+</style>
 
 <!-- ── FAB camera button ── -->
 <button id="fab" onclick="toggleCountCamera()" title="สแกน">📷</button>
