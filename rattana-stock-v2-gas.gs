@@ -328,7 +328,8 @@ function saveCount(b) {
 const LIVE_HEADERS = [
   'lotId','เวลาบันทึก','warehouse','location','empId','ผู้นับ','userKey',
   'รหัสสินค้า','ชื่อสินค้า','factors_json',
-  'CS','BP','PA','EA','วันหมดอายุ','expiryISO','sessionStart'
+  'CS','BP','PA','EA','วันหมดอายุ','expiryISO','sessionStart',
+  'นับได้(ชิ้น)','สต็อกระบบ(CS.EA)','สต็อกระบบ(ชิ้น)','ต่าง(ชิ้น)','ต่าง(CS.EA)'
 ];
 
 // Per-warehouse sheets: Live_W1, Live_W2, Live_W3, Live_W4, Live_C4.
@@ -370,6 +371,19 @@ function upsertLot(b) {
   const f = b.factors || {EA:1,PA:1,BP:1,CS:1};
   const expIso = b.expiryDate || '';
   const expThai = expIso ? thaiDateTime(expIso + 'T00:00:00+07:00').split(' ')[0] : '';
+  // Compute pieces / diff vs system stock (app sends systemRaw + systemPieces).
+  const factorCS = f.CS || 1;
+  const countedPieces = ['EA','PA','BP','CS'].reduce((s,u) => s + (c[u]||0) * (f[u]||1), 0);
+  const systemRaw    = b.systemRaw != null ? String(b.systemRaw) : '';
+  const systemPieces = (b.systemPieces != null) ? Number(b.systemPieces) || 0 : 0;
+  const diffPieces   = countedPieces - systemPieces;
+  const diffCSEA = (function() {
+    if (diffPieces === 0) return '0';
+    const sign = diffPieces > 0 ? '+' : '-';
+    const a = Math.abs(diffPieces);
+    const cs = Math.floor(a / factorCS), ea = a - cs * factorCS;
+    return sign + cs + '.' + ea;
+  })();
   const rowVals = [
     b.lotId,
     thaiDateTime(new Date()),
@@ -387,7 +401,12 @@ function upsertLot(b) {
     c.EA || 0,
     expThai,
     expIso,
-    b.sessionStart ? thaiDateTime(b.sessionStart) : ''
+    b.sessionStart ? thaiDateTime(b.sessionStart) : '',
+    countedPieces,
+    systemRaw,
+    systemPieces,
+    diffPieces,
+    diffCSEA
   ];
   const row = findLiveRow(sh, b.lotId);
   if (row > 0) {
