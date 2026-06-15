@@ -21,8 +21,8 @@ const TZ    = 'Asia/Bangkok';
 //  3) Anything not listed here falls back to the default SS_ID.
 // ═════════════════════════════════════════════════════════════
 const WAREHOUSE_SS_ID = {
-  'C4': '',   // ← paste the C4 spreadsheet ID here
-  'W4': ''    // ← paste the W4 spreadsheet ID here
+  'C4': '1rWZ7_vWBTx7hcXucAtWNX3ruA5lVro90P3HkQ6amFMg',
+  'W4': '18RojK-hmI3-sqh6bRh3YVdt4EZ8EGYHgMGRLxrqkqxw'
 };
 
 function ssFor(wh) {
