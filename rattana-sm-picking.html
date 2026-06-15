@@ -441,7 +441,7 @@ body.dark .spin-box{background:var(--card-bg)}
 </nav>
 
 <script>
-const VERSION='5.20';
+const VERSION='5.21';
 const DEFAULT_ORDER_ID='1ZOS3vAPbizWCG_Y7A6rODjIznSMf1_FDSGZ_ZUr_RjQ';
 const DEFAULT_ORDER_GID='1632859410';
 const PDDT_ID='16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
@@ -458,7 +458,7 @@ const PRICE_TIER3='CC03';  // ราคา fallback ตัวที่ 3 ("CS 03
 const C={date:0,branch:1,branchName:2,doc:3,form:4,smGroup:6,smCode:7,smName:8,qty:9,unit:10,barcode:13,name:14,unitCS:15,price:16,total:17,flag:18};
 
 let pddtMap=null;        // barcode -> {catGroup,catType,shortName}
-let pddtNorm=null;       // บาร์โค้ดตัด 0 นำหน้า -> entry (กันยิงบาร์ที่ 0 นำหน้าต่างจาก PDDT)
+let pddtBc=null;         // bcKey(ตัดช่องว่าง/ขีด/0 นำหน้า) -> {info, bc:บาร์โค้ด PDDT เป๊ะ} — ใช้ "หา" ตอนยิง · เก็บ/ส่งออกใช้ bc ตาม PDDT
 let masterByItem=null;   // SMR item code (H) -> [บาร์โค้ดรัตนทุกตัว] (1 itemCode มีได้หลายบาร์/หลายลอต — จาก WMS_barcode_SMR ไฟล์ MASTER_ID gid 0)
 let lastBuild=null;      // {branchList, branchName, inGroups, noRows, totals}
 
@@ -526,14 +526,14 @@ async function loadPddt(force){
   const cG=idx('CAT GROUP'),cT=idx('CAT TYPE'),cS=idx('SHORT NAME'),cN=idx('PRODUCT NAME');
   const pS01=idx('PRICE S01 CS'),pC01=idx('PRICE CC01 CS'),pC03=idx('PRICE CC03 CS'),pS03=idx('PRICE S03 CS');
   const sW4=idx('STOCK W4'),sC4=idx('STOCK C4');
-  const m={},mn={};
+  const m={},mc={};
   for(let i=1;i<rows.length;i++){const r=rows[i];if(!r)continue;
     const info={catGroup:clean(r[cG]),catType:clean(r[cT]),shortName:clean(r[cS]),productName:cN>=0?clean(r[cN]):'',
       pS01:numv(r[pS01]),pC01:numv(r[pC01]),pC03:numv(r[pC03]),pS03:numv(r[pS03]),
       stockW4:numv(r[sW4]),stockC4:numv(r[sC4])};
-    [cEA,cPA,cBP,cCS].forEach(ci=>{if(ci<0)return;const code=clean(r[ci]);if(code&&!m[code]){m[code]=info;const s=code.replace(/^0+/,'');if(s&&!(s in mn))mn[s]=info;}});
+    [cEA,cPA,cBP,cCS].forEach(ci=>{if(ci<0)return;const code=clean(r[ci]);if(code&&!m[code]){m[code]=info;const k=bcKey(code);if(k&&!(k in mc))mc[k]={info,bc:code};}});
   }
-  pddtMap=m;pddtNorm=mn;return m;
+  pddtMap=m;pddtBc=mc;return m;
 }
 
 // ── picker map: CAT GROUP -> คนจัด (ลิงก์ตายตัว gid 0; auto-detect คอลัมน์ค่า ข้ามคอลัมน์ว่าง) ──
@@ -570,8 +570,12 @@ function shortBranch(name){const m=clean(name).match(/\(([^)]+)\)/);return m?m[1
 function csPrice(pd){if(!pd)return 0;const t3=PRICE_TIER3==='S03'?pd.pS03:pd.pC03;for(const v of [pd.pS01,pd.pC01,t3])if(v>0)return v;return 0;}
 // ชื่อรัตนจาก PDDT: SHORT NAME → ถ้าว่าง PRODUCT NAME (ชื่อ/บาร์ต้องเป็นของรัตนเสมอ ไม่ใช้ชื่อ SMR)
 function pddtName(pd){return pd?(clean(pd.shortName)||clean(pd.productName)):'';}
-// หา PDDT จากบาร์โค้ด: ตรงเป๊ะ → ถ้าไม่เจอ ลองตัด 0 นำหน้า (ยิงบาร์จริงอาจมี/ไม่มี 0 ต่างจากในระบบ)
-function pddtLookup(code){if(!code)return null;code=clean(code);return (pddtMap&&pddtMap[code])||(pddtNorm&&pddtNorm[code.replace(/^0+/,'')])||null;}
+// bcKey: คีย์ "หา" เท่านั้น — ตัดช่องว่าง/ขีด/อักขระไม่ใช่เลข-อังกฤษ + 0 นำหน้า · ❌ ห้ามใช้เก็บ/ส่งออก (ใช้บาร์ PDDT เป๊ะ)
+function bcKey(s){return String(s==null?'':s).replace(/[^0-9A-Za-z]/g,'').replace(/^0+/,'');}
+// หา PDDT จากบาร์โค้ด (ทน 0 นำหน้า/ช่องว่าง) → คืน info
+function pddtLookup(code){if(!code)return null;code=clean(code);return (pddtMap&&pddtMap[code])||(pddtBc&&(pddtBc[bcKey(code)]||{}).info)||null;}
+// คืนบาร์โค้ด PDDT "เป๊ะ" (canonical สำหรับ แสดง/เก็บ/export — คง 0+ช่องว่างตาม PDDT)
+function pddtCanon(code){if(!code)return '';code=clean(code);if(pddtMap&&pddtMap[code])return code;const e=pddtBc&&pddtBc[bcKey(code)];return e?e.bc:'';}
 
 async function run(forcePddt){
   const btn=$('btnLoad');btn.disabled=true;
@@ -595,7 +599,7 @@ async function run(forcePddt){
       // บาร์โค้ด: คอลัมน์ N (ไฟล์เก่า) + ทุกบาร์ของ itemCode จาก master (1 itemCode หลายบาร์/หลายลอต)
       // บาร์หลัก = ตัวแรกที่ "เจอใน PDDT" (ยึด PDDT — ชื่อ/ราคา/BK ถูก) · ที่เหลือเป็น alias ยิงบาร์ไหนก็เข้า order line เดียวกัน
       const cand=[];{const oc=clean(r[C.barcode]);if(oc)cand.push(oc);const ml=(masterByItem&&masterByItem[clean(r[C.smCode])])||[];for(const b of ml)if(cand.indexOf(b)<0)cand.push(b);}
-      let barcode='';for(const b of cand){if(pddtLookup(b)){barcode=b;break;}}
+      let barcode='';for(const b of cand){if(pddtLookup(b)){barcode=pddtCanon(b)||b;break;}}   // ยึดบาร์ PDDT เป๊ะ (canonical) เก็บ/ส่งออก
       if(!barcode)barcode=cand[0]||'';
       const flag=clean(r[C.flag]);
       const inSys=barcode!==''&&!/ไม่มี/.test(flag);
@@ -823,7 +827,7 @@ async function exportTransfer(){
 // ── เคลียเริ่มวันใหม่ — ล้าง ออเดอร์(1mUQ เก็บหัว) + ใบจัด/แสกน(SMR) + ใบโอนย้าย + state ในแอป ──
 async function clearAllDay(){
   if(!confirm('เคลียเริ่มวันใหม่? (ล้างทั้งหมด)\n\nจะล้าง:\n• ออเดอร์ (ชีทใบสั่งซื้อ — เก็บหัวตาราง)\n• ใบจัด/แสกน (เช็คสินค้าออก)\n• ใบโอนย้าย\n• รายการค้างในแอป\n\n⚠️ ลบข้อมูลของเมื่อวานทั้งหมด — ยืนยัน?'))return;
-  picked=[];sDirty=false;lastBuild=null;scanMap={};aliasMap={};jobClosed=false;try{localStorage.removeItem('smr_jobclosed');}catch(e){}updateJobUI();
+  picked=[];sDirty=false;lastBuild=null;scanMap={};scanIndex={};jobClosed=false;try{localStorage.removeItem('smr_jobclosed');}catch(e){}updateJobUI();
   try{Object.keys(localStorage).filter(k=>k.indexOf('smr_pick_')===0||k.indexOf('smr_links_')===0).forEach(k=>localStorage.removeItem(k));}catch(e){}
   try{if(typeof renderPicked==='function')renderPicked();}catch(e){}
   try{$('results').style.display='none';}catch(e){}
@@ -844,7 +848,7 @@ const SALESMAN='HSW402', LOCATION='W4', DEBTOR='7000300340', PREFIX='BK08', STAR
 const SMR_HEADER=['วันที่เอกสาร','BK08 เลขที่เอกสาร','รหัสลูกหนี้','ส่วนลดท้ายบิล','รหัสสาขา','รหัสแผนก','รหัสโครงการ','รหัสพนักงานขาย','หมายเหตุ','วันที่ส่งของ','รหัสซื้อขาย','จำนวน','แถม','ราคาต่อหน่วย','ส่วนลดต่อหน่วย','น้ำหนักต่อหน่วย','เลขล็อต','เลขกำกับ','ตำแหน่งเก็บ','วันที่คีย์','ชื่อร้าน','ชื่อสินค้า','ราคาคีย์','Status','ยอดรวม','วันเวลาที่ยิง'];
 const BRANCH_COLORS=['#0EA5E9','#EF4444','#15803D','#F59E0B','#8B5CF6','#EC4899','#14B8A6','#F97316'];
 const TRANSFER_TAB='โอนย้าย', TRANSFER_HEADER=['Barcode','ชื่อ','จำนวน','วันเวลาที่ยิง'];  // tab โอนย้าย ในไฟล์ 1lT3 เดียวกัน
-let scanMap={},aliasMap={},sBL=[],sShort={},scanBranchFull={},sColor={},sOrderDate='',sDoc='',picked=[],curItem=null,sDirty=false,curTransfer=false,transferMode=false,jobClosed=false;
+let scanMap={},scanIndex={},sBL=[],sShort={},scanBranchFull={},sColor={},sOrderDate='',sDoc='',picked=[],curItem=null,sDirty=false,curTransfer=false,transferMode=false,jobClosed=false;
 let html5QrScanner=null,scannerActive=false,lastScanned='',torchOn=false,torchTrack=null,camOpen=false;
 
 function toBE(dateStr){let s=clean(dateStr);const dm=s.match(/^Date\((\d+),(\d+),(\d+)/);if(dm){s=`${String(+dm[3]).padStart(2,'0')}/${String(+dm[2]+1).padStart(2,'0')}/${+dm[1]}`;}const m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);if(!m)return s;let y=+m[3];if(y<2400)y+=543;return `${m[1].padStart(2,'0')}/${m[2].padStart(2,'0')}/${y}`;}
@@ -861,10 +865,11 @@ function initScan(){
   if(!lastBuild)return;
   sBL=lastBuild.branchList.slice();sShort=lastBuild.branchName;
   sColor={};sBL.forEach((b,i)=>sColor[b]=BRANCH_COLORS[i%BRANCH_COLORS.length]);
-  scanMap={};aliasMap={};
+  scanMap={};scanIndex={};
   for(const g of lastBuild.groups)for(const r of g.rows){if(r.inSys&&r.barcode&&!scanMap[r.barcode])scanMap[r.barcode]={barcode:r.barcode,name:r.name,unit:simpleUnit(r.unit),priceCS:r.priceCS||0,per:r.per,total:r.total};}
-  // alias: บาร์ลอต/รุ่นอื่นของ itemCode เดียวกัน (ที่บาร์หลักอยู่ใน PDDT) → ชี้บาร์หลัก · ยิงบาร์ไหนก็เข้า order line เดียว บันทึก/นับใช้บาร์หลักเสมอ
-  for(const g of lastBuild.groups)for(const r of g.rows){if(!r.inSys||!r.barcode||!r.aliases||!pddtLookup(r.barcode))continue;for(const b of r.aliases){if(b&&b!==r.barcode&&!scanMap[b]&&!aliasMap[b])aliasMap[b]=r.barcode;}}
+  // ดัชนี "หา" ตอนยิง: bcKey(บาร์ใดก็ได้ของ order line) -> บาร์หลัก(canonical) ใน scanMap · ไม่แตะค่าที่เก็บ/ส่งออก
+  for(const k in scanMap){const kk=bcKey(k);if(kk&&!(kk in scanIndex))scanIndex[kk]=k;}
+  for(const g of lastBuild.groups)for(const r of g.rows){if(!r.inSys||!r.barcode||!r.aliases||!pddtLookup(r.barcode))continue;for(const b of r.aliases){const kk=bcKey(b);if(kk&&!(kk in scanIndex))scanIndex[kk]=r.barcode;}}
   // matchable = ที่รัตนระบุไม่ได้: ไม่มีบาร์ (noRows) + ในระบบแต่บาร์(จาก master)ไม่อยู่ PDDT (— ไม่ระบุหมวด —) → ยิงบาร์จริงมาจับคู่ได้
   lastBuild.matchable=(lastBuild.noRows||[]).slice();
   for(const g of lastBuild.groups)for(const r of g.rows){if(r.inSys&&r.barcode&&!pddtLookup(r.barcode))lastBuild.matchable.push(r);}
@@ -914,7 +919,7 @@ function onScanFound(code){
   if(jobClosed){setScanStatus('🔒 ปิดงานแล้ว — กด "เปิดงานต่อ" ก่อนถ้าต้องยิงเพิ่ม','err');beep(true);vibrate([200]);toast('🔒 งานปิดแล้ว — กดเปิดงานต่อก่อนยิง','warning');$('manual-bc').value='';return;}
   if(!Object.keys(scanMap).length){toast('ออเดอร์ยังโหลดไม่เสร็จ','warning');return;}
   let item=scanMap[code];
-  if(!item&&aliasMap[code]){item=scanMap[aliasMap[code]];if(item)toast('🔗 บาร์นี้เป็นลอต/บาร์อื่นของ '+(item.name||'')+' — ใช้บาร์หลัก '+item.barcode,'info');}
+  if(!item){const canon=scanIndex&&scanIndex[bcKey(code)];if(canon){item=scanMap[canon];if(item&&canon!==code)toast('🔗 บาร์ '+code+' → '+(item.name||'')+' (บาร์ PDDT '+canon+')','info');}}
   if(!item){
     $('manual-bc').value='';lastScanned='';
     const pd=pddtLookup(code),nm=pddtName(pd);   // เจอใน PDDT ไหม → บอกว่าคือสินค้าอะไรของรัตน
@@ -1234,12 +1239,12 @@ async function exportMap(){
     const refRows=parseCsvRaw(await fetchCsv(gvizUrl(MASTER_ID,{gid:MASTER_GID})));
     hideSpin();
     const refExact=new Set(),refNormMap={},refByItem={};let supplier='';
-    for(let i=1;i<refRows.length;i++){const b=clean(refRows[i][4]),ic=clean(refRows[i][0]);if(b){refExact.add(b);const s=b.replace(/^0+/,'');if(!(s in refNormMap))refNormMap[s]=b;if(ic&&b!==ic&&b.length>=12&&!refByItem[ic])refByItem[ic]=b;if(!supplier)supplier=clean(refRows[i][3]);}}
-    const refMatch=code=>refExact.has(code)?code:(refNormMap[code.replace(/^0+/,'')]||'');  // คืนบาร์ master ที่ตรง หรือ ''
+    for(let i=1;i<refRows.length;i++){const b=clean(refRows[i][4]),ic=clean(refRows[i][0]);if(b){refExact.add(b);const s=bcKey(b);if(s&&!(s in refNormMap))refNormMap[s]=b;if(ic&&b!==ic&&b.length>=12&&!refByItem[ic])refByItem[ic]=b;if(!supplier)supplier=clean(refRows[i][3]);}}
+    const refMatch=code=>refExact.has(code)?code:(refNormMap[bcKey(code)]||'');  // คืนบาร์ master ที่ตรง หรือ '' (ทน 0/ช่องว่าง)
     // สินค้าที่จับคู่โดยยิง (scan-to-link): อ่านชีทเช็คสินค้าออก (หมายเหตุ 'SMR <รหัส>' — เห็นทุกเครื่อง) + ลิงก์ในเครื่องนี้
     showSpin('เช็คสินค้าที่จับคู่ยิงแล้ว...');
     const linkedBySm={};
-    try{loadLinks().forEach(l=>{const pd=pddtMap[l.bc];linkedBySm[l.smCode]={bc:l.bc,name:pddtName(pd),price:pd?(pd.pS01>0?pd.pS01:(pd.pC03>0?pd.pC03:'')):''};});}catch(e){}
+    try{loadLinks().forEach(l=>{const pd=pddtLookup(l.bc);linkedBySm[l.smCode]={bc:l.bc,name:pddtName(pd),price:pd?(pd.pS01>0?pd.pS01:(pd.pC03>0?pd.pC03:'')):''};});}catch(e){}
     try{const sc=parseCsvRaw(await fetchCsv(gvizUrl(DEFAULT_SMR_ID,{gid:DEFAULT_SMR_GID})));
       for(let i=1;i<sc.length;i++){const m=clean(sc[i][8]).match(/^SMR\s+(\S+)/);if(m)linkedBySm[m[1]]={bc:clean(sc[i][10]),name:clean(sc[i][21]),price:clean(sc[i][13])};}
     }catch(e){console.error('map/linked',e);}
