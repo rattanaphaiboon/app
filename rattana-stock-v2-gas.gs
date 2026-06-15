@@ -21,8 +21,9 @@ const TZ    = 'Asia/Bangkok';
 //  3) Anything not listed here falls back to the default SS_ID.
 // ═════════════════════════════════════════════════════════════
 const WAREHOUSE_SS_ID = {
-  'C4': '1rWZ7_vWBTx7hcXucAtWNX3ruA5lVro90P3HkQ6amFMg',
-  'W4': '18RojK-hmI3-sqh6bRh3YVdt4EZ8EGYHgMGRLxrqkqxw'
+  'C4':  '1rWZ7_vWBTx7hcXucAtWNX3ruA5lVro90P3HkQ6amFMg',
+  'W4':  '18RojK-hmI3-sqh6bRh3YVdt4EZ8EGYHgMGRLxrqkqxw',
+  'EW4': '18RojK-hmI3-sqh6bRh3YVdt4EZ8EGYHgMGRLxrqkqxw'  // คลังของเสีย — ใช้ไฟล์เดียวกับ W4
 };
 
 function ssFor(wh) {
