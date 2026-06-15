@@ -289,9 +289,21 @@ const LIVE_HEADERS = [
   'CS','BP','PA','EA','วันหมดอายุ','expiryISO','sessionStart'
 ];
 
-function liveSheet() { return getOrCreate('Live', LIVE_HEADERS); }
+// Per-warehouse sheets: Live_W1, Live_W2, Live_W3, Live_W4, Live_C4.
+function liveSheetName(wh) {
+  return 'Live_' + String(wh || '').toUpperCase();
+}
+function liveSheetFor(wh) {
+  if (!wh) return null;
+  return getOrCreate(liveSheetName(wh), LIVE_HEADERS);
+}
+// Backward-compat: if a row was written to the legacy "Live" sheet before
+// this split, also search it during reads/deletes so nothing gets orphaned.
+function legacyLiveSheet() {
+  return SpreadsheetApp.openById(SS_ID).getSheetByName('Live');
+}
 function findLiveRow(sh, lotId) {
-  if (!lotId) return -1;
+  if (!sh || !lotId) return -1;
   const data = sh.getDataRange().getValues();
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][0]) === String(lotId)) return i + 1; // 1-based row index
@@ -304,7 +316,8 @@ function findLiveRow(sh, lotId) {
 // location, empId, counterName (optional), sessionStart (optional).
 function upsertLot(b) {
   if (!b.lotId) return { ok:false, error:'lotId required' };
-  const sh = liveSheet();
+  if (!b.warehouse) return { ok:false, error:'warehouse required' };
+  const sh = liveSheetFor(b.warehouse);
   const c = b.counts || {EA:0,PA:0,BP:0,CS:0};
   const f = b.factors || {EA:1,PA:1,BP:1,CS:1};
   const expIso = b.expiryDate || '';
@@ -339,54 +352,77 @@ function upsertLot(b) {
 
 function deleteLot(b) {
   if (!b.lotId) return { ok:false, error:'lotId required' };
-  const sh = liveSheet();
-  const row = findLiveRow(sh, b.lotId);
-  if (row > 0) sh.deleteRow(row);
+  // Prefer the warehouse-specific sheet; fall back to scanning every Live_* +
+  // legacy "Live" so we never leave an orphan row behind.
+  const tried = [];
+  if (b.warehouse) tried.push(liveSheetFor(b.warehouse));
+  const ss = SpreadsheetApp.openById(SS_ID);
+  ss.getSheets().forEach(s => {
+    const n = s.getName();
+    if (n === 'Live' || n.indexOf('Live_') === 0) {
+      if (!tried.some(t => t && t.getName() === n)) tried.push(s);
+    }
+  });
+  for (const sh of tried) {
+    const row = findLiveRow(sh, b.lotId);
+    if (row > 0) { sh.deleteRow(row); break; }
+  }
   return { ok: true };
 }
 
 // Delete every live row for a given userKey + warehouse (called after final save).
 function clearLiveForUser(b) {
-  const sh = liveSheet();
-  const data = sh.getDataRange().getValues();
   const uk = String(b.userKey || '').toLowerCase();
   const wh = String(b.warehouse || '');
-  // Iterate bottom-up to keep row indices stable while deleting.
-  for (let i = data.length - 1; i >= 1; i--) {
-    if (String(data[i][6] || '').toLowerCase() === uk && String(data[i][2] || '') === wh) {
-      sh.deleteRow(i + 1);
+  if (!wh) return { ok:false, error:'warehouse required' };
+  const sheetsToScan = [liveSheetFor(wh), legacyLiveSheet()].filter(Boolean);
+  sheetsToScan.forEach(sh => {
+    const data = sh.getDataRange().getValues();
+    for (let i = data.length - 1; i >= 1; i--) {
+      const sameWh = String(data[i][2] || '') === wh;
+      const sameUser = String(data[i][6] || '').toLowerCase() === uk;
+      if (sameUser && (sameWh || sh.getName().indexOf('Live_') === 0)) {
+        sh.deleteRow(i + 1);
+      }
     }
-  }
+  });
   return { ok: true };
 }
 
 // Return all live lots for a warehouse (everyone — team summary fans out from here)
 function getLiveLots(p) {
-  const sh = liveSheet();
-  const data = sh.getDataRange().getValues();
-  if (data.length < 2) return { ok: true, lots: [] };
   const wh = String(p.warehouse || '');
+  if (!wh) return { ok: true, lots: [] };
   const out = [];
-  for (let i = 1; i < data.length; i++) {
-    const r = data[i];
-    if (wh && String(r[2] || '') !== wh) continue;
-    let factors = {EA:1,PA:1,BP:1,CS:1};
-    try { factors = JSON.parse(r[9] || '{}'); } catch (_) {}
-    out.push({
-      lotId:        r[0],
-      ts:           tsMs(r[1]),
-      warehouse:    r[2],
-      location:     r[3] || '',
-      empId:        r[4] || '',
-      name:         r[5] || '',
-      userKey:      r[6] || '',
-      key:          r[7] || '',
-      productName:  r[8] || '',
-      factors:      factors,
-      counts: { CS: r[10]||0, BP: r[11]||0, PA: r[12]||0, EA: r[13]||0 },
-      expiryDate:   r[15] || ''
-    });
-  }
+  const seen = {}; // dedupe by lotId if a row exists in both the per-wh sheet and the legacy Live sheet
+  const sheets = [liveSheetFor(wh), legacyLiveSheet()].filter(Boolean);
+  sheets.forEach(sh => {
+    const data = sh.getDataRange().getValues();
+    if (data.length < 2) return;
+    for (let i = 1; i < data.length; i++) {
+      const r = data[i];
+      if (String(r[2] || '') !== wh) continue;       // legacy sheet stores all warehouses
+      const id = String(r[0] || '');
+      if (id && seen[id]) continue;
+      if (id) seen[id] = 1;
+      let factors = {EA:1,PA:1,BP:1,CS:1};
+      try { factors = JSON.parse(r[9] || '{}'); } catch (_) {}
+      out.push({
+        lotId:        r[0],
+        ts:           tsMs(r[1]),
+        warehouse:    r[2],
+        location:     r[3] || '',
+        empId:        r[4] || '',
+        name:         r[5] || '',
+        userKey:      r[6] || '',
+        key:          r[7] || '',
+        productName:  r[8] || '',
+        factors:      factors,
+        counts: { CS: r[10]||0, BP: r[11]||0, PA: r[12]||0, EA: r[13]||0 },
+        expiryDate:   r[15] || ''
+      });
+    }
+  });
   return { ok: true, lots: out };
 }
 
