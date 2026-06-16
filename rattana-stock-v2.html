@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.22</title>
+  <title>Rattana Stock Count v3.23</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -747,7 +747,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.22';
+const APP_VERSION = 'v3.23';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // Apps Script Web App URL for saving count results (paste after deploying — see setup note)
@@ -988,7 +988,7 @@ function startDraftPoll() {
   stopDraftPoll();
   draftPollTimer = setInterval(() => {
     if (currentMode === 'count' && countSession && !document.hidden && navigator.onLine !== false) {
-      maybeAdoptRemoteDraft(countSession.warehouse);
+      /* legacy: maybeAdoptRemoteDraft(countSession.warehouse); */
       fetchTeamDrafts(countSession.warehouse);
     }
   }, 5000);   // every 5 seconds — feels real-time without hammering the Sheet
@@ -1045,7 +1045,7 @@ function stopDraftPoll() { if (draftPollTimer) { clearInterval(draftPollTimer); 
 function refreshEverything() {
   if (!currentUser) return;
   if (currentMode === 'history') { historyLoaded = false; loadHistory(true); }
-  if (currentMode === 'count')   { fetchAndUpdate(); if (countSession) maybeAdoptRemoteDraft(countSession.warehouse); }
+  if (currentMode === 'count')   { fetchAndUpdate(); if (countSession) reloadCountFromLive(); }
   if (currentMode === 'summary') { fetchAndUpdate(); renderSummary(); }
 }
 
@@ -1221,7 +1221,7 @@ function onCounterChange() {
       loadCountSession(countSession.warehouse);
       renderCountList();
       renderPending();
-      maybeAdoptRemoteDraft(countSession.warehouse);
+      /* legacy: maybeAdoptRemoteDraft(countSession.warehouse); */
     }
   } catch (e) { console.warn('reload draft after counter pick failed', e); }
   showToast(`ผู้นับ: ${nickname || name}`, 'success');
@@ -1877,7 +1877,7 @@ function initCountMode() {
   if (!countSession) loadCountSession(sel.value || visibleWh[0]);
   syncLocationFromSession();
   renderCountList();
-  maybeAdoptRemoteDraft(countSession.warehouse);
+  /* legacy: maybeAdoptRemoteDraft(countSession.warehouse); */
   fetchTeamDrafts(countSession.warehouse);
 }
 
@@ -1890,7 +1890,9 @@ function onCountWhChange() {
   teamData = { wh:'', byKey:{} };
   syncLocationFromSession();
   renderCountList();
-  maybeAdoptRemoteDraft(wh);
+  // Authoritative reload: pull THIS user's lots straight out of the Live sheet
+  // for the new warehouse so stale local state from another warehouse can't leak in.
+  reloadCountFromLive();
   fetchTeamDrafts(wh);
 }
 function onLocationChange(){
@@ -2014,35 +2016,58 @@ async function clearRemoteDraft(wh) {
 // Manual override — bypass the 30s guard, fetch the remote draft and adopt it
 // even if local has items. Used when the user knows another device has the
 // authoritative state.
-async function forcePullDraft() {
+// Rebuild the local count session from the Live sheet for THIS warehouse +
+// THIS user. This is the authoritative reload — the Drafts JSON blob is
+// ignored because Live rows are the source of truth.
+async function reloadCountFromLive() {
   if (!COUNT_SAVE_URL || !currentUser || !countSession) {
     showToast('ยังไม่พร้อม — รอเข้าระบบให้เรียบร้อย', 'warning');
     return;
   }
   const wh = countSession.warehouse;
-  showSpinner('กำลังดึงรายการค้าง...');
+  showSpinner('กำลังโหลดจากชีท...');
   try {
-    delete recentlySavedAt[wh];
-    const remote = await fetchRemoteDraft(wh);
-    console.log('forcePullDraft remote =', remote);
-    if (!remote || !remote.items || !Object.keys(remote.items).length) {
-      showToast('ไม่มีรายการค้างไว้ในระบบ', 'info');
-      return;
-    }
-    if (Object.keys(countSession.items || {}).length &&
-        !confirm(`พบ ${Object.keys(remote.items).length} รายการในระบบ — แทนที่รายการในเครื่องตอนนี้?`)) return;
-    countSession = { warehouse: wh, startedAt: remote.sessionStart || new Date().toISOString(),
-                     items: remote.items, lastEdit: remote.updatedAt, syncedAt: remote.updatedAt };
+    const r = await fetch(`${COUNT_SAVE_URL}?action=liveLots&warehouse=${encodeURIComponent(wh)}`, { cache:'no-store' });
+    const j = await r.json();
+    const allLots = Array.isArray(j.lots) ? j.lots : [];
+    const myTag = String(userKey() || '').toLowerCase();
+    const myLots = allLots.filter(lot => String(lot.userKey || '').toLowerCase() === myTag);
+    const items = {};
+    myLots.forEach(lot => {
+      const k = lot.key; if (!k) return;
+      if (!items[k]) {
+        items[k] = {
+          key: k,
+          name: lot.productName || lot.name || '',
+          factors: lot.factors || { EA:1, PA:1, BP:1, CS:1 },
+          counts: { EA:0, PA:0, BP:0, CS:0 },
+          lots: []
+        };
+      }
+      items[k].lots.push({
+        lotId:      lot.lotId,
+        counts:     { EA: lot.counts.EA||0, PA: lot.counts.PA||0, BP: lot.counts.BP||0, CS: lot.counts.CS||0 },
+        expiryDate: lot.expiryDate || '',
+        location:   lot.location || ''
+      });
+    });
+    Object.values(items).forEach(it => { it.counts = lotsToTotalCounts(it.lots); });
+    countSession = { warehouse: wh, startedAt: countSession.startedAt || new Date().toISOString(),
+                     items, lastEdit: new Date().toISOString() };
     try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
+    syncLocationFromSession();
     renderCountList();
-    showToast(`โหลด ${Object.keys(remote.items).length} รายการแล้ว ✓`, 'success');
+    const n = Object.keys(items).length;
+    showToast(n ? `โหลด ${n} รายการจากชีทแล้ว ✓` : `ไม่มีรายการของคุณในคลัง ${wh}`, n ? 'success' : 'info');
   } catch (e) {
     showToast('โหลดไม่สำเร็จ: ' + (e.message || e), 'error');
-    console.error('forcePullDraft error', e);
+    console.error('reloadCountFromLive error', e);
   } finally {
     hideSpinner();
   }
 }
+// Backwards-compat alias — the ↻ button still calls forcePullDraft().
+const forcePullDraft = reloadCountFromLive;
 
 // Pull newest draft from Sheet — last-write-wins by updatedAt.
 // Always compares to the LOCAL last-edit timestamp (set on every save / clear),
