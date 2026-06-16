@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.4
+//  Rattana Stock Count — GAS Backend  v1.5  (Drafts sheet retired)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -94,10 +94,11 @@ function doGet(e) {
   const p = e.parameter || {};
   const action = p.action || '';
   try {
-    if (action === 'draft')      return json(getDraft(p));
-    if (action === 'allDrafts')  return json(getAllDrafts(p));
     if (action === 'liveLots')   return json(getLiveLots(p));
     if (action === 'getHistory' || action === 'history') return json(getHistory(p));
+    // Retired Drafts endpoints — answer harmlessly for any cached old client.
+    if (action === 'draft')      return json({ ok: true, draft: null });
+    if (action === 'allDrafts')  return json({ ok: true, drafts: [] });
     return json({ ok: false, error: 'unknown action: ' + action });
   } catch (err) {
     return json({ ok: false, error: err.message });
@@ -109,14 +110,15 @@ function doPost(e) {
   try { body = JSON.parse(e.postData.contents); } catch (_) {}
   const action = body.action || '';
   try {
-    if (action === 'saveDraft')  return json(saveDraft(body));
-    if (action === 'clearDraft') return json(clearDraft(body));
     if (action === 'upsertLot')  return json(upsertLot(body));
     if (action === 'deleteLot')  return json(deleteLot(body));
     if (action === 'clearLive')  return json(clearLiveForUser(body));
     if (action === 'saveCount' || (!action && Array.isArray(body.rows))) {
       return json(saveCount(body));
     }
+    // Retired Drafts endpoints — accept and ignore so old clients don't error
+    // or recreate the Drafts sheet.
+    if (action === 'saveDraft' || action === 'clearDraft') return json({ ok: true });
     return json({ ok: false, error: 'unknown action: ' + action });
   } catch (err) {
     return json({ ok: false, error: err.message });
@@ -147,104 +149,7 @@ function getOrCreate(a, b, c) {
   return sh;
 }
 
-// ── SAVE DRAFT ────────────────────────────────────────
-// Columns: userKey | warehouse | sessionStart | updatedAt | itemsJson | name | location
-// Both sessionStart and updatedAt are written as Thai-formatted text.
-function saveDraft(b) {
-  const sh = getOrCreate(ssFor(b.warehouse), 'Drafts',
-    ['userKey','warehouse','sessionStart','updatedAt','itemsJson','name','location']);
-  const data = sh.getDataRange().getValues();
-  const nowThai = thaiDateTime(new Date());
-  const startThai = b.sessionStart ? thaiDateTime(b.sessionStart) : '';
-  const key = (b.userKey || '') + '|' + (b.warehouse || '');
-
-  for (let i = 1; i < data.length; i++) {
-    if ((data[i][0] + '|' + data[i][1]) === key) {
-      sh.getRange(i + 1, 3, 1, 5).setValues([[
-        startThai || data[i][2],
-        nowThai,
-        JSON.stringify(b.items || {}),
-        b.name || data[i][5] || '',
-        b.location != null ? b.location : (data[i][6] || '')
-      ]]);
-      return { ok: true };
-    }
-  }
-  sh.appendRow([
-    b.userKey || '',
-    b.warehouse || '',
-    startThai,
-    nowThai,
-    JSON.stringify(b.items || {}),
-    b.name || '',
-    b.location || ''
-  ]);
-  return { ok: true };
-}
-
-function clearDraft(b) {
-  const sh = ssFor(b.warehouse).getSheetByName('Drafts');
-  if (!sh) return { ok: true };
-  const data = sh.getDataRange().getValues();
-  const key = (b.userKey || '') + '|' + (b.warehouse || '');
-  for (let i = 1; i < data.length; i++) {
-    if ((data[i][0] + '|' + data[i][1]) === key) {
-      sh.getRange(i + 1, 5).setValue('{}');
-      return { ok: true };
-    }
-  }
-  return { ok: true };
-}
-
-// ── GET ONE DRAFT (own) ───────────────────────────────
-// updatedAt is returned as epoch ms so the app can compare timestamps.
-function getDraft(p) {
-  const sh = getOrCreate(ssFor(p.warehouse), 'Drafts',
-    ['userKey','warehouse','sessionStart','updatedAt','itemsJson','name','location']);
-  const data = sh.getDataRange().getValues();
-  const key = (p.userKey || '') + '|' + (p.warehouse || '');
-  for (let i = 1; i < data.length; i++) {
-    if ((data[i][0] + '|' + data[i][1]) === key) {
-      let items = {};
-      try { items = JSON.parse(data[i][4] || '{}'); } catch (_) {}
-      return {
-        ok: true,
-        draft: {
-          userKey:      data[i][0],
-          warehouse:    data[i][1],
-          sessionStart: tsMs(data[i][2]),
-          updatedAt:    tsMs(data[i][3]),
-          items:        items,
-          name:         data[i][5] || '',
-          location:     data[i][6] || ''
-        }
-      };
-    }
-  }
-  return { ok: true, draft: null };
-}
-
-// ── GET ALL DRAFTS (live team aggregate) ──────────────
-function getAllDrafts(p) {
-  const sh = ssFor(p.warehouse).getSheetByName('Drafts');
-  if (!sh) return { ok: true, drafts: [] };
-  const data = sh.getDataRange().getValues();
-  const wh = String(p.warehouse || '');
-  const drafts = [];
-  for (let i = 1; i < data.length; i++) {
-    if (String(data[i][1] || '') !== wh) continue;
-    let items = {};
-    try { items = JSON.parse(data[i][4] || '{}'); } catch (_) {}
-    if (!Object.keys(items).length) continue;
-    drafts.push({
-      userKey:   data[i][0],
-      name:      data[i][5] || '',
-      updatedAt: tsMs(data[i][3]),
-      items:     items
-    });
-  }
-  return { ok: true, drafts: drafts };
-}
+// ── (Drafts sheet retired — Live_<wh> is the only backend now) ──
 
 // ── SAVE COUNT (final submit — writes flat rows) ──────
 function saveCount(b) {
@@ -286,20 +191,8 @@ function saveCount(b) {
   });
   sh.getRange(sh.getLastRow() + 1, 1, out.length, out[0].length).setValues(out);
 
-  // Clear this user's draft after a final save (in the same warehouse SS)
-  try {
-    const ds = ssFor(b.warehouse).getSheetByName('Drafts');
-    if (ds) {
-      const dd = ds.getDataRange().getValues();
-      const key = (b.userKey || '') + '|' + (b.warehouse || '');
-      for (let i = 1; i < dd.length; i++) {
-        if ((dd[i][0] + '|' + dd[i][1]) === key) {
-          ds.getRange(i + 1, 5).setValue('{}');
-          break;
-        }
-      }
-    }
-  } catch (_) {}
+  // Remove this user's live lot rows after a final save.
+  try { clearLiveForUser({ userKey: b.userKey, warehouse: b.warehouse }); } catch (_) {}
 
   return { ok: true, written: out.length };
 }

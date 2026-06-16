@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.30</title>
+  <title>Rattana Stock Count v3.31</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -747,7 +747,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.30';
+const APP_VERSION = 'v3.31';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // Apps Script Web App URL for saving count results (paste after deploying — see setup note)
@@ -1002,39 +1002,34 @@ function startDraftPoll() {
 }
 
 // ── TEAM AGGREGATE — live sum of other counters in same warehouse ──
-let teamData = { wh:'', byKey:{} };   // byKey[productKey] = { team:{EA,PA,BP,CS}, by:[{name,counts}] }
+// Source of truth: the Live_<wh> sheet (one row per lot). We fetch every lot,
+// drop the current user's own rows, and aggregate the rest per product.
+let teamData = { wh:'', byKey:{} };   // byKey[productKey] = { team:{EA,PA,BP,CS}, factors, by:[], lots:[] }
 async function fetchTeamDrafts(wh){
   if (!COUNT_SAVE_URL || !wh) return;
   try {
-    const url = `${COUNT_SAVE_URL}?action=allDrafts&warehouse=${encodeURIComponent(wh)}`;
+    const url = `${COUNT_SAVE_URL}?action=liveLots&warehouse=${encodeURIComponent(wh)}`;
     const r = await fetch(url, { cache:'no-store' });
     const j = await r.json();
-    if (!j.ok || !Array.isArray(j.drafts)) return;
-    const myTag = userKey();
+    if (!j.ok || !Array.isArray(j.lots)) return;
+    const myTag = String(userKey() || '').toLowerCase();
     const byKey = {};
-    j.drafts.forEach(d => {
-      if (String(d.userKey||'').toLowerCase() === String(myTag||'').toLowerCase()) return;  // skip own draft
-      const name = d.name || d.userKey || '—';
-      Object.entries(d.items || {}).forEach(([k, it]) => {
-        const factors = it.factors || {EA:1,PA:1,BP:1,CS:1};
-        const counts  = it.lots ? lotsToTotalCounts(it.lots) : (it.counts || {EA:0,PA:0,BP:0,CS:0});
-        const lots = Array.isArray(it.lots) ? it.lots : [];
-        const itemLoc = it.location || '';
-        if (!byKey[k]) byKey[k] = { team:{EA:0,PA:0,BP:0,CS:0}, factors, by:[], lots:[] };
-        ['EA','PA','BP','CS'].forEach(u => byKey[k].team[u] += (counts[u]||0));
-        byKey[k].by.push({ name, counts, location: itemLoc });
-        // collect teammate lots (read-only display) — show lot's own location only
-        lots.forEach(lot => {
-          byKey[k].lots.push({
-            name,
-            location: lot.location || '',
-            expiryDate: lot.expiryDate || '',
-            counts: lot.counts || {EA:0,PA:0,BP:0,CS:0}
-          });
-        });
-        // adopt factors if missing locally
-        if (factors) byKey[k].factors = factors;
+    j.lots.forEach(lot => {
+      if (String(lot.userKey||'').toLowerCase() === myTag) return;   // skip own lots
+      const k = lot.key; if (!k) return;
+      const name = lot.name || lot.empId || '—';
+      const factors = lot.factors || {EA:1,PA:1,BP:1,CS:1};
+      const counts  = { EA: lot.counts.EA||0, PA: lot.counts.PA||0, BP: lot.counts.BP||0, CS: lot.counts.CS||0 };
+      if (!byKey[k]) byKey[k] = { team:{EA:0,PA:0,BP:0,CS:0}, factors, by:[], lots:[] };
+      ['EA','PA','BP','CS'].forEach(u => byKey[k].team[u] += counts[u]);
+      byKey[k].by.push({ name, counts, location: lot.location || '' });
+      byKey[k].lots.push({
+        name,
+        location: lot.location || '',
+        expiryDate: lot.expiryDate || '',
+        counts
       });
+      if (factors) byKey[k].factors = factors;
     });
     const changed = JSON.stringify(teamData.byKey) !== JSON.stringify(byKey) || teamData.wh !== wh;
     teamData = { wh, byKey };
@@ -1951,7 +1946,7 @@ function saveCountSession() {
     countSession.lastEdit = new Date().toISOString();
     try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
     updateSavedBadge();
-    queueDraftSync();
+    // No Drafts blob anymore — per-lot upsertLot() is the authoritative write.
   }
 }
 function updateSavedBadge() {
@@ -1970,56 +1965,13 @@ const userKey = () => {
                    || (currentUser && (currentUser.empId || currentUser.email)) || '').toLowerCase();
   return base;
 };
+// Drafts sheet has been retired — these are kept as no-ops so any remaining
+// caller is harmless. The Live_<wh> sheet (per-lot rows) is the only backend.
 let draftSyncTimer = null;
-function queueDraftSync() {
-  if (!COUNT_SAVE_URL || !currentUser || !countSession) return;
-  clearTimeout(draftSyncTimer);
-  draftSyncTimer = setTimeout(syncDraftNow, 400); // debounce 0.4s — feels instant
-}
-async function syncDraftNow() {
-  if (!COUNT_SAVE_URL || !currentUser || !countSession) return;
-  try {
-    await fetch(COUNT_SAVE_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{ 'Content-Type':'text/plain;charset=utf-8' },
-      body: JSON.stringify({
-        action:'saveDraft',
-        userKey: userKey(),
-        email: currentUser.email,
-        empId: counterDisplayEmpId(),
-        warehouse: countSession.warehouse,
-        sessionStart: countSession.startedAt,
-        location: countSession.location || '',
-        items: countSession.items,
-        name: counterDisplayName(),
-      }),
-    });
-    // Mark this local snapshot as mirrored on the Sheet
-    if (countSession) {
-      countSession.syncedAt = new Date().toISOString();
-      try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
-    }
-  } catch {}
-}
-async function fetchRemoteDraft(wh) {
-  if (!COUNT_SAVE_URL || !currentUser) return null;
-  try {
-    const url = `${COUNT_SAVE_URL}?action=draft&userKey=${encodeURIComponent(userKey())}&warehouse=${encodeURIComponent(wh)}`;
-    const res = await fetch(url, { cache:'no-store' });
-    const json = await res.json();
-    return json && json.ok && json.draft ? json.draft : null;
-  } catch { return null; }
-}
-async function clearRemoteDraft(wh) {
-  if (!COUNT_SAVE_URL || !currentUser) return;
-  try {
-    await fetch(COUNT_SAVE_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{ 'Content-Type':'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action:'clearDraft', userKey: userKey(), warehouse: wh }),
-    });
-  } catch {}
-}
+function queueDraftSync() {}
+async function syncDraftNow() {}
+async function fetchRemoteDraft(wh) { return null; }
+async function clearRemoteDraft(wh) {}
 // Manual override — bypass the 30s guard, fetch the remote draft and adopt it
 // even if local has items. Used when the user knows another device has the
 // authoritative state.
