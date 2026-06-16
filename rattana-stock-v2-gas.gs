@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.5  (Drafts sheet retired)
+//  Rattana Stock Count — GAS Backend  v1.6  (Drafts retired + LockService)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -105,16 +105,34 @@ function doGet(e) {
   }
 }
 
+// All write operations go through a script-wide lock so two users editing
+// at the same time can't interleave a read-modify-write on the sheet
+// (which would otherwise duplicate or lose rows). Reads (doGet) are NOT
+// locked — they can run concurrently and only ever read.
+function withLock(fn) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);   // wait up to 20s for our turn
+  } catch (e) {
+    return { ok: false, error: 'busy — ระบบกำลังถูกใช้งานหนัก ลองใหม่อีกครั้ง' };
+  }
+  try {
+    return fn();
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
+  }
+}
+
 function doPost(e) {
   let body = {};
   try { body = JSON.parse(e.postData.contents); } catch (_) {}
   const action = body.action || '';
   try {
-    if (action === 'upsertLot')  return json(upsertLot(body));
-    if (action === 'deleteLot')  return json(deleteLot(body));
-    if (action === 'clearLive')  return json(clearLiveForUser(body));
+    if (action === 'upsertLot')  return json(withLock(() => upsertLot(body)));
+    if (action === 'deleteLot')  return json(withLock(() => deleteLot(body)));
+    if (action === 'clearLive')  return json(withLock(() => clearLiveForUser(body)));
     if (action === 'saveCount' || (!action && Array.isArray(body.rows))) {
-      return json(saveCount(body));
+      return json(withLock(() => saveCount(body)));
     }
     // Retired Drafts endpoints — accept and ignore so old clients don't error
     // or recreate the Drafts sheet.
