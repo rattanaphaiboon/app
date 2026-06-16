@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.6  (Drafts retired + LockService)
+//  Rattana Stock Count — GAS Backend  v1.7  (key column forced to TEXT)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -320,11 +320,12 @@ function upsertLot(b) {
     diffCSEA
   ];
   const row = findLiveRow(sh, b.lotId);
-  if (row > 0) {
-    sh.getRange(row, 1, 1, rowVals.length).setValues([rowVals]);
-  } else {
-    sh.appendRow(rowVals);
-  }
+  const target = row > 0 ? row : sh.getLastRow() + 1;
+  // Force the รหัสสินค้า column (col 8) to TEXT BEFORE writing, otherwise
+  // Google Sheets converts an all-digit key like "00500100008" to the number
+  // 500100008 and drops the leading zeros.
+  sh.getRange(target, 8).setNumberFormat('@');
+  sh.getRange(target, 1, 1, rowVals.length).setValues([rowVals]);
   return { ok: true };
 }
 
