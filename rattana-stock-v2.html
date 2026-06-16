@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.42</title>
+  <title>Rattana Stock Count v3.43</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -707,9 +707,11 @@
     <div class="card mt-8">
       <div class="card-head">
         <h3>🔀 เทียบสต็อก C4 ↔ W4</h3>
-        <div style="display:flex;gap:6px">
-          <button class="btn btn-gold btn-sm" onclick="openTransferExportDialog()" type="button">📤 โอนย้าย</button>
-          <button class="btn btn-outline btn-sm" onclick="renderCompare()" type="button">↻ รีเฟรช</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-gold btn-sm" onclick="openExportDialog('move')" type="button">🔄 โอนย้าย</button>
+          <button class="btn btn-sm" style="background:#e8f7ee;color:#1e8449;border:1px solid #bfe8cf" onclick="openExportDialog('in')" type="button">➕ ปรับเข้า</button>
+          <button class="btn btn-sm" style="background:#fbf1da;color:#a87800;border:1px solid #ecd9a8" onclick="openExportDialog('out')" type="button">➖ ปรับออก</button>
+          <button class="btn btn-outline btn-sm" onclick="renderCompare()" type="button">↻</button>
         </div>
       </div>
       <div class="card-body" id="compareBody">
@@ -765,7 +767,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.42';
+const APP_VERSION = 'v3.43';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 // Live-sheet poll interval. Raised from 5s → 15s so ~30 concurrent users
 // don't exhaust the Apps Script execution quota.
@@ -2900,91 +2902,113 @@ function nextDocNo(s){
   return m[1] + n + m[3];
 }
 
+// Per-kind export config — matches each B-Plus "BplusData" import template.
+const EXPORT_CFG = {
+  move: { title:'📤 Export โอนย้าย', lsKey:'rattana_doc_move', defNo:'DMI46906/00051', label:'โอนย้าย', fileTag:'โอนย้าย' },
+  in:   { title:'📥 Export ปรับเข้า', lsKey:'rattana_doc_in',   defNo:'IPI16906/00000', label:'ปรับเข้า', fileTag:'ปรับเข้า' },
+  out:  { title:'📤 Export ปรับออก', lsKey:'rattana_doc_out',  defNo:'DRI16906/00000', label:'ปรับออก', fileTag:'ปรับออก' },
+};
+let exportKind = 'move';
+
+// Decompose a piece amount into CS / EA barcode lines for one product.
+function adjUnitLines(prod, pieces, fcs){
+  fcs = fcs > 0 ? fcs : 1;
+  const cs = Math.floor(pieces / fcs), ea = pieces - cs * fcs;
+  const lines = [];
+  if (cs > 0) lines.push({ code: prod ? String(prod['CODE CS'] || '').trim() : '', qty: cs });
+  if (ea > 0) lines.push({ code: prod ? String(prod['CODE EA'] || '').trim() : '', qty: ea });
+  return lines;
+}
+
 // Step 1: ask for the current document number, then export.
-function openTransferExportDialog(){
+function openExportDialog(kind){
+  exportKind = kind;
+  const cfg = EXPORT_CFG[kind];
   if (!cmpLastRows.length) { showToast('ยังไม่มีข้อมูลเทียบ — รอโหลดสักครู่', 'warning'); return; }
-  // Are there any transfers at all?
-  const hasMove = cmpLastRows.some(r => reconcileActions(r).some(a => a.k === 'move'));
-  if (!hasMove) { showToast('ไม่มีรายการที่ต้องโอนย้าย', 'info'); return; }
-  // Field holds the CURRENT (last existing) doc number; export produces +1.
-  const lastUsed = localStorage.getItem('rattana_transferDocNo') || 'DMI46906/00051';
+  const has = cmpLastRows.some(r => reconcileActions(r).some(a => a.k === kind));
+  if (!has) { showToast(`ไม่มีรายการที่ต้อง${cfg.label}`, 'info'); return; }
+  document.getElementById('docNoTitle').textContent = cfg.title;
   const inp = document.getElementById('docNoInput');
-  if (inp) inp.value = lastUsed;
+  if (inp) inp.value = localStorage.getItem(cfg.lsKey) || cfg.defNo;
   document.getElementById('docNoModal').style.display = 'flex';
   setTimeout(() => { if (inp) { inp.focus(); inp.select(); } }, 50);
 }
+// Back-compat alias
+function openTransferExportDialog(){ openExportDialog('move'); }
 function closeDocNoModal(){ document.getElementById('docNoModal').style.display = 'none'; }
 
-// Export the transfer (โอนย้าย) actions to an Excel file matching the
-// B-Plus "BplusData" import template. One row per (product, unit) moved.
-// Each transfer DIRECTION (C4→W4, W4→C4) is its own document number,
-// running on from the number the user entered.
-function exportTransfersExcel() {
+// Build + download the Excel for the currently-selected exportKind.
+function runExport() {
   if (typeof XLSX === 'undefined') { showToast('โหลด Excel library ไม่ได้', 'error'); return; }
+  const cfg = EXPORT_CFG[exportKind];
   const startDoc = String(document.getElementById('docNoInput')?.value || '').trim();
   if (!startDoc) { showToast('กรุณาใส่เลขที่เอกสาร', 'warning'); return; }
 
-  const DOC_DATE = formatThaiDate(new Date());   // วันที่เอกสาร (พ.ศ.)
-  const DEPT = 'SP01';                            // รหัสแผนก
-  const BRANCH = 0, PROJECT = 0, SHOWPRICE = 0, UNITPRICE = 0;
+  const DOC_DATE = formatThaiDate(new Date());
 
-  // Collect transfers grouped by direction so each direction = 1 document.
-  const byDir = {};   // "C4>W4" → [{code, qty, from, to}]
+  // Group action lines by their document-grouping key:
+  //   move → direction "from>to" · in/out → warehouse code
+  const groups = {};
   cmpLastRows.forEach(r => {
     const prod = productByKey[r.key];
-    reconcileActions(r).filter(a => a.k === 'move').forEach(a => {
-      const fcs = a.fcs > 0 ? a.fcs : 1;
-      const cs = Math.floor(a.pieces / fcs);
-      const ea = a.pieces - cs * fcs;
-      const dir = a.from + '>' + a.to;
-      if (!byDir[dir]) byDir[dir] = [];
-      if (cs > 0) byDir[dir].push({ code: prod ? String(prod['CODE CS'] || '').trim() : '', qty: cs, from: a.from, to: a.to, key: r.key });
-      if (ea > 0) byDir[dir].push({ code: prod ? String(prod['CODE EA'] || '').trim() : '', qty: ea, from: a.from, to: a.to, key: r.key });
-    });
-  });
-
-  const dirs = Object.keys(byDir);
-  if (!dirs.length) { showToast('ไม่มีรายการที่ต้องโอนย้าย', 'info'); return; }
-
-  const out = [];
-  let docNo = startDoc;   // = the current/last existing number; increment before use
-  dirs.forEach((dir) => {
-    docNo = nextDocNo(docNo);   // first document = entered number + 1
-    const [from, to] = dir.split('>');
-    const note = `โอนย้ายจาก ${from} ไป ${to}`;
-    byDir[dir].forEach(ln => {
-      out.push({
-        'วันที่เอกสาร':       DOC_DATE,
-        'เลขที่เอกสาร':       docNo,
-        'รหัสสาขา':          BRANCH,
-        'รหัสแผนก':          DEPT,
-        'รหัสโครงการ':        PROJECT,
-        'ราคาที่แสดง':        SHOWPRICE,
-        'หมายเหตุ':          note,
-        'รหัสซื้อขาย':        ln.code || ln.key,
-        'จำนวน':             ln.qty,
-        'ราคาต่อหน่วย':       UNITPRICE,
-        'น้ำหนักต่อหน่วย':    '',
-        'เลขล็อต':           '',
-        'เลขกำกับ':          '',
-        'ตำแหน่งเก็บ':        from,
-        'ย้ายไปตำแหน่งเก็บ':  to,
+    reconcileActions(r).filter(a => a.k === exportKind).forEach(a => {
+      const gk = exportKind === 'move' ? (a.from + '>' + a.to) : a.wh;
+      if (!groups[gk]) groups[gk] = [];
+      adjUnitLines(prod, a.pieces, a.fcs).forEach(ln => {
+        groups[gk].push({ code: ln.code || r.key, qty: ln.qty, from: a.from, to: a.to, wh: a.wh, exp: '' });
       });
     });
   });
+  const gkeys = Object.keys(groups);
+  if (!gkeys.length) { showToast(`ไม่มีรายการที่ต้อง${cfg.label}`, 'info'); return; }
 
-  // Remember the LAST document number used so next time pre-fills the next one.
-  try { localStorage.setItem('rattana_transferDocNo', docNo); } catch {}
+  // Column builders per kind ────────────────────────────
+  const out = [];
+  let docNo = startDoc;
+  gkeys.forEach(gk => {
+    docNo = nextDocNo(docNo);   // current number + 1, then +1 per next document
+    groups[gk].forEach(ln => {
+      if (exportKind === 'move') {
+        const [from, to] = gk.split('>');
+        out.push({
+          'วันที่เอกสาร':DOC_DATE,'เลขที่เอกสาร':docNo,'รหัสสาขา':0,'รหัสแผนก':'SP01','รหัสโครงการ':0,
+          'ราคาที่แสดง':0,'หมายเหตุ':`โอนย้ายจาก ${from} ไป ${to}`,'รหัสซื้อขาย':ln.code,'จำนวน':ln.qty,
+          'ราคาต่อหน่วย':0,'น้ำหนักต่อหน่วย':'','เลขล็อต':'','เลขกำกับ':'','ตำแหน่งเก็บ':from,'ย้ายไปตำแหน่งเก็บ':to,
+        });
+      } else if (exportKind === 'in') {
+        out.push({
+          'วันที่เอกสาร':DOC_DATE,'เลขที่เอกสาร':docNo,'รหัสสาขา':0,'รหัสแผนก':'SP01','รหัสโครงการ':0,
+          'ราคาที่แสดง':1,'หมายเหตุ':'','รหัสซื้อขาย':ln.code,'จำนวน':ln.qty,'ราคาต่อหน่วย':0,
+          'น้ำหนักต่อหน่วย':'','เลขล็อต':'','เลขกำกับ':'','ตำแหน่งเก็บ':gk,'วันที่ผลิต':DOC_DATE,'วันที่หมดอายุ':DOC_DATE,
+        });
+      } else { // out
+        out.push({
+          'วันที่เอกสาร':DOC_DATE,'เลขที่เอกสาร':docNo,'รหัสสาขา':0,'รหัสแผนก':'SP01','รหัสโครงการ':0,
+          'เบิกไปสำหรับ':1,'ราคาที่แสดง':1,'หมายเหตุ':'','รหัสซื้อขาย':ln.code,'จำนวน':ln.qty,'ราคาต่อหน่วย':0,
+          'น้ำหนักต่อหน่วย':'','เลขล็อต':'','เลขกำกับ':'','ตำแหน่งเก็บ':gk,
+        });
+      }
+    });
+  });
 
-  const header = ['วันที่เอกสาร','เลขที่เอกสาร','รหัสสาขา','รหัสแผนก','รหัสโครงการ','ราคาที่แสดง','หมายเหตุ','รหัสซื้อขาย','จำนวน','ราคาต่อหน่วย','น้ำหนักต่อหน่วย','เลขล็อต','เลขกำกับ','ตำแหน่งเก็บ','ย้ายไปตำแหน่งเก็บ'];
+  try { localStorage.setItem(cfg.lsKey, docNo); } catch {}
+
+  const header = exportKind === 'move'
+    ? ['วันที่เอกสาร','เลขที่เอกสาร','รหัสสาขา','รหัสแผนก','รหัสโครงการ','ราคาที่แสดง','หมายเหตุ','รหัสซื้อขาย','จำนวน','ราคาต่อหน่วย','น้ำหนักต่อหน่วย','เลขล็อต','เลขกำกับ','ตำแหน่งเก็บ','ย้ายไปตำแหน่งเก็บ']
+    : exportKind === 'in'
+    ? ['วันที่เอกสาร','เลขที่เอกสาร','รหัสสาขา','รหัสแผนก','รหัสโครงการ','ราคาที่แสดง','หมายเหตุ','รหัสซื้อขาย','จำนวน','ราคาต่อหน่วย','น้ำหนักต่อหน่วย','เลขล็อต','เลขกำกับ','ตำแหน่งเก็บ','วันที่ผลิต','วันที่หมดอายุ']
+    : ['วันที่เอกสาร','เลขที่เอกสาร','รหัสสาขา','รหัสแผนก','รหัสโครงการ','เบิกไปสำหรับ','ราคาที่แสดง','หมายเหตุ','รหัสซื้อขาย','จำนวน','ราคาต่อหน่วย','น้ำหนักต่อหน่วย','เลขล็อต','เลขกำกับ','ตำแหน่งเก็บ'];
+
   const ws = XLSX.utils.json_to_sheet(out, { header });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'BplusData');
   const stamp = formatThaiDate(new Date()).replace(/\//g, '-');
-  XLSX.writeFile(wb, `โอนย้าย_C4-W4_${stamp}.xlsx`);
+  XLSX.writeFile(wb, `${cfg.fileTag}_${stamp}.xlsx`);
   closeDocNoModal();
-  showToast(`ดาวน์โหลดโอนย้าย ${out.length} แถว · ${dirs.length} เอกสาร ✓`, 'success');
+  showToast(`ดาวน์โหลด${cfg.label} ${out.length} แถว · ${gkeys.length} เอกสาร ✓`, 'success');
 }
+// Back-compat alias
+function exportTransfersExcel(){ runExport(); }
 function startComparePoll(){
   stopComparePoll();
   comparePollTimer = setInterval(() => {
@@ -3949,16 +3973,16 @@ document.addEventListener('DOMContentLoaded', ()=>{
 <div id="docNoModal" style="display:none;position:fixed;inset:0;background:rgba(13,27,62,.55);z-index:9500;align-items:center;justify-content:center;padding:18px;backdrop-filter:blur(3px)">
   <div style="background:var(--card-bg);border-radius:18px;max-width:400px;width:100%;border-top:4px solid var(--gold);box-shadow:var(--shadow-lg);overflow:hidden;animation:slideUp .22s ease">
     <div style="padding:18px 20px 6px">
-      <div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px">📤 Export โอนย้าย</div>
-      <div style="font-size:12.5px;color:var(--muted);margin-bottom:12px">ใส่เลขที่เอกสารปัจจุบัน — ระบบจะรันเลขต่อให้ (แต่ละทิศทางการโอน = 1 เอกสาร)</div>
+      <div id="docNoTitle" style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:4px">📤 Export</div>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:12px">ใส่เลขที่เอกสารปัจจุบัน — ระบบจะรันเลขต่อให้ (+1 ต่อ 1 เอกสาร)</div>
       <label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;display:block;margin-bottom:4px">เลขที่เอกสาร</label>
       <input id="docNoInput" type="text" class="input" autocomplete="off"
-             onkeydown="if(event.key==='Enter')exportTransfersExcel()"
+             onkeydown="if(event.key==='Enter')runExport()"
              style="width:100%;font-size:16px;font-weight:700;letter-spacing:.5px">
     </div>
     <div style="display:flex;gap:8px;padding:14px 16px 16px;background:var(--bg)">
       <button type="button" onclick="closeDocNoModal()" style="flex:1;min-height:46px;border-radius:12px;background:var(--card-bg);border:1.5px solid var(--border);color:var(--text);font-family:inherit;font-size:14px;font-weight:700;cursor:pointer">ยกเลิก</button>
-      <button type="button" onclick="exportTransfersExcel()" style="flex:2;min-height:46px;border-radius:12px;background:var(--gold);border:none;color:var(--navy);font-family:inherit;font-size:14px;font-weight:800;cursor:pointer">📥 ดาวน์โหลด Excel</button>
+      <button type="button" onclick="runExport()" style="flex:2;min-height:46px;border-radius:12px;background:var(--gold);border:none;color:var(--navy);font-family:inherit;font-size:14px;font-weight:800;cursor:pointer">📥 ดาวน์โหลด Excel</button>
     </div>
   </div>
 </div>
