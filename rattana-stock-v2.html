@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.39</title>
+  <title>Rattana Stock Count v3.40</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -707,7 +707,10 @@
     <div class="card mt-8">
       <div class="card-head">
         <h3>🔀 เทียบสต็อก C4 ↔ W4</h3>
-        <button class="btn btn-outline btn-sm" onclick="renderCompare()" type="button">↻ รีเฟรช</button>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-gold btn-sm" onclick="exportTransfersExcel()" type="button">📤 โอนย้าย</button>
+          <button class="btn btn-outline btn-sm" onclick="renderCompare()" type="button">↻ รีเฟรช</button>
+        </div>
       </div>
       <div class="card-body" id="compareBody">
         <div class="txt-center txt-muted" style="padding:32px 16px">กำลังโหลด...</div>
@@ -762,7 +765,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.39';
+const APP_VERSION = 'v3.40';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 // Live-sheet poll interval. Raised from 5s → 15s so ~30 concurrent users
 // don't exhaust the Apps Script execution quota.
@@ -2884,7 +2887,65 @@ function stopSummaryPoll(){
 
 // ── COMPARE MODE — C4 ↔ W4 side-by-side ──
 let comparePollTimer = null;
+let cmpLastRows = [];            // last computed compare rows (for export)
 const compareOpen = new Set();   // expanded product rows in compare view
+
+// Export the transfer (โอนย้าย) actions to an Excel file matching the
+// B-Plus "BplusData" import template. One row per (product, unit) moved.
+function exportTransfersExcel() {
+  if (typeof XLSX === 'undefined') { showToast('โหลด Excel library ไม่ได้', 'error'); return; }
+  if (!cmpLastRows.length) { showToast('ยังไม่มีข้อมูลเทียบ — รอโหลดสักครู่', 'warning'); return; }
+
+  // ── Fixed template values (ปรับได้ตามระบบ B-Plus) ──
+  const DOC_DATE = formatThaiDate(new Date());   // วันที่เอกสาร (พ.ศ.)
+  const DOC_NO   = 'DMI46906/00051';             // เลขที่เอกสาร — แก้ก่อนนำเข้า B-Plus
+  const DEPT     = 'SP01';                        // รหัสแผนก
+  const NOTE     = 'W402';                        // หมายเหตุ
+  const BRANCH = 0, PROJECT = 0, SHOWPRICE = 0, UNITPRICE = 0;
+
+  const out = [];
+  cmpLastRows.forEach(r => {
+    const prod = productByKey[r.key];
+    const acts = reconcileActions(r).filter(a => a.k === 'move');
+    acts.forEach(a => {
+      const fcs = a.fcs > 0 ? a.fcs : 1;
+      const cs = Math.floor(a.pieces / fcs);
+      const ea = a.pieces - cs * fcs;
+      const lines = [];
+      if (cs > 0) lines.push({ unit: 'CS', code: prod ? String(prod['CODE CS'] || '').trim() : '', qty: cs });
+      if (ea > 0) lines.push({ unit: 'EA', code: prod ? String(prod['CODE EA'] || '').trim() : '', qty: ea });
+      lines.forEach(ln => {
+        out.push({
+          'วันที่เอกสาร':       DOC_DATE,
+          'เลขที่เอกสาร':       DOC_NO,
+          'รหัสสาขา':          BRANCH,
+          'รหัสแผนก':          DEPT,
+          'รหัสโครงการ':        PROJECT,
+          'ราคาที่แสดง':        SHOWPRICE,
+          'หมายเหตุ':          NOTE,
+          'รหัสซื้อขาย':        ln.code || r.key,
+          'จำนวน':             ln.qty,
+          'ราคาต่อหน่วย':       UNITPRICE,
+          'น้ำหนักต่อหน่วย':    '',
+          'เลขล็อต':           '',
+          'เลขกำกับ':          '',
+          'ตำแหน่งเก็บ':        a.from,
+          'ย้ายไปตำแหน่งเก็บ':  a.to,
+        });
+      });
+    });
+  });
+
+  if (!out.length) { showToast('ไม่มีรายการที่ต้องโอนย้าย', 'info'); return; }
+
+  const header = ['วันที่เอกสาร','เลขที่เอกสาร','รหัสสาขา','รหัสแผนก','รหัสโครงการ','ราคาที่แสดง','หมายเหตุ','รหัสซื้อขาย','จำนวน','ราคาต่อหน่วย','น้ำหนักต่อหน่วย','เลขล็อต','เลขกำกับ','ตำแหน่งเก็บ','ย้ายไปตำแหน่งเก็บ'];
+  const ws = XLSX.utils.json_to_sheet(out, { header });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'BplusData');
+  const stamp = formatThaiDate(new Date()).replace(/\//g, '-');
+  XLSX.writeFile(wb, `โอนย้าย_C4-W4_${stamp}.xlsx`);
+  showToast(`ดาวน์โหลดโอนย้าย ${out.length} แถวแล้ว ✓`, 'success');
+}
 function startComparePoll(){
   stopComparePoll();
   comparePollTimer = setInterval(() => {
@@ -2954,13 +3015,13 @@ function reconcileActions(r){
   const acts = [];
   const f = p => piecesToCSEA(p, fcs);
   // Cross transfers first (one over ↔ other short)
-  if (cOver > 0 && wShort > 0) { const t = Math.min(cOver, wShort); acts.push({ k:'move', text:`🔄 โอนย้าย C4 → W4 : ${f(t)}` }); cOver -= t; wShort -= t; }
-  if (wOver > 0 && cShort > 0) { const t = Math.min(wOver, cShort); acts.push({ k:'move', text:`🔄 โอนย้าย W4 → C4 : ${f(t)}` }); wOver -= t; cShort -= t; }
+  if (cOver > 0 && wShort > 0) { const t = Math.min(cOver, wShort); acts.push({ k:'move', from:'C4', to:'W4', pieces:t, fcs, text:`🔄 โอนย้าย C4 → W4 : ${f(t)}` }); cOver -= t; wShort -= t; }
+  if (wOver > 0 && cShort > 0) { const t = Math.min(wOver, cShort); acts.push({ k:'move', from:'W4', to:'C4', pieces:t, fcs, text:`🔄 โอนย้าย W4 → C4 : ${f(t)}` }); wOver -= t; cShort -= t; }
   // Remaining: short → ปรับเข้า, over → ปรับออก
-  if (cShort > 0) acts.push({ k:'in',  text:`➕ ปรับเข้า C4 : ${f(cShort)}` });
-  if (wShort > 0) acts.push({ k:'in',  text:`➕ ปรับเข้า W4 : ${f(wShort)}` });
-  if (cOver  > 0) acts.push({ k:'out', text:`➖ ปรับออก C4 : ${f(cOver)}` });
-  if (wOver  > 0) acts.push({ k:'out', text:`➖ ปรับออก W4 : ${f(wOver)}` });
+  if (cShort > 0) acts.push({ k:'in',  wh:'C4', pieces:cShort, fcs, text:`➕ ปรับเข้า C4 : ${f(cShort)}` });
+  if (wShort > 0) acts.push({ k:'in',  wh:'W4', pieces:wShort, fcs, text:`➕ ปรับเข้า W4 : ${f(wShort)}` });
+  if (cOver  > 0) acts.push({ k:'out', wh:'C4', pieces:cOver,  fcs, text:`➖ ปรับออก C4 : ${f(cOver)}` });
+  if (wOver  > 0) acts.push({ k:'out', wh:'W4', pieces:wOver,  fcs, text:`➖ ปรับออก W4 : ${f(wOver)}` });
   return acts;
 }
 async function renderCompare(silent){
@@ -2992,6 +3053,7 @@ async function renderCompare(silent){
   });
   // Sort: rows with any imbalance first, descending by combined |diff|
   rows.sort((a,b) => (Math.abs(b.c4.diff)+Math.abs(b.w4.diff)) - (Math.abs(a.c4.diff)+Math.abs(a.w4.diff)));
+  cmpLastRows = rows;   // cache for the transfer Excel export
   // Stat counters: how many products need each action.
   let nIn = 0, nOut = 0, nMove = 0;
   rows.forEach(r => {
