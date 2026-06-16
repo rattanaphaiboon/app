@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.29</title>
+  <title>Rattana Stock Count v3.30</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -747,7 +747,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.29';
+const APP_VERSION = 'v3.30';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // Apps Script Web App URL for saving count results (paste after deploying — see setup note)
@@ -2026,9 +2026,13 @@ async function clearRemoteDraft(wh) {
 // Rebuild the local count session from the Live sheet for THIS warehouse +
 // THIS user. This is the authoritative reload — the Drafts JSON blob is
 // ignored because Live rows are the source of truth.
+// While a clear is in flight, block the silent reload so the Live rows that
+// are being deleted server-side don't get re-fetched and resurrect the list.
+let clearGuardUntil = 0;
 async function reloadCountFromLive(opts) {
   opts = opts || {};
   const silent = !!opts.silent;
+  if (silent && Date.now() < clearGuardUntil) return;
   if (!COUNT_SAVE_URL || !currentUser || !countSession) {
     if (!silent) showToast('ยังไม่พร้อม — รอเข้าระบบให้เรียบร้อย', 'warning');
     return;
@@ -2691,13 +2695,32 @@ function clearCount() {
   if (!confirm('ล้างรายการนับทั้งหมดของคลังนี้?')) return;
   const wh = countSession.warehouse;
   recentlySavedAt[wh] = Date.now();
+  // Block silent reloads for 10s while the Live rows are deleted server-side,
+  // otherwise an in-flight reload re-fetches them and the list comes back.
+  clearGuardUntil = Date.now() + 10000;
   if (draftSyncTimer) { clearTimeout(draftSyncTimer); draftSyncTimer = null; }
+  // 1) Delete every Live lot row this user has in this warehouse (server-side).
+  if (COUNT_SAVE_URL) {
+    try {
+      fetch(COUNT_SAVE_URL, {
+        method:'POST', mode:'no-cors',
+        headers:{ 'Content-Type':'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action:'clearLive', userKey: userKey(), warehouse: wh })
+      });
+    } catch {}
+  }
+  // 2) Belt-and-suspenders: also delete each known lot by id (covers any rows
+  //    whose userKey casing differs from the bulk clear filter).
+  Object.values(countSession.items).forEach(it => deleteAllLotsOf(it));
+  // 3) Clear locally + the legacy Drafts blob.
   countSession.items = {};
   countSession.startedAt = new Date().toISOString();
   saveCountSession();
   clearRemoteDraft(wh);
   renderCountList();
   showToast('ล้างการนับแล้ว', 'info');
+  // Re-pull once after the server has had time to finish deleting.
+  setTimeout(() => { clearGuardUntil = 0; reloadCountFromLive({ silent: true }); }, 11000);
 }
 
 // ── Edit item modal ──
