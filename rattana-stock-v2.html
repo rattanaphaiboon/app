@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.25</title>
+  <title>Rattana Stock Count v3.26</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -747,7 +747,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.25';
+const APP_VERSION = 'v3.26';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // Apps Script Web App URL for saving count results (paste after deploying — see setup note)
@@ -1045,7 +1045,7 @@ function stopDraftPoll() { if (draftPollTimer) { clearInterval(draftPollTimer); 
 function refreshEverything() {
   if (!currentUser) return;
   if (currentMode === 'history') { historyLoaded = false; loadHistory(true); }
-  if (currentMode === 'count')   { fetchAndUpdate(); if (countSession) reloadCountFromLive(); }
+  if (currentMode === 'count')   { fetchAndUpdate(); if (countSession) reloadCountFromLive({silent:true}); }
   if (currentMode === 'summary') { fetchAndUpdate(); renderSummary(); }
 }
 
@@ -1892,7 +1892,7 @@ function onCountWhChange() {
   renderCountList();
   // Authoritative reload: pull THIS user's lots straight out of the Live sheet
   // for the new warehouse so stale local state from another warehouse can't leak in.
-  reloadCountFromLive();
+  reloadCountFromLive({silent:true});
   fetchTeamDrafts(wh);
 }
 function onLocationChange(){
@@ -2019,13 +2019,15 @@ async function clearRemoteDraft(wh) {
 // Rebuild the local count session from the Live sheet for THIS warehouse +
 // THIS user. This is the authoritative reload — the Drafts JSON blob is
 // ignored because Live rows are the source of truth.
-async function reloadCountFromLive() {
+async function reloadCountFromLive(opts) {
+  opts = opts || {};
+  const silent = !!opts.silent;
   if (!COUNT_SAVE_URL || !currentUser || !countSession) {
-    showToast('ยังไม่พร้อม — รอเข้าระบบให้เรียบร้อย', 'warning');
+    if (!silent) showToast('ยังไม่พร้อม — รอเข้าระบบให้เรียบร้อย', 'warning');
     return;
   }
   const wh = countSession.warehouse;
-  showSpinner('กำลังโหลดจากชีท...');
+  if (!silent) showSpinner('กำลังโหลดจากชีท...');
   try {
     const r = await fetch(`${COUNT_SAVE_URL}?action=liveLots&warehouse=${encodeURIComponent(wh)}`, { cache:'no-store' });
     const j = await r.json();
@@ -2057,13 +2059,15 @@ async function reloadCountFromLive() {
     try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
     syncLocationFromSession();
     renderCountList();
-    const n = Object.keys(items).length;
-    showToast(n ? `โหลด ${n} รายการจากชีทแล้ว ✓` : `ไม่มีรายการของคุณในคลัง ${wh}`, n ? 'success' : 'info');
+    if (!silent) {
+      const n = Object.keys(items).length;
+      showToast(n ? `โหลด ${n} รายการจากชีทแล้ว ✓` : `ไม่มีรายการของคุณในคลัง ${wh}`, n ? 'success' : 'info');
+    }
   } catch (e) {
-    showToast('โหลดไม่สำเร็จ: ' + (e.message || e), 'error');
+    if (!silent) showToast('โหลดไม่สำเร็จ: ' + (e.message || e), 'error');
     console.error('reloadCountFromLive error', e);
   } finally {
-    hideSpinner();
+    if (!silent) hideSpinner();
   }
 }
 // Backwards-compat alias — the ↻ button still calls forcePullDraft().
@@ -2162,8 +2166,21 @@ function renderPending() {
         ${expiryPickerHtml('expiry', '')}
       </div>`;
       })()}
+      ${(() => {
+        // Quick-pick chips from existing lots of this product (current session)
+        const existingLocs = countSession.items[productKey(p)]
+          ? [...new Set(itemLots(countSession.items[productKey(p)]).map(l => l.location).filter(Boolean))]
+          : [];
+        // Also include the session's lastLocation as a fallback chip
+        const lastLoc = countSession.lastLocation || countSession.location || '';
+        if (lastLoc && !existingLocs.includes(lastLoc)) existingLocs.unshift(lastLoc);
+        const locChips = existingLocs.length
+          ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${existingLocs.map(loc => `<button type="button" onclick="pickLocChip('${encodeURIComponent(loc)}')" style="background:var(--row-alt);border:1px solid var(--border);border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;color:#2f6df0;font-weight:600">📍 ${esc(loc)}</button>`).join('')}</div>`
+          : '';
+        return `
       <div class="field" style="margin-top:10px;padding:10px 12px;background:var(--bg);border-radius:14px;border:1.5px dashed var(--border)">
         <label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;display:block">📍 ที่ตั้ง</label>
+        ${locChips}
         <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
           <input id="penLoc" class="input input-compact" autocomplete="off"
                  value="${(countSession && (countSession.lastLocation||countSession.location)) ? String(countSession.lastLocation||countSession.location||'').replace(/"/g,'&quot;') : ''}"
@@ -2172,7 +2189,8 @@ function renderPending() {
           <button type="button" onclick="openPendingLocCamera()" title="สแกน Location"
                   style="height:42px;width:42px;flex-shrink:0;border-radius:11px;background:var(--blue-soft);color:var(--navy-mid);border:none;font-size:18px;cursor:pointer">📷</button>
         </div>
-      </div>
+      </div>`;
+      })()}
       <div class="pb-row">
         <button class="step-btn" onclick="bumpQty(-1)" type="button">−</button>
         <input id="qtyInput" class="pb-qty" type="text" inputmode="numeric" value="1"
@@ -2204,6 +2222,11 @@ function updateAddBtn(){
   const ok = !!(cb && cb.checked) && !!(loc && String(loc.value||'').trim());
   btn.disabled = !ok;
   btn.textContent = ok ? '✓ เพิ่มเข้ารายการ' : '✓ ยืนยันโลเคชันก่อนเพิ่มเข้ารายการ';
+}
+function pickLocChip(enc){
+  const v = decodeURIComponent(String(enc || ''));
+  const inp = document.getElementById('penLoc');
+  if (inp) { inp.value = v; inp.focus(); }
 }
 function openPendingLocCamera(){
   if (camStarting) return;
