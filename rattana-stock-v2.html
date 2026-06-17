@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.52</title>
+  <title>Rattana Stock Count v3.53</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -769,7 +769,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.52';
+const APP_VERSION = 'v3.53';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 // Live-sheet poll interval. Raised from 5s → 15s so ~30 concurrent users
 // don't exhaust the Apps Script execution quota.
@@ -1769,11 +1769,11 @@ let torchOn = false;
 
 // ZXing decode hints — TRY_HARDER (slower but better at small/wrinkled barcodes)
 // + ALSO_INVERTED for white-on-black labels.
-function zxingHints() {
+function zxingHints(tryHarder) {
   if (!window.ZXingBrowser || !ZXingBrowser.DecodeHintType) return undefined;
   const H = ZXingBrowser.DecodeHintType;
   const hints = new Map();
-  hints.set(H.TRY_HARDER, true);
+  if (tryHarder !== false) hints.set(H.TRY_HARDER, true);
   if (H.ALSO_INVERTED) hints.set(H.ALSO_INVERTED, true);
   if (H.POSSIBLE_FORMATS && ZXingBrowser.BarcodeFormat) {
     const F = ZXingBrowser.BarcodeFormat;
@@ -1898,23 +1898,74 @@ async function startScanner(videoElId, onDetected) {
   }
 
   // ── ENGINE 2: ZXing JS fallback (iOS Safari & anything without BarcodeDetector) ──
-  const reader = new ZXingBrowser.BrowserMultiFormatReader(zxingHints(), { delayBetweenScanAttempts: 60 });
-  const cb = (result) => { if (result) { const t = result.getText(); if (acceptScan(t)) onDetected(t); } };
-  let controls;
-  try {
-    controls = await reader.decodeFromConstraints(bestVideoConstraints(1920, 1080), videoEl, cb);
-  } catch (e1) {
-    try {
-      controls = await reader.decodeFromConstraints(bestVideoConstraints(1280, 720), videoEl, cb);
-    } catch (e2) {
-      controls = await reader.decodeFromVideoDevice(undefined, videoEl, cb);
-    }
-  }
-  currentStream = videoEl.srcObject || null;
+  // iPhone has no native detector, so speed matters. Instead of letting ZXing decode
+  // the whole 1080p frame every attempt (slow on iOS), we grab the camera ourselves
+  // and each tick decode only a downscaled CENTRE-CROP — a fraction of the pixels, so
+  // many× faster. TRY_HARDER is dropped here because the clean centre-crop rarely needs it.
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia(bestVideoConstraints(1280, 720)); }
+  catch { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } }); }
+  videoEl.setAttribute('playsinline', 'true');
+  videoEl.muted = true;
+  videoEl.srcObject = stream;
+  await videoEl.play().catch(() => {});
+  currentStream = stream;
   torchOn = false;
-  await tuneTrack(currentStream);
+  await tuneTrack(stream);
   updateTorchButton();
+
+  const reader = new ZXingBrowser.BrowserMultiFormatReader(zxingHints(false));
+  if (typeof reader.decodeFromCanvas === 'function') {
+    return runZxingCropLoop(videoEl, reader, accept, stream);
+  }
+  // Very old ZXing build without decodeFromCanvas — decode the live element directly.
+  const cb = (result) => { if (result) { const t = result.getText(); if (acceptScan(t)) onDetected(t); } };
+  const controls = await reader.decodeFromVideoElement(videoEl, cb);
   return controls;
+}
+
+// iOS-fast ZXing loop: draw a downscaled centre-crop of the live video into a small
+// canvas, then decode that single frame. Far cheaper than full-frame 1080p decoding.
+function runZxingCropLoop(videoEl, reader, accept, stream) {
+  let stopped = false, raf = 0, busy = false, last = 0, miss = 0;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  function tick(ts) {
+    if (stopped) return;
+    if (!busy && videoEl.readyState >= 2 && ts - last >= 55) {
+      busy = true; last = ts;
+      const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+      if (vw && vh) {
+        // Centre-crop ~92% × 78% of the frame, downscaled so the longest side ≈ 1000px.
+        const cw = Math.round(vw * 0.92), ch = Math.round(vh * 0.78);
+        const sx = Math.round((vw - cw) / 2), sy = Math.round((vh - ch) / 2);
+        const scale = Math.min(1, 1000 / Math.max(cw, ch));
+        canvas.width  = Math.max(2, Math.round(cw * scale));
+        canvas.height = Math.max(2, Math.round(ch * scale));
+        try { ctx.drawImage(videoEl, sx, sy, cw, ch, 0, 0, canvas.width, canvas.height); } catch {}
+        let res = null;
+        try { res = reader.decodeFromCanvas(canvas); } catch { res = null; }
+        if (res) {
+          const t = (res.getText() || '').trim();
+          miss = 0;
+          if (t && acceptScan(t)) accept(t);
+        } else if (++miss % 20 === 0) {
+          tuneTrack(stream);   // nudge focus/exposure when struggling
+        }
+      }
+      busy = false;
+    }
+    raf = requestAnimationFrame(tick);
+  }
+  raf = requestAnimationFrame(tick);
+  return {
+    stop() {
+      stopped = true;
+      if (raf) cancelAnimationFrame(raf);
+      try { (stream || videoEl.srcObject)?.getTracks().forEach(t => t.stop()); } catch {}
+      try { videoEl.srcObject = null; } catch {}
+    }
+  };
 }
 
 // ── Torch (flashlight) — only shown when the device supports it ──
