@@ -2,11 +2,11 @@
 <html lang="th">
 <head>
 <meta charset="UTF-8">
-<title>Rattana Product Photos v3.11</title>
+<title>Rattana Product Photos v4.0</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://accounts.google.com/gsi/client" onload="initGoogleSignIn()" onerror="handleGsiError()"></script>
+<script src="https://accounts.google.com/gsi/client" async defer onerror="window.__gsiFailed=true"></script>
 <style>
 :root{
   --navy:#0d1b3e; --navy-mid:#1a2f5e; --navy-light:#243b73;
@@ -377,7 +377,7 @@ body.dark .setup-notice{background:#3a2e15;color:#e8c86a;border-color:#7a5d20}
 <div id="loginScreen">
   <div class="login-card">
     <div class="logo-big">RATTANA <span>PRODUCT PHOTOS</span></div>
-    <div class="sub">รัตนไพบูลย์ · v3.11</div>
+    <div class="sub">รัตนไพบูลย์ · v4.0</div>
     <div id="googleBtnContainer" style="display:flex;justify-content:center;min-height:44px;margin-bottom:4px"></div>
     <div class="login-err" id="loginErr"></div>
   </div>
@@ -386,7 +386,7 @@ body.dark .setup-notice{background:#3a2e15;color:#e8c86a;border-color:#7a5d20}
 <!-- App Screen -->
 <div id="appScreen" class="page" style="display:none">
   <header>
-    <div class="logo-text">RATTANA <span>PRODUCT PHOTOS</span><span class="ver">v3.11 · 2026-06-15</span></div>
+    <div class="logo-text">RATTANA <span>PRODUCT PHOTOS</span><span class="ver">v4.0 · 2026-06-17</span></div>
     <a href="https://rattanaphaiboon.github.io/app/rattana-hub.html" class="hub-btn" title="กลับหน้า Hub">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
         <path d="M3 12l9-9 9 9"/><path d="M5 10v10h14V10"/>
@@ -659,7 +659,7 @@ body.dark .setup-notice{background:#3a2e15;color:#e8c86a;border-color:#7a5d20}
     </div>
 
     <div class="app-footer">
-      Rattana Product Photos · <span class="ver">v3.8</span> · 2026-05-09
+      Rattana Product Photos · <span class="ver">v4.0</span> · 2026-06-17
     </div>
   </div>
 </div>
@@ -844,6 +844,26 @@ function escapeHtml(s) {
 //   - rattana_session (key หลัก ใช้ร่วมกับ Hub และแอป Rattana ทุกตัว)
 //   - rattanaUser     (legacy fallback ของแอปนี้)
 // ตอน login เขียนทั้ง 2 keys; ตอน logout ลบทั้ง 2 keys
+// รอจน GSI library + DOM พร้อมทั้งคู่ค่อย render ปุ่ม
+// (ห้ามพึ่ง <script onload> เพราะ onload ยิงก่อน body-script จะ define ฟังก์ชันนี้เสร็จ)
+let __gsiRendered = false;
+function ensureGoogleSignIn() {
+  if (__gsiRendered) return;
+  let tries = 0;
+  const tick = () => {
+    if (__gsiRendered) return;
+    if (window.__gsiFailed) { handleGsiError(); return; }
+    if (window.google && google.accounts && google.accounts.id) {
+      __gsiRendered = true;
+      initGoogleSignIn();
+      return;
+    }
+    if (++tries > 120) { handleGsiError(); return; }   // ~12s timeout
+    setTimeout(tick, 100);
+  };
+  tick();
+}
+
 function initGoogleSignIn() {
   try {
     google.accounts.id.initialize({
@@ -1561,27 +1581,51 @@ window.fetchImageFromUrl = async function() {
 };
 
 /**
- * Try direct fetch first; if blocked by CORS, fall back through proxy chain.
- * Most public image hosts support CORS so direct often works.
+ * แปลงลิงก์ Google Drive ทุกรูปแบบ → lh3.googleusercontent.com/d/{id}
+ * (lh3 ตอบ CORS '*' ดึงรูปตรงได้เลย ไม่ต้องผ่าน proxy)
+ *   - drive.google.com/file/d/{id}/view
+ *   - drive.google.com/open?id={id}  /  uc?export=download&id={id}
+ *   - lh3.googleusercontent.com/d/{id}  (อยู่แล้ว)
  */
-async function fetchImageBlobViaProxy(url) {
-  // 1) Direct fetch (works for CORS-friendly hosts: most CDNs, Imgur, etc.)
+function normalizeImageUrl(url) {
+  const u = String(url || '').trim();
+  if (/lh3\.googleusercontent\.com\/d\//i.test(u)) return u;
+  let id = '';
+  let m = u.match(/\/file\/d\/([-\w]{20,})/);             // .../file/d/{id}/view
+  if (m) id = m[1];
+  if (!id) { m = u.match(/[?&]id=([-\w]{20,})/); if (m) id = m[1]; }   // ?id={id}
+  if (!id) { m = u.match(/\/d\/([-\w]{20,})/);  if (m) id = m[1]; }    // .../d/{id}
+  if (id && /drive\.google\.com|docs\.google\.com|googleusercontent/i.test(u)) {
+    return `https://lh3.googleusercontent.com/d/${id}=s0`;
+  }
+  return u;
+}
+
+/**
+ * Try direct fetch first; if blocked by CORS, fall back through proxy chain.
+ * Proxy ที่เลือก (เช็คสด 2026-06): weserv (image-specialized, CORS *) → allorigins → codetabs.
+ * ตัด corsproxy.io ออก — กลายเป็นบริการจ่ายเงินแล้ว (403 บน free plan).
+ */
+async function fetchImageBlobViaProxy(rawUrl) {
+  const url = normalizeImageUrl(rawUrl);
+
+  // 1) Direct fetch (CORS-friendly hosts: CDN, github, Drive lh3, ฯลฯ)
   try {
     const res = await fetch(url, { mode: 'cors', cache: 'no-store' });
     if (res.ok) {
       const blob = await res.blob();
-      if (blob.size > 0) return blob;
+      if (blob.size > 0 && (!blob.type || blob.type.startsWith('image/'))) return blob;
     }
   } catch (e) {
-    // CORS blocked — try proxies
     console.warn('Direct fetch failed, trying proxies:', e.message);
   }
 
-  // 2) Proxy chain (Rattana standard CORS proxies)
+  // 2) Proxy chain
+  const noScheme = url.replace(/^https?:\/\//i, '');
   const proxies = [
-    `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
-    `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    `https://images.weserv.nl/?url=${encodeURIComponent(noScheme)}`,
     `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
   ];
 
   let lastErr = null;
@@ -2538,7 +2582,10 @@ window.applyErase = async function() {
 // ═══════════════════════════════════════════════════════════════════
 // Boot
 // ═══════════════════════════════════════════════════════════════════
-window.addEventListener('load', checkSession);
+window.addEventListener('load', () => {
+  checkSession();
+  if (!currentUser) ensureGoogleSignIn();   // มี session แล้วก็ไม่ต้อง render ปุ่ม
+});
 
 </script>
 </body>
