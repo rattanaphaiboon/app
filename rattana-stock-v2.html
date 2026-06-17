@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.45</title>
+  <title>Rattana Stock Count v3.46</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -767,7 +767,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.45';
+const APP_VERSION = 'v3.46';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 // Live-sheet poll interval. Raised from 5s → 15s so ~30 concurrent users
 // don't exhaust the Apps Script execution quota.
@@ -951,6 +951,36 @@ function setExpiryPicker(idPrefix, valueIso){
   csSet(`${idPrefix}_y`, parseInt(valueIso.slice(0,4), 10));
 }
 
+// ── RELIABLE WRITE — reads the response so a failed/blocked write is known ──
+// (GET reads already work cross-origin for this GAS deployment, so a text/plain
+// POST is a "simple request" whose JSON response is readable too.)
+let _writeFailToastAt = 0;
+async function postWrite(body){
+  if (!COUNT_SAVE_URL) return { ok:false };
+  for (let attempt = 0; attempt < 3; attempt++){
+    try {
+      const r = await fetch(COUNT_SAVE_URL, {
+        method:'POST',
+        headers:{ 'Content-Type':'text/plain;charset=utf-8' },
+        body: JSON.stringify(body)
+      });
+      const j = await r.json().catch(() => null);
+      if (j && j.ok) { setStatusDot('ok'); return { ok:true }; }
+      // reachable but server said not-ok (e.g. lock busy) → wait and retry
+    } catch (e) {
+      // network / CORS hiccup → wait and retry
+    }
+    await new Promise(res => setTimeout(res, 500 * (attempt + 1)));
+  }
+  setStatusDot('error');
+  const now = Date.now();
+  if (now - _writeFailToastAt > 4000){
+    _writeFailToastAt = now;
+    showToast('⚠ บันทึกขึ้นเซิร์ฟเวอร์ไม่สำเร็จ — เช็คเน็ตแล้วลองนับ/แก้ซ้ำอีกครั้ง', 'error');
+  }
+  return { ok:false };
+}
+
 // ── LIVE LOT SYNC — each lot pushed to/from the sheet individually ──
 async function pushLot(item, lot){
   if (!COUNT_SAVE_URL || !item || !lot) return;
@@ -991,24 +1021,12 @@ async function pushLot(item, lot){
     systemRaw,
     systemPieces
   };
-  try {
-    await fetch(COUNT_SAVE_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{ 'Content-Type':'text/plain;charset=utf-8' },
-      body: JSON.stringify(body)
-    });
-  } catch {}
+  await postWrite(body);
 }
 async function deleteLotRemote(lotId, warehouse){
   if (!COUNT_SAVE_URL || !lotId) return;
   const wh = warehouse || (countSession && countSession.warehouse) || '';
-  try {
-    await fetch(COUNT_SAVE_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{ 'Content-Type':'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action:'deleteLot', lotId, warehouse: wh })
-    });
-  } catch {}
+  await postWrite({ action:'deleteLot', lotId, warehouse: wh });
 }
 function pushAllLotsOf(item){
   if (!item || !item.lots) return;
@@ -2709,15 +2727,7 @@ function clearCount() {
   clearGuardUntil = Date.now() + 10000;
   if (draftSyncTimer) { clearTimeout(draftSyncTimer); draftSyncTimer = null; }
   // 1) Delete every Live lot row this user has in this warehouse (server-side).
-  if (COUNT_SAVE_URL) {
-    try {
-      fetch(COUNT_SAVE_URL, {
-        method:'POST', mode:'no-cors',
-        headers:{ 'Content-Type':'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action:'clearLive', userKey: userKey(), warehouse: wh })
-      });
-    } catch {}
-  }
+  postWrite({ action:'clearLive', userKey: userKey(), warehouse: wh });
   // 2) Belt-and-suspenders: also delete each known lot by id (covers any rows
   //    whose userKey casing differs from the bulk clear filter).
   Object.values(countSession.items).forEach(it => deleteAllLotsOf(it));
@@ -2966,7 +2976,7 @@ function openTransferExportDialog(){ openExportDialog('move'); }
 function closeDocNoModal(){ document.getElementById('docNoModal').style.display = 'none'; }
 
 // Build + download the Excel for the currently-selected exportKind.
-function runExport() {
+async function runExport() {
   if (typeof XLSX === 'undefined') { showToast('โหลด Excel library ไม่ได้', 'error'); return; }
   const cfg = EXPORT_CFG[exportKind];
   const startDoc = String(document.getElementById('docNoInput')?.value || '').trim();
@@ -2990,11 +3000,30 @@ function runExport() {
   const gkeys = Object.keys(groups);
   if (!gkeys.length) { showToast(`ไม่มีรายการที่ต้อง${cfg.label}`, 'info'); return; }
 
+  // Reserve a collision-free block of running numbers from the server (under
+  // its lock) so two people exporting at once never get the same documents.
+  let firstDoc;
+  showSpinner('กำลังขอเลขเอกสาร...');
+  try {
+    const res = await fetch(COUNT_SAVE_URL, {
+      method:'POST', headers:{ 'Content-Type':'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action:'reserveDocNo', kind: exportKind, current: startDoc, count: gkeys.length })
+    });
+    const j = await res.json();
+    if (!j || !j.ok || !j.first) throw new Error('reserve failed');
+    firstDoc = j.first;
+  } catch (e) {
+    hideSpinner();
+    showToast('ขอเลขเอกสารจากเซิร์ฟเวอร์ไม่สำเร็จ — เช็คเน็ตแล้วลองใหม่', 'error');
+    return;
+  }
+  hideSpinner();
+
   // Column builders per kind ────────────────────────────
   const out = [];
-  let docNo = startDoc;
-  gkeys.forEach(gk => {
-    docNo = nextDocNo(docNo);   // current number + 1, then +1 per next document
+  let docNo = firstDoc;
+  gkeys.forEach((gk, gi) => {
+    if (gi > 0) docNo = nextDocNo(docNo);   // server reserved a contiguous block
     groups[gk].forEach(ln => {
       if (exportKind === 'move') {
         const [from, to] = gk.split('>');
@@ -3019,7 +3048,7 @@ function runExport() {
     });
   });
 
-  try { localStorage.setItem(cfg.lsKey, docNo); } catch {}
+  try { localStorage.setItem(cfg.lsKey, docNo); } catch {}   // local hint only; server is authoritative
 
   const header = exportKind === 'move'
     ? ['วันที่เอกสาร','เลขที่เอกสาร','รหัสสาขา','รหัสแผนก','รหัสโครงการ','ราคาที่แสดง','หมายเหตุ','รหัสซื้อขาย','จำนวน','ราคาต่อหน่วย','น้ำหนักต่อหน่วย','เลขล็อต','เลขกำกับ','ตำแหน่งเก็บ','ย้ายไปตำแหน่งเก็บ']

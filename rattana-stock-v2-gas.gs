@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.7  (key column forced to TEXT)
+//  Rattana Stock Count — GAS Backend  v1.8  (collision-free running doc numbers)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -131,6 +131,7 @@ function doPost(e) {
     if (action === 'upsertLot')  return json(withLock(() => upsertLot(body)));
     if (action === 'deleteLot')  return json(withLock(() => deleteLot(body)));
     if (action === 'clearLive')  return json(withLock(() => clearLiveForUser(body)));
+    if (action === 'reserveDocNo') return json(withLock(() => reserveDocNo(body)));
     if (action === 'saveCount' || (!action && Array.isArray(body.rows))) {
       return json(withLock(() => saveCount(body)));
     }
@@ -141,6 +142,43 @@ function doPost(e) {
   } catch (err) {
     return json({ ok: false, error: err.message });
   }
+}
+
+// ── RUNNING DOCUMENT NUMBERS (shared, collision-free) ────────
+// Stored in a "DocCounters" sheet: kind | lastDocNo. Under the script lock,
+// reserveDocNo hands out a contiguous block so two users exporting at the
+// same moment can never get overlapping numbers.
+function gsNextDocNo(s){
+  const m = String(s || '').match(/^(.*?)(\d+)(\D*)$/);
+  if (!m) return String(s || '');
+  const width = m[2].length;
+  const n = (parseInt(m[2], 10) + 1).toString().padStart(width, '0');
+  return m[1] + n + m[3];
+}
+function gsDocNum(s){ const m = String(s || '').match(/(\d+)(\D*)$/); return m ? parseInt(m[1], 10) : -1; }
+
+// body: { kind, current, count }
+//   kind    — 'move' | 'in' | 'out'
+//   current — the doc number the user typed (a floor)
+//   count   — how many documents to reserve
+// returns { ok, first }  — the first doc number to use; reserves `count` of them.
+function reserveDocNo(b){
+  const sh = getOrCreate(SpreadsheetApp.openById(SS_ID), 'DocCounters', ['kind','lastDocNo']);
+  const data = sh.getDataRange().getValues();
+  const kind = String(b.kind || '');
+  const count = Math.max(1, parseInt(b.count, 10) || 1);
+  let rowIdx = -1, stored = '';
+  for (let i = 1; i < data.length; i++){
+    if (String(data[i][0]) === kind){ rowIdx = i + 1; stored = String(data[i][1]); break; }
+  }
+  // Base = whichever is higher: the stored last number, or the user's current.
+  let base = (gsDocNum(stored) >= gsDocNum(b.current)) ? stored : String(b.current || '');
+  const first = gsNextDocNo(base);
+  let last = first;
+  for (let k = 1; k < count; k++) last = gsNextDocNo(last);
+  if (rowIdx > 0) { sh.getRange(rowIdx, 2).setNumberFormat('@'); sh.getRange(rowIdx, 2).setValue(last); }
+  else { sh.appendRow([kind, '']); const r = sh.getLastRow(); sh.getRange(r, 2).setNumberFormat('@'); sh.getRange(r, 2).setValue(last); }
+  return { ok: true, first: first, last: last };
 }
 
 function json(obj) {
