@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.8  (collision-free running doc numbers)
+//  Rattana Stock Count — GAS Backend  v1.9  (confirm-done per user/warehouse)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -132,6 +132,7 @@ function doPost(e) {
     if (action === 'deleteLot')  return json(withLock(() => deleteLot(body)));
     if (action === 'clearLive')  return json(withLock(() => clearLiveForUser(body)));
     if (action === 'reserveDocNo') return json(withLock(() => reserveDocNo(body)));
+    if (action === 'confirmDone')  return json(withLock(() => confirmDone(body)));
     if (action === 'saveCount' || (!action && Array.isArray(body.rows))) {
       return json(withLock(() => saveCount(body)));
     }
@@ -446,7 +447,53 @@ function getLiveLots(p) {
       });
     }
   });
-  return { ok: true, lots: out };
+  return { ok: true, lots: out, done: getDoneList(wh) };
+}
+
+// ── CONFIRM DONE (per user, per warehouse) ────────────
+// Sheet "DoneStatus": warehouse | userKey | empId | ผู้นับ | status | เวลายืนยัน
+// status = 'done' (records the Thai timestamp) | 'open' (unlock — clears it).
+// Upsert by warehouse + userKey so a person can confirm / unlock repeatedly.
+function confirmDone(b) {
+  const wh = String(b.warehouse || '');
+  if (!wh) return { ok:false, error:'warehouse required' };
+  const uk = String(b.userKey || '').toLowerCase();
+  if (!uk) return { ok:false, error:'userKey required' };
+  const status = (b.status === 'open') ? 'open' : 'done';
+  const when = status === 'done' ? thaiDateTime(new Date()) : '';
+  const sh = getOrCreate(ssFor(wh), 'DoneStatus',
+    ['warehouse','userKey','empId','ผู้นับ','status','เวลายืนยัน']);
+  const data = sh.getDataRange().getValues();
+  let rowIdx = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === wh && String(data[i][1]).toLowerCase() === uk) { rowIdx = i + 1; break; }
+  }
+  const vals = [wh, uk, b.empId || '', b.counterName || b.name || '', status, when];
+  if (rowIdx > 0) sh.getRange(rowIdx, 1, 1, vals.length).setValues([vals]);
+  else            sh.appendRow(vals);
+  return { ok:true, status: status, doneAt: when };
+}
+
+// All users who have confirmed 'done' in this warehouse.
+function getDoneList(wh) {
+  const sh = ssFor(wh).getSheetByName('DoneStatus');
+  if (!sh) return [];
+  const data = sh.getDataRange().getValues();
+  const out = [];
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (String(r[0] || '') !== String(wh)) continue;
+    if (String(r[4] || '') !== 'done') continue;
+    out.push({
+      userKey:    String(r[1] || '').toLowerCase(),
+      empId:      r[2] || '',
+      name:       r[3] || '',
+      status:     r[4] || '',
+      doneAt:     tsMs(r[5]),
+      doneAtText: r[5] || ''
+    });
+  }
+  return out;
 }
 
 // ── GET HISTORY ───────────────────────────────────────

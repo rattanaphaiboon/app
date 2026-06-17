@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.47</title>
+  <title>Rattana Stock Count v3.48</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -682,6 +682,9 @@
       </div>
       <div id="countList"></div>
       <button class="btn btn-primary btn-block btn-lg" style="margin-top:12px" onclick="setMode('summary')" type="button">ตรวจสอบและสรุปผล →</button>
+
+      <!-- Confirm done -->
+      <div id="doneBanner" style="margin-top:12px"></div>
     </div>
 
   </div><!-- /modeCount -->
@@ -767,7 +770,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.47';
+const APP_VERSION = 'v3.48';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 // Live-sheet poll interval. Raised from 5s → 15s so ~30 concurrent users
 // don't exhaust the Apps Script execution quota.
@@ -1051,6 +1054,8 @@ function startDraftPoll() {
 // Source of truth: the Live_<wh> sheet (one row per lot). We fetch every lot,
 // drop the current user's own rows, and aggregate the rest per product.
 let teamData = { wh:'', byKey:{} };   // byKey[productKey] = { team:{EA,PA,BP,CS}, factors, by:[], lots:[] }
+let myDone   = { status:'open', doneAt:0 };   // this user's confirm-done state for the current warehouse
+let teamDone = [];   // [{ userKey, name, empId, doneAt(ms), doneAtText }] — everyone who confirmed in this wh
 async function fetchTeamDrafts(wh){
   if (!COUNT_SAVE_URL || !wh) return;
   try {
@@ -1077,10 +1082,70 @@ async function fetchTeamDrafts(wh){
       });
       if (factors) byKey[k].factors = factors;
     });
+    // Confirm-done statuses for the whole team (and my own).
+    const done = Array.isArray(j.done) ? j.done : [];
+    teamDone = done;
+    const mine = done.find(d => String(d.userKey||'').toLowerCase() === myTag);
+    myDone = mine ? { status:'done', doneAt: mine.doneAt||0, doneAtText: mine.doneAtText||'' } : { status:'open', doneAt:0 };
     const changed = JSON.stringify(teamData.byKey) !== JSON.stringify(byKey) || teamData.wh !== wh;
     teamData = { wh, byKey };
+    renderDoneBanner();
     if (changed) renderCountList();
   } catch {}
+}
+
+// Toggle this user's "เช็คเสร็จแล้ว" confirmation for the current warehouse.
+async function confirmDone(status){
+  if (!countSession) return;
+  const wh = countSession.warehouse;
+  if (status === 'done') {
+    const n = Object.keys(countSession.items||{}).length;
+    if (!n) { showToast('ยังไม่มีรายการที่นับ', 'warning'); return; }
+    if (!confirm(`ยืนยันว่าเช็คคลัง ${wh} เสร็จแล้ว?\nระบบจะบันทึกเวลาที่เสร็จ (ยังกลับมาแก้ต่อได้)`)) return;
+  }
+  myDone = status === 'done'
+    ? { status:'done', doneAt: Date.now(), doneAtText: formatThaiDateTime(new Date()) }
+    : { status:'open', doneAt:0 };
+  renderDoneBanner();
+  const res = await postWrite({
+    action: 'confirmDone',
+    warehouse: wh,
+    userKey: userKey(),
+    empId: counterDisplayEmpId(),
+    counterName: counterDisplayName(),
+    status
+  });
+  if (res && res.ok) {
+    showToast(status === 'done' ? '✓ ยืนยันเช็คเสร็จแล้ว' : 'ปลดล็อก — กลับมาแก้ต่อได้', 'success');
+    fetchTeamDrafts(wh);
+  } else {
+    showToast('บันทึกสถานะไม่สำเร็จ ลองใหม่', 'error');
+  }
+}
+
+function renderDoneBanner(){
+  const el = document.getElementById('doneBanner');
+  if (!el) return;
+  const myTag = String(userKey()||'').toLowerCase();
+  const others = (teamDone||[]).filter(d => String(d.userKey||'').toLowerCase() !== myTag);
+  const teamHtml = others.length ? `
+    <div style="margin-top:10px;font-size:11.5px;color:var(--muted)">
+      <span style="font-weight:700">เช็คเสร็จแล้ว:</span>
+      ${others.map(d => `<span style="display:inline-block;margin:2px 4px 0 0;padding:2px 8px;background:rgba(46,204,113,.12);color:#1e8449;border-radius:10px;font-weight:600">✓ ${esc(d.name||d.empId||'—')}${d.doneAtText ? ' · '+esc(d.doneAtText) : ''}</span>`).join('')}
+    </div>` : '';
+  if (myDone.status === 'done') {
+    el.innerHTML = `
+      <div style="padding:12px 14px;background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.4);border-radius:12px">
+        <div style="font-weight:800;color:#1e8449;font-size:14px">✓ เช็คคลังนี้เสร็จแล้ว</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px">เสร็จเมื่อ ${esc(myDone.doneAtText || formatThaiDateTime(myDone.doneAt))}</div>
+        <button class="btn btn-outline btn-sm" style="margin-top:8px" onclick="confirmDone('open')" type="button">🔓 กลับมาแก้ต่อ</button>
+        ${teamHtml}
+      </div>`;
+  } else {
+    el.innerHTML = `
+      <button class="btn btn-gold btn-block btn-lg" onclick="confirmDone('done')" type="button">✓ ยืนยันว่าเช็คคลังนี้เสร็จแล้ว</button>
+      ${teamHtml}`;
+  }
 }
 function teamPiecesFor(key, fallbackFactors){
   const t = teamData.byKey[key]; if (!t) return 0;
@@ -1947,6 +2012,7 @@ function onCountWhChange() {
   document.getElementById('countPending').innerHTML = '';
   loadCountSession(wh);
   teamData = { wh:'', byKey:{} };
+  myDone = { status:'open', doneAt:0 }; teamDone = [];
   syncLocationFromSession();
   renderCountList();
   // Authoritative reload: pull THIS user's lots straight out of the Live sheet
@@ -2585,6 +2651,7 @@ function renderCountList() {
     </div>`;
    }
   }).join('');
+  renderDoneBanner();
 }
 
 function toggleLiveRow(encKey) {
