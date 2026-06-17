@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.184</title>
+<title>Rattana Sales — v8.185</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -4926,7 +4926,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.184 · 2026-06-17</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.185 · 2026-06-17</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -4937,7 +4937,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag">v8.184</span>
+  <span class="demo-tag">v8.185</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -5066,7 +5066,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
   </button>
 
   <div class="drawer-footer">
-    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v8.184<br>2026-06-17 🔒 (เพิ่มประวัติการซื้อ 6 เดือนรายร้าน บนหน้ารายละเอียดร้าน — BigQuery)<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
+    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v8.185<br>2026-06-17 🔒 (อนุมัติราคาหลายรายการรวมเป็น 1 call — เร็วขึ้น/ไม่ค้าง/ไม่ timeout · BUG อนุมัติ 16-17 มิ.ย.)<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
   </div>
 </aside>
 
@@ -12403,6 +12403,22 @@ window._setApprFilter = function(f){ window._apprFilter = f; window.openApproval
 // v8.106: batch อนุมัติ/ไม่อนุมัติ ต่อ 1 ร้าน — ทำงานกับเฉพาะ checkbox ที่ "ติ๊ก" ของ order นั้น
 //   วนเรียก endpoint 'updateApproval' เดิมทีละรายการ (ไม่แตะ Code.gs) · อันไม่ติ๊ก = ค้าง pending
 //   เสร็จแล้ว reload modal โชว์ที่เหลือ (ติ๊กใหม่หมด default) — กดอนุมัติ/ไม่อนุมัติ รอบถัดไปได้
+// v8.185: อัปเดต row ใน SHEET_DATA ทันทีหลังอนุมัติ/ปฏิเสธ (ใช้ทั้ง batch + fallback)
+function _applyApprovalLocal(orderId, barcode, decision, approverName, approvedPrice) {
+  const row = (SHEET_DATA.orders || []).find(r =>
+    String(r['orderId']||'').trim() === String(orderId) &&
+    String(r['Barcode']||'').trim() === String(barcode) &&
+    isStatusPending(r['สถานะอนุมัติ']));
+  if (!row) return;
+  row['สถานะอนุมัติ'] = decision === 'approve' ? STATUS_APPROVED : STATUS_REJECTED;
+  row['ผู้อนุมัติ']   = approverName;
+  if (decision === 'approve' && approvedPrice > 0) {
+    row['ราคา']       = approvedPrice;
+    row['ยอดเงินรวม'] = (parseFloat(row['จำนวน'])||0) * approvedPrice;
+  }
+}
+
+// v8.185: รวมเป็น 1 call (เดิมยิงทีละ barcode → 10 SKU = 20-40 วิ timeout/ค้าง) · มี fallback ทีละ barcode ถ้า backend ยังไม่ deploy
 window.decideApprovalBatch = async function(orderId, decision) {
   const approverName = (currentUser && currentUser.name) || SALESMAN.name || '';
   const verb = decision === 'approve' ? 'อนุมัติ' : 'ไม่อนุมัติ';
@@ -12412,37 +12428,44 @@ window.decideApprovalBatch = async function(orderId, decision) {
   if (!barcodes.length) { showToast('⚠️ ติ๊กอย่างน้อย 1 รายการก่อน', 'warning'); return; }
   if (!confirm(`ยืนยัน${verb} ${barcodes.length} รายการ?`)) return;
   showToast(`กำลัง${verb} ${barcodes.length} รายการ...`, 'info');
+
   let ok = 0, fail = 0, already = 0;
-  for (const barcode of barcodes) {
-    try {
-      const res = await postToAppsScript({ action: 'updateApproval', orderId, barcode, decision, approverName });
-      if (res && res.ok) {
-        ok++;
-        window._apprDecidedKeys.add(_apprKeyO(orderId, barcode));   // v8.175: ซ่อนทันที กันค้าง/เด้งกลับจาก gviz lag
-        const row = (SHEET_DATA.orders || []).find(r =>
-          String(r['orderId']||'').trim() === String(orderId) &&
-          String(r['Barcode']||'').trim() === barcode &&
-          isStatusPending(r['สถานะอนุมัติ']));
-        if (row) {
-          row['สถานะอนุมัติ'] = decision === 'approve' ? STATUS_APPROVED : STATUS_REJECTED;
-          row['ผู้อนุมัติ']   = approverName;
-          if (decision === 'approve' && res.approvedPrice > 0) {
-            row['ราคา']       = res.approvedPrice;
-            row['ยอดเงินรวม'] = (parseFloat(row['จำนวน'])||0) * res.approvedPrice;
-          }
-        }
-      } else if (_apprAlreadyResolved(res)) {
-        already++;
-        window._apprDecidedKeys.add(_apprKeyO(orderId, barcode));   // v8.175: คนอื่นตัดสินไปก่อนแล้ว → เอาการ์ดออก ไม่นับ "พลาด"
-      } else { fail++; console.warn('[approval batch] not ok', barcode, res && res.error); }
-    } catch (e) { fail++; console.warn('[approval batch] error', barcode, e); }
+
+  // v8.185: ยิง batch call เดียว
+  let res = null;
+  try {
+    res = await postToAppsScript({ action: 'updateApprovalBatch', orderId, barcodes, decision, approverName });
+  } catch (e) { res = null; console.warn('[approval batch] call error', e); }
+
+  // fallback: backend ยังไม่ deploy action ใหม่ → วนทีละ barcode แบบเดิม (กันอนุมัติพังช่วงรอ deploy)
+  const _noBatch = !res || (!res.ok && !Array.isArray(res.results) && /unknown action|updateApprovalBatch/i.test(String(res.error||'')));
+  if (_noBatch) {
+    for (const barcode of barcodes) {
+      try {
+        const r1 = await postToAppsScript({ action: 'updateApproval', orderId, barcode, decision, approverName });
+        if (r1 && r1.ok) { ok++; window._apprDecidedKeys.add(_apprKeyO(orderId, barcode)); _applyApprovalLocal(orderId, barcode, decision, approverName, r1.approvedPrice); }
+        else if (_apprAlreadyResolved(r1)) { already++; window._apprDecidedKeys.add(_apprKeyO(orderId, barcode)); }
+        else { fail++; console.warn('[approval fallback] not ok', barcode, r1 && r1.error); }
+      } catch (e) { fail++; console.warn('[approval fallback] error', barcode, e); }
+    }
+  } else if (res && res.ok && Array.isArray(res.results)) {
+    res.results.forEach(rr => {
+      const bc = String(rr.barcode || '').trim();
+      if (rr.ok) { ok++; window._apprDecidedKeys.add(_apprKeyO(orderId, bc)); _applyApprovalLocal(orderId, bc, decision, approverName, rr.approvedPrice); }
+      else if (rr.alreadyDecided || rr.alreadyPicked) { already++; window._apprDecidedKeys.add(_apprKeyO(orderId, bc)); }
+      else { fail++; console.warn('[approval batch] line not ok', bc, rr.error); }
+    });
+  } else {
+    fail = barcodes.length;
+    console.warn('[approval batch] batch failed', res && res.error);
   }
+
   try { localStorage.removeItem('rsa_orders'); } catch {}
   let _msg;
-  if (fail)            _msg = `✅ ${verb} ${ok}${already?` · ⏭️ คนอื่นทำแล้ว ${already}`:''} · ❌ พลาด ${fail}`;
+  if (fail)                _msg = `✅ ${verb} ${ok}${already?` · ⏭️ คนอื่นทำแล้ว ${already}`:''} · ❌ พลาด ${fail}`;
   else if (already && !ok) _msg = `⏭️ คนอื่น${verb}ไปแล้ว ${already} รายการ`;
-  else if (already)    _msg = `✅ ${verb} ${ok} · ⏭️ คนอื่นทำไปแล้ว ${already}`;
-  else                 _msg = `✅ ${verb}แล้ว ${ok} รายการ`;
+  else if (already)        _msg = `✅ ${verb} ${ok} · ⏭️ คนอื่นทำไปแล้ว ${already}`;
+  else                     _msg = `✅ ${verb}แล้ว ${ok} รายการ`;
   showToast(_msg, fail ? 'warning' : 'success');
   closeModal();
   if (typeof renderHomeDashboard === 'function') renderHomeDashboard();
