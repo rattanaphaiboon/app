@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.53</title>
+  <title>Rattana Stock Count v3.54</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -725,19 +725,6 @@
   <div style="height:72px"></div>
 </div>
 
-<!-- History session detail modal -->
-<div class="modal-overlay" id="histModal">
-  <div class="modal" style="max-width:720px">
-    <div class="modal-head">
-      <h3 id="histModalTitle">รายละเอียดการเช็คสต็อก</h3>
-      <button class="modal-close" onclick="closeHistDetail()">×</button>
-    </div>
-    <div class="modal-body" id="histModalBody"></div>
-    <div class="modal-foot">
-      <button class="btn btn-outline btn-sm" onclick="closeHistDetail()">ปิด</button>
-    </div>
-  </div>
-</div>
 
 <!-- Edit-item modal -->
 <div class="modal-overlay" id="editModal">
@@ -769,7 +756,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.53';
+const APP_VERSION = 'v3.54';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 // Live-sheet poll interval. Raised from 5s → 15s so ~30 concurrent users
 // don't exhaust the Apps Script execution quota.
@@ -1123,6 +1110,23 @@ async function confirmDone(status){
   }
 }
 
+// If this user had confirmed "done" and then edits again (e.g. scans another
+// barcode while the page is collapsed), silently reopen: bring the list back and
+// clear the confirm timestamp on the server — they're no longer finished.
+function reopenIfDone(){
+  if (myDone.status !== 'done' || !countSession) return;
+  myDone = { status:'open', doneAt:0 };
+  postWrite({
+    action: 'confirmDone',
+    warehouse: countSession.warehouse,
+    userKey: userKey(),
+    empId: counterDisplayEmpId(),
+    counterName: counterDisplayName(),
+    status: 'open'
+  });
+  showToast('ปลดล็อกอัตโนมัติ — แก้ไขต่อได้', 'info');
+}
+
 function renderDoneBanner(){
   const el = document.getElementById('doneBanner');
   if (!el) return;
@@ -1157,7 +1161,6 @@ function stopDraftPoll() { if (draftPollTimer) { clearInterval(draftPollTimer); 
 // Re-sync everything that depends on the network the moment focus returns.
 function refreshEverything() {
   if (!currentUser) return;
-  if (currentMode === 'history') { historyLoaded = false; loadHistory(true); }
   if (currentMode === 'count')   { fetchAndUpdate(); if (countSession) reloadCountFromLive({silent:true}); }
   if (currentMode === 'summary') { fetchAndUpdate(); renderSummary(); }
 }
@@ -2560,6 +2563,7 @@ async function confirmCount() {
   }
   const ok = await confirmLocationInApp(locVal);
   if (!ok) { if (locEl) locEl.focus(); return; }
+  reopenIfDone();   // editing after "done" → bring the list back & clear the timestamp
   const item = countSession.items[key];
   item.location = locVal;
   countSession.lastLocation = locVal;
@@ -3741,370 +3745,6 @@ function exportCountExcel() {
   showToast('ดาวน์โหลด Excel แล้ว', 'success');
 }
 
-async function saveCountToSheet() {
-  if (!COUNT_SAVE_URL) {
-    showToast('ยังไม่ได้ตั้งค่า Google Sheet — ดู Excel ไปก่อน หรือแจ้งผู้ดูแลตั้งค่า', 'warning');
-    return;
-  }
-  if (counterRequiredButMissing()) {
-    showToast('กรุณาเลือกชื่อผู้นับก่อนบันทึก', 'warning');
-    setMode('count');
-    setTimeout(() => {
-      const sel = document.getElementById('counterSel');
-      if (sel) { sel.focus(); sel.scrollIntoView({behavior:'smooth', block:'center'}); }
-    }, 200);
-    return;
-  }
-  const rows = buildSummaryRows();
-  if (!rows.length) return;
-  const payload = {
-    warehouse: countSession.warehouse,
-    sessionStart: countSession.startedAt,
-    counterName: counterDisplayName(),
-    empId: counterDisplayEmpId(),
-    email: currentUser?.email || '',
-    location: countSession.location || '',
-    savedAt: new Date().toISOString(),
-    rows: rows.flatMap(r => {
-      const lots = itemLots(r.item);
-      const diffCSEA = (() => {
-        if (r.diff === 0) return '0';
-        const sign = r.diff > 0 ? '+' : '-';
-        const a = Math.abs(r.diff), f = r.factorCS > 0 ? r.factorCS : 1;
-        const cs = Math.floor(a / f), ea = a - cs * f;
-        return `${sign}${cs}.${ea}`;
-      })();
-      const status = r.status==='ok' ? 'ตรง' : r.status==='short' ? 'ขาด' : 'เกิน';
-      // Merge lots with the same expiry date (including both-blank = no-date lots)
-      const merged = new Map();
-      lots.forEach(lot => {
-        const key = lot.expiryDate || '';
-        if (!merged.has(key)) merged.set(key, { counts: {EA:0,PA:0,BP:0,CS:0}, expiryDate: key });
-        const m = merged.get(key);
-        ['EA','PA','BP','CS'].forEach(u => { m.counts[u] = (m.counts[u]||0) + (lot.counts[u]||0); });
-      });
-      return [...merged.values()].map((lot, li) => {
-        const lc = lot.counts;
-        const lotPieces = ['EA','PA','BP','CS'].reduce((s,u)=>s+(lc[u]||0)*(r.item.factors[u]||1),0);
-        return {
-          key: r.key, name: r.name,
-          location: r.item.location || countSession.location || '',
-          cs: lc.CS||0, bp: lc.BP||0, pa: lc.PA||0, ea: lc.EA||0,
-          countedPieces: lotPieces,
-          systemRaw: li===0 ? r.systemRaw : '',
-          systemPieces: li===0 ? r.system : 0,
-          diffPieces: li===0 ? r.diff : 0,
-          diffCSEA: li===0 ? diffCSEA : '',
-          status: li===0 ? status : '',
-          expiryDate: lot.expiryDate || '',
-        };
-      });
-    }),
-  };
-  showSpinner('กำลังบันทึกลง Google Sheet...');
-  try {
-    await fetch(COUNT_SAVE_URL, {
-      method: 'POST', mode: 'no-cors',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(payload),
-    });
-    // Clear the local count session — start fresh for the next round
-    const wh = countSession.warehouse;
-    recentlySavedAt[wh] = Date.now();   // block re-adoption from a stale remote draft
-    // Cancel any pending draft sync so a stale items={} POST doesn't race the clear
-    if (draftSyncTimer) { clearTimeout(draftSyncTimer); draftSyncTimer = null; }
-    try { localStorage.removeItem(countStoreKey(wh)); } catch {}
-    clearRemoteDraft(wh);
-    // Belt + suspenders: try clearing again after 2s in case the first POST raced the save.
-    setTimeout(() => clearRemoteDraft(wh), 2000);
-    // Clear live lot rows on the sheet for this user + warehouse
-    try {
-      await fetch(COUNT_SAVE_URL, {
-        method:'POST', mode:'no-cors',
-        headers:{ 'Content-Type':'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action:'clearLive', userKey: userKey(), warehouse: wh })
-      });
-    } catch {}
-    const now = new Date().toISOString();
-    countSession = { warehouse: wh, startedAt: now, items: {}, lastEdit: now };
-    try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
-    renderCountList();
-    renderSummary();
-    historyLoaded = false;  // invalidate history cache so the new save appears next time
-    showToast('บันทึกลง Google Sheet แล้ว ✓ เคลียร์รายการนับแล้ว', 'success');
-    setMode('count');
-  } catch (e) {
-    showToast('บันทึกไม่สำเร็จ: ' + e, 'error');
-  } finally {
-    hideSpinner();
-  }
-}
-
-// ════════════ HISTORY MODE ════════════
-let historyCache = null;
-let historyLoaded = false;
-
-async function loadHistory(force) {
-  if (!COUNT_SAVE_URL) {
-    document.getElementById('historyBody').innerHTML =
-      '<div class="txt-center txt-muted" style="padding:24px 16px">ยังไม่ได้ตั้งค่า Google Sheet</div>';
-    return;
-  }
-  if (historyLoaded && !force && historyCache) { renderHistory(historyCache); return; }
-  document.getElementById('historyBody').innerHTML =
-    '<div class="txt-center txt-muted" style="padding:24px 16px">⏳ กำลังโหลด...</div>';
-  try {
-    const res = await fetch(COUNT_SAVE_URL + '?action=history', { cache: 'no-store' });
-    const json = await res.json();
-    if (!json.ok) throw new Error(json.error || 'fetch failed');
-    historyCache = json.rows || [];
-    historyLoaded = true;
-    renderHistory(historyCache);
-  } catch (e) {
-    document.getElementById('historyBody').innerHTML =
-      `<div class="txt-center" style="padding:24px 16px;color:var(--danger);font-size:13px">โหลดประวัติไม่สำเร็จ: ${e.message||e}</div>`;
-  }
-}
-
-// Group rows by (savedAt + warehouse + counter) into one "session" per save
-function groupSessions(rows) {
-  // Visibility rules — same model as the count tab:
-  //   • Role >= ALL_WAREHOUSE_ROLE → every warehouse AND every counter
-  //   • Role <  ALL_WAREHOUSE_ROLE → own warehouse AND only own counts
-  const allowedWh = new Set(visibleWh);
-  const seeAll    = currentUser && currentUser.role >= ALL_WAREHOUSE_ROLE;
-  const myEmp     = String(currentUser?.empId || '').trim();
-  const myEmail   = String(currentUser?.email || '').toLowerCase();
-  const myName    = String(currentUser?.name  || '').trim();
-  const isMine = r => {
-    if (seeAll) return true;
-    const e = String(r.empId||'').trim();
-    if (e && myEmp && e === myEmp) return true;
-    const n = String(r.counterName||'').trim();
-    if (n && (n === myName || n.toLowerCase() === myEmail)) return true;
-    return false;
-  };
-  const filtered = rows.filter(r => allowedWh.has(String(r.warehouse).toUpperCase()) && isMine(r));
-  // Group by DATE (not full timestamp) so multiple saves in the same day by
-  // the same person at the same warehouse fold into one card.
-  const dayOf = iso => String(iso || '').slice(0, 10);   // "YYYY-MM-DD"
-  const map = new Map();
-  filtered.forEach(r => {
-    const day = dayOf(r.savedAt);
-    const key = `${day}__${r.warehouse}__${r.empId || r.counterName}`;
-    if (!map.has(key)) {
-      map.set(key, { savedAt:r.savedAt, sessionStart:r.sessionStart, warehouse:r.warehouse,
-                     empId:r.empId, counterName:r.counterName, items:[] });
-    } else {
-      const g = map.get(key);
-      // Keep the most recent save timestamp for display; earliest session start
-      if ((r.savedAt||'') > (g.savedAt||''))     g.savedAt = r.savedAt;
-      if (r.sessionStart && (!g.sessionStart || r.sessionStart < g.sessionStart)) g.sessionStart = r.sessionStart;
-    }
-    map.get(key).items.push(r);
-  });
-  return [...map.values()].sort((a,b) => (b.savedAt||'').localeCompare(a.savedAt||''));
-}
-
-let historyWhFilter = 'ALL';
-function setHistoryWhFilter(wh) {
-  historyWhFilter = wh;
-  renderHistory(historyCache || []);
-}
-function renderHistoryChips(allSessions) {
-  const chipBox = document.getElementById('historyWhChips');
-  if (!chipBox) return;
-  // Count sessions per warehouse (using ALL allowed sessions, before chip filter)
-  const counts = {};
-  allSessions.forEach(s => { const w = String(s.warehouse||'').toUpperCase(); counts[w] = (counts[w]||0)+1; });
-  const whs = visibleWh.filter(w => counts[w]); // only show chips for warehouses with history
-  if (whs.length < 2) { chipBox.style.display = 'none'; chipBox.innerHTML = ''; return; }
-  chipBox.style.display = 'flex';
-  const total = allSessions.length;
-  const chips = [
-    `<button class="hist-chip ${historyWhFilter==='ALL'?'active':''}" onclick="setHistoryWhFilter('ALL')">ทั้งหมด <span class="ct">${total}</span></button>`,
-    ...whs.map(w => `<button class="hist-chip ${historyWhFilter===w?'active':''}" onclick="setHistoryWhFilter('${w}')">${w} <span class="ct">${counts[w]}</span></button>`)
-  ];
-  chipBox.innerHTML = chips.join('');
-}
-function renderHistory(rows) {
-  const allSessions = groupSessions(rows || []);
-  renderHistoryChips(allSessions);
-  const sessions = historyWhFilter === 'ALL'
-    ? allSessions
-    : allSessions.filter(s => String(s.warehouse||'').toUpperCase() === historyWhFilter);
-  const body = document.getElementById('historyBody');
-  if (!sessions.length) {
-    body.innerHTML = '<div class="txt-center txt-muted" style="padding:24px 16px;font-size:13px">ยังไม่มีประวัติ — เริ่มต้นด้วยการนับสต็อกแล้วบันทึก</div>';
-    return;
-  }
-  body.innerHTML = sessions.map((s, idx) => {
-    const ok    = s.items.filter(i => i.status==='ตรง').length;
-    const short = s.items.filter(i => i.status==='ขาด').length;
-    const over  = s.items.filter(i => i.status==='เกิน').length;
-    const who   = s.counterName || s.empId || '-';
-    return `
-      <div class="hist-row" data-idx="${idx}">
-        <div style="flex:1;min-width:0">
-          <div class="hist-date">${formatThaiDate(s.savedAt)}</div>
-          <div class="hist-meta">${s.warehouse} · ${WH_NAMES[s.warehouse]||''} · ${who} · ${s.items.length} รายการ</div>
-        </div>
-        <div class="hist-counts">
-          ${ok?`<span class="hc hc-ok">✓ ${ok}</span>`:''}
-          ${short?`<span class="hc hc-short">↓ ${short}</span>`:''}
-          ${over?`<span class="hc hc-over">↑ ${over}</span>`:''}
-        </div>
-        <span style="color:var(--muted);font-size:18px">›</span>
-      </div>`;
-  }).join('');
-  // Store grouped data on the container AND on window as a belt-and-suspenders fallback
-  body._sessions = sessions;
-  window._histSessions = sessions;
-}
-
-// Global delegated click — bound once on script load, survives every
-// innerHTML replacement that renderHistory does on refresh.
-document.addEventListener('click', function (e) {
-  const row = e.target && e.target.closest && e.target.closest('.hist-row');
-  if (!row) return;
-  const idx = parseInt(row.dataset.idx, 10);
-  if (!isFinite(idx)) return;
-  try { openHistDetail(idx); }
-  catch (err) {
-    console.error('openHistDetail failed:', err);
-    showToast('เปิดรายละเอียดไม่สำเร็จ: ' + (err.message || err), 'error');
-  }
-}, true);
-
-function openHistDetail(idx) {
-  const body = document.getElementById('historyBody');
-  const sessions = (body && body._sessions) || window._histSessions || [];
-  const s = sessions[idx];
-  if (!s) { console.warn('openHistDetail: no session at idx', idx, 'of', sessions.length); return; }
-
-  document.getElementById('histModalTitle').textContent =
-    `${formatThaiDate(s.savedAt)} · ${s.warehouse} · ${s.counterName||s.empId||'-'}`;
-
-  // Level 1: group by product key
-  // Level 2: within each product, group by savedAt (exact timestamp = one scan entry)
-  const prodMap = new Map();
-  s.items.forEach(it => {
-    const k = it.key || it.name;
-    if (!prodMap.has(k)) {
-      const prod = productByKey[it.key];
-      let factorCS = prod ? unitFactor(prod, 'CS') : 1;
-      if ((!prod || factorCS===1) && it.cs>0 && it.countedPieces>0) {
-        const inf = Math.round((it.countedPieces - it.ea - (it.bp||0) - (it.pa||0)) / it.cs);
-        if (inf > 1) factorCS = inf;
-      }
-      prodMap.set(k, { name:it.name, key:it.key, factorCS, counted:0,
-                       system:it.systemPieces||0, diff:it.diffPieces||0, status:it.status,
-                       scanMap: new Map() });
-    }
-    const g = prodMap.get(k);
-    g.counted += it.countedPieces||0;
-    if (it.systemPieces) g.system = it.systemPieces;
-    if (it.diffPieces)   g.diff   = it.diffPieces;
-    if (it.status)       g.status = it.status;
-    // Group by savedAt (each unique save time = one scan)
-    const tKey = it.savedAt || '__none__';
-    if (!g.scanMap.has(tKey)) g.scanMap.set(tKey, { savedAt:it.savedAt, counted:0, system:0, lots:[] });
-    const sc = g.scanMap.get(tKey);
-    sc.counted += it.countedPieces||0;
-    if (it.systemPieces) sc.system = it.systemPieces;
-    sc.lots.push(it);
-  });
-
-  const prods = [...prodMap.values()];
-  const nOk    = prods.filter(p=>p.status==='ตรง').length;
-  const nShort = prods.filter(p=>p.status==='ขาด').length;
-  const nOver  = prods.filter(p=>p.status==='เกิน').length;
-  const totC   = prods.reduce((s,p)=>s+p.counted,0);
-  const totSy  = prods.reduce((s,p)=>s+p.system,0);
-  const totD   = prods.reduce((s,p)=>s+(p.diff||0),0);
-
-  const pillTxt = (p) => {
-    if (p.status==='ตรง') return '<span class="srp srp-ok">✓ ตรง</span>';
-    const a=Math.abs(p.diff), f=p.factorCS||1, cs=Math.floor(a/f), ea=a-cs*f;
-    const csea = cs>0?`${cs} CS ${ea} EA`:`${ea} EA`;
-    return `<span class="srp srp-${p.status==='ขาด'?'short':'over'}">${p.status==='ขาด'?'↓':'↑'} ${csea}</span>`;
-  };
-
-  const prodRows = prods.map(p => {
-    const scans = [...p.scanMap.values()].sort((a,b)=>(a.savedAt||'') < (b.savedAt||'') ? -1 : 1);
-    const multiScan = scans.length > 1;
-
-    // Render scan-time sub-rows
-    const scanRows = scans.map((sc, si) => {
-      const timeLabel = sc.savedAt ? formatThaiTime(sc.savedAt) : '—';
-      const hasLots = sc.lots.length > 1 || sc.lots.some(l=>l.expiryDate);
-      const scDiff = sc.counted - sc.system;
-      const scDiffTxt = sc.system
-        ? (scDiff===0 ? '<span style="color:var(--ok);font-weight:700;font-size:12px">ตรง</span>'
-          : `<span style="color:var(--${scDiff<0?'short':'over'});font-weight:700;font-size:12px">${scDiff>0?'+':''}${piecesToCSEA(scDiff, p.factorCS)}</span>`)
-        : '';
-      const lotRows = hasLots ? sc.lots.map(l => {
-        const exp = l.expiryDate
-          ? `<span class="exp-chip" style="font-size:11px">📅 ${formatThaiDate(l.expiryDate)}</span>`
-          : '<span style="color:var(--muted);font-size:11px">ไม่มีวันหมดอายุ</span>';
-        const csea = piecesToCSEA(l.countedPieces||0, p.factorCS);
-        return `<div style="display:flex;align-items:center;gap:8px;padding:7px 14px 7px 32px;border-top:1px solid var(--border);font-size:12px">
-          <span style="flex:1">${exp}</span>
-          <span style="font-weight:600">${csea}</span>
-        </div>`;
-      }).join('') : '';
-
-      if (multiScan) {
-        return `<div class="hd-scan-row${hasLots?' hd-has-lots':''}" onclick="event.stopPropagation();this.classList.toggle('open')">
-          <div class="hd-scan-main">
-            <span class="time-chip" style="font-size:12px">${timeLabel}</span>
-            <span style="font-size:12px;color:var(--muted)">นับ <b style="color:var(--text)">${piecesToCSEA(sc.counted,p.factorCS)}</b>${sc.system?` · ระบบ ${piecesToCSEA(sc.system,p.factorCS)}`:''}</span>
-            <span style="margin-left:auto">${scDiffTxt}</span>
-            ${hasLots?`<span class="hd-chevron" style="font-size:14px">›</span>`:''}
-          </div>
-          ${hasLots?`<div class="hd-lots">${lotRows}</div>`:''}
-        </div>`;
-      } else {
-        // Single scan — only show lots inside product card if has lots
-        return hasLots ? lotRows : '';
-      }
-    }).join('');
-
-    const hasDrill = multiScan || scans.some(sc => sc.lots.length>1 || sc.lots.some(l=>l.expiryDate));
-    return `
-    <div class="hd-prod-row${hasDrill?' hd-has-lots':''}" onclick="this.classList.toggle('open')">
-      <div class="hd-prod-main">
-        <div class="hd-prod-info">
-          <div style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
-          <div style="font-size:12px;color:var(--muted);margin-top:1px">นับ <b>${piecesToCSEA(p.counted,p.factorCS)}</b> · ระบบ ${piecesToCSEA(p.system,p.factorCS)}${multiScan?` · <b>${scans.length} ครั้ง</b>`:''}
-          </div>
-        </div>
-        <div class="hd-prod-right">
-          ${pillTxt(p)}
-          ${hasDrill?`<span class="hd-chevron">›</span>`:''}
-        </div>
-      </div>
-      ${hasDrill?`<div class="hd-lots">${scanRows}</div>`:''}
-    </div>`;
-  }).join('');
-
-  document.getElementById('histModalBody').innerHTML = `
-    <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">
-      ${nOk?`<span class="hc hc-ok" style="padding:5px 12px;border-radius:10px;font-size:13px">✓ ตรง ${nOk}</span>`:''}
-      ${nShort?`<span class="hc hc-short" style="padding:5px 12px;border-radius:10px;font-size:13px">↓ ขาด ${nShort}</span>`:''}
-      ${nOver?`<span class="hc hc-over" style="padding:5px 12px;border-radius:10px;font-size:13px">↑ เกิน ${nOver}</span>`:''}
-      <span style="margin-left:auto;font-size:12px;color:var(--muted);align-self:center">${prods.length} รายการ</span>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:6px">${prodRows}</div>
-    <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);display:flex;justify-content:space-between;font-size:13px;font-weight:700">
-      <span>รวม</span>
-      <span>นับ ${totC.toLocaleString()} · ระบบ ${totSy.toLocaleString()} · ต่าง ${totD>0?'+':''}${totD.toLocaleString()}</span>
-    </div>`;
-  document.getElementById('histModal').classList.add('open');
-}
-function closeHistDetail() {
-  document.getElementById('histModal').classList.remove('open');
-}
 
 // ── Count camera — full-screen overlay ──
 let camMode = 'product'; // 'product' | 'location'
