@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.9  (confirm-done per user/warehouse)
+//  Rattana Stock Count — GAS Backend  v1.10  (confirm-done stamped in Live sheet)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -279,8 +279,10 @@ const LIVE_HEADERS = [
   'lotId','เวลาบันทึก','warehouse','location','empId','ผู้นับ','userKey',
   'รหัสสินค้า','ชื่อสินค้า','factors_json',
   'CS','BP','PA','EA','วันหมดอายุ','expiryISO','sessionStart',
-  'นับได้(ชิ้น)','สต็อกระบบ(CS.EA)','สต็อกระบบ(ชิ้น)','ต่าง(ชิ้น)','ต่าง(CS.EA)'
+  'นับได้(ชิ้น)','สต็อกระบบ(CS.EA)','สต็อกระบบ(ชิ้น)','ต่าง(ชิ้น)','ต่าง(CS.EA)',
+  'เวลายืนยัน'
 ];
+const DONE_COL = LIVE_HEADERS.length;   // 1-based column index of เวลายืนยัน (23)
 
 // Per-warehouse sheets: Live_W1, Live_W2, Live_W3, Live_W4, Live_C4.
 function liveSheetName(wh) {
@@ -451,9 +453,10 @@ function getLiveLots(p) {
 }
 
 // ── CONFIRM DONE (per user, per warehouse) ────────────
-// Sheet "DoneStatus": warehouse | userKey | empId | ผู้นับ | status | เวลายืนยัน
-// status = 'done' (records the Thai timestamp) | 'open' (unlock — clears it).
-// Upsert by warehouse + userKey so a person can confirm / unlock repeatedly.
+// No separate sheet — the Thai timestamp is stamped into the "เวลายืนยัน"
+// column (last column) of every Live_<wh> row belonging to this user.
+// status = 'done' → stamp the time on all their rows.
+// status = 'open' → clear the time from all their rows (unlock).
 function confirmDone(b) {
   const wh = String(b.warehouse || '');
   if (!wh) return { ok:false, error:'warehouse required' };
@@ -461,39 +464,50 @@ function confirmDone(b) {
   if (!uk) return { ok:false, error:'userKey required' };
   const status = (b.status === 'open') ? 'open' : 'done';
   const when = status === 'done' ? thaiDateTime(new Date()) : '';
-  const sh = getOrCreate(ssFor(wh), 'DoneStatus',
-    ['warehouse','userKey','empId','ผู้นับ','status','เวลายืนยัน']);
-  const data = sh.getDataRange().getValues();
-  let rowIdx = -1;
-  for (let i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === wh && String(data[i][1]).toLowerCase() === uk) { rowIdx = i + 1; break; }
-  }
-  const vals = [wh, uk, b.empId || '', b.counterName || b.name || '', status, when];
-  if (rowIdx > 0) sh.getRange(rowIdx, 1, 1, vals.length).setValues([vals]);
-  else            sh.appendRow(vals);
-  return { ok:true, status: status, doneAt: when };
-}
 
-// All users who have confirmed 'done' in this warehouse.
-function getDoneList(wh) {
-  const sh = ssFor(wh).getSheetByName('DoneStatus');
-  if (!sh) return [];
+  const sh = liveSheetFor(wh);
+  // Make sure the header cell exists for older sheets created before this column.
+  if (String(sh.getRange(1, DONE_COL).getValue() || '') !== 'เวลายืนยัน') {
+    sh.getRange(1, DONE_COL).setValue('เวลายืนยัน');
+  }
   const data = sh.getDataRange().getValues();
-  const out = [];
+  let n = 0;
   for (let i = 1; i < data.length; i++) {
     const r = data[i];
-    if (String(r[0] || '') !== String(wh)) continue;
-    if (String(r[4] || '') !== 'done') continue;
-    out.push({
-      userKey:    String(r[1] || '').toLowerCase(),
-      empId:      r[2] || '',
-      name:       r[3] || '',
-      status:     r[4] || '',
-      doneAt:     tsMs(r[5]),
-      doneAtText: r[5] || ''
-    });
+    if (String(r[2] || '') !== wh) continue;                       // warehouse col (index 2)
+    if (String(r[6] || '').toLowerCase() !== uk) continue;          // userKey col (index 6)
+    sh.getRange(i + 1, DONE_COL).setValue(when);
+    n++;
   }
-  return out;
+  return { ok:true, status: status, doneAt: when, rows: n };
+}
+
+// All users who have a confirm timestamp on at least one of their rows.
+function getDoneList(wh) {
+  const sh = ssFor(wh).getSheetByName(liveSheetName(wh));
+  if (!sh) return [];
+  const data = sh.getDataRange().getValues();
+  const byUser = {};
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (String(r[0] || '') === '') continue;
+    if (String(r[2] || '') !== String(wh)) continue;
+    const when = r[DONE_COL - 1];                                   // 0-based index of เวลายืนยัน
+    if (!when) continue;
+    const uk = String(r[6] || '').toLowerCase();
+    const ms = tsMs(when);
+    if (!byUser[uk] || ms > byUser[uk].doneAt) {
+      byUser[uk] = {
+        userKey:    uk,
+        empId:      r[4] || '',
+        name:       r[5] || '',
+        status:     'done',
+        doneAt:     ms,
+        doneAtText: String(when)
+      };
+    }
+  }
+  return Object.keys(byUser).map(function(k){ return byUser[k]; });
 }
 
 // ── GET HISTORY ───────────────────────────────────────
