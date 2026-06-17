@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.51</title>
+  <title>Rattana Stock Count v3.52</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -769,7 +769,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.51';
+const APP_VERSION = 'v3.52';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 // Live-sheet poll interval. Raised from 5s → 15s so ~30 concurrent users
 // don't exhaust the Apps Script execution quota.
@@ -1761,8 +1761,9 @@ function acceptScan(code) {
   return true;
 }
 
-// ZXing reader: decodes the FULL video frame (great 1D support on iOS & Android).
-// Tries rear camera (environment) first, falls back to default device.
+// Dual-engine scanner: native BarcodeDetector first (Android — hardware-accelerated,
+// reads any angle / contrast / size / inverted), ZXing JS as fallback (iOS Safari).
+// Both use the rear camera at high resolution with continuous focus/exposure.
 let currentStream = null;     // MediaStream of the active camera (for torch)
 let torchOn = false;
 
@@ -1776,39 +1777,142 @@ function zxingHints() {
   if (H.ALSO_INVERTED) hints.set(H.ALSO_INVERTED, true);
   if (H.POSSIBLE_FORMATS && ZXingBrowser.BarcodeFormat) {
     const F = ZXingBrowser.BarcodeFormat;
-    hints.set(H.POSSIBLE_FORMATS, [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.ITF].filter(Boolean));
+    hints.set(H.POSSIBLE_FORMATS, [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.CODE_93, F.ITF, F.CODABAR, F.QR_CODE].filter(Boolean));
   }
   return hints;
 }
 
-async function startScanner(videoElId, onDetected) {
-  const reader = new ZXingBrowser.BrowserMultiFormatReader(zxingHints(), { delayBetweenScanAttempts: 80 });
-  const videoEl = document.getElementById(videoElId);
-  const cb = (result) => { if (result) { const t = result.getText(); if (acceptScan(t)) onDetected(t); } };
-  // Ask for the best rear-cam: 1920x1080 + continuous focus. Silently downgraded if unsupported.
-  const hi = {
+// Best rear-camera constraints — high res + continuous focus/exposure/white-balance.
+// These are all "ideal", so a device silently downgrades anything it can't do.
+function bestVideoConstraints(w, h) {
+  return {
     video: {
       facingMode: { ideal: 'environment' },
-      width:  { ideal: 1920 },
-      height: { ideal: 1080 },
+      width:  { ideal: w },
+      height: { ideal: h },
       frameRate: { ideal: 30 },
-      advanced: [{ focusMode: 'continuous' }, { whiteBalanceMode: 'continuous' }],
+      advanced: [
+        { focusMode: 'continuous' },
+        { exposureMode: 'continuous' },
+        { whiteBalanceMode: 'continuous' }
+      ]
     }
   };
+}
+
+// Push focus/exposure/white-balance back to "continuous" after the stream starts
+// (some Android devices ignore the constraint at getUserMedia time but honour it
+// via applyConstraints). Best-effort — failures are harmless.
+async function tuneTrack(stream) {
+  try {
+    const t = stream && stream.getVideoTracks()[0];
+    if (!t || !t.getCapabilities) return;
+    const caps = t.getCapabilities();
+    const adv = [];
+    if (caps.focusMode && caps.focusMode.includes('continuous')) adv.push({ focusMode: 'continuous' });
+    if (caps.exposureMode && caps.exposureMode.includes('continuous')) adv.push({ exposureMode: 'continuous' });
+    if (caps.whiteBalanceMode && caps.whiteBalanceMode.includes('continuous')) adv.push({ whiteBalanceMode: 'continuous' });
+    if (adv.length) await t.applyConstraints({ advanced: adv });
+  } catch {}
+}
+
+// Native BarcodeDetector formats we care about (skip 2D-only ones we never use).
+const NATIVE_FORMATS = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','itf','codabar','qr_code'];
+let _nativeFmtCache = null;
+async function nativeFormats() {
+  if (_nativeFmtCache) return _nativeFmtCache;
+  if (!('BarcodeDetector' in window)) return (_nativeFmtCache = []);
+  let supported = [];
+  try { supported = await window.BarcodeDetector.getSupportedFormats(); } catch { supported = []; }
+  _nativeFmtCache = NATIVE_FORMATS.filter(f => !supported.length || supported.includes(f));
+  return _nativeFmtCache;
+}
+
+// Native-detector scan loop. Runs ~every frame, debounced, reading the live
+// <video>. The native detector handles ANY orientation, low contrast, small or
+// large, and inverted (white-on-dark) codes far better than the JS decoder.
+function runNativeDetector(videoEl, detector, accept, stream) {
+  let stopped = false, busy = false, last = 0, raf = 0;
+  let missStreak = 0;   // when native misses a lot in low light, nudge a re-focus
+  async function tick(ts) {
+    if (stopped) return;
+    if (!busy && videoEl.readyState >= 2 && ts - last >= 60) {
+      busy = true; last = ts;
+      try {
+        const codes = await detector.detect(videoEl);
+        if (codes && codes.length) {
+          // Prefer the code closest to the frame centre (what the user aimed at).
+          const cx = videoEl.videoWidth / 2, cy = videoEl.videoHeight / 2;
+          codes.sort((a, b) => {
+            const da = a.boundingBox ? Math.hypot(a.boundingBox.x + a.boundingBox.width/2 - cx, a.boundingBox.y + a.boundingBox.height/2 - cy) : 1e9;
+            const db = b.boundingBox ? Math.hypot(b.boundingBox.x + b.boundingBox.width/2 - cx, b.boundingBox.y + b.boundingBox.height/2 - cy) : 1e9;
+            return da - db;
+          });
+          const val = (codes[0].rawValue || '').trim();
+          missStreak = 0;
+          if (val && acceptScan(val)) { accept(val); }
+        } else if (++missStreak % 25 === 0) {
+          tuneTrack(stream);   // periodic re-tune helps tricky labels
+        }
+      } catch {}
+      busy = false;
+    }
+    raf = requestAnimationFrame(tick);
+  }
+  raf = requestAnimationFrame(tick);
+  return {
+    stop() {
+      stopped = true;
+      if (raf) cancelAnimationFrame(raf);
+      try { (stream || videoEl.srcObject)?.getTracks().forEach(t => t.stop()); } catch {}
+      try { videoEl.srcObject = null; } catch {}
+    }
+  };
+}
+
+async function startScanner(videoElId, onDetected) {
+  const videoEl = document.getElementById(videoElId);
+  const accept = (t) => onDetected(t);
+
+  // ── ENGINE 1: native BarcodeDetector (Android Chrome/Edge) — fastest & most robust ──
+  const fmts = await nativeFormats();
+  if (fmts.length) {
+    try {
+      let stream;
+      try { stream = await navigator.mediaDevices.getUserMedia(bestVideoConstraints(1920, 1080)); }
+      catch { stream = await navigator.mediaDevices.getUserMedia(bestVideoConstraints(1280, 720)); }
+      videoEl.setAttribute('playsinline', 'true');
+      videoEl.muted = true;
+      videoEl.srcObject = stream;
+      await videoEl.play().catch(() => {});
+      currentStream = stream;
+      torchOn = false;
+      await tuneTrack(stream);
+      updateTorchButton();
+      const detector = new window.BarcodeDetector({ formats: fmts });
+      return runNativeDetector(videoEl, detector, accept, stream);
+    } catch (e) {
+      // fall through to ZXing — make sure any half-open stream is released
+      try { videoEl.srcObject?.getTracks().forEach(t => t.stop()); videoEl.srcObject = null; } catch {}
+    }
+  }
+
+  // ── ENGINE 2: ZXing JS fallback (iOS Safari & anything without BarcodeDetector) ──
+  const reader = new ZXingBrowser.BrowserMultiFormatReader(zxingHints(), { delayBetweenScanAttempts: 60 });
+  const cb = (result) => { if (result) { const t = result.getText(); if (acceptScan(t)) onDetected(t); } };
   let controls;
   try {
-    controls = await reader.decodeFromConstraints(hi, videoEl, cb);
+    controls = await reader.decodeFromConstraints(bestVideoConstraints(1920, 1080), videoEl, cb);
   } catch (e1) {
     try {
-      controls = await reader.decodeFromConstraints(
-        { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
-        videoEl, cb);
+      controls = await reader.decodeFromConstraints(bestVideoConstraints(1280, 720), videoEl, cb);
     } catch (e2) {
       controls = await reader.decodeFromVideoDevice(undefined, videoEl, cb);
     }
   }
   currentStream = videoEl.srcObject || null;
   torchOn = false;
+  await tuneTrack(currentStream);
   updateTorchButton();
   return controls;
 }
