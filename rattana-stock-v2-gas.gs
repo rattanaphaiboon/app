@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.11  (C4 → fresh sheet 18L3B1...)
+//  Rattana Stock Count — GAS Backend  v1.12  (C4 writes→new sheet, reads merge old archive cached 6h)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -416,39 +416,108 @@ function clearLiveForUser(b) {
 }
 
 // Return all live lots for a warehouse (everyone — team summary fans out from here)
+// ── ARCHIVE (read-only) SPREADSHEETS ─────────────────────────
+// Extra spreadsheets whose Live_<wh> rows are MERGED into the live view but never
+// written to. Used to keep showing C4's old 9,300-row sheet after C4 moved to a
+// fresh file. The old data is static, so it's cached 6h to avoid re-reading it on
+// every poll. To turn this off, set the warehouse's list to [] (or remove it).
+const ARCHIVE_SS_ID = {
+  'C4': ['1rWZ7_vWBTx7hcXucAtWNX3ruA5lVro90P3HkQ6amFMg']   // old C4 sheet (history)
+};
+
+// One Live row → lot object (shared by live + archive readers).
+function rowToLot_(r) {
+  let factors = {EA:1,PA:1,BP:1,CS:1};
+  try { factors = JSON.parse(r[9] || '{}'); } catch (_) {}
+  return {
+    lotId:        r[0],
+    ts:           tsMs(r[1]),
+    warehouse:    r[2],
+    location:     r[3] || '',
+    empId:        r[4] || '',
+    name:         r[5] || '',
+    userKey:      r[6] || '',
+    key:          r[7] || '',
+    productName:  r[8] || '',
+    factors:      factors,
+    counts: { CS: r[10]||0, BP: r[11]||0, PA: r[12]||0, EA: r[13]||0 },
+    expiryDate:   r[15] || ''
+  };
+}
+function collectLots_(sh, wh, out, seen) {
+  if (!sh) return;
+  const data = sh.getDataRange().getValues();
+  if (data.length < 2) return;
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (String(r[2] || '') !== wh) continue;       // legacy sheet stores all warehouses
+    const id = String(r[0] || '');
+    if (id && seen[id]) continue;
+    if (id) seen[id] = 1;
+    out.push(rowToLot_(r));
+  }
+}
+
+// ── Chunked CacheService (handles values >100KB) ──
+function cachePutBig_(key, str, ttl) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const size = 90000, n = Math.ceil(str.length / size), obj = {};
+    obj[key + '_n'] = String(n);
+    for (let i = 0; i < n; i++) obj[key + '_' + i] = str.substr(i * size, size);
+    cache.putAll(obj, ttl);
+  } catch (_) {}
+}
+function cacheGetBig_(key) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const nStr = cache.get(key + '_n');
+    if (!nStr) return null;
+    const n = parseInt(nStr, 10), keys = [];
+    for (let i = 0; i < n; i++) keys.push(key + '_' + i);
+    const got = cache.getAll(keys);
+    let s = '';
+    for (let i = 0; i < n; i++) { const c = got[key + '_' + i]; if (c == null) return null; s += c; }
+    return s;
+  } catch (_) { return null; }
+}
+
+// Archived (old, static) lots for a warehouse — cached 6h so the heavy sheet isn't
+// re-read on every poll. Fully defensive: any failure returns [].
+function getArchiveLots(wh) {
+  const ids = ARCHIVE_SS_ID[String(wh || '').toUpperCase()] || [];
+  if (!ids.length) return [];
+  const cacheKey = 'arch_' + wh;
+  const cached = cacheGetBig_(cacheKey);
+  if (cached) { try { return JSON.parse(cached); } catch (_) {} }
+  const out = [], seen = {};
+  ids.forEach(function (id) {
+    try {
+      const ss = SpreadsheetApp.openById(id);
+      const sh = ss.getSheetByName(liveSheetName(wh)) || ss.getSheetByName('Live');
+      collectLots_(sh, wh, out, seen);
+    } catch (_) {}
+  });
+  cachePutBig_(cacheKey, JSON.stringify(out), 21600);   // 6h — old data never changes
+  return out;
+}
+
 function getLiveLots(p) {
   const wh = String(p.warehouse || '');
   if (!wh) return { ok: true, lots: [] };
   const out = [];
-  const seen = {}; // dedupe by lotId in case a row exists in both the per-wh sheet and a legacy "Live" sheet
+  const seen = {}; // dedupe by lotId in case a row exists in more than one sheet
   const sheets = [liveSheetFor(wh)].concat(legacyLiveSheetsFor(wh)).filter(Boolean);
-  sheets.forEach(sh => {
-    const data = sh.getDataRange().getValues();
-    if (data.length < 2) return;
-    for (let i = 1; i < data.length; i++) {
-      const r = data[i];
-      if (String(r[2] || '') !== wh) continue;       // legacy sheet stores all warehouses
-      const id = String(r[0] || '');
-      if (id && seen[id]) continue;
+  sheets.forEach(function (sh) { collectLots_(sh, wh, out, seen); });
+  // Merge archived (old) lots, deduped by lotId — read at most once / 6h.
+  try {
+    getArchiveLots(wh).forEach(function (lot) {
+      const id = String(lot.lotId || '');
+      if (id && seen[id]) return;
       if (id) seen[id] = 1;
-      let factors = {EA:1,PA:1,BP:1,CS:1};
-      try { factors = JSON.parse(r[9] || '{}'); } catch (_) {}
-      out.push({
-        lotId:        r[0],
-        ts:           tsMs(r[1]),
-        warehouse:    r[2],
-        location:     r[3] || '',
-        empId:        r[4] || '',
-        name:         r[5] || '',
-        userKey:      r[6] || '',
-        key:          r[7] || '',
-        productName:  r[8] || '',
-        factors:      factors,
-        counts: { CS: r[10]||0, BP: r[11]||0, PA: r[12]||0, EA: r[13]||0 },
-        expiryDate:   r[15] || ''
-      });
-    }
-  });
+      out.push(lot);
+    });
+  } catch (_) {}
   return { ok: true, lots: out, done: getDoneList(wh) };
 }
 
