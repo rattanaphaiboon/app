@@ -242,7 +242,7 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
 <div class="topbar">
   <header>
     <div class="brand">
-      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.23</span></div>
+      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.24</span></div>
       <div class="subttl">เทียบเช็คสต็อก C4 (นับจริง) × PDDT — ขาด/เกิน</div>
     </div>
     <div class="hgroup">
@@ -262,6 +262,7 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
           <li onclick="exportCompare()">📋 เทียบสต็อก (ตรง/ไม่ตรง)</li>
           <li onclick="exportExpiry()">📅 วันหมดอายุ (รายล็อต)</li>
           <li onclick="exportTransfer()">🔄 ข้ามคลัง (โอน/ปรับสต็อก)</li>
+          <li onclick="exportUncounted()">📦 ยังไม่ได้เช็ค (มีสต็อกแต่ไม่ได้นับ)</li>
         </ul>
       </div>
     </div>
@@ -435,7 +436,7 @@ function expInfo(p){
 }
 
 /* ── state ── */
-let PRODUCTS=[],pddtMap={},pddtMapNZ={},prodByCode={};
+let PRODUCTS=[],pddtMap={},pddtMapNZ={},prodByCode={},PDDTLIST=[];
 // status/shelf/expiry/warehouse/checkDate = array (multi-select, [] = ทั้งหมด) · counter = string (single)
 let F={status:[],shelf:[],counter:'all',expiry:[],warehouse:[],checkDate:[],q:''};
 let SORT='loc';
@@ -451,7 +452,7 @@ async function fetchRows(url){
   return parseCsv(txt);
 }
 /* PDDT: fetch only the 8 columns we use (89% smaller than full sheet) + cache 30 min + fallback to full if columns shift */
-const PDDT_SEL='select B,D,F,H,Q,BN,BO,BP,BQ,BR,BD,BE';
+const PDDT_SEL='select B,D,F,H,Q,BM,BN,BO,BP,BQ,BR,BD,BE';
 const PDDT_CACHE='rsc_pddt_v1', PDDT_TTL=1800000;
 const pddtUrl=sel=>`https://docs.google.com/spreadsheets/d/${CFG.pddtId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(CFG.pddtSheet)}`+(sel?`&tq=${encodeURIComponent(PDDT_SEL)}`:'')+`&t=${Date.now()}`;
 async function fetchPddt(force){
@@ -512,12 +513,14 @@ function showError(e){
 }
 
 function buildPddt(rows){
-  pddtMap={};pddtMapNZ={};
+  pddtMap={};pddtMapNZ={};PDDTLIST=[];
   const cc=['CODE EA','CODE PA','CODE BP','CODE CS'];
   rows.forEach(p=>{
     const obj={qtyCs:num(p['QTY CS'])||0,brand:p['CAT BRAND']||'',size:p['CAT SIZE']||'',
       stock:{W1:p['STOCK W1']||'',W2:p['STOCK W2']||'',W3:p['STOCK W3']||'',W4:p['STOCK W4']||'',C4:p['STOCK C4']||''}};
     cc.forEach(c=>{const code=normCode(p[c]);if(!code)return;if(!pddtMap[code])pddtMap[code]=obj;const nz=code.replace(/^0+/,'');if(nz&&!pddtMapNZ[nz])pddtMapNZ[nz]=obj;});
+    const codesRaw=cc.map(c=>String(p[c]||'').trim()).filter(x=>x&&x.length>3&&x!=='0'&&x!=='-');
+    if(codesRaw.length) PDDTLIST.push({codes:codesRaw.map(normCode),displayCode:String(p['CODE EA']||'').trim()||codesRaw[0],qtyCs:obj.qtyCs,brand:obj.brand,size:obj.size,name:p['SHORT NAME']||'',stock:obj.stock});
   });
 }
 function matchPddt(code){const c=normCode(code);if(pddtMap[c])return pddtMap[c];return pddtMapNZ[c.replace(/^0+/,'')]||null;}
@@ -788,6 +791,42 @@ function exportTransfer(){
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'ข้ามคลัง');
   XLSX.writeFile(wb,_xlFname('crosswh'));
   showToast('Export ข้ามคลัง '+rows.length+' สินค้า ('+whList.join('/')+') ✓','success');
+}
+// 4) ยังไม่ได้เช็ค — PDDT มีสต็อก (บวก/ลบ ไม่ใช่ 0) ในคลังที่เรานับ แต่ไม่มีในข้อมูลนับ = ของตกสำรวจ
+function exportUncounted(){
+  _closeMenus();
+  if(typeof XLSX==='undefined'){ showToast('ไลบรารี Excel ยังโหลดไม่เสร็จ','error'); return; }
+  if(!PDDTLIST.length){ showToast('ยังไม่ได้โหลด PDDT — กด ⟳ โหลดใหม่ก่อน','error'); return; }
+  // คลังที่เรานับ + รหัสที่นับแล้วในแต่ละคลัง (เก็บทั้ง normalized + ตัด 0 นำหน้า)
+  const countedWh={}, countedWarehouses=new Set();
+  PRODUCTS.forEach(p=>{ countedWarehouses.add(p.wh); const set=countedWh[p.wh]||(countedWh[p.wh]=new Set()); const c=normCode(p.code); set.add(c); set.add(c.replace(/^0+/,'')); });
+  if(!countedWarehouses.size){ showToast('ยังไม่มีข้อมูลนับ','error'); return; }
+  const out=[];
+  PDDTLIST.forEach(pd=>{
+    if(!pd.codes.length) return;
+    countedWarehouses.forEach(w=>{
+      const raw=pd.stock[w]||''; if(raw==='') return;
+      const pcs=parseCsEa(raw,pd.qtyCs); if(pcs===0) return;              // ต้องมีสต็อก (บวก/ลบ) ไม่ใช่ 0
+      const set=countedWh[w]; let counted=false;
+      for(const c of pd.codes){ if(set.has(c)||set.has(c.replace(/^0+/,''))){counted=true;break;} }
+      if(counted) return;                                                 // นับแล้วในคลังนี้ → ข้าม
+      const s=csEaOf(pcs,pd.qtyCs);
+      out.push({wh:w,code:pd.displayCode,name:pd.name,brand:pd.brand,size:pd.size,qtyCs:pd.qtyCs,raw,pcs,cs:s.cs,ea:s.ea});
+    });
+  });
+  if(!out.length){ showToast('เยี่ยม! ไม่พบสินค้าที่มีสต็อกแต่ยังไม่ได้เช็ค ✓','success'); return; }
+  out.sort((a,b)=> a.wh.localeCompare(b.wh) || Math.abs(b.pcs)-Math.abs(a.pcs));  // คลัง → สต็อกมากสุดก่อน
+  const rows=out.map(r=>({
+    'คลัง':r.wh, 'รหัสสินค้า':r.code, 'ชื่อสินค้า':r.name, 'CAT BRAND':r.brand, 'CAT SIZE':r.size,
+    'บรรจุ(ชิ้น/ลัง)':r.qtyCs>1?r.qtyCs:'',
+    'สต็อกระบบ (CS.EA)':r.raw, 'สต็อก (ลัง)':r.cs, 'สต็อก (ชิ้น)':r.ea, 'สต็อก (ชิ้นรวม)':r.pcs,
+    'หมายเหตุ':r.pcs<0?'⚠ สต็อกติดลบ':''
+  }));
+  const ws=XLSX.utils.json_to_sheet(rows);
+  ws['!cols']=[{wch:7},{wch:16},{wch:34},{wch:16},{wch:16},{wch:11},{wch:15},{wch:9},{wch:9},{wch:11},{wch:14}];
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'ยังไม่ได้เช็ค');
+  XLSX.writeFile(wb,_xlFname('uncounted'));
+  showToast('Export ยังไม่ได้เช็ค '+rows.length+' รายการ ('+[...countedWarehouses].join('/')+') ✓','success');
 }
 
 function applyFilter(){
