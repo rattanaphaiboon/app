@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.10  (confirm-done stamped in Live sheet)
+//  Rattana Stock Count — GAS Backend  v1.11  (C4 → fresh sheet 18L3B1...)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -21,7 +21,7 @@ const TZ    = 'Asia/Bangkok';
 //  3) Anything not listed here falls back to the default SS_ID.
 // ═════════════════════════════════════════════════════════════
 const WAREHOUSE_SS_ID = {
-  'C4':  '1rWZ7_vWBTx7hcXucAtWNX3ruA5lVro90P3HkQ6amFMg',
+  'C4':  '18L3B1A5e2xEGW1Hgh4lBvskb5tVKqIeao9C3ift9CpU',   // C4 V2 — fresh empty sheet (old 1rWZ7... kept for the 9,300 prior rows)
   'W4':  '18RojK-hmI3-sqh6bRh3YVdt4EZ8EGYHgMGRLxrqkqxw',
   'EW4': '18RojK-hmI3-sqh6bRh3YVdt4EZ8EGYHgMGRLxrqkqxw'  // คลังของเสีย — ใช้ไฟล์เดียวกับ W4
 };
