@@ -242,7 +242,7 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
 <div class="topbar">
   <header>
     <div class="brand">
-      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.21</span></div>
+      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.22</span></div>
       <div class="subttl">เทียบเช็คสต็อก C4 (นับจริง) × PDDT — ขาด/เกิน</div>
     </div>
     <div class="hgroup">
@@ -261,6 +261,7 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
         <ul class="dd-list">
           <li onclick="exportCompare()">📋 เทียบสต็อก (ตรง/ไม่ตรง)</li>
           <li onclick="exportExpiry()">📅 วันหมดอายุ (รายล็อต)</li>
+          <li onclick="exportTransfer()">🔄 ข้ามคลัง (โอน/ปรับสต็อก)</li>
         </ul>
       </div>
     </div>
@@ -723,6 +724,59 @@ function exportExpiry(){
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'วันหมดอายุ');
   XLSX.writeFile(wb,_xlFname('expiry'));
   showToast('Export วันหมดอายุ '+rows.length+' ล็อต ✓','success');
+}
+// จับคู่ "เกิน" ของคลังหนึ่ง กับ "ขาด" ของอีกคลัง → แนะนำโอนย้าย · ที่เหลือ = ปรับเพิ่ม/ตัดสต็อก
+// diff = นับ − ระบบ : เกิน(+) = ของจริงเกินระบบ · ขาด(−) = ของจริงหายไป
+function reconcileWh(whData,whList){
+  const ov=[],sh=[];
+  whList.forEach(w=>{const d=whData[w]; if(!d||d.diff==null)return; if(d.diff>0)ov.push({w,q:d.diff}); else if(d.diff<0)sh.push({w,q:-d.diff});});
+  const transfers=[]; let i=0,j=0;
+  while(i<ov.length&&j<sh.length){
+    const t=Math.min(ov[i].q,sh[j].q);
+    if(t>0){ transfers.push({from:ov[i].w,to:sh[j].w,q:t}); ov[i].q-=t; sh[j].q-=t; }
+    if(ov[i].q===0)i++; if(sh[j].q===0)j++;
+  }
+  const adjusts=[];
+  ov.forEach(o=>{ if(o.q>0) adjusts.push({w:o.w,type:'add',q:o.q}); });   // ยังเกิน → เพิ่มระบบให้ตรงของจริง
+  sh.forEach(s=>{ if(s.q>0) adjusts.push({w:s.w,type:'cut',q:s.q}); });   // ยังขาด → ตัดระบบออก
+  return {transfers,adjusts};
+}
+// 3) ข้ามคลัง — รวมต่อสินค้า · ระบบ/นับ/ต่าง รายคลัง + รวม + แนะนำโอนย้าย/ปรับสต็อก
+function exportTransfer(){
+  _closeMenus();
+  const items=applyFilter();
+  if(!items.length){ showToast('ไม่มีรายการให้ export','error'); return; }
+  if(typeof XLSX==='undefined'){ showToast('ไลบรารี Excel ยังโหลดไม่เสร็จ','error'); return; }
+  const byCode={};
+  items.forEach(p=>{
+    let c=byCode[p.code]; if(!c)c=byCode[p.code]={code:p.code,name:p.name,brand:p.brand||'',size:p.size||'',wh:{}};
+    if(p.brand&&!c.brand)c.brand=p.brand; if(p.size&&!c.size)c.size=p.size; if(p.name&&(!c.name||c.name===c.code))c.name=p.name;
+    c.wh[p.wh]={system:p.found?p.system:null,counted:p.counted,diff:p.found?p.diff:null};
+  });
+  const order=['C4','W1','W2','W3','W4','HQ'], whSet=new Set();
+  Object.values(byCode).forEach(c=>Object.keys(c.wh).forEach(w=>whSet.add(w)));
+  const whList=order.filter(w=>whSet.has(w)).concat([...whSet].filter(w=>order.indexOf(w)<0).sort());
+  const codes=Object.values(byCode).sort((a,b)=>(a.brand||'').localeCompare(b.brand||'','th')||(a.size||'').localeCompare(b.size||'','th')||(a.name||'').localeCompare(b.name||'','th'));
+  const rows=codes.map(c=>{
+    const row={'ชื่อสินค้า':c.name,'รหัสสินค้า':c.code,'CAT BRAND':c.brand,'CAT SIZE':c.size};
+    let totS=0,totC=0,totD=0,anyFound=false;
+    whList.forEach(w=>{const d=c.wh[w];
+      row[w+' ระบบ']=d&&d.system!=null?d.system:''; row[w+' นับ']=d?d.counted:''; row[w+' ต่าง']=d&&d.diff!=null?d.diff:'';
+      if(d){ totC+=d.counted; if(d.system!=null){totS+=d.system;anyFound=true;} if(d.diff!=null)totD+=d.diff; }
+    });
+    row['รวม ระบบ']=anyFound?totS:''; row['รวม นับ']=totC; row['รวม ต่าง']=anyFound?totD:'';
+    const {transfers,adjusts}=reconcileWh(c.wh,whList);
+    row['คำแนะนำโอนย้าย']=transfers.map(t=>`โอน ${t.from}→${t.to} : ${t.q.toLocaleString()}`).join('  ·  ');
+    row['ปรับสต็อก (เพิ่ม/ตัด)']=adjusts.map(a=>`${a.type==='add'?'เพิ่ม':'ตัดออก'} ${a.w} : ${a.q.toLocaleString()}`).join('  ·  ');
+    return row;
+  });
+  const cols=[{wch:34},{wch:16},{wch:16},{wch:14}];
+  whList.forEach(()=>{cols.push({wch:9},{wch:9},{wch:9});});
+  cols.push({wch:10},{wch:10},{wch:10},{wch:24},{wch:24});
+  const ws=XLSX.utils.json_to_sheet(rows); ws['!cols']=cols;
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'ข้ามคลัง');
+  XLSX.writeFile(wb,_xlFname('crosswh'));
+  showToast('Export ข้ามคลัง '+rows.length+' สินค้า ('+whList.join('/')+') ✓','success');
 }
 
 function applyFilter(){
