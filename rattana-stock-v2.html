@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.60</title>
+  <title>Rattana Stock Count v3.61</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -325,6 +325,14 @@
     .cs-opt:first-child{border-top:none}
     .cs-opt:hover{background:rgba(47,109,240,.08)}
     .cs-opt.on{background:rgba(29,59,110,.08);font-weight:700;color:var(--navy-mid)}
+    /* Location autocomplete popup */
+    .locpop{position:fixed;z-index:9600;background:var(--card-bg);border:1.5px solid var(--navy-mid);border-radius:11px;box-shadow:var(--shadow-lg);max-height:240px;overflow-y:auto;-webkit-overflow-scrolling:touch;display:none}
+    .locpop.show{display:block}
+    .loc-opt{padding:11px 13px;font-size:14px;color:var(--text);cursor:pointer;border-top:1px solid var(--border);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .loc-opt:first-child{border-top:none}
+    .loc-opt:active,.loc-opt:hover{background:rgba(47,109,240,.1)}
+    .loc-opt b{color:#2f6df0}
+    .loc-clear{height:42px;width:42px;flex-shrink:0;border-radius:11px;background:var(--row-alt);color:var(--muted);border:1px solid var(--border);font-size:16px;cursor:pointer}
     .pb-flag{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:800;color:var(--navy-mid);margin-bottom:10px}
     .pb-top{display:flex;align-items:center;gap:11px}
     .pb-info{flex:1;min-width:0}
@@ -750,6 +758,9 @@
 <script>
 // ── CONFIG ──────────────────────────────────────────────
 const SHEET_ID   = '16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
+// Master Location list — autocomplete suggestions for the Location field (column "โลเคชัน").
+const LOCATION_SHEET_ID = '1OmdfoSmPPA3ueKn624AU-WY6BJxS5iSS4e5YlPgl5nk';
+const LOCATION_GID      = '830311777';
 const CACHE_KEY  = 'rattana_stock_v3';   // bumped: schema now includes IB W1-W4 + C4
 const CACHE_TTL  = 60 * 1000;   // 1 minute — show cache instantly, refresh fast
 
@@ -757,7 +768,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.60';
+const APP_VERSION = 'v3.61';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 // Live-sheet poll interval. Raised from 5s → 15s so ~30 concurrent users
 // don't exhaust the Apps Script execution quota.
@@ -1401,6 +1412,7 @@ function enterApp() {
   document.getElementById('appScreen').classList.add('show');
 
   loadData();
+  loadLocations();   // master Location suggestions (optional — failure is harmless)
   startDataPoll();
   setMode('count');   // start in count mode (lookup tab removed)
   renderCounterPicker();
@@ -2466,10 +2478,11 @@ function renderPending() {
         <label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;display:block">📍 ที่ตั้ง</label>
         ${locChips}
         <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
-          <input id="penLoc" class="input input-compact" autocomplete="off"
+          <input id="penLoc" class="input input-compact loc-auto" autocomplete="off"
                  value="${(countSession && (countSession.lastLocation||countSession.location)) ? String(countSession.lastLocation||countSession.location||'').replace(/"/g,'&quot;') : ''}"
                  placeholder="พิมพ์หรือสแกน Location..."
                  style="flex:1;min-width:0">
+          <button type="button" onclick="clearPenLoc()" title="ล้าง Location" class="loc-clear">✕</button>
           <button type="button" onclick="openPendingLocCamera()" title="สแกน Location"
                   style="height:42px;width:42px;flex-shrink:0;border-radius:11px;background:var(--blue-soft);color:var(--navy-mid);border:none;font-size:18px;cursor:pointer">📷</button>
         </div>
@@ -2512,6 +2525,79 @@ function pickLocChip(enc){
   const inp = document.getElementById('penLoc');
   if (inp) { inp.value = v; inp.focus(); }
 }
+
+// ── Location autocomplete (master list from the Location sheet) ──────────────
+// Pure-additive: if the list fails to load, the Location field still works exactly
+// as before — users just won't get suggestions.
+let locationList = [];
+let locActiveInput = null;
+async function loadLocations(){
+  if (!LOCATION_SHEET_ID) return;
+  try {
+    const url = `https://docs.google.com/spreadsheets/d/${LOCATION_SHEET_ID}/gviz/tq?tqx=out:csv&gid=${LOCATION_GID}&tq=${encodeURIComponent('select A')}`;
+    const res = await fetch(url, { cache:'no-store' });
+    const rows = parseCsv(await res.text());
+    const set = new Set();
+    rows.forEach(r => {
+      const v = String(r['โลเคชัน'] || r['Location'] || Object.values(r)[0] || '').trim();
+      if (v) set.add(v);
+    });
+    locationList = [...set].sort((a,b) => a.localeCompare(b, undefined, { numeric:true }));
+  } catch (e) { /* suggestions optional — leave list empty */ }
+}
+function locEsc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+function locHighlight(text, q){
+  const t = locEsc(text);
+  if (!q) return t;
+  const i = text.toLowerCase().indexOf(q);
+  if (i < 0) return t;
+  return locEsc(text.slice(0,i)) + '<b>' + locEsc(text.slice(i, i+q.length)) + '</b>' + locEsc(text.slice(i+q.length));
+}
+function locAutoShow(input){
+  if (!input || !locationList.length) { locAutoHide(); return; }
+  locActiveInput = input;
+  const q = String(input.value || '').trim().toLowerCase();
+  let matches = q ? locationList.filter(l => l.toLowerCase().includes(q)) : locationList.slice();
+  matches = matches.slice(0, 50);
+  const pop = document.getElementById('locPop');
+  if (!pop) return;
+  if (!matches.length) { locAutoHide(); return; }
+  pop.innerHTML = matches.map(l => `<div class="loc-opt" data-v="${locEsc(l)}">${locHighlight(l, q)}</div>`).join('');
+  const r = input.getBoundingClientRect();
+  pop.style.left  = r.left + 'px';
+  pop.style.top   = (r.bottom + 4) + 'px';
+  pop.style.width = r.width + 'px';
+  pop.classList.add('show');
+}
+function locAutoHide(){
+  const pop = document.getElementById('locPop');
+  if (pop) pop.classList.remove('show');
+}
+function clearPenLoc(){
+  const inp = document.getElementById('penLoc');
+  if (inp) { inp.value = ''; inp.focus(); }
+  locAutoHide();
+}
+// Delegated events — work for the dynamically-rendered #penLoc input.
+document.addEventListener('input',  e => { if (e.target.classList && e.target.classList.contains('loc-auto')) locAutoShow(e.target); });
+document.addEventListener('focusin', e => { if (e.target.classList && e.target.classList.contains('loc-auto') && String(e.target.value||'').trim()) locAutoShow(e.target); });
+// Use mousedown + preventDefault so picking an option doesn't blur the input first.
+document.addEventListener('mousedown', e => {
+  const opt = e.target.closest && e.target.closest('.loc-opt');
+  if (opt && locActiveInput) {
+    e.preventDefault();
+    locActiveInput.value = opt.dataset.v || '';
+    if (locActiveInput.id === 'locationInput') { try { onLocationChange(); } catch {} }
+    locAutoHide();
+    return;
+  }
+  // tap/click outside the field + popup → close
+  if (!(e.target.classList && e.target.classList.contains('loc-auto')) && !(e.target.closest && e.target.closest('#locPop'))) {
+    locAutoHide();
+  }
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') locAutoHide(); });
+window.addEventListener('scroll', () => locAutoHide(), true);
 function openPendingLocCamera(){
   if (camStarting) return;
   camMode = 'location-pending';
@@ -3948,6 +4034,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
 <!-- ── FAB camera button ── -->
 <button id="fab" onclick="toggleCountCamera()" title="สแกน">📷</button>
+
+<!-- Location autocomplete suggestions popup -->
+<div id="locPop" class="locpop"></div>
 
 <!-- ── Full-screen camera overlay ── -->
 <div id="camOv">
