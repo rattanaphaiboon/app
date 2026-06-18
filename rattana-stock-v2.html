@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.62</title>
+  <title>Rattana Stock Count v3.63</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -768,7 +768,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.62';
+const APP_VERSION = 'v3.63';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 // Live-sheet poll interval. Raised from 5s → 15s so ~30 concurrent users
 // don't exhaust the Apps Script execution quota.
@@ -1452,13 +1452,32 @@ function parseCsv(text) {
 
 // ── DATA LOADING ─────────────────────────────────────────
 const getCached = k => { try{const i=JSON.parse(localStorage.getItem(k));return i&&Date.now()-i.ts<CACHE_TTL?i.data:null;}catch{return null}};
+// Last-known data regardless of age — used as a fallback when the source sheet
+// is temporarily unreachable (e.g. mid-sync), so the app never goes blank.
+const getCachedAny = k => { try{const i=JSON.parse(localStorage.getItem(k));return (i&&i.data&&i.data.length)?i.data:null;}catch{return null}};
 const setCache  = (k,d) => { try{localStorage.setItem(k,JSON.stringify({ts:Date.now(),data:d}));}catch{} };
 
+// When a live fetch fails, keep the app usable on the last-known stock instead
+// of showing an empty screen.
+function fallbackToStaleStock() {
+  const stale = getCachedAny(CACHE_KEY);
+  if (stale && stale.length) {
+    buildIndex(stale);
+    setStatusOk(stale.length);
+    const el = document.getElementById('dataStatus');
+    if (el) el.textContent = '⚠ ใช้สต็อกล่าสุด — ต้นทางไม่ตอบ (กำลังลองใหม่)';
+    setStatusDot('error');
+    return true;
+  }
+  return false;
+}
+
 async function loadData(force=false) {
-  // Always show cached data instantly so UI is usable on first paint
+  // Show cached data instantly so UI is usable on first paint. Prefer a fresh
+  // cache; otherwise fall back to any stored copy (so a down source still works).
   if (!force) {
-    const cached = getCached(CACHE_KEY);
-    if (cached) {
+    const cached = getCached(CACHE_KEY) || getCachedAny(CACHE_KEY);
+    if (cached && cached.length) {
       buildIndex(cached);
       setStatusOk(cached.length);
       fetchAndUpdate(); // silent background refresh
@@ -1475,14 +1494,16 @@ async function loadData(force=false) {
       setCache(CACHE_KEY, data);
       buildIndex(data);
       setStatusOk(data.length);
-    } else {
+    } else if (!fallbackToStaleStock()) {
       document.getElementById('dataStatus').textContent = 'โหลดไม่ได้ — กรุณา Refresh';
       setStatusDot('error');
       showToast('โหลดข้อมูลไม่ได้', 'error');
     }
   } catch (e) {
-    document.getElementById('dataStatus').textContent = 'โหลดไม่ได้ — กรุณา Refresh';
-    setStatusDot('error');
+    if (!fallbackToStaleStock()) {
+      document.getElementById('dataStatus').textContent = 'โหลดไม่ได้ — กรุณา Refresh';
+      setStatusDot('error');
+    }
   } finally {
     setLoadingBar(false);
   }
@@ -1513,9 +1534,17 @@ const NEEDED_COLS = 'A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,BC,BD,BE,BM,BN,BO,BP,BQ,B
 async function fetchSheet() {
   const tq  = encodeURIComponent(`select ${NEEDED_COLS}`);
   const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&tq=${tq}`;
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  return parseCsv(await res.text());
+  // Time out after 20s so a hung source sheet doesn't freeze the app — we fall
+  // back to the last cached stock instead of waiting forever.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return parseCsv(await res.text());
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function buildIndex(data) {
