@@ -235,7 +235,7 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
 <div class="topbar">
   <header>
     <div class="brand">
-      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.9</span></div>
+      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.10</span></div>
       <div class="subttl">เทียบเช็คสต็อก C4 (นับจริง) × PDDT — ขาด/เกิน</div>
     </div>
     <div class="hgroup">
@@ -424,18 +424,23 @@ async function loadData(force){
   st.style.display='block';
   st.innerHTML='<div class="spin"></div>กำลังโหลดข้อมูล...';
   document.getElementById('list').innerHTML='';
-  let pddt,count;
-  try{ pddt=await fetchPddt(force); }
-  catch(e){ showError({which:'pddt',message:(e&&e.message)||String(e)}); setLoading(false); return; }
+  const cf=document.getElementById('srcInfo');
+  const countLink=`<a href="https://docs.google.com/spreadsheets/d/${CFG.countId}/edit" target="_blank">Rattana Stock — C4 · ${CFG.countSheet}</a>`;
+  const pddtLink=`<a href="https://docs.google.com/spreadsheets/d/${CFG.pddtId}/edit" target="_blank">PDDT (Stocksync)</a>`;
+  // 1) Count first — small & fast → first paint using count-time snapshot system stock
+  let count;
   try{ count=await fetchRows(gviz(CFG.countId,CFG.countSheet)); }
   catch(e){ showError({which:'count',message:(e&&e.message)||String(e)}); setLoading(false); return; }
+  buildProducts(count); buildFilters(); render(); setLoading(false);
+  cf.innerHTML=`ข้อมูลนับ: ${countLink} · ระบบ: <b>ณ ตอนนับ</b> <span style="color:var(--muted)">⏳ กำลังดึงค่าล่าสุดจาก PDDT…</span><br>โหลดเมื่อ ${formatThaiDateTime(new Date())}`;
+  // 2) PDDT in background → refine system stock to live, then re-render
   try{
-    buildPddt(pddt); buildProducts(count); buildFilters(); render();
-    document.getElementById('srcInfo').innerHTML=
-      `ข้อมูลนับ: <a href="https://docs.google.com/spreadsheets/d/${CFG.countId}/edit" target="_blank">Rattana Stock — C4 · ${CFG.countSheet}</a> · `+
-      `ระบบ: <a href="https://docs.google.com/spreadsheets/d/${CFG.pddtId}/edit" target="_blank">PDDT (Stocksync)</a><br>โหลดเมื่อ ${formatThaiDateTime(new Date())}`;
-  }catch(e){ showError({which:'render',message:(e&&e.message)||String(e)}); }
-  finally{ setLoading(false); }
+    const pddt=await fetchPddt(force);
+    buildPddt(pddt); applyPddt(); buildFilters(); render();
+    cf.innerHTML=`ข้อมูลนับ: ${countLink} · ระบบ: ${pddtLink} <span style="color:var(--success)">✓ ค่าล่าสุด</span><br>โหลดเมื่อ ${formatThaiDateTime(new Date())}`;
+  }catch(e){
+    cf.innerHTML=`ข้อมูลนับ: ${countLink} · ระบบ: <b>ณ ตอนนับ</b> <span style="color:var(--danger)">⚠ ดึง PDDT ล่าสุดไม่ได้ — แสดงค่า ณ ตอนนับแทน</span><br>โหลดเมื่อ ${formatThaiDateTime(new Date())}`;
+  }
 }
 function showError(e){
   const st=document.getElementById('state'); st.style.display='block';
@@ -478,18 +483,34 @@ function buildProducts(rows){
   });
   prodByCode={};
   PRODUCTS=Object.values(by).map(g=>{
-    const pd=matchPddt(g.code);
-    const qtyCs=(pd&&pd.qtyCs)||g.csCount||1;
-    const system=pd?parseCsEa(pd.stockC4,qtyCs):null;
-    const diff=pd?(g.counted-system):null;
-    let status='none'; if(pd){status=diff===0?'match':diff<0?'short':'over';}
+    const qtyCs=g.csCount||1;
+    const system=(g.snap!=null)?g.snap:null;                 // count-time snapshot — PDDT refines to live later
+    const diff=(system!=null)?(g.counted-system):null;
+    const status=(system!=null)?(diff===0?'match':diff<0?'short':'over'):'none';
     const locArr=[...g.locs].sort();
     const shelves=new Set(locArr.map(l=>shelfOf(l)));
-    const prod={code:g.code,name:g.name||(pd&&pd.name)||g.code,brand:(pd&&pd.brand)||'',group:(pd&&pd.group)||'',size:(pd&&pd.size)||'',
-      counted:g.counted,system,diff,status,qtyCs,lots:g.lots,snap:g.snap,wh:g.wh||'C4',lotRows:g.lotRows,
+    const prod={code:g.code,name:g.name||g.code,brand:'',group:'',size:'',
+      counted:g.counted,system,diff,status,qtyCs,lots:g.lots,snap:g.snap,wh:g.wh||'C4',lotRows:g.lotRows,live:false,
       locs:locArr,primary:locArr[0]||'',shelves:[...shelves],counters:[...g.counters],
-      expISO:(g.expiry.sort()[0]||''),expDate:(g.expiry[0]?new Date(g.expiry[0]+'T00:00:00'):null),found:!!pd};
+      expISO:(g.expiry.sort()[0]||''),expDate:(g.expiry[0]?new Date(g.expiry[0]+'T00:00:00'):null),found:(system!=null)};
     prodByCode[g.code]=prod; return prod;
+  });
+}
+// Refine system stock from count-time snapshot → live PDDT (runs after PDDT loads in background)
+function applyPddt(){
+  PRODUCTS.forEach(p=>{
+    p.live=true;
+    const pd=matchPddt(p.code);
+    if(pd){
+      p.qtyCs=pd.qtyCs||p.qtyCs;
+      p.brand=pd.brand||''; p.size=pd.size||'';
+      p.system=parseCsEa(pd.stockC4,p.qtyCs);
+      p.diff=p.counted-p.system;
+      p.found=true;
+      p.status=p.diff===0?'match':p.diff<0?'short':'over';
+    }else if(p.snap==null){
+      p.found=false; p.system=null; p.diff=null; p.status='none';
+    }
   });
 }
 function shelfOf(loc){if(!loc)return '—';const p=loc.split('.');return p.length>=2&&p[1]?p[1]:'—';}
