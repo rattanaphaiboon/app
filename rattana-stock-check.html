@@ -88,7 +88,10 @@ header{background:var(--navy);color:#fff;padding:10px 14px;padding-top:max(10px,
 .dd-list li{padding:9px 13px;cursor:pointer;font-size:14px;white-space:nowrap;display:flex;justify-content:space-between;gap:12px;align-items:center}
 .dd-list li:hover{background:var(--row-alt)}
 .dd-list li.sel{color:var(--gold);font-weight:700}
-.dd-cnt{color:var(--muted);font-weight:400;font-size:12px}
+.dd-list li .dd-opt{display:flex;align-items:center;gap:8px;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.dd-list li.multi .dd-opt::before{content:'☐';font-size:16px;line-height:1;opacity:.5;flex-shrink:0}
+.dd-list li.multi.sel .dd-opt::before{content:'☑';opacity:1;color:var(--gold)}
+.dd-cnt{color:var(--muted);font-weight:400;font-size:12px;flex-shrink:0}
 .excelbtn{display:inline-flex;align-items:center;gap:5px;height:44px;padding:0 14px;border-radius:22px;background:var(--success);color:#fff;font-size:13px;font-weight:700;white-space:nowrap;flex-shrink:0}
 .excelbtn:hover{opacity:.9}
 
@@ -237,7 +240,7 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
 <div class="topbar">
   <header>
     <div class="brand">
-      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.14</span></div>
+      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.15</span></div>
       <div class="subttl">เทียบเช็คสต็อก C4 (นับจริง) × PDDT — ขาด/เกิน</div>
     </div>
     <div class="hgroup">
@@ -387,6 +390,18 @@ function fmtCs(totalEa,qtyCs){
   return (neg?'-':'')+(cs?cs+' ลัง ':'')+(ea||!cs?ea+' ชิ้น':'');
 }
 function monthsAhead(n){const d=new Date();d.setMonth(d.getMonth()+n);return d;}
+// ช่วงวันหมดอายุแบบ "ไม่ซ้อนกัน" (non-overlapping bands) — ใช้วันหมดอายุล็อตที่ใกล้สุดของ SKU (p.expDate)
+function expLimits(){return {now:new Date(),m1:monthsAhead(1),m2:monthsAhead(2),m3:monthsAhead(3),m6:monthsAhead(6)};}
+function bandOf(p,L){
+  if(!p.expDate) return 'none';
+  const d=p.expDate;
+  if(d<L.now) return 'exp';
+  if(d<L.m1) return 'b1';
+  if(d<L.m2) return 'b2';
+  if(d<L.m3) return 'b3';
+  if(d<L.m6) return 'b6';
+  return 'b6p';
+}
 function expInfo(p){
   if(!p.expDate) return null;
   const days=Math.floor((p.expDate-new Date())/86400000);
@@ -400,8 +415,11 @@ function expInfo(p){
 
 /* ── state ── */
 let PRODUCTS=[],pddtMap={},pddtMapNZ={},prodByCode={};
-let F={status:'all',shelf:'all',counter:'all',expiry:'all',q:''};
+// status/shelf/expiry = array (multi-select, [] = ทั้งหมด) · counter = string (single)
+let F={status:[],shelf:[],counter:'all',expiry:[],q:''};
 let SORT='loc';
+const MULTI={status:1,shelf:1,expiry:1};
+const DD={status:{list:'listStatus',val:'valStatus'},shelf:{list:'listShelf',val:'valShelf'},expiry:{list:'listExpiry',val:'valExpiry'},counter:{list:'listCounter',val:'valCounter'}};
 
 async function fetchRows(url){
   const r=await fetch(url); const txt=await r.text();
@@ -529,22 +547,45 @@ function shelfOf(loc){const s=String(loc||'').trim();if(!/^c4\./i.test(s))return
 
 function buildFilters(){
   const cnt=c=>PRODUCTS.filter(p=>p.status===c).length;
-  const now=new Date(), N=PRODUCTS.length;
-  const expCnt=v=>v==='exp'?PRODUCTS.filter(p=>p.expDate&&p.expDate<now).length:(function(){const lim=monthsAhead(+v);return PRODUCTS.filter(p=>p.expDate&&p.expDate<=lim).length;})();
+  const N=PRODUCTS.length;
   fillDD('status','listStatus','valStatus',[{v:'all',label:'ทั้งหมด',c:N},{v:'short',label:'ขาด',c:cnt('short')},{v:'over',label:'เกิน',c:cnt('over')},{v:'match',label:'ตรง',c:cnt('match')},{v:'none',label:'ไม่พบ',c:cnt('none')}]);
-  fillDD('expiry','listExpiry','valExpiry',[{v:'all',label:'ทั้งหมด',c:N},{v:'exp',label:'หมดอายุแล้ว',c:expCnt('exp')},{v:'1',label:'≤1 เดือน',c:expCnt('1')},{v:'2',label:'≤2 เดือน',c:expCnt('2')},{v:'3',label:'≤3 เดือน',c:expCnt('3')},{v:'6',label:'≤6 เดือน',c:expCnt('6')}]);
+  const L=expLimits(), bc={}; PRODUCTS.forEach(p=>{const b=bandOf(p,L);bc[b]=(bc[b]||0)+1;});
+  fillDD('expiry','listExpiry','valExpiry',[{v:'all',label:'ทั้งหมด',c:N},{v:'exp',label:'หมดอายุแล้ว',c:bc.exp||0},{v:'b1',label:'0-1 เดือน',c:bc.b1||0},{v:'b2',label:'1-2 เดือน',c:bc.b2||0},{v:'b3',label:'2-3 เดือน',c:bc.b3||0},{v:'b6',label:'3-6 เดือน',c:bc.b6||0},{v:'b6p',label:'มากกว่า 6 เดือน',c:bc.b6p||0},{v:'none',label:'ไม่ระบุวันหมดอายุ',c:bc.none||0}]);
   const sh={}; PRODUCTS.forEach(p=>p.shelves.forEach(s=>sh[s]=(sh[s]||0)+1));
   fillDD('shelf','listShelf','valShelf',[{v:'all',label:'ทั้งหมด',c:N}].concat(Object.keys(sh).sort((a,b)=>a==='—'?1:b==='—'?-1:a.localeCompare(b,undefined,{numeric:true})).map(s=>({v:s,label:s,c:sh[s]}))));
   const cn={}; PRODUCTS.forEach(p=>p.counters.forEach(c=>cn[c]=(cn[c]||0)+1));
   fillDD('counter','listCounter','valCounter',[{v:'all',label:'ทั้งหมด',c:N}].concat(Object.keys(cn).sort().map(c=>({v:c,label:c,c:cn[c]}))));
 }
 function fillDD(key,listId,valId,opts){
-  const cur=F[key], sel=opts.find(o=>o.v===cur)||opts[0];
-  document.getElementById(valId).textContent=sel.label;
+  const multi=!!MULTI[key], cur=F[key];
+  document.getElementById(valId).textContent=ddLabel(key,opts);
   document.getElementById(listId).innerHTML=opts.map(o=>{
     const lbl=String(o.label).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
-    return `<li data-key="${key}" data-v="${o.v}" data-lbl="${lbl}" class="${o.v===cur?'sel':''}">${lbl}${o.c!=null?` <span class="dd-cnt">(${o.c})</span>`:''}</li>`;
+    const on=multi?(o.v==='all'?cur.length===0:cur.includes(o.v)):(o.v===cur);
+    const cls=(multi?'multi ':'')+(on?'sel':'');
+    return `<li data-key="${key}" data-v="${o.v}" data-lbl="${lbl}" class="${cls}"><span class="dd-opt">${lbl}</span>${o.c!=null?`<span class="dd-cnt">(${o.c})</span>`:''}</li>`;
   }).join('');
+}
+// ป้ายบนปุ่ม dropdown: single = label ของค่าที่เลือก · multi = ทั้งหมด / label เดียว / "เลือก N รายการ"
+function ddLabel(key,opts){
+  const cur=F[key];
+  if(!MULTI[key]){const o=opts.find(o=>o.v===cur)||opts[0];return o.label;}
+  if(!cur.length){const a=opts.find(o=>o.v==='all')||opts[0];return a.label;}
+  if(cur.length===1){const o=opts.find(o=>o.v===cur[0]);return o?o.label:'เลือก 1 รายการ';}
+  return 'เลือก '+cur.length+' รายการ';
+}
+// toggle multi โดยไม่ rebuild list (รักษา scroll + ช่องค้นหา) — count ใน dropdown คงที่อยู่แล้ว
+function syncMultiDD(key){
+  const list=document.getElementById(DD[key].list), sel=F[key]; let oneLbl='';
+  list.querySelectorAll('li[data-v]').forEach(li=>{
+    const v=li.dataset.v, on=(v==='all')?sel.length===0:sel.includes(v);
+    li.classList.toggle('sel',on);
+    if(on&&v!=='all'&&sel.length===1)oneLbl=li.dataset.lbl;
+  });
+  const val=document.getElementById(DD[key].val);
+  if(!sel.length){const a=list.querySelector('li[data-v="all"]');val.textContent=a?a.dataset.lbl:'ทั้งหมด';}
+  else if(sel.length===1)val.textContent=oneLbl||'เลือก 1 รายการ';
+  else val.textContent='เลือก '+sel.length+' รายการ';
 }
 function toggleDD(btn){
   const wrap=btn.closest('.dd-wrap'), open=wrap.classList.contains('open');
@@ -626,13 +667,12 @@ function exportExpiry(){
 }
 
 function applyFilter(){
-  const q=F.q.toLowerCase();
-  const now=new Date(),lim=(F.expiry!=='all'&&F.expiry!=='exp')?monthsAhead(+F.expiry):null;
+  const q=F.q.toLowerCase(), L=expLimits();
   return PRODUCTS.filter(p=>{
-    if(F.status!=='all'&&p.status!==F.status) return false;
-    if(F.shelf!=='all'&&!p.shelves.includes(F.shelf)) return false;
+    if(F.status.length&&!F.status.includes(p.status)) return false;
+    if(F.shelf.length&&!p.shelves.some(s=>F.shelf.includes(s))) return false;
     if(F.counter!=='all'&&!p.counters.includes(F.counter)) return false;
-    if(F.expiry!=='all'){ if(!p.expDate)return false; if(F.expiry==='exp'){if(!(p.expDate<now))return false;} else if(!(p.expDate<=lim))return false; }
+    if(F.expiry.length&&!F.expiry.includes(bandOf(p,L))) return false;
     if(q&&!(p.name.toLowerCase().includes(q)||p.code.toLowerCase().includes(q))) return false;
     return true;
   });
@@ -677,7 +717,7 @@ function render(){
   nd.textContent=diffCsEaText(gAll); nd.style.color=gAll.tot<0?'var(--danger)':gAll.tot>0?'var(--warning)':'var(--success)';
   document.getElementById('absDiff').textContent=csEaText(gAbs);
   document.getElementById('shownN').textContent=items.length;
-  document.getElementById('clearBtn').style.display=(F.q||F.status!=='all'||F.shelf!=='all'||F.counter!=='all'||F.expiry!=='all')?'inline-flex':'none';
+  document.getElementById('clearBtn').style.display=(F.q||F.status.length||F.shelf.length||F.counter!=='all'||F.expiry.length)?'inline-flex':'none';
 
   const groups={}; items.forEach(p=>{const k=p.primary||'__none__';(groups[k]=groups[k]||[]).push(p);});
   const keys=Object.keys(groups).sort((a,b)=>a==='__none__'?1:b==='__none__'?-1:a.localeCompare(b,undefined,{numeric:true}));
@@ -785,11 +825,23 @@ async function refreshData(){
 }
 document.getElementById('q').addEventListener('input',e=>{F.q=e.target.value;render();});
 document.getElementById('sortBtn').onclick=function(){SORT=SORT==='loc'?'diff':'loc';this.textContent=SORT==='loc'?'↕ ตามโล':'↕ ตามส่วนต่าง';render();};
-document.getElementById('clearBtn').onclick=()=>{F={status:'all',shelf:'all',counter:'all',expiry:'all',q:''};document.getElementById('q').value='';buildFilters();render();showToast('ล้างตัวกรองแล้ว','info');};
+document.getElementById('clearBtn').onclick=()=>{F={status:[],shelf:[],counter:'all',expiry:[],q:''};document.getElementById('q').value='';buildFilters();render();showToast('ล้างตัวกรองแล้ว','info');};
 /* Excel exports wired via menu items (exportCompare / exportExpiry) */
 document.getElementById('list').addEventListener('click',e=>{const row=e.target.closest('.prow');if(row&&row.dataset.code)openEditModal(row.dataset.code);});
 document.getElementById('editModal').addEventListener('click',e=>{if(e.target.id==='editModal')closeEdit();});
-document.querySelector('.filterrow').addEventListener('click',e=>{const li=e.target.closest('li[data-v]');if(!li)return;F[li.dataset.key]=li.dataset.v;document.querySelectorAll('.dd-wrap.open').forEach(w=>w.classList.remove('open'));buildFilters();render();});
+document.querySelector('.filterrow').addEventListener('click',e=>{
+  const li=e.target.closest('li[data-v]');if(!li)return;
+  const key=li.dataset.key, v=li.dataset.v;
+  if(MULTI[key]){
+    if(v==='all') F[key]=[];
+    else{const i=F[key].indexOf(v); if(i<0)F[key].push(v); else F[key].splice(i,1);}
+    syncMultiDD(key); render();          // คง dropdown เปิดไว้ ให้เลือกต่อได้หลายอัน
+  }else{
+    F[key]=v;
+    document.querySelectorAll('.dd-wrap.open').forEach(w=>w.classList.remove('open'));
+    buildFilters(); render();
+  }
+});
 document.addEventListener('click',e=>{if(!e.target.closest('.dd-wrap'))document.querySelectorAll('.dd-wrap.open').forEach(w=>w.classList.remove('open'));});
 window.addEventListener('scroll',()=>document.getElementById('backToTop').classList.toggle('show',window.scrollY>300));
 loadData();
