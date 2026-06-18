@@ -240,7 +240,7 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
 <div class="topbar">
   <header>
     <div class="brand">
-      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.18</span></div>
+      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.19</span></div>
       <div class="subttl">เทียบเช็คสต็อก C4 (นับจริง) × PDDT — ขาด/เกิน</div>
     </div>
     <div class="hgroup">
@@ -267,6 +267,14 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
 
 <div class="content">
   <div class="filterrow">
+    <div class="dd-wrap" id="ddWarehouse">
+      <button class="dd-trigger" onclick="toggleDD(this)"><span class="dd-cap">คลัง</span><span class="dd-val" id="valWarehouse">ทั้งหมด</span><span class="dd-arrow">▾</span></button>
+      <div class="dd-panel"><ul class="dd-list" id="listWarehouse"></ul></div>
+    </div>
+    <div class="dd-wrap" id="ddCheckDate">
+      <button class="dd-trigger" onclick="toggleDD(this)"><span class="dd-cap">วันที่เช็ค</span><span class="dd-val" id="valCheckDate">ทั้งหมด</span><span class="dd-arrow">▾</span></button>
+      <div class="dd-panel"><input class="dd-search" placeholder="🔍 ค้นหาวันที่" oninput="filterDD(this)" onclick="event.stopPropagation()"><ul class="dd-list" id="listCheckDate"></ul></div>
+    </div>
     <div class="dd-wrap" id="ddStatus">
       <button class="dd-trigger" onclick="toggleDD(this)"><span class="dd-cap">สถานะ</span><span class="dd-val" id="valStatus">ทั้งหมด</span><span class="dd-arrow">▾</span></button>
       <div class="dd-panel"><ul class="dd-list" id="listStatus"></ul></div>
@@ -390,6 +398,9 @@ function fmtCs(totalEa,qtyCs){
   return (neg?'-':'')+(cs?cs+' ลัง ':'')+(ea||!cs?ea+' ชิ้น':'');
 }
 function monthsAhead(n){const d=new Date();d.setMonth(d.getMonth()+n);return d;}
+// เรียงวันที่ไทย "DD/MM/พ.ศ." ตามจริง (แปลงเป็น YYYYMMDD ก่อนเทียบ)
+function thaiDateKey(s){const m=String(s||'').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);return m?m[3]+m[2].padStart(2,'0')+m[1].padStart(2,'0'):'';}
+function cmpThaiDate(a,b){const ka=thaiDateKey(a),kb=thaiDateKey(b);return ka<kb?-1:ka>kb?1:0;}
 // ช่วงวันหมดอายุแบบ "ไม่ซ้อนกัน" (non-overlapping bands) — ใช้วันหมดอายุล็อตที่ใกล้สุดของ SKU (p.expDate)
 function expLimits(){return {now:new Date(),m1:monthsAhead(1),m2:monthsAhead(2),m3:monthsAhead(3),m6:monthsAhead(6)};}
 function bandOf(p,L){
@@ -415,14 +426,14 @@ function expInfo(p){
 
 /* ── state ── */
 let PRODUCTS=[],pddtMap={},pddtMapNZ={},prodByCode={};
-// status/shelf/expiry = array (multi-select, [] = ทั้งหมด) · counter = string (single)
-let F={status:[],shelf:[],counter:'all',expiry:[],q:''};
+// status/shelf/expiry/warehouse/checkDate = array (multi-select, [] = ทั้งหมด) · counter = string (single)
+let F={status:[],shelf:[],counter:'all',expiry:[],warehouse:[],checkDate:[],q:''};
 let SORT='loc';
 // วาดรายการสินค้า (อาจหลายพันแถว) หนัก → debounce เวลาติ๊ก filter/พิมพ์ค้นหา ให้รวบเป็นครั้งเดียว (UI checkbox อัปเดตทันทีผ่าน syncMultiDD)
 let _renderTimer=null;
 function scheduleRender(){ if(_renderTimer)clearTimeout(_renderTimer); _renderTimer=setTimeout(()=>{_renderTimer=null;render();},160); }
-const MULTI={status:1,shelf:1,expiry:1};
-const DD={status:{list:'listStatus',val:'valStatus'},shelf:{list:'listShelf',val:'valShelf'},expiry:{list:'listExpiry',val:'valExpiry'},counter:{list:'listCounter',val:'valCounter'}};
+const MULTI={status:1,shelf:1,expiry:1,warehouse:1,checkDate:1};
+const DD={status:{list:'listStatus',val:'valStatus'},shelf:{list:'listShelf',val:'valShelf'},expiry:{list:'listExpiry',val:'valExpiry'},counter:{list:'listCounter',val:'valCounter'},warehouse:{list:'listWarehouse',val:'valWarehouse'},checkDate:{list:'listCheckDate',val:'valCheckDate'}};
 
 async function fetchRows(url){
   const r=await fetch(url); const txt=await r.text();
@@ -500,10 +511,11 @@ function buildProducts(rows){
   const by={};
   rows.forEach(r=>{
     const code=normCode(r['รหัสสินค้า']); if(!code) return;
-    if(!by[code]) by[code]={code,name:r['ชื่อสินค้า']||'',counted:0,lots:0,locs:new Set(),counters:new Set(),snap:null,expiry:[],csCount:0,lotRows:[],wh:''};
+    if(!by[code]) by[code]={code,name:r['ชื่อสินค้า']||'',counted:0,lots:0,locs:new Set(),counters:new Set(),snap:null,expiry:[],csCount:0,lotRows:[],wh:'',whs:new Set(),checkDates:new Set()};
     const g=by[code];
     g.counted+=num(r['นับได้(ชิ้น)']); g.lots++;
-    if(!g.wh) g.wh=(r['warehouse']||'').trim()||'C4';
+    const w=(r['warehouse']||'').trim()||'C4'; g.whs.add(w); if(!g.wh) g.wh=w;
+    const cd=(r['เวลาบันทึก']||'').trim().split(' ')[0]; if(cd) g.checkDates.add(cd);   // วันที่เช็ค = ส่วนวันที่ของ เวลาบันทึก
     const loc=(r['location']||'').trim(); if(loc&&loc!=='.'&&loc!=='-') g.locs.add(loc);
     const cn=(r['ผู้นับ']||'').trim(); if(cn) g.counters.add(cn);
     if(g.snap===null&&r['สต็อกระบบ(ชิ้น)']!=='') g.snap=num(r['สต็อกระบบ(ชิ้น)']);
@@ -522,6 +534,7 @@ function buildProducts(rows){
     const shelves=new Set(locArr.map(l=>shelfOf(l)));
     const prod={code:g.code,name:g.name||g.code,brand:'',group:'',size:'',
       counted:g.counted,system,diff,status,qtyCs,lots:g.lots,snap:g.snap,wh:g.wh||'C4',lotRows:g.lotRows,live:false,
+      warehouses:[...g.whs].sort(),checkDates:[...g.checkDates].sort((a,b)=>cmpThaiDate(a,b)),
       locs:locArr,primary:locArr[0]||'',shelves:[...shelves],counters:[...g.counters],
       expISO:(g.expiry.sort()[0]||''),expDate:(g.expiry[0]?new Date(g.expiry[0]+'T00:00:00'):null),found:(system!=null)};
     prodByCode[g.code]=prod; return prod;
@@ -558,6 +571,10 @@ function buildFilters(){
   fillDD('shelf','listShelf','valShelf',[{v:'all',label:'ทั้งหมด',c:N}].concat(Object.keys(sh).sort((a,b)=>a==='—'?1:b==='—'?-1:a.localeCompare(b,undefined,{numeric:true})).map(s=>({v:s,label:s,c:sh[s]}))));
   const cn={}; PRODUCTS.forEach(p=>p.counters.forEach(c=>cn[c]=(cn[c]||0)+1));
   fillDD('counter','listCounter','valCounter',[{v:'all',label:'ทั้งหมด',c:N}].concat(Object.keys(cn).sort().map(c=>({v:c,label:c,c:cn[c]}))));
+  const wh={}; PRODUCTS.forEach(p=>(p.warehouses||[]).forEach(w=>wh[w]=(wh[w]||0)+1));
+  fillDD('warehouse','listWarehouse','valWarehouse',[{v:'all',label:'ทั้งหมด',c:N}].concat(Object.keys(wh).sort().map(w=>({v:w,label:w,c:wh[w]}))));
+  const cd={}; PRODUCTS.forEach(p=>(p.checkDates||[]).forEach(d=>cd[d]=(cd[d]||0)+1));
+  fillDD('checkDate','listCheckDate','valCheckDate',[{v:'all',label:'ทั้งหมด',c:N}].concat(Object.keys(cd).sort((a,b)=>cmpThaiDate(b,a)).map(d=>({v:d,label:d,c:cd[d]}))));  // ใหม่สุดขึ้นก่อน
 }
 function fillDD(key,listId,valId,opts){
   const multi=!!MULTI[key], cur=F[key];
@@ -607,44 +624,46 @@ function _expStat(iso){
   const txt=days<0?'หมดอายุแล้ว':days<30?'≤30 วัน':days<90?'≤90 วัน':days<180?'≤180 วัน':'ปกติ';
   return {days,txt};
 }
-// 1) เทียบสต็อก (ตรง/ไม่ตรง) — รวมต่อสินค้า + ลิสต์วันหมดอายุทุกล็อต + ธงหมดอายุ
+// 1) เทียบสต็อก (ตรง/ไม่ตรง) — 1 แถว/สินค้า · เรียง Shelf → location → CAT BRAND → CAT SIZE · วันหมดอายุแยกคอลัมน์ ล็อต1-5 (เก่าสุดก่อน)
 function exportCompare(){
   _closeMenus();
   const items=applyFilter();
   if(!items.length){ showToast('ไม่มีรายการให้ export','error'); return; }
   if(typeof XLSX==='undefined'){ showToast('ไลบรารี Excel ยังโหลดไม่เสร็จ','error'); return; }
   const order=[...items].sort((a,b)=>{
-    const la=a.primary||'~~~', lb=b.primary||'~~~';
+    const sa=shelfOf(a.primary), sb=shelfOf(b.primary);                  // 1) shelf ('—' ไปท้าย)
+    if(sa!==sb){ if(sa==='—')return 1; if(sb==='—')return -1; return sa.localeCompare(sb,undefined,{numeric:true}); }
+    const la=a.primary||'', lb=b.primary||'';                            // 2) location (ว่าง=ท้าย)
+    if(!la!==!lb) return la?-1:1;
     if(la!==lb) return la.localeCompare(lb,undefined,{numeric:true});
-    if((a.brand||'')!==(b.brand||'')) return (a.brand||'').localeCompare(b.brand||'','th');
-    return (a.size||'').localeCompare(b.size||'','th');
+    if((a.brand||'')!==(b.brand||'')) return (a.brand||'').localeCompare(b.brand||'','th');  // 3) CAT BRAND
+    return (a.size||'').localeCompare(b.size||'','th');                  // 4) CAT SIZE
   });
   const stTxt={short:'ขาด',over:'เกิน',match:'ตรง',none:'ไม่พบใน PDDT'};
   const now=new Date();
   const rows=order.map(p=>{
     const lr=p.lotRows||[];
-    // สรุปทุกล็อตในเซลล์เดียว — เรียงวันหมดใกล้สุดก่อน · แต่ละล็อต = วันหมด @location (จำนวนชิ้น) + ธง ⚠ ถ้าหมดแล้ว
-    const lotDetail=lr.slice().sort((a,b)=>((a.expISO||'9999')<(b.expISO||'9999')?-1:1)).map(l=>{
-      const dt=l.expISO?formatThaiDate(new Date(l.expISO+'T00:00:00')):'ไม่ระบุวันหมด';
-      const flag=(l.expISO&&new Date(l.expISO+'T00:00:00')<now)?'⚠หมดแล้ว ':'';
-      const loc=(l.loc&&l.loc!=='.'&&l.loc!=='-')?l.loc:'ไม่ระบุที่';
-      return `${flag}${dt} @${loc} (${(l.counted||0).toLocaleString()} ชิ้น)`;
-    }).join('  |  ');
+    // วันหมดอายุไม่ซ้ำ เรียงเก่าสุด→ใหม่สุด เอา 5 วันแรก แยกคอลัมน์ ล็อต1-5 (⚠ ถ้าหมดแล้ว)
+    const expDates=[...new Set(lr.map(l=>l.expISO).filter(Boolean))].sort();
+    const exp5={}; for(let i=0;i<5;i++){ const iso=expDates[i]; const d=iso?new Date(iso+'T00:00:00'):null; exp5['หมดอายุล็อต'+(i+1)]=d?((d<now?'⚠ ':'')+formatThaiDate(d)):''; }
     const expN=lr.filter(l=>l.expISO && new Date(l.expISO+'T00:00:00')<now).length;
-    return {
-      'Location (ทุกที่)':(p.locs&&p.locs.length)?p.locs.join(', '):'', 'Shelf':p.shelves.filter(s=>s!=='—').join(', '),
+    const moreExp=expDates.length>5?('+'+(expDates.length-5)+' วัน'):'';
+    return Object.assign({
+      'Shelf':p.shelves.filter(s=>s!=='—').join(', '),
+      'Location (ทุกที่)':(p.locs&&p.locs.length)?p.locs.join(', '):'',
       'CAT BRAND':p.brand||'', 'CAT SIZE':p.size||'',
-      'รหัสสินค้า':p.code, 'ชื่อสินค้า':p.name, 'บรรจุ(ชิ้น/ลัง)':p.found&&p.qtyCs>1?p.qtyCs:'',
+      'รหัสสินค้า':p.code, 'ชื่อสินค้า':p.name,
+      'คลัง':(p.warehouses||[]).join(', '), 'วันที่เช็ค':(p.checkDates||[]).join(', '),
+      'บรรจุ(ชิ้น/ลัง)':p.found&&p.qtyCs>1?p.qtyCs:'',
       'นับได้(ชิ้น)':p.counted, 'ระบบ(ชิ้น)':p.found?p.system:'', 'ต่าง(ชิ้น)':p.found?p.diff:'',
       'นับได้ (ลัง·ชิ้น)':csEaText(csEaOf(p.counted,p.qtyCs)),
       'ระบบ (ลัง·ชิ้น)':p.found?csEaText(csEaOf(p.system,p.qtyCs)):'',
       'ต่าง (ลัง·ชิ้น)':p.found?diffCsEaText(csEaOf(p.diff,p.qtyCs)):'',
-      'สถานะ':stTxt[p.status], 'ผู้นับ':p.counters.join(', '), 'จำนวนล็อต':p.lots,
-      'รายละเอียดล็อต (วันหมด·ที่·นับ)':lotDetail, 'หมดอายุแล้ว':expN?('⚠ '+expN+' ล็อต'):''
-    };
+      'สถานะ':stTxt[p.status], 'ผู้นับ':p.counters.join(', '), 'จำนวนล็อต':p.lots
+    }, exp5, {'วันหมดอายุเพิ่ม':moreExp, 'หมดอายุแล้ว':expN?('⚠ '+expN+' ล็อต'):''});
   });
   const ws=XLSX.utils.json_to_sheet(rows);
-  ws['!cols']=[{wch:22},{wch:11},{wch:16},{wch:14},{wch:16},{wch:34},{wch:11},{wch:11},{wch:11},{wch:10},{wch:15},{wch:15},{wch:15},{wch:12},{wch:18},{wch:9},{wch:48},{wch:14}];
+  ws['!cols']=[{wch:10},{wch:26},{wch:16},{wch:16},{wch:16},{wch:34},{wch:8},{wch:22},{wch:11},{wch:11},{wch:11},{wch:10},{wch:15},{wch:15},{wch:15},{wch:12},{wch:18},{wch:9},{wch:13},{wch:13},{wch:13},{wch:13},{wch:13},{wch:11},{wch:13}];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'เทียบสต็อก');
   XLSX.writeFile(wb,_xlFname('compare'));
   showToast('Export เทียบสต็อก '+rows.length+' รายการ ✓','success');
@@ -687,6 +706,8 @@ function exportExpiry(){
 function applyFilter(){
   const q=F.q.toLowerCase(), L=expLimits();
   return PRODUCTS.filter(p=>{
+    if(F.warehouse.length&&!(p.warehouses||[]).some(w=>F.warehouse.includes(w))) return false;
+    if(F.checkDate.length&&!(p.checkDates||[]).some(d=>F.checkDate.includes(d))) return false;
     if(F.status.length&&!F.status.includes(p.status)) return false;
     if(F.shelf.length&&!p.shelves.some(s=>F.shelf.includes(s))) return false;
     if(F.counter!=='all'&&!p.counters.includes(F.counter)) return false;
@@ -735,7 +756,7 @@ function render(){
   nd.textContent=diffCsEaText(gAll); nd.style.color=gAll.tot<0?'var(--danger)':gAll.tot>0?'var(--warning)':'var(--success)';
   document.getElementById('absDiff').textContent=csEaText(gAbs);
   document.getElementById('shownN').textContent=items.length;
-  document.getElementById('clearBtn').style.display=(F.q||F.status.length||F.shelf.length||F.counter!=='all'||F.expiry.length)?'inline-flex':'none';
+  document.getElementById('clearBtn').style.display=(F.q||F.status.length||F.shelf.length||F.counter!=='all'||F.expiry.length||F.warehouse.length||F.checkDate.length)?'inline-flex':'none';
 
   const groups={}; items.forEach(p=>{const k=p.primary||'__none__';(groups[k]=groups[k]||[]).push(p);});
   const keys=Object.keys(groups).sort((a,b)=>a==='__none__'?1:b==='__none__'?-1:a.localeCompare(b,undefined,{numeric:true}));
@@ -843,7 +864,7 @@ async function refreshData(){
 }
 document.getElementById('q').addEventListener('input',e=>{F.q=e.target.value;scheduleRender();});
 document.getElementById('sortBtn').onclick=function(){SORT=SORT==='loc'?'diff':'loc';this.textContent=SORT==='loc'?'↕ ตามโล':'↕ ตามส่วนต่าง';render();};
-document.getElementById('clearBtn').onclick=()=>{F={status:[],shelf:[],counter:'all',expiry:[],q:''};document.getElementById('q').value='';buildFilters();render();showToast('ล้างตัวกรองแล้ว','info');};
+document.getElementById('clearBtn').onclick=()=>{F={status:[],shelf:[],counter:'all',expiry:[],warehouse:[],checkDate:[],q:''};document.getElementById('q').value='';buildFilters();render();showToast('ล้างตัวกรองแล้ว','info');};
 /* Excel exports wired via menu items (exportCompare / exportExpiry) */
 document.getElementById('list').addEventListener('click',e=>{const row=e.target.closest('.prow');if(row&&row.dataset.code)openEditModal(row.dataset.code);});
 document.getElementById('editModal').addEventListener('click',e=>{if(e.target.id==='editModal')closeEdit();});
