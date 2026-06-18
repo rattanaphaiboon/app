@@ -28,6 +28,16 @@
 
 ## 🚀 วิธีอัปเดต
 
+### ✅ ก่อนเริ่มแก้ทุกครั้ง (กันชนกับเพื่อน)
+1. `git pull --rebase` — ดึงล่าสุด · ถ้ามีคน push ไปก่อน จะได้ของเขามาก่อน (git ไม่ให้ทับ — push ทับจะถูก reject)
+2. `git log -1 vendor-compare/backend.gs` — ดูใครแก้ล่าสุด เมื่อไหร่
+3. **ping เทียบ version** — เปิด `…/exec?action=ping` ดู `version` เทียบกับ `var VERSION` ใน `backend.gs`
+   - ตรงกัน → live ตรงกับ GitHub ✅ แก้ได้เลย
+   - **ไม่ตรง → มีคนแก้/deploy ค้าง (push แล้วยังไม่ deploy หรือแก้ใน Apps Script ตรงๆ) → อย่าทับ ทักทีมก่อน**
+4. แก้เสร็จ → **bump `var VERSION`** → commit + push → (backend) copy ไป Apps Script + Deploy
+
+> ⚠️ **git เห็นเฉพาะคนที่ push แล้ว** — ถ้าเพื่อน "กำลังแก้ค้างยังไม่ push" git/ping มองไม่เห็น → **ทัก LINE ก่อนแก้** + เปิด Apps Script editor ดู **avatar เพื่อน** มุมขวาบน (มี = เพื่อนเปิดอยู่)
+
 ### อัปเดต HTML (หน้าเว็บ)
 1. แก้ `rattana-vendor-compare.html`
 2. commit + push เข้า `rattanaphaiboon/app` (branch `main`)
@@ -35,7 +45,7 @@
 
 ### อัปเดต backend.gs (ตัวเรียก BigQuery)
 > ⚠️ แก้ใน GitHub อย่างเดียว **ไม่พอ** — ของจริงรันใน Apps Script
-1. แก้ `backend.gs` ที่นี่ (เก็บประวัติ)
+1. แก้ `backend.gs` ที่นี่ + **bump `var VERSION`** (เก็บประวัติ + ให้ ping เช็ค deploy ได้)
 2. copy ทั้งหมดไปวางใน [Apps Script](https://script.google.com/home/projects/1NC2e_Yd-CfiuvZ-Yf7tPm61WEg6IFhKeEQXRD6wxUwtaebq8dA2AdWRF/edit)
 3. 💾 Save → Deploy → จัดการการทำให้ใช้งานได้ → ✏ → เวอร์ชันใหม่ → Deploy
 4. Web App URL เดิมคงอยู่
@@ -52,4 +62,4 @@
 ## 🔢 เวอร์ชัน
 
 - HTML: v3.0
-- backend.gs: v1.6
+- backend.gs: v1.7

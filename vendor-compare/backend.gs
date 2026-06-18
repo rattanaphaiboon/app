@@ -1,5 +1,7 @@
 /**
  * Rattana Vendor Sales Compare — BigQuery Proxy
+ * v1.7 — 2026-06-18
+ *   - ping (?action=ping) คืน version → เช็ค deploy ตรงกับ GitHub ได้ (drift detection กันชนกับเพื่อน)
  * v1.6 — 2026-05-24
  *   - Sales_CS → Sales_CSxValue across all aggregates
  *   - stores: added level='vendor' (accurate grand-total unique customer count)
@@ -22,13 +24,14 @@
  *   3. Deploy → New deployment → Web app → Execute as: Me, Access: Anyone
  *
  * Endpoints (GET):
- *   ?action=ping                              → health check
+ *   ?action=ping                              → health check (+ version → เทียบ deploy กับ GitHub)
  *   ?action=vendors&months=6                  → distinct Cat_Vendor (last N months)
  *   ?action=trend&vendor=<v>&months=6         → EXVat/Sales per WH per month + Channel
  *   ?action=sales&vendor=<v>&months=6         → drill-down (brand/pack/product) + Channel
  *   ?action=stores&vendor=<v>&months=6        → unique Customer_Code per level + Channel
  */
 
+var VERSION    = 'v1.7';   // bump ทุกครั้งที่แก้ — ping คืนค่านี้ เทียบกับ GitHub ได้ว่า live deploy ตรงไหม
 var PROJECT_ID = 'project-test-471907';
 var DATASET    = 'Testimport';
 var VIEW       = 'BQ_2024_2025';
@@ -38,7 +41,7 @@ function doGet(e) {
     var action = (e && e.parameter && e.parameter.action) || 'ping';
     var out;
     if (action === 'ping') {
-      out = { ok: true, msg: 'pong', time: new Date().toISOString() };
+      out = { ok: true, msg: 'pong', version: VERSION, time: new Date().toISOString() };
     } else if (action === 'vendors') {
       out = { ok: true, data: getVendors_(parseInt(e.parameter.months) || 6) };
     } else if (action === 'trend') {
