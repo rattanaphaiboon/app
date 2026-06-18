@@ -62,4 +62,4 @@
 ## 🔢 เวอร์ชัน
 
 - HTML: v3.0
-- backend.gs: v1.7
+- backend.gs: v1.8 (เพิ่ม `custHistory` / `custHistoryBatch` — ประวัติซื้อราย ร้าน×สินค้า · ใช้โดย Pre-order Picker ฟีเจอร์ "แบ่งออเดอร์")

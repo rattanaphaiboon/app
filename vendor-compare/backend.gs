@@ -1,5 +1,7 @@
 /**
  * Rattana Vendor Sales Compare — BigQuery Proxy
+ * v1.8 — 2026-06-18
+ *   - custHistory / custHistoryBatch — ประวัติซื้อราย ร้าน×สินค้า (CS) ย้อนหลัง N เดือน (ไม่รวมเดือนปัจจุบัน) → ฟีเจอร์ "แบ่งออเดอร์" Pre-order Picker
  * v1.7 — 2026-06-18
  *   - ping (?action=ping) คืน version → เช็ค deploy ตรงกับ GitHub ได้ (drift detection กันชนกับเพื่อน)
  * v1.6 — 2026-05-24
@@ -29,9 +31,11 @@
  *   ?action=trend&vendor=<v>&months=6         → EXVat/Sales per WH per month + Channel
  *   ?action=sales&vendor=<v>&months=6         → drill-down (brand/pack/product) + Channel
  *   ?action=stores&vendor=<v>&months=6        → unique Customer_Code per level + Channel
+ *   ?action=custHistory&cc=<code>&months=3    → ประวัติซื้อ 1 ร้าน ราย product (CS) — แบ่งออเดอร์
+ *   ?action=custHistoryBatch&ccs=<c1,c2>&months=3 → ประวัติซื้อหลายร้าน ราย product (CS) — แบ่งออเดอร์
  */
 
-var VERSION    = 'v1.7';   // bump ทุกครั้งที่แก้ — ping คืนค่านี้ เทียบกับ GitHub ได้ว่า live deploy ตรงไหม
+var VERSION    = 'v1.8';   // bump ทุกครั้งที่แก้ — ping คืนค่านี้ เทียบกับ GitHub ได้ว่า live deploy ตรงไหม
 var PROJECT_ID = 'project-test-471907';
 var DATASET    = 'Testimport';
 var VIEW       = 'BQ_2024_2025';
@@ -56,6 +60,14 @@ function doGet(e) {
       var v3 = e.parameter.vendor || '';
       if (!v3) return json_({ ok: false, error: 'missing vendor param' });
       out = { ok: true, data: getStoresForVendor_(v3, parseInt(e.parameter.months) || 6) };
+    } else if (action === 'custHistory') {
+      var cc = e.parameter.cc || '';
+      if (!cc) return json_({ ok: false, error: 'missing cc param' });
+      out = { ok: true, data: getCustHistory_(cc, parseInt(e.parameter.months) || 6) };
+    } else if (action === 'custHistoryBatch') {
+      var ccs = e.parameter.ccs || '';
+      if (!ccs) return json_({ ok: false, error: 'missing ccs param' });
+      out = { ok: true, data: getCustHistoryBatch_(ccs, parseInt(e.parameter.months) || 6) };
     } else {
       out = { ok: false, error: 'unknown action: ' + action };
     }
@@ -79,6 +91,44 @@ function lastNMonthLabels_(months) {
     labels.push(y + '/' + mm);
   }
   return labels;
+}
+
+/* ===== ประวัติซื้อรายร้าน (ฟีเจอร์ "แบ่งออเดอร์" Pre-order Picker) ===== */
+// 1 ร้าน → ราย product (CS) ย้อนหลัง N เดือน (ไม่รวมเดือนปัจจุบัน)
+function getCustHistory_(custCode, months) {
+  var inList = lastNMonthLabels_(months).map(function (l) { return "'" + l + "'"; }).join(',');
+  var c = String(custCode).replace(/'/g, "''");
+  var query =
+    'SELECT Product_Code, Product_Name, Cat_Brand, Cat_Pack, ' +
+    '       SUM(Sales_CSxValue) AS sales_cs, SUM(Free_CS) AS free_cs, ' +
+    '       SUM(Exvat) AS exvat, SUM(TotalBaht) AS total_baht, ' +
+    '       MAX(Month_Year) AS last_month, COUNT(DISTINCT Month_Year) AS months_bought ' +
+    'FROM `' + PROJECT_ID + '.' + DATASET + '.' + VIEW + '` ' +
+    "WHERE CAST(Customer_Code AS STRING) = '" + c + "' " +
+    '  AND Month_Year IN (' + inList + ') ' +
+    'GROUP BY Product_Code, Product_Name, Cat_Brand, Cat_Pack ' +
+    'ORDER BY sales_cs DESC';
+  return runQuery_(query, ['product_code', 'product_name', 'cat_brand', 'cat_pack',
+                           'sales_cs', 'free_cs', 'exvat', 'total_baht', 'last_month', 'months_bought']);
+}
+// หลายร้านพร้อมกัน (prefetch) — ccs = "7400300457,7400300458,..." → ราย ร้าน×product (CS)
+function getCustHistoryBatch_(ccCsv, months) {
+  var inList = lastNMonthLabels_(months).map(function (l) { return "'" + l + "'"; }).join(',');
+  var ccs = String(ccCsv).split(',').map(function (x) { return "'" + x.trim().replace(/'/g, "''") + "'"; })
+              .filter(function (x) { return x !== "''"; }).join(',');
+  if (!ccs) return [];
+  var query =
+    'SELECT CAST(Customer_Code AS STRING) AS customer_code, ' +
+    '       Product_Code, Product_Name, Cat_Brand, Cat_Pack, ' +
+    '       SUM(Sales_CSxValue) AS sales_cs, SUM(Exvat) AS exvat, ' +
+    '       MAX(Month_Year) AS last_month, COUNT(DISTINCT Month_Year) AS months_bought ' +
+    'FROM `' + PROJECT_ID + '.' + DATASET + '.' + VIEW + '` ' +
+    'WHERE CAST(Customer_Code AS STRING) IN (' + ccs + ') ' +
+    '  AND Month_Year IN (' + inList + ') ' +
+    'GROUP BY customer_code, Product_Code, Product_Name, Cat_Brand, Cat_Pack ' +
+    'ORDER BY customer_code, sales_cs DESC';
+  return runQuery_(query, ['customer_code', 'product_code', 'product_name', 'cat_brand', 'cat_pack',
+                           'sales_cs', 'exvat', 'last_month', 'months_bought']);
 }
 
 function getVendors_(months) {
