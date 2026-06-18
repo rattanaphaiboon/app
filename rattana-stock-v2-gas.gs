@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.12  (C4 writes→new sheet, reads merge old archive cached 6h)
+//  Rattana Stock Count — GAS Backend  v1.13  (+ light 'summary' endpoint — server-aggregated)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -95,6 +95,7 @@ function doGet(e) {
   const action = p.action || '';
   try {
     if (action === 'liveLots')   return json(getLiveLots(p));
+    if (action === 'summary')    return json(getSummary(p));
     if (action === 'getHistory' || action === 'history') return json(getHistory(p));
     // Retired Drafts endpoints — answer harmlessly for any cached old client.
     if (action === 'draft')      return json({ ok: true, draft: null });
@@ -519,6 +520,52 @@ function getLiveLots(p) {
     });
   } catch (_) {}
   return { ok: true, lots: out, done: getDoneList(wh) };
+}
+
+// LIGHT summary — aggregate lots server-side into per-product totals + per-person
+// breakdown, so the app downloads ~products instead of thousands of raw lots.
+// Loses exact per-lot/per-time detail (keeps per-person counts + their locations
+// + expiry dates).
+function getSummary(p) {
+  const wh = String(p.warehouse || '');
+  if (!wh) return { ok: true, items: [] };
+  const out = [], seen = {};
+  const sheets = [liveSheetFor(wh)].concat(legacyLiveSheetsFor(wh)).filter(Boolean);
+  sheets.forEach(function (sh) { collectLots_(sh, wh, out, seen); });
+  try {
+    getArchiveLots(wh).forEach(function (lot) {
+      const id = String(lot.lotId || ''); if (id && seen[id]) return; if (id) seen[id] = 1; out.push(lot);
+    });
+  } catch (_) {}
+
+  const byKey = {};
+  out.forEach(function (lot) {
+    const k = lot.key; if (!k) return;
+    if (!byKey[k]) byKey[k] = { key: k, name: lot.productName || lot.name || '',
+      factors: lot.factors || {EA:1,PA:1,BP:1,CS:1}, total: {EA:0,PA:0,BP:0,CS:0}, lotCount: 0, persons: {} };
+    const g = byKey[k];
+    ['EA','PA','BP','CS'].forEach(function (u) { g.total[u] += (lot.counts[u] || 0); });
+    if (lot.factors) g.factors = lot.factors;
+    g.lotCount++;
+    const pk = String(lot.empId || lot.userKey || lot.name || '—');
+    if (!g.persons[pk]) g.persons[pk] = { name: lot.name || lot.empId || '—', counts: {EA:0,PA:0,BP:0,CS:0}, locs: {}, exps: {} };
+    const pp = g.persons[pk];
+    ['EA','PA','BP','CS'].forEach(function (u) { pp.counts[u] += (lot.counts[u] || 0); });
+    if (lot.location)   pp.locs[lot.location] = 1;
+    if (lot.expiryDate) pp.exps[lot.expiryDate] = 1;
+  });
+
+  const items = Object.keys(byKey).map(function (k) {
+    const g = byKey[k];
+    return {
+      key: g.key, name: g.name, factors: g.factors, total: g.total, lotCount: g.lotCount,
+      by: Object.keys(g.persons).map(function (pk) {
+        const pp = g.persons[pk];
+        return { name: pp.name, counts: pp.counts, locs: Object.keys(pp.locs), exps: Object.keys(pp.exps) };
+      })
+    };
+  });
+  return { ok: true, items: items, done: getDoneList(wh) };
 }
 
 // ── CONFIRM DONE (per user, per warehouse) ────────────

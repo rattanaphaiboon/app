@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Rattana Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
-  <title>Rattana Stock Count v3.68</title>
+  <title>Rattana Stock Count v3.69</title>
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://docs.google.com" crossorigin>
@@ -768,7 +768,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.68';
+const APP_VERSION = 'v3.69';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 // Live-sheet poll interval. Raised from 5s → 15s so ~30 concurrent users
 // don't exhaust the Apps Script execution quota.
@@ -3698,6 +3698,29 @@ function onSummaryWhChange(){
   document.getElementById('summaryBody').dataset.loaded = '';
   renderSummary();
 }
+// Aggregate raw lots into the light summary-item shape (used as a fallback when
+// the server 'summary' endpoint isn't available, e.g. GAS not yet redeployed).
+function lotsToSummaryItems(lots){
+  const byKey = {};
+  (lots||[]).forEach(lot => {
+    const k = lot.key; if (!k) return;
+    if (!byKey[k]) byKey[k] = { key:k, name: lot.productName||lot.name||'', factors: lot.factors||{EA:1,PA:1,BP:1,CS:1}, total:{EA:0,PA:0,BP:0,CS:0}, lotCount:0, persons:{} };
+    const g = byKey[k];
+    ['EA','PA','BP','CS'].forEach(u => g.total[u] += (lot.counts[u]||0));
+    if (lot.factors) g.factors = lot.factors;
+    g.lotCount++;
+    const pk = String(lot.empId||lot.userKey||lot.name||'—');
+    if (!g.persons[pk]) g.persons[pk] = { name: lot.name||lot.empId||'—', counts:{EA:0,PA:0,BP:0,CS:0}, locs:{}, exps:{} };
+    const pp = g.persons[pk];
+    ['EA','PA','BP','CS'].forEach(u => pp.counts[u] += (lot.counts[u]||0));
+    if (lot.location)   pp.locs[lot.location] = 1;
+    if (lot.expiryDate) pp.exps[lot.expiryDate] = 1;
+  });
+  return Object.keys(byKey).map(k => { const g = byKey[k]; return {
+    key:g.key, name:g.name, factors:g.factors, total:g.total, lotCount:g.lotCount,
+    by: Object.keys(g.persons).map(pk => { const pp = g.persons[pk]; return { name:pp.name, counts:pp.counts, locs:Object.keys(pp.locs), exps:Object.keys(pp.exps) }; })
+  }; });
+}
 async function renderSummary() {
   try {
     await _renderSummaryImpl();
@@ -3723,46 +3746,36 @@ async function _renderSummaryImpl() {
   if (!body.dataset.loaded) {
     body.innerHTML = `<div class="txt-center txt-muted" style="padding:32px 16px">กำลังดึงข้อมูลจากชีท...</div>`;
   }
-  let lots = [];
+  // Light path: server pre-aggregates → tiny payload. Fallback: raw lots.
+  let items = null;
   try {
-    const r = await fetch(`${COUNT_SAVE_URL}?action=liveLots&warehouse=${encodeURIComponent(wh)}`, { cache:'no-store' });
+    const r = await fetch(`${COUNT_SAVE_URL}?action=summary&warehouse=${encodeURIComponent(wh)}`, { cache:'no-store' });
     const j = await r.json();
-    lots = Array.isArray(j.lots) ? j.lots : [];
-  } catch {
-    body.innerHTML = `<div class="txt-center" style="padding:32px 16px;color:var(--danger)">ดึงข้อมูลจากชีทไม่สำเร็จ — เช็คเน็ตแล้วลองใหม่</div>`;
-    return;
+    if (j && j.ok && Array.isArray(j.items)) items = j.items;
+  } catch {}
+  if (!items) {
+    try {
+      const r = await fetch(`${COUNT_SAVE_URL}?action=liveLots&warehouse=${encodeURIComponent(wh)}`, { cache:'no-store' });
+      const j = await r.json();
+      items = lotsToSummaryItems(Array.isArray(j.lots) ? j.lots : []);
+    } catch {
+      body.innerHTML = `<div class="txt-center" style="padding:32px 16px;color:var(--danger)">ดึงข้อมูลจากชีทไม่สำเร็จ — เช็คเน็ตแล้วลองใหม่</div>`;
+      return;
+    }
   }
   body.dataset.loaded = '1';
-  // Group by product key — aggregate team total + per-counter breakdown
-  const groups = new Map();
-  lots.forEach(lot => {
-    const k = lot.key || ''; if (!k) return;
-    if (!groups.has(k)) groups.set(k, {
-      key: k, name: lot.productName || lot.name || '', factors: lot.factors || {EA:1,PA:1,BP:1,CS:1},
-      total: { EA:0, PA:0, BP:0, CS:0 }, byPerson: new Map(), lots: []
-    });
-    const g = groups.get(k);
-    ['EA','PA','BP','CS'].forEach(u => g.total[u] = (g.total[u]||0) + (lot.counts[u]||0));
-    if (lot.factors) g.factors = lot.factors;
-    const pkey = (lot.empId || lot.userKey || lot.name || '—') + '|' + (lot.name || '');
-    if (!g.byPerson.has(pkey)) g.byPerson.set(pkey, { name: lot.name || lot.empId || '—', counts: { EA:0, PA:0, BP:0, CS:0 } });
-    const bp = g.byPerson.get(pkey);
-    ['EA','PA','BP','CS'].forEach(u => bp.counts[u] += (lot.counts[u]||0));
-    g.lots.push(lot);
-  });
-  // Build summary rows with diff vs system stock
-  const rows = [];
-  groups.forEach(g => {
-    const counted = ['EA','PA','BP','CS'].reduce((s,u) => s + (g.total[u]||0) * (g.factors[u]||1), 0);
-    const prod = findProduct(g.key);
-    const sys = prod ? systemPiecesFor({ key: g.key, factors: g.factors }) : { pieces: 0, raw: '-' };
+  // Build summary rows with diff vs system stock (diff computed client-side from product master)
+  const rows = items.map(it => {
+    const factors = it.factors || {EA:1,PA:1,BP:1,CS:1};
+    const total = it.total || {EA:0,PA:0,BP:0,CS:0};
+    const counted = ['EA','PA','BP','CS'].reduce((s,u) => s + (total[u]||0) * (factors[u]||1), 0);
+    const prod = findProduct(it.key);
+    const sys = prod ? systemPiecesFor({ key: it.key, factors }) : { pieces: 0, raw: '-' };
     const diff = counted - sys.pieces;
-    rows.push({
-      key: g.key, name: g.name, counted, system: sys.pieces, diff, factorCS: g.factors.CS||1,
-      systemRaw: sys.raw, status: diff===0?'ok':(diff<0?'short':'over'),
-      byPerson: [...g.byPerson.values()], lots: g.lots, factors: g.factors
-    });
-  });
+    return { key: it.key, name: it.name, counted, system: sys.pieces, diff, factorCS: factors.CS||1,
+             systemRaw: sys.raw, status: diff===0?'ok':(diff<0?'short':'over'),
+             by: it.by||[], lotCount: it.lotCount||0, factors };
+  }).filter(r => r.counted > 0 || (r.by && r.by.length));
   rows.sort((a,b) => Math.abs(b.diff) - Math.abs(a.diff));
   if (!rows.length) {
     body.innerHTML = `<div class="txt-center txt-muted" style="padding:32px 16px">ยังไม่มีรายการนับในคลัง ${wh} — ไปที่แท็บ 📦 นับ เพื่อเริ่มนับสินค้า</div>`;
@@ -3783,41 +3796,22 @@ async function _renderSummaryImpl() {
   const sumRowsHtml = rows.map(r => {
     const csea = diffCSEA(r.diff, r.factorCS);
     const isOpen = sumOpen.has(encodeURIComponent(r.key));
-    const lotCount = (r.lots || []).length;
-    const breakdown = `<span style="font-size:11px;color:var(--muted);margin-left:6px">${r.byPerson.length} คน · ${lotCount} ครั้ง</span>`;
+    const by = r.by || [];
+    const lotCount = r.lotCount || 0;
+    const breakdown = `<span style="font-size:11px;color:var(--muted);margin-left:6px">${by.length} คน · ${lotCount} ครั้ง</span>`;
     const countedCSEA = piecesToCSEA(r.counted, r.factorCS);
     const systemCSEA  = piecesToCSEA(r.system,  r.factorCS);
-    // Build lot sub-rows (each scan = 1 lot row), grouped by person
-    const lotsByPerson = new Map();
-    (r.lots || []).forEach(lot => {
-      const pk = (lot.empId || lot.userKey || lot.name || '—') + '|' + (lot.name || '');
-      if (!lotsByPerson.has(pk)) lotsByPerson.set(pk, { name: lot.name || lot.empId || '—', lots: [] });
-      lotsByPerson.get(pk).lots.push(lot);
-    });
+    // Per-person breakdown (counts + their locations + expiry dates) — aggregated,
+    // no per-lot rows, so the payload stays small.
     const expandPanel = isOpen ? `<div class="sum-expand">
-      ${[...lotsByPerson.values()].map(p => `
-        <div class="sum-person">
-          <div class="sum-person-name">👤 ${esc(p.name)}</div>
-          ${p.lots.map(lot => {
-            const lotId = encodeURIComponent(lot.lotId || lot.ts || (lot.key + '|' + Math.random()));
-            const lotOpen = sumLotOpen.has(lotId);
-            const bd = ['CS','BP','PA','EA'].filter(u => (lot.counts[u]||0) > 0).map(u => `${lot.counts[u]} ${u}`).join(' + ') || '0';
-            const lotPieces = ['EA','PA','BP','CS'].reduce((s,u) => s + (lot.counts[u]||0) * ((r.factors||{})[u]||1), 0);
-            const timeBadge = lot.ts ? formatThaiTime(new Date(lot.ts)) : '—';
-            return `<div class="sum-lot ${lotOpen?'open':''}" data-sum-lot="${lotId}">
-              <div class="sum-lot-head">
-                <span class="sum-lot-time">${timeBadge}</span>
-                <span class="sum-lot-bd">${bd}</span>
-                <span class="sum-lot-pieces">${lotPieces.toLocaleString()} ชิ้น</span>
-                <span class="sum-lot-chev">›</span>
-              </div>
-              ${lotOpen ? `<div class="sum-lot-detail">
-                ${lot.location ? `<div>📍 <b>${esc(lot.location)}</b></div>` : '<div style="color:var(--muted);font-style:italic">ไม่ระบุที่ตั้ง</div>'}
-                ${lot.expiryDate ? `<div>📅 หมดอายุ <b>${formatThaiDate(lot.expiryDate)}</b></div>` : ''}
-              </div>` : ''}
-            </div>`;
-          }).join('')}
-        </div>`).join('')}
+      ${by.map(p => {
+        const bd = ['CS','BP','PA','EA'].filter(u => (p.counts[u]||0) > 0).map(u => `${p.counts[u]} ${u}`).join(' + ') || '0';
+        return `<div class="sum-person">
+          <div class="sum-person-name">👤 ${esc(p.name)} · <b>${bd}</b></div>
+          ${(p.locs && p.locs.length) ? `<div class="sum-lot-detail">📍 ${p.locs.map(esc).join(', ')}</div>` : ''}
+          ${(p.exps && p.exps.length) ? `<div class="sum-lot-detail">📅 ${p.exps.map(e=>formatThaiDate(e)).join(', ')}</div>` : ''}
+        </div>`;
+      }).join('')}
     </div>` : '';
     return `<div class="sum-row sr-${r.status==='ok'?'ok':(r.status==='short'?'short':'over')} ${isOpen?'open':''}" data-sum-key="${encodeURIComponent(r.key)}" title="คลิกดูรายละเอียด">
       <div class="sr-main">
