@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.18  (?fresh=1 bypasses 6h archive cache for manual ↻)
+//  Rattana Stock Count — GAS Backend  v1.19  (fix blank วันหมดอายุ: normalize expiry + TEXT cols + backfill)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -11,7 +11,7 @@
 
 const SS_ID = '18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4';   // default file (W1, W2, W3, …)
 const TZ    = 'Asia/Bangkok';
-const GAS_VERSION = 'v1.18';   // bump on every deploy — check with ?action=ping
+const GAS_VERSION = 'v1.19';   // bump on every deploy — check with ?action=ping
 
 // ═════════════════════════════════════════════════════════════
 //  PER-WAREHOUSE SPREADSHEET ROUTING
@@ -89,6 +89,15 @@ function parseAnyTs(v) {
   return isNaN(d) ? null : d;
 }
 function tsMs(v) { const d = parseAnyTs(v); return d ? d.getTime() : 0; }
+
+// Normalize any expiry value → "YYYY-MM-DD" (handles Date cells and ISO-with-time
+// like "2027-12-31T17:00:00.000Z" that Sheets produces when a cell auto-types to date).
+function isoDate_(v) {
+  if (v == null || v === '') return '';
+  if (v instanceof Date) return isNaN(v) ? '' : Utilities.formatDate(v, TZ, 'yyyy-MM-dd');
+  const m = String(v).trim().match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : String(v).trim();
+}
 
 // ── ROUTING ───────────────────────────────────────────
 function doGet(e) {
@@ -325,8 +334,8 @@ function upsertLot(b) {
   const sh = liveSheetFor(b.warehouse);
   const c = b.counts || {EA:0,PA:0,BP:0,CS:0};
   const f = b.factors || {EA:1,PA:1,BP:1,CS:1};
-  const expIso = b.expiryDate || '';
-  const expThai = expIso ? thaiDateTime(expIso + 'T00:00:00+07:00').split(' ')[0] : '';
+  const expIso = isoDate_(b.expiryDate);   // normalize (strips any time part) so the Thai column always computes
+  const expThai = /^\d{4}-\d{2}-\d{2}$/.test(expIso) ? thaiDateTime(expIso + 'T00:00:00+07:00').split(' ')[0] : '';
   // Compute pieces / diff vs system stock (app sends systemRaw + systemPieces).
   const factorCS = f.CS || 1;
   const countedPieces = ['EA','PA','BP','CS'].reduce((s,u) => s + (c[u]||0) * (f[u]||1), 0);
@@ -370,8 +379,37 @@ function upsertLot(b) {
   // Google Sheets converts an all-digit key like "00500100008" to the number
   // 500100008 and drops the leading zeros.
   sh.getRange(target, 8).setNumberFormat('@');
+  // Keep วันหมดอายุ (15) + expiryISO (16) as TEXT so Sheets doesn't auto-convert
+  // them to date cells (which is what made re-reads return datetime and blank the Thai col).
+  sh.getRange(target, 15, 1, 2).setNumberFormat('@');
   sh.getRange(target, 1, 1, rowVals.length).setValues([rowVals]);
   return { ok: true };
+}
+
+// One-time cleanup — run from the Apps Script editor: backfillExpiryThai('C4').
+// Fills blank วันหมดอายุ (col 15) from expiryISO (col 16) across the warehouse's
+// live + archive sheets. Returns how many cells were filled.
+function backfillExpiryThai(wh) {
+  wh = String(wh || '').toUpperCase();
+  const sheets = [liveSheetFor(wh)].concat(legacyLiveSheetsFor(wh));
+  archiveSpecs_(wh).forEach(function (spec) {
+    try { sheets.push(archiveSheet_(SpreadsheetApp.openById(spec.id), spec.gid, wh)); } catch (_) {}
+  });
+  let n = 0;
+  sheets.filter(Boolean).forEach(function (sh) {
+    const data = sh.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      const o = data[i][14];                 // วันหมดอายุ (0-based 14)
+      const iso = isoDate_(data[i][15]);     // expiryISO  (0-based 15)
+      if ((o === '' || o == null) && /^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+        sh.getRange(i + 1, 15).setNumberFormat('@');
+        sh.getRange(i + 1, 15).setValue(thaiDateTime(iso + 'T00:00:00+07:00').split(' ')[0]);
+        n++;
+      }
+    }
+  });
+  try { cacheDelBig_('arch_' + wh); } catch (_) {}
+  return n;
 }
 
 function deleteLot(b) {
@@ -511,7 +549,7 @@ function rowToLot_(r) {
     productName:  r[8] || '',
     factors:      factors,
     counts: { CS: r[10]||0, BP: r[11]||0, PA: r[12]||0, EA: r[13]||0 },
-    expiryDate:   r[15] || ''
+    expiryDate:   isoDate_(r[15])
   };
 }
 function collectLots_(sh, wh, out, seen) {
