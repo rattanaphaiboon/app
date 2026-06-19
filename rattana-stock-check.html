@@ -243,7 +243,7 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
 <div class="topbar">
   <header>
     <div class="brand">
-      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.46</span></div>
+      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.47</span></div>
       <div class="subttl">เทียบเช็คสต็อก C4 (นับจริง) × PDDT — ขาด/เกิน</div>
     </div>
     <div class="hgroup">
@@ -385,6 +385,7 @@ function parseCsv(text){
   return rows.slice(1).filter(r=>r.some(c=>clean(c))).map(r=>Object.fromEntries(h.map((k,i)=>[k,clean(r[i])])));
 }
 const normCode=s=>String(s||'').replace(/\s+/g,'').trim();
+const normName=s=>String(s||'').trim().replace(/\s+/g,' ').toLowerCase();   // ชื่อสินค้า normalize สำหรับ match (ตัดช่องว่างเกิน)
 const num=s=>{const n=parseFloat(String(s||'').replace(/,/g,''));return isNaN(n)?0:n;};
 
 /* ── Thai date (พ.ศ.) ── */
@@ -850,15 +851,18 @@ function buildBrandMap(){
   return brandMap;
 }
 // สร้างแถว+คอลัมน์ "ยังไม่ได้เช็คทั้ง 2 คลัง" — สินค้าที่ไม่ถูกนับ "ที่ไหนเลย" (C4/W4 · A/B) แต่ยังมีสต็อก
-function buildUncountedRows(countedWh,countedWarehouses,brandMap){
+// match "เช็คแล้ว" = barcode ตรง หรือ ชื่อสินค้าตรง (countedNames) — กันของที่นับด้วยบาร์โค้ดคนละรุ่นแต่ชื่อเดียวกัน
+function buildUncountedRows(countedWh,countedWarehouses,brandMap,countedNames){
   const numSort=(a,b)=>a.localeCompare(b,undefined,{numeric:true});
   const mainShelf=t=>{const k=Object.keys(t||{}); if(!k.length)return ''; k.sort((a,b)=>(t[b]-t[a])||numSort(a,b)); return k[0];};
   const countedAll=new Set(); Object.values(countedWh).forEach(set=>set.forEach(c=>countedAll.add(c)));  // นับที่คลังไหนก็ตาม = เช็คแล้ว
+  const names=countedNames||new Set();
   const out=[];
   PDDTLIST.forEach(pd=>{
     if(!pd.codes.length) return;
     let checked=false; for(const c of pd.codes){ if(countedAll.has(c)||countedAll.has(c.replace(/^0+/,''))){checked=true;break;} }
-    if(checked) return;                                                   // เคยนับคลังใดคลังหนึ่ง (A/B) แล้ว → ไม่ขึ้น
+    if(!checked && pd.name && names.has(normName(pd.name))) checked=true;  // match ด้วยชื่อสินค้าด้วย
+    if(checked) return;                                                   // เคยนับ (barcode หรือ ชื่อ) คลังใดคลังหนึ่ง (A/B) แล้ว → ไม่ขึ้น
     countedWarehouses.forEach(w=>{
       const raw=pd.stock[w]||''; if(raw==='') return;
       const pcs=parseCsEa(raw,pd.qtyCs); if(pcs===0) return;              // ต้องมีสต็อก (บวก/ลบ) ไม่ใช่ 0
@@ -888,13 +892,13 @@ async function exportUncounted(){
   if(typeof XLSX==='undefined'){ showToast('ไลบรารี Excel ยังโหลดไม่เสร็จ','error'); return; }
   if(!PDDTLIST.length){ showToast('ยังไม่ได้โหลด PDDT — กด ⟳ โหลดใหม่ก่อน','error'); return; }
   // คลังที่เรานับ + รหัสที่นับแล้วในแต่ละคลัง (เก็บทั้ง normalized + ตัด 0 นำหน้า) — นับว่า "เช็คแล้ว" ทั้งรอบ A และ B
-  const countedWh={}, countedWarehouses=new Set();
-  const addCounted=(code,wh)=>{ const w=(wh||'C4'); countedWarehouses.add(w); const set=countedWh[w]||(countedWh[w]=new Set()); const c=normCode(code); if(!c)return; set.add(c); set.add(c.replace(/^0+/,'')); };
-  PRODUCTS.forEach(p=>addCounted(p.code,p.wh));                                  // รอบ A
+  const countedWh={}, countedWarehouses=new Set(), countedNames=new Set();
+  const addCounted=(code,wh,name)=>{ const w=(wh||'C4'); countedWarehouses.add(w); const set=countedWh[w]||(countedWh[w]=new Set()); const c=normCode(code); if(c){set.add(c); set.add(c.replace(/^0+/,''));} const nm=normName(name); if(nm)countedNames.add(nm); };
+  PRODUCTS.forEach(p=>addCounted(p.code,p.wh,p.name));                           // รอบ A
   showToast('กำลังเช็ครอบ B ประกอบ…','info');
-  for(const s of (CFG.roundBSources||[])){ try{ (await fetchRows(gvizSrc(s))).forEach(r=>addCounted(r['รหัสสินค้า'],(r['warehouse']||'').trim())); }catch(e){} }  // รอบ B
+  for(const s of (CFG.roundBSources||[])){ try{ (await fetchRows(gvizSrc(s))).forEach(r=>addCounted(r['รหัสสินค้า'],(r['warehouse']||'').trim(),r['ชื่อสินค้า'])); }catch(e){} }  // รอบ B
   if(!countedWarehouses.size){ showToast('ยังไม่มีข้อมูลนับ','error'); return; }
-  const {rows,cols}=buildUncountedRows(countedWh,countedWarehouses,buildBrandMap());
+  const {rows,cols}=buildUncountedRows(countedWh,countedWarehouses,buildBrandMap(),countedNames);
   if(!rows.length){ showToast('เยี่ยม! ไม่พบสินค้าที่มีสต็อกแต่ยังไม่ได้เช็ค ✓','success'); return; }
   const ws=XLSX.utils.json_to_sheet(rows); ws['!cols']=cols;
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'ยังไม่ได้เช็คทั้ง2คลัง');
@@ -968,11 +972,11 @@ async function exportCompareRounds(){
   XLSX.utils.book_append_sheet(wb,ws2,'ข้ามคลัง (B ทับ A)');
   // ชีท 3: ยังไม่ได้เช็ค — มีสต็อกใน PDDT แต่ไม่นับทั้งรอบ A และ B
   if(PDDTLIST.length){
-    const cwh={}, cwarehouses=new Set();
-    const addC=(code,wh)=>{const w=(wh||'C4');cwarehouses.add(w);const set=cwh[w]||(cwh[w]=new Set());const c=normCode(code);if(!c)return;set.add(c);set.add(c.replace(/^0+/,''));};
-    PRODUCTS.forEach(p=>addC(p.code,p.wh));
-    bRows.forEach(r=>addC(r['รหัสสินค้า'],(r['warehouse']||'').trim()));
-    const u=buildUncountedRows(cwh,cwarehouses,buildBrandMap());
+    const cwh={}, cwarehouses=new Set(), cnames=new Set();
+    const addC=(code,wh,name)=>{const w=(wh||'C4');cwarehouses.add(w);const set=cwh[w]||(cwh[w]=new Set());const c=normCode(code);if(c){set.add(c);set.add(c.replace(/^0+/,''));}const nm=normName(name);if(nm)cnames.add(nm);};
+    PRODUCTS.forEach(p=>addC(p.code,p.wh,p.name));
+    bRows.forEach(r=>addC(r['รหัสสินค้า'],(r['warehouse']||'').trim(),r['ชื่อสินค้า']));
+    const u=buildUncountedRows(cwh,cwarehouses,buildBrandMap(),cnames);
     if(u.rows.length){ const ws3=XLSX.utils.json_to_sheet(u.rows); ws3['!cols']=u.cols; XLSX.utils.book_append_sheet(wb,ws3,'ยังไม่ได้เช็คทั้ง2คลัง'); }
   }
   XLSX.writeFile(wb,_xlFname('round-A-vs-B'));
