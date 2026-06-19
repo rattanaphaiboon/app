@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.17  (+?action=ping version check)
+//  Rattana Stock Count — GAS Backend  v1.18  (?fresh=1 bypasses 6h archive cache for manual ↻)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -11,7 +11,7 @@
 
 const SS_ID = '18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4';   // default file (W1, W2, W3, …)
 const TZ    = 'Asia/Bangkok';
-const GAS_VERSION = 'v1.17';   // bump on every deploy — check with ?action=ping
+const GAS_VERSION = 'v1.18';   // bump on every deploy — check with ?action=ping
 
 // ═════════════════════════════════════════════════════════════
 //  PER-WAREHOUSE SPREADSHEET ROUTING
@@ -564,12 +564,14 @@ function cacheDelBig_(key) {
 
 // Archived (old, static) lots for a warehouse — cached 6h so the heavy sheet isn't
 // re-read on every poll. Fully defensive: any failure returns [].
-function getArchiveLots(wh) {
+function getArchiveLots(wh, fresh) {
   const specs = archiveSpecs_(wh);
   if (!specs.length) return [];
   const cacheKey = 'arch_' + wh;
-  const cached = cacheGetBig_(cacheKey);
-  if (cached) { try { return JSON.parse(cached); } catch (_) {} }
+  if (!fresh) {   // fresh=true (manual ↻) bypasses cache → re-reads the sheet now
+    const cached = cacheGetBig_(cacheKey);
+    if (cached) { try { return JSON.parse(cached); } catch (_) {} }
+  }
   const out = [], seen = {};
   specs.forEach(function (spec) {
     try {
@@ -581,6 +583,8 @@ function getArchiveLots(wh) {
   return out;
 }
 
+function isFresh_(p) { const v = p && p.fresh; return v === '1' || v === 1 || v === true || v === 'true'; }
+
 function getLiveLots(p) {
   const wh = String(p.warehouse || '');
   if (!wh) return { ok: true, lots: [] };
@@ -588,9 +592,9 @@ function getLiveLots(p) {
   const seen = {}; // dedupe by lotId in case a row exists in more than one sheet
   const sheets = [liveSheetFor(wh)].concat(legacyLiveSheetsFor(wh)).filter(Boolean);
   sheets.forEach(function (sh) { collectLots_(sh, wh, out, seen); });
-  // Merge archived (old) lots, deduped by lotId — read at most once / 6h.
+  // Merge archived (old) lots, deduped by lotId — cached 6h, ?fresh=1 re-reads now.
   try {
-    getArchiveLots(wh).forEach(function (lot) {
+    getArchiveLots(wh, isFresh_(p)).forEach(function (lot) {
       const id = String(lot.lotId || '');
       if (id && seen[id]) return;
       if (id) seen[id] = 1;
@@ -611,7 +615,7 @@ function getSummary(p) {
   const sheets = [liveSheetFor(wh)].concat(legacyLiveSheetsFor(wh)).filter(Boolean);
   sheets.forEach(function (sh) { collectLots_(sh, wh, out, seen); });
   try {
-    getArchiveLots(wh).forEach(function (lot) {
+    getArchiveLots(wh, isFresh_(p)).forEach(function (lot) {
       const id = String(lot.lotId || ''); if (id && seen[id]) return; if (id) seen[id] = 1; out.push(lot);
     });
   } catch (_) {}
