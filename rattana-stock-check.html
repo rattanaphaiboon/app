@@ -243,7 +243,7 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
 <div class="topbar">
   <header>
     <div class="brand">
-      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.38</span></div>
+      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.39</span></div>
       <div class="subttl">เทียบเช็คสต็อก C4 (นับจริง) × PDDT — ขาด/เกิน</div>
     </div>
     <div class="hgroup">
@@ -761,12 +761,8 @@ function reconcileWh(whData,whList){
   sh.forEach(s=>{ if(s.q>0) adjusts.push({w:s.w,type:'cut',q:s.q}); });   // ยังขาด → ตัดระบบออก
   return {transfers,adjusts};
 }
-// 3) ข้ามคลัง — รวมต่อสินค้า · ระบบ/นับ/ต่าง รายคลัง + รวม + แนะนำโอนย้าย/ปรับสต็อก
-function exportTransfer(){
-  _closeMenus();
-  const items=applyFilter();
-  if(!items.length){ showToast('ไม่มีรายการให้ export','error'); return; }
-  if(typeof XLSX==='undefined'){ showToast('ไลบรารี Excel ยังโหลดไม่เสร็จ','error'); return; }
+// สร้างแถว+คอลัมน์รายงาน "ข้ามคลัง" จาก items — ใช้ร่วม (ข้ามคลังปกติ + ฉบับ B ทับ A ในไฟล์เทียบรอบ)
+function buildCrossWh(items){
   const byCode={};
   items.forEach(p=>{
     let c=byCode[p.code]; if(!c)c=byCode[p.code]={code:p.code,name:p.name,brand:p.brand||'',size:p.size||'',qtyCs:p.qtyCs||1,wh:{}};
@@ -825,6 +821,15 @@ function exportTransfer(){
   whList.forEach(()=>cols.push({wch:12},{wch:8},{wch:8}));              // ปรับ รายคลัง: เพิ่ม/ตัด · ลัง · ชิ้น
   cols.push({wch:15});                                                  // สรุปต่าง (รวม +/−)
   whList.forEach(w=>{ cols.push({wch:24}); if(w==='C4')cols.push({wch:9}); });   // Location {wh} (+ Shelf C4 เลขเดียว)
+  return {rows,cols,whList};
+}
+// 3) ข้ามคลัง — รวมต่อสินค้า · ระบบ/นับ/ต่าง รายคลัง + รวม + แนะนำโอนย้าย/ปรับสต็อก
+function exportTransfer(){
+  _closeMenus();
+  const items=applyFilter();
+  if(!items.length){ showToast('ไม่มีรายการให้ export','error'); return; }
+  if(typeof XLSX==='undefined'){ showToast('ไลบรารี Excel ยังโหลดไม่เสร็จ','error'); return; }
+  const {rows,cols,whList}=buildCrossWh(items);
   const ws=XLSX.utils.json_to_sheet(rows); ws['!cols']=cols;
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'ข้ามคลัง');
   XLSX.writeFile(wb,_xlFname('crosswh'));
@@ -930,9 +935,22 @@ async function exportCompareRounds(){
   const ws=XLSX.utils.json_to_sheet(rows);
   ws['!cols']=[{wch:7},{wch:16},{wch:34},{wch:16},{wch:16},{wch:11},{wch:11},{wch:14},{wch:11},{wch:14},{wch:11},{wch:14},{wch:11},{wch:14},{wch:11},{wch:14},{wch:11},{wch:14},{wch:14},{wch:26},{wch:26}];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'เทียบรอบ A-B');
+  // ชีท 2: ข้ามคลัง ฉบับ "B ทับ A" — แต่ละ (รหัส+คลัง): ถ้า B นับ ใช้ B แทน A · ไม่มี B ใช้ A · แล้วคำนวณโอน/ปรับใหม่
+  const mergedMap={};
+  PRODUCTS.forEach(p=>{ mergedMap[p.uid]={code:p.code,wh:p.wh,name:p.name,brand:p.brand,size:p.size,qtyCs:p.qtyCs,counted:p.counted,system:p.found?p.system:null,found:p.found,diff:p.found?p.diff:null,locs:p.locs,shelves:p.shelves}; });
+  Object.keys(bMap).forEach(k=>{
+    const b=bMap[k], a=prodByCode[k];
+    const q=(a&&a.qtyCs>1?a.qtyCs:0)||b.qtyCs||1;
+    const pd=matchPddt(b.code); const sysRaw=pd&&pd.stock?(pd.stock[b.wh]||''):''; const system=sysRaw!==''?parseCsEa(sysRaw,q):null;
+    const blocs=[...b.locs].sort((x,y)=>x.localeCompare(y,undefined,{numeric:true}));
+    mergedMap[k]={code:b.code,wh:b.wh,name:(a&&a.name)||b.name,brand:(a&&a.brand)||'',size:(a&&a.size)||'',qtyCs:q,counted:b.counted,system,found:system!=null,diff:system!=null?(b.counted-system):null,locs:blocs,shelves:[...new Set(blocs.map(l=>shelfOf(l)))]};
+  });
+  const cw=buildCrossWh(Object.values(mergedMap));
+  const ws2=XLSX.utils.json_to_sheet(cw.rows); ws2['!cols']=cw.cols;
+  XLSX.utils.book_append_sheet(wb,ws2,'ข้ามคลัง (B ทับ A)');
   XLSX.writeFile(wb,_xlFname('round-A-vs-B'));
   const nDiff=out.filter(r=>r.status==='diff').length, nOnlyB=out.filter(r=>r.status==='onlyB').length;
-  showToast('เทียบรอบ A↔B: '+out.length+' รายการ · ต่าง '+nDiff+' · ไม่มีในรอบ A '+nOnlyB+' ✓','success');
+  showToast('เทียบรอบ A↔B: '+out.length+' รายการ · ต่าง '+nDiff+' · 2 ชีท (เทียบ + ข้ามคลัง B ทับ A) ✓','success');
 }
 
 function applyFilter(){
