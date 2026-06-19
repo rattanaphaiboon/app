@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.16  (+deleteByKey — remove ALL lots of a product, any user)
+//  Rattana Stock Count — GAS Backend  v1.17  (+?action=ping version check)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -11,6 +11,7 @@
 
 const SS_ID = '18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4';   // default file (W1, W2, W3, …)
 const TZ    = 'Asia/Bangkok';
+const GAS_VERSION = 'v1.17';   // bump on every deploy — check with ?action=ping
 
 // ═════════════════════════════════════════════════════════════
 //  PER-WAREHOUSE SPREADSHEET ROUTING
@@ -94,6 +95,7 @@ function doGet(e) {
   const p = e.parameter || {};
   const action = p.action || '';
   try {
+    if (action === 'ping')       return json({ ok: true, version: GAS_VERSION });
     if (action === 'liveLots')   return json(getLiveLots(p));
     if (action === 'summary')    return json(getSummary(p));
     if (action === 'getHistory' || action === 'history') return json(getHistory(p));
