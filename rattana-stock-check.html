@@ -243,7 +243,7 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
 <div class="topbar">
   <header>
     <div class="brand">
-      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.43</span></div>
+      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.44</span></div>
       <div class="subttl">เทียบเช็คสต็อก C4 (นับจริง) × PDDT — ขาด/เกิน</div>
     </div>
     <div class="hgroup">
@@ -837,7 +837,46 @@ function exportTransfer(){
   XLSX.writeFile(wb,_xlFname('crosswh'));
   showToast('Export ข้ามคลัง '+rows.length+' สินค้า ('+whList.join('/')+') ✓','success');
 }
-// 4) ยังไม่ได้เช็ค — PDDT มีสต็อก (บวก/ลบ ไม่ใช่ 0) ในคลังที่เรานับ แต่ไม่มีในข้อมูลนับ = ของตกสำรวจ
+// C4 map: brand → shelf/location ที่นับเจอ (รายคลัง) — สำหรับเดาตำแหน่งของที่ยังไม่ได้เช็ค
+function buildBrandMap(){
+  const brandMap={};
+  PRODUCTS.forEach(p=>{ if(!p.brand)return; const w=p.wh; (brandMap[w]=brandMap[w]||{}); const m=brandMap[w][p.brand]||(brandMap[w][p.brand]={shelves:new Set(),locs:new Set(),tally:{}}); p.shelves.forEach(s=>{const t=String(s).trim();if(t&&t!=='—')m.shelves.add(t);}); (p.locs||[]).forEach(l=>{m.locs.add(l); const sh=String(shelfOf(l)).trim(); if(sh&&sh!=='—')m.tally[sh]=(m.tally[sh]||0)+1;}); });
+  return brandMap;
+}
+// สร้างแถว+คอลัมน์ "ยังไม่ได้เช็ค" จากชุดรหัสที่นับแล้ว (countedWh = A+B) + C4 map → {rows,cols}
+function buildUncountedRows(countedWh,countedWarehouses,brandMap){
+  const numSort=(a,b)=>a.localeCompare(b,undefined,{numeric:true});
+  const mainShelf=t=>{const k=Object.keys(t||{}); if(!k.length)return ''; k.sort((a,b)=>(t[b]-t[a])||numSort(a,b)); return k[0];};
+  const out=[];
+  PDDTLIST.forEach(pd=>{
+    if(!pd.codes.length) return;
+    countedWarehouses.forEach(w=>{
+      const raw=pd.stock[w]||''; if(raw==='') return;
+      const pcs=parseCsEa(raw,pd.qtyCs); if(pcs===0) return;              // ต้องมีสต็อก (บวก/ลบ) ไม่ใช่ 0
+      const set=countedWh[w]; if(!set) return; let counted=false;
+      for(const c of pd.codes){ if(set.has(c)||set.has(c.replace(/^0+/,''))){counted=true;break;} }
+      if(counted) return;                                                 // นับแล้ว (A หรือ B) ในคลังนี้ → ข้าม
+      const s=csEaOf(pcs,pd.qtyCs);
+      const bm=(brandMap[w]||{})[pd.brand];
+      const shMain=bm?mainShelf(bm.tally):'';
+      const shGuess=bm?[...bm.shelves].sort(numSort).join(', '):'';
+      const locArr=bm?[...bm.locs].sort(numSort):[];
+      const locGuess=locArr.slice(0,6).join(', ')+(locArr.length>6?(' +'+(locArr.length-6)+' จุด'):'');
+      out.push({wh:w,codeEA:pd.codeEA,codeCS:pd.codeCS,name:pd.name,brand:pd.brand,size:pd.size,qtyCs:pd.qtyCs,raw,pcs,cs:s.cs,ea:s.ea,shMain,shGuess,locGuess});
+    });
+  });
+  out.sort((a,b)=> (a.brand||'').localeCompare(b.brand||'','th') || (a.size||'').localeCompare(b.size||'','th') || (a.name||'').localeCompare(b.name||'','th') || (b.pcs-a.pcs));
+  const rows=out.map(r=>({
+    'คลัง':r.wh, 'บาร์โค้ด (ชิ้น)':r.codeEA, 'บาร์โค้ด (ลัง)':r.codeCS, 'ชื่อสินค้า':r.name, 'CAT BRAND':r.brand, 'CAT SIZE':r.size,
+    'Shelf หลัก (เดา)':r.shMain, 'Shelf (แบรนด์นี้เคยนับ)':r.shGuess, 'Location (แบรนด์นี้เคยนับ)':r.locGuess,
+    'บรรจุ(ชิ้น/ลัง)':r.qtyCs>1?r.qtyCs:'',
+    'สต็อกระบบ (CS.EA)':r.raw, 'สต็อก (ลัง)':r.cs, 'สต็อก (ชิ้น)':r.ea, 'สต็อก (ชิ้นรวม)':r.pcs,
+    'หมายเหตุ':r.pcs<0?'⚠ สต็อกติดลบ':''
+  }));
+  const cols=[{wch:7},{wch:16},{wch:16},{wch:34},{wch:16},{wch:16},{wch:10},{wch:16},{wch:30},{wch:11},{wch:15},{wch:9},{wch:9},{wch:11},{wch:14}];
+  return {rows,cols};
+}
+// 4) ยังไม่ได้เช็ค — PDDT มีสต็อก (บวก/ลบ ไม่ใช่ 0) ในคลังที่เรานับ แต่ไม่มีในข้อมูลนับ (A+B) = ของตกสำรวจ
 async function exportUncounted(){
   _closeMenus();
   if(typeof XLSX==='undefined'){ showToast('ไลบรารี Excel ยังโหลดไม่เสร็จ','error'); return; }
@@ -849,41 +888,9 @@ async function exportUncounted(){
   showToast('กำลังเช็ครอบ B ประกอบ…','info');
   for(const s of (CFG.roundBSources||[])){ try{ (await fetchRows(gvizSrc(s))).forEach(r=>addCounted(r['รหัสสินค้า'],(r['warehouse']||'').trim())); }catch(e){} }  // รอบ B
   if(!countedWarehouses.size){ showToast('ยังไม่มีข้อมูลนับ','error'); return; }
-  // "C4 map" — แบรนด์ไหนเคยนับเจอที่ shelf/location ไหน (รายคลัง) → ใช้เดาตำแหน่งของที่ยังไม่ได้เช็ค (60% แบรนด์อยู่ shelf เดียว)
-  const brandMap={};
-  PRODUCTS.forEach(p=>{ if(!p.brand)return; const w=p.wh; (brandMap[w]=brandMap[w]||{}); const m=brandMap[w][p.brand]||(brandMap[w][p.brand]={shelves:new Set(),locs:new Set(),tally:{}}); p.shelves.forEach(s=>{const t=String(s).trim();if(t&&t!=='—')m.shelves.add(t);}); (p.locs||[]).forEach(l=>{m.locs.add(l); const sh=String(shelfOf(l)).trim(); if(sh&&sh!=='—')m.tally[sh]=(m.tally[sh]||0)+1;}); });
-  const numSort=(a,b)=>a.localeCompare(b,undefined,{numeric:true});
-  const mainShelf=t=>{const k=Object.keys(t||{}); if(!k.length)return ''; k.sort((a,b)=>(t[b]-t[a])||numSort(a,b)); return k[0];};  // shelf ที่แบรนด์กระจุกมากสุด
-  const out=[];
-  PDDTLIST.forEach(pd=>{
-    if(!pd.codes.length) return;
-    countedWarehouses.forEach(w=>{
-      const raw=pd.stock[w]||''; if(raw==='') return;
-      const pcs=parseCsEa(raw,pd.qtyCs); if(pcs===0) return;              // ต้องมีสต็อก (บวก/ลบ) ไม่ใช่ 0
-      const set=countedWh[w]; let counted=false;
-      for(const c of pd.codes){ if(set.has(c)||set.has(c.replace(/^0+/,''))){counted=true;break;} }
-      if(counted) return;                                                 // นับแล้วในคลังนี้ → ข้าม
-      const s=csEaOf(pcs,pd.qtyCs);
-      // เดาตำแหน่งจาก "C4 map" — แบรนด์เดียวกันในคลังนี้เคยนับเจอที่ shelf/location ไหน
-      const bm=(brandMap[w]||{})[pd.brand];
-      const shMain=bm?mainShelf(bm.tally):'';
-      const shGuess=bm?[...bm.shelves].sort(numSort).join(', '):'';
-      const locArr=bm?[...bm.locs].sort(numSort):[];
-      const locGuess=locArr.slice(0,6).join(', ')+(locArr.length>6?(' +'+(locArr.length-6)+' จุด'):'');
-      out.push({wh:w,codeEA:pd.codeEA,codeCS:pd.codeCS,name:pd.name,brand:pd.brand,size:pd.size,qtyCs:pd.qtyCs,raw,pcs,cs:s.cs,ea:s.ea,shMain,shGuess,locGuess});
-    });
-  });
-  if(!out.length){ showToast('เยี่ยม! ไม่พบสินค้าที่มีสต็อกแต่ยังไม่ได้เช็ค ✓','success'); return; }
-  out.sort((a,b)=> (a.brand||'').localeCompare(b.brand||'','th') || (a.size||'').localeCompare(b.size||'','th') || (a.name||'').localeCompare(b.name||'','th') || (b.pcs-a.pcs));  // CAT BRAND → CAT SIZE → ชื่อ → สต็อกมากก่อน
-  const rows=out.map(r=>({
-    'คลัง':r.wh, 'บาร์โค้ด (ชิ้น)':r.codeEA, 'บาร์โค้ด (ลัง)':r.codeCS, 'ชื่อสินค้า':r.name, 'CAT BRAND':r.brand, 'CAT SIZE':r.size,
-    'Shelf หลัก (เดา)':r.shMain, 'Shelf (แบรนด์นี้เคยนับ)':r.shGuess, 'Location (แบรนด์นี้เคยนับ)':r.locGuess,
-    'บรรจุ(ชิ้น/ลัง)':r.qtyCs>1?r.qtyCs:'',
-    'สต็อกระบบ (CS.EA)':r.raw, 'สต็อก (ลัง)':r.cs, 'สต็อก (ชิ้น)':r.ea, 'สต็อก (ชิ้นรวม)':r.pcs,
-    'หมายเหตุ':r.pcs<0?'⚠ สต็อกติดลบ':''
-  }));
-  const ws=XLSX.utils.json_to_sheet(rows);
-  ws['!cols']=[{wch:7},{wch:16},{wch:16},{wch:34},{wch:16},{wch:16},{wch:10},{wch:16},{wch:30},{wch:11},{wch:15},{wch:9},{wch:9},{wch:11},{wch:14}];
+  const {rows,cols}=buildUncountedRows(countedWh,countedWarehouses,buildBrandMap());
+  if(!rows.length){ showToast('เยี่ยม! ไม่พบสินค้าที่มีสต็อกแต่ยังไม่ได้เช็ค ✓','success'); return; }
+  const ws=XLSX.utils.json_to_sheet(rows); ws['!cols']=cols;
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'ยังไม่ได้เช็ค');
   XLSX.writeFile(wb,_xlFname('uncounted'));
   showToast('Export ยังไม่ได้เช็ค '+rows.length+' รายการ ('+[...countedWarehouses].join('/')+') ✓','success');
@@ -953,9 +960,18 @@ async function exportCompareRounds(){
   const cw=buildCrossWh(Object.values(mergedMap));
   const ws2=XLSX.utils.json_to_sheet(cw.rows); ws2['!cols']=cw.cols;
   XLSX.utils.book_append_sheet(wb,ws2,'ข้ามคลัง (B ทับ A)');
+  // ชีท 3: ยังไม่ได้เช็ค — มีสต็อกใน PDDT แต่ไม่นับทั้งรอบ A และ B
+  if(PDDTLIST.length){
+    const cwh={}, cwarehouses=new Set();
+    const addC=(code,wh)=>{const w=(wh||'C4');cwarehouses.add(w);const set=cwh[w]||(cwh[w]=new Set());const c=normCode(code);if(!c)return;set.add(c);set.add(c.replace(/^0+/,''));};
+    PRODUCTS.forEach(p=>addC(p.code,p.wh));
+    bRows.forEach(r=>addC(r['รหัสสินค้า'],(r['warehouse']||'').trim()));
+    const u=buildUncountedRows(cwh,cwarehouses,buildBrandMap());
+    if(u.rows.length){ const ws3=XLSX.utils.json_to_sheet(u.rows); ws3['!cols']=u.cols; XLSX.utils.book_append_sheet(wb,ws3,'ยังไม่ได้เช็ค'); }
+  }
   XLSX.writeFile(wb,_xlFname('round-A-vs-B'));
   const nDiff=out.filter(r=>r.status==='diff').length, nOnlyB=out.filter(r=>r.status==='onlyB').length;
-  showToast('เทียบรอบ A↔B: '+out.length+' รายการ · ต่าง '+nDiff+' · 2 ชีท (เทียบ + ข้ามคลัง B ทับ A) ✓','success');
+  showToast('เทียบรอบ A↔B: '+out.length+' รายการ · ต่าง '+nDiff+' · 3 ชีท (เทียบ + ข้ามคลัง B ทับ A + ยังไม่ได้เช็ค) ✓','success');
 }
 
 function applyFilter(){
