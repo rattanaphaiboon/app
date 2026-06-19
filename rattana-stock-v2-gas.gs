@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.20  (summary returns lastTs for newest-first sort)
+//  Rattana Stock Count — GAS Backend  v1.21  (fix sort: BE-year timestamps shifted to CE + เวลาบันทึก kept TEXT)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -11,7 +11,7 @@
 
 const SS_ID = '18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4';   // default file (W1, W2, W3, …)
 const TZ    = 'Asia/Bangkok';
-const GAS_VERSION = 'v1.20';   // bump on every deploy — check with ?action=ping
+const GAS_VERSION = 'v1.21';   // bump on every deploy — check with ?action=ping
 
 // ═════════════════════════════════════════════════════════════
 //  PER-WAREHOUSE SPREADSHEET ROUTING
@@ -89,6 +89,19 @@ function parseAnyTs(v) {
   return isNaN(d) ? null : d;
 }
 function tsMs(v) { const d = parseAnyTs(v); return d ? d.getTime() : 0; }
+
+// Robust timestamp (ms) for sort. Handles เวลาบันทึก cells that Sheets auto-typed
+// to a DATE, reading the Buddhist year (e.g. 2569) literally as CE → a date ~543y in
+// the future. We detect year>2200 and shift it back so old + new rows are comparable.
+function lotTs_(v) {
+  if (v instanceof Date) {
+    if (isNaN(v)) return 0;
+    var y = v.getFullYear();
+    if (y > 2200) return new Date(y - 543, v.getMonth(), v.getDate(), v.getHours(), v.getMinutes(), v.getSeconds()).getTime();
+    return v.getTime();
+  }
+  return tsMs(v);   // text path — tsMs/parseAnyTs already converts BE→CE
+}
 
 // Normalize any expiry value → "YYYY-MM-DD" (handles Date cells and ISO-with-time
 // like "2027-12-31T17:00:00.000Z" that Sheets produces when a cell auto-types to date).
@@ -379,8 +392,10 @@ function upsertLot(b) {
   // Google Sheets converts an all-digit key like "00500100008" to the number
   // 500100008 and drops the leading zeros.
   sh.getRange(target, 8).setNumberFormat('@');
-  // Keep วันหมดอายุ (15) + expiryISO (16) as TEXT so Sheets doesn't auto-convert
-  // them to date cells (which is what made re-reads return datetime and blank the Thai col).
+  // Keep เวลาบันทึก (2) as TEXT so the Buddhist-year string isn't auto-typed to a
+  // far-future date (which broke newest-first sorting), and วันหมดอายุ (15) +
+  // expiryISO (16) as TEXT so they don't become date cells either.
+  sh.getRange(target, 2).setNumberFormat('@');
   sh.getRange(target, 15, 1, 2).setNumberFormat('@');
   sh.getRange(target, 1, 1, rowVals.length).setValues([rowVals]);
   return { ok: true };
@@ -539,7 +554,7 @@ function rowToLot_(r) {
   try { factors = JSON.parse(r[9] || '{}'); } catch (_) {}
   return {
     lotId:        r[0],
-    ts:           tsMs(r[1]),
+    ts:           lotTs_(r[1]),
     warehouse:    r[2],
     location:     r[3] || '',
     empId:        r[4] || '',
