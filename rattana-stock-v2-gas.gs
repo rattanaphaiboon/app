@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.21  (fix sort: BE-year timestamps shifted to CE + เวลาบันทึก kept TEXT)
+//  Rattana Stock Count — GAS Backend  v1.22  (เวลาบันทึก includes seconds → precise sort)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -11,7 +11,7 @@
 
 const SS_ID = '18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4';   // default file (W1, W2, W3, …)
 const TZ    = 'Asia/Bangkok';
-const GAS_VERSION = 'v1.21';   // bump on every deploy — check with ?action=ping
+const GAS_VERSION = 'v1.22';   // bump on every deploy — check with ?action=ping
 
 // ═════════════════════════════════════════════════════════════
 //  PER-WAREHOUSE SPREADSHEET ROUTING
@@ -55,6 +55,20 @@ function thaiDateTime(input) {
   else if (!(d instanceof Date)) d = new Date(d);
   if (!d || isNaN(d)) return '';
   const s = Utilities.formatDate(d, TZ, 'dd/MM/yyyy HH:mm');
+  const parts = s.split(' ');
+  const dmy = parts[0].split('/');
+  const beYear = parseInt(dmy[2], 10) + 543;
+  return dmy[0] + '/' + dmy[1] + '/' + beYear + ' ' + parts[1];
+}
+
+// Like thaiDateTime but WITH seconds — used for เวลาบันทึก so same-minute scans
+// get distinct timestamps and sort correctly (newest first).
+function thaiDateTimeSec(input) {
+  let d = input;
+  if (!d) d = new Date();
+  else if (!(d instanceof Date)) d = new Date(d);
+  if (!d || isNaN(d)) return '';
+  const s = Utilities.formatDate(d, TZ, 'dd/MM/yyyy HH:mm:ss');
   const parts = s.split(' ');
   const dmy = parts[0].split('/');
   const beYear = parseInt(dmy[2], 10) + 543;
@@ -364,7 +378,7 @@ function upsertLot(b) {
   })();
   const rowVals = [
     b.lotId,
-    thaiDateTime(new Date()),
+    thaiDateTimeSec(new Date()),   // seconds → distinct sort key for same-minute scans
     b.warehouse || '',
     b.location || '',
     b.empId || '',
