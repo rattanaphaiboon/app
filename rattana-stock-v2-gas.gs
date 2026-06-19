@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.14  (deleteLot reaches ARCHIVE sheets + updates cache)
+//  Rattana Stock Count — GAS Backend  v1.15  (archive reads/deletes target exact gid 796495760)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -391,9 +391,12 @@ function deleteLot(b) {
       if (n === 'Live' || n.indexOf('Live_') === 0) consider(s, false);
     });
   });
-  (ARCHIVE_SS_ID[wh.toUpperCase()] || []).forEach(id => {
+  archiveSpecs_(wh).forEach(spec => {
     try {
-      const ss = SpreadsheetApp.openById(id);
+      const ss = SpreadsheetApp.openById(spec.id);
+      // the exact gid tab the data lives in...
+      consider(archiveSheet_(ss, spec.gid, wh), true);
+      // ...plus any other Live* tabs, in case rows landed elsewhere.
       ss.getSheets().forEach(s => {
         const n = s.getName();
         if (n === 'Live' || n.indexOf('Live_') === 0) consider(s, true);
@@ -446,8 +449,23 @@ function clearLiveForUser(b) {
 // fresh file. The old data is static, so it's cached 6h to avoid re-reading it on
 // every poll. To turn this off, set the warehouse's list to [] (or remove it).
 const ARCHIVE_SS_ID = {
-  'C4': ['1rWZ7_vWBTx7hcXucAtWNX3ruA5lVro90P3HkQ6amFMg']   // old C4 sheet (history)
+  // old C4 history — read the EXACT tab the user pointed to (gid 796495760)
+  'C4': [{ id: '1rWZ7_vWBTx7hcXucAtWNX3ruA5lVro90P3HkQ6amFMg', gid: 796495760 }]
 };
+// Normalize archive entries (string id OR {id, gid}) → [{id, gid}].
+function archiveSpecs_(wh) {
+  return (ARCHIVE_SS_ID[String(wh || '').toUpperCase()] || []).map(function (s) {
+    return (typeof s === 'string') ? { id: s, gid: null } : { id: s.id, gid: (s.gid != null ? s.gid : null) };
+  });
+}
+// Resolve the archive sheet: by gid if given, else by Live_<wh>/"Live" name.
+function archiveSheet_(ss, gid, wh) {
+  if (gid != null) {
+    const all = ss.getSheets();
+    for (var i = 0; i < all.length; i++) if (all[i].getSheetId() === gid) return all[i];
+  }
+  return ss.getSheetByName(liveSheetName(wh)) || ss.getSheetByName('Live');
+}
 
 // One Live row → lot object (shared by live + archive readers).
 function rowToLot_(r) {
@@ -519,17 +537,16 @@ function cacheDelBig_(key) {
 // Archived (old, static) lots for a warehouse — cached 6h so the heavy sheet isn't
 // re-read on every poll. Fully defensive: any failure returns [].
 function getArchiveLots(wh) {
-  const ids = ARCHIVE_SS_ID[String(wh || '').toUpperCase()] || [];
-  if (!ids.length) return [];
+  const specs = archiveSpecs_(wh);
+  if (!specs.length) return [];
   const cacheKey = 'arch_' + wh;
   const cached = cacheGetBig_(cacheKey);
   if (cached) { try { return JSON.parse(cached); } catch (_) {} }
   const out = [], seen = {};
-  ids.forEach(function (id) {
+  specs.forEach(function (spec) {
     try {
-      const ss = SpreadsheetApp.openById(id);
-      const sh = ss.getSheetByName(liveSheetName(wh)) || ss.getSheetByName('Live');
-      collectLots_(sh, wh, out, seen);
+      const ss = SpreadsheetApp.openById(spec.id);
+      collectLots_(archiveSheet_(ss, spec.gid, wh), wh, out, seen);
     } catch (_) {}
   });
   cachePutBig_(cacheKey, JSON.stringify(out), 21600);   // 6h — old data never changes
