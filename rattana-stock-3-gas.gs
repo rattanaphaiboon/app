@@ -21,11 +21,9 @@ const GAS_VERSION = 'v1.0';   // app-2
 //  2) Paste those IDs below.
 //  3) Anything not listed here falls back to the default SS_ID.
 // ═════════════════════════════════════════════════════════════
-const WAREHOUSE_SS_ID = {
-  'C4':  'PASTE_C4_SHEET_ID',    // app-2 — NEW C4 save sheet (paste ID)
-  'W4':  'PASTE_W4_SHEET_ID',    // app-2 — NEW W4 save sheet (paste ID)
-  'EW4': 'PASTE_W4_SHEET_ID'     // EW4 shares W4's file (paste the same W4 ID)
-};
+// App-2: every warehouse uses the single file SS_ID + single "Live" tab,
+// so this map is empty (ssFor() falls back to SS_ID for all warehouses).
+const WAREHOUSE_SS_ID = {};
 
 function ssFor(wh) {
   const id = WAREHOUSE_SS_ID[String(wh || '').toUpperCase()] || SS_ID;
@@ -324,9 +322,10 @@ const LIVE_HEADERS = [
 ];
 const DONE_COL = LIVE_HEADERS.length;   // 1-based column index of เวลายืนยัน (23)
 
-// Per-warehouse sheets: Live_W1, Live_W2, Live_W3, Live_W4, Live_C4.
+// App-2: ALL warehouses share ONE tab named "Live" (rows tell them apart by the
+// warehouse column). Reads filter by warehouse, so one tab works fine.
 function liveSheetName(wh) {
-  return 'Live_' + String(wh || '').toUpperCase();
+  return 'Live';
 }
 function liveSheetFor(wh) {
   if (!wh) return null;
