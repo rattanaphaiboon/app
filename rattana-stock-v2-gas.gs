@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.19  (fix blank วันหมดอายุ: normalize expiry + TEXT cols + backfill)
+//  Rattana Stock Count — GAS Backend  v1.20  (summary returns lastTs for newest-first sort)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -11,7 +11,7 @@
 
 const SS_ID = '18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4';   // default file (W1, W2, W3, …)
 const TZ    = 'Asia/Bangkok';
-const GAS_VERSION = 'v1.19';   // bump on every deploy — check with ?action=ping
+const GAS_VERSION = 'v1.20';   // bump on every deploy — check with ?action=ping
 
 // ═════════════════════════════════════════════════════════════
 //  PER-WAREHOUSE SPREADSHEET ROUTING
@@ -662,10 +662,11 @@ function getSummary(p) {
   out.forEach(function (lot) {
     const k = lot.key; if (!k) return;
     if (!byKey[k]) byKey[k] = { key: k, name: lot.productName || lot.name || '',
-      factors: lot.factors || {EA:1,PA:1,BP:1,CS:1}, total: {EA:0,PA:0,BP:0,CS:0}, lotCount: 0, persons: {} };
+      factors: lot.factors || {EA:1,PA:1,BP:1,CS:1}, total: {EA:0,PA:0,BP:0,CS:0}, lotCount: 0, lastTs: 0, persons: {} };
     const g = byKey[k];
     ['EA','PA','BP','CS'].forEach(function (u) { g.total[u] += (lot.counts[u] || 0); });
     if (lot.factors) g.factors = lot.factors;
+    if (lot.ts && lot.ts > g.lastTs) g.lastTs = lot.ts;   // newest scan time of this product
     g.lotCount++;
     const pk = String(lot.empId || lot.userKey || lot.name || '—');
     if (!g.persons[pk]) g.persons[pk] = { name: lot.name || lot.empId || '—', counts: {EA:0,PA:0,BP:0,CS:0}, locs: {}, exps: {} };
@@ -678,7 +679,7 @@ function getSummary(p) {
   const items = Object.keys(byKey).map(function (k) {
     const g = byKey[k];
     return {
-      key: g.key, name: g.name, factors: g.factors, total: g.total, lotCount: g.lotCount,
+      key: g.key, name: g.name, factors: g.factors, total: g.total, lotCount: g.lotCount, lastTs: g.lastTs,
       by: Object.keys(g.persons).map(function (pk) {
         const pp = g.persons[pk];
         return { name: pp.name, counts: pp.counts, locs: Object.keys(pp.locs), exps: Object.keys(pp.exps) };
