@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.13  (+ light 'summary' endpoint — server-aggregated)
+//  Rattana Stock Count — GAS Backend  v1.14  (deleteLot reaches ARCHIVE sheets + updates cache)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -373,26 +373,49 @@ function upsertLot(b) {
 
 function deleteLot(b) {
   if (!b.lotId) return { ok:false, error:'lotId required' };
-  // Prefer the warehouse-specific sheet (in the warehouse's spreadsheet).
-  // Fall back to scanning every Live* sheet in both that spreadsheet and
-  // the default one so orphans get cleaned up wherever they landed.
+  const wh = String(b.warehouse || '');
+  // Scan the warehouse's own sheet + the default one + any ARCHIVE (old) sheets,
+  // so a lot can be deleted from the app no matter which file it lives in
+  // (incl. old C4 history). Each entry tracks whether it's an archive sheet.
   const tried = [];
   const seen = {};
-  function consider(sh) {
+  function consider(sh, isArchive) {
     if (!sh) return;
     const tag = sh.getParent().getId() + '::' + sh.getName();
-    if (seen[tag]) return; seen[tag] = 1; tried.push(sh);
+    if (seen[tag]) return; seen[tag] = 1; tried.push({ sh: sh, isArchive: !!isArchive });
   }
-  if (b.warehouse) consider(liveSheetFor(b.warehouse));
-  [ssFor(b.warehouse), SpreadsheetApp.openById(SS_ID)].forEach(ss => {
+  if (wh) consider(liveSheetFor(wh), false);
+  [ssFor(wh), SpreadsheetApp.openById(SS_ID)].forEach(ss => {
     ss.getSheets().forEach(s => {
       const n = s.getName();
-      if (n === 'Live' || n.indexOf('Live_') === 0) consider(s);
+      if (n === 'Live' || n.indexOf('Live_') === 0) consider(s, false);
     });
   });
-  for (const sh of tried) {
-    const row = findLiveRow(sh, b.lotId);
-    if (row > 0) { sh.deleteRow(row); break; }
+  (ARCHIVE_SS_ID[wh.toUpperCase()] || []).forEach(id => {
+    try {
+      const ss = SpreadsheetApp.openById(id);
+      ss.getSheets().forEach(s => {
+        const n = s.getName();
+        if (n === 'Live' || n.indexOf('Live_') === 0) consider(s, true);
+      });
+    } catch (_) {}
+  });
+  let deletedArchive = false;
+  for (const t of tried) {
+    const row = findLiveRow(t.sh, b.lotId);
+    if (row > 0) { t.sh.deleteRow(row); if (t.isArchive) deletedArchive = true; break; }
+  }
+  // If an archived row was removed, drop it from the 6h cache too so it
+  // disappears immediately — surgically (no re-read of the big old sheet).
+  if (deletedArchive && wh) {
+    try {
+      const cacheKey = 'arch_' + wh;
+      const cached = cacheGetBig_(cacheKey);
+      if (cached) {
+        const arr = JSON.parse(cached).filter(function (l) { return String(l.lotId) !== String(b.lotId); });
+        cachePutBig_(cacheKey, JSON.stringify(arr), 21600);
+      }
+    } catch (_) { cacheDelBig_('arch_' + wh); }
   }
   return { ok: true };
 }
@@ -481,6 +504,16 @@ function cacheGetBig_(key) {
     for (let i = 0; i < n; i++) { const c = got[key + '_' + i]; if (c == null) return null; s += c; }
     return s;
   } catch (_) { return null; }
+}
+function cacheDelBig_(key) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const nStr = cache.get(key + '_n');
+    if (!nStr) return;
+    const n = parseInt(nStr, 10), keys = [key + '_n'];
+    for (let i = 0; i < n; i++) keys.push(key + '_' + i);
+    cache.removeAll(keys);
+  } catch (_) {}
 }
 
 // Archived (old, static) lots for a warehouse — cached 6h so the heavy sheet isn't
