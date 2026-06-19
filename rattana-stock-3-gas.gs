@@ -9,7 +9,7 @@
 //         to the app (so app code is unchanged).
 // ═══════════════════════════════════════════════════════
 
-const SS_ID = 'PASTE_DEFAULT_SHEET_ID';   // app-2 default save sheet
+const SS_ID = '1WuDaJETlr4ycqChpE9u2cFF3gb3SQSKwR25Ns0R4LxY';   // app-2 'Check Final' — single file, single 'Live' tab
 const TZ    = 'Asia/Bangkok';
 const GAS_VERSION = 'v1.0';   // app-2
 
