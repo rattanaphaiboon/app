@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.15  (archive reads/deletes target exact gid 796495760)
+//  Rattana Stock Count — GAS Backend  v1.16  (+deleteByKey — remove ALL lots of a product, any user)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -131,6 +131,7 @@ function doPost(e) {
   try {
     if (action === 'upsertLot')  return json(withLock(() => upsertLot(body)));
     if (action === 'deleteLot')  return json(withLock(() => deleteLot(body)));
+    if (action === 'deleteByKey') return json(withLock(() => deleteByKey(body)));
     if (action === 'clearLive')  return json(withLock(() => clearLiveForUser(body)));
     if (action === 'reserveDocNo') return json(withLock(() => reserveDocNo(body)));
     if (action === 'confirmDone')  return json(withLock(() => confirmDone(body)));
@@ -421,6 +422,31 @@ function deleteLot(b) {
     } catch (_) { cacheDelBig_('arch_' + wh); }
   }
   return { ok: true };
+}
+
+// Delete EVERY lot of a product (any user) in a warehouse — across the new sheet,
+// legacy sheets, and archive (old) sheets. Powers the app's "ลบรายการนี้" so an
+// item fully disappears (incl. teammates' lots + old archived rows).
+function deleteByKey(b) {
+  const wh = String(b.warehouse || '');
+  const key = String(b.key || '');
+  if (!wh || !key) return { ok:false, error:'warehouse + key required' };
+  const keyAlt = key.replace(/^0+/, '');
+  const match = function (v) { const s = String(v || ''); return s === key || s.replace(/^0+/, '') === keyAlt; };
+  const targets = [], seen = {};
+  function add(sh) { if (!sh) return; const t = sh.getParent().getId() + '::' + sh.getName(); if (seen[t]) return; seen[t] = 1; targets.push(sh); }
+  add(liveSheetFor(wh));
+  legacyLiveSheetsFor(wh).forEach(add);
+  archiveSpecs_(wh).forEach(function (spec) { try { add(archiveSheet_(SpreadsheetApp.openById(spec.id), spec.gid, wh)); } catch (_) {} });
+  let total = 0;
+  targets.forEach(function (sh) {
+    const data = sh.getDataRange().getValues();
+    for (let i = data.length - 1; i >= 1; i--) {
+      if (String(data[i][2] || '') === wh && match(data[i][7])) { sh.deleteRow(i + 1); total++; }
+    }
+  });
+  try { cacheDelBig_('arch_' + wh); } catch (_) {}
+  return { ok: true, deleted: total };
 }
 
 // Delete every live row for a given userKey + warehouse (called after final save).
