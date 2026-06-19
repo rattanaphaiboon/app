@@ -243,7 +243,7 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
 <div class="topbar">
   <header>
     <div class="brand">
-      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.36</span></div>
+      <div class="logo-text">RATTANA <span>STOCK CHECK</span><span class="ver">v1.37</span></div>
       <div class="subttl">เทียบเช็คสต็อก C4 (นับจริง) × PDDT — ขาด/เกิน</div>
     </div>
     <div class="hgroup">
@@ -264,6 +264,7 @@ body.dark .errbox{background:#2a1512;color:#ffb3a8}
           <li onclick="exportExpiry()">📅 วันหมดอายุ (รายล็อต)</li>
           <li onclick="exportTransfer()">🔄 ข้ามคลัง (โอน/ปรับสต็อก)</li>
           <li onclick="exportUncounted()">📦 ยังไม่ได้เช็ค (มีสต็อกแต่ไม่ได้นับ)</li>
+          <li onclick="exportCompareRounds()">🔁 เทียบรอบ A ↔ B (นับซ้ำ)</li>
         </ul>
       </div>
     </div>
@@ -345,6 +346,10 @@ const CFG={
     {id:'1rWZ7_vWBTx7hcXucAtWNX3ruA5lVro90P3HkQ6amFMg', sheet:'Live_C4', name:'Rattana Stock — C4'},
     {id:'18L3B1A5e2xEGW1Hgh4lBvskb5tVKqIeao9C3ift9CpU', gid:'1191696229', name:'Rattana Stock — C4 (2)'},
     {id:'18RojK-hmI3-sqh6bRh3YVdt4EZ8EGYHgMGRLxrqkqxw', gid:'1253609050', name:'Rattana Stock — W4'}
+  ],
+  // เช็ครอบ B — ใช้เทียบกับรอบ A (3 ชีทบน) เท่านั้น ❌ ไม่รวมเข้าข้อมูลหลัก
+  roundBSources:[
+    {id:'1WuDaJETlr4ycqChpE9u2cFF3gb3SQSKwR25Ns0R4LxY', gid:'570274981', name:'เช็ครอบ B'}
   ],
   pddtId:'16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I', pddtSheet:'PDDT',
   saveUrl:'https://script.google.com/macros/s/AKfycbyjEww3Fxwc8MBtK0GRtNP9SD-VG-coHNlAL25urGt9qQoaHCg34R_epN88797psMgL2g/exec'
@@ -872,6 +877,54 @@ function exportUncounted(){
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'ยังไม่ได้เช็ค');
   XLSX.writeFile(wb,_xlFname('uncounted'));
   showToast('Export ยังไม่ได้เช็ค '+rows.length+' รายการ ('+[...countedWarehouses].join('/')+') ✓','success');
+}
+// 5) เทียบรอบ A ↔ B — รอบ A = ข้อมูลหลัก (PRODUCTS) · รอบ B = ชีทแยก (ไม่รวมกัน) · เทียบ "นับได้" ต่อ รหัส+คลัง
+async function exportCompareRounds(){
+  _closeMenus();
+  if(typeof XLSX==='undefined'){ showToast('ไลบรารี Excel ยังโหลดไม่เสร็จ','error'); return; }
+  if(!PRODUCTS.length){ showToast('ยังไม่มีข้อมูลรอบ A — กด ⟳ โหลดก่อน','error'); return; }
+  showToast('กำลังดึงเช็ครอบ B…','info');
+  let bRows=[]; const failed=[];
+  for(const s of (CFG.roundBSources||[])){ try{ bRows=bRows.concat(await fetchRows(gvizSrc(s))); }catch(e){ failed.push(s.name); } }
+  if(!bRows.length){ showToast('ดึงเช็ครอบ B ไม่ได้'+(failed.length?' ('+failed.join(', ')+')':'')+' — เช็คว่าแชร์ public แล้ว','error'); return; }
+  // รวมรอบ B ต่อ รหัส+คลัง
+  const bMap={};
+  bRows.forEach(r=>{ const code=normCode(r['รหัสสินค้า']); if(!code) return; const wh=(r['warehouse']||'').trim()||'C4'; const k=code+'|'+wh;
+    let b=bMap[k]; if(!b)b=bMap[k]={code,wh,counted:0,name:(r['ชื่อสินค้า']||'').trim(),qtyCs:1,locs:new Set(),counters:new Set()};
+    b.counted+=num(r['นับได้(ชิ้น)']);
+    if(b.qtyCs<=1){try{const f=JSON.parse(r['factors_json']||'{}');if(f.CS>1)b.qtyCs=f.CS;}catch(_){}}
+    const loc=(r['location']||'').trim(); if(loc&&loc!=='.'&&loc!=='-')b.locs.add(loc);
+    const cn=(r['ผู้นับ']||'').trim(); if(cn)b.counters.add(cn);
+  });
+  const stTxt={diff:'ต่าง',match:'ตรง',onlyB:'ไม่มีในรอบ A',onlyA:'ไม่มีในรอบ B'};
+  // เริ่มจากทุก key ของ B (ของที่เพิ่งเช็คซ้ำ) + เผื่อ A มีแต่ B ไม่มี (ถ้าต้องการดู เลือกได้ — ที่นี่เน้น B)
+  const out=[];
+  Object.keys(bMap).forEach(k=>{
+    const b=bMap[k], a=prodByCode[k];
+    const q=(a&&a.qtyCs>1?a.qtyCs:0)||b.qtyCs||1;
+    const aCounted=a?a.counted:null;
+    const diff=(aCounted!=null)?(b.counted-aCounted):null;
+    const status=(aCounted==null)?'onlyB':(diff===0?'match':'diff');
+    out.push({wh:b.wh,code:b.code,name:(a&&a.name)||b.name,brand:(a&&a.brand)||'',size:(a&&a.size)||'',q,
+      aCounted,bCounted:b.counted,diff,status,
+      locA:a?(a.locs||[]).join(', '):'', locB:[...b.locs].sort((x,y)=>x.localeCompare(y,undefined,{numeric:true})).join(', ')});
+  });
+  if(!out.length){ showToast('รอบ B ไม่มีข้อมูล','error'); return; }
+  const rank={diff:0,onlyB:1,match:2};
+  out.sort((x,y)=> (rank[x.status]-rank[y.status]) || (Math.abs(y.diff||0)-Math.abs(x.diff||0)) || x.code.localeCompare(y.code));
+  const rows=out.map(r=>({
+    'คลัง':r.wh,'รหัสสินค้า':r.code,'ชื่อสินค้า':r.name,'CAT BRAND':r.brand,'CAT SIZE':r.size,'บรรจุ(ชิ้น/ลัง)':r.q>1?r.q:'',
+    'A นับ (ชิ้น)':r.aCounted!=null?r.aCounted:'', 'A นับ (ลัง·ชิ้น)':r.aCounted!=null?csEaText(csEaOf(r.aCounted,r.q)):'',
+    'B นับ (ชิ้น)':r.bCounted, 'B นับ (ลัง·ชิ้น)':csEaText(csEaOf(r.bCounted,r.q)),
+    'ต่าง B−A (ชิ้น)':r.diff!=null?r.diff:'', 'ต่าง B−A (ลัง·ชิ้น)':r.diff!=null?diffCsEaText(csEaOf(r.diff,r.q)):'',
+    'สถานะ':stTxt[r.status], 'Location รอบ A':r.locA, 'Location รอบ B':r.locB
+  }));
+  const ws=XLSX.utils.json_to_sheet(rows);
+  ws['!cols']=[{wch:7},{wch:16},{wch:34},{wch:16},{wch:16},{wch:11},{wch:11},{wch:14},{wch:11},{wch:14},{wch:12},{wch:15},{wch:14},{wch:26},{wch:26}];
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'เทียบรอบ A-B');
+  XLSX.writeFile(wb,_xlFname('round-A-vs-B'));
+  const nDiff=out.filter(r=>r.status==='diff').length, nOnlyB=out.filter(r=>r.status==='onlyB').length;
+  showToast('เทียบรอบ A↔B: '+out.length+' รายการ · ต่าง '+nDiff+' · ไม่มีในรอบ A '+nOnlyB+' ✓','success');
 }
 
 function applyFilter(){
