@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.199</title>
+<title>Rattana Sales — v8.200</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -4975,7 +4975,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.199 · 2026-06-21</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.200 · 2026-06-21</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -4986,7 +4986,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag">v8.199</span>
+  <span class="demo-tag">v8.200</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -5115,7 +5115,7 @@ body.dark .oc2-confirm-btn:disabled { background: #1a3060; color: #3d4d6b; }
   </button>
 
   <div class="drawer-footer">
-    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v8.199<br>2026-06-21 🔒 (กันโปรเฉพาะคลังรั่วข้ามศูนย์ — เซล Wx เห็นเฉพาะโปรคลังตัวเอง · resolve คลังจาก Users + strict ตอนคีย์)<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
+    <div style="font-size:10px;color:var(--muted);text-align:center">Rattana Sales v8.200<br>2026-06-21 🔒 (โปรราคาขายกำหนด: คีย์ราคาต่ำกว่า floor = ไม่ได้แถม — แก้ทั้งจอคีย์ (earned เคารพ floor+ราคาจริง) + ตอนยืนยัน (floor guard))<br><a href="https://rattanaphaiboon.github.io/app/" target="_blank" style="color:var(--gold);text-decoration:none">rattanaphaiboon.github.io/app</a></div>
   </div>
 </aside>
 
@@ -19637,18 +19637,20 @@ function _buildExclusivePromoBars(p, productId, safeId, unit, qty) {
 
   const browseMode = !currentShopId;
   const draft = window._orderDraft[productId] || {};
+  const draftPrice = numv(draft.price);   // v8.200: ราคาที่กำลังคีย์ (เดิมส่ง price:0 → floor เช็คไม่ได้)
   const draftLine = (qty > 0 && !browseMode) ? {
-    productId, unit, qty, price: 0, shopId: currentShopId, isDraft: true,
+    productId, unit, qty, price: draftPrice, shopId: currentShopId, isDraft: true,
   } : null;
 
   // คำนวณ "ได้แถมแล้วไหม" ต่อโปร + auto-pick ตัวที่ threshold สูงสุดที่ qty ถึง
+  // v8.200: เคารพ "ราคาขายกำหนด" — คีย์ราคา < floor → ไม่ได้แถม (เดิมดูแค่จำนวน → ราคาต่ำกว่ากำหนดก็แถม) · เช็คเฉพาะเมื่อมีราคาแล้ว (draftPrice>0) กันซ่อนตอนยังไม่พิมพ์
   const earned = [];
   let autoIdx = null, bestThreshold = -1;
   allPromos.forEach((promo, idx) => {
     const threshold = numv(promo['จำนวน']) || 1;
-    let cur = 0;
-    try { const r = cartMatchesPromo(promo, draftLine); cur = (r && r.currentValue) || 0; } catch (e) {}
-    earned[idx] = cur >= threshold;
+    let cur = 0, floorBad = false;
+    try { const r = cartMatchesPromo(promo, draftLine); cur = (r && r.currentValue) || 0; floorBad = !!(r && r.priceFloorViolated && draftPrice > 0); } catch (e) {}
+    earned[idx] = cur >= threshold && !floorBad;
     if (earned[idx] && threshold > bestThreshold) { bestThreshold = threshold; autoIdx = idx; }
   });
 
@@ -25164,6 +25166,9 @@ function confirmOrderWithPromos(confirmed) {
     if (!pick || pick.rounds <= 0) continue;
     const chosenItem = g.items.find(e => promoKeyOf(e.promo) === pick.promoKey) || g.items[0];
     const promo = chosenItem.promo;
+    // v8.200: floor guard (authoritative) — ราคาขายกำหนด: ราคาในตะกร้าจริงต่ำกว่า floor → ไม่แถม (กันทุก path แม้ modal โชว์พลาด)
+    const _fp = (typeof cartMatchesPromo === 'function') ? cartMatchesPromo(promo, null) : null;
+    if (_fp && _fp.priceFloorViolated) continue;
     const promoKey = promoKeyOf(promo);
     const baseGiftQty = Math.max(1, numv(promo['จำนวนแถม']) || 1);
     const giftQty = pick.rounds * baseGiftQty;
