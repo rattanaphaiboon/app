@@ -691,7 +691,11 @@
     <div class="livebar mt-10" id="countListCard" style="display:none">
       <div class="livebar-head">
         <div style="font-size:14px;font-weight:700">รายการที่นับ <span class="dsk-n" id="countN">0</span></div>
-        <button class="lnk-clear" onclick="clearCount()" type="button">🗑 ล้างทั้งหมด</button>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <button id="adjStockBtn" class="btn btn-outline btn-sm" style="display:none" type="button"
+            onclick="toggleAdjStock(countSession&&countSession.warehouse)">📥 โหลดสต็อก ERP</button>
+          <button class="lnk-clear" onclick="clearCount()" type="button">🗑 ล้างทั้งหมด</button>
+        </div>
       </div>
       <div id="countList"></div>
       <button class="btn btn-primary btn-block btn-lg" style="margin-top:12px" onclick="setMode('summary')" type="button">ตรวจสอบและสรุปผล →</button>
@@ -804,7 +808,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.59';
+const APP_VERSION = 'v3.60';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -812,6 +816,16 @@ const COUNT_SAVE_URL = 'https://script.google.com/macros/s/AKfycbyMAQLR0MCCBq8-f
 
 const WH_LIST  = ['W1','W2','W3','W4','C4'];
 const WH_NAMES = { W1:'สมุทรสงคราม', W2:'สุพรรณบุรี', W3:'ราชบุรี', W4:'นครปฐม', C4:'รัตนมาร์ท' };
+
+// ── สต็อก ERP (รวมออเดอร์ล่วงหน้า) ──────────────────────
+// เพิ่ม ID+GID ของแต่ละคลัง — กรอกเฉพาะคลังที่มีไฟล์
+const ADJ_STOCK_SHEETS = {
+  W3: { id: '1i8deQwAmJmhd4mOlLjv2gdHs9jQ4G-HG7rarogNHWwI', gid: '1029181344' },
+  // W1: { id: '...', gid: '...' },
+  // W2: { id: '...', gid: '...' },
+  // W4: { id: '...', gid: '...' },
+  // C4: { id: '...', gid: '...' },
+};
 const UNITS    = ['EA','PA','BP','CS'];
 const UNIT_CSS = { EA:'badge-ea', PA:'badge-pa', BP:'badge-bp', CS:'badge-cs' };
 
@@ -823,6 +837,8 @@ let counterPick  = null; // { name, empId } override when email is shared by mul
 let allProducts  = [];
 let barcodeIndex = {};   // code → { product, unit }
 let productByKey = {};   // productKey → product row
+let adjStockCache = {};  // wh → { barcode → totalEA } from ERP sheet
+let useAdjStock  = false; // toggle: use ERP adj stock instead of real-time
 let currentMode  = 'lookup';
 let html5QR      = null;
 let cameraOpen   = false;
@@ -1142,6 +1158,103 @@ function parseCsv(text) {
   const clean = s => String(s||'').replace(/[​‌‍﻿]/g,'').replace(/ /g,' ').trim();
   const headers = rows[0].map(clean);
   return rows.slice(1).filter(r=>r.some(c=>clean(c))).map(r=>Object.fromEntries(headers.map((k,i)=>[k,clean(r[i]||'')])));
+}
+
+// ── ERP ADJ STOCK ─────────────────────────────────────────
+// Parse ERP report CSV as raw arrays (not object-keyed) since row 0 is a title, not headers
+function parseCsvRaw(text) {
+  if (!text) return [];
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const rows = []; let row = [], cell = '', inQuote = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuote) {
+      if (ch==='"') { if (text[i+1]==='"'){cell+='"';i++;}else inQuote=false; }
+      else cell += ch;
+    } else {
+      if (ch==='"') inQuote=true;
+      else if (ch===',') { row.push(cell.trim()); cell=''; }
+      else if (ch==='\r') {}
+      else if (ch==='\n') { row.push(cell.trim()); rows.push(row); row=[]; cell=''; }
+      else cell += ch;
+    }
+  }
+  if (cell||row.length) { row.push(cell.trim()); rows.push(row); }
+  return rows;
+}
+
+// Build barcode → totalEA index from ERP raw rows
+// ERP columns (0-based): 0=barcode, 3=secondary code, 5=name, 9=unit, 11=mainQty(CS), 13=subQty(EA), 16=factor
+function buildAdjIndex(rawRows) {
+  const index = {};
+  rawRows.forEach(cols => {
+    const code = String(cols[0]||'').trim();
+    if (!/^\d{5,}$/.test(code)) return; // skip header/title rows
+    const mainQty = parseFloat(String(cols[11]||'').replace(/,/g,'')) || 0;
+    const subQty  = parseFloat(String(cols[13]||'').replace(/,/g,'')) || 0;
+    const factor  = parseFloat(String(cols[16]||'').replace(/,/g,'')) || 1;
+    const totalEA = Math.round(mainQty * factor + subQty);
+    index[code] = totalEA;
+    // Secondary code (รหัสใช้ประจำ) — may differ from main barcode
+    const code2 = String(cols[3]||'').trim();
+    if (code2 && /^\d{5,}$/.test(code2) && !index[code2]) index[code2] = totalEA;
+  });
+  return index;
+}
+
+async function fetchAdjStock(wh) {
+  const cfg = ADJ_STOCK_SHEETS[wh];
+  if (!cfg) return null;
+  const url = `https://docs.google.com/spreadsheets/d/${cfg.id}/gviz/tq?tqx=out:csv&gid=${cfg.gid}`;
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return buildAdjIndex(parseCsvRaw(await res.text()));
+}
+
+// Load adj stock for a warehouse, update cache and UI badge
+async function loadAdjStock(wh) {
+  const btn = document.getElementById('adjStockBtn');
+  if (btn) { btn.disabled=true; btn.textContent='⏳ โหลด...'; }
+  try {
+    const idx = await fetchAdjStock(wh);
+    if (!idx) { showToast('ไม่มีข้อมูล ERP สำหรับคลังนี้','warning'); return; }
+    adjStockCache[wh] = idx;
+    useAdjStock = true;
+    updateAdjStockBadge(wh);
+    renderCountList();
+    showToast(`โหลดสต็อก ERP ${wh} สำเร็จ (${Object.keys(idx).length} รายการ)`,'success');
+  } catch(e) {
+    showToast('โหลดสต็อก ERP ไม่สำเร็จ: '+e.message,'error');
+  } finally {
+    if (btn) { btn.disabled=false; updateAdjStockBadge(wh); }
+  }
+}
+
+function toggleAdjStock(wh) {
+  if (!adjStockCache[wh]) { loadAdjStock(wh); return; }
+  useAdjStock = !useAdjStock;
+  updateAdjStockBadge(wh);
+  renderCountList();
+  showToast(useAdjStock ? 'ใช้สต็อก ERP แล้ว' : 'กลับไปใช้สต็อก Real-time', 'info');
+}
+
+function updateAdjStockBadge(wh) {
+  const btn = document.getElementById('adjStockBtn');
+  if (!btn) return;
+  const hasData = !!adjStockCache[wh];
+  const n = hasData ? Object.keys(adjStockCache[wh]).length : 0;
+  if (!hasData) {
+    btn.textContent = '📥 โหลดสต็อก ERP';
+    btn.className = 'btn btn-outline btn-sm';
+  } else if (useAdjStock) {
+    btn.textContent = `✅ ERP (${n}) — คลิกปิด`;
+    btn.className = 'btn btn-sm' ;
+    btn.style.background='var(--success)'; btn.style.color='#fff'; btn.style.border='none';
+  } else {
+    btn.textContent = `📊 ERP พร้อม (${n}) — คลิกเปิด`;
+    btn.className = 'btn btn-outline btn-sm';
+    btn.style.background=''; btn.style.color=''; btn.style.border='';
+  }
 }
 
 // ── DATA LOADING ─────────────────────────────────────────
@@ -1701,6 +1814,7 @@ function onCountWhChange() {
   const wh = document.getElementById('countWh').value;
   pendingScan = null;
   document.getElementById('countPending').innerHTML = '';
+  useAdjStock = false; // reset toggle when switching warehouse
   loadCountSession(wh);
   renderCountList();
   maybeAdoptRemoteDraft(wh);
@@ -2165,10 +2279,20 @@ function thumbHtml(name, product, big) {
   return `<div class="ci-thumb" style="${sz}">${productEmoji(name)}</div>`;
 }
 function systemPiecesFor(item) {
-  const p = productByKey[item.key];
-  const raw = p ? (p[`STOCK ${countSession.warehouse}`] || '0') : '0';
+  const wh = countSession && countSession.warehouse;
+  const p  = productByKey[item.key];
+  // Use ERP adj stock if toggled on and available for this warehouse
+  if (useAdjStock && wh && adjStockCache[wh]) {
+    const totalEA = adjStockCache[wh][item.key];
+    if (totalEA !== undefined) {
+      const f = item.factors.CS || 1;
+      const cs = Math.floor(totalEA / f), ea = totalEA - cs * f;
+      return { pieces: totalEA, raw: `${cs}.${String(ea).padStart(String(f-1).length||1,'0')}`, cs, ea, isAdj: true };
+    }
+  }
+  const raw = p ? (p[`STOCK ${wh}`] || '0') : '0';
   const { cs, ea } = parseStock(raw);
-  return { pieces: cs * (item.factors.CS||1) + ea, raw, cs, ea };
+  return { pieces: cs * (item.factors.CS||1) + ea, raw, cs, ea, isAdj: false };
 }
 function piecesToCSEA(pieces, factorCS) {
   const sign = pieces < 0 ? '-' : '';
@@ -2187,6 +2311,13 @@ function renderCountList() {
   const list = document.getElementById('countList');
   const items = countSession ? Object.values(countSession.items) : [];
   document.getElementById('countN').textContent = items.length;
+  // Show ERP stock button only for warehouses with configured adj stock sheets
+  const adjBtn = document.getElementById('adjStockBtn');
+  if (adjBtn && countSession) {
+    const hasAdj = !!ADJ_STOCK_SHEETS[countSession.warehouse];
+    adjBtn.style.display = hasAdj ? 'inline-flex' : 'none';
+    if (hasAdj) updateAdjStockBadge(countSession.warehouse);
+  }
   if (!items.length) { card.style.display = 'none'; return; }
   card.style.display = 'block';
   list.innerHTML = items.map(it => {
