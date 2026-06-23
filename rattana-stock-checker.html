@@ -801,7 +801,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.57';
+const APP_VERSION = 'v3.58';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -2825,33 +2825,32 @@ function renderDashboard(rows) {
     ctrSel.value = cur;
   }
 
-  // Latest record per product key — aggregate multi-lot rows from the same session
-  const latestTimeByKey = {};
+  // Latest record per product key — use session-day (YYYY-MM-DD) grouping so
+  // multi-lot rows saved seconds apart still merge correctly
+  const dayOf = iso => String(iso || '').slice(0, 10);
+  const latestDayByKey = {};
   const latestByKey = {};
   filtered.forEach(r => {
     if (!r.key) return;
-    const t = r.savedAt || '';
-    if (!latestTimeByKey[r.key] || t > latestTimeByKey[r.key]) {
-      // Newer session found — reset accumulator
-      latestTimeByKey[r.key] = t;
+    const d = dayOf(r.savedAt);
+    if (!latestDayByKey[r.key] || d > latestDayByKey[r.key]) {
+      latestDayByKey[r.key] = d;
       latestByKey[r.key] = { ...r,
         countedPieces: Number(r.countedPieces) || 0,
         systemPieces:  Number(r.systemPieces)  || 0,
         _lotCount: 1
       };
-    } else if (t === latestTimeByKey[r.key]) {
-      // Same session, different lot — accumulate
+    } else if (d === latestDayByKey[r.key]) {
       latestByKey[r.key].countedPieces += Number(r.countedPieces) || 0;
       latestByKey[r.key].systemPieces  += Number(r.systemPieces)  || 0;
       latestByKey[r.key]._lotCount++;
+      latestByKey[r.key].status = '';
     }
   });
-  // Recompute diff for multi-lot products so _resolvedStatus is correct
+  // Recompute diff for all merged rows
   Object.values(latestByKey).forEach(r => {
-    if (r._lotCount > 1) {
-      r.diffPieces = r.countedPieces - r.systemPieces;
-      r.status = ''; // clear stored status — let _resolvedStatus recompute
-    }
+    r.diffPieces = r.countedPieces - r.systemPieces;
+    if (r._lotCount > 1) r.status = '';
   });
   const latestRows = Object.values(latestByKey);
 
@@ -2880,37 +2879,28 @@ function renderDashboard(rows) {
   const nOver  = latestRows.filter(r=>r._resolvedStatus==='over').length;
 
   // Per-checker stats
+  // Count sessions per checker (for display only)
   const sessions = groupSessions(filtered);
-  const checkerMap = {};
+  const sessionCountByName = {};
   sessions.forEach(s => {
-    const name = s.counterName || '—';
-    if (!checkerMap[name]) checkerMap[name] = { sessions:0, nTotal:0, nOk:0, nShort:0, nOver:0 };
-    checkerMap[name].sessions++;
+    const n = s.counterName || '—';
+    sessionCountByName[n] = (sessionCountByName[n] || 0) + 1;
+  });
 
-    // Aggregate multi-lot items by key before counting status
-    const aggByKey = {};
-    s.items.forEach(i => {
-      if (!aggByKey[i.key]) {
-        aggByKey[i.key] = { ...i,
-          countedPieces: Number(i.countedPieces)||0,
-          systemPieces:  Number(i.systemPieces)||0
-        };
-      } else {
-        aggByKey[i.key].countedPieces += Number(i.countedPieces)||0;
-        aggByKey[i.key].systemPieces  += Number(i.systemPieces)||0;
-        aggByKey[i.key].status = ''; // recompute
-      }
-    });
-    const aggItems = Object.values(aggByKey);
-    checkerMap[name].nTotal += aggItems.length;
-    aggItems.forEach(i => {
-      const diff = i.countedPieces - i.systemPieces;
-      const st = ['ok','short','over'].includes(i.status) ? i.status
-        : (diff === 0 ? 'ok' : diff < 0 ? 'short' : 'over');
-      if (st==='ok') checkerMap[name].nOk++;
-      else if (st==='short') checkerMap[name].nShort++;
-      else checkerMap[name].nOver++;
-    });
+  // Build checkerMap from latestRows (already aggregated) so counts match the table exactly
+  const checkerMap = {};
+  latestRows.forEach(r => {
+    const name = r.counterName || '—';
+    if (!checkerMap[name]) checkerMap[name] = { sessions:0, nTotal:0, nOk:0, nShort:0, nOver:0 };
+    checkerMap[name].nTotal++;
+    const st = r._resolvedStatus;
+    if (st==='ok') checkerMap[name].nOk++;
+    else if (st==='short') checkerMap[name].nShort++;
+    else checkerMap[name].nOver++;
+  });
+  // Attach session count
+  Object.keys(checkerMap).forEach(n => {
+    checkerMap[n].sessions = sessionCountByName[n] || 1;
   });
 
   // ── Render stats ──
