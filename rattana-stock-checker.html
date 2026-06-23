@@ -693,7 +693,7 @@
         <div style="font-size:14px;font-weight:700">รายการที่นับ <span class="dsk-n" id="countN">0</span></div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <button id="adjStockBtn" class="btn btn-outline btn-sm" style="display:none" type="button"
-            onclick="toggleAdjStock(countSession&&countSession.warehouse)">📥 โหลดสต็อก ERP</button>
+            onclick="refreshAdjStock(countSession&&countSession.warehouse)">⏳ โหลดสต็อกเลือกวัน...</button>
           <button class="lnk-clear" onclick="clearCount()" type="button">🗑 ล้างทั้งหมด</button>
         </div>
       </div>
@@ -808,7 +808,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.60';
+const APP_VERSION = 'v3.61';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -1211,49 +1211,41 @@ async function fetchAdjStock(wh) {
   return buildAdjIndex(parseCsvRaw(await res.text()));
 }
 
-// Load adj stock for a warehouse, update cache and UI badge
-async function loadAdjStock(wh) {
+// Load adj stock for a warehouse — auto-load in background, or manual refresh
+// Logic: if product found in ERP index → use ERP stock; else → fallback Stocksync
+async function loadAdjStock(wh, silent=false) {
   const btn = document.getElementById('adjStockBtn');
-  if (btn) { btn.disabled=true; btn.textContent='⏳ โหลด...'; }
+  if (btn && !silent) { btn.disabled=true; btn.textContent='⏳ โหลด...'; }
   try {
     const idx = await fetchAdjStock(wh);
-    if (!idx) { showToast('ไม่มีข้อมูล ERP สำหรับคลังนี้','warning'); return; }
+    if (!idx) return;
     adjStockCache[wh] = idx;
-    useAdjStock = true;
     updateAdjStockBadge(wh);
     renderCountList();
-    showToast(`โหลดสต็อก ERP ${wh} สำเร็จ (${Object.keys(idx).length} รายการ)`,'success');
+    if (!silent) showToast(`อัปเดตสต็อกเลือกวัน ${wh} (${Object.keys(idx).length} รายการ)`, 'success');
   } catch(e) {
-    showToast('โหลดสต็อก ERP ไม่สำเร็จ: '+e.message,'error');
+    if (!silent) showToast('โหลดสต็อกเลือกวัน ไม่สำเร็จ: '+e.message, 'error');
   } finally {
     if (btn) { btn.disabled=false; updateAdjStockBadge(wh); }
   }
 }
 
-function toggleAdjStock(wh) {
-  if (!adjStockCache[wh]) { loadAdjStock(wh); return; }
-  useAdjStock = !useAdjStock;
-  updateAdjStockBadge(wh);
-  renderCountList();
-  showToast(useAdjStock ? 'ใช้สต็อก ERP แล้ว' : 'กลับไปใช้สต็อก Real-time', 'info');
-}
+// Refresh button handler
+function refreshAdjStock(wh) { loadAdjStock(wh, false); }
 
 function updateAdjStockBadge(wh) {
   const btn = document.getElementById('adjStockBtn');
   if (!btn) return;
-  const hasData = !!adjStockCache[wh];
-  const n = hasData ? Object.keys(adjStockCache[wh]).length : 0;
-  if (!hasData) {
-    btn.textContent = '📥 โหลดสต็อก ERP';
+  const idx = adjStockCache[wh];
+  if (!idx) {
+    btn.textContent = '⏳ โหลดสต็อกเลือกวัน...';
     btn.className = 'btn btn-outline btn-sm';
-  } else if (useAdjStock) {
-    btn.textContent = `✅ ERP (${n}) — คลิกปิด`;
-    btn.className = 'btn btn-sm' ;
-    btn.style.background='var(--success)'; btn.style.color='#fff'; btn.style.border='none';
+    btn.style.cssText = '';
   } else {
-    btn.textContent = `📊 ERP พร้อม (${n}) — คลิกเปิด`;
-    btn.className = 'btn btn-outline btn-sm';
-    btn.style.background=''; btn.style.color=''; btn.style.border='';
+    const n = Object.keys(idx).length;
+    btn.textContent = `🔄 สต็อกเลือกวัน (${n})`;
+    btn.className = 'btn btn-sm';
+    btn.style.cssText = 'background:var(--navy-mid);color:#fff;border:none';
   }
 }
 
@@ -1814,10 +1806,11 @@ function onCountWhChange() {
   const wh = document.getElementById('countWh').value;
   pendingScan = null;
   document.getElementById('countPending').innerHTML = '';
-  useAdjStock = false; // reset toggle when switching warehouse
   loadCountSession(wh);
   renderCountList();
   maybeAdoptRemoteDraft(wh);
+  // Auto-load ERP adj stock in background if configured for this warehouse
+  if (ADJ_STOCK_SHEETS[wh]) loadAdjStock(wh, true);
 }
 
 function loadCountSession(wh) {
@@ -2281,15 +2274,16 @@ function thumbHtml(name, product, big) {
 function systemPiecesFor(item) {
   const wh = countSession && countSession.warehouse;
   const p  = productByKey[item.key];
-  // Use ERP adj stock if toggled on and available for this warehouse
-  if (useAdjStock && wh && adjStockCache[wh]) {
+  // สต็อกเลือกวัน (ERP) — ใช้ถ้ามีข้อมูลสำหรับ product นี้; fallback Stocksync
+  if (wh && adjStockCache[wh]) {
     const totalEA = adjStockCache[wh][item.key];
     if (totalEA !== undefined) {
       const f = item.factors.CS || 1;
       const cs = Math.floor(totalEA / f), ea = totalEA - cs * f;
-      return { pieces: totalEA, raw: `${cs}.${String(ea).padStart(String(f-1).length||1,'0')}`, cs, ea, isAdj: true };
+      return { pieces: totalEA, raw: `${cs}.${ea}`, cs, ea, isAdj: true };
     }
   }
+  // Stocksync (real-time)
   const raw = p ? (p[`STOCK ${wh}`] || '0') : '0';
   const { cs, ea } = parseStock(raw);
   return { pieces: cs * (item.factors.CS||1) + ea, raw, cs, ea, isAdj: false };
