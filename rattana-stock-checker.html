@@ -110,6 +110,21 @@
     .lot-exp-sel{flex:1;height:42px;border:1.5px solid var(--border);border-radius:10px;background:var(--card-bg);color:var(--text);font-family:inherit;font-size:14px;font-weight:600;padding:0 8px;outline:none;appearance:auto;transition:border-color .15s}
     .lot-exp-sel:focus{border-color:var(--navy-mid)}
     .lot-exp-sel.required-err{border-color:var(--danger);background:rgba(224,72,58,.04)}
+    /* ── Name-search dropdown ── */
+    .bc-wrap{position:relative}
+    .search-drop{position:absolute;bottom:calc(100% + 4px);left:0;right:0;background:var(--card-bg);border:1.5px solid var(--navy-mid);border-radius:12px;z-index:600;max-height:260px;overflow-y:auto;box-shadow:0 -4px 20px rgba(13,27,62,.15)}
+    @media(min-width:640px){.search-drop{top:calc(100% + 4px);bottom:auto;border-radius:0 0 12px 12px}}
+    .search-opt{display:flex;align-items:center;gap:10px;padding:9px 12px;cursor:pointer;border-bottom:1px solid var(--border)}
+    .search-opt:last-child{border-bottom:none}
+    .search-opt:hover{background:rgba(26,47,94,.06)}
+    .search-opt-name{font-size:13px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+    .search-opt-units{display:flex;gap:4px;flex-shrink:0}
+    /* ── Already-counted badge ── */
+    .pb-already{display:inline-flex;align-items:center;gap:5px;background:rgba(26,47,94,.08);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;font-weight:600;color:var(--navy-mid);margin-top:10px}
+    body.dark .pb-already{background:rgba(255,255,255,.07);color:var(--muted)}
+    /* ── Summary totals bar ── */
+    .sum-total-bar{display:flex;flex-wrap:wrap;gap:8px 16px;padding:10px 14px;background:var(--row-alt);border-radius:10px;font-size:13px;margin-bottom:10px}
+    .sum-total-bar span{white-space:nowrap}
     .exp-pick{position:relative;flex:1}
     .exp-pick-btn{width:100%;height:42px;border:1.5px solid var(--border);border-radius:10px;background:var(--card-bg);color:var(--text);font-family:inherit;font-size:14px;font-weight:600;padding:0 10px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:border-color .15s;text-align:left}
     .exp-pick-btn:focus{border-color:var(--navy-mid);outline:none}
@@ -586,13 +601,14 @@
     <!-- Barcode dock — first in DOM so it's at top on desktop (sticky).
          On mobile it's position:fixed bottom:0 so DOM order doesn't matter. -->
     <div class="bc-dock">
-      <div class="bc-input">
+      <div class="bc-input bc-wrap">
         <span style="color:var(--muted);font-size:18px">🔍</span>
-        <input type="text" id="countInput" inputmode="numeric" autocomplete="off"
-               oninput="document.getElementById('bcClear').style.display=this.value?'flex':'none'"
-               placeholder="สแกน / พิมพ์บาร์โค้ด แล้วกด Enter">
+        <input type="text" id="countInput" inputmode="text" autocomplete="off"
+               oninput="onCountInput(this)"
+               placeholder="สแกน / พิมพ์ชื่อสินค้า หรือบาร์โค้ด">
         <button class="bc-clear" id="bcClear" onclick="clearScanInput()" title="ล้าง" type="button" style="display:none">✕</button>
         <button class="bc-go" onclick="countScan()" title="เพิ่ม" type="button">→</button>
+        <div id="searchDrop" class="search-drop" style="display:none"></div>
       </div>
       <button class="cam-btn" id="btnCountCam" onclick="toggleCountCamera()" title="เปิดกล้อง" type="button">📷</button>
     </div>
@@ -714,7 +730,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.49';
+const APP_VERSION = 'v3.50';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -1752,9 +1768,61 @@ function clearScanInput() {
 }
 
 // Scan in count mode → show qty entry card
+function closeSearchDrop() {
+  const d = document.getElementById('searchDrop');
+  if (d) { d.style.display='none'; d.innerHTML=''; }
+}
+let _searchTimer = null;
+function onCountInput(inp) {
+  document.getElementById('bcClear').style.display = inp.value ? 'flex' : 'none';
+  clearTimeout(_searchTimer);
+  const q = inp.value.trim();
+  if (!q) { closeSearchDrop(); return; }
+  // Pure-digit string that matches a barcode → no dropdown needed
+  if (/^\d+$/.test(q) && barcodeIndex[q]) { closeSearchDrop(); return; }
+  _searchTimer = setTimeout(() => liveSearch(q), 180);
+}
+function liveSearch(q) {
+  const drop = document.getElementById('searchDrop');
+  if (!drop) return;
+  const ql = q.toLowerCase();
+  const matched = Object.values(productByKey).filter(p => {
+    return (p['PRODUCT NAME']||'').toLowerCase().includes(ql)
+      || (p['SHORT NAME']||'').toLowerCase().includes(ql)
+      || (p['KEY']||'').toLowerCase().includes(ql);
+  }).slice(0, 25);
+  if (!matched.length) {
+    drop.innerHTML = `<div style="padding:10px 14px;font-size:13px;color:var(--muted)">ไม่พบสินค้า "${q}"</div>`;
+    drop.style.display = 'block'; return;
+  }
+  drop.innerHTML = matched.map(p => {
+    const units = ['CS','BP','PA','EA'].filter(u => unitFactor(p,u) > 0);
+    const unitBtns = units.map(u =>
+      `<button type="button" class="badge ${UNIT_CSS[u]||''}" style="cursor:pointer;font-size:10px;padding:2px 6px"
+        onclick="pickSearchProduct(event,'${productKey(p)}','${u}')">${u}</button>`
+    ).join('');
+    return `<div class="search-opt" onclick="pickSearchProduct(event,'${productKey(p)}','${units[0]||'EA'}')">
+      <span class="search-opt-name">${p['PRODUCT NAME']||'-'}</span>
+      <span class="search-opt-units">${unitBtns}</span>
+    </div>`;
+  }).join('');
+  drop.style.display = 'block';
+}
+function pickSearchProduct(e, key, unit) {
+  e.stopPropagation();
+  const p = productByKey[key];
+  if (!p) return;
+  document.getElementById('countInput').value = '';
+  document.getElementById('bcClear').style.display = 'none';
+  closeSearchDrop();
+  pendingScan = { product: p, unit, code: p['KEY'] || key };
+  renderPending();
+  if (navigator.vibrate) navigator.vibrate(60);
+}
 function countScan(code) {
   const inp = document.getElementById('countInput');
   const bc  = (code || inp.value).trim();
+  closeSearchDrop();
   if (!bc) { inp.focus(); return; }
   const found = barcodeIndex[bc];
   if (!found) {
@@ -1763,11 +1831,15 @@ function countScan(code) {
     return;
   }
   inp.value = '';
-  // Open the qty card with 1 pre-filled — user can confirm or edit.
+  document.getElementById('bcClear').style.display = 'none';
   pendingScan = { product: found.product, unit: found.unit, code: bc };
   renderPending();
   if (navigator.vibrate) navigator.vibrate(60);
 }
+// Close search dropdown when clicking outside
+document.addEventListener('click', e => {
+  if (!e.target.closest('.bc-wrap')) closeSearchDrop();
+});
 
 function renderPending() {
   const el = document.getElementById('countPending');
@@ -1781,6 +1853,11 @@ function renderPending() {
   const packChip = scannedPackLabel && scannedPackLabel !== '0' && scannedPackLabel !== '-'
     ? `<span class="badge ${UNIT_CSS[u]||''}" style="padding:2px 7px;font-size:10.5px">${scannedPackLabel}</span>`
     : '';
+  const existingItem = countSession?.items[productKey(p)];
+  const alreadyPcs = existingItem
+    ? itemLots(existingItem).reduce((s,l) =>
+        s + ['CS','BP','PA','EA'].reduce((a,u) => a + (l.counts[u]||0)*(existingItem.factors?.[u]||1), 0), 0)
+    : 0;
   el.innerHTML = `
     <div class="pb-card mt-8">
       <div class="pb-flag">▸ สแกนแล้ว · ใส่จำนวนที่นับได้</div>
@@ -1792,6 +1869,7 @@ function renderPending() {
         </div>
         <button class="pb-x" onclick="cancelPending()" title="ยกเลิก">✕</button>
       </div>
+      ${alreadyPcs > 0 ? `<div class="pb-already">📦 นับแล้ว ${alreadyPcs.toLocaleString()} ชิ้นในเซสชันนี้</div>` : ''}
       <div class="pb-unit-row">
         <div class="pb-unit-l">หน่วยที่ยิง</div>
         <div class="pb-unit-pill pb-unit-${u}">
@@ -2454,6 +2532,13 @@ function renderSummary() {
       <div class="stat stat-ok"><div class="st-v">${nOk}</div><div class="st-l">ตรง</div></div>
       <div class="stat stat-short"><div class="st-v">${nShort}</div><div class="st-l">ขาด</div></div>
       <div class="stat stat-over"><div class="st-v">${nOver}</div><div class="st-l">เกิน</div></div>
+    </div>
+    <div class="sum-total-bar">
+      <span>นับรวม <b>${totCount.toLocaleString()}</b> ชิ้น</span>
+      <span style="color:var(--border)">|</span>
+      <span>ระบบ <b>${totSys.toLocaleString()}</b> ชิ้น</span>
+      <span style="color:var(--border)">|</span>
+      <span class="${totDiff===0?'diff-ok':totDiff<0?'diff-short':'diff-over'}">ส่วนต่าง <b>${totDiff>0?'+':''}${totDiff.toLocaleString()}</b> ชิ้น</span>
     </div>
     <div class="sum-rows">${sumRowsHtml}</div>`;
 }
