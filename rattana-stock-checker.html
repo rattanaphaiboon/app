@@ -819,7 +819,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.77';
+const APP_VERSION = 'v3.78';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -849,7 +849,8 @@ let counterPick  = null; // { name, empId } override when email is shared by mul
 let allProducts  = [];
 let barcodeIndex = {};   // code → { product, unit }
 let productByKey = {};   // productKey → product row
-let adjStockCache = {};  // wh → { barcode → totalEA } from ERP sheet
+let adjStockCache = {};  // wh → { index:{barcode→totalEA}, reportDate } from ERP sheet
+let adjLoading   = new Set(); // warehouses with an in-flight adj-stock load
 let useAdjStock  = false; // toggle: use ERP adj stock instead of real-time
 let currentMode  = 'lookup';
 let html5QR      = null;
@@ -1242,33 +1243,39 @@ async function fetchAdjStock(wh) {
     ? `gid=${cfg.gid}`
     : `sheet=${encodeURIComponent(cfg.sheet || '')}`;
   const url = `https://docs.google.com/spreadsheets/d/${cfg.id}/gviz/tq?tqx=out:csv&${tab}`;
-  // gviz intermittently returns an empty body for large sheets — retry a few times
-  let lastErr = null;
+  // gviz intermittently returns an empty body for large sheets — retry a few times.
+  // If still empty after retries, it's treated as "no วางเอง data" → caller uses Stocksync.
+  let last = { index: {}, reportDate: null };
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
       const res = await fetch(url + `&_=${attempt}`, { cache: 'no-store' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
-      const text = await res.text();
-      const result = buildAdjIndex(parseCsvRaw(text));
-      // Empty / partial response → treat as failure and retry
-      if (Object.keys(result.index).length === 0) throw new Error('empty');
-      return result;
-    } catch (e) {
-      lastErr = e;
-      await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
-    }
+      const result = buildAdjIndex(parseCsvRaw(await res.text()));
+      if (Object.keys(result.index).length > 0) return result; // got data
+      last = result; // empty — retry in case it's a gviz hiccup
+    } catch (_) { /* network error — retry */ }
+    await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
   }
-  throw lastErr || new Error('โหลดไม่สำเร็จ');
+  return last; // genuinely empty → no adj data
 }
 
 // Load adj stock for a warehouse — auto-load in background, or manual refresh
 // Logic: if product found in ERP index → use ERP stock; else → fallback Stocksync
 async function loadAdjStock(wh, silent=false) {
+  adjLoading.add(wh);
+  renderStockSrcBar();
   try {
     const r = await fetchAdjStock(wh);
-    if (!r) return;
+    const n = r ? Object.keys(r.index).length : 0;
+    if (!r || n === 0) {
+      // No วางเอง data for this warehouse → use Stocksync silently, drop any stale cache
+      delete adjStockCache[wh];
+      renderStockSrcBar();
+      renderCountList();
+      if (!silent) showToast(`คลัง ${wh} ยังไม่มีข้อมูลสต็อกวางเอง — ใช้ Stocksync`, 'info');
+      return;
+    }
     adjStockCache[wh] = { index: r.index, reportDate: r.reportDate };
-    const n = Object.keys(r.index).length;
     renderStockSrcBar();
     renderCountList();
     if (!silent) {
@@ -1277,6 +1284,9 @@ async function loadAdjStock(wh, silent=false) {
     }
   } catch(e) {
     if (!silent) showToast('โหลดสต็อกวางเอง ไม่สำเร็จ: '+e.message, 'error');
+  } finally {
+    adjLoading.delete(wh);
+    renderStockSrcBar();
   }
 }
 
@@ -1292,14 +1302,20 @@ function renderStockSrcBar() {
     chip.style.display = 'none';
     return;
   }
-  chip.style.display = 'inline-flex';
   const meta = adjStockCache[wh];
   if (!meta) {
-    chip.className = 'src-chip sc-loading';
-    chip.title = 'กำลังโหลดสต็อกวางเอง...';
-    chip.textContent = '⏳';
+    // No data yet: show spinner only while actively loading, otherwise hide (uses Stocksync)
+    if (adjLoading.has(wh)) {
+      chip.style.display = 'inline-flex';
+      chip.className = 'src-chip sc-loading';
+      chip.title = 'กำลังโหลดสต็อกวางเอง...';
+      chip.textContent = '⏳';
+    } else {
+      chip.style.display = 'none';
+    }
     return;
   }
+  chip.style.display = 'inline-flex';
   const n = Object.keys(meta.index).length;
   const dateStr = meta.reportDate ? formatThaiDate(meta.reportDate) : 'ไม่ระบุวันที่';
   chip.className = 'src-chip sc-adj';
