@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-//  Rattana Stock Count — GAS Backend  v1.22  (เวลาบันทึก includes seconds → precise sort)
+//  Rattana Stock Count 2 — GAS Backend  v1.0  (independent instance — new sheets)
 //  Sheet: 18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4
 //  Used by: rattana-stock-v2.html
 //
@@ -9,9 +9,9 @@
 //         to the app (so app code is unchanged).
 // ═══════════════════════════════════════════════════════
 
-const SS_ID = '18Yn-gru-0BG1FPgsqxANFvuXULgFurK2t1TPIz1vOG4';   // default file (W1, W2, W3, …)
+const SS_ID = '1WuDaJETlr4ycqChpE9u2cFF3gb3SQSKwR25Ns0R4LxY';   // app-2 'Check Final' — single file, single 'Live' tab
 const TZ    = 'Asia/Bangkok';
-const GAS_VERSION = 'v1.22';   // bump on every deploy — check with ?action=ping
+const GAS_VERSION = 'v1.0';   // app-2
 
 // ═════════════════════════════════════════════════════════════
 //  PER-WAREHOUSE SPREADSHEET ROUTING
@@ -21,11 +21,9 @@ const GAS_VERSION = 'v1.22';   // bump on every deploy — check with ?action=pi
 //  2) Paste those IDs below.
 //  3) Anything not listed here falls back to the default SS_ID.
 // ═════════════════════════════════════════════════════════════
-const WAREHOUSE_SS_ID = {
-  'C4':  '18L3B1A5e2xEGW1Hgh4lBvskb5tVKqIeao9C3ift9CpU',   // C4 V2 — fresh empty sheet (old 1rWZ7... kept for the 9,300 prior rows)
-  'W4':  '18RojK-hmI3-sqh6bRh3YVdt4EZ8EGYHgMGRLxrqkqxw',
-  'EW4': '18RojK-hmI3-sqh6bRh3YVdt4EZ8EGYHgMGRLxrqkqxw'  // คลังของเสีย — ใช้ไฟล์เดียวกับ W4
-};
+// App-2: every warehouse uses the single file SS_ID + single "Live" tab,
+// so this map is empty (ssFor() falls back to SS_ID for all warehouses).
+const WAREHOUSE_SS_ID = {};
 
 function ssFor(wh) {
   const id = WAREHOUSE_SS_ID[String(wh || '').toUpperCase()] || SS_ID;
@@ -324,9 +322,10 @@ const LIVE_HEADERS = [
 ];
 const DONE_COL = LIVE_HEADERS.length;   // 1-based column index of เวลายืนยัน (23)
 
-// Per-warehouse sheets: Live_W1, Live_W2, Live_W3, Live_W4, Live_C4.
+// App-2: ALL warehouses share ONE tab named "Live" (rows tell them apart by the
+// warehouse column). Reads filter by warehouse, so one tab works fine.
 function liveSheetName(wh) {
-  return 'Live_' + String(wh || '').toUpperCase();
+  return 'Live';
 }
 function liveSheetFor(wh) {
   if (!wh) return null;
@@ -544,8 +543,7 @@ function clearLiveForUser(b) {
 // fresh file. The old data is static, so it's cached 6h to avoid re-reading it on
 // every poll. To turn this off, set the warehouse's list to [] (or remove it).
 const ARCHIVE_SS_ID = {
-  // old C4 history — read the EXACT tab the user pointed to (gid 796495760)
-  'C4': [{ id: '1rWZ7_vWBTx7hcXucAtWNX3ruA5lVro90P3HkQ6amFMg', gid: 796495760 }]
+  // app-2 is a fresh instance — no old archive to merge. Add entries later if needed.
 };
 // Normalize archive entries (string id OR {id, gid}) → [{id, gid}].
 function archiveSpecs_(wh) {
