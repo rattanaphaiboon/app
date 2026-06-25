@@ -113,7 +113,8 @@
     /* ── Dashboard ── */
     .dash-filter-bar{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;align-items:end}
     @media(min-width:560px){.dash-filter-bar{grid-template-columns:repeat(3,1fr)}}
-    @media(min-width:800px){.dash-filter-bar{grid-template-columns:1fr 1fr 100px 1fr 90px auto}}
+    @media(min-width:800px){.dash-filter-bar{grid-template-columns:158px 158px 1.4fr 1.4fr 110px auto}}
+    .dash-pager{display:flex;align-items:center;justify-content:center;gap:12px;padding:12px;border-top:1px solid var(--border)}
     .dash-filter-actions{display:flex;gap:6px;align-items:flex-end}
     .dash-fg{display:flex;flex-direction:column;gap:4px}
     .dash-fl{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
@@ -817,7 +818,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.79';
+const APP_VERSION = 'v3.81';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -3001,6 +3002,72 @@ async function saveCountToSheet() {
 let historyCache = null;
 let historyLoaded = false;
 
+// ── Dashboard table: CS/EA display + search + pagination ──
+const DASH_PAGE_SIZE = 20;
+let _dashRows = [];
+let _dashFilterWh = 'ALL';
+let dashPage = 1;
+// pieces → "x CS y EA" using the product's CS pack factor; falls back to plain pieces
+function pcsCSEA(pieces, key) {
+  const p = productByKey[key];
+  const f = p ? (unitFactor(p, 'CS') || 1) : 1;
+  const n = Number(pieces) || 0;
+  if (f <= 1) return n.toLocaleString();
+  const sign = n < 0 ? '-' : '';
+  const a = Math.abs(n);
+  const cs = Math.floor(a / f), ea = a - cs * f;
+  return cs > 0 ? `${sign}${cs} CS ${ea} EA` : `${sign}${ea} EA`;
+}
+function dashSearchInput() { dashPage = 1; renderDashTable(); }
+function dashGoPage(n) { dashPage = n; renderDashTable(); }
+function renderDashTable() {
+  const tbody = document.getElementById('dashTbody');
+  if (!tbody) return;
+  const q = (document.getElementById('dashSearch')?.value || '').trim().toLowerCase();
+  let rows = _dashRows;
+  if (q) {
+    rows = rows.filter(r => [r.name, r.key, r.warehouse, r.counterName,
+      formatThaiDate(r.savedAt), r._resolvedStatus,
+      pcsCSEA(r.systemPieces, r.key), pcsCSEA(r.countedPieces, r.key)
+    ].join(' ').toLowerCase().includes(q));
+  }
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / DASH_PAGE_SIZE));
+  if (dashPage > pages) dashPage = pages;
+  if (dashPage < 1) dashPage = 1;
+  const start = (dashPage - 1) * DASH_PAGE_SIZE;
+  const pageRows = rows.slice(start, start + DASH_PAGE_SIZE);
+  tbody.innerHTML = pageRows.map(r => {
+    const st = r._resolvedStatus;
+    const diff = Number(r.diffPieces) || (Number(r.countedPieces) - Number(r.systemPieces));
+    const statusHtml = st === 'ok'
+      ? '<span class="diff-ok">✓ ตรง</span>'
+      : st === 'short'
+        ? `<span class="diff-short">↓ ขาด ${pcsCSEA(Math.abs(diff), r.key)}</span>`
+        : `<span class="diff-over">↑ เกิน ${pcsCSEA(Math.abs(diff), r.key)}</span>`;
+    const whBadge = _dashFilterWh === 'ALL'
+      ? `<span class="badge badge-info" style="font-size:9px;vertical-align:middle;margin-left:4px">${r.warehouse||''}</span>`
+      : '';
+    return `<tr class="row-${st}">
+      <td style="font-size:12px">${r.name||r.key||'—'}${whBadge}</td>
+      <td class="num">${pcsCSEA(r.systemPieces, r.key)}</td>
+      <td class="num">${pcsCSEA(r.countedPieces, r.key)}</td>
+      <td class="num">${statusHtml}</td>
+      <td style="font-size:11px;white-space:nowrap">${formatThaiDate(r.savedAt)}</td>
+      <td style="font-size:11px">${r.counterName||'—'}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="6" class="txt-center txt-muted" style="padding:24px">${q?'ไม่พบรายการที่ค้นหา':'ไม่มีข้อมูลตามตัวกรองที่เลือก'}</td></tr>`;
+  const cnt = document.getElementById('dashCount');
+  if (cnt) cnt.textContent = `${total.toLocaleString()} รายการ`;
+  const pager = document.getElementById('dashPager');
+  if (pager) {
+    pager.innerHTML = pages <= 1 ? '' : `
+      <button class="btn btn-outline btn-sm" ${dashPage<=1?'disabled':''} onclick="dashGoPage(${dashPage-1})">‹ ก่อนหน้า</button>
+      <span style="font-size:12px;font-weight:600">หน้า ${dashPage} / ${pages}</span>
+      <button class="btn btn-outline btn-sm" ${dashPage>=pages?'disabled':''} onclick="dashGoPage(${dashPage+1})">ถัดไป ›</button>`;
+  }
+}
+
 async function loadDashboard(force) {
   if (!COUNT_SAVE_URL) {
     document.getElementById('dashBody').innerHTML = '<div class="txt-center txt-muted" style="padding:32px">ยังไม่ได้ตั้งค่า URL</div>';
@@ -3207,55 +3274,39 @@ function renderDashboard(rows) {
       </div>
     </div>` : '';
 
-  // ── Product table ──
-  const sortedRows = latestRows.sort((a,b)=>{
+  // ── Product table (CS/EA · search · pagination) ──
+  _dashRows = latestRows.sort((a,b)=>{
     const o={short:0,over:1,ok:2};
     return (o[a._resolvedStatus]??3)-(o[b._resolvedStatus]??3);
   });
-  const tblRows = sortedRows.map(r=>{
-    const st = r._resolvedStatus;
-    const diff = Number(r.diffPieces)||(Number(r.countedPieces)-Number(r.systemPieces));
-    const diffStr = diff>0?`+${diff.toLocaleString()}`:diff.toLocaleString();
-    const statusHtml = st==='ok'
-      ? '<span class="diff-ok">✓ ตรง</span>'
-      : st==='short'
-        ? `<span class="diff-short">↓ ขาด ${Math.abs(diff).toLocaleString()}</span>`
-        : `<span class="diff-over">↑ เกิน ${Math.abs(diff).toLocaleString()}</span>`;
-    const whBadge = filterWh==='ALL'
-      ? `<span class="badge badge-info" style="font-size:9px;vertical-align:middle;margin-left:4px">${r.warehouse||''}</span>`
-      : '';
-    return `<tr class="row-${st}">
-      <td style="font-size:12px">${r.name||r.key||'—'}${whBadge}</td>
-      <td class="num">${Number(r.systemPieces||0).toLocaleString()}</td>
-      <td class="num">${Number(r.countedPieces||0).toLocaleString()}</td>
-      <td class="num">${statusHtml}</td>
-      <td style="font-size:11px;white-space:nowrap">${formatThaiDate(r.savedAt)}</td>
-      <td style="font-size:11px">${r.counterName||'—'}</td>
-    </tr>`;
-  }).join('')||`<tr><td colspan="6" class="txt-center txt-muted" style="padding:24px">ไม่มีข้อมูลตามตัวกรองที่เลือก</td></tr>`;
-
+  _dashFilterWh = filterWh;
+  dashPage = 1;
   const tableHtml = `
     <div class="card mt-8">
-      <div class="card-head">
-        <h3>📦 รายการสินค้า</h3>
-        <span style="font-size:12px;color:var(--muted)">${sortedRows.length} รายการ</span>
+      <div class="card-head" style="gap:8px;flex-wrap:wrap">
+        <h3 style="white-space:nowrap">📦 รายการสินค้า</h3>
+        <input id="dashSearch" class="input" style="flex:1 1 100%;width:100%;font-size:15px"
+               placeholder="🔍 ค้นหา (ชื่อ/บาร์โค้ด/คลัง/ผู้เช็ค...)" oninput="dashSearchInput()" autocomplete="off">
+        <span id="dashCount" style="font-size:12px;color:var(--muted)"></span>
       </div>
       <div class="tbl-wrap">
         <table class="tbl">
           <thead><tr>
             <th>สินค้า</th>
-            <th class="num">สต็อก (ชิ้น)</th>
+            <th class="num">สต็อก</th>
             <th class="num">นับจริง</th>
             <th class="num">สถานะ</th>
             <th>วันที่</th>
             <th>ผู้เช็ค</th>
           </tr></thead>
-          <tbody>${tblRows}</tbody>
+          <tbody id="dashTbody"></tbody>
         </table>
       </div>
+      <div id="dashPager" class="dash-pager"></div>
     </div>`;
 
   document.getElementById('dashBody').innerHTML = statsHtml + checkerHtml + tableHtml;
+  renderDashTable();
 }
 
 async function loadHistory(force) {
