@@ -666,14 +666,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v7.14.0</div>
+<div class="version-badge">SupplyLink v7.15.0</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    SupplyLink v6.6.6 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v7.14.0';
+const VERSION = 'v7.15.0';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -1698,7 +1698,7 @@ async function enterApp(session) {
   render();
   // Prefetch ในพื้นหลัง (ไม่บล็อก)
   if (S.session && S.session.role === 'supplier') prefetchDefects(); // ของเสีย+PO → กดจองเด้งทันที
-  else if (S.view === 'admin') loadOverdueDefects();                 // badge "ของเสียเลยกำหนด" ใน sidebar
+  else if (S.view === 'admin') { loadOverdueDefects(); loadGRApprovals(); }                 // badge "ของเสียเลยกำหนด" ใน sidebar
 }
 
 // Background prefetch of defects so the booking gate is instant
@@ -1880,7 +1880,7 @@ async function refreshData(silent) {
   try { await hydrateData(); } catch(e) { console.error('[refresh]', e); }
   if (S.view === 'login') { render(); return; }
   if (S.session && S.session.role === 'supplier') prefetchDefects();
-  else if (S.view === 'admin') loadOverdueDefects();
+  else if (S.view === 'admin') { loadOverdueDefects(); loadGRApprovals(); }
   renderContentOnly();
   if (!silent) toast('รีเฟรชข้อมูลแล้ว', '', 'ok');
 }
@@ -2066,6 +2066,7 @@ function renderDesktopShell() {
     { id:'targets-admin', ic:'dashboard', lbl:'เป้าหมายขาย', badge: cTargets },
     { id:'returns', ic:'rotate', lbl:'สินค้าต้องคืน', badge: cReturns, badgeErr:true },
     { id:'overdue-defects', ic:'warn', lbl:'ของเสีย·รอจัดซื้อ', badge: (S._overdueAdmin && S._overdueAdmin.length) ? String(S._overdueAdmin.length) : null, badgeErr:true },
+    { id:'gr-approvals', ic:'box', lbl:'รับของมีปัญหา', badge: (S._grApprovals && S._grApprovals.length) ? String(S._grApprovals.length) : null, badgeErr:true },
     { sec:'ข้อมูลหลัก' },
     { id:'vendors', ic:'building', lbl:'Vendor Master' },
     { id:'users', ic:'users', lbl:'ผู้ใช้ระบบ' },
@@ -2165,6 +2166,7 @@ function renderTopbar() {
     'targets-admin': ['เป้าหมายขาย เดือน/ปี', 'supplier ตั้งเป้า — ทีมขายจะดึงไป follow up'],
     'returns': ['สินค้าต้องคืน', 'รอ supplier ยืนยัน'],
     'overdue-defects': ['ของเสีย · รอจัดซื้อ', 'อนุมัติคืน (เจ้าไม่รับคืน) · เลื่อน/หักเงิน ของเลยกำหนด'],
+    'gr-approvals': ['รับของมีปัญหา', 'GR ยิงรับเจอปัญหา + ซัพร่วมรับผิดชอบ — ตัดสิน รับ/ลดราคา/ปฏิเสธ'],
     'vendors': ['Vendor Master', 'ข้อมูลคู่ค้าทั้งหมด'],
     'users': ['ผู้ใช้ระบบ', 'จัดการสิทธิ์การเข้าถึง'],
     'settings': ['ตั้งค่าระบบ', 'การตั้งค่าทั่วไป'],
@@ -2299,6 +2301,7 @@ function pageMap() {
     'targets-admin': renderAdminTargets,
     'returns': renderReturnsAdmin,
     'overdue-defects': adminOverdueDefects,
+    'gr-approvals': renderGRApprovals,
     'vendors': renderVendors,
     'users': renderUsers,
     'settings': renderSettings,
@@ -2586,6 +2589,69 @@ function wireAdminPORevs() {
 }
 
 /* ───────────────────────── ADMIN: ของเสียเลยกำหนด (จัดซื้ออนุมัติ) ───────────────────────── */
+/* ── ADMIN: รับของมีปัญหา (GR ยิงรับ flag → จัดซื้อตัดสิน รับ/ลดราคา/ปฏิเสธ) ── */
+async function loadGRApprovals() {
+  try {
+    const res = await callAPI('getGRApprovals', {});
+    S._grApprovals = (res && res.ok && Array.isArray(res.data)) ? res.data : [];
+  } catch (e) { console.error('[getGRApprovals]', e); S._grApprovals = []; }
+  if (S.view === 'admin') render();
+}
+function renderGRApprovals() {
+  afterPage = wireGRApprovals;
+  if (!S._grApprovals) {
+    loadGRApprovals();
+    return '<div style="flex:1;overflow:auto;padding:16px"><div style="padding:48px;text-align:center;color:var(--ink-3)"><span class="spinner" style="width:30px;height:30px;border-width:3px"></span><div style="margin-top:12px">กำลังโหลด…</div></div></div>';
+  }
+  const list = S._grApprovals;
+  let html = '<div style="flex:1;overflow:auto;padding:16px">';
+  if (!list.length) {
+    return html + '<div class="card" style="padding:48px;text-align:center;color:var(--ink-3)"><div style="font-size:14px;font-weight:600;color:var(--ink-2)">ไม่มีของรับมีปัญหารอตัดสิน</div><div style="font-size:12px;margin-top:4px">GR ยิงรับแล้วไม่มีปัญหา หรือจัดซื้อตัดสินครบแล้ว</div></div></div>';
+  }
+  html += '<div class="alert" style="margin-bottom:14px;background:#fff7ed;border:1px solid #f59e0b">' + ic('warn', 16, '#f59e0b') +
+    '<div style="font-size:12.5px;color:#7c2d12"><b>' + list.length + ' บรรทัด</b> GR ยิงรับแล้วเจอปัญหา + supplier ร่วมรับผิดชอบ — ตัดสิน <b>รับ / ลดราคา / ปฏิเสธ</b></div></div>';
+  html += list.map(d =>
+    '<div class="card mb-12 gra-item" data-id="' + esc(d.id) + '" style="padding:14px;border:1.5px solid #f59e0b">' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-weight:700;font-size:14px">' + esc(d.vendorName) + '</div>' +
+          '<div style="font-size:12px;color:var(--ink-2);margin-top:2px">' + esc(d.name || d.sku) + '</div>' +
+          '<div class="num" style="font-size:11px;color:var(--ink-3);margin-top:1px">PO ' + esc(d.po) + ' · ' + esc(d.barcode || d.sku) + (d.recordedAt ? ' · ยิง ' + esc(d.recordedAt) : '') + '</div>' +
+        '</div>' +
+        '<div style="text-align:right;white-space:nowrap">' +
+          '<div style="font-size:12px;font-weight:700">รับ ' + fmtNum(d.receivedEa) + ' / สั่ง ' + fmtNum(d.orderedEa) + ' ชิ้น</div>' +
+          (d.expiry ? '<div style="font-size:11px;color:var(--ink-3);margin-top:2px">หมดอายุ ' + toBE(d.expiry) + (d.remainingDays != null ? ' (' + d.remainingDays + 'ว)' : '') + '</div>' : '') +
+        '</div>' +
+      '</div>' +
+      '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">' +
+        d.problems.map(p => '<span class="chip chip-sm" style="background:var(--err-bg);color:var(--err)">' + esc(p) + '</span>').join('') +
+        (d.supplierAccept ? '<span class="chip chip-sm" style="background:#fff7ed;color:#b45309">✓ ซัพร่วมรับผิดชอบ</span>' : '') +
+      '</div>' +
+      '<div style="display:flex;gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">' +
+        '<input class="input gra-note" placeholder="หมายเหตุ / ยอดลด (ถ้ามี)" style="flex:1;min-width:130px;height:34px;font-size:12px">' +
+        '<button class="btn btn-sm btn-primary gra-act" data-dec="รับ">' + ic('check', 13) + ' รับ</button>' +
+        '<button class="btn btn-sm gra-act" data-dec="ลดราคา" style="border-color:#f59e0b;color:#b45309">ลดราคา</button>' +
+        '<button class="btn btn-sm gra-act" data-dec="ปฏิเสธ" style="border-color:var(--err);color:var(--err)">✗ ปฏิเสธ</button>' +
+      '</div>' +
+    '</div>'
+  ).join('');
+  return html + '</div>';
+}
+function wireGRApprovals() {
+  $$('.gra-item').forEach(card => {
+    const id = card.dataset.id;
+    card.querySelectorAll('.gra-act').forEach(b => b.addEventListener('click', async () => {
+      const dec = b.dataset.dec, note = (card.querySelector('.gra-note') || {}).value || '';
+      if (dec === 'ปฏิเสธ' && !note) { toast('ปฏิเสธ — ใส่เหตุผลก่อน', '', 'err'); return; }
+      showAppLoading('กำลังบันทึก…');
+      try { await callAPI('resolveGRLine', { id: id, decision: dec, note: note }); } catch (e) { console.error(e); }
+      S._grApprovals = null; hideAppLoading();
+      toast('บันทึก: ' + dec, '', 'ok');
+      loadGRApprovals();
+    }));
+  });
+}
+
 async function loadOverdueDefects() {
   try {
     const res = await callAPI('getOverdueDefects', {});
