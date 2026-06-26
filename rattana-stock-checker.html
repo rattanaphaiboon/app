@@ -120,7 +120,10 @@
     @media(max-width:640px){
       .tbl .col-hide-m{display:none}
       .tbl-wrap{overflow-x:hidden}
-      .row-sub-m{display:block;font-size:10px;color:var(--muted);margin-top:3px;line-height:1.5;font-weight:500}
+      .tbl{table-layout:fixed;width:100%}
+      .tbl tbody td:first-child{white-space:normal;word-break:break-word}
+      .tbl tbody td:last-child{white-space:nowrap;width:96px;text-align:right;vertical-align:top}
+      .row-sub-m{display:block;font-size:10px;color:var(--muted);margin-top:3px;line-height:1.5;font-weight:500;white-space:normal}
     }
     .dash-filter-actions{display:flex;gap:6px;align-items:flex-end}
     .dash-fg{display:flex;flex-direction:column;gap:4px}
@@ -826,7 +829,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.86';
+const APP_VERSION = 'v3.90';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -1231,11 +1234,16 @@ function parseReportDate(rawRows) {
 // Build barcode → totalEA index from ERP raw rows. Returns { index, reportDate }.
 // ERP columns (0-based): 0=barcode, 3=secondary code, 5=name, 9=unit "ลังx48(CS)", 11=mainQty, 13=subQty
 // Factor (pieces per main unit) is parsed from the unit string e.g. "ลังx48(CS)" → 48.
+// normalize a product name for matching (collapse spaces, lowercase)
+function normName(s) { return String(s || '').replace(/\s+/g, ' ').trim().toLowerCase(); }
+
 function buildAdjIndex(rawRows) {
   const index = {};
+  const nameIndex = {};   // normalized name → totalEA (fallback when barcode not in ERP)
+  const nameSeen  = {};   // track conflicts so ambiguous names aren't used
   rawRows.forEach(cols => {
     const code = String(cols[0]||'').trim();
-    if (!/^\d{5,}$/.test(code)) return; // skip header/title rows
+    if (!/^\d{4,}$/.test(code)) return; // skip header/title rows (รหัสภายในก็เป็นตัวเลข)
     const mainQty = parseFloat(String(cols[11]||'').replace(/,/g,'')) || 0;
     const subQty  = parseFloat(String(cols[13]||'').replace(/,/g,'')) || 0;
     // factor = number after "x" in the unit string (e.g. ลังx48(CS) → 48); fallback col 16, else 1
@@ -1247,9 +1255,15 @@ function buildAdjIndex(rawRows) {
     index[code] = totalEA;
     // Secondary code (รหัสใช้ประจำ) — may differ from main barcode
     const code2 = String(cols[3]||'').trim();
-    if (code2 && /^\d{5,}$/.test(code2) && !index[code2]) index[code2] = totalEA;
+    if (code2 && /^\d{4,}$/.test(code2) && !index[code2]) index[code2] = totalEA;
+    // Name index — exact (normalized) name; mark ambiguous if same name → different total
+    const nm = normName(cols[5]);
+    if (nm) {
+      if (nameSeen[nm] === undefined) { nameSeen[nm] = totalEA; nameIndex[nm] = totalEA; }
+      else if (nameSeen[nm] !== totalEA) { nameIndex[nm] = undefined; } // ชื่อซ้ำ ค่าต่าง → ไม่ใช้
+    }
   });
-  return { index, reportDate: parseReportDate(rawRows) };
+  return { index, nameIndex, reportDate: parseReportDate(rawRows) };
 }
 
 async function fetchAdjStock(wh) {
@@ -1291,7 +1305,7 @@ async function loadAdjStock(wh, silent=false) {
       if (!silent) showToast(`คลัง ${wh} ยังไม่มีข้อมูลสต็อกวางเอง — ใช้ Stocksync`, 'info');
       return;
     }
-    adjStockCache[wh] = { index: r.index, reportDate: r.reportDate };
+    adjStockCache[wh] = { index: r.index, nameIndex: r.nameIndex, reportDate: r.reportDate };
     renderStockSrcBar();
     renderCountList();
     if (!silent) {
@@ -1924,8 +1938,11 @@ function saveCountSession() {
 // userKey for cross-device draft sync — keyed by the PICKED counter so
 // each person's in-progress count syncs only with their own devices.
 const userKey = () => {
-  const base = String((counterPick && (counterPick.empId || counterPick.name))
-                   || (currentUser && (currentUser.empId || currentUser.email)) || '').toLowerCase();
+  // ใช้ "ชื่อผู้นับ" เป็นหลัก — เสถียรข้ามเครื่อง (ทั้ง 2 เครื่องเลือกชื่อเดียวกันจาก sheet เดียวกัน)
+  // empId อาจว่างบางเครื่องถ้า sheet ยังโหลดไม่เสร็จตอนเลือก ทำให้คีย์ไม่ตรงกัน
+  const base = String((counterPick && (counterPick.name || counterPick.empId))
+                   || (currentUser && (currentUser.name || currentUser.email)) || '')
+                   .replace(/\s+/g, ' ').trim().toLowerCase();
   return base;
 };
 let draftSyncTimer = null;
@@ -2372,7 +2389,10 @@ function systemPiecesFor(item) {
   const p  = productByKey[item.key];
   // สต็อกวางเอง (ERP) — ใช้ถ้ามีข้อมูลสำหรับ product นี้; fallback Stocksync
   if (wh && adjStockCache[wh]) {
-    const totalEA = adjStockCache[wh].index[item.key];
+    const adj = adjStockCache[wh];
+    // จับคู่ด้วย "ชื่อสินค้า" เป็นหลัก → ถ้าไม่เจอค่อย fallback บาร์โค้ด
+    let totalEA = adj.nameIndex ? adj.nameIndex[normName((p && p['PRODUCT NAME']) || item.name)] : undefined;
+    if (totalEA === undefined) totalEA = adj.index[item.key];
     if (totalEA !== undefined) {
       const f = item.factors.CS || 1;
       const cs = Math.floor(totalEA / f), ea = totalEA - cs * f;
@@ -2541,7 +2561,10 @@ function productStock(p) {
   const wh = countSession && countSession.warehouse;
   const factorCS = unitFactor(p, 'CS') || 1;
   if (wh && adjStockCache[wh]) {
-    const totalEA = adjStockCache[wh].index[productKey(p)];
+    const adj = adjStockCache[wh];
+    // จับคู่ด้วย "ชื่อสินค้า" เป็นหลัก → ถ้าไม่เจอค่อย fallback บาร์โค้ด
+    let totalEA = adj.nameIndex ? adj.nameIndex[normName(p['PRODUCT NAME'])] : undefined;
+    if (totalEA === undefined) totalEA = adj.index[productKey(p)];
     if (totalEA !== undefined) {
       const cs = Math.floor(totalEA / factorCS), ea = totalEA - cs * factorCS;
       return { pieces: totalEA, cs, ea, factorCS, isAdj: true };
