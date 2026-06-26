@@ -277,7 +277,7 @@ body.dark .spin-box{background:var(--card-bg)}
   <div id="tabBk" class="hidden">
   <div class="card"><div class="card-body">
     <h2>📤 Export BK08 (นำเข้า bplus)</h2>
-    <p class="hint" style="margin-bottom:12px">สร้าง "เลขที่เอกสาร" (คอลัมน์ B) อัตโนมัติ — 1 สาขา (ชื่อร้าน) = 1 ใบ = 1 เลข · ไล่เลขทีละสาขา /001 /002 /003 · จัดกลุ่มสาขาเดียวกันติดกัน · เขียนทุกค่าเป็น TEXT</p>
+    <p class="hint" style="margin-bottom:12px">สร้าง "เลขที่เอกสาร" (คอลัมน์ B) อัตโนมัติ — 1 สาขา = 1 ใบ · สินค้า "ไม่มี VAT" (PDDT VAT status = No) แยกเป็นอีกใบต่อท้ายบิลมี VAT ของสาขาเดียวกัน · ไล่เลขทีละใบ /001 /002 /003 · เขียนทุกค่าเป็น TEXT</p>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
       <div class="field"><label>PREFIX</label><input class="input" id="bkPrefix" value="BK08"></div>
       <div class="field"><label>เริ่มลำดับที่ /NNN</label><input class="input" id="bkStart" value="1" inputmode="numeric"></div>
@@ -449,7 +449,7 @@ body.dark .spin-box{background:var(--card-bg)}
 </nav>
 
 <script>
-const VERSION='5.24';
+const VERSION='5.25';
 const DEFAULT_ORDER_ID='1ZOS3vAPbizWCG_Y7A6rODjIznSMf1_FDSGZ_ZUr_RjQ';
 const DEFAULT_ORDER_GID='1632859410';
 const PDDT_ID='16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
@@ -519,13 +519,25 @@ async function fetchCsv(url,timeoutMs){
   }finally{clearTimeout(tid);}
 }
 
-// ── PDDT map: barcode (EA/PA/BP/CS) -> cat info ──
+// index → column letter (0=A, 26=AA) — ใช้ระบุคอลัมน์ที่เพิ่งถูกเพิ่ม ตำแหน่งไม่คงที่
+function colLetter(i){let s='';i++;while(i>0){const m=(i-1)%26;s=String.fromCharCode(65+m)+s;i=Math.floor((i-1)/26);}return s;}
+// หา column letter ของหัวคอลัมน์ PDDT ตามชื่อ (SELECT * LIMIT 1 → อ่านหัวตาราง) — ไม่เจอ คืน '' เช่น VAT status ที่อาจยังไม่ถูกเพิ่ม
+async function findPddtCol(label){
+  try{
+    const rows=parseCsvRaw(await fetchCsv(gvizUrl(PDDT_ID,{sheet:PDDT_SHEET})+'&tq='+encodeURIComponent('SELECT * LIMIT 1'),12000));
+    const H=(rows[0]||[]).map(h=>clean(h).toUpperCase());const i=H.indexOf(label.toUpperCase());
+    return i<0?'':colLetter(i);
+  }catch(e){return '';}
+}
+// ── PDDT map: barcode (EA/PA/BP/CS) -> cat info (+ vat) ──
 async function loadPddt(force){
   if(pddtMap&&!force)return pddtMap;
   showSpin('โหลด PDDT (ข้อมูลสินค้า)...');
-  // ดึงเฉพาะ 11 คอลัมน์ที่ใช้ (PDDT มี 120 คอลัมน์ ~12.5MB → ~2MB · parse เร็วขึ้น ~10×) — กันแอปค้างตอนเปิดบนมือถือ
+  // ดึงเฉพาะคอลัมน์ที่ใช้ (PDDT มี 120+ คอลัมน์ ~12.5MB → ~2MB · parse เร็วขึ้น ~10×) — กันแอปค้างตอนเปิดบนมือถือ
   // B,D,F,H=CODE EA/PA/BP/CS · BC,BB=CAT GROUP/TYPE · BM=SHORT NAME · AR,AB,AJ,AZ=PRICE S01/CC01/CC03/S03 CS · BQ,BR=STOCK W4/C4
-  const SEL='SELECT A,B,D,F,H,BC,BB,BM,AR,AB,AJ,AZ,BQ,BR';
+  // VAT status: ตำแหน่งไม่คงที่ (เพิ่งเพิ่ม) → หา letter ตอน runtime · ไม่มี = ข้าม (ทุกตัวถือว่ามี VAT) → ไม่แยกบิล เหมือนเดิม
+  const vatCol=await findPddtCol('VAT status');
+  const SEL='SELECT A,B,D,F,H,BC,BB,BM,AR,AB,AJ,AZ,BQ,BR'+(vatCol?','+vatCol:'');
   const load=async q=>parseCsvRaw(await fetchCsv(gvizUrl(PDDT_ID,{sheet:PDDT_SHEET})+(q?'&tq='+encodeURIComponent(q):'')));
   let rows,H,idx;const remap=()=>{H=rows[0].map(clean);idx=name=>H.findIndex(h=>h.toUpperCase()===name);};
   try{rows=await load(SEL);remap();if(idx('CODE CS')<0||idx('CAT GROUP')<0)throw 0;}
@@ -533,12 +545,12 @@ async function loadPddt(force){
   const cEA=idx('CODE EA'),cPA=idx('CODE PA'),cBP=idx('CODE BP'),cCS=idx('CODE CS');
   const cG=idx('CAT GROUP'),cT=idx('CAT TYPE'),cS=idx('SHORT NAME'),cN=idx('PRODUCT NAME');
   const pS01=idx('PRICE S01 CS'),pC01=idx('PRICE CC01 CS'),pC03=idx('PRICE CC03 CS'),pS03=idx('PRICE S03 CS');
-  const sW4=idx('STOCK W4'),sC4=idx('STOCK C4');
+  const sW4=idx('STOCK W4'),sC4=idx('STOCK C4'),cVat=idx('VAT STATUS');
   const m={},mc={};
   for(let i=1;i<rows.length;i++){const r=rows[i];if(!r)continue;
     const info={catGroup:clean(r[cG]),catType:clean(r[cT]),shortName:clean(r[cS]),productName:cN>=0?clean(r[cN]):'',
       pS01:numv(r[pS01]),pC01:numv(r[pC01]),pC03:numv(r[pC03]),pS03:numv(r[pS03]),
-      stockW4:numv(r[sW4]),stockC4:numv(r[sC4])};
+      stockW4:numv(r[sW4]),stockC4:numv(r[sC4]),vat:cVat>=0?clean(r[cVat]):''};
     [cEA,cPA,cBP,cCS].forEach(ci=>{if(ci<0)return;const code=clean(r[ci]);if(code&&!m[code]){m[code]=info;const k=bcKey(code);if(k&&!(k in mc))mc[k]={info,bc:code};}});
   }
   pddtMap=m;pddtBc=mc;return m;
@@ -772,19 +784,27 @@ async function exportBK12(){
     const prefix=clean($('bkPrefix').value)||'BK08';
     const startSeq=Math.max(1,parseInt(clean($('bkStart').value),10)||1);
     const src=parseSheetUrl($('bkUrl').value)||{id:DEFAULT_SMR_ID,gid:DEFAULT_SMR_GID};
+    await loadPddt();   // ต้องมี vat ของแต่ละบาร์ก่อนจัดกลุ่มแยก VAT (cache อยู่แล้วถ้าโหลดจาก run())
     showSpin('โหลดชีท SMR (bplus format)...');
     const rows=parseCsvRaw(await fetchCsv(gvizUrl(src.id,{gid:src.gid})));
     if(rows.length<2){toast('ชีท SMR ว่าง','error');hideSpin();btn.disabled=false;return;}
     const header=rows[0].slice();header[BK.B]=prefix+' เลขที่เอกสาร';const data=rows.slice(1);  // บังคับหัว B ตาม prefix (กันหัวเก่า BK12 ค้างในชีทต้นทาง)
-    // จัดกลุ่ม "1 สาขา (ชื่อร้าน) = 1 ใบ = 1 เลข" — ไล่เลขทีละสาขาตามลำดับที่เจอครั้งแรก; ไม่มีชื่อร้าน = ข้าม
-    const order=[],bucket=new Map(),skip=[];
+    // จัดกลุ่ม "1 สาขา (ชื่อร้าน) = 1 ใบ" + แยกสินค้า "ไม่มี VAT" (PDDT VAT status = No) เป็นบิลใหม่ต่อท้ายบิลมี VAT ของสาขาเดียวกัน
+    // หาบาร์ใน PDDT ไม่เจอ / ไม่มีคอลัมน์ VAT status → ถือว่ามี VAT (default) → ไม่แยก เหมือนเดิม
+    const isNoVat=r=>{const pd=pddtLookup(clean(r[BK.BARCODE]));return !!pd&&String(pd.vat||'').trim().toLowerCase()==='no';};
+    const bucket=new Map(),skip=[],branchOrder=[],seenBranch=new Set();
     for(const r of data){
       const c=clean(r[BK.C]),shop=clean(r[BK.SHOP]);
       if(shop===''){skip.push(r);continue;}
-      const key=c+'|'+shop;
-      if(!bucket.has(key)){bucket.set(key,[]);order.push(key);}
+      const branch=c+'|'+shop;
+      if(!seenBranch.has(branch)){seenBranch.add(branch);branchOrder.push(branch);}
+      const key=branch+'|'+(isNoVat(r)?'N':'V');
+      if(!bucket.has(key))bucket.set(key,[]);
       bucket.get(key).push(r);
     }
+    // ลำดับใบ: ไล่ทีละสาขา (ตามลำดับที่เจอครั้งแรก) → มี VAT ก่อน → ไม่มี VAT ต่อทันที (เลขรันต่อเนื่อง)
+    const order=[];
+    for(const branch of branchOrder)for(const f of ['V','N']){const k=branch+'|'+f;if(bucket.has(k))order.push(k);}
     // เรียงสินค้าในแต่ละสาขาตามลำดับใบจัดสินค้า (CAT GROUP จากออเดอร์) ไม่ใช่ตามที่ยิงแสกน · ตัวไม่อยู่ในใบจัด = ต่อท้าย
     const prodRank={};
     if(lastBuild&&lastBuild.groups){let i=0;for(const g of lastBuild.groups)for(const rw of g.rows){if(rw.barcode&&!(rw.barcode in prodRank))prodRank[rw.barcode]=i++;}}
@@ -801,7 +821,8 @@ async function exportBK12(){
     const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'BK08');
     XLSX.writeFile(wb,`BK08_SMR_${di.yy}${di.mm}${di.dd}.xlsx`);
     hideSpin();
-    toast(`สร้างเลขเอกสาร ${order.length} ใบ · ${data.length-skip.length} บรรทัด`,'success');
+    const nNo=order.filter(k=>k.endsWith('|N')).length;
+    toast(`สร้างเลขเอกสาร ${order.length} ใบ`+(nNo?` (แยกไม่มี VAT ${nNo} ใบ)`:'')+` · ${data.length-skip.length} บรรทัด`,'success');
   }catch(e){hideSpin();toast(e.message||'ผิดพลาด','error');console.error(e);}
   finally{btn.disabled=false;}
 }
