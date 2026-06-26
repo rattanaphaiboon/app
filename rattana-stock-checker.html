@@ -829,7 +829,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.87';
+const APP_VERSION = 'v3.88';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -1234,11 +1234,16 @@ function parseReportDate(rawRows) {
 // Build barcode → totalEA index from ERP raw rows. Returns { index, reportDate }.
 // ERP columns (0-based): 0=barcode, 3=secondary code, 5=name, 9=unit "ลังx48(CS)", 11=mainQty, 13=subQty
 // Factor (pieces per main unit) is parsed from the unit string e.g. "ลังx48(CS)" → 48.
+// normalize a product name for matching (collapse spaces, lowercase)
+function normName(s) { return String(s || '').replace(/\s+/g, ' ').trim().toLowerCase(); }
+
 function buildAdjIndex(rawRows) {
   const index = {};
+  const nameIndex = {};   // normalized name → totalEA (fallback when barcode not in ERP)
+  const nameSeen  = {};   // track conflicts so ambiguous names aren't used
   rawRows.forEach(cols => {
     const code = String(cols[0]||'').trim();
-    if (!/^\d{5,}$/.test(code)) return; // skip header/title rows
+    if (!/^\d{4,}$/.test(code)) return; // skip header/title rows (รหัสภายในก็เป็นตัวเลข)
     const mainQty = parseFloat(String(cols[11]||'').replace(/,/g,'')) || 0;
     const subQty  = parseFloat(String(cols[13]||'').replace(/,/g,'')) || 0;
     // factor = number after "x" in the unit string (e.g. ลังx48(CS) → 48); fallback col 16, else 1
@@ -1250,9 +1255,15 @@ function buildAdjIndex(rawRows) {
     index[code] = totalEA;
     // Secondary code (รหัสใช้ประจำ) — may differ from main barcode
     const code2 = String(cols[3]||'').trim();
-    if (code2 && /^\d{5,}$/.test(code2) && !index[code2]) index[code2] = totalEA;
+    if (code2 && /^\d{4,}$/.test(code2) && !index[code2]) index[code2] = totalEA;
+    // Name index — exact (normalized) name; mark ambiguous if same name → different total
+    const nm = normName(cols[5]);
+    if (nm) {
+      if (nameSeen[nm] === undefined) { nameSeen[nm] = totalEA; nameIndex[nm] = totalEA; }
+      else if (nameSeen[nm] !== totalEA) { nameIndex[nm] = undefined; } // ชื่อซ้ำ ค่าต่าง → ไม่ใช้
+    }
   });
-  return { index, reportDate: parseReportDate(rawRows) };
+  return { index, nameIndex, reportDate: parseReportDate(rawRows) };
 }
 
 async function fetchAdjStock(wh) {
@@ -1294,7 +1305,7 @@ async function loadAdjStock(wh, silent=false) {
       if (!silent) showToast(`คลัง ${wh} ยังไม่มีข้อมูลสต็อกวางเอง — ใช้ Stocksync`, 'info');
       return;
     }
-    adjStockCache[wh] = { index: r.index, reportDate: r.reportDate };
+    adjStockCache[wh] = { index: r.index, nameIndex: r.nameIndex, reportDate: r.reportDate };
     renderStockSrcBar();
     renderCountList();
     if (!silent) {
@@ -2375,7 +2386,11 @@ function systemPiecesFor(item) {
   const p  = productByKey[item.key];
   // สต็อกวางเอง (ERP) — ใช้ถ้ามีข้อมูลสำหรับ product นี้; fallback Stocksync
   if (wh && adjStockCache[wh]) {
-    const totalEA = adjStockCache[wh].index[item.key];
+    const adj = adjStockCache[wh];
+    let totalEA = adj.index[item.key];
+    if (totalEA === undefined && adj.nameIndex) {  // หาไม่เจอด้วยบาร์โค้ด → ลองด้วยชื่อสินค้า
+      totalEA = adj.nameIndex[normName((p && p['PRODUCT NAME']) || item.name)];
+    }
     if (totalEA !== undefined) {
       const f = item.factors.CS || 1;
       const cs = Math.floor(totalEA / f), ea = totalEA - cs * f;
@@ -2544,7 +2559,11 @@ function productStock(p) {
   const wh = countSession && countSession.warehouse;
   const factorCS = unitFactor(p, 'CS') || 1;
   if (wh && adjStockCache[wh]) {
-    const totalEA = adjStockCache[wh].index[productKey(p)];
+    const adj = adjStockCache[wh];
+    let totalEA = adj.index[productKey(p)];
+    if (totalEA === undefined && adj.nameIndex) {  // หาไม่เจอด้วยบาร์โค้ด → ลองด้วยชื่อสินค้า
+      totalEA = adj.nameIndex[normName(p['PRODUCT NAME'])];
+    }
     if (totalEA !== undefined) {
       const cs = Math.floor(totalEA / factorCS), ea = totalEA - cs * factorCS;
       return { pieces: totalEA, cs, ea, factorCS, isAdj: true };
