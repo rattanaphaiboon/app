@@ -549,8 +549,8 @@ a { color: var(--brand); text-decoration: none; }
 /* Responsive */
 @media (max-width: 900px) {
   .sidebar { display:none; }
-  .topbar { padding:0 12px; }
-  .topbar-search { display:none; }
+  .topbar { padding:8px 12px; }
+  .topbar-search { order:3; flex-basis:100%; min-width:0; max-width:none; }   /* ไม่ซ่อน — ค้นหาต้องเห็นเสมอ (กฎบริษัท) ตกลงมาเป็นแถวล่างเต็มกว้าง */
   .content { padding:12px; }
   .kpi-grid { grid-template-columns: 1fr 1fr; }
   .two-pane { flex-direction: column; }
@@ -666,14 +666,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v7.15.0</div>
+<div class="version-badge">SupplyLink v7.17.0</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    SupplyLink v6.6.6 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v7.15.0';
+const VERSION = 'v7.17.0';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -1626,6 +1626,37 @@ async function callAPI(action, args) {
   }
 }
 
+/* ส่งข้อมูลแบบกันหาย: กันกดซ้ำ (ปุ่ม busy) + คืน res ให้ caller เช็ค res.ok เอง
+   ไม่สำเร็จ = caller ห้ามลบ draft / ห้าม nav ออก — ฟอร์มต้องคงค่าไว้ให้ส่งใหม่ได้ */
+async function safeSubmit(btn, action, args, opts) {
+  opts = opts || {};
+  if (btn) {
+    if (btn._busy) return { ok: false, _busy: true };
+    btn._busy = true; btn.disabled = true; btn.style.opacity = '.6'; btn.style.cursor = 'wait';
+    if (opts.busy != null) { btn._lbl = btn.innerHTML; btn.innerHTML = opts.busy; }
+  }
+  let res = null;
+  try { res = await callAPI(action, args); }
+  finally {
+    if (btn) {
+      btn._busy = false; btn.disabled = false; btn.style.opacity = ''; btn.style.cursor = '';
+      if (opts.busy != null && btn._lbl != null) { btn.innerHTML = btn._lbl; btn._lbl = null; }
+    }
+  }
+  return res;
+}
+
+/* วันนี้ตามเวลาไทย (UTC+7) → YYYY-MM-DD (ใช้เป็น min ของช่องวันที่ กันเลือกย้อนหลัง) */
+function todayISO() { return new Date(Date.now() + 7*3600*1000).toISOString().slice(0,10); }
+
+/* ปุ่มกลับ Hub (ทอง) — ทุกแอป Rattana ต้องมี */
+function hubBtnHTML(style) {
+  return '<a href="https://rattanaphaiboon.github.io/app/rattana-hub.html" title="กลับ Hub" '+
+    'style="display:inline-flex;align-items:center;gap:5px;height:34px;padding:0 12px;border-radius:9px;'+
+    'background:linear-gradient(135deg,#c9a84c,#b8923a);color:#1a1303;font-weight:800;font-size:12.5px;'+
+    'text-decoration:none;white-space:nowrap;flex:none;'+(style||'')+'">'+ic('chevL',15)+'Hub</a>';
+}
+
 /* ───────────────────────── AUTH ───────────────────────── */
 function saveSession(s) {
   S.session = s;
@@ -2197,6 +2228,7 @@ function renderTopbar() {
       '<input id="globalSearch" placeholder="ค้นหา ID, PO, supplier, คนขับ, ทะเบียน…" value="'+q+'" autocomplete="off">' +
       (q ? '<button class="clear-btn" id="clearSearch" title="ล้าง">'+ic('x',12,'#fff',2.5)+'</button>' : '<span class="kbd">Ctrl K</span>') +
     '</div>' +
+    hubBtnHTML() +
     '<div style="position:relative">' +
       '<button class="btn btn-ghost btn-icon" id="btnNotif" style="position:relative" title="จัดซื้อต้องดำเนินการ">'+ic('bell',16)+
         (adminTodo.length?'<span style="position:absolute;top:2px;right:2px;min-width:15px;height:15px;padding:0 3px;border-radius:8px;background:var(--err);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;line-height:1">'+adminTodo.length+'</span>':'')+'</button>' +
@@ -2643,9 +2675,17 @@ function wireGRApprovals() {
     card.querySelectorAll('.gra-act').forEach(b => b.addEventListener('click', async () => {
       const dec = b.dataset.dec, note = (card.querySelector('.gra-note') || {}).value || '';
       if (dec === 'ปฏิเสธ' && !note) { toast('ปฏิเสธ — ใส่เหตุผลก่อน', '', 'err'); return; }
+      if (card._busy) return; card._busy = true;
+      const acts = card.querySelectorAll('.gra-act');
+      acts.forEach(x => { x.disabled = true; x.style.opacity = '.6'; });
       showAppLoading('กำลังบันทึก…');
-      try { await callAPI('resolveGRLine', { id: id, decision: dec, note: note }); } catch (e) { console.error(e); }
-      S._grApprovals = null; hideAppLoading();
+      const res = await callAPI('resolveGRLine', { id: id, decision: dec, note: note });
+      hideAppLoading();
+      if (!res || !res.ok) {
+        card._busy = false; acts.forEach(x => { x.disabled = false; x.style.opacity = ''; });
+        toast('บันทึกไม่สำเร็จ', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง', 'err'); return;
+      }
+      S._grApprovals = null;
       toast('บันทึก: ' + dec, '', 'ok');
       loadGRApprovals();
     }));
@@ -2756,15 +2796,19 @@ function wireOverdueDefects() {
     const ab = card.querySelector('.ap-approve'), xb = card.querySelector('.ap-reject');
     if (ab) ab.addEventListener('click', async () => {
       showAppLoading('กำลังอนุมัติ…');
-      try { await callAPI('approveDefectReturn', { clearanceId: id }); } catch (e) { console.error(e); }
-      S._overdueAdmin = null; hideAppLoading();
+      const res = await callAPI('approveDefectReturn', { clearanceId: id });
+      hideAppLoading();
+      if (!res || !res.ok) { toast('อนุมัติไม่สำเร็จ', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง', 'err'); return; }
+      S._overdueAdmin = null;
       toast('อนุมัติให้คืนแล้ว', 'ซัพจองส่งได้', 'ok');
       loadOverdueDefects();
     });
     if (xb) xb.addEventListener('click', async () => {
       showAppLoading('กำลังบันทึก…');
-      try { await callAPI('rejectDefectReturn', { clearanceId: id }); } catch (e) { console.error(e); }
-      S._overdueAdmin = null; hideAppLoading();
+      const res = await callAPI('rejectDefectReturn', { clearanceId: id });
+      hideAppLoading();
+      if (!res || !res.ok) { toast('บันทึกไม่สำเร็จ', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง', 'err'); return; }
+      S._overdueAdmin = null;
       toast('ปฏิเสธการคืน', 'ซัพต้องกลับไปเลือก "ทำลาย"', 'ok');
       loadOverdueDefects();
     });
@@ -4284,7 +4328,7 @@ function grDetailHTML(a) {
             '<button type="button" class="pv-type-btn" data-vtype="refuse"><span style="display:inline-flex;align-items:center"><span class="vdot" style="background:#3D3D3D"></span>ปฏิเสธ</span><small>เสีย/ผิด spec</small></button>' +
           '</div>' +
           '<div class="pv-extra" style="display:none">' +
-            '<div class="pv-expected"><label>วันที่จะมาส่ง (supplier บอก)</label><input type="date" class="input pv-expected-input" style="width:160px"></div>' +
+            '<div class="pv-expected"><label>วันที่จะมาส่ง (supplier บอก)</label><input type="date" class="input pv-expected-input" min="'+todayISO()+'" style="width:160px"></div>' +
             '<div class="pv-reason"><label>เหตุผล / หมายเหตุ</label><input type="text" class="input pv-reason-input" placeholder="เช่น โรงงานผลิตไม่ทัน · ของหายระหว่างขนส่ง · spec ผิด"></div>' +
           '</div>' +
         '</div>' +
@@ -4407,6 +4451,9 @@ function _wireGRScan() {
   const g = S._grScan; if (!g) return;
   const redraw = (i) => { const c = $('.grs-card[data-i="' + i + '"]'); if (c) { c.outerHTML = _grsCard(g.lines[i], i); _wireGRScan(); _grsUpdateFoot(); } };
   const cl = $('#grsClose'); if (cl) cl.onclick = closeGRScan;
+  const ov = $('#grScanModal');
+  if (ov && !ov._bdWired) { ov._bdWired = true; ov.addEventListener('click', e => { if (e.target === ov) closeGRScan(); }); }   // แตะพื้นหลังปิด (กล้องดับ)
+  if (!window._grsEscWired) { window._grsEscWired = true; document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#grScanModal')) closeGRScan(); }); }   // Esc ปิด (กล้องดับ)
   const sb = $('#grsSubmit'); if (sb) sb.onclick = submitGRScanResult;
   const mb = $('#grsManualBtn'); if (mb) mb.onclick = () => { const el = $('#grsManual'), v = (el.value || '').trim(); if (v) { onGRScanCode(v); el.value = ''; } };
   const mi = $('#grsManual'); if (mi) mi.onkeydown = (e) => { if (e.key === 'Enter') { const v = (e.target.value || '').trim(); if (v) { onGRScanCode(v); e.target.value = ''; } } };
@@ -4975,7 +5022,7 @@ function collectGR() {
     const sku = (cells[1].textContent || '').trim();
     const po = (cells[0].textContent || '').trim();
     const ordered = Number(inp.dataset.ordered) || 0;
-    const received = inp.value === '' ? 0 : Number(inp.value);
+    const received = inp.value === '' ? 0 : Math.max(0, Number(inp.value) || 0);   // กันค่าติดลบ/ไม่ใช่ตัวเลข
     const sc = srMap[sku]; // ผลยิงรับ → แนบ ปัญหา/อายุ/EA เพื่อบันทึกเป็นคอลัมน์ GR_Lines
     // Variance info
     let varianceType = null, expectedDate = null, varianceReason = null;
@@ -5006,10 +5053,10 @@ function collectGR() {
     return {
       sku: inputs[0] ? inputs[0].value.trim() : '',
       name: inputs[1] ? inputs[1].value.trim() : '',
-      qty: inputs[2] ? (Number(inputs[2].value) || 0) : 0,
+      qty: inputs[2] ? Math.max(0, Number(inputs[2].value) || 0) : 0,
       unit: select ? select.value : 'ลัง',
     };
-  }).filter(f => f.sku || f.name);
+  }).filter(f => (f.sku || f.name) && f.qty > 0);   // แถม: ต้องมีจำนวน > 0 ถึงนับ (กันแถม 0/ติดลบ)
   const extra = collectExtraFees();
   return { lines, foc, extra };
 }
@@ -5077,6 +5124,10 @@ async function handleGRSubmit() {
     }
   }
 
+  if (S._grSubmitting) return;   // กันกดปิดงานซ้ำตอนกำลังส่ง
+  S._grSubmitting = true;
+  try {
+
   // ── ใบกำกับ/ใบส่งของ: ต้องแนบรูป + อัปขึ้น Drive สำเร็จก่อน ถึงปิดงานได้ ──
   const inv = _grInv(a.id);
   if (!inv.uploaded) {
@@ -5099,6 +5150,13 @@ async function handleGRSubmit() {
     if (!invRes || !invRes.ok) { toast('อัปรูปไม่สำเร็จ — ยังไม่ปิดงาน', (invRes && invRes.error) || 'ลองใหม่อีกครั้ง', 'err'); return; }
     inv.uploaded = true; // กันอัปซ้ำ ถ้า submitGR ล้มแล้วกดใหม่
   }
+
+  // บันทึก GR หลังบ้านก่อน — สำเร็จแล้วค่อย commit state ในเครื่อง (กันเน็ตหลุดแล้วโชว์สำเร็จลวง/ข้อมูลเพี้ยน)
+  const doneAt = nowHHMM();
+  showAppLoading('กำลังบันทึก GR…');
+  const grRes = await callAPI('submitGR', { apptId: a.id, ...data, doneAt: doneAt });
+  hideAppLoading();
+  if (!grRes || !grRes.ok) { toast('บันทึก GR ไม่สำเร็จ — ยังไม่ปิดงาน', (grRes && grRes.error) || 'เน็ตอาจหลุด · กดปิดงานอีกครั้ง (ใบกำกับอัปแล้วไม่ซ้ำ)', 'err'); return; }
 
   // Auto-create backorder records in DATA
   if (!DATA.backorders) DATA.backorders = [];
@@ -5157,15 +5215,15 @@ async function handleGRSubmit() {
   if (over.length && !shortage.length) msg = 'เกิน '+over.length+' SKU';
 
   a.status = 'เสร็จสิ้น';
-  a.done = nowHHMM();
+  a.done = doneAt;
   a.grLines = data.lines;
   a.focLines = data.foc;
   a.extra = Object.assign(a.extra || {}, data.extra);
   if (a.extra.total === undefined) a.extra.total = data.extra.total;
   toast('บันทึก GR สำเร็จ', msg + ' · ปิดงาน '+a.done, shortage.length?'warn':'ok');
-  await callAPI('submitGR', { apptId: a.id, ...data, doneAt: a.done });
   try { localStorage.removeItem('sl_gr_draft_'+a.id); } catch(e) {}
   renderContentOnly();
+  } finally { S._grSubmitting = false; }
 }
 
 /* ─── PromptPay QR modal ─── */
@@ -5290,6 +5348,7 @@ function renderSupplierShell() {
     '<div class="mobile-bar">' +
       (showBack ? '<button class="btn btn-ghost btn-icon" id="mBack">'+ic('chevL',18)+'</button>' : '<div class="mobile-bar-logo">SL</div>') +
       '<div class="mobile-bar-title">'+esc(titles[S.page] || 'SupplyLink')+'</div>' +
+      hubBtnHTML('height:30px;padding:0 9px;font-size:11.5px;gap:3px') +
       (!showBack ? '<button class="btn btn-ghost btn-icon btn-refresh" onclick="refreshData()" title="รีเฟรช">'+ic('rotate',16)+'</button>' : '') +
       '<button class="btn btn-ghost btn-icon" id="mLogout" title="ออกจากระบบ">'+ic('logout',16)+'</button>' +
     '</div>' +
@@ -5374,11 +5433,14 @@ function wireSupplierBackorders() {
     if (!confirm('ยืนยันยกเลิก backorder นี้? (เปลี่ยนเป็น "ขาดส่ง" — admin จะออก credit note)')) return;
     const bo = (DATA.backorders||[]).find(x => x.id === boId);
     if (!bo) return;
+    showAppLoading('กำลังยกเลิก…');
+    const res = await callAPI('cancelBackorder', { id: boId });
+    hideAppLoading();
+    if (!res || !res.ok) { toast('ยกเลิกไม่สำเร็จ', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง', 'err'); return; }
     bo.status = 'ยกเลิก';
     bo.varianceType = 'short-billed';
     bo.settledDate = nowFullTS();
     toast('ยกเลิกแล้ว', 'admin จะออก credit note', 'warn');
-    await callAPI('cancelBackorder', { id: boId });
     renderContentOnly();
   }));
 }
@@ -5403,11 +5465,17 @@ function wireSupplierApptDetail() {
   if (confirmBtn) confirmBtn.addEventListener('click', async () => {
     const a = DATA.appointments.find(x => x.id === confirmBtn.dataset.id);
     if (!a || !a.extra) return;
+    if (confirmBtn._busy) return; confirmBtn._busy = true; confirmBtn.disabled = true;
+    const confirmedAt = nowFullTS();
+    showAppLoading('กำลังบันทึก…');
+    const res = await callAPI('confirmExtraFees', { apptId: a.id, confirmedAt: confirmedAt });
+    hideAppLoading();
+    confirmBtn._busy = false; confirmBtn.disabled = false;
+    if (!res || !res.ok) { toast('ยืนยันไม่สำเร็จ', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง', 'err'); return; }
     a.extra.confirmedBySupplier = true;
-    a.extra.confirmedAt = nowFullTS();
+    a.extra.confirmedAt = confirmedAt;
     a.extra.disputedReason = null;
     toast('ยืนยันยอดแล้ว', 'GR จะเห็นว่า supplier confirm ฝั่งคุณ', 'ok');
-    await callAPI('confirmExtraFees', { apptId: a.id, confirmedAt: a.extra.confirmedAt });
     renderContentOnly();
   });
   if (disputeBtn) disputeBtn.addEventListener('click', async () => {
@@ -5415,10 +5483,13 @@ function wireSupplierApptDetail() {
     if (!reason) return;
     const a = DATA.appointments.find(x => x.id === disputeBtn.dataset.id);
     if (!a || !a.extra) return;
+    showAppLoading('กำลังบันทึก…');
+    const res = await callAPI('disputeExtraFees', { apptId: a.id, reason });
+    hideAppLoading();
+    if (!res || !res.ok) { toast('แย้งยอดไม่สำเร็จ', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง', 'err'); return; }
     a.extra.disputedReason = reason;
     a.extra.confirmedBySupplier = false;
     toast('แย้งยอดแล้ว', 'แอดมินและ GR จะเห็นเหตุผล', 'warn');
-    await callAPI('disputeExtraFees', { apptId: a.id, reason });
     renderContentOnly();
   });
   if (qrBtn) {
@@ -5442,6 +5513,7 @@ function supplierDashboard() {
   let html = '<div class="m-hero">' +
     '<div class="m-hero-row">' + avatar(vendor.short.slice(0,2), { bg:'var(--accent)', color:'var(--brand-deep)' }) +
       '<div style="flex:1;min-width:0;line-height:1.2"><div class="m-hero-greet">สวัสดี</div><div class="m-hero-name">'+esc(vendor.short)+'</div></div>' +
+      '<span style="flex:none;align-self:flex-start;font-size:10px;font-weight:700;color:var(--accent-soft);background:rgba(255,255,255,.10);padding:3px 7px;border-radius:6px;font-family:var(--font-num)">SupplyLink '+VERSION+'</span>' +
     '</div>';
   if (nextAppt) {
     html += '<div class="m-next">' +
@@ -5832,9 +5904,12 @@ function wireDefectGate() {
     bulk.forEach(d => items.push(mk(d, S._dcMaster)));
     splits.forEach(d => items.push(mk(d, S._dcItem[d.barcode] || {})));
 
+    if (btn._busy) return; btn._busy = true; btn.disabled = true; btn.style.opacity = '.6';
     showAppLoading('กำลังบันทึก…');
     const res = await callAPI('submitDefectClearance', { items });
     hideAppLoading();
+    btn._busy = false; btn.disabled = false; btn.style.opacity = '';
+    if (!res || !res.ok) { toast('บันทึกไม่สำเร็จ — ยังไม่เคลียร์', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง (ข้อมูลยังอยู่ครบ)', 'err'); return; }
     const aw = (res && res.data && res.data.awaiting) || 0;
     toast(aw ? 'บันทึกแล้ว' : 'เคลียร์ของเสียแล้ว', aw ? aw+' รายการขอคืน รอจัดซื้ออนุมัติ' : 'จองส่งสินค้าต่อได้เลย', 'ok');
     S._defects = null; S._defectsCache = null;
@@ -6119,10 +6194,11 @@ function wireSupplierPORevEdit() {
     const v = prompt('อายุสินค้า SKU LIFE (วัน) — ถ้าผิดแก้ได้ ระบบจะใช้คำนวณวันหมดอายุตอนรับของ:', Number(l.skuLife) || '');
     if (v === null) return;
     const n = Number(v); if (!(n > 0)) { toast('ใส่จำนวนวันให้ถูก', '', 'err'); return; }
-    l.skuLife = n;
+    const res = await callAPI('saveProductInfo', { info: { pKey: l.pKey, sku: l.sku, name: l.name, skuLife: n } });
+    if (!res || !res.ok) { toast('บันทึกไม่สำเร็จ', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง', 'err'); return; }
+    l.skuLife = n;   // commit หลังบันทึกสำเร็จเท่านั้น (กันโชว์ค่าใหม่ทั้งที่ยังไม่เซฟ)
     const el = $('.rv-skulife[data-i="' + i + '"]'); if (el) el.textContent = n + ' วัน';
-    try { await callAPI('saveProductInfo', { info: { pKey: l.pKey, sku: l.sku, name: l.name, skuLife: n } }); toast('บันทึกอายุสินค้าแล้ว', esc(l.name || l.sku), 'ok'); }
-    catch (e) { console.error('[saveProductInfo]', e); toast('บันทึกไม่สำเร็จ', '', 'err'); }
+    toast('บันทึกอายุสินค้าแล้ว', esc(l.name || l.sku), 'ok');
   }));
   const addBtn = $('#rvAddBtn');
   if (addBtn) addBtn.addEventListener('click', () => {
@@ -6414,13 +6490,14 @@ function wireWizard() {
     // step 4 → ยืนยันจอง → สร้างนัดจริง
     const w = S.wizard;
     if (!w.pos.length || !w.wh || !w.day || !w.slot) { toast('ข้อมูลไม่ครบ', 'เลือก PO / คลัง / วัน / เวลา ให้ครบ', 'err'); return; }
+    if (next._busy) return; next._busy = true; next.disabled = true;   // กันกดจองซ้ำ
     showAppLoading('กำลังจองนัด…');
-    try {
-      await callAPI('createAppointment', { pos: w.pos, wh: w.wh, date: w.day, time: w.slot });
-      clearOpenPOCache();         // ล้าง cache → โหลด PO ใหม่รอบหน้า (ตัดใบที่เพิ่งจองออก)
-      await hydrateData();
-    } catch (e) { console.error('[createAppointment]', e); }
+    const res = await callAPI('createAppointment', { pos: w.pos, wh: w.wh, date: w.day, time: w.slot });
     hideAppLoading();
+    next._busy = false; next.disabled = false;
+    if (!res || !res.ok) { toast('จองนัดไม่สำเร็จ — ยังไม่หาย', (res && res.error) || 'เน็ตอาจหลุด · ข้อมูลที่เลือกยังอยู่ครบ กดยืนยันใหม่ได้เลย', 'err'); return; }
+    clearOpenPOCache();         // ล้าง cache → โหลด PO ใหม่รอบหน้า (ตัดใบที่เพิ่งจองออก)
+    await hydrateData();
     S.wizard = { step:1, pos:[], wh:null, day:null, slot:null };
     toast('จองนัดสำเร็จ', 'ดูได้ที่ "นัดของฉัน"', 'ok');
     nav('my-appts');
@@ -6872,7 +6949,10 @@ function wireNewProduct() {
     if (!data.bc_EA) { toast('กรุณากรอกบาร์โค้ดชิ้น (EA)', '', 'err'); return; }
     if (!data.shelfLife || !(parseInt(data.shelfLife,10) > 0)) { toast('กรุณาระบุอายุสินค้า', 'เลือก chip หรือกรอกจำนวนวันใน "อื่นๆ"', 'err'); return; }
     if (!data.plan2m && !data.plan2mDetail) { toast('กรุณาระบุแผนกรณีขายไม่ได้ 2 เดือน', 'เลือกอย่างน้อย 1 chip หรือกรอกรายละเอียด', 'err'); return; }
-    const res = await callAPI('submitNewProduct', { product: data });
+    try { localStorage.setItem('sl_new_product_draft', JSON.stringify(data)); } catch(e) {}   // เซฟก่อนส่ง กันหาย
+    const res = await safeSubmit($('#submitProd'), 'submitNewProduct', { product: data }, { busy: 'กำลังส่ง…' });
+    if (res && res._busy) return;
+    if (!res || !res.ok) { toast('ส่งไม่สำเร็จ — ยังไม่หาย', (res && res.error) || 'เน็ตอาจหลุด · ฉบับร่างถูกเก็บไว้ กดส่งใหม่ได้เลย', 'err'); return; }
     toast('ส่งข้อมูลสินค้าใหม่สำเร็จ', 'ทีมจัดซื้อจะตอบกลับใน 5 วันทำการ', 'ok');
     try { localStorage.removeItem('sl_new_product_draft'); } catch(e) {}
     nav('updates');
@@ -7019,20 +7099,8 @@ function renderField(f) {
     inputHTML = '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px"><input type="checkbox" id="'+name+'" style="width:18px;height:18px;cursor:pointer"> '+esc(f.label)+'</label>';
     return '<div class="field-group">'+inputHTML+'</div>';
   } else if (f.type === 'sku-multi') {
-    const myskus = [
-      { code:"88234", name:"ปลากระป๋อง 155g · รสมะเขือเทศ" },
-      { code:"88235", name:"ปลากระป๋อง 155g · รสซอสพริก" },
-      { code:"88240", name:"ปลากระป๋อง 290g · รสน้ำมัน" },
-      { code:"77003", name:"ปลาทูน่าก้อน 185g" },
-      { code:"77018", name:"ปลาทูน่าก้อน 95g · 3-pack" },
-      { code:"22504", name:"ปูนซีเมนต์ถุง 50kg" },
-      { code:"55102", name:"น้ำตาลทรายแดง 1 กก." },
-    ];
     inputHTML = '<div id="'+name+'_skus" data-field-type="sku-multi" data-field="'+f.name+'" style="display:flex;flex-direction:column;gap:6px;max-height:240px;overflow-y:auto">' +
-      myskus.map(s => '<button class="po-card sku-pick" type="button" data-sku="'+esc(s.code)+'" style="padding:8px 10px">' +
-        '<span class="po-check"></span>' +
-        '<div style="flex:1;text-align:left"><div class="num bold" style="font-size:12px">'+s.code+'</div><div style="font-size:11px;color:var(--ink-3);margin-top:2px">'+esc(s.name)+'</div></div>' +
-      '</button>').join('') +
+      _skuPickRowsHTML(_vendorSkuItems()) +
     '</div>';
   } else if (f.type === 'tier-table') {
     inputHTML = '<div class="tier-table" id="'+name+'_tiers" data-field="'+f.name+'">' +
@@ -7081,6 +7149,7 @@ function wireSchemaForm() {
   const schemaId = S.currentSchema;
   const schema = FORM_SCHEMAS[schemaId];
   if (!schema) return;
+  if (schema.fields.some(f => f.type === 'sku-multi')) _ensureVendorSkus('schema-form'); // โหลด SKU จริงของ vendor
   const state = { values:{}, supplierSig:null };
 
   // Init chip handlers
@@ -7229,7 +7298,10 @@ function wireSchemaForm() {
     if ((schema.signature === 'both' || schema.signature === 'supplier') && !state.supplierSig) {
       toast('กรุณาลงนาม','ฟอร์มนี้ต้องเซ็นชื่อก่อนส่ง','err'); return;
     }
-    await callAPI('submitForm', { type: schemaId, payload: data, supplierSig: state.supplierSig });
+    try { localStorage.setItem('sl_draft_'+schemaId, JSON.stringify(data)); } catch(e) {}   // เซฟก่อนส่ง กันหาย
+    const res = await safeSubmit($('#submitSchema'), 'submitForm', { type: schemaId, payload: data, supplierSig: state.supplierSig }, { busy: 'กำลังส่ง…' });
+    if (res && res._busy) return;
+    if (!res || !res.ok) { toast('ส่งไม่สำเร็จ — ยังไม่หาย', (res && res.error) || 'เน็ตอาจหลุด · ฉบับร่างถูกเก็บไว้ กดส่งใหม่ได้เลย', 'err'); return; }
     // Push to local mock submissions
     const id = 'SB-' + String(Date.now()).slice(-4);
     DATA.submissions.unshift({
@@ -7253,15 +7325,8 @@ function wireSchemaForm() {
 function updatePricePair(containerId, skuList) {
   const el = document.getElementById(containerId);
   if (!el) return;
-  const skuNames = {
-    "88234":"ปลากระป๋อง 155g · รสมะเขือเทศ",
-    "88235":"ปลากระป๋อง 155g · รสซอสพริก",
-    "88240":"ปลากระป๋อง 290g · รสน้ำมัน",
-    "77003":"ปลาทูน่าก้อน 185g",
-    "77018":"ปลาทูน่าก้อน 95g · 3-pack",
-    "22504":"ปูนซีเมนต์ถุง 50kg",
-    "55102":"น้ำตาลทรายแดง 1 กก.",
-  };
+  const skuNames = {};   // ชื่อจริงจาก SKU ของ vendor (ไม่ใช่ mock)
+  (_vendorSkuItems() || []).forEach(it => { skuNames[String(it.code)] = it.name; });
   if (skuList.length === 0) { el.innerHTML = '<div style="font-size:11px;color:var(--ink-3)">เลือก SKU ก่อน แล้วราคาเก่า→ใหม่จะปรากฏ</div>'; return; }
   el.innerHTML = skuList.map(sku => {
     return '<div class="price-row">' +
@@ -7276,16 +7341,28 @@ function updatePricePair(containerId, skuList) {
 }
 
 /* ───────────────── SUPPLIER: New Promo Request form ───────────────── */
+// SKU จริงของ vendor (จาก getVendorProducts/S._vp — รวม PDDT + สินค้าใหม่อนุมัติ) · null = ยังไม่โหลด
+function _vendorSkuItems() {
+  const list = (S._vp || {})['self'];
+  if (!list) return null;
+  return list.map(p => ({ code: (p.units && p.units[0] && p.units[0].barcode) || p.name, name: p.name + (p.brand ? ' · ' + p.brand : ''), isNew: !!p.isNew }));
+}
+function _ensureVendorSkus(pageForReRender) {
+  if ((S._vp || {})['self']) return true;
+  try { loadVendorProducts().then(() => { if (S.page === pageForReRender) renderContentOnly(); }); } catch (e) {}
+  return false;
+}
+function _skuPickRowsHTML(items) {
+  if (!items) return '<div style="padding:18px;text-align:center;color:var(--ink-3);font-size:12px"><span class="spinner"></span> กำลังโหลดสินค้าของคุณ…</div>';
+  if (!items.length) return '<div style="padding:14px;text-align:center;color:var(--ink-3);font-size:12px">ไม่พบสินค้าของเจ้านี้ใน PDDT</div>';
+  return items.map(s => '<button type="button" class="po-card sku-pick" data-sku="' + esc(s.code) + '" data-name="' + esc(s.name) + '" style="padding:8px 10px">' +
+    '<span class="po-check"></span>' +
+    '<div style="flex:1;text-align:left"><div class="num bold" style="font-size:12px">' + esc(s.code) + (s.isNew ? ' <span class="chip chip-sm chip-info" style="font-size:8px">ใหม่</span>' : '') + '</div><div style="font-size:11px;color:var(--ink-3);margin-top:2px">' + esc(s.name) + '</div></div>' +
+  '</button>').join('');
+}
 function supplierNewPromo() {
   const vendor = curVendor0() || DATA.vendors[0];
-  // mock vendor's SKUs (in real app would come from PO history / vendor master)
-  const myskus = [
-    { code:"88234", name:"ปลากระป๋อง 155g · รสมะเขือเทศ" },
-    { code:"88235", name:"ปลากระป๋อง 155g · รสซอสพริก" },
-    { code:"88240", name:"ปลากระป๋อง 290g · รสน้ำมัน" },
-    { code:"77003", name:"ปลาทูน่าก้อน 185g" },
-    { code:"77018", name:"ปลาทูน่าก้อน 95g · 3-pack" },
-  ];
+  const myskuItems = _vendorSkuItems(); // SKU จริงของเจ้านั้น (null = กำลังโหลด)
 
   const sec = (n, title, body) =>
     '<div class="form-section">' +
@@ -7319,18 +7396,15 @@ function supplierNewPromo() {
     sec(2, 'สินค้าที่เข้าโปร',
       lbl('เลือก SKU (เลือกได้หลายตัว)') +
       '<div id="skuPicker" style="display:flex;flex-direction:column;gap:6px">' +
-        myskus.map(s => '<button type="button" class="po-card sku-pick" data-sku="'+esc(s.code)+'" data-name="'+esc(s.name)+'" style="padding:10px 12px">' +
-          '<span class="po-check"></span>' +
-          '<div style="flex:1;text-align:left"><div class="num bold" style="font-size:12.5px">'+s.code+'</div><div style="font-size:11.5px;color:var(--ink-3);margin-top:2px">'+esc(s.name)+'</div></div>' +
-        '</button>').join('') +
+        _skuPickRowsHTML(myskuItems) +
       '</div>' +
       '<div id="skuSummary" style="margin-top:10px;padding:8px 12px;background:var(--brand-tint);border-radius:6px;font-size:12px;font-weight:600;color:var(--brand);display:none"></div>'
     ) +
 
     sec(3, 'ช่วงเวลาและช่องทาง',
       '<div class="form-grid-2">' +
-        field('วันเริ่ม', '<input class="input" type="date" name="startDate" value="2026-06-01">') +
-        field('วันสิ้นสุด', '<input class="input" type="date" name="endDate" value="2026-06-15">') +
+        field('วันเริ่ม', '<input class="input" type="date" name="startDate">') +
+        field('วันสิ้นสุด', '<input class="input" type="date" name="endDate">') +
       '</div>' +
       lbl('ช่องทาง') +
       '<div class="chip-row" style="margin-bottom:10px" id="channelPicker">' +
@@ -7371,8 +7445,10 @@ function supplierNewPromo() {
         '<textarea class="input textarea" rows="4" placeholder="ตลาดเป็นอย่างไร · คู่แข่งทำอะไร · ทำไมตอนนี้" name="reason"></textarea>',
         'ยิ่งอธิบายชัด ยิ่งอนุมัติเร็ว'
       ) +
-      field('แนบรูปโปสเตอร์ / POP (ไม่บังคับ)', '<button class="btn btn-block" type="button">'+ic('upload',14)+' แนบไฟล์</button>')
+      field('แนบรูปโปสเตอร์ / POP (ไม่บังคับ)', '<input type="file" id="promoAttachInput" accept="image/*" style="display:none"><button class="btn btn-block" type="button" id="promoAttachBtn">'+ic('upload',14)+' แนบไฟล์</button><div id="promoAttachPreview" style="margin-top:8px"></div>')
     ) +
+
+    renderSignatureSection('promo') +
 
     '<div style="display:flex;gap:8px;margin-top:12px">' +
       '<button class="btn btn-lg" id="savePromoDraft" style="flex:1;height:46px">บันทึกแบบร่าง</button>' +
@@ -7382,7 +7458,8 @@ function supplierNewPromo() {
 }
 
 function wireNewPromo() {
-  const state = { ptype:null, skus:[], channel:'ทุกคลัง', target:'ทั่วไป', supports:[] };
+  const state = { ptype:null, skus:[], channel:'ทุกคลัง', target:'ทั่วไป', supports:[], attachment:null, sig:null };
+  _ensureVendorSkus('new-promo'); // โหลด SKU จริงของ vendor
 
   // Promo type chip picker → reveal type-specific inputs
   $$('#promoTypePicker button').forEach(b => b.addEventListener('click', () => {
@@ -7435,6 +7512,27 @@ function wireNewPromo() {
     b.classList.toggle('active', state.supports.indexOf(s) !== -1);
   }));
 
+  // แนบรูปโปสเตอร์/POP → ย่อ + เก็บ base64 (guard กัน cell เกิน 50k)
+  const attachBtn = $('#promoAttachBtn'), attachInput = $('#promoAttachInput');
+  if (attachBtn && attachInput) {
+    attachBtn.addEventListener('click', () => attachInput.click());
+    attachInput.addEventListener('change', async () => {
+      const f = attachInput.files && attachInput.files[0]; if (!f) return;
+      try {
+        const r = await resizeImageToJpeg(f);
+        if (r.data.length > 45000) { toast('รูปใหญ่ไป', 'ถ่าย/ย่อให้เล็กลงก่อนแนบ', 'err'); attachInput.value = ''; return; }
+        state.attachment = r.data;
+        const pv = $('#promoAttachPreview');
+        if (pv) pv.innerHTML = '<div style="display:flex;align-items:center;gap:8px"><img src="' + r.data + '" style="width:52px;height:52px;border-radius:8px;object-fit:cover;border:1px solid var(--line)"><span style="font-size:12px;color:var(--ok);font-weight:600">✓ แนบรูปแล้ว</span><button type="button" id="promoAttachRm" style="border:0;background:transparent;color:var(--err);cursor:pointer;font-size:12px">ลบ</button></div>';
+        const rm = $('#promoAttachRm'); if (rm) rm.addEventListener('click', () => { state.attachment = null; if (pv) pv.innerHTML = ''; attachInput.value = ''; });
+      } catch (e) { console.error('[promoAttach]', e); toast('แนบรูปไม่สำเร็จ', '', 'err'); }
+    });
+  }
+  // ลายเซ็น supplier (ไม่บังคับ — เผื่อโปรต้องเซ็น)
+  const sigReuse = $('#sigReuseBtn'), sigNew = $('#sigNewBtn');
+  if (sigReuse) sigReuse.addEventListener('click', () => { const s = SIG.load(); if (s) { state.sig = s.dataURL; toast('ใช้ลายเซ็นเดิม', '', 'ok'); sigReuse.innerHTML = ic('check', 13) + ' ลายเซ็นพร้อม'; sigReuse.disabled = true; } });
+  if (sigNew) sigNew.addEventListener('click', () => { SIG.openPad((dataURL) => { state.sig = dataURL; const p = $('#sigPreview'); if (p) p.innerHTML = '<img src="' + dataURL + '">'; toast('เซ็นเรียบร้อย', '', 'ok'); }); });
+
   function collect() {
     const data = {
       title: $('[name="promoTitle"]').value,
@@ -7449,6 +7547,7 @@ function wireNewPromo() {
       budget: $('[name="budget"]').value,
       objective: $('[name="objective"]').value,
       reason: $('[name="reason"]').value,
+      attachment: state.attachment || '',
     };
     // type-specific
     if (state.ptype === 'buyXgetY') {
@@ -7472,8 +7571,12 @@ function wireNewPromo() {
     if (!d.ptype) { toast('กรุณาเลือกประเภทโปร','','err'); return; }
     if (d.skus.length === 0) { toast('กรุณาเลือกอย่างน้อย 1 SKU','','err'); return; }
     if (!d.startDate || !d.endDate) { toast('กรุณาระบุวันเริ่ม-สิ้นสุด','','err'); return; }
+    if (d.endDate < d.startDate) { toast('วันสิ้นสุดต้องไม่ก่อนวันเริ่ม','','err'); return; }
     if (!d.reason) { toast('กรุณาอธิบายเหตุผล','ยิ่งชัด ยิ่งอนุมัติเร็ว','err'); return; }
-    await callAPI('submitPromoRequest', { promo: d });
+    try { localStorage.setItem('sl_promo_draft', JSON.stringify(d)); } catch(e) {}   // เซฟก่อนส่ง กันหาย
+    const res = await safeSubmit($('#submitPromo'), 'submitPromoRequest', { promo: d, supplierSig: state.sig }, { busy: 'กำลังส่ง…' });
+    if (res && res._busy) return;
+    if (!res || !res.ok) { toast('ส่งไม่สำเร็จ — ยังไม่หาย', (res && res.error) || 'เน็ตอาจหลุด · ฉบับร่างถูกเก็บไว้ กดส่งใหม่ได้เลย', 'err'); return; }
     try { localStorage.removeItem('sl_promo_draft'); } catch(e) {}
     toast('ส่งคำขอโปรสำเร็จ','จัดซื้อจะตอบกลับใน 3 วันทำการ','ok');
     nav('updates');
@@ -7689,12 +7792,11 @@ function wireTargets() {
     const valid = _targetsBuf.filter(t => t.scope && t.periodType && t.unit && Number(t.targetAmount) > 0);
     if (valid.length === 0) { toast('กรุณากรอกอย่างน้อย 1 รายการให้ครบ', 'ต้องเลือก Scope + Period + Unit + จำนวน', 'err'); return; }
     if (!supplierSig) { toast('กรุณาลงนาม', 'ฟอร์มนี้ต้องเซ็นก่อนส่ง', 'err'); return; }
-    const res = await callAPI('submitTargets', { targets: valid, supplierSig: supplierSig });
-    // Add to local mock
+    try { localStorage.setItem('sl_targets_draft', JSON.stringify(_targetsBuf)); } catch(e) {}   // เซฟก่อนส่ง กันหาย
+    const res = await safeSubmit($('#submitTargets'), 'submitTargets', { targets: valid, supplierSig: supplierSig }, { busy: 'กำลังส่ง…' });
+    if (res && res._busy) return;
+    if (!res || !res.ok) { toast('ส่งไม่สำเร็จ — ยังไม่หาย', (res && res.error) || 'เน็ตอาจหลุด · ฉบับร่างถูกเก็บไว้ กดส่งใหม่ได้เลย', 'err'); return; }
     const groupId = 'TG-' + String(Date.now()).slice(-6);
-    valid.forEach((t, i) => {
-      // Could push to DATA.salesTargets if we want to display in admin local view
-    });
     try { localStorage.removeItem('sl_targets_draft'); } catch(e) {}
     toast('ส่งเป้าหมายสำเร็จ','รหัส: '+groupId+' · จำนวน '+valid.length+' รายการ','ok');
     _targetsBuf = []; // reset
