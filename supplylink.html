@@ -666,14 +666,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v7.17.0</div>
+<div class="version-badge">SupplyLink v7.18.0</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    SupplyLink v6.6.6 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v7.17.0';
+const VERSION = 'v7.18.0';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -1606,24 +1606,28 @@ function exitActAs() {
 }
 window.actAsVendor = actAsVendor; window.exitActAs = exitActAs;
 
-async function callAPI(action, args) {
+async function callAPI(action, args, opts) {
+  opts = opts || {};
   args = Object.assign({}, args || {});
   if (S.actAs && S.actAs.code && args.vendorCode == null) args.vendorCode = S.actAs.code; // ทำแทนซัพ → แนบ vendorCode อัตโนมัติ
   if (!GAS_API_URL || GAS_API_URL.startsWith('REPLACE_')) {
     console.warn('[API] GAS_API_URL not set — using mock');
     return { ok: true, mock: true, data: null };
   }
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), opts.timeout || 30000);   // กัน fetch ค้างไม่จบ (เน็ตช้า/หลุด)
   try {
     const res = await fetch(GAS_API_URL, {
       method: 'POST',
       body: JSON.stringify({ action, token: S.session && S.session.token, args: args || {} }),
+      signal: ctrl.signal,
     });
     return await res.json();
   } catch (e) {
     console.error('[API]', e);
-    toast('เชื่อมต่อ server ไม่ได้', e.message, 'err');
-    return { ok: false, error: e.message };
-  }
+    if (!opts.silent) toast('เชื่อมต่อ server ไม่ได้', e.name === 'AbortError' ? 'หมดเวลา (เน็ตช้า)' : e.message, 'err');
+    return { ok: false, error: e.name === 'AbortError' ? 'timeout' : e.message };
+  } finally { clearTimeout(to); }
 }
 
 /* ส่งข้อมูลแบบกันหาย: กันกดซ้ำ (ปุ่ม busy) + คืน res ให้ caller เช็ค res.ok เอง
@@ -1636,7 +1640,7 @@ async function safeSubmit(btn, action, args, opts) {
     if (opts.busy != null) { btn._lbl = btn.innerHTML; btn.innerHTML = opts.busy; }
   }
   let res = null;
-  try { res = await callAPI(action, args); }
+  try { res = await callWrite(action, args, opts); }   // queueable → เข้าคิวกันหาย · อื่น → ยิงตรง
   finally {
     if (btn) {
       btn._busy = false; btn.disabled = false; btn.style.opacity = ''; btn.style.cursor = '';
@@ -1644,6 +1648,88 @@ async function safeSubmit(btn, action, args, opts) {
     }
   }
   return res;
+}
+
+/* ═══ Offline write-queue — กันข้อมูลหายตอนเน็ตหลุด/เด้ง · auto-resend (idempotent ด้วย clientReqId หลังบ้าน) ═══ */
+const QUEUEABLE_FE = { createAppointment:1, submitGR:1, submitPromoRequest:1, submitForm:1, submitNewProduct:1, submitTargets:1, submitDefectClearance:1, submitPORevision:1, confirmExtraFees:1, disputeExtraFees:1, cancelBackorder:1, saveProductInfo:1 };
+
+const WQ = {
+  KEY: 'sl_write_queue',
+  get() { try { return JSON.parse(localStorage.getItem(this.KEY) || '[]'); } catch (e) { return []; } },
+  save(q) { try { localStorage.setItem(this.KEY, JSON.stringify(q || [])); } catch (e) {} _wqRenderBanner(); },
+  count() { return this.get().length; },
+  add(item) { const q = this.get(); q.push(item); this.save(q); },
+  remove(crid) { this.save(this.get().filter(x => x.clientReqId !== crid)); },
+};
+
+function _newClientReqId() { return 'q_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+
+// ส่ง write แบบกันหาย: แนบ clientReqId · เข้าคิวก่อนยิง · สำเร็จ→ออกจากคิว · ล้ม→คาคิว auto-resend (banner ล่างโชว์)
+async function queuedWrite(action, args, opts) {
+  opts = opts || {};
+  const clientReqId = _newClientReqId();
+  const a = Object.assign({}, args || {}, { clientReqId });
+  if (S.actAs && S.actAs.code && a.vendorCode == null) a.vendorCode = S.actAs.code;
+  WQ.add({ clientReqId, action, args: a, attempts: 0, ts: Date.now(), label: opts.label || action });
+  const res = await callAPI(action, a, { silent: true });
+  if (res && res.ok) { WQ.remove(clientReqId); return res; }
+  return { ok: true, queued: true, clientReqId };   // ยิงไม่ได้ → คาคิว auto-resend · ถือว่า "รับเรื่องแล้ว" (ข้อมูลไม่หาย)
+}
+
+// route: queueable → เข้าคิว · อื่นๆ → ยิงตรง
+function callWrite(action, args, opts) {
+  return QUEUEABLE_FE[action] ? queuedWrite(action, args, opts) : callAPI(action, args, opts);
+}
+
+let _wqFlushing = false, _wqTimer = null;
+async function flushQueue(manual) {
+  if (_wqFlushing) return;
+  if (!manual && !navigator.onLine) return;
+  const q = WQ.get();
+  if (!q.length) return;
+  _wqFlushing = true;
+  try {
+    const doneSet = {}, attemptById = {};
+    for (let i = 0; i < q.length; i++) {
+      const item = q[i];
+      const res = await callAPI(item.action, item.args, { silent: true });
+      if (res && res.ok) doneSet[item.clientReqId] = 1;                       // ok หรือ dedup → ลงชีทแล้ว
+      else attemptById[item.clientReqId] = (item.attempts || 0) + 1;
+    }
+    // ⚠️ อ่านคิว "สด" ตอนเซฟ (อาจมี item ใหม่เข้าระหว่าง flush await) → เอาออกเฉพาะที่สำเร็จ ห้ามทับด้วย snapshot เก่า
+    const cur = WQ.get().filter(x => !doneSet[x.clientReqId])
+      .map(x => attemptById[x.clientReqId] != null ? Object.assign({}, x, { attempts: attemptById[x.clientReqId] }) : x);
+    WQ.save(cur);
+    const done = Object.keys(doneSet).length;
+    if (done) toast('✅ ส่งข้อมูลที่ค้างสำเร็จ', done + ' รายการ', 'ok');
+  } finally { _wqFlushing = false; _wqRenderBanner(); }
+}
+
+function startQueueAutoFlush() {
+  _wqRenderBanner();
+  if (_wqTimer) return;
+  setTimeout(() => flushQueue(), 3000);                                  // boot: ลองส่งของค้างจากเซสชันก่อน
+  _wqTimer = setInterval(() => { if (navigator.onLine) flushQueue(); }, 30000);
+  window.addEventListener('online', () => { toast('🌐 ออนไลน์แล้ว', 'กำลังส่งข้อมูลที่ค้าง', 'ok'); flushQueue(); });
+}
+
+function _wqRenderBanner() {
+  let b = document.getElementById('wqBanner');
+  const q = WQ.get();
+  const n = q.length;
+  if (!n) { if (b) b.remove(); return; }
+  const stuck = q.some(x => (x.attempts || 0) >= 8);   // ส่งไม่ได้หลายครั้ง → เตือนชัดขึ้น (ไม่ลบทิ้งเงียบ)
+  if (!b) {
+    b = document.createElement('div'); b.id = 'wqBanner';
+    b.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9000;display:flex;align-items:center;gap:10px;padding:9px 14px;color:#fff;font-size:12.5px;box-shadow:0 -2px 12px rgba(0,0,0,.25)';
+    document.body.appendChild(b);
+  }
+  b.style.background = stuck ? '#991b1b' : '#7c2d12';
+  b.innerHTML = '<span style="flex:1;min-width:0">' +
+    (stuck ? '⚠️ มี <b>' + n + '</b> รายการส่งไม่สำเร็จหลายครั้ง — เช็คเน็ต/ล็อกอิน แล้วแตะ "ส่งใหม่"'
+           : '⏳ มี <b>' + n + '</b> รายการรอส่ง (เน็ตหลุด) — ระบบจะส่งให้อัตโนมัติ') + '</span>' +
+    '<button id="wqResendBtn" style="border:1px solid rgba(255,255,255,.55);background:transparent;color:#fff;border-radius:7px;padding:4px 12px;font-size:12px;font-weight:700;cursor:pointer">ส่งใหม่</button>';
+  const rb = document.getElementById('wqResendBtn'); if (rb) rb.onclick = () => flushQueue(true);
 }
 
 /* วันนี้ตามเวลาไทย (UTC+7) → YYYY-MM-DD (ใช้เป็น min ของช่องวันที่ กันเลือกย้อนหลัง) */
@@ -5154,7 +5240,7 @@ async function handleGRSubmit() {
   // บันทึก GR หลังบ้านก่อน — สำเร็จแล้วค่อย commit state ในเครื่อง (กันเน็ตหลุดแล้วโชว์สำเร็จลวง/ข้อมูลเพี้ยน)
   const doneAt = nowHHMM();
   showAppLoading('กำลังบันทึก GR…');
-  const grRes = await callAPI('submitGR', { apptId: a.id, ...data, doneAt: doneAt });
+  const grRes = await callWrite('submitGR', { apptId: a.id, ...data, doneAt: doneAt }, { label: 'ปิดงาน GR ' + a.id });
   hideAppLoading();
   if (!grRes || !grRes.ok) { toast('บันทึก GR ไม่สำเร็จ — ยังไม่ปิดงาน', (grRes && grRes.error) || 'เน็ตอาจหลุด · กดปิดงานอีกครั้ง (ใบกำกับอัปแล้วไม่ซ้ำ)', 'err'); return; }
 
@@ -5220,7 +5306,7 @@ async function handleGRSubmit() {
   a.focLines = data.foc;
   a.extra = Object.assign(a.extra || {}, data.extra);
   if (a.extra.total === undefined) a.extra.total = data.extra.total;
-  toast('บันทึก GR สำเร็จ', msg + ' · ปิดงาน '+a.done, shortage.length?'warn':'ok');
+  toast(grRes.queued ? '⏳ ปิดงานไว้แล้ว — จะส่งอัตโนมัติ' : 'บันทึก GR สำเร็จ', grRes.queued ? 'เน็ตไม่เสถียร · อยู่ในคิว (ดูแถบล่าง)' : (msg + ' · ปิดงาน '+a.done), grRes.queued ? 'warn' : (shortage.length?'warn':'ok'));
   try { localStorage.removeItem('sl_gr_draft_'+a.id); } catch(e) {}
   renderContentOnly();
   } finally { S._grSubmitting = false; }
@@ -5434,7 +5520,7 @@ function wireSupplierBackorders() {
     const bo = (DATA.backorders||[]).find(x => x.id === boId);
     if (!bo) return;
     showAppLoading('กำลังยกเลิก…');
-    const res = await callAPI('cancelBackorder', { id: boId });
+    const res = await callWrite('cancelBackorder', { id: boId });
     hideAppLoading();
     if (!res || !res.ok) { toast('ยกเลิกไม่สำเร็จ', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง', 'err'); return; }
     bo.status = 'ยกเลิก';
@@ -5468,7 +5554,7 @@ function wireSupplierApptDetail() {
     if (confirmBtn._busy) return; confirmBtn._busy = true; confirmBtn.disabled = true;
     const confirmedAt = nowFullTS();
     showAppLoading('กำลังบันทึก…');
-    const res = await callAPI('confirmExtraFees', { apptId: a.id, confirmedAt: confirmedAt });
+    const res = await callWrite('confirmExtraFees', { apptId: a.id, confirmedAt: confirmedAt });
     hideAppLoading();
     confirmBtn._busy = false; confirmBtn.disabled = false;
     if (!res || !res.ok) { toast('ยืนยันไม่สำเร็จ', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง', 'err'); return; }
@@ -5484,7 +5570,7 @@ function wireSupplierApptDetail() {
     const a = DATA.appointments.find(x => x.id === disputeBtn.dataset.id);
     if (!a || !a.extra) return;
     showAppLoading('กำลังบันทึก…');
-    const res = await callAPI('disputeExtraFees', { apptId: a.id, reason });
+    const res = await callWrite('disputeExtraFees', { apptId: a.id, reason });
     hideAppLoading();
     if (!res || !res.ok) { toast('แย้งยอดไม่สำเร็จ', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง', 'err'); return; }
     a.extra.disputedReason = reason;
@@ -5906,7 +5992,7 @@ function wireDefectGate() {
 
     if (btn._busy) return; btn._busy = true; btn.disabled = true; btn.style.opacity = '.6';
     showAppLoading('กำลังบันทึก…');
-    const res = await callAPI('submitDefectClearance', { items });
+    const res = await callWrite('submitDefectClearance', { items });
     hideAppLoading();
     btn._busy = false; btn.disabled = false; btn.style.opacity = '';
     if (!res || !res.ok) { toast('บันทึกไม่สำเร็จ — ยังไม่เคลียร์', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง (ข้อมูลยังอยู่ครบ)', 'err'); return; }
@@ -6194,7 +6280,7 @@ function wireSupplierPORevEdit() {
     const v = prompt('อายุสินค้า SKU LIFE (วัน) — ถ้าผิดแก้ได้ ระบบจะใช้คำนวณวันหมดอายุตอนรับของ:', Number(l.skuLife) || '');
     if (v === null) return;
     const n = Number(v); if (!(n > 0)) { toast('ใส่จำนวนวันให้ถูก', '', 'err'); return; }
-    const res = await callAPI('saveProductInfo', { info: { pKey: l.pKey, sku: l.sku, name: l.name, skuLife: n } });
+    const res = await callWrite('saveProductInfo', { info: { pKey: l.pKey, sku: l.sku, name: l.name, skuLife: n } });
     if (!res || !res.ok) { toast('บันทึกไม่สำเร็จ', (res && res.error) || 'เน็ตอาจหลุด · ลองอีกครั้ง', 'err'); return; }
     l.skuLife = n;   // commit หลังบันทึกสำเร็จเท่านั้น (กันโชว์ค่าใหม่ทั้งที่ยังไม่เซฟ)
     const el = $('.rv-skulife[data-i="' + i + '"]'); if (el) el.textContent = n + ' วัน';
@@ -6253,7 +6339,7 @@ async function submitRevision(asIs) {
   const vendor = curVendor0() || {};
   let res = null;
   try {
-    res = await callAPI('submitPORevision', { revision: {
+    res = await callWrite('submitPORevision', { revision: {
       poRef: E.po, vendorCode: E.vendorCode || vendor.code || '', vendorName: vendor.name || '',
       wlCode: E.wh || '', deliveryDate: E.deliveryDate || '',
       discountType: asIs ? 'none' : (E.discountType || 'none'),
@@ -6492,14 +6578,13 @@ function wireWizard() {
     if (!w.pos.length || !w.wh || !w.day || !w.slot) { toast('ข้อมูลไม่ครบ', 'เลือก PO / คลัง / วัน / เวลา ให้ครบ', 'err'); return; }
     if (next._busy) return; next._busy = true; next.disabled = true;   // กันกดจองซ้ำ
     showAppLoading('กำลังจองนัด…');
-    const res = await callAPI('createAppointment', { pos: w.pos, wh: w.wh, date: w.day, time: w.slot });
+    const res = await callWrite('createAppointment', { pos: w.pos, wh: w.wh, date: w.day, time: w.slot }, { label: 'จองส่ง คลัง ' + w.wh });
     hideAppLoading();
     next._busy = false; next.disabled = false;
     if (!res || !res.ok) { toast('จองนัดไม่สำเร็จ — ยังไม่หาย', (res && res.error) || 'เน็ตอาจหลุด · ข้อมูลที่เลือกยังอยู่ครบ กดยืนยันใหม่ได้เลย', 'err'); return; }
-    clearOpenPOCache();         // ล้าง cache → โหลด PO ใหม่รอบหน้า (ตัดใบที่เพิ่งจองออก)
-    await hydrateData();
+    if (!res.queued) { clearOpenPOCache(); await hydrateData(); }   // queued (offline): ข้ามโหลดใหม่ — อยู่ในคิว auto-resend
     S.wizard = { step:1, pos:[], wh:null, day:null, slot:null };
-    toast('จองนัดสำเร็จ', 'ดูได้ที่ "นัดของฉัน"', 'ok');
+    toast(res.queued ? '⏳ บันทึกการจองไว้แล้ว' : 'จองนัดสำเร็จ', res.queued ? 'เน็ตไม่เสถียร — จะส่งให้อัตโนมัติ (ดูแถบล่าง)' : 'ดูได้ที่ "นัดของฉัน"', res.queued ? 'warn' : 'ok');
     nav('my-appts');
   });
   // step-specific handlers
@@ -7845,6 +7930,7 @@ async function init() {
     S.view = 'login';
   }
   render();
+  startQueueAutoFlush();   // เริ่ม auto-resend ของค้างจากเซสชันก่อน + โชว์ banner "รอส่ง"
 }
 
 // Run init when DOM is ready (script is at end of body so DOM is ready)
