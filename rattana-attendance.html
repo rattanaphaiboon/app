@@ -6535,6 +6535,8 @@ const SH_START_TIMES = {
   'สโตร์':  ['06:30','07:00','08:00','09:00','10:00','11:00','13:30','20:00','22:00','05:00'],
 };
 const SH_TIME_STYLE = "width:100%;height:44px;padding:0 12px;border:1px solid #DCE0E6;border-radius:10px;font:inherit;font-size:15px;background:#fff;color:#1A2230";
+const SH_WORK_HOURS = 8;   // ชั่วโมงทำงานมาตรฐานต่อกะ (คำนวณเวลาออกอัตโนมัติ)
+function shOtHours(ot){ return ot ? (ot.hours!=null ? Number(ot.hours) : shHours(ot.start,ot.end)) : 0; }
 const SH_DAYS=['อา.','จ.','อ.','พ.','พฤ.','ศ.','ส.'], SH_DAYSF=['อาทิตย์','จันทร์','อังคาร','พุธ','พฤหัสบดี','ศุกร์','เสาร์'];
 const SH_MON=['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
 let _shift = null;
@@ -6583,8 +6585,8 @@ async function shInitState(){
   prevEmps.forEach(pe=>{ if(!employees.find(e=>e.id===pe.id)) employees.push(pe); });
   const ws=shMonday(new Date());
   _shift={ weekStart:ws, khlang: rosterKhlang || currentUser.khlang || '', employees, shifts, tab:'day', selectedDay:Math.min(6,Math.max(0,(new Date().getDay()+6)%7)),
-    activeCell:null, pendingType:null, pendingStart:'09:00', pendingEnd:'18:00', pickerFilled:false,
-    pendingOtOn:false, pendingOtStart:'18:00', pendingOtEnd:'20:00',
+    activeCell:null, pendingMode:'work', pendingType:null, pendingStart:'07:00', pickerFilled:false,
+    pendingOtOn:false, pendingOtHours:2,
     addOpen:false, newName:'', newCode:'', newDept:'' };
   shSave();
 }
@@ -6598,12 +6600,18 @@ function shSelDay(i){_shift.selectedDay=i;drawShift();}
 function shOpenPicker(empId,iso){
   const e=_shift.employees.find(x=>x.id===empId); if(!e) return;
   const d=new Date(iso+'T00:00:00'), wd=d.getDay();
-  const sh=_shift.shifts[empId+'|'+iso], baseEnd=sh&&sh.end?sh.end:'18:00', ot=sh&&sh.ot;
+  const sh=_shift.shifts[empId+'|'+iso], ot=sh&&sh.ot;
+  const list=SH_START_TIMES[_shift.khlang]||[];
   _shift.activeCell={empId,iso,empName:e.name,dayFull:SH_DAYSF[wd],dateLabel:d.getDate()+' '+SH_MON[d.getMonth()]};
-  _shift.pendingType=sh?sh.type:null; _shift.pendingStart=sh&&sh.start?sh.start:'09:00'; _shift.pendingEnd=baseEnd; _shift.pickerFilled=!!sh;
-  _shift.pendingOtOn=!!ot; _shift.pendingOtStart=ot?ot.start:baseEnd; _shift.pendingOtEnd=ot?ot.end:shAddH(baseEnd,2);
+  _shift.pendingMode = sh ? ((SH_TYPES[sh.type]&&SH_TYPES[sh.type].work) ? 'work' : sh.type) : 'work';
+  _shift.pendingStart = (sh&&sh.start) ? sh.start : (list[0]||'07:00');
+  _shift.pickerFilled = !!sh;
+  _shift.pendingOtOn = !!ot;
+  _shift.pendingOtHours = ot ? shOtHours(ot) : 2;
   drawShift();
 }
+function shSetMode(m){ _shift.pendingMode=m; drawShift(); }
+function shSetOtHours(v){ _shift.pendingOtHours=parseFloat(v)||0; }
 function shClosePicker(){_shift.activeCell=null;drawShift();}
 function shClickType(key){
   const t=SH_TYPES[key], ac=_shift.activeCell;
@@ -6612,11 +6620,12 @@ function shClickType(key){
   _shift.pendingType=key; _shift.pendingStart=useCur?cur.start:t.start; _shift.pendingEnd=useCur?cur.end:t.end; drawShift();
 }
 function shSetTime(field,val){_shift[field]=val;drawShift();}
-function shToggleOt(){ if(_shift.pendingOtOn){_shift.pendingOtOn=false;} else {_shift.pendingOtOn=true; _shift.pendingOtStart=_shift.pendingEnd; _shift.pendingOtEnd=shAddH(_shift.pendingEnd,2);} drawShift(); }
+function shToggleOt(){ _shift.pendingOtOn=!_shift.pendingOtOn; if(_shift.pendingOtOn && !(_shift.pendingOtHours>0)) _shift.pendingOtHours=2; drawShift(); }
 function shSaveShift(){
   const s=_shift, ac=s.activeCell; if(!ac) return;
-  const shift={type:'work',start:s.pendingStart,end:s.pendingEnd};
-  if(s.pendingOtOn) shift.ot={start:s.pendingOtStart,end:s.pendingOtEnd};
+  let shift;
+  if(s.pendingMode==='off'||s.pendingMode==='leave'){ shift={type:s.pendingMode,start:null,end:null}; }
+  else { shift={type:'work',start:s.pendingStart,end:shAddH(s.pendingStart,SH_WORK_HOURS)}; if(s.pendingOtOn && s.pendingOtHours>0) shift.ot={hours:Number(s.pendingOtHours)}; }
   s.shifts[ac.empId+'|'+ac.iso]=shift; shSave(); shClosePicker();
 }
 function shClearCell(){const ac=_shift.activeCell; delete _shift.shifts[ac.empId+'|'+ac.iso]; shSave(); shClosePicker();}
@@ -6676,7 +6685,7 @@ function drawShift(){
       if(sh){ const t=SH_TYPES[sh.type];
         let time='',ot='';
         if(t.work){ const h=shHours(sh.start,sh.end); dayStaff++; dayHours+=h; time=`<div style="font-size:11px;color:#667085;font-family:'IBM Plex Mono',monospace;margin-top:3px;white-space:nowrap">${sh.start} – ${sh.end}</div>`;
-          if(sh.ot){const oh=shHours(sh.ot.start,sh.ot.end);dayHours+=oh;ot=`<div style="font-size:10px;font-weight:700;color:#C2410C;margin-top:2px">OT +${shFmtH(oh)} ชม.</div>`;} }
+          if(sh.ot){const oh=shOtHours(sh.ot);dayHours+=oh;ot=`<div style="font-size:10px;font-weight:700;color:#C2410C;margin-top:2px">OT +${shFmtH(oh)} ชม.</div>`;} }
         right=`<div style="text-align:right;flex-shrink:0"><div style="display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:9px;font-size:12.5px;font-weight:700;white-space:nowrap;background:${t.bg};color:${t.color};border:1px solid ${t.border}"><span style="width:7px;height:7px;border-radius:2px;background:${t.dot}"></span>${t.label}</div>${time}${ot}</div>`;
       } else {
         right=`<div style="display:flex;align-items:center;gap:5px;color:#0F766E;font-size:12.5px;font-weight:600;flex-shrink:0;background:#E4F7F1;border-radius:9px;padding:7px 11px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0F766E" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>จัดกะ</div>`;
@@ -6688,7 +6697,7 @@ function drawShift(){
   } else if(s.tab==='week'){
     let weekHoursAll=0, weekShifts=0;
     const rows=s.employees.map((e,idx)=>{ let total=0;
-      const dots=days.map(d=>{const sh=s.shifts[e.id+'|'+d.iso];let bg='#EAEDF1';if(sh){const t=SH_TYPES[sh.type];if(t.work){total+=shHours(sh.start,sh.end);weekShifts++;if(sh.ot)total+=shHours(sh.ot.start,sh.ot.end);}bg=t.dot;}return `<div style="flex:1;text-align:center"><div style="font-size:9.5px;color:#B0B7C0;font-weight:600">${d.dayShort.replace('.','')}</div><div style="height:6px;border-radius:3px;margin-top:3px;background:${bg}"></div></div>`;}).join('');
+      const dots=days.map(d=>{const sh=s.shifts[e.id+'|'+d.iso];let bg='#EAEDF1';if(sh){const t=SH_TYPES[sh.type];if(t.work){total+=shHours(sh.start,sh.end);weekShifts++;if(sh.ot)total+=shOtHours(sh.ot);}bg=t.dot;}return `<div style="flex:1;text-align:center"><div style="font-size:9.5px;color:#B0B7C0;font-weight:600">${d.dayShort.replace('.','')}</div><div style="height:6px;border-radius:3px;margin-top:3px;background:${bg}"></div></div>`;}).join('');
       weekHoursAll+=total;
       return `<div style="background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:13px"><div style="display:flex;align-items:center;gap:11px"><div style="${shAvatar(idx,40)}">${shEsc(shIni(e.name))}</div><div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${shEsc(e.name)}</div><div style="font-size:11.5px;color:#98A2B3">${shEsc(e.dept)}</div></div><div style="font-size:16px;font-weight:700;color:#0F766E;font-family:'IBM Plex Mono',monospace">${shFmtH(total)} ชม.</div></div><div style="display:flex;gap:5px;margin-top:11px">${dots}</div></div>`;
     }).join('');
@@ -6703,12 +6712,17 @@ function drawShift(){
   // shift picker sheet
   if(s.activeCell){
     const ac=s.activeCell;
-    const timeBox=`<div style="margin-top:6px;background:#F7F8FA;border:1px solid #EDEFF2;border-radius:13px;padding:14px"><div style="display:flex;align-items:center;gap:11px"><div style="flex:1"><div style="font-size:12px;color:#667085;font-weight:600;margin-bottom:6px">เวลาเข้า</div>${shStartSelect(s.pendingStart)}</div><div style="padding-top:24px;color:#C0C7D1">→</div><div style="flex:1"><div style="font-size:12px;color:#667085;font-weight:600;margin-bottom:6px">เวลาออก</div><input type="time" value="${s.pendingEnd}" onchange="shSetTime('pendingEnd',this.value)" style="${SH_TIME_STYLE}"></div></div><div style="margin-top:12px;display:flex;align-items:center;justify-content:space-between;padding-top:11px;border-top:1px dashed #DDE1E7"><span style="font-size:13px;color:#667085">ชั่วโมงทำงาน</span><span style="font-size:16px;font-weight:700;color:#0F766E;font-family:'IBM Plex Mono',monospace">${shFmtH(shHours(s.pendingStart,s.pendingEnd))} ชม.</span></div></div>`;
-    let otInner='';
-    if(s.pendingOtOn) otInner=`<div style="margin-top:13px"><div style="display:flex;align-items:center;gap:11px"><div style="flex:1"><div style="font-size:12px;color:#667085;font-weight:600;margin-bottom:6px">เริ่ม OT</div><input type="time" value="${s.pendingOtStart}" onchange="shSetTime('pendingOtStart',this.value)" style="${SH_TIME_STYLE}"></div><div style="padding-top:24px;color:#C0C7D1">→</div><div style="flex:1"><div style="font-size:12px;color:#667085;font-weight:600;margin-bottom:6px">สิ้นสุด OT</div><input type="time" value="${s.pendingOtEnd}" onchange="shSetTime('pendingOtEnd',this.value)" style="${SH_TIME_STYLE}"></div></div><div style="margin-top:12px;display:flex;align-items:center;justify-content:space-between;padding-top:11px;border-top:1px dashed #DDE1E7"><span style="font-size:13px;color:#667085">ชั่วโมง OT</span><span style="font-size:16px;font-weight:700;color:#C2410C;font-family:'IBM Plex Mono',monospace">${shFmtH(shHours(s.pendingOtStart,s.pendingOtEnd))} ชม.</span></div></div>`;
-    const otBox=`<div style="margin-top:11px;border:1px solid #EDEFF2;border-radius:13px;padding:13px 14px"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px"><div style="display:flex;align-items:center;gap:8px"><span style="width:9px;height:9px;border-radius:3px;background:#F97316"></span><span style="font-size:13.5px;font-weight:600">ทำ OT ต่อจากกะนี้</span></div><button onclick="shToggleOt()" style="width:42px;height:25px;border-radius:99px;border:none;cursor:pointer;padding:3px;display:flex;background:${s.pendingOtOn?'#F97316':'#D6DAE0'};justify-content:${s.pendingOtOn?'flex-end':'flex-start'}"><span style="width:19px;height:19px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(16,24,40,.3)"></span></button></div>${otInner}</div>`;
-    const offLeave=['off','leave'].map(k=>{const t=SH_TYPES[k],active=s.pendingType===k;return `<button onclick="shClickType('${k}')" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border-radius:11px;cursor:pointer;font:inherit;width:100%;background:${active?t.bg:'#fff'};border:${active?'1.5px solid '+t.color:'1px solid #E7EAEF'};color:${active?t.color:'#475467'};font-weight:600"><span style="width:9px;height:9px;border-radius:3px;background:${t.dot}"></span><span style="font-size:13.5px">${t.label} (ทั้งวัน)</span></button>`;}).join('');
-    html += `<div onclick="shClosePicker()" style="position:fixed;inset:0;background:rgba(16,24,40,.4);z-index:60;animation:shbg .18s ease;display:flex;align-items:flex-end"><div onclick="event.stopPropagation()" style="width:100%;background:#fff;border-radius:22px 22px 0 0;padding:8px 18px calc(20px + env(safe-area-inset-bottom));max-height:92%;overflow-y:auto;animation:shup .26s cubic-bezier(.2,.9,.25,1)"><div style="width:40px;height:4px;border-radius:99px;background:#E2E6EB;margin:6px auto 14px"></div><div style="margin-bottom:8px"><div style="font-size:17px;font-weight:700">กำหนดกะการทำงาน</div><div style="font-size:13px;color:#667085;margin-top:2px">${shEsc(ac.empName)} · ${ac.dayFull} ${ac.dateLabel}</div></div>${timeBox}${otBox}<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:12px">${offLeave}</div><div style="display:flex;gap:10px;margin-top:16px">${s.pickerFilled?`<button onclick="shClearCell()" style="height:50px;padding:0 18px;border-radius:13px;border:1px solid #F3D3D3;background:#fff;color:#E5484D;font:inherit;font-size:14.5px;font-weight:600;cursor:pointer">ล้างกะ</button>`:''}<button onclick="shSaveShift()" style="flex:1;height:50px;border-radius:13px;border:none;background:#0F766E;color:#fff;font:inherit;font-size:15.5px;font-weight:700;cursor:pointer">บันทึกกะ</button></div></div></div>`;
+    const modeBtns=[['work','วันทำงาน','#0F766E'],['off','วันหยุด','#64748B'],['leave','ลา','#BE185D']]
+      .map(([m,lb,c])=>{const on=s.pendingMode===m;return `<button onclick="shSetMode('${m}')" style="flex:1;height:42px;border-radius:11px;cursor:pointer;font:inherit;font-size:13.5px;font-weight:${on?700:600};border:none;background:${on?c:'#F4F6F8'};color:${on?'#fff':'#475467'}">${lb}</button>`;}).join('');
+    let body='';
+    if(s.pendingMode==='work'){
+      const endT=shAddH(s.pendingStart,SH_WORK_HOURS);
+      body=`<div style="margin-top:14px;background:#F7F8FA;border:1px solid #EDEFF2;border-radius:13px;padding:14px"><div style="display:flex;align-items:center;gap:11px"><div style="flex:1"><div style="font-size:12px;color:#667085;font-weight:600;margin-bottom:6px">เวลาเข้า</div>${shStartSelect(s.pendingStart)}</div><div style="padding-top:24px;color:#C0C7D1">→</div><div style="flex:1"><div style="font-size:12px;color:#667085;font-weight:600;margin-bottom:6px">เวลาออก (อัตโนมัติ)</div><div style="height:44px;display:flex;align-items:center;padding:0 12px;border:1px solid #EDEFF2;border-radius:10px;background:#fff;font-size:15px;font-weight:600;color:#0F766E;font-family:'IBM Plex Mono',monospace">${endT} น.</div></div></div><div style="margin-top:12px;display:flex;align-items:center;justify-content:space-between;padding-top:11px;border-top:1px dashed #DDE1E7"><span style="font-size:13px;color:#667085">ชั่วโมงทำงาน</span><span style="font-size:16px;font-weight:700;color:#0F766E;font-family:'IBM Plex Mono',monospace">${shFmtH(SH_WORK_HOURS)} ชม.</span></div></div>`;
+      let otInner='';
+      if(s.pendingOtOn) otInner=`<div style="margin-top:13px"><div style="font-size:12px;color:#667085;font-weight:600;margin-bottom:6px">จำนวนชั่วโมง OT</div><input type="number" min="0" step="0.5" value="${s.pendingOtHours}" oninput="shSetOtHours(this.value)" placeholder="เช่น 2" style="${SH_TIME_STYLE}"></div>`;
+      body+=`<div style="margin-top:11px;border:1px solid #EDEFF2;border-radius:13px;padding:13px 14px"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px"><div style="display:flex;align-items:center;gap:8px"><span style="width:9px;height:9px;border-radius:3px;background:#F97316"></span><span style="font-size:13.5px;font-weight:600">ทำ OT ต่อจากกะนี้</span></div><button onclick="shToggleOt()" style="width:42px;height:25px;border-radius:99px;border:none;cursor:pointer;padding:3px;display:flex;background:${s.pendingOtOn?'#F97316':'#D6DAE0'};justify-content:${s.pendingOtOn?'flex-end':'flex-start'}"><span style="width:19px;height:19px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(16,24,40,.3)"></span></button></div>${otInner}</div>`;
+    }
+    html += `<div onclick="shClosePicker()" style="position:fixed;inset:0;background:rgba(16,24,40,.4);z-index:60;animation:shbg .18s ease;display:flex;align-items:flex-end"><div onclick="event.stopPropagation()" style="width:100%;background:#fff;border-radius:22px 22px 0 0;padding:8px 18px calc(20px + env(safe-area-inset-bottom));max-height:92%;overflow-y:auto;animation:shup .26s cubic-bezier(.2,.9,.25,1)"><div style="width:40px;height:4px;border-radius:99px;background:#E2E6EB;margin:6px auto 14px"></div><div style="margin-bottom:14px"><div style="font-size:17px;font-weight:700">กำหนดกะการทำงาน</div><div style="font-size:13px;color:#667085;margin-top:2px">${shEsc(ac.empName)} · ${ac.dayFull} ${ac.dateLabel}</div></div><div style="display:flex;gap:8px">${modeBtns}</div>${body}<div style="display:flex;gap:10px;margin-top:18px">${s.pickerFilled?`<button onclick="shClearCell()" style="height:50px;padding:0 18px;border-radius:13px;border:1px solid #F3D3D3;background:#fff;color:#E5484D;font:inherit;font-size:14.5px;font-weight:600;cursor:pointer">ล้างกะ</button>`:''}<button onclick="shSaveShift()" style="flex:1;height:50px;border-radius:13px;border:none;background:#0F766E;color:#fff;font:inherit;font-size:15.5px;font-weight:700;cursor:pointer">บันทึกกะ</button></div></div></div>`;
   }
 
   // add employee sheet
