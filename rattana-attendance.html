@@ -6540,6 +6540,8 @@ function shOtHours(ot){ return ot ? (ot.hours!=null ? Number(ot.hours) : shHours
 function shSheetDate(iso){ const p=iso.split('-'); return p[2]+'/'+p[1]+'/'+(parseInt(p[0],10)+543); }
 const SH_DAYS=['อา.','จ.','อ.','พ.','พฤ.','ศ.','ส.'], SH_DAYSF=['อาทิตย์','จันทร์','อังคาร','พุธ','พฤหัสบดี','ศุกร์','เสาร์'];
 const SH_MON=['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+const SH_MON_FULL=['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+const SH_MANAGER_RE=/^ผู้จัดการ/;   // ผู้จัดการ / ผู้จัดการคอฟฟี่ / ผู้จัดการสโตร์ = จัดกะได้
 let _shift = null;
 
 function shPad(n){return String(n).padStart(2,'0');}
@@ -6576,17 +6578,19 @@ async function shInitState(){
   let shifts={}, prevEmps=[];
   try{ const sv=JSON.parse(localStorage.getItem(shKey())||'null'); if(sv){ shifts=sv.shifts||{}; prevEmps=sv.employees||[]; } }catch(_){}
   // รายชื่อ = พนักงาน PTT คลังเดียวกับ user ที่ login
-  let employees=[], rosterKhlang='', rosterSaka='';
+  let employees=[], rosterKhlang='', rosterSaka='', rosterPosition='';
   try{
     const res=await callAppsScript('getPTTStaff',{ khlang: currentUser.khlang || '', empId: currentUser.empId });
     employees=(res.staff||[]).map(u=>({id:'e'+u.empId, name:u.name, code:String(u.empId||''), dept:u.dept||''}));
     rosterKhlang=res.khlang||'';
     rosterSaka=res.saka||'';
+    rosterPosition=res.myPosition||'';
   }catch(_){}
+  const rosterCanEdit = SH_MANAGER_RE.test((rosterPosition||'').trim());
   // รวมคนที่เพิ่มเองไว้ก่อนหน้า (ที่ไม่มีในรายชื่อ server)
   prevEmps.forEach(pe=>{ if(!employees.find(e=>e.id===pe.id)) employees.push(pe); });
-  const ws=shMonday(new Date());
-  _shift={ weekStart:ws, khlang: rosterKhlang || currentUser.khlang || '', saka: rosterSaka || '', employees, shifts, tab:'day', selectedDay:Math.min(6,Math.max(0,(new Date().getDay()+6)%7)),
+  const now=new Date(); const ws=new Date(now.getFullYear(),now.getMonth(),1);
+  _shift={ weekStart:ws, khlang: rosterKhlang || currentUser.khlang || '', saka: rosterSaka || '', canEdit: rosterCanEdit, employees, shifts, tab:'day', selectedDay: now.getDate()-1,
     activeCell:null, pendingMode:'work', pendingType:null, pendingStart:'07:00', pickerFilled:false,
     pendingOtOn:false, pendingOtHours:2,
     addOpen:false, newName:'', newCode:'', newDept:'' };
@@ -6595,11 +6599,12 @@ async function shInitState(){
 
 /* ── handlers ── */
 function shTab(t){_shift.tab=t;drawShift();}
-function shPrevWeek(){_shift.weekStart=shAddDays(_shift.weekStart,-7);drawShift();}
-function shNextWeek(){_shift.weekStart=shAddDays(_shift.weekStart,7);drawShift();}
-function shToday(){_shift.weekStart=shMonday(new Date());_shift.selectedDay=Math.min(6,Math.max(0,(new Date().getDay()+6)%7));drawShift();}
+function shPrevWeek(){const d=_shift.weekStart;_shift.weekStart=new Date(d.getFullYear(),d.getMonth()-1,1);_shift.selectedDay=0;drawShift();}
+function shNextWeek(){const d=_shift.weekStart;_shift.weekStart=new Date(d.getFullYear(),d.getMonth()+1,1);_shift.selectedDay=0;drawShift();}
+function shToday(){const n=new Date();_shift.weekStart=new Date(n.getFullYear(),n.getMonth(),1);_shift.selectedDay=n.getDate()-1;drawShift();}
 function shSelDay(i){_shift.selectedDay=i;drawShift();}
 function shOpenPicker(empId,iso){
+  if(!_shift.canEdit){ toast('คุณมีสิทธิ์ดูอย่างเดียว — เฉพาะผู้จัดการจัดกะได้', 'info'); return; }
   const e=_shift.employees.find(x=>x.id===empId); if(!e) return;
   const d=new Date(iso+'T00:00:00'), wd=d.getDay();
   const sh=_shift.shifts[empId+'|'+iso], ot=sh&&sh.ot;
@@ -6646,7 +6651,7 @@ function shSaveShift(){
   shClosePicker();
 }
 function shClearCell(){const ac=_shift.activeCell; delete _shift.shifts[ac.empId+'|'+ac.iso]; shSave(); shClosePicker();}
-function shOpenAdd(){_shift.addOpen=true;_shift.newName='';_shift.newCode='';_shift.newDept='';drawShift();}
+function shOpenAdd(){ if(!_shift.canEdit){ toast('คุณมีสิทธิ์ดูอย่างเดียว','info'); return; } _shift.addOpen=true;_shift.newName='';_shift.newCode='';_shift.newDept='';drawShift();}
 function shCloseAdd(){_shift.addOpen=false;drawShift();}
 function shSetField(field,val){_shift[field]=val;}
 function shAddEmp(){
@@ -6655,6 +6660,7 @@ function shAddEmp(){
   _shift.addOpen=false; shSave(); drawShift();
 }
 function shRemoveEmp(id){
+  if(!_shift.canEdit){ toast('คุณมีสิทธิ์ดูอย่างเดียว','info'); return; }
   if(!confirm('ลบพนักงานคนนี้ออกจากตารางกะ?')) return;
   _shift.employees=_shift.employees.filter(e=>e.id!==id);
   Object.keys(_shift.shifts).forEach(k=>{ if(k.split('|')[0]===id) delete _shift.shifts[k]; });
@@ -6665,10 +6671,11 @@ function shRemoveEmp(id){
 function drawShift(){
   const host=document.getElementById('page-shift'); if(!host||!_shift) return;
   const s=_shift, days=[];
-  for(let i=0;i<7;i++){const d=shAddDays(s.weekStart,i),wd=d.getDay();days.push({idx:i,iso:shIso(d),dayShort:SH_DAYS[wd],dayFull:SH_DAYSF[wd],dateNum:d.getDate(),dateLabel:d.getDate()+' '+SH_MON[d.getMonth()]});}
+  const dim=new Date(s.weekStart.getFullYear(), s.weekStart.getMonth()+1, 0).getDate();
+  for(let i=0;i<dim;i++){const d=shAddDays(s.weekStart,i),wd=d.getDay();days.push({idx:i,iso:shIso(d),dayShort:SH_DAYS[wd],dayFull:SH_DAYSF[wd],dateNum:d.getDate(),dateLabel:d.getDate()+' '+SH_MON[d.getMonth()]});}
   const countFor=iso=>s.employees.reduce((n,e)=>{const sh=s.shifts[e.id+'|'+iso];return n+(sh&&SH_TYPES[sh.type].work?1:0);},0);
-  const end=shAddDays(s.weekStart,6), be=s.weekStart.getFullYear()+543;
-  const weekLabel=s.weekStart.getDate()+' '+SH_MON[s.weekStart.getMonth()]+' – '+end.getDate()+' '+SH_MON[end.getMonth()]+' '+be;
+  const be=s.weekStart.getFullYear()+543;
+  const weekLabel=SH_MON_FULL[s.weekStart.getMonth()]+' '+be;
 
   // header + week nav + segmented tabs
   let html = `<div style="background:#fff;border-bottom:1px solid #ECEFF2;padding:12px 16px 0">
@@ -6678,11 +6685,11 @@ function drawShift(){
     </div>
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 0">
       <button onclick="shPrevWeek()" style="width:34px;height:34px;border-radius:9px;border:1px solid #E9ECF0;background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#344054" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
-      <div style="text-align:center;flex:1"><div style="font-size:14px;font-weight:700;white-space:nowrap">${weekLabel}</div><div onclick="shToday()" style="font-size:11.5px;color:#0F766E;font-weight:600;cursor:pointer;margin-top:1px">ไปสัปดาห์นี้</div></div>
+      <div style="text-align:center;flex:1"><div style="font-size:14px;font-weight:700;white-space:nowrap">${weekLabel}</div><div onclick="shToday()" style="font-size:11.5px;color:#0F766E;font-weight:600;cursor:pointer;margin-top:1px">ไปเดือนนี้</div></div>
       <button onclick="shNextWeek()" style="width:34px;height:34px;border-radius:9px;border:1px solid #E9ECF0;background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#344054" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
     </div>
     <div style="display:flex;gap:6px;padding-bottom:12px">
-      ${[['day','จัดกะ'],['week','สรุปสัปดาห์'],['staff','พนักงาน']].map(([k,lb])=>{const on=s.tab===k;return `<button onclick="shTab('${k}')" style="flex:1;height:36px;border-radius:10px;border:none;cursor:pointer;font:inherit;font-size:13px;font-weight:${on?700:600};background:${on?'#101828':'#F4F6F8'};color:${on?'#fff':'#475467'}">${lb}</button>`;}).join('')}
+      ${[['day','จัดกะ'],['week','สรุปเดือน'],['staff','พนักงาน']].map(([k,lb])=>{const on=s.tab===k;return `<button onclick="shTab('${k}')" style="flex:1;height:36px;border-radius:10px;border:none;cursor:pointer;font:inherit;font-size:13px;font-weight:${on?700:600};background:${on?'#101828':'#F4F6F8'};color:${on?'#fff':'#475467'}">${lb}</button>`;}).join('')}
     </div>`;
 
   // day strip (day tab only)
@@ -6705,24 +6712,26 @@ function drawShift(){
           if(sh.ot){const oh=shOtHours(sh.ot);dayHours+=oh;ot=`<div style="font-size:10px;font-weight:700;color:#C2410C;margin-top:2px">OT +${shFmtH(oh)} ชม.</div>`;} }
         right=`<div style="text-align:right;flex-shrink:0"><div style="display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:9px;font-size:12.5px;font-weight:700;white-space:nowrap;background:${t.bg};color:${t.color};border:1px solid ${t.border}"><span style="width:7px;height:7px;border-radius:2px;background:${t.dot}"></span>${t.label}</div>${time}${ot}</div>`;
       } else {
-        right=`<div style="display:flex;align-items:center;gap:5px;color:#0F766E;font-size:12.5px;font-weight:600;flex-shrink:0;background:#E4F7F1;border-radius:9px;padding:7px 11px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0F766E" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>จัดกะ</div>`;
+        right = s.canEdit
+          ? `<div style="display:flex;align-items:center;gap:5px;color:#0F766E;font-size:12.5px;font-weight:600;flex-shrink:0;background:#E4F7F1;border-radius:9px;padding:7px 11px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0F766E" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>จัดกะ</div>`
+          : `<div style="font-size:12px;color:#B0B7C0;flex-shrink:0">— ยังไม่จัดกะ</div>`;
       }
       return `<button onclick="shOpenPicker('${e.id}','${selDay.iso}')" style="display:flex;align-items:center;gap:12px;width:100%;text-align:left;background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:12px 13px;cursor:pointer;font:inherit"><div style="${shAvatar(idx,42)}">${shEsc(shIni(e.name))}</div><div style="flex:1;min-width:0"><div style="font-size:14.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${shEsc(e.name)}</div><div style="font-size:11.5px;color:#98A2B3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${shEsc(e.dept)}</div></div>${right}</button>`;
     }).join('');
     html += `<div style="padding:14px 16px 24px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><div style="font-size:15px;font-weight:700">${selDay.dayFull} ${selDay.dateLabel}</div><div style="font-size:12.5px;color:#667085;font-weight:500">เข้ากะ ${dayStaff} คน · ${shFmtH(dayHours)} ชม.</div></div><div style="display:flex;flex-direction:column;gap:10px">${rows||'<div style="text-align:center;color:#98A2B3;padding:20px">ยังไม่มีพนักงาน</div>'}</div>
-      <button onclick="shOpenAdd()" style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin-top:12px;height:46px;border-radius:13px;border:1.5px dashed #CBD2DA;background:transparent;color:#475467;font:inherit;font-size:14px;font-weight:600;cursor:pointer"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#475467" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>เพิ่มพนักงาน</button></div>`;
+      ${s.canEdit?`<button onclick="shOpenAdd()" style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin-top:12px;height:46px;border-radius:13px;border:1.5px dashed #CBD2DA;background:transparent;color:#475467;font:inherit;font-size:14px;font-weight:600;cursor:pointer"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#475467" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>เพิ่มพนักงาน</button>`:''}</div>`;
   } else if(s.tab==='week'){
     let weekHoursAll=0, weekShifts=0;
-    const rows=s.employees.map((e,idx)=>{ let total=0;
-      const dots=days.map(d=>{const sh=s.shifts[e.id+'|'+d.iso];let bg='#EAEDF1';if(sh){const t=SH_TYPES[sh.type];if(t.work){total+=shHours(sh.start,sh.end);weekShifts++;if(sh.ot)total+=shOtHours(sh.ot);}bg=t.dot;}return `<div style="flex:1;text-align:center"><div style="font-size:9.5px;color:#B0B7C0;font-weight:600">${d.dayShort.replace('.','')}</div><div style="height:6px;border-radius:3px;margin-top:3px;background:${bg}"></div></div>`;}).join('');
+    const rows=s.employees.map((e,idx)=>{ let total=0, wdC=0, offC=0;
+      days.forEach(d=>{const sh=s.shifts[e.id+'|'+d.iso];if(sh){const t=SH_TYPES[sh.type];if(t.work){total+=shHours(sh.start,sh.end);weekShifts++;wdC++;if(sh.ot)total+=shOtHours(sh.ot);}else offC++;}});
       weekHoursAll+=total;
-      return `<div style="background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:13px"><div style="display:flex;align-items:center;gap:11px"><div style="${shAvatar(idx,40)}">${shEsc(shIni(e.name))}</div><div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${shEsc(e.name)}</div><div style="font-size:11.5px;color:#98A2B3">${shEsc(e.dept)}</div></div><div style="font-size:16px;font-weight:700;color:#0F766E;font-family:'IBM Plex Mono',monospace">${shFmtH(total)} ชม.</div></div><div style="display:flex;gap:5px;margin-top:11px">${dots}</div></div>`;
+      return `<div style="background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:13px"><div style="display:flex;align-items:center;gap:11px"><div style="${shAvatar(idx,40)}">${shEsc(shIni(e.name))}</div><div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${shEsc(e.name)}</div><div style="font-size:11.5px;color:#98A2B3">เข้ากะ ${wdC} วัน · หยุด/ลา ${offC} วัน</div></div><div style="font-size:16px;font-weight:700;color:#0F766E;font-family:'IBM Plex Mono',monospace">${shFmtH(total)} ชม.</div></div></div>`;
     }).join('');
-    html += `<div style="padding:16px 16px 24px"><div style="display:flex;gap:11px;margin-bottom:16px"><div style="flex:1;background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:14px"><div style="font-size:12px;color:#667085;font-weight:500">ชั่วโมงรวมสัปดาห์นี้</div><div style="font-size:24px;font-weight:700;color:#0F766E;margin-top:3px">${shFmtH(weekHoursAll)} ชม.</div></div><div style="flex:1;background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:14px"><div style="font-size:12px;color:#667085;font-weight:500">กะที่จัดแล้ว</div><div style="font-size:24px;font-weight:700;margin-top:3px">${weekShifts} <span style="font-size:13px;font-weight:500;color:#98A2B3">กะ</span></div></div></div><div style="font-size:13px;font-weight:600;color:#667085;margin-bottom:10px">ชั่วโมงรวมรายคน</div><div style="display:flex;flex-direction:column;gap:10px">${rows}</div></div>`;
+    html += `<div style="padding:16px 16px 24px"><div style="display:flex;gap:11px;margin-bottom:16px"><div style="flex:1;background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:14px"><div style="font-size:12px;color:#667085;font-weight:500">ชั่วโมงรวมเดือนนี้</div><div style="font-size:24px;font-weight:700;color:#0F766E;margin-top:3px">${shFmtH(weekHoursAll)} ชม.</div></div><div style="flex:1;background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:14px"><div style="font-size:12px;color:#667085;font-weight:500">กะที่จัดแล้ว</div><div style="font-size:24px;font-weight:700;margin-top:3px">${weekShifts} <span style="font-size:13px;font-weight:500;color:#98A2B3">กะ</span></div></div></div><div style="font-size:13px;font-weight:600;color:#667085;margin-bottom:10px">ชั่วโมงรวมรายคน</div><div style="display:flex;flex-direction:column;gap:10px">${rows}</div></div>`;
   } else {
-    const rows=s.employees.map((e,idx)=>`<div style="display:flex;align-items:center;gap:12px;background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:12px 13px"><div style="${shAvatar(idx,42)}">${shEsc(shIni(e.name))}</div><div style="flex:1;min-width:0"><div style="font-size:14.5px;font-weight:600">${shEsc(e.name)}</div><div style="font-size:11.5px;color:#98A2B3;display:flex;align-items:center;gap:6px;margin-top:1px"><span style="font-family:'IBM Plex Mono',monospace">${shEsc(e.code)}</span>${e.dept?'<span style="width:3px;height:3px;border-radius:50%;background:#CBD5E1"></span><span>'+shEsc(e.dept)+'</span>':''}</div></div><button onclick="shRemoveEmp('${e.id}')" style="width:34px;height:34px;border-radius:9px;border:none;background:#FBFBFC;color:#C0C7D1;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m-1 0v14H9V6"/></svg></button></div>`).join('');
+    const rows=s.employees.map((e,idx)=>`<div style="display:flex;align-items:center;gap:12px;background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:12px 13px"><div style="${shAvatar(idx,42)}">${shEsc(shIni(e.name))}</div><div style="flex:1;min-width:0"><div style="font-size:14.5px;font-weight:600">${shEsc(e.name)}</div><div style="font-size:11.5px;color:#98A2B3;display:flex;align-items:center;gap:6px;margin-top:1px"><span style="font-family:'IBM Plex Mono',monospace">${shEsc(e.code)}</span>${e.dept?'<span style="width:3px;height:3px;border-radius:50%;background:#CBD5E1"></span><span>'+shEsc(e.dept)+'</span>':''}</div></div>${s.canEdit?`<button onclick="shRemoveEmp('${e.id}')" style="width:34px;height:34px;border-radius:9px;border:none;background:#FBFBFC;color:#C0C7D1;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m-1 0v14H9V6"/></svg></button>`:''}</div>`).join('');
     html += `<div style="padding:16px 16px 24px"><div style="font-size:13px;font-weight:600;color:#667085;margin-bottom:10px">พนักงานทั้งหมด · ${s.employees.length} คน</div><div style="display:flex;flex-direction:column;gap:10px">${rows||'<div style="text-align:center;color:#98A2B3;padding:20px">ยังไม่มีพนักงาน</div>'}</div>
-      <button onclick="shOpenAdd()" style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin-top:12px;height:48px;border-radius:13px;border:none;background:#101828;color:#fff;font:inherit;font-size:14.5px;font-weight:600;cursor:pointer"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>เพิ่มพนักงาน</button></div>`;
+      ${s.canEdit?`<button onclick="shOpenAdd()" style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin-top:12px;height:48px;border-radius:13px;border:none;background:#101828;color:#fff;font:inherit;font-size:14.5px;font-weight:600;cursor:pointer"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>เพิ่มพนักงาน</button>`:''}</div>`;
   }
   html += `</div>`;
 
