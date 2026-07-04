@@ -617,6 +617,7 @@
     <button class="tab-btn" id="tabSummary" onclick="setMode('summary')">สรุปผล</button>
     <button class="tab-btn" id="tabHistory" onclick="setMode('history')">ประวัติ</button>
     <button class="tab-btn" id="tabDashboard" onclick="setMode('dashboard')">📊 แดชบอร์ด</button>
+    <button class="tab-btn" id="tabPutaway" onclick="setMode('putaway')">📍 จุดวาง</button>
   </div>
 
   <!-- ══════════ LOOKUP MODE (hidden — kept for internal lookup logic) ══════════ -->
@@ -783,6 +784,27 @@
     <div id="dashBody" style="margin-top:10px"></div>
   </div>
 
+  <!-- ══════════ PUTAWAY MODE (จุดวาง) ══════════ -->
+  <div id="modePutaway" style="display:none">
+    <div class="card mt-8" style="padding:14px 16px">
+      <div class="bc-input bc-wrap" style="margin-bottom:10px">
+        <span style="color:var(--muted);font-size:18px">🔍</span>
+        <input type="text" id="putawayInput" inputmode="text" autocomplete="off"
+               oninput="onPutawayInput(this)" placeholder="สแกน / พิมพ์ชื่อสินค้าที่จะเอาไปวาง">
+        <button class="bc-clear" id="putawayClear" onclick="clearPutawayInput()" type="button" style="display:none">✕</button>
+        <div id="putawaySearchDrop" class="search-drop" style="display:none"></div>
+      </div>
+      <div class="wh-bar">
+        <span class="wh-bar-l">คลัง</span>
+        <select id="putawayWh" class="input input-compact wh-bar-sel" onchange="loadPutaway(true)"></select>
+        <button class="btn-pull" onclick="loadPutaway(true)" title="รีเฟรช" type="button">↻</button>
+      </div>
+      <div id="putawayPending"></div>
+    </div>
+    <div id="putawayBody" style="margin-top:10px"></div>
+    <datalist id="putawayLocOpts"></datalist>
+  </div>
+
   <div style="height:72px"></div>
 </div>
 
@@ -830,7 +852,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.93';
+const APP_VERSION = 'v3.94';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -1866,11 +1888,13 @@ function setMode(mode) {
   document.getElementById('modeSummary').style.display = mode==='summary' ? 'block' : 'none';
   document.getElementById('modeHistory').style.display   = mode==='history'   ? 'block' : 'none';
   document.getElementById('modeDashboard').style.display = mode==='dashboard' ? 'block' : 'none';
+  document.getElementById('modePutaway').style.display = mode==='putaway' ? 'block' : 'none';
   document.getElementById('tabCount').classList.toggle('active', mode==='count');
   document.getElementById('tabSummary').classList.toggle('active', mode==='summary');
   document.getElementById('tabHistory').classList.toggle('active', mode==='history');
   document.getElementById('tabDashboard').classList.toggle('active', mode==='dashboard');
-  const titles = { count:'นับสต็อก', summary:'สรุปผล', history:'ประวัติ', dashboard:'แดชบอร์ด' };
+  document.getElementById('tabPutaway').classList.toggle('active', mode==='putaway');
+  const titles = { count:'นับสต็อก', summary:'สรุปผล', history:'ประวัติ', dashboard:'แดชบอร์ด', putaway:'จุดวาง' };
   document.getElementById('hdTitle').innerHTML =
     `${titles[mode] || titles.count} <span class="hd-ver">${APP_VERSION}</span>`;
   // stop cameras when leaving their modes
@@ -1888,6 +1912,8 @@ function setMode(mode) {
     loadHistory(true);
   } else if (mode==='dashboard') {
     loadDashboard();
+  } else if (mode==='putaway') {
+    initPutawayMode();
   } else {
     setTimeout(() => document.getElementById('barcodeInput').focus(), 60);
   }
@@ -3425,6 +3451,162 @@ function renderDashboard(rows) {
   document.getElementById('dashBody').innerHTML = statsHtml + checkerHtml + tableHtml + uncheckedHtml;
   renderDashTable();
 }
+
+// ════════════ PUTAWAY MODE (จุดวาง) ════════════
+let putawayCache = [];
+let putawayPendingProduct = null;
+
+function initPutawayMode() {
+  const sel = document.getElementById('putawayWh');
+  if (sel && !sel.options.length && visibleWh.length) {
+    sel.innerHTML = visibleWh.map(w => `<option value="${w}">${w} · ${WH_NAMES[w]||w}</option>`).join('');
+  }
+  loadPutaway(true);
+  setTimeout(() => document.getElementById('putawayInput')?.focus(), 60);
+}
+function closePutawayDrop() { const d=document.getElementById('putawaySearchDrop'); if(d){d.style.display='none';d.innerHTML='';} }
+function clearPutawayInput() {
+  const i=document.getElementById('putawayInput'); i.value='';
+  document.getElementById('putawayClear').style.display='none'; closePutawayDrop(); i.focus();
+}
+function onPutawayInput(inp) {
+  document.getElementById('putawayClear').style.display = inp.value ? 'flex' : 'none';
+  clearTimeout(_searchTimer);
+  const q = inp.value.trim();
+  if (!q) { closePutawayDrop(); return; }
+  if (/^\d+$/.test(q) && barcodeIndex[q]) {
+    closePutawayDrop(); setPutawayProduct(barcodeIndex[q].product);
+    inp.value=''; document.getElementById('putawayClear').style.display='none'; return;
+  }
+  _searchTimer = setTimeout(() => putawaySearch(q), 180);
+}
+function putawaySearch(q) {
+  const drop = document.getElementById('putawaySearchDrop');
+  if (!drop) return;
+  const ql = q.toLowerCase();
+  const matched = Object.values(productByKey).filter(p =>
+    (p['PRODUCT NAME']||'').toLowerCase().includes(ql) ||
+    (p['SHORT NAME']||'').toLowerCase().includes(ql)
+  ).slice(0,25);
+  if (!matched.length) { drop.innerHTML = `<div style="padding:10px 14px;font-size:13px;color:var(--muted)">ไม่พบสินค้า "${q}"</div>`; drop.style.display='block'; return; }
+  drop.innerHTML = matched.map(p =>
+    `<div class="search-opt" onclick="pickPutawayProduct('${productKey(p)}')"><span class="search-opt-name">${p['PRODUCT NAME']||'-'}</span></div>`
+  ).join('');
+  drop.style.display='block';
+}
+function pickPutawayProduct(key) { const p=productByKey[key]; if(!p) return; clearPutawayInput(); setPutawayProduct(p); }
+function setPutawayProduct(p) {
+  putawayPendingProduct = p;
+  const el = document.getElementById('putawayPending');
+  el.innerHTML = `
+    <div class="pb-card mt-8">
+      <div class="pb-flag">▸ เลือกแล้ว · ใส่จำนวนพาเลท + จุดวาง</div>
+      <div class="pb-top">
+        <div class="pb-info"><div class="pb-name">${p['PRODUCT NAME']||'-'}</div><div class="pb-sub">${productKey(p)}</div></div>
+        <button class="pb-x" onclick="cancelPutawayPending()" title="ยกเลิก">✕</button>
+      </div>
+      <div class="field" style="margin-top:10px">
+        <label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px">📦 จำนวน (พาเลท)</label>
+        <div class="pb-row" style="margin-top:4px">
+          <button class="step-btn" onclick="putawayBump(-1)" type="button">−</button>
+          <input id="putawayPallets" class="pb-qty" type="text" inputmode="numeric" value="1" onfocus="this.select()">
+          <button class="step-btn" onclick="putawayBump(1)" type="button">+</button>
+        </div>
+      </div>
+      <div class="field" style="margin-top:10px">
+        <label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px">📍 จุดวาง</label>
+        <input type="text" id="putawayLoc" class="input input-compact" style="margin-top:4px" list="putawayLocOpts"
+               placeholder="พิมพ์จุดวาง เช่น A1 / หน้าโรง" autocomplete="off">
+      </div>
+      <button class="btn btn-primary btn-block pb-add" onclick="confirmPutaway()" type="button">✓ บันทึกจุดวาง</button>
+    </div>`;
+  refreshPutawayLocOpts();
+  setTimeout(()=>document.getElementById('putawayLoc')?.focus(),50);
+}
+function putawayBump(d){ const q=document.getElementById('putawayPallets'); q.value=Math.max(0,(parseInt(q.value)||0)+d); }
+function cancelPutawayPending(){ putawayPendingProduct=null; document.getElementById('putawayPending').innerHTML=''; }
+function refreshPutawayLocOpts(){
+  const dl=document.getElementById('putawayLocOpts'); if(!dl) return;
+  const locs=[...new Set(putawayCache.map(r=>r.location).filter(Boolean))].sort();
+  dl.innerHTML=locs.map(l=>`<option value="${l.replace(/"/g,'&quot;')}">`).join('');
+}
+async function confirmPutaway() {
+  if (!putawayPendingProduct) return;
+  const wh = document.getElementById('putawayWh').value;
+  const pallets = parseInt(document.getElementById('putawayPallets').value)||0;
+  const location = String(document.getElementById('putawayLoc').value||'').trim();
+  if (!pallets)  { showToast('ใส่จำนวนพาเลทก่อน','warning'); return; }
+  if (!location) { showToast('ใส่จุดวางก่อน','warning'); return; }
+  if (counterRequiredButMissing()) { showToast('เลือกชื่อผู้เช็คก่อน (ที่แท็บนับสต็อก)','warning'); return; }
+  const p = putawayPendingProduct;
+  showSpinner('บันทึก...');
+  try {
+    await fetch(COUNT_SAVE_URL, { method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({ action:'putawayAdd', warehouse:wh, empId:counterDisplayEmpId(), counterName:counterDisplayName(),
+        key: productKey(p), name: p['PRODUCT NAME']||'', pallets, location }) });
+    cancelPutawayPending();
+    showToast(`บันทึก ${pallets} พาเลท @ ${location} ✓`,'success');
+    setTimeout(()=>loadPutaway(true), 900);
+  } catch(e){ showToast('บันทึกไม่สำเร็จ: '+e,'error'); }
+  finally { hideSpinner(); }
+}
+async function loadPutaway(force) {
+  const body = document.getElementById('putawayBody');
+  if (!COUNT_SAVE_URL) { body.innerHTML='<div class="txt-center txt-muted" style="padding:24px">ยังไม่ได้ตั้งค่า URL</div>'; return; }
+  if (force) body.innerHTML='<div class="txt-center txt-muted" style="padding:24px">⏳ กำลังโหลด...</div>';
+  try {
+    const res = await fetch(COUNT_SAVE_URL+'?action=putaway',{cache:'no-store'});
+    const json = await res.json();
+    putawayCache = json.rows||[];
+    renderPutaway();
+  } catch(e){ body.innerHTML=`<div class="txt-center" style="padding:24px;color:var(--danger)">โหลดไม่สำเร็จ: ${e.message||e}</div>`; }
+}
+function renderPutaway() {
+  const body = document.getElementById('putawayBody');
+  const wh = document.getElementById('putawayWh')?.value;
+  refreshPutawayLocOpts();
+  const rows = putawayCache.filter(r =>
+    visibleWh.includes(String(r.warehouse||'').toUpperCase()) &&
+    (!wh || String(r.warehouse).toUpperCase()===wh));
+  if (!rows.length) { body.innerHTML=`<div class="card"><div class="txt-center txt-muted" style="padding:28px 16px">ยังไม่มีสินค้าวางไว้ในคลังนี้</div></div>`; return; }
+  const byLoc={};
+  rows.forEach(r=>{ const k=r.location||'—'; (byLoc[k]=byLoc[k]||[]).push(r); });
+  const totalPallets = rows.reduce((s,r)=>s+(Number(r.pallets)||0),0);
+  body.innerHTML = `
+    <div class="sum-total-bar" style="margin:0 0 10px">
+      <span>วางอยู่ <b>${rows.length}</b> รายการ</span><span style="color:var(--border)">|</span>
+      <span>รวม <b>${totalPallets}</b> พาเลท</span><span style="color:var(--border)">|</span>
+      <span><b>${Object.keys(byLoc).length}</b> จุดวาง</span>
+    </div>` +
+    Object.keys(byLoc).sort().map(loc=>`
+      <div class="card mt-8">
+        <div class="card-head"><h3>📍 ${loc}</h3><span style="font-size:12px;color:var(--muted)">${byLoc[loc].reduce((s,r)=>s+(Number(r.pallets)||0),0)} พาเลท</span></div>
+        <div style="padding:6px 0">
+          ${byLoc[loc].map(r=>`<div class="lrow" style="cursor:default">
+            <div class="lrow-main" style="cursor:default">
+              <div class="lrow-info">
+                <div class="lrow-name">${r.name||r.key}</div>
+                <div class="lrow-sub"><b>${r.pallets}</b> พาเลท · ${r.warehouse} · ${formatThaiDate(r.savedAt)} · ${r.counterName||'—'}</div>
+              </div>
+              <button class="btn btn-danger btn-sm" style="flex-shrink:0" onclick="removePutaway('${r.id}','${(r.name||'').replace(/['\\]/g,'')}')" type="button">เอาออก</button>
+            </div>
+          </div>`).join('')}
+        </div>
+      </div>`).join('');
+}
+async function removePutaway(id, name) {
+  if (!confirm(`เอา "${name}" ออกจากจุดวาง?`)) return;
+  showSpinner('เอาออก...');
+  try {
+    await fetch(COUNT_SAVE_URL, { method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({ action:'putawayRemove', id, counterName: counterDisplayName() }) });
+    showToast('เอาออกแล้ว ✓','success');
+    setTimeout(()=>loadPutaway(true), 900);
+  } catch(e){ showToast('ไม่สำเร็จ: '+e,'error'); }
+  finally { hideSpinner(); }
+}
+// close putaway search drop on outside click
+document.addEventListener('click', e => { if (!e.target.closest('#modePutaway .bc-wrap')) closePutawayDrop(); });
 
 async function loadHistory(force) {
   if (!COUNT_SAVE_URL) {
