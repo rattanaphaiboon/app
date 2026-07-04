@@ -852,7 +852,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v3.94';
+const APP_VERSION = 'v3.95';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -1931,6 +1931,8 @@ function initCountMode() {
   if (!countSession) loadCountSession(sel.value || visibleWh[0]);
   renderCountList();
   maybeAdoptRemoteDraft(countSession.warehouse);
+  // โหลด putaway summary เพื่อหักออกจากสต็อกระบบ
+  loadPutawaySummary().then(() => { renderCountList(); renderPending(); });
 }
 
 function onCountWhChange() {
@@ -2193,8 +2195,12 @@ function renderPending() {
       ${alreadyPcs > 0 ? `<div class="pb-already">📦 นับแล้ว ${alreadyPcs.toLocaleString()} ชิ้นในเซสชันนี้</div>` : ''}
       ${(() => {
         const st = productStock(p);
-        const csea = st.cs > 0 ? `${st.cs} CS ${st.ea} EA` : `${st.ea} EA`;
-        return `<div class="pb-sysstock">สต็อกระบบ: <b>${st.pieces.toLocaleString()}</b> ชิ้น (${csea})</div>`;
+        const factorCS = st.factorCS || 1;
+        const csFromPcs = n => { const cs = Math.floor(n/factorCS), ea = n - cs*factorCS; return cs > 0 ? `${cs} CS ${ea} EA` : `${ea} EA`; };
+        const putLine = st.putawayPallets > 0
+          ? `<div style="font-size:11.5px;color:var(--muted);margin-top:4px">📍 จุดวาง <b style="color:var(--navy-mid)">${st.putawayPallets}</b> พาเลท (${csFromPcs(st.putawayPieces)}) · ระบบเต็ม ${st.basePieces.toLocaleString()}</div>`
+          : '';
+        return `<div class="pb-sysstock"><div style="width:100%">สต็อกที่ต้องเช็ค: <b>${st.pieces.toLocaleString()}</b> ชิ้น (${csFromPcs(st.pieces)})${putLine}</div></div>`;
       })()}
       <div class="pb-unit-row">
         <div class="pb-unit-l">หน่วยที่ยิง</div>
@@ -2429,25 +2435,60 @@ function thumbHtml(name, product, big) {
   }
   return `<div class="ci-thumb" style="${sz}">${productEmoji(name)}</div>`;
 }
+// Putaway summary: { "WH__key": { pallets, pieces } } — สินค้าที่วางไว้จุดวางแล้ว หักออกจากสต็อก
+let putawaySummary = {};
+
+async function loadPutawaySummary() {
+  if (!COUNT_SAVE_URL) return;
+  try {
+    const res = await fetch(COUNT_SAVE_URL + '?action=putaway', { cache: 'no-store' });
+    const json = await res.json();
+    const sum = {};
+    (json.rows || []).forEach(r => {
+      const wh = String(r.warehouse || '').toUpperCase();
+      if (!wh || !r.key) return;
+      const p = productByKey[r.key];
+      const palletCS = p ? (parseInt(String(p['CS PALLET']||'').replace(/[^\d]/g,''))||0) : 0;
+      const factorCS = p ? (unitFactor(p, 'CS') || 1) : 1;
+      const pieces   = (Number(r.pallets)||0) * palletCS * factorCS;
+      const k = wh + '__' + r.key;
+      if (!sum[k]) sum[k] = { pallets: 0, pieces: 0 };
+      sum[k].pallets += Number(r.pallets) || 0;
+      sum[k].pieces  += pieces;
+    });
+    putawaySummary = sum;
+  } catch(e) { console.warn('load putaway summary failed', e); }
+}
+// dedupe helper — returns { pallets, pieces }
+function putawayFor(wh, key) {
+  return putawaySummary[String(wh||'').toUpperCase() + '__' + key] || { pallets: 0, pieces: 0 };
+}
+
 function systemPiecesFor(item) {
   const wh = countSession && countSession.warehouse;
   const p  = productByKey[item.key];
+  const put = putawayFor(wh, item.key);
+  let base, raw, cs, ea, isAdj = false;
   // สต็อกวางเอง (ERP) — ใช้ถ้ามีข้อมูลสำหรับ product นี้; fallback Stocksync
   if (wh && adjStockCache[wh]) {
     const adj = adjStockCache[wh];
-    // จับคู่ด้วย "ชื่อสินค้า" เป็นหลัก → ถ้าไม่เจอค่อย fallback บาร์โค้ด
     let totalEA = adj.nameIndex ? adj.nameIndex[normName((p && p['PRODUCT NAME']) || item.name)] : undefined;
     if (totalEA === undefined) totalEA = adj.index[item.key];
     if (totalEA !== undefined) {
       const f = item.factors.CS || 1;
-      const cs = Math.floor(totalEA / f), ea = totalEA - cs * f;
-      return { pieces: totalEA, raw: `${cs}.${ea}`, cs, ea, isAdj: true };
+      cs = Math.floor(totalEA / f); ea = totalEA - cs * f;
+      base = totalEA; raw = `${cs}.${ea}`; isAdj = true;
     }
   }
-  // Stocksync (real-time)
-  const raw = p ? (p[`STOCK ${wh}`] || '0') : '0';
-  const { cs, ea } = parseStock(raw);
-  return { pieces: cs * (item.factors.CS||1) + ea, raw, cs, ea, isAdj: false };
+  if (base === undefined) {
+    // Stocksync (real-time)
+    raw = p ? (p[`STOCK ${wh}`] || '0') : '0';
+    ({ cs, ea } = parseStock(raw));
+    base = cs * (item.factors.CS||1) + ea;
+  }
+  // หักจำนวนที่อยู่ในจุดวางออก
+  const pieces = base - put.pieces;
+  return { pieces, raw, cs, ea, isAdj, putawayPallets: put.pallets, putawayPieces: put.pieces, basePieces: base };
 }
 function piecesToCSEA(pieces, factorCS) {
   const sign = pieces < 0 ? '-' : '';
@@ -2506,7 +2547,7 @@ function renderCountList() {
       <div class="lrow-main" onclick="toggleLiveRow('${key}')">
         <div class="lrow-info">
           <div class="lrow-name">${it.name}</div>
-          <div class="lrow-sub">${breakdownText(it)} = <b>${d.counted.toLocaleString()}</b> ชิ้น · ระบบ ${d.system.toLocaleString()}</div>
+          <div class="lrow-sub">${breakdownText(it)} = <b>${d.counted.toLocaleString()}</b> ชิ้น · ระบบ ${d.system.toLocaleString()}${d.putawayPallets ? ` <span style="color:var(--navy-mid);font-weight:600">· 📍 ${d.putawayPallets} พาเลท</span>` : ''}</div>
         </div>
         ${pill}
         <span class="lrow-chev">›</span>
@@ -2605,25 +2646,33 @@ function srcBadge(isAdj) {
 function productStock(p) {
   const wh = countSession && countSession.warehouse;
   const factorCS = unitFactor(p, 'CS') || 1;
+  const put = putawayFor(wh, productKey(p));
+  let base, cs, ea, isAdj = false;
   if (wh && adjStockCache[wh]) {
     const adj = adjStockCache[wh];
-    // จับคู่ด้วย "ชื่อสินค้า" เป็นหลัก → ถ้าไม่เจอค่อย fallback บาร์โค้ด
     let totalEA = adj.nameIndex ? adj.nameIndex[normName(p['PRODUCT NAME'])] : undefined;
     if (totalEA === undefined) totalEA = adj.index[productKey(p)];
     if (totalEA !== undefined) {
-      const cs = Math.floor(totalEA / factorCS), ea = totalEA - cs * factorCS;
-      return { pieces: totalEA, cs, ea, factorCS, isAdj: true };
+      cs = Math.floor(totalEA / factorCS); ea = totalEA - cs * factorCS;
+      base = totalEA; isAdj = true;
     }
   }
-  const { cs, ea } = parseStock(p ? (p[`STOCK ${wh}`] || '0') : '0');
-  return { pieces: cs * factorCS + ea, cs, ea, factorCS, isAdj: false };
+  if (base === undefined) {
+    ({ cs, ea } = parseStock(p ? (p[`STOCK ${wh}`] || '0') : '0'));
+    base = cs * factorCS + ea;
+  }
+  // หักจำนวนที่วางไว้จุดวางออก
+  const pieces = base - put.pieces;
+  return { pieces, cs, ea, factorCS, isAdj, putawayPallets: put.pallets, putawayPieces: put.pieces, basePieces: base };
 }
 
 function itemDiff(it) {
   const counted = countedPieces(it);
   const sys = systemPiecesFor(it);
   const diff = counted - sys.pieces;
-  return { counted, system: sys.pieces, diff, raw: sys.raw, isAdj: sys.isAdj, status: diff===0?'ok':(diff<0?'short':'over'), factorCS: it.factors.CS||1 };
+  return { counted, system: sys.pieces, diff, raw: sys.raw, isAdj: sys.isAdj,
+           putawayPallets: sys.putawayPallets||0, putawayPieces: sys.putawayPieces||0, basePieces: sys.basePieces||sys.pieces,
+           status: diff===0?'ok':(diff<0?'short':'over'), factorCS: it.factors.CS||1 };
 }
 
 function statusPill(d) {
@@ -3546,7 +3595,7 @@ async function confirmPutaway() {
         key: productKey(p), name: p['PRODUCT NAME']||'', pallets, location }) });
     cancelPutawayPending();
     showToast(`บันทึก ${pallets} พาเลท @ ${location} ✓`,'success');
-    setTimeout(()=>loadPutaway(true), 900);
+    setTimeout(()=>{ loadPutaway(true); loadPutawaySummary(); }, 900);
   } catch(e){ showToast('บันทึกไม่สำเร็จ: '+e,'error'); }
   finally { hideSpinner(); }
 }
@@ -3601,7 +3650,7 @@ async function removePutaway(id, name) {
     await fetch(COUNT_SAVE_URL, { method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain;charset=utf-8'},
       body: JSON.stringify({ action:'putawayRemove', id, counterName: counterDisplayName() }) });
     showToast('เอาออกแล้ว ✓','success');
-    setTimeout(()=>loadPutaway(true), 900);
+    setTimeout(()=>{ loadPutaway(true); loadPutawaySummary(); }, 900);
   } catch(e){ showToast('ไม่สำเร็จ: '+e,'error'); }
   finally { hideSpinner(); }
 }
