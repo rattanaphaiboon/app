@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Vehicle Repair v6.4</title>
+<title>Rattana Vehicle Repair v6.5</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
@@ -490,7 +490,7 @@ body.dark .ai-ocr-text strong{color:var(--gold)}
 <div class="login-screen" id="loginScreen">
   <div class="login-card">
     <div class="login-logo">RATTANA<span> · </span>REPAIR</div>
-    <div class="login-title">ระบบแจ้งซ่อมรถบริษัท · v6.4</div>
+    <div class="login-title">ระบบแจ้งซ่อมรถบริษัท · v6.5</div>
     <div id="g_id_onload"
          data-client_id="615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com"
          data-callback="handleGoogleLogin"
@@ -600,13 +600,14 @@ body.dark .ai-ocr-text strong{color:var(--gold)}
           </div>
 
           <div class="field">
-            <label>รูปใบเสนอราคา <span class="req">*</span></label>
-            <div class="upload-zone" id="uploadZone" onclick="document.getElementById('inBill').click()">
-              <div class="upload-icon">📷</div>
-              <p id="uploadText">แตะเพื่อถ่ายรูป หรือเลือกรูปจากเครื่อง</p>
-              <input type="file" id="inBill" accept="image/*" capture="environment" style="display:none" onchange="handleBillUpload(event)">
-              <img id="billPreview" class="bill-preview hidden">
+            <label>รูปใบเสนอราคา <span class="req">*</span> <span style="color:var(--muted);font-weight:400">(แนบได้หลายรูป สูงสุด 5 รูป)</span></label>
+            <div class="damage-thumbs" id="billThumbs">
+              <button type="button" class="damage-add-btn" id="billAddBtn" onclick="document.getElementById('inBill').click()">
+                <span class="add-icon">📷</span>
+                <span>เพิ่มรูปบิล</span>
+              </button>
             </div>
+            <input type="file" id="inBill" accept="image/*" capture="environment" multiple style="display:none" onchange="handleBillUpload(event)">
           </div>
 
           <div class="field">
@@ -1059,7 +1060,8 @@ const CHECK_INTERVAL_DAYS = 30;   // เกินกำหนดถ้า >= 30 
 const CHECK_WARNING_DAYS  = 25;   // ใกล้ครบถ้า >= 25 วัน
 let selectedVehicle = null;
 let selectedVendor  = null; // {name, phone} | null
-let billPhotoData = null; // {base64, mime}
+let billPhotoData = null; // {base64, mime} — รูปแรก (backward compat + OCR)
+let billPhotosData = []; // [{base64, mime, dataUrl, name}] — รูปบิลทั้งหมด
 let damagePhotosData = []; // [{base64, mime, dataUrl}]
 let selectedRepairItems = new Set();  // เก็บรายการซ่อมที่เลือก
 let currentTab = 'dashboard';
@@ -2032,26 +2034,60 @@ function selectVendor(idx) {
 // BILL UPLOAD
 // ═════════════════════════════════════════════════════════════════════
 function handleBillUpload(ev) {
-  const file = ev.target.files[0];
-  if (!file) return;
-  if (file.size > 8 * 1024 * 1024) {
-    showToast('ขนาดไฟล์เกิน 8 MB กรุณาเลือกใหม่', 'error');
-    ev.target.value = '';
-    return;
-  }
-  const reader = new FileReader();
-  reader.onload = e => {
-    // เก็บ base64 (ตัด data:image/...;base64, ออก)
-    const dataUrl = e.target.result;
-    const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
-    if (!m) { showToast('อ่านรูปไม่ได้', 'error'); return; }
-    billPhotoData = { mime: m[1], base64: m[2] };
-    $('billPreview').src = dataUrl;
-    $('billPreview').classList.remove('hidden');
-    $('uploadText').textContent = '✓ เลือกแล้ว: ' + file.name + ' (แตะเพื่อเปลี่ยน)';
-    $('uploadZone').classList.add('has-file');
-  };
-  reader.readAsDataURL(file);
+  const files = [...(ev.target.files || [])];
+  if (!files.length) return;
+  const remaining = 5 - billPhotosData.length;
+  if (remaining <= 0) { showToast('แนบรูปบิลได้สูงสุด 5 รูป', 'warning'); ev.target.value=''; return; }
+  const accept = files.slice(0, remaining);
+  let processed = 0;
+  accept.forEach(file => {
+    if (file.size > 8 * 1024 * 1024) {
+      showToast('ข้าม "' + file.name + '" (เกิน 8 MB)', 'warning');
+      processed++;
+      if (processed === accept.length) renderBillThumbs();
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = e => {
+      const dataUrl = e.target.result;
+      const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
+      if (m) {
+        billPhotosData.push({ mime: m[1], base64: m[2], dataUrl, name: file.name });
+        // รูปแรก = billPhotoData (ใช้ backward compat)
+        if (!billPhotoData) billPhotoData = { mime: m[1], base64: m[2] };
+      }
+      processed++;
+      if (processed === accept.length) renderBillThumbs();
+    };
+    reader.readAsDataURL(file);
+  });
+  ev.target.value = '';
+  if (files.length > remaining) showToast('แนบได้สูงสุด 5 รูป — ใช้เฉพาะ ' + remaining + ' รูปแรก', 'warning');
+}
+
+function renderBillThumbs() {
+  const wrap = $('billThumbs');
+  if (!wrap) return;
+  const thumbsHtml = billPhotosData.map((p, idx) => `
+    <div class="damage-thumb">
+      <img src="${p.dataUrl}" alt="บิล ${idx+1}">
+      <button type="button" class="dt-x" onclick="removeBillPhoto(${idx})" title="ลบ">×</button>
+    </div>
+  `).join('');
+  const canAdd = billPhotosData.length < 5;
+  const addBtn = canAdd ? `
+    <button type="button" class="damage-add-btn" id="billAddBtn" onclick="document.getElementById('inBill').click()">
+      <span class="add-icon">📷</span>
+      <span>เพิ่มรูปบิล</span>
+      <span style="font-size:10px;color:var(--gold)">${billPhotosData.length}/5</span>
+    </button>` : '';
+  wrap.innerHTML = thumbsHtml + addBtn;
+}
+
+function removeBillPhoto(idx) {
+  billPhotosData.splice(idx, 1);
+  billPhotoData = billPhotosData.length ? { mime: billPhotosData[0].mime, base64: billPhotosData[0].base64 } : null;
+  renderBillThumbs();
 }
 
 // ─── DAMAGE PHOTOS (multiple, optional) ───
@@ -2133,12 +2169,12 @@ async function handleOcrUpload(ev) {
   if (!m) { showToast('อ่านรูปไม่ได้', 'error'); return; }
   const mime = m[1], base64 = m[2];
 
-  // Auto-fill รูปบิลด้วยเลย (ผู้ใช้ไม่ต้องอัปอีกรอบ)
+  // Auto-fill รูปบิลด้วยเลย (ผู้ใช้ไม่ต้องอัปอีกรอบ) — เพิ่มเข้า array
   billPhotoData = { mime, base64 };
-  $('billPreview').src = dataUrl;
-  $('billPreview').classList.remove('hidden');
-  $('uploadText').textContent = '✓ ใช้รูปนี้เป็นบิล (' + file.name + ')';
-  $('uploadZone').classList.add('has-file');
+  if (billPhotosData.length < 5) {
+    billPhotosData.push({ mime, base64, dataUrl, name: file.name });
+  }
+  renderBillThumbs();
 
   // UI loading
   const card = document.querySelector('.ai-ocr-card');
@@ -2422,7 +2458,7 @@ async function submitRepair() {
     showToast('กรุณาเลือกรายการที่ต้องซ่อม (อย่างน้อย 1 รายการ) หรือกรอกหมายเหตุ', 'warning'); return;
   }
   if (!amount || amount <= 0) { showToast('กรุณากรอกยอดเงิน', 'warning'); return; }
-  if (!billPhotoData) { showToast('กรุณาแนบรูปใบเสนอราคา', 'warning'); return; }
+  if (!billPhotosData.length) { showToast('กรุณาแนบรูปใบเสนอราคา', 'warning'); return; }
   if (!damagePhotosData.length) { showToast('กรุณาแนบรูปความเสียหาย (อย่างน้อย 1 รูป)', 'warning'); return; }
   if (!GAS_URL || GAS_URL.includes('PASTE_YOUR')) {
     showToast('ยังไม่ได้ตั้งค่า GAS_URL กรุณาแจ้งผู้ดูแลระบบ', 'error'); return;
@@ -2453,6 +2489,7 @@ async function submitRepair() {
       vendorPhone:  vendorPhone,
       billPhotoBase64: billPhotoData.base64,
       billPhotoMime:   billPhotoData.mime,
+      billPhotos:   billPhotosData.map(p => ({ base64: p.base64, mime: p.mime })),
       damagePhotos: damagePhotosData.map(p => ({ base64: p.base64, mime: p.mime }))
     };
     const r = await fetch(GAS_URL, {
@@ -2485,6 +2522,7 @@ function resetForm() {
   selectedVehicle = null;
   selectedVendor = null;
   billPhotoData = null;
+  billPhotosData = [];
   damagePhotosData = [];
   selectedRepairItems.clear();
   $('ddPlateLabel').textContent = '-- เลือกทะเบียนรถ --';
@@ -2498,15 +2536,12 @@ function resetForm() {
   $('inIssueNote').value = '';
   $('inAmount').value = '';
   $('inBill').value = '';
-  $('billPreview').classList.add('hidden');
-  $('billPreview').src = '';
-  $('uploadText').textContent = 'แตะเพื่อถ่ายรูป หรือเลือกรูปจากเครื่อง';
-  $('uploadZone').classList.remove('has-file');
   $('approvalHint').textContent = '';
   $('repairSearch').value = '';
   filterRepairItems('');
   syncRepairUI();
   renderDamageThumbs();
+  renderBillThumbs();
 }
 
 // ═════════════════════════════════════════════════════════════════════
@@ -3657,31 +3692,33 @@ function openDetail(id) {
     `<div class="det-row"><span class="det-label">${l}</span><span class="det-value">${v}</span></div>`
   ).join('');
 
-  // รูปบิล — แสดงเลยด้วย iframe preview (ใช้ session login ของ user)
+  // รูปบิล — อาจมีหลายรูป (แยกด้วย \n)
   if (r.billPhotoUrl) {
-    const fileId = (r.billPhotoUrl.match(/\/d\/([a-zA-Z0-9_-]+)/) || [])[1];
-    const directUrl = driveDirectUrl(r.billPhotoUrl);
-    if (fileId) {
-      html += `<div style="margin-top:14px">
-        <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;margin-bottom:6px;letter-spacing:.4px">รูปใบเสนอราคา</div>
-        <div style="position:relative;background:#f0f0f0;border-radius:8px;overflow:hidden;border:1px solid var(--border)">
-          <iframe src="https://drive.google.com/file/d/${fileId}/preview"
-                  style="width:100%;height:520px;border:0;display:block"
-                  allow="autoplay"
-                  allowfullscreen
-                  loading="lazy"></iframe>
-        </div>
-        <div style="text-align:center;margin-top:6px">
-          <a href="${r.billPhotoUrl}" target="_blank" style="font-size:12px;color:var(--info);text-decoration:none">🔗 เปิดดูใน Google Drive (เต็มหน้าจอ)</a>
-        </div>
-      </div>`;
-    } else {
-      // fallback ถ้าหา fileId ไม่เจอ
-      html += `<div style="margin-top:14px;text-align:center">
-        <img src="${directUrl}" style="max-width:100%;max-height:380px;border-radius:8px;border:1px solid var(--border)">
-        <div style="font-size:11px;color:var(--muted);margin-top:6px"><a href="${r.billPhotoUrl}" target="_blank">เปิดดูใน Drive</a></div>
-      </div>`;
-    }
+    const billUrls = String(r.billPhotoUrl).split('\n').map(s => s.trim()).filter(Boolean);
+    html += `<div style="margin-top:14px">
+      <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;margin-bottom:6px;letter-spacing:.4px">รูปใบเสนอราคา${billUrls.length > 1 ? ' ('+billUrls.length+' รูป)' : ''}</div>`;
+    billUrls.forEach((url, i) => {
+      const fileId = (url.match(/\/d\/([a-zA-Z0-9_-]+)/) || [])[1];
+      const directUrl = driveDirectUrl(url);
+      if (fileId) {
+        html += `
+          ${billUrls.length > 1 ? `<div style="font-size:11px;color:var(--muted);margin:8px 0 4px">รูปที่ ${i+1}</div>` : ''}
+          <div style="position:relative;background:#f0f0f0;border-radius:8px;overflow:hidden;border:1px solid var(--border)">
+            <iframe src="https://drive.google.com/file/d/${fileId}/preview"
+                    style="width:100%;height:520px;border:0;display:block"
+                    allow="autoplay" allowfullscreen loading="lazy"></iframe>
+          </div>
+          <div style="text-align:center;margin-top:6px">
+            <a href="${url}" target="_blank" style="font-size:12px;color:var(--info);text-decoration:none">🔗 เปิดดูใน Google Drive (เต็มหน้าจอ)</a>
+          </div>`;
+      } else {
+        html += `<div style="margin-top:8px;text-align:center">
+          <img src="${directUrl}" style="max-width:100%;max-height:380px;border-radius:8px;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--muted);margin-top:6px"><a href="${url}" target="_blank">เปิดดูใน Drive</a></div>
+        </div>`;
+      }
+    });
+    html += `</div>`;
   }
 
   // รูปความเสียหาย (multiple)
