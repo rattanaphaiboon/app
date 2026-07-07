@@ -449,7 +449,7 @@ body.dark .spin-box{background:var(--card-bg)}
 </nav>
 
 <script>
-const VERSION='5.25';
+const VERSION='5.26';
 const DEFAULT_ORDER_ID='1ZOS3vAPbizWCG_Y7A6rODjIznSMf1_FDSGZ_ZUr_RjQ';
 const DEFAULT_ORDER_GID='1632859410';
 const PDDT_ID='16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
@@ -469,6 +469,7 @@ let pddtMap=null;        // barcode -> {catGroup,catType,shortName}
 let pddtBc=null;         // bcKey(ตัดช่องว่าง/ขีด/0 นำหน้า) -> {info, bc:บาร์โค้ด PDDT เป๊ะ} — ใช้ "หา" ตอนยิง · เก็บ/ส่งออกใช้ bc ตาม PDDT
 let masterByItem=null;   // SMR item code (H) -> [บาร์โค้ดรัตนทุกตัว] (1 itemCode มีได้หลายบาร์/หลายลอต — จาก WMS_barcode_SMR ไฟล์ MASTER_ID gid 0)
 let lastBuild=null;      // {branchList, branchName, inGroups, noRows, totals}
+let pddtVatOk=false;     // อ่านคอลัมน์ VAT status จาก PDDT สำเร็จ+มีค่าจริงไหม (false = probe พลาด/ไม่มีคอลัมน์ → export จะเตือน ไม่แยกเงียบ ๆ)
 
 // ── helpers ──
 const $=id=>document.getElementById(id);
@@ -522,16 +523,23 @@ async function fetchCsv(url,timeoutMs){
 // index → column letter (0=A, 26=AA) — ใช้ระบุคอลัมน์ที่เพิ่งถูกเพิ่ม ตำแหน่งไม่คงที่
 function colLetter(i){let s='';i++;while(i>0){const m=(i-1)%26;s=String.fromCharCode(65+m)+s;i=Math.floor((i-1)/26);}return s;}
 // หา column letter ของหัวคอลัมน์ PDDT ตามชื่อ (SELECT * LIMIT 1 → อ่านหัวตาราง) — ไม่เจอ คืน '' เช่น VAT status ที่อาจยังไม่ถูกเพิ่ม
-async function findPddtCol(label){
-  try{
-    const rows=parseCsvRaw(await fetchCsv(gvizUrl(PDDT_ID,{sheet:PDDT_SHEET})+'&tq='+encodeURIComponent('SELECT * LIMIT 1'),12000));
-    const H=(rows[0]||[]).map(h=>clean(h).toUpperCase());const i=H.indexOf(label.toUpperCase());
-    return i<0?'':colLetter(i);
-  }catch(e){return '';}
+// retry ได้ (default 3 ครั้ง) + timeout 25s: กัน probe timeout/พลาดชั่วคราวแล้วปิดการแยกบิลเงียบ ๆ · ลองใหม่เฉพาะตอน error/หัวตารางว่าง (อ่านสำเร็จแต่ "ไม่มีคอลัมน์" คืน '' ทันที ไม่ retry)
+async function findPddtCol(label,tries){
+  tries=tries||3;
+  for(let a=0;a<tries;a++){
+    try{
+      const rows=parseCsvRaw(await fetchCsv(gvizUrl(PDDT_ID,{sheet:PDDT_SHEET})+'&tq='+encodeURIComponent('SELECT * LIMIT 1'),25000));
+      const H=(rows[0]||[]).map(h=>clean(h).toUpperCase());
+      if(!H.length){if(a<tries-1)continue;return '';}   // หัวตารางว่าง = โหลดพลาด → ลองใหม่
+      const i=H.indexOf(label.toUpperCase());
+      return i<0?'':colLetter(i);
+    }catch(e){if(a<tries-1)continue;}
+  }
+  return '';
 }
 // ── PDDT map: barcode (EA/PA/BP/CS) -> cat info (+ vat) ──
 async function loadPddt(force){
-  if(pddtMap&&!force)return pddtMap;
+  if(pddtMap&&!force&&pddtVatOk)return pddtMap;   // cache เฉพาะเมื่ออ่าน VAT ได้แล้ว · รอบก่อน probe VAT พลาด (pddtVatOk=false) → โหลดใหม่ ลองอ่าน VAT อีกครั้ง
   showSpin('โหลด PDDT (ข้อมูลสินค้า)...');
   // ดึงเฉพาะคอลัมน์ที่ใช้ (PDDT มี 120+ คอลัมน์ ~12.5MB → ~2MB · parse เร็วขึ้น ~10×) — กันแอปค้างตอนเปิดบนมือถือ
   // B,D,F,H=CODE EA/PA/BP/CS · BC,BB=CAT GROUP/TYPE · BM=SHORT NAME · AR,AB,AJ,AZ=PRICE S01/CC01/CC03/S03 CS · BQ,BR=STOCK W4/C4
@@ -553,6 +561,7 @@ async function loadPddt(force){
       stockW4:numv(r[sW4]),stockC4:numv(r[sC4]),vat:cVat>=0?clean(r[cVat]):''};
     [cEA,cPA,cBP,cCS].forEach(ci=>{if(ci<0)return;const code=clean(r[ci]);if(code&&!m[code]){m[code]=info;const k=bcKey(code);if(k&&!(k in mc))mc[k]={info,bc:code};}});
   }
+  pddtVatOk=cVat>=0;   // cVat>=0 = โหลดคอลัมน์ VAT STATUS ติด (มีค่า vat ในแมพ) · <0 = probe พลาด/ไม่มีคอลัมน์ → export เตือนก่อนแยกไม่ได้
   pddtMap=m;pddtBc=mc;return m;
 }
 
@@ -768,7 +777,7 @@ function exportExcel(){
 // ── BK08 export (bplus) — generate เลขที่เอกสาร (คอลัมน์ B) ──
 const DEFAULT_SMR_ID='1lT3-s_dr1txAermNhq79aAA0Fnbi1WDeeiSiqxHp-A8';
 const DEFAULT_SMR_GID='220963490';
-const BK={A:0,B:1,C:2,H:7,I:8,SHOP:20,BARCODE:10};  // SMR cols: วันที่/เลขเอกสาร/ลูกหนี้/พนักงาน/หมายเหตุ/ชื่อร้าน(สาขา)/รหัสซื้อขาย
+const BK={A:0,B:1,C:2,H:7,I:8,SHOP:20,BARCODE:10,NAME:21};  // SMR cols: วันที่/เลขเอกสาร/ลูกหนี้/พนักงาน/หมายเหตุ/ชื่อร้าน(สาขา)/รหัสซื้อขาย/ชื่อสินค้า
 const pad3=n=>n<1000?String(n).padStart(3,'0'):String(n);
 function bkHead(prefix,colA){
   // colA = วันที่เอกสาร พ.ศ. "DD/MM/YYYY"; ถ้าว่าง/ผิด → ใช้วันนี้ (พ.ศ.=ค.ศ.+543)
@@ -785,6 +794,10 @@ async function exportBK12(){
     const startSeq=Math.max(1,parseInt(clean($('bkStart').value),10)||1);
     const src=parseSheetUrl($('bkUrl').value)||{id:DEFAULT_SMR_ID,gid:DEFAULT_SMR_GID};
     await loadPddt();   // ต้องมี vat ของแต่ละบาร์ก่อนจัดกลุ่มแยก VAT (cache อยู่แล้วถ้าโหลดจาก run())
+    if(!pddtVatOk){     // อ่านคอลัมน์ VAT status ไม่ได้ (probe พลาด/ไม่มีคอลัมน์) → ห้ามแยกเงียบ ๆ เตือนให้ตัดสินใจก่อน
+      hideSpin();
+      if(!confirm('⚠️ อ่านสถานะ VAT จาก PDDT ไม่ได้ (คอลัมน์ VAT status)\n\nรอบนี้จะ "ไม่แยก" ของไม่มี VAT ออกจากบิล — ทุกรายการจะรวมเป็นบิลมี VAT\n\nแนะนำ: กด "ยกเลิก" แล้วกด Export อีกครั้ง (ระบบจะโหลด VAT ใหม่ให้)\n\nยืนยัน Export แบบ "ไม่แยก" ต่อเลยหรือไม่?')){btn.disabled=false;return;}
+    }
     showSpin('โหลดชีท SMR (bplus format)...');
     const rows=parseCsvRaw(await fetchCsv(gvizUrl(src.id,{gid:src.gid})));
     if(rows.length<2){toast('ชีท SMR ว่าง','error');hideSpin();btn.disabled=false;return;}
@@ -814,6 +827,19 @@ async function exportBK12(){
     for(const k of order){const b=bucket.get(k);b.sort((x,y)=>rankOf(x)-rankOf(y));seq++;const no=dhead+pad3(seq);b.forEach(r=>{r[BK.B]=no;});}
     skip.forEach(r=>{r[BK.B]='';});
     const out=[header];for(const k of order)out.push(...bucket.get(k));out.push(...skip);
+    // สรุปก่อนดาวน์โหลด — เห็นชัดว่ารอบนี้แยก "ไม่มี VAT" กี่ใบ/บรรทัดไหน (กันแยกพลาดเงียบ ๆ) · ยกเลิกได้ ยังไม่โหลดไฟล์
+    hideSpin();
+    const noVatKeys=order.filter(k=>k.endsWith('|N'));
+    const namesStr=b=>{const ns=b.map(r=>clean(r[BK.NAME])).filter(Boolean);return ns.slice(0,8).join(', ')+(ns.length>8?` … (+${ns.length-8})`:'');};
+    let summary;
+    if(noVatKeys.length){
+      const detail=noVatKeys.map(k=>{const b=bucket.get(k);return `• ${b[0][BK.B]} (${shortBranch(b[0][BK.SHOP])}) — ${b.length} รายการ\n    ${namesStr(b)}`;}).join('\n');
+      summary=`แยกบิล "ไม่มี VAT" ${noVatKeys.length} ใบ:\n\n${detail}\n\nรวมทั้งหมด ${order.length} ใบ · ${data.length-skip.length} บรรทัด\n\nกด "ตกลง" เพื่อดาวน์โหลด · "ยกเลิก" เพื่อกลับไปตรวจ`;
+    }else{
+      summary=`ℹ️ รอบนี้ไม่มีการแยกบิล "ไม่มี VAT" (0 ใบ)\n${pddtVatOk?'— ทุกรายการมี VAT':'— อ่านสถานะ VAT ไม่ได้'}\n\nรวมทั้งหมด ${order.length} ใบ · ${data.length-skip.length} บรรทัด\n\nกด "ตกลง" เพื่อดาวน์โหลด`;
+    }
+    if(!confirm(summary)){btn.disabled=false;return;}
+    showSpin('สร้างไฟล์ Excel...');
     // Excel — ทุกค่าเป็น TEXT (กัน 0 นำหน้าหาย / scientific notation)
     const ws=XLSX.utils.aoa_to_sheet(out);
     const rng=XLSX.utils.decode_range(ws['!ref']);
