@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.286</title>
+<title>Rattana Sales — v8.287</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5126,7 +5126,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.286 · 2026-07-07</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.287 · 2026-07-07</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5137,7 +5137,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.286</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.287</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -10091,12 +10091,13 @@ let _wqFlushTimer = null;
 function _startWriteQueueAutoFlush() {
   if (_wqFlushTimer) return;
   // First attempt after 3s (let initial sheet fetch settle)
-  setTimeout(() => { writeQueue.flush().catch(()=>{}); _syncMatchedSubmittedOrders(); _autoResendStuck(); }, 3000);
+  setTimeout(() => { writeQueue.flush().catch(()=>{}); _syncMatchedSubmittedOrders(); _autoResendStuck(); _autoVerifyPhantoms(); }, 3000);
   _wqFlushTimer = setInterval(() => {
     if (!navigator.onLine) return; // don't burn retries while offline
     writeQueue.flush().catch(()=>{});
     _syncMatchedSubmittedOrders();
     _autoResendStuck();   // v8.220: ส่งซ้ำใบค้างทุก 30 วิ (idempotent)
+    _autoVerifyPhantoms();   // v8.287: ตรวจใบ "ส่งแล้ว" ที่ชีทจริงไม่มี → ส่งซ้ำเอง
   }, 30000);
   // also flush whenever browser comes back online
   window.addEventListener('online', () => {
@@ -10104,6 +10105,7 @@ function _startWriteQueueAutoFlush() {
     writeQueue.flush().catch(()=>{});
     _syncMatchedSubmittedOrders();
     _autoResendStuck();   // v8.220: เน็ตกลับมา → ส่งซ้ำใบค้างทันที
+    _autoVerifyPhantoms();   // v8.287: + ตรวจใบ "ส่งแล้ว" ที่ชีทจริงไม่มี
   });
 }
 
@@ -10190,6 +10192,60 @@ async function _autoResendStuck() {
   finally { _autoResendInFlight = false; }
 }
 window._autoResendStuck = _autoResendStuck;
+
+// v8.287: AUTO verify-sweep — จับใบ "ส่งแล้ว" (synced) ที่จริงๆ ไม่อยู่ในชีท (phantom จาก false-sync เก่า/edge ที่ยังหาไม่เจอ) → ส่งซ้ำเองอัตโนมัติ
+//   เซลไม่ต้องกดอะไร · ยืนยันด้วย verifyOrder (นับชีทจริง server-side ไม่ใช่ SHEET_DATA ที่ปน optimistic) · throttle 60วิ/ใบ · ตั้ง _sheetConfirmed กันเช็คซ้ำ + ปล่อยหลุด disk เมื่อยืนยันแล้ว
+//   resend จากใบเสร็จ (_swGet) ก่อน · ไม่มีใบเสร็จ → rebuild จาก o.items ผ่าน pushOrderToSheet (สร้างใบเสร็จใหม่ + idempotent ผ่าน lineId เดิม)
+let _phantomSweepInFlight = false;
+async function _autoVerifyPhantoms() {
+  if (_phantomSweepInFlight || !navigator.onLine) return;
+  _phantomSweepInFlight = true;
+  try {
+    const now = Date.now();
+    const suspects = (submittedOrders || []).filter(o =>
+      o && o.id && o.synced && !o._sheetConfirmed && !o.isPushing && (now - (o._lastPhantomChk || 0) > 60000)
+    );
+    let changed = 0;
+    for (const o of suspects) {
+      o._lastPhantomChk = now;
+      const rec = _swGet(o.id);
+      const expect = (rec && rec.rows && rec.rows.length) || (o.items && o.items.length) || 1;
+      let actual = null;
+      try {
+        const v = await postToAppsScript({ action: 'verifyOrder', orderId: o.id, expectedCount: expect });
+        if (v && v.actualCount != null) actual = Number(v.actualCount);
+      } catch (e) { continue; }   // verify ใช้ไม่ได้ชั่วคราว → ลองรอบหน้า (ไม่ demote มั่ว)
+      if (actual === null) continue;
+      if (actual >= expect) { o._sheetConfirmed = true; changed++; continue; }   // อยู่ในชีทจริงแล้ว → ยืนยัน เลิกเช็ค
+      // PHANTOM: mark ว่า "ส่งแล้ว" แต่ชีทจริงมี actual/expect ไม่ครบ → demote + ส่งซ้ำเอง
+      console.warn('[phantom] "ส่งแล้ว" แต่ชีทมีจริง', actual, '/', expect, '→ ส่งซ้ำอัตโนมัติ', o.id);
+      o.synced = false; o.isPushing = false; o._lastAutoResend = now;   // กัน _autoResendStuck ยิงซ้ำในรอบเดียวกัน
+      try {
+        if (rec && rec.rows && rec.rows.length) {
+          const res = await postToAppsScript({ action: 'appendOrderBatch', rows: rec.rows });
+          if (res && res.ok !== false) {
+            let a2 = null;
+            try { const v2 = await postToAppsScript({ action: 'verifyOrder', orderId: o.id, expectedCount: rec.rows.length }); if (v2 && v2.actualCount != null) a2 = Number(v2.actualCount); } catch (e) {}
+            if (a2 !== null && a2 >= rec.rows.length) { o.synced = true; o._sheetConfirmed = true; _swClear(o.id); changed++; }
+          }
+        } else if (o.items && o.items.length) {
+          // ไม่มีใบเสร็จ (โดน false-sync clear ไปแล้ว) → rebuild จาก items — pushOrderToSheet สร้างใบเสร็จใหม่เองด้วย
+          const shop = (typeof SHOPS !== 'undefined' && SHOPS.find(s => s.id === o.shopId)) || { name: o.shopName, id: o.shopId, bplusCode: o.shopId };
+          const nowD = new Date(String(o.date || '').replace(/\//g, '-') + 'T' + String(o.time || '00:00').replace('.', ':') + ':00');
+          const res = await pushOrderToSheet(o.id, shop, o.items, isNaN(nowD.getTime()) ? new Date() : nowD, o.notes || '', o.deliveryDate || '', o.billId);
+          if (res && res.ok) { o.synced = true; o._sheetConfirmed = true; changed++; }
+        }
+      } catch (e) { /* คงไว้ synced=false → _autoResendStuck/รอบถัดไป ลองต่อ (ใบเสร็จถูกสร้างแล้วถ้าผ่าน pushOrderToSheet) */ }
+    }
+    if (changed > 0) {
+      try { _persistPendingOrders(); } catch (e) {}
+      _injectSubmittedOrdersIntoSheetData();
+      if (typeof rerenderCurrentScreen === 'function') rerenderCurrentScreen();
+    }
+  } catch (e) { console.warn('[_autoVerifyPhantoms]', e); }
+  finally { _phantomSweepInFlight = false; }
+}
+window._autoVerifyPhantoms = _autoVerifyPhantoms;
 
 function initAppUI() {
   if (typeof updateDate === 'function') updateDate();
@@ -10730,7 +10786,7 @@ window.showOrdersDiag = async function() {
   const cAge  = g(() => { const c = _memCache && _memCache['orders']; return (c && c.ts) ? Math.round((Date.now() - c.ts) / 1000) + 's' : 'ว่าง'; });
   const when  = g(() => new Date().toLocaleString('th-TH', { hour12: false }));
   const lines = [
-    'Rattana Sales · ตรวจสอบข้อมูล · v8.286',
+    'Rattana Sales · ตรวจสอบข้อมูล · v8.287',
     'เวลา: ' + when,
     '──────────────',
     'Role: ' + role + '   คลัง: ' + wh,
@@ -27900,7 +27956,7 @@ const _PENDING_ORDERS_KEY = 'rsa_pending_orders';
 function _persistPendingOrders() {
   try {
     const keep = (submittedOrders || [])
-      .filter(o => o && o.id && !o.synced)
+      .filter(o => o && o.id && !o._sheetConfirmed)              // v8.287: เก็บจนกว่ายืนยันในชีทจริง (กัน phantom "ส่งแล้ว" ที่ยังไม่ verify หลุด disk → restart แล้วหายเงียบ)
       .slice(0, 40)                                              // กัน localStorage โต (ใหม่สุดอยู่หน้า)
       .map(o => Object.assign({}, o, { isPushing: false }));     // เซฟแบบพร้อมส่งซ้ำ (boot ไม่มี promise วิ่ง)
     if (keep.length) localStorage.setItem(_PENDING_ORDERS_KEY, JSON.stringify(keep));
