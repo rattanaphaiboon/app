@@ -110,8 +110,12 @@ body.dark .nav button.act{color:var(--gold-light)}
 const CONFIG = {
   sheetId:      '1q8LU6lyioIJqIW7mUAinF3EFs37aUZ9oZZKnn4U11oU',
   sheetName:    'ค่าใช้จ่าย',
-  appsScriptUrl:'https://script.google.com/macros/s/AKfycbxQFwvW3qtMwVEZGXpP6FG12wHyePwCsQ-NpqNcbBr9_GR6y8JwQ2juCC70ztqra0BS/exec',   // ← วาง Web app URL ที่ deploy จาก Code.gs ตรงนี้ (ในเครื่องหมาย ' ')
-  version:      'v2.0'
+  appsScriptUrl:'https://script.google.com/macros/s/AKfycbxQFwvW3qtMwVEZGXpP6FG12wHyePwCsQ-NpqNcbBr9_GR6y8JwQ2juCC70ztqra0BS/exec',
+  // ตัวเลือก: เติมลงคอลัมน์ คลัง / ผู้ส่ง / e-mail อัตโนมัติ (เว้นว่างได้)
+  warehouse:    '',
+  sender:       '',
+  userEmail:    '',
+  version:      'v2.1'
 };
 </script>
 
@@ -204,7 +208,10 @@ const state = { screen:'list', company:'', type:'', payment:'', provider:'—', 
 
 /* ═══════════ utils ═══════════ */
 const fmt = n => (Number(n)||0).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2}) + ' ฿';
-function fmtDate(iso){ if(!iso) return '—'; const p=String(iso).split('-'); if(p.length<3) return iso; return p[2].slice(0,2)+'/'+p[1]+'/'+(Number(p[0])+543); }
+// วันที่ค.ศ. รูปแบบ d/m/yyyy ให้ตรงกับชีท (รับได้ทั้ง yyyy-mm-dd และ d/m/yyyy)
+function fmtDate(v){ if(!v) return '—'; v=String(v).trim(); if(v.indexOf('/')>=0) return v; const p=v.split('-'); if(p.length<3) return v; return Number(p[2].slice(0,2))+'/'+Number(p[1])+'/'+p[0]; }
+// หาค่าในแถวจากคีย์เวิร์ดของหัวคอลัมน์
+function col(row,kw,exact){ const keys=Object.keys(row); for(const k of keys){ if(exact? k.trim()===kw : k.indexOf(kw)>=0) return row[k]; } return ''; }
 
 /* RFC-4180 CSV parser (Rattana standard) */
 function parseCsv(text){
@@ -231,14 +238,19 @@ async function loadFromSheet(){
   if(!res.ok) throw new Error('fetch '+res.status);
   const rows=parseCsv(await res.text());
   return rows.map(r=>{
-    const before = numOf(r['จำนวนเงินก่อน VAT']);
-    const vatOn  = /มี\s*vat|true|1|ใช่/i.test(r['VAT']||'') && !/ไม่/.test(r['VAT']||'');
-    const total  = r['จำนวนเงินรวม']!=null && r['จำนวนเงินรวม']!=='' ? numOf(r['จำนวนเงินรวม']) : before*(vatOn?1.07:1);
+    const before  = numOf(col(r,'ก่อน'));            // L จำนวนเงิน(ก่อนแวท)
+    const vatAmt  = numOf(col(r,'Vat'));             // M Vat
+    const total   = numOf(col(r,'สุทธิ')) || before+vatAmt; // P จำนวนเงินสุทธิ
     return {
-      company:r['บริษัท']||'', category:r['ประเภท']||'', payment:r['ประเภทชำระเงิน']||'',
-      provider:r['ผู้ให้บริการ']||'', date:r['วันที่เอกสาร']||'', before, vat:vatOn, total, note:r['หมายเหตุ']||''
+      company:  col(r,'บริษัท'),          // AA
+      category: col(r,'ประเภท',true),     // G (exact เพื่อไม่ชน ประเภทชำระเงิน)
+      payment:  col(r,'ชำระ'),            // AB
+      provider: col(r,'เจ้าหนี้'),        // J ชื่อเจ้าหนี้
+      date:     col(r,'วันที่ตามบิล'),    // I
+      note:     col(r,'หมายเหตุ'),        // T
+      before, vat: vatAmt>0, total
     };
-  }).reverse(); // ใหม่สุดอยู่บน
+  }).filter(e=>e.company||e.total||e.before).reverse(); // ใหม่สุดอยู่บน
 }
 
 /* ═══════════ เขียนลงชีท (Apps Script) ═══════════ */
@@ -247,7 +259,8 @@ function postToSheet(e){
   const before=Number(e.before)||0, vatAmt=e.vat?before*0.07:0;
   const payload={ date:e.date||'', company:e.company||'', category:e.category||'', payment:e.payment||'',
     provider:(e.provider&&e.provider!=='—')?e.provider:'', before:before,
-    vat:e.vat?'มี VAT':'ไม่มี VAT', vatAmount:vatAmt, total:before+vatAmt, note:e.note||'' };
+    vat:e.vat?'มี VAT':'ไม่มี VAT', vatAmount:vatAmt, total:before+vatAmt, note:e.note||'',
+    warehouse:CONFIG.warehouse||'', sender:CONFIG.sender||'', email:CONFIG.userEmail||'' };
   return fetch(CONFIG.appsScriptUrl,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)})
     .then(()=>true).catch(()=>false);
 }
