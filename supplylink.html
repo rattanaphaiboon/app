@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>SupplyLink v7.30.0 — Rattanaphaiboon</title>
+<title>SupplyLink v7.31.0 — Rattanaphaiboon</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+Thai:wght@300;400;500;600;700;800&family=Sacramento&display=swap" rel="stylesheet">
@@ -683,14 +683,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v7.30.0</div>
+<div class="version-badge">SupplyLink v7.31.0</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
-   SupplyLink v7.30.0 — Single-file vanilla JS app
+   SupplyLink v7.31.0 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v7.30.0';
+const VERSION = 'v7.31.0';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -1788,7 +1788,7 @@ function clearVolatileState() {
   ['vendors','buyers','appointments','submissions','newProducts','promoRequests','returns','backorders','extraFeeRates','salesTargets','openPOs','poRevisions','updates'].forEach(k => { DATA[k] = []; });
   DATA._hydrated = false;
   try {
-    Object.keys(localStorage).filter(k => /^sl_(openpo_|revs_|new_product_draft|gr_draft|promo_draft|targets_draft)/.test(k)).forEach(k => localStorage.removeItem(k)); // เว้น sl_session / sl_write_queue / sl_sig_
+    Object.keys(localStorage).filter(k => /^sl_(boot_|openpo_|revs_|new_product_draft|gr_draft|promo_draft|targets_draft)/.test(k)).forEach(k => localStorage.removeItem(k)); // เว้น sl_session / sl_write_queue / sl_sig_
   } catch (e) {}
 }
 function logout() {
@@ -1821,7 +1821,13 @@ async function hydrateData() {
     return false;
   }
   if (!res || !res.ok || !res.data) return false;
-  const d = res.data;
+  _applyBootstrap(res.data);
+  saveBootCache(res.data);
+  return true;
+}
+
+// เอา payload bootstrap (สดจากหลังบ้าน หรือจาก cache ในเครื่อง) ใส่ DATA + reconcile session
+function _applyBootstrap(d) {
   const setArr = (k, v) => { if (Array.isArray(v)) DATA[k] = v; };
   setArr('vendors', d.vendors);
   setArr('buyers', d.buyers);
@@ -1846,19 +1852,51 @@ async function hydrateData() {
   DATA.updates = []; // no legacy updates in real mode
   if (d.today) DATA.today = d.today;
   DATA._hydrated = true;
-  return true;
 }
 
-// Login → set view → hydrate (with overlay) → render
+/* ═══ Bootstrap cache (stale-while-revalidate · v7.31.0) — เปิดแอปวาดหน้าจากข้อมูลรอบก่อนทันที แล้วดึงของสดเบื้องหลัง (เร็วแบบ Sales App โดยไม่เปิดชีทให้ซัพอ่านตรง) ═══ */
+// key ผูก user+role — เครื่องแชร์ไม่เห็นข้ามเจ้า · ทิ้งเมื่อคนละ VERSION (โครง DATA อาจเปลี่ยน) หรือเก่าเกิน 24 ชม. · ล้างตอน logout ใน clearVolatileState
+function _bootCacheKey() {
+  const s = S.session || {};
+  return 'sl_boot_' + (s.vendor && s.vendor.code ? 'v' + s.vendor.code : 'u' + (s.email || 'anon')) + '_' + (s.role || '');
+}
+function saveBootCache(d) {
+  try { localStorage.setItem(_bootCacheKey(), JSON.stringify({ v: VERSION, ts: Date.now(), d: d })); } catch (e) {}  // payload ใหญ่เกิน quota → ข้ามเงียบ (แอปช้าเท่าเดิม ไม่พัง)
+}
+function tryBootFromCache() {
+  try {
+    const c = JSON.parse(localStorage.getItem(_bootCacheKey()) || 'null');
+    if (!c || c.v !== VERSION || !c.d) return false;
+    if (Date.now() - c.ts > 24 * 3600 * 1000) return false;
+    _applyBootstrap(c.d);
+    return true;
+  } catch (e) { return false; }
+}
+// re-render เงียบหลังของสดมาถึง — เว้นตอนกำลังพิมพ์/เปิด modal (กันหน้าเด้งกลางมือ · ข้อมูลลง DATA แล้ว การ render ครั้งถัดไปเห็นเอง)
+function _rerenderAfterHydrate() {
+  if (!S.session) { render(); return; }  // session หมดอายุระหว่างดึงเบื้องหลัง → ไปหน้า login
+  const ov = document.getElementById('modal-overlay');
+  if (ov && !ov.classList.contains('hidden')) return;
+  const ae = document.activeElement;
+  if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return;
+  render();
+}
+
+// Login → set view → มี cache: เข้าแอปทันที + ดึงสดเบื้องหลัง · ไม่มี: overlay รอเหมือนเดิม (ครั้งแรกของเครื่อง)
 async function enterApp(session) {
   saveSession(session);
   S.view = session.role === 'gr' ? 'gr' : session.role === 'supplier' ? 'supplier' : 'admin';
   S.page = 'dashboard';
-  showAppLoading('กำลังโหลดข้อมูลจาก Sheet…');
-  try { await hydrateData(); }
-  catch (e) { console.error('[hydrate]', e); toast('โหลดข้อมูลไม่ครบ', 'ลองรีเฟรชอีกครั้ง', 'warn'); }
-  hideAppLoading();
-  render();
+  if (tryBootFromCache()) {
+    render();
+    hydrateData().then(_rerenderAfterHydrate).catch(e => console.error('[hydrate bg]', e));
+  } else {
+    showAppLoading('กำลังโหลดข้อมูลจาก Sheet…');
+    try { await hydrateData(); }
+    catch (e) { console.error('[hydrate]', e); toast('โหลดข้อมูลไม่ครบ', 'ลองรีเฟรชอีกครั้ง', 'warn'); }
+    hideAppLoading();
+    render();
+  }
   // Prefetch ในพื้นหลัง (ไม่บล็อก)
   if (S.session && S.session.role === 'supplier') prefetchDefects(); // ของเสีย+PO → กดจองเด้งทันที
   else if (S.view === 'admin') loadAdminCounts();                 // badge ที่จัดซื้อต้องจัดการ (ของเสีย/รับมีปัญหา/ยืนยัน PO)
@@ -8439,9 +8477,13 @@ async function init() {
   if (S.session) {
     S.view = S.session.role === 'gr' ? 'gr' : S.session.role === 'supplier' ? 'supplier' : 'admin';
     if (GAS_API_URL && !GAS_API_URL.startsWith('REPLACE_')) {
-      showAppLoading('กำลังโหลดข้อมูล…');
-      try { await hydrateData(); } catch(e) { console.error('[init hydrate]', e); }
-      hideAppLoading();
+      if (tryBootFromCache()) {
+        hydrateData().then(_rerenderAfterHydrate).catch(e => console.error('[init hydrate bg]', e));  // เปิดจาก cache ทันที ของสดตามมา
+      } else {
+        showAppLoading('กำลังโหลดข้อมูล…');
+        try { await hydrateData(); } catch(e) { console.error('[init hydrate]', e); }
+        hideAppLoading();
+      }
     }
   } else {
     S.view = 'login';
