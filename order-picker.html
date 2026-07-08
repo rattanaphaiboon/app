@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Order Picker v1.1</title>
+<title>Order Picker v1.2</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -77,7 +77,7 @@ td.num,#panel-orders td.num{text-align:center;font-variant-numeric:tabular-nums}
 <body>
 
 <header class="appbar">
-  <div class="title">📦 Order Picker <span class="ver">v1.1</span></div>
+  <div class="title">📦 Order Picker <span class="ver">v1.2</span></div>
   <div style="flex:1"></div>
   <a class="hub-btn" href="index.html">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 12H5M12 19l-7-7 7-7"/></svg> Hub
@@ -246,13 +246,9 @@ async function loadOrders(){
                     .map(normalizeRow);
   }
   try{
-    // ดึงย้อนหลัง 30 วัน · order by วัน desc, เวลา desc · limit 5000
-    const from = dateMinus(todayBKK(), 30);
-    const url = `${SUPABASE_URL}/rest/v1/roo_sales`
-      + `?select=*`
-      + `&${encodeURIComponent('วัน')}=gte.${from}`
-      + `&order=${encodeURIComponent('วัน')}.desc,${encodeURIComponent('เวลา')}.desc`
-      + `&limit=5000`;
+    // v1.2 fix: PostgREST parse ชื่อคอลัมน์ไทย (`วัน`/`เวลา`) ใน URL ไม่ได้ (Content-Type 400 "column ว does not exist")
+    // → ยิงแค่ select=* + limit · filter/sort ฝั่ง client (ข้อมูล < 5000 rows ทำเร็วอยู่แล้ว)
+    const url = `${SUPABASE_URL}/rest/v1/roo_sales?select=*&limit=5000`;
     const res = await fetch(url, {
       headers:{'apikey':SUPABASE_ANON,'Authorization':'Bearer '+SUPABASE_ANON,'Prefer':'count=exact'}
     });
@@ -270,10 +266,15 @@ async function loadOrders(){
                       .map(normalizeRow);
     }
 
-    setSrcStatus(`✅ Supabase · ${rows.length.toLocaleString()} แถว (30 วันล่าสุด)`, 'ok');
-    return rows.filter(r=> !/ยกเลิก/.test(String(r['ยกเลิก']||'')))
-               .filter(r=> !/รออนุมัติ|ปฏิเสธ/.test(String(r['สถานะอนุมัติ']||'')))
-               .map(normalizeRow);
+    // Filter/sort ฝั่ง client — เอา 30 วันล่าสุด, sort desc (ทำเองเพราะ URL param ไทยพัง)
+    const from = dateMinus(todayBKK(), 30);
+    const filtered = rows.filter(r=> !/ยกเลิก/.test(String(r['ยกเลิก']||'')))
+                         .filter(r=> !/รออนุมัติ|ปฏิเสธ/.test(String(r['สถานะอนุมัติ']||'')))
+                         .map(normalizeRow)
+                         .filter(r=> r.date >= from)
+                         .sort((a,b)=> b.date.localeCompare(a.date) || String(b.time||'').localeCompare(String(a.time||'')));
+    setSrcStatus(`✅ Supabase · ${filtered.length.toLocaleString()} แถว (30 วันล่าสุด · จากทั้งหมด ${rows.length.toLocaleString()})`, 'ok');
+    return filtered;
   }catch(e){
     console.error('[Supabase] loadOrders failed', e);
     setSrcStatus(`❌ Supabase error: ${esc(e.message||e)} — ใช้ mock ชั่วคราว`, 'err');
@@ -462,23 +463,31 @@ function renderOrders(){
 function renderSchema(){
   document.getElementById('panel-schema').innerHTML = `
   <div class="schema-box" style="border-color:var(--red);background:#fef2f2">
-    <h3 style="color:var(--red)">🚨 ต้องเปิด RLS ให้ anon อ่านก่อน (ตอนนี้ block อยู่)</h3>
-    <p style="font-size:13px;margin-bottom:10px">Supabase ตอบ <code>Content-Range: */0</code> — anon key มองเห็น 0 rows (แต่ Table Editor เห็น 2 rows) → RLS policy บล็อกอยู่<br>
-    <b>ไปที่ Supabase Dashboard → SQL Editor → Run SQL นี้:</b></p>
-    <pre>-- เปิด RLS + เพิ่ม policy อ่านสำหรับ anon (public read)
-ALTER TABLE public.roo_sales ENABLE ROW LEVEL SECURITY;
+    <h3 style="color:var(--red)">🚨 ถ้ายังเห็น 0 rows — ต้อง <code>GRANT SELECT</code> ให้ anon ด้วย (RLS อย่างเดียวไม่พอ)</h3>
+    <p style="font-size:13px;margin-bottom:10px"><b>ที่มา:</b> PostgreSQL RLS เป็น "ตัวกรอง <u>on top ของ GRANT</u>" — ถ้า role <code>anon</code> ยัง <b>ไม่มีสิทธิ์ SELECT</b> บน table อยู่แล้ว RLS policy ก็ไม่มีผล<br>
+    Supabase auto-grant SELECT ให้ anon เมื่อสร้าง table ผ่าน Table Editor UI แต่ถ้าสร้างผ่าน SQL อาจไม่มี GRANT</p>
+    <p style="font-size:13px;margin-bottom:8px"><b>Supabase Dashboard → SQL Editor → Run SQL นี้ทั้งก้อน:</b></p>
+    <pre>-- 1. GRANT สิทธิ์อ่านให้ anon (ขาดตัวนี้ = RLS policy ไม่มีผล)
+GRANT USAGE ON SCHEMA public TO anon;
+GRANT SELECT ON public.roo_sales TO anon;
 
+-- 2. เปิด RLS + policy อ่าน (ถ้ายังไม่ได้ทำ)
+ALTER TABLE public.roo_sales ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "anon_read_roo_sales" ON public.roo_sales;
 CREATE POLICY "anon_read_roo_sales"
-  ON public.roo_sales
-  FOR SELECT
-  TO anon
-  USING (true);
+  ON public.roo_sales FOR SELECT
+  TO anon USING (true);
 
--- (option) เพิ่ม index ให้ query เร็ว
-CREATE INDEX IF NOT EXISTS idx_roo_sales_wan ON public.roo_sales ("วัน");
-CREATE INDEX IF NOT EXISTS idx_roo_sales_order ON public.roo_sales ("orderId");</pre>
-    <p style="font-size:12px;color:var(--muted);margin-top:8px">รัน SQL เสร็จ → กด <b>🔄 โหลดใหม่</b> ที่ banner สีเหลืองด้านบน แถบจะเปลี่ยนเป็น <b style="color:var(--ok)">✅ Supabase · N แถว</b> ทันที</p>
+-- 3. เช็คว่าเรียบร้อยด้วย SQL นี้ (ต้องคืน count > 0)
+SELECT COUNT(*) FROM public.roo_sales;   -- แถวจริงในตาราง
+SELECT has_table_privilege('anon','public.roo_sales','SELECT');   -- ต้อง true</pre>
+    <p style="font-size:12px;color:var(--muted);margin-top:8px">รัน SQL เสร็จ → กด <b>🔄 โหลดใหม่</b> ที่ banner ด้านบน · ถ้ายัง 0 rows แถว 3 (has_table_privilege) จะบอกว่าปัญหาอยู่ที่ GRANT หรือ RLS</p>
+  </div>
+
+  <div class="schema-box" style="border-color:#f59e0b;background:#fffbeb">
+    <h3 style="color:#b45309">🔧 v1.2 fix: PostgREST parse ชื่อคอลัมน์ไทยใน URL ไม่ได้</h3>
+    <p style="font-size:13px;line-height:1.7">v1.1 ยิง <code>?วัน=gte.2026-06-08&order=วัน.desc</code> → เจอ <code>HTTP 400 "column ว does not exist"</code> — PostgREST truncate ที่ non-ASCII byte แรก<br>
+    <b>v1.2 fix:</b> ยิงแค่ <code>?select=*&limit=5000</code> → filter/sort ฝั่ง JS (30 วันล่าสุด · เร็วอยู่แล้วเพราะ &lt;5000 rows)</p>
   </div>
 
   <div class="schema-box">
