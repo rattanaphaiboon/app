@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <title>Rattana OM Report v8.87</title>
+  <title>Rattana OM Report v8.83</title>
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
@@ -241,9 +241,7 @@
   <div id="g_id_onload"
     data-client_id="615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com"
     data-callback="handleGoogleLogin"
-    data-auto_prompt="false"
-    data-ux_mode="popup"
-    data-cancel_on_tap_outside="false"></div>
+    data-auto_prompt="false"></div>
   <div class="login-card">
     <h2>Rattana OM Report</h2>
     <p>กรุณาเข้าสู่ระบบด้วย Google Account ของบริษัท</p>
@@ -261,7 +259,7 @@
 
 <header>
   
-  <div class="logo-text">Rattana <span>OM Report</span> <span class="ver-badge">v8.87 · 2026-07-09</span></div>
+  <div class="logo-text">Rattana <span>OM Report</span> <span class="ver-badge">v8.83 · 2026-07-09</span></div>
   <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรชข้อมูล">↻</button>
   <button class="icon-btn" id="btnDark" onclick="toggleDark()" title="Dark mode">🌙</button>
   <button class="icon-btn" onclick="exportExcel()" title="Export Excel">📥</button>
@@ -2316,31 +2314,20 @@ function exportSummaryExcel() {
     const payload = decodeJwtPayload(response.credential);
     if (!payload) { showLoginError('ไม่สามารถยืนยันตัวตนได้'); return; }
     const email = normalizeEmail(payload.email);
-    // Save session optimistically so redirect doesn't lose it
-    const session = { email, name: payload.name, exp: Date.now() + SESSION_DAYS * 86400000 };
-    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
     try {
       const url = `https://docs.google.com/spreadsheets/d/${AUTH_CONFIG.usersSheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(AUTH_CONFIG.usersSheetName)}`;
       const res = await fetch(url); const csv = await res.text();
-      const rows = csv.trim().split('
-').slice(1).map(r => r.replace(/^"|"$/g,'').split('","'));
+      const rows = csv.trim().split('\n').slice(1).map(r => r.replace(/^"|"$/g,'').split('","'));
       const allowed = rows.map(r => normalizeEmail(r[8]));
-      if (!allowed.includes(email)) {
-        localStorage.removeItem(SESSION_KEY); // revert
-        showLoginError(`ไม่พบสิทธิ์: ${payload.email}`); return;
-      }
+      if (!allowed.includes(email)) { showLoginError(`ไม่พบสิทธิ์: ${payload.email}`); return; }
+      const session = { email, name: payload.name, exp: Date.now() + SESSION_DAYS * 86400000 };
+      localStorage.setItem(SESSION_KEY, JSON.stringify(session));
       document.getElementById('loginScreen').style.display = 'none';
       document.getElementById('btnLogout').style.display = '';
       initApp();
-    } catch(e) {
-      // If fetch fails, allow if session already saved (offline fallback)
-      document.getElementById('loginScreen').style.display = 'none';
-      document.getElementById('btnLogout').style.display = '';
-      initApp();
-    }
+    } catch(e) { showLoginError('เกิดข้อผิดพลาด กรุณาลองใหม่'); }
   }
 
-  
   function checkSession() {
     const raw = localStorage.getItem(SESSION_KEY);
     if (raw) {
@@ -2413,42 +2400,72 @@ function buildQtrDataSelect() {
 
 async function loadQtrDataSheet(qLabel) {
   if (!qLabel) return;
-  const m = qLabel.match(/Q([0-9])\/([0-9]{2})/);
-  if (!m) return;
-  const q = parseInt(m[1]); const yr = 2000 + parseInt(m[2]);
-  const starts = {1:[1,2,3],2:[4,5,6],3:[7,8,9],4:[10,11,12]};
-  const qMonths = starts[q].map(mo => yr + "/" + String(mo).padStart(2,"0"));
-  const rows = allData.filter(r => qMonths.includes(r["Month_Year"]));
-  renderQtrDataTable(rows, qLabel, qMonths);
-}
-
-function renderQtrDataTable(rows, qLabel, qMonths) {
   const infoEl = document.getElementById('infoBarQD');
   const tbodyEl = document.getElementById('qtrDataBody');
   const theadEl = document.getElementById('qtrDataThead');
   const countEl = document.getElementById('qtrDataCount');
-  const TEXT_COLS = new Set(['Quater','Quarter','Month_Year','Customer_Code','Doc_No','Sale_No_ROO','Customer_Name','Product_Name','Cat_BU','Cat_Brand']);
+
+  if (qtrDataCache[qLabel]) {
+    renderQtrDataTable(qtrDataCache[qLabel], qLabel);
+    return;
+  }
+  infoEl.innerHTML = `⏳ กำลังโหลด <strong>${qLabel}</strong>...`;
+  tbodyEl.innerHTML = '<tr class="empty-row"><td colspan="20">กำลังโหลด...</td></tr>';
+  countEl.textContent = '';
+  try {
+    const rows = await fetchSheet(qLabel);
+    qtrDataCache[qLabel] = rows;
+    renderQtrDataTable(rows, qLabel);
+  } catch(e) {
+    infoEl.innerHTML = `❌ ไม่พบชีต <strong>${qLabel}</strong> — ${e.message}`;
+    tbodyEl.innerHTML = `<tr class="empty-row"><td colspan="20">ไม่พบข้อมูล — อาจยังไม่มีชีตชื่อ "${qLabel}"</td></tr>`;
+    theadEl.innerHTML = '<tr><th>ข้อมูล</th></tr>';
+    document.getElementById('qtrDataCount').textContent = '';
+  }
+}
+
+function renderQtrDataTable(rows, qLabel) {
+  const infoEl = document.getElementById('infoBarQD');
+  const tbodyEl = document.getElementById('qtrDataBody');
+  const theadEl = document.getElementById('qtrDataThead');
+  const countEl = document.getElementById('qtrDataCount');
+
   if (!rows.length) {
-    infoEl.innerHTML = '📅 ไตรมาส: <strong>' + qLabel + '</strong> — ไม่พบข้อมูล (' + escHtml((qMonths||[]).join(', ')) + ')';
-    tbodyEl.innerHTML = '<tr class="empty-row"><td colspan="20">ไม่พบข้อมูลในไตรมาสนี้</td></tr>';
+    infoEl.innerHTML = `📅 <strong>${qLabel}</strong> — ไม่มีข้อมูล`;
+    tbodyEl.innerHTML = '<tr class="empty-row"><td colspan="20">ไม่มีข้อมูลในไตรมาสนี้</td></tr>';
     theadEl.innerHTML = '<tr><th>ข้อมูล</th></tr>';
     countEl.textContent = '';
     return;
   }
   const cols = Object.keys(rows[0]);
-  theadEl.innerHTML = '<tr>' + cols.map(c => '<th>' + escHtml(c) + '</th>').join('') + '</tr>';
+  // Build header
+  theadEl.innerHTML = '<tr>' + cols.map(c => `<th>${escHtml(c)}</th>`).join('') + '</tr>';
+  // Build body
   tbodyEl.innerHTML = rows.map(r =>
     '<tr>' + cols.map(c => {
-      const v = r[c] != null ? r[c] : '';
-      const str = String(v);
-      if (TEXT_COLS.has(c)) return '<td>' + escHtml(str) + '</td>';
-      const n = parseFloat(str.replace(/,/g,''));
-      return isNaN(n) || str === '' ? '<td>' + escHtml(str) + '</td>' : '<td class="num">' + Number(n).toLocaleString('th-TH',{minimumFractionDigits:0,maximumFractionDigits:2}) + '</td>';
+      const v = r[c] ?? '';
+      const n = parseFloat(String(v).replace(/,/g,''));
+      return isNaN(n) || v === '' ? `<td>${escHtml(String(v))}</td>` : `<td class="num">${Number(n).toLocaleString('th-TH', {minimumFractionDigits:0,maximumFractionDigits:2})}</td>`;
     }).join('') + '</tr>'
   ).join('');
-  infoEl.innerHTML = '📅 ไตรมาส: <strong>' + qLabel + '</strong>' + (currentSheet ? ' &nbsp;|&nbsp; 👤 <strong>' + escHtml(currentSheet) + '</strong>' : '');
-  countEl.textContent = rows.length.toLocaleString() + ' รายการ';
+  infoEl.innerHTML = `📅 ไตรมาส: <strong>${qLabel}</strong>${currentSheet ? ` &nbsp;|&nbsp; 👤 <strong>${currentSheet}</strong>` : ''}`;
+  countEl.textContent = `${rows.length.toLocaleString()} รายการ`;
 }
+
+    window.onload = () => {
+  if (localStorage.getItem('om_dark') === '1') {
+    document.body.classList.add('dark');
+    document.getElementById('btnDark').textContent = '☀️';
+  }
+  bindHeaderSort();
+  checkSession();
+};
+</script>
+</body>
+</html>
+
+
+
 
 
 
