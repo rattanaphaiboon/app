@@ -6564,12 +6564,22 @@ function shIni(name){const p=(name||'').trim().split(/\s+/);return (p[0]?p[0][0]
 function shEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function shAvatar(idx,size){const a=SH_AV[idx%SH_AV.length];return `background:${a.bg};color:${a.fg};width:${size}px;height:${size}px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0`;}
 function shStartSelect(val){
-  const khlang=(_shift&&_shift.khlang)||(currentUser&&currentUser.khlang)||'';
+  const s=_shift, ac=s&&s.activeCell;
+  const khlang=(s&&s.khlang)||(currentUser&&currentUser.khlang)||'';
   const list=(SH_START_TIMES[khlang]||[]).slice();
   if(val && list.indexOf(val)<0) list.unshift(val);   // เก็บค่าปัจจุบันไว้ถ้าไม่อยู่ในลิสต์คลัง
   if(!list.length) return `<input type="time" value="${val}" onchange="shSetTime('pendingStart',this.value)" style="${SH_TIME_STYLE}">`;
-  return `<select onchange="shSetTime('pendingStart',this.value)" style="${SH_TIME_STYLE};cursor:pointer">`+
-    list.map(t=>`<option value="${t}"${t===val?' selected':''}>${t} น.</option>`).join('')+`</select>`;
+  const enforce = ac && !s.canEdit;   // พนักงานทั่วไป: จำกัดตามโควต้า
+  const curStart = ac ? ((s.shifts[ac.empId+'|'+ac.iso]||{}).start||null) : null;
+  const opts = list.map(t=>{
+    let full=false, tail='';
+    if(ac){ const key=shSheetDate(ac.iso)+'|'+t; const lim=s.quota[key]; const used=s.booked[key]||0;
+      if(lim!=null){ const mineHere=(curStart===t);
+        full = enforce && used>=lim && !mineHere;
+        tail = full ? ' — เต็ม' : ' (เหลือ '+Math.max(0,lim-used)+'/'+lim+')'; } }
+    return `<option value="${t}"${t===val?' selected':''}${full?' disabled':''}>${t} น.${tail}</option>`;
+  }).join('');
+  return `<select onchange="shSetTime('pendingStart',this.value)" style="${SH_TIME_STYLE};cursor:pointer">`+opts+`</select>`;
 }
 function shKey(){return 'rf_shift_'+(currentUser&&currentUser.empId||'x');}
 function shSave(){ try{ localStorage.setItem(shKey(), JSON.stringify({employees:_shift.employees, shifts:_shift.shifts})); }catch(_){} }
@@ -6594,6 +6604,12 @@ async function shInitState(){
     rosterKhlang=res.khlang||'';
     rosterSaka=res.saka||'';
     rosterPosition=res.myPosition||'';
+    // fallback: ถ้า myPosition ว่าง/ไม่ใช่ผู้จัดการ ให้ใช้ตำแหน่งจากแถวตัวเองในรายชื่อ
+    if(!SH_MANAGER_RE.test((rosterPosition||'').trim())){
+      const mine=(res.staff||[]).find(u=>String(u.empId||'')===String(currentUser.empId||''))
+              || (res.staff||[]).find(u=>(u.name||'').trim()===(currentUser.name||'').trim());
+      if(mine && mine.dept) rosterPosition=mine.dept;
+    }
   }catch(_){}
   const rosterCanEdit = SH_MANAGER_RE.test((rosterPosition||'').trim());
   // รวมคนที่เพิ่มเองไว้ก่อนหน้า (ที่ไม่มีในรายชื่อ server)
@@ -6616,8 +6632,14 @@ async function shInitState(){
       shifts=fromSheet;   // ชีท = แหล่งข้อมูลจริง
     }
   }catch(_){}
+  // โหลดโควต้า + จำนวนที่จองแล้ว จากชีท "โควต้ากะ" / "จัดกะ"
+  let quota={}, booked={};
+  try{
+    const q=await callAppsScript('getQuota',{ saka: rosterSaka, khlang: rosterKhlang });
+    if(q && q.ok){ quota=q.quota||{}; booked=q.booked||{}; }
+  }catch(_){}
   const now=new Date(); const ws=new Date(now.getFullYear(),now.getMonth(),1);
-  _shift={ weekStart:ws, khlang: rosterKhlang || currentUser.khlang || '', saka: rosterSaka || '', canEdit: rosterCanEdit, employees, shifts, tab:'day', selectedDay: now.getDate()-1,
+  _shift={ weekStart:ws, khlang: rosterKhlang || currentUser.khlang || '', saka: rosterSaka || '', canEdit: rosterCanEdit, employees, shifts, quota, booked, quotaEdit:{}, tab:'day', selectedDay: now.getDate()-1,
     activeCell:null, pendingMode:'work', pendingType:null, pendingStart:'07:00', pickerFilled:false,
     pendingOtOn:false, pendingOtHours:2,
     addOpen:false, newName:'', newCode:'', newDept:'' };
@@ -6631,14 +6653,14 @@ function shNextWeek(){const d=_shift.weekStart;_shift.weekStart=new Date(d.getFu
 function shToday(){const n=new Date();_shift.weekStart=new Date(n.getFullYear(),n.getMonth(),1);_shift.selectedDay=n.getDate()-1;drawShift();}
 function shSelDay(i){_shift.selectedDay=i;drawShift();}
 function shOpenPicker(empId,iso){
-  if(!_shift.canEdit){ toast('คุณมีสิทธิ์ดูอย่างเดียว — เฉพาะผู้จัดการจัดกะได้', 'info'); return; }
   const e=_shift.employees.find(x=>x.id===empId); if(!e) return;
+  if(!shCanEditRow(e)){ toast('คุณจองกะได้เฉพาะกะของตัวเอง','info'); return; }
   const d=new Date(iso+'T00:00:00'), wd=d.getDay();
   const sh=_shift.shifts[empId+'|'+iso], ot=sh&&sh.ot;
   const list=SH_START_TIMES[_shift.khlang]||[];
   _shift.activeCell={empId,iso,empName:e.name,dayFull:SH_DAYSF[wd],dateLabel:d.getDate()+' '+SH_MON[d.getMonth()]};
   _shift.pendingMode = sh ? ((SH_TYPES[sh.type]&&SH_TYPES[sh.type].work) ? 'work' : sh.type) : 'work';
-  _shift.pendingStart = (sh&&sh.start) ? sh.start : (list[0]||'07:00');
+  _shift.pendingStart = (sh&&sh.start) ? sh.start : shFirstFreeStart(iso,list);
   _shift.pickerFilled = !!sh;
   _shift.pendingOtOn = !!ot;
   _shift.pendingOtHours = ot ? shOtHours(ot) : 2;
@@ -6655,6 +6677,30 @@ function shClickType(key){
 }
 function shSetTime(field,val){_shift[field]=val;drawShift();}
 function shToggleOt(){ _shift.pendingOtOn=!_shift.pendingOtOn; if(_shift.pendingOtOn && !(_shift.pendingOtHours>0)) _shift.pendingOtHours=2; drawShift(); }
+/* ── สิทธิ์รายแถว + โควต้า ── */
+function shCanEditRow(e){ if(!_shift) return false; if(_shift.canEdit) return true; return String((e&&e.code)||'')===String((currentUser&&currentUser.empId)||''); }
+function shFirstFreeStart(iso,list){
+  const s=_shift; const arr=(list&&list.length)?list:(SH_START_TIMES[s.khlang]||['07:00']);
+  if(s.canEdit) return arr[0]||'07:00';
+  for(const t of arr){ const k=shSheetDate(iso)+'|'+t; const lim=s.quota[k]; if(lim==null||(s.booked[k]||0)<lim) return t; }
+  return arr[0]||'07:00';
+}
+function shSetQuota(iso,t,val){ _shift.quotaEdit[iso+'|'+t] = (val===''?'':val); }
+function shSaveQuota(){
+  const s=_shift; const iso=shIso(shAddDays(s.weekStart,s.selectedDay)); const dateTh=shSheetDate(iso);
+  const times=SH_START_TIMES[s.khlang]||[];
+  const items=times.map(t=>{ const ek=iso+'|'+t; const raw=(s.quotaEdit[ek]!=null)?s.quotaEdit[ek]:s.quota[dateTh+'|'+t];
+    const lim=(raw===''||raw==null)?null:Math.max(0,parseInt(raw,10)||0); return {start:t,limit:lim}; });
+  items.forEach(it=>{ const k=dateTh+'|'+it.start; if(it.limit==null) delete s.quota[k]; else s.quota[k]=it.limit; });
+  drawShift();
+  callAppsScript('submitQuota',{ saka:s.saka||'', khlang:s.khlang||'', date:dateTh, items })
+    .then(()=>toast('✓ บันทึกโควต้าแล้ว','success'))
+    .catch(err=>toast((err&&err.message)||'บันทึกโควต้าไม่สำเร็จ','warning'));
+}
+async function shReloadQuota(){
+  try{ const q=await callAppsScript('getQuota',{ saka:_shift.saka||'', khlang:_shift.khlang||'' });
+    if(q&&q.ok){ _shift.quota=q.quota||{}; _shift.booked=q.booked||{}; drawShift(); } }catch(_){}
+}
 function shSaveShift(){
   const s=_shift, ac=s.activeCell; if(!ac) return;
   const emp=s.employees.find(e=>e.id===ac.empId)||{};
@@ -6663,18 +6709,27 @@ function shSaveShift(){
     shift={type:s.pendingMode,start:null,end:null};
     payload={ start:'', end:'', holiday:(s.pendingMode==='leave'?'ลา':'วันหยุด'), ot:'' };
   } else {
+    // พนักงานทั่วไป: กันเลือกกะที่โควต้าเต็ม
+    if(!s.canEdit){
+      const key=shSheetDate(ac.iso)+'|'+s.pendingStart, lim=s.quota[key];
+      const curStart=(s.shifts[ac.empId+'|'+ac.iso]||{}).start;
+      if(lim!=null && (s.booked[key]||0)>=lim && curStart!==s.pendingStart){ toast('กะนี้เต็มแล้ว เลือกเวลาอื่น','warning'); return; }
+    }
     const endT=shAddH(s.pendingStart,SH_WORK_HOURS);
     shift={type:'work',start:s.pendingStart,end:endT};
     const ot=(s.pendingOtOn && s.pendingOtHours>0)?Number(s.pendingOtHours):0;
     if(ot>0) shift.ot={hours:ot};
     payload={ start:s.pendingStart, end:endT, holiday:'', ot: ot||'' };
   }
+  const prev=s.shifts[ac.empId+'|'+ac.iso];
   s.shifts[ac.empId+'|'+ac.iso]=shift; shSave();
-  // บันทึกลง Google Sheet "จัดกะ"
+  // บันทึกลง Google Sheet "จัดกะ" (server เช็คโควต้าซ้ำกันจองซ้อน)
   callAppsScript('submitShift', Object.assign({
-    saka: s.saka||'', company: s.khlang||'', name: emp.name||'', date: shSheetDate(ac.iso),
-  }, payload)).catch(()=>{});
-  toast('✓ บันทึกกะแล้ว','success');
+    saka: s.saka||'', company: s.khlang||'', name: emp.name||'', empId: emp.code||'',
+    date: shSheetDate(ac.iso), bypassQuota: !!s.canEdit,
+  }, payload)).then(()=>{ toast('✓ บันทึกกะแล้ว','success'); shReloadQuota(); })
+   .catch(err=>{ if(prev) s.shifts[ac.empId+'|'+ac.iso]=prev; else delete s.shifts[ac.empId+'|'+ac.iso];
+     shSave(); toast((err&&err.message)||'บันทึกกะไม่สำเร็จ','warning'); shReloadQuota(); });
   shClosePicker();
 }
 function shClearCell(){const ac=_shift.activeCell; delete _shift.shifts[ac.empId+'|'+ac.iso]; shSave(); shClosePicker();}
@@ -6716,11 +6771,11 @@ function drawShift(){
       <button onclick="shNextWeek()" style="width:34px;height:34px;border-radius:9px;border:1px solid #E9ECF0;background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#344054" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
     </div>
     <div style="display:flex;gap:6px;padding-bottom:12px">
-      ${[['day','จัดกะ'],['week','สรุปเดือน'],['staff','พนักงาน']].map(([k,lb])=>{const on=s.tab===k;return `<button onclick="shTab('${k}')" style="flex:1;height:36px;border-radius:10px;border:none;cursor:pointer;font:inherit;font-size:13px;font-weight:${on?700:600};background:${on?'#101828':'#F4F6F8'};color:${on?'#fff':'#475467'}">${lb}</button>`;}).join('')}
+      ${[['day','จัดกะ'],['week','สรุปเดือน'],['staff','พนักงาน']].concat(s.canEdit?[['quota','โควต้า']]:[]).map(([k,lb])=>{const on=s.tab===k;return `<button onclick="shTab('${k}')" style="flex:1;height:36px;border-radius:10px;border:none;cursor:pointer;font:inherit;font-size:12.5px;font-weight:${on?700:600};background:${on?'#101828':'#F4F6F8'};color:${on?'#fff':'#475467'}">${lb}</button>`;}).join('')}
     </div>`;
 
-  // day strip (day tab only)
-  if(s.tab==='day'){
+  // day strip (day + quota tab)
+  if(s.tab==='day'||s.tab==='quota'){
     html += `<div style="display:flex;gap:7px;overflow-x:auto;padding:0 0 13px">`+days.map(d=>{const active=d.idx===s.selectedDay,c=countFor(d.iso);
       return `<button onclick="shSelDay(${d.idx})" style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:46px;padding:9px 4px 8px;border-radius:13px;border:none;cursor:pointer;font:inherit;flex-shrink:0;background:${active?'#101828':'#F4F6F8'};color:${active?'#fff':'#344054'}"><span style="font-size:11.5px;font-weight:600;opacity:.8">${d.dayShort}</span><span style="font-size:17px;font-weight:700;line-height:1.1">${d.dateNum}</span><span style="font-size:10px;font-weight:700;min-width:16px;height:16px;line-height:16px;border-radius:8px;margin-top:2px;background:${active?'rgba(255,255,255,.22)':'#E4E8ED'};color:${active?'#fff':'#667085'}">${c}</span></button>`;
     }).join('')+`</div>`;
@@ -6739,8 +6794,8 @@ function drawShift(){
           if(sh.ot){const oh=shOtHours(sh.ot);dayHours+=oh;ot=`<div style="font-size:10px;font-weight:700;color:#C2410C;margin-top:2px">OT +${shFmtH(oh)} ชม.</div>`;} }
         right=`<div style="text-align:right;flex-shrink:0"><div style="display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:9px;font-size:12.5px;font-weight:700;white-space:nowrap;background:${t.bg};color:${t.color};border:1px solid ${t.border}"><span style="width:7px;height:7px;border-radius:2px;background:${t.dot}"></span>${t.label}</div>${time}${ot}</div>`;
       } else {
-        right = s.canEdit
-          ? `<div style="display:flex;align-items:center;gap:5px;color:#0F766E;font-size:12.5px;font-weight:600;flex-shrink:0;background:#E4F7F1;border-radius:9px;padding:7px 11px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0F766E" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>จัดกะ</div>`
+        right = shCanEditRow(e)
+          ? `<div style="display:flex;align-items:center;gap:5px;color:#0F766E;font-size:12.5px;font-weight:600;flex-shrink:0;background:#E4F7F1;border-radius:9px;padding:7px 11px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0F766E" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>${s.canEdit?'จัดกะ':'จองกะ'}</div>`
           : `<div style="font-size:12px;color:#B0B7C0;flex-shrink:0">— ยังไม่จัดกะ</div>`;
       }
       return `<button onclick="shOpenPicker('${e.id}','${selDay.iso}')" style="display:flex;align-items:center;gap:12px;width:100%;text-align:left;background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:12px 13px;cursor:pointer;font:inherit"><div style="${shAvatar(idx,42)}">${shEsc(shIni(e.name))}</div><div style="flex:1;min-width:0"><div style="font-size:14.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${shEsc(e.name)}</div><div style="font-size:11.5px;color:#98A2B3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${shEsc(e.dept)}</div></div>${right}</button>`;
@@ -6755,6 +6810,15 @@ function drawShift(){
       return `<div style="background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:13px"><div style="display:flex;align-items:center;gap:11px"><div style="${shAvatar(idx,40)}">${shEsc(shIni(e.name))}</div><div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${shEsc(e.name)}</div><div style="font-size:11.5px;color:#98A2B3">เข้ากะ ${wdC} วัน · หยุด/ลา ${offC} วัน</div></div><div style="font-size:16px;font-weight:700;color:#0F766E;font-family:'IBM Plex Mono',monospace">${shFmtH(total)} ชม.</div></div></div>`;
     }).join('');
     html += `<div style="padding:16px 16px 24px"><div style="display:flex;gap:11px;margin-bottom:16px"><div style="flex:1;background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:14px"><div style="font-size:12px;color:#667085;font-weight:500">ชั่วโมงรวมเดือนนี้</div><div style="font-size:24px;font-weight:700;color:#0F766E;margin-top:3px">${shFmtH(weekHoursAll)} ชม.</div></div><div style="flex:1;background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:14px"><div style="font-size:12px;color:#667085;font-weight:500">กะที่จัดแล้ว</div><div style="font-size:24px;font-weight:700;margin-top:3px">${weekShifts} <span style="font-size:13px;font-weight:500;color:#98A2B3">กะ</span></div></div></div><div style="font-size:13px;font-weight:600;color:#667085;margin-bottom:10px">ชั่วโมงรวมรายคน</div><div style="display:flex;flex-direction:column;gap:10px">${rows}</div></div>`;
+  } else if(s.tab==='quota'){
+    const selDay=days[s.selectedDay];
+    const times=SH_START_TIMES[s.khlang]||[];
+    const rowsHtml = times.length ? times.map(t=>{
+      const key=shSheetDate(selDay.iso)+'|'+t, used=s.booked[key]||0, ek=selDay.iso+'|'+t;
+      const cur=(s.quotaEdit[ek]!=null)?s.quotaEdit[ek]:(s.quota[key]!=null?s.quota[key]:'');
+      return `<div style="display:flex;align-items:center;gap:12px;background:#fff;border:1px solid #ECEFF2;border-radius:13px;padding:11px 13px"><div style="flex:1"><div style="font-size:15px;font-weight:700;font-family:'IBM Plex Mono',monospace">${t} น.</div><div style="font-size:11.5px;color:#98A2B3;margin-top:1px">จองแล้ว ${used} คน</div></div><input type="number" min="0" inputmode="numeric" value="${cur}" oninput="shSetQuota('${selDay.iso}','${t}',this.value)" placeholder="ไม่จำกัด" style="width:100px;height:44px;text-align:center;border:1px solid #DCE0E6;border-radius:11px;font:inherit;font-size:16px;font-weight:700;color:#0F766E"></div>`;
+    }).join('') : '<div style="text-align:center;color:#98A2B3;padding:20px">คลังนี้ยังไม่ได้ตั้งเวลาเข้างาน</div>';
+    html += `<div style="padding:14px 16px 24px"><div style="font-size:15px;font-weight:700;margin-bottom:5px">โควต้า ${selDay.dayFull} ${selDay.dateLabel}</div><div style="font-size:12px;color:#667085;margin-bottom:13px">กำหนดจำนวนคนสูงสุดต่อเวลาเข้างาน · เว้นว่าง = ไม่จำกัด</div><div style="display:flex;flex-direction:column;gap:9px">${rowsHtml}</div>${times.length?`<button onclick="shSaveQuota()" style="width:100%;margin-top:16px;height:50px;border-radius:13px;border:none;background:#0F766E;color:#fff;font:inherit;font-size:15.5px;font-weight:700;cursor:pointer">บันทึกโควต้าวันนี้</button>`:''}</div>`;
   } else {
     const rows=s.employees.map((e,idx)=>`<div style="display:flex;align-items:center;gap:12px;background:#fff;border:1px solid #ECEFF2;border-radius:14px;padding:12px 13px"><div style="${shAvatar(idx,42)}">${shEsc(shIni(e.name))}</div><div style="flex:1;min-width:0"><div style="font-size:14.5px;font-weight:600">${shEsc(e.name)}</div><div style="font-size:11.5px;color:#98A2B3;display:flex;align-items:center;gap:6px;margin-top:1px"><span style="font-family:'IBM Plex Mono',monospace">${shEsc(e.code)}</span>${e.dept?'<span style="width:3px;height:3px;border-radius:50%;background:#CBD5E1"></span><span>'+shEsc(e.dept)+'</span>':''}</div></div>${s.canEdit?`<button onclick="shRemoveEmp('${e.id}')" style="width:34px;height:34px;border-radius:9px;border:none;background:#FBFBFC;color:#C0C7D1;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m-1 0v14H9V6"/></svg></button>`:''}</div>`).join('');
     html += `<div style="padding:16px 16px 24px"><div style="font-size:13px;font-weight:600;color:#667085;margin-bottom:10px">พนักงานทั้งหมด · ${s.employees.length} คน</div><div style="display:flex;flex-direction:column;gap:10px">${rows||'<div style="text-align:center;color:#98A2B3;padding:20px">ยังไม่มีพนักงาน</div>'}</div>
