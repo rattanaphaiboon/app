@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Order Picker v1.3</title>
+<title>Order Picker v1.4</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -77,7 +77,7 @@ td.num,#panel-orders td.num{text-align:center;font-variant-numeric:tabular-nums}
 <body>
 
 <header class="appbar">
-  <div class="title">📦 Order Picker <span class="ver">v1.3</span></div>
+  <div class="title">📦 Order Picker <span class="ver">v1.4</span></div>
   <div style="flex:1"></div>
   <a class="hub-btn" href="index.html">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 12H5M12 19l-7-7 7-7"/></svg> Hub
@@ -88,6 +88,7 @@ td.num,#panel-orders td.num{text-align:center;font-variant-numeric:tabular-nums}
   🔌 <b>ต่อ Supabase</b> — <code>roo_sales</code> @ <code>ncmgqigufxmlgiqfisdf</code>
   &nbsp;·&nbsp; <span id="srcStatus" style="font-weight:700">⏳ กำลังโหลด…</span>
   &nbsp;·&nbsp; <button onclick="reload()" style="border:1px solid var(--gold);background:#fff;color:var(--navy);border-radius:6px;padding:2px 10px;font-weight:700;cursor:pointer;font-size:12px">🔄 โหลดใหม่</button>
+  &nbsp;·&nbsp; 👤 <input id="adminInput" placeholder="ชื่อคุณ (แอดมินจัด)" oninput="setAdmin(this.value)" style="border:1px solid var(--border);background:#fff;border-radius:6px;padding:2px 8px;font-size:12px;font-family:inherit;min-width:120px;outline:none">
 </div>
 
 <div class="filterbar">
@@ -206,6 +207,13 @@ const SUPABASE_URL = 'https://ncmgqigufxmlgiqfisdf.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jbWdxaWd1ZnhtbGdpcWZpc2RmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE1MDU5NzAsImV4cCI6MjA5NzA4MTk3MH0.jU0ZOe2AtO9YR6dKOmOQzkmvqj_27eiDisYNvLzVItQ';
 let USE_MOCK = false;   // toggle ถ้าอยากทดสอบ mock
 
+/* v1.4: auto-mark สถานะจัด หลัง Export Excel */
+const WRITE_STATUS = true;
+/* GAS webhook URL — สำหรับเขียนสถานะจัดลง Google Sheets ORDER tab ด้วย
+ * ปล่อยว่าง = เขียนแค่ Supabase (Google Sheets ไม่โดนอัปเดต)
+ * ตั้งค่า = paste /exec URL ของ Apps Script (action:'markDone' รับ orderIds+by)  */
+const GAS_URL = '';
+
 /* ค่าคอลัมน์ที่ทน key เพี้ยน (ชื่อไทย/eng/case ต่าง) */
 function pick(r, keys){ for(const k of keys){ const v=r[k]; if(v!==undefined && v!==null && v!=='') return v; } return ''; }
 
@@ -232,7 +240,12 @@ function normalizeRow(r, i){
     orderId: String(pick(r,['orderId','order_id','billId','bill_id'])||'').trim(),
     note: String(pick(r,['หมายเหตุ','note','remark'])||'').trim(),
     dueDate: String(pick(r,['วันกำหนดส่ง','due_date','deliv_date'])||'').slice(0,10),
-    apprStatus: String(pick(r,['สถานะอนุมัติ','approval_status','apprStatus'])||'').trim()
+    apprStatus: String(pick(r,['สถานะอนุมัติ','approval_status','apprStatus'])||'').trim(),
+    /* v1.4: สถานะจัดจากหลังบ้าน — badge "จัดแล้ว" ในตาราง + tooltip แอดมิน+วัน */
+    done: /จัดแล้ว/.test(String(pick(r,['สถานะจัด','done','status_done'])||'')),
+    doneBy: String(pick(r,['แอดมินจัด','done_by','doneBy'])||''),
+    doneDate: String(pick(r,['วันสั่งจัด','done_date','doneDate'])||'').slice(0,10),
+    doneTime: String(pick(r,['เวลาสั่งจัด','done_time','doneTime'])||'')
   };
 }
 
@@ -295,6 +308,74 @@ function setSrcStatus(html, level){
   else { b.style.background='#fffbeb'; b.style.borderBottomColor='var(--gold)'; }
 }
 async function reload(){ setSrcStatus('⏳ กำลังโหลด…',''); DATA_ORDERS = await loadOrders(); selectedBills.clear(); buildBills().forEach(b=>selectedBills.add(b.orderId)); render(); }
+
+/* ============================================================
+   v1.4: mark สถานะจัด — Supabase (REST PATCH) + Google Sheets (GAS webhook)
+   ============================================================ */
+function getAdmin(){
+  let admin = localStorage.getItem('picker_admin')||'';
+  if(!admin){
+    admin = (prompt('ชื่อคุณ (จะบันทึกใน "แอดมินจัด" ทุกครั้งที่ Export):','')||'').trim();
+    if(admin) localStorage.setItem('picker_admin', admin);
+  }
+  return admin;
+}
+function setAdmin(v){ v=String(v||'').trim(); if(v){ localStorage.setItem('picker_admin',v); } else { localStorage.removeItem('picker_admin'); } }
+function nowBKK(){
+  const parts = new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Bangkok',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date());
+  // "09/07/2026, 15:23" → {date:"2026-07-09", time:"15:23"}
+  const [d,t] = parts.split(', ');
+  const [dd,mm,yy] = d.split('/');
+  return {date:`${yy}-${mm}-${dd}`, time:t};
+}
+
+/* Supabase PATCH — orderId=in.(a,b,c) filter · ต้องมี GRANT UPDATE ให้ anon ก่อน (SQL อยู่ในแท็บ Schema) */
+async function markDoneSupabase(orderIds, admin){
+  if(!WRITE_STATUS || !orderIds || !orderIds.length) return {ok:false, n:0, skipped:true};
+  const {date, time} = nowBKK();
+  const payload = { 'สถานะจัด':'จัดแล้ว', 'แอดมินจัด':admin||'', 'วันสั่งจัด':date, 'เวลาสั่งจัด':time };
+  const filter = 'orderId=in.('+orderIds.map(o=>encodeURIComponent(o)).join(',')+')';
+  const url = `${SUPABASE_URL}/rest/v1/roo_sales?${filter}`;
+  try{
+    const res = await fetch(url, {
+      method:'PATCH',
+      headers:{'apikey':SUPABASE_ANON,'Authorization':'Bearer '+SUPABASE_ANON,'Content-Type':'application/json','Prefer':'return=representation'},
+      body: JSON.stringify(payload)
+    });
+    if(!res.ok){ const t=await res.text(); return {ok:false, n:0, err:`HTTP ${res.status}: ${t.slice(0,120)}`}; }
+    const rows = await res.json();
+    return {ok:true, n: Array.isArray(rows)?rows.length:0};
+  }catch(e){ return {ok:false, n:0, err:e.message||String(e)}; }
+}
+
+/* Google Sheets — POST ไป Apps Script webhook (no-cors → เชื่อว่าเขียนสำเร็จ) */
+async function markDoneGAS(orderIds, admin){
+  if(!GAS_URL || !orderIds || !orderIds.length) return {ok:false, n:0, skipped:true};
+  try{
+    await fetch(GAS_URL, {
+      method:'POST',
+      mode:'no-cors',   // Apps Script ไม่ส่ง CORS header
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({action:'markDone', orderIds, by:admin||''})
+    });
+    return {ok:true, n:orderIds.length};   // no-cors อ่าน response ไม่ได้ · ถือว่าสำเร็จ
+  }catch(e){ return {ok:false, n:0, err:e.message||String(e)}; }
+}
+
+async function markDoneAfterExport(orderIds){
+  if(!WRITE_STATUS || !orderIds.length) return;
+  const admin = getAdmin();
+  if(!admin){ toast('⏸ ไม่ได้ใส่ชื่อ — ข้ามการมาร์คสถานะจัด'); return; }
+  const [sr, gr] = await Promise.all([markDoneSupabase(orderIds, admin), markDoneGAS(orderIds, admin)]);
+  const parts = [];
+  if(sr.ok) parts.push(`✅ Supabase ${sr.n} บรรทัด`);
+  else if(sr.err) parts.push(`❌ Supabase: ${sr.err}`);
+  if(gr.ok) parts.push(`✅ GS ${gr.n}`);
+  else if(gr.err) parts.push(`⚠️ GS: ${gr.err}`);
+  else if(gr.skipped) parts.push(`⏸ GS: ยังไม่ตั้ง GAS_URL`);
+  if(parts.length) toast(parts.join(' · '));
+  if(sr.ok){ DATA_ORDERS = await loadOrders(); render(); }   // reload → badge "จัดแล้ว" โผล่ในตาราง
+}
 
 /* ============================================================
    STATE + HELPERS
@@ -371,13 +452,15 @@ function buildBills(){
     if(!bills[o.orderId]){
       bills[o.orderId]={orderId:o.orderId, date:o.date, time:o.time||'', salesman:o.salesman,
         salesmanName: u.name||o.name||'', chan, roleLab: chan || 'R0',
-        store:o.store, wh:shipWh(o), lines:0, total:0, keyTS:0, seq:Infinity, isROO:isROO(o)};
+        store:o.store, wh:shipWh(o), lines:0, total:0, keyTS:0, seq:Infinity, isROO:isROO(o),
+        done:false, doneBy:'', doneDate:'', doneTime:''};
     }
     const b = bills[o.orderId];
     const ts = keyTSof(o);
     if(ts>=b.keyTS){ b.keyTS=ts; if(o.time) b.time=o.time; }
     if(o.seq<b.seq) b.seq=o.seq;
     b.lines++; b.total += o.total;
+    if(o.done){ b.done=true; b.doneBy=o.doneBy||b.doneBy; b.doneDate=o.doneDate||b.doneDate; b.doneTime=o.doneTime||b.doneTime; }
   }
   return Object.values(bills).sort((a,b)=>
     String(a.date).localeCompare(String(b.date)) ||
@@ -426,14 +509,17 @@ function renderBills(bills){
     <span class="note" style="margin-left:6px"><b style="color:var(--navy)">เลือก ${bills.filter(b=>selectedBills.has(b.orderId)).length}</b> / ${bills.length} บิล (จะ Export)</span>
   </div>`;
   if(!bills.length){ p.innerHTML=head+'<div class="empty">ไม่มีบิลในตัวกรอง — ลองสลับ chip วัน/คลัง/ประเภท</div>'; return; }
-  const rows = bills.map(b=>`<tr class="${selectedBills.has(b.orderId)?'':'cut-row'}">
+  const rows = bills.map(b=>{
+    const doneBadge = b.done ? `<span title="${esc(b.doneBy||'')} ${esc(b.doneDate||'')} ${esc(b.doneTime||'')}" style="background:#dcfce7;color:#166534;font-size:10px;font-weight:700;padding:1px 6px;border-radius:5px;margin-left:5px;white-space:nowrap">✓ จัดแล้ว</span>` : '';
+    return `<tr class="${selectedBills.has(b.orderId)?'':'cut-row'}">
     <td style="text-align:center"><input type="checkbox" ${selectedBills.has(b.orderId)?'checked':''} onchange="toggleBill('${esc(b.orderId)}',this.checked)" style="width:17px;height:17px;cursor:pointer"></td>
     <td>${esc(b.date)}</td><td>${esc(b.time)}</td>
     <td>${esc(b.salesman)} <span style="color:var(--muted);font-size:11px">${esc(b.salesmanName||'')}</span></td>
     <td><span class="chip" style="background:${b.chan==='ROO'?'#f3e8ff':b.chan==='ปลีก'?'#dbeafe':b.chan==='ส่ง'?'#dcfce7':'#f1f5f9'};color:${b.chan==='ROO'?'#6b21a8':b.chan==='ปลีก'?'#1d4ed8':b.chan==='ส่ง'?'#166534':'#64748b'};padding:1px 8px;font-size:11px">${esc(b.roleLab)}</span></td>
-    <td>${esc(b.store)}</td><td>${esc(b.wh)}</td><td>${esc(b.orderId)}</td>
+    <td>${esc(b.store)}</td><td>${esc(b.wh)}</td><td>${esc(b.orderId)}${doneBadge}</td>
     <td class="num">${b.lines}</td><td class="num">${b.total.toLocaleString()}</td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
   p.innerHTML = head +
     `<div class="note">ติ๊กบิลที่จะจัด → กด <b>⬇️ Export Excel (bplus)</b> (มุมขวาบน) · ตะกร้าข้ามวันได้ · Export ซ้ำได้ทุกเมื่อ</div>
      <div class="tbl-wrap"><table><thead><tr>
@@ -509,6 +595,28 @@ NOTIFY pgrst, 'reload schema';</pre>
     <h3 style="color:#b45309">🔧 v1.2 fix: PostgREST parse ชื่อคอลัมน์ไทยใน URL ไม่ได้</h3>
     <p style="font-size:13px;line-height:1.7">v1.1 ยิง <code>?วัน=gte.2026-06-08&order=วัน.desc</code> → เจอ <code>HTTP 400 "column ว does not exist"</code> — PostgREST truncate ที่ non-ASCII byte แรก<br>
     <b>v1.2 fix:</b> ยิงแค่ <code>?select=*&limit=5000</code> → filter/sort ฝั่ง JS (30 วันล่าสุด · เร็วอยู่แล้วเพราะ &lt;5000 rows)</p>
+  </div>
+
+  <div class="schema-box" style="border-color:#7c3aed;background:#faf5ff">
+    <h3 style="color:#6b21a8">🖊️ v1.4: ให้ Export → มาร์ค "จัดแล้ว" ลง Supabase</h3>
+    <p style="font-size:13px;margin-bottom:10px">แอปจะยิง PATCH ไปที่ <code>roo_sales</code> เขียนทับ 4 คอลัมน์: <code>สถานะจัด</code> = "จัดแล้ว" · <code>แอดมินจัด</code> = ชื่อคุณ · <code>วันสั่งจัด</code> · <code>เวลาสั่งจัด</code><br>
+    ⚠️ ต้อง <b>GRANT UPDATE</b> ให้ anon ก่อน (ตอนนี้ anon อ่านได้อย่างเดียว) · แนะนำ scope เฉพาะ 4 คอลัมน์ (ปลอดภัยกว่า GRANT UPDATE ทั้ง table)</p>
+    <p style="font-size:13px;margin-bottom:8px"><b>Supabase → SQL Editor → รัน SQL นี้ทีเดียว:</b></p>
+    <pre>GRANT UPDATE ("สถานะจัด","แอดมินจัด","วันสั่งจัด","เวลาสั่งจัด")
+  ON public.roo_sales TO anon;</pre>
+    <p style="font-size:12px;color:var(--muted);margin-top:8px">ต้องใส่ชื่อในช่อง 👤 "ชื่อคุณ" ที่ banner ด้านบนด้วย · Export ครั้งต่อไป แถวที่ถูกเลือกจะถูกมาร์คอัตโนมัติ (badge <b>✓ จัดแล้ว</b> จะโผล่ในตาราง)</p>
+  </div>
+
+  <div class="schema-box" style="border-color:#0891b2;background:#f0fdff">
+    <h3 style="color:#0891b2">📝 (option) ให้เขียนลง Google Sheets ORDER tab ด้วย</h3>
+    <p style="font-size:13px;line-height:1.7">ถ้าอยากให้ Google Sheets sync ตามด้วย → deploy Apps Script webhook ที่รับ <code>action:'markDone'</code> แล้ววาง URL /exec ใน <code>GAS_URL</code> (บรรทัด 174 ในไฟล์ order-picker.html)<br>
+    Payload ที่แอปยิง (POST · <code>Content-Type: text/plain</code>):</p>
+    <pre>{
+  "action": "markDone",
+  "orderIds": ["ORD1783561516123", "ORD1783562119547", ...],
+  "by": "มนัสวี"
+}</pre>
+    <p style="font-size:12px;color:var(--muted);margin-top:8px">Apps Script side: <code>doPost(e)</code> parse <code>e.postData.contents</code> → หา row ที่ orderId ตรง → set columns AH-AK (สถานะจัด/แอดมินจัด/วันสั่งจัด/เวลาสั่งจัด) — ตัวอย่าง code อยู่ใน <code>rattana-online-order-backend.gs</code> action 'markDone' ที่มีอยู่แล้ว</p>
   </div>
 
   <div class="schema-box">
@@ -614,7 +722,7 @@ function switchTab(t){
 function docBook(code){ return DOC_BOOKS[code]||'NA-'+code; }
 function docBookFor(o){ return isROO(o) ? 'BV28' : docBook(o.salesman); }
 
-function exportXlsx(){
+async function exportXlsx(){
   const bills = buildBills();
   const selBills = bills.filter(b=>selectedBills.has(b.orderId));
   if(!selBills.length){ toast('ยังไม่ได้เลือกบิล'); return; }
@@ -695,12 +803,18 @@ function exportXlsx(){
   XLSX.utils.book_append_sheet(wb, ws, 'ใบจองสินค้า');
   XLSX.writeFile(wb, `ใบจอง-${runDate}.xlsx`);
   toast(`✅ ดาวน์โหลดแล้ว · ${selBills.length} บิล · ${bRows.length} บรรทัด`);
+
+  /* v1.4: mark สถานะจัด → Supabase + Google Sheets (async · ไม่บล็อกดาวน์โหลด) */
+  const orderIds = [...new Set(selBills.map(b=>b.orderId))];
+  markDoneAfterExport(orderIds);
 }
 
 /* ============================================================
    INIT
    ============================================================ */
 async function init(){
+  const savedAdmin = localStorage.getItem('picker_admin')||'';
+  const ai=document.getElementById('adminInput'); if(ai) ai.value=savedAdmin;
   DATA_ORDERS = await loadOrders();
   setDate('t');
   setRole('all');
