@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <title>Rattana OM Report v9.39</title>
+  <title>Rattana OM Report v9.41</title>
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
@@ -262,7 +262,7 @@
 
 <header>
   
-  <div class="logo-text">Rattana <span>OM Report</span> <span class="ver-badge">v9.39 · 2026-07-09</span></div>
+  <div class="logo-text">Rattana <span>OM Report</span> <span class="ver-badge">v9.41 · 2026-07-09</span></div>
   <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรชข้อมูล">↻</button>
   <button class="icon-btn" id="btnDark" onclick="toggleDark()" title="Dark mode">🌙</button>
   <button class="icon-btn" onclick="exportExcel()" title="Export Excel">📥</button>
@@ -411,6 +411,7 @@
             <th id="thTop15Label" style="text-align:center">Top 15 Cat_Brand ติดลบ</th>
             <th id="thTop15PosLabel" style="text-align:center">Top 15 Cat_Brand บวก</th>
             <th id="thNewProdLabel" style="text-align:center;color:#fff">NEW<br>SKU</th>
+            <th style="text-align:center;color:#fff;min-width:200px">สินค้าขาดหาย<br>(ไตรมาสก่อน)</th>
             <th style="text-align:center;color:#fff;min-width:180px">Suggestion อำเภอ<br>ที่ร้านไม่ซื้อ</th>
             <th style="text-align:center;color:#fff;padding-right:16px;min-width:110px">Budget</th>
           </tr>
@@ -1885,6 +1886,30 @@ function renderSummaryTab() {
     newProdNamesByCust[cust] = [...set];
   });
 
+  // สินค้าขาดหาย = อยู่ในไตรมาสก่อนแต่ไม่อยู่ในเดือนล่าสุด (top 3 by AVG Sales_CS)
+  const _prevQCSRaw = {}; // cname → pname → {total, months: Set}
+  data.filter(r => prevQMthsInData.includes(r['Month_Year'])).forEach(r => {
+    const cust = String(r['Customer_Name']||'').trim();
+    const prod = String(r['Product_Name']||'').trim();
+    const cs   = parseFloat(r['Sales_CS']) || 0;
+    const mon  = String(r['Month_Year']||'').trim();
+    if (!cust || !prod) return;
+    if (!_prevQCSRaw[cust]) _prevQCSRaw[cust] = {};
+    if (!_prevQCSRaw[cust][prod]) _prevQCSRaw[cust][prod] = { total: 0, months: new Set() };
+    _prevQCSRaw[cust][prod].total += cs;
+    _prevQCSRaw[cust][prod].months.add(mon);
+  });
+  const missingSalesSkuByCust = {};
+  Object.keys(_prevQCSRaw).forEach(cust => {
+    const latSkus = skuLatestByCust[cust] ? [...skuLatestByCust[cust]].map(s => s.toLowerCase()) : [];
+    const missing = Object.entries(_prevQCSRaw[cust])
+      .filter(([pname]) => !latSkus.some(s => s.includes(pname.toLowerCase()) || pname.toLowerCase().includes(s)))
+      .map(([pname, d]) => ({ name: pname, avg: d.total / d.months.size }))
+      .sort((a, b) => b.avg - a.avg)
+      .slice(0, 3);
+    if (missing.length) missingSalesSkuByCust[cust] = missing;
+  });
+
   // Top 15 บวกต่อร้าน
   const top15PosByCust = {};
   Object.values(brandDeltaMap).forEach(r => {
@@ -1956,6 +1981,7 @@ function renderSummaryTab() {
       <td style="line-height:1.8;font-size:10px;max-width:320px">${top15Html}</td>
       <td style="line-height:1.8;font-size:10px;max-width:320px">${top15PosHtml}</td>
       <td class="new-sku-names" style="min-width:200px;max-width:300px;line-height:1.9;white-space:normal;word-break:break-word">${(() => { const prods = newProdNamesByCust[r.name]; if (!prods) return '<span style="color:var(--muted)">—</span>'; return prods.map((p,i)=>`<span style="font-weight:600;color:${i%2===0?'var(--text)':'var(--info)'}">${escHtml(p)}</span>`).join('<span style="color:var(--muted)"> , </span>'); })()}</td>
+      <td style="font-size:10px;min-width:200px;max-width:300px;line-height:1.9;white-space:normal;word-break:break-word">${(()=>{ const ms=missingSalesSkuByCust[r.name]; if(!ms||!ms.length) return '<span style="color:var(--muted)">—</span>'; return ms.map(p=>`<span style="color:var(--danger);font-weight:600">${escHtml(p.name)}</span> <span style="color:var(--gold);font-weight:700">(${p.avg.toFixed(2)})</span>`).join('<span style="color:var(--muted)"> , </span>'); })()}</td>
       <td style="font-size:10px;font-weight:600;min-width:180px;line-height:1.8;white-space:normal;word-break:break-word">${(() => {
         const _cr2=(window._custAllRows||[]).find(row=>String(row['ชื่อร้านค้า']||'').trim()===r.name);
         if(!_cr2)return'<span style="color:var(--muted)">—</span>';
@@ -2559,15 +2585,26 @@ function renderSuggestTab() {
     if (!_skuMap[cname]) _skuMap[cname] = [];
     if (!_skuMap[cname].includes(pname)) _skuMap[cname].push(pname);
   });
-  // Build SKU map from previous quarter
+  // Build SKU map from previous quarter (with AVG Sales_CS)
   const { months: _prevQMs } = prevQuarterMonths(_latM);
-  const _prevQSkuMap = {};
+  const _prevQRaw = {}; // cname → { pname → {total, months: Set} }
   allData.filter(r => _prevQMs.includes(r['Month_Year'])).forEach(r => {
     const cname = String(r['Customer_Name']||'').trim();
     const pname = String(r['Product_Name']||'').trim();
+    const cs    = parseFloat(r['Sales_CS']) || 0;
+    const mon   = String(r['Month_Year']||'').trim();
     if (!cname || !pname) return;
-    if (!_prevQSkuMap[cname]) _prevQSkuMap[cname] = [];
-    if (!_prevQSkuMap[cname].includes(pname)) _prevQSkuMap[cname].push(pname);
+    if (!_prevQRaw[cname]) _prevQRaw[cname] = {};
+    if (!_prevQRaw[cname][pname]) _prevQRaw[cname][pname] = { total: 0, months: new Set() };
+    _prevQRaw[cname][pname].total += cs;
+    _prevQRaw[cname][pname].months.add(mon);
+  });
+  // _prevQSkuMap[cname] = [{name, avg}] sorted by avg desc
+  const _prevQSkuMap = {};
+  Object.keys(_prevQRaw).forEach(cname => {
+    _prevQSkuMap[cname] = Object.entries(_prevQRaw[cname])
+      .map(([pname, d]) => ({ name: pname, avg: d.total / d.months.size }))
+      .sort((a, b) => b.avg - a.avg);
   });
   // Build global not-sold map for other tabs
   window._notSoldByCust = {};
@@ -2587,12 +2624,18 @@ function renderSuggestTab() {
     + '<td>' + escHtml((r[ampKey]||'').split(',')[1] || '') + '</td>'
     + '<td>' + escHtml(r['ประเภทร้านค้าขอพร'] || '') + '</td>'
     + '<td style="font-size:12px;color:var(--success)">' + escHtml((_skuMap[String(r['ชื่อร้านค้า']||'').trim()] || []).join(', ')) + '</td>'
-    + '<td style="font-size:12px;color:var(--info)">' + escHtml((_prevQSkuMap[String(r['ชื่อร้านค้า']||'').trim()] || []).join(', ')) + '</td>'
+    + (function() {
+        const _nm = String(r['ชื่อร้านค้า']||'').trim();
+        const _items = (_prevQSkuMap[_nm] || []);
+        const _html = _items.map(p => escHtml(p.name) + ' <span style="color:var(--gold);font-weight:700">(' + p.avg.toFixed(2) + ')</span>').join('<span style="color:var(--muted)">, </span>');
+        return '<td style="font-size:12px;color:var(--info)">' + (_html || '—') + '</td>';
+      })()
     + (function() {
         const _nm = String(r['ชื่อร้านค้า']||'').trim();
         const _latSkus = (_skuMap[_nm] || []).map(s => s.toLowerCase());
-        const _missing = (_prevQSkuMap[_nm] || []).filter(p => !_latSkus.some(s => s.includes(p.toLowerCase()) || p.toLowerCase().includes(s)));
-        return '<td style="font-size:12px;color:var(--danger);font-weight:600">' + escHtml(_missing.join(', ')) + '</td>';
+        const _missing = (_prevQSkuMap[_nm] || []).filter(p => !_latSkus.some(s => s.includes(p.name.toLowerCase()) || p.name.toLowerCase().includes(s)));
+        const _html = _missing.map(p => escHtml(p.name) + ' <span style="color:var(--gold);font-weight:700">(' + p.avg.toFixed(2) + ')</span>').join('<span style="color:var(--muted)">, </span>');
+        return '<td style="font-size:12px;color:var(--danger);font-weight:600">' + (_html || '') + '</td>';
       })()
     + (function() {
         const _amp2 = (r[ampKey]||'').split(',')[1]?.trim()||'';
