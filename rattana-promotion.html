@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,viewport-fit=cover">
-<title>Rattana Promotion v1.9</title>
+<title>Rattana Promotion v1.10</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&family=Prompt:wght@400;600;700;800&family=Kanit:wght@400;600;700;800&family=Mitr:wght@400;500;600;700&family=Chakra+Petch:wght@400;600;700&family=IBM+Plex+Sans+Thai:wght@400;600;700&family=Bai+Jamjuree:wght@600;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -314,8 +315,9 @@ body.bg-gradient{background:linear-gradient(180deg,#ffe0f0 0%,#e0f0ff 50%,#f0ffe
 <body>
 
 <header>
-  <div class="logo-text">RATTANA <span class="brand">PROMOTION</span><span class="v">v1.9</span></div>
+  <div class="logo-text">RATTANA <span class="brand">PROMOTION</span><span class="v">v1.10</span></div>
   <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="โหลดข้อมูลใหม่">↻ รีเฟรช</button>
+  <button class="icon-btn" onclick="exportExcel()" title="ส่งออก Excel รูปแบบ Promotion / Free" style="background:#217346;border-color:#217346">📊 Excel</button>
   <button class="icon-btn gold" onclick="window.print()" title="พิมพ์/บันทึก PDF">🖨 พิมพ์</button>
 </header>
 
@@ -703,7 +705,18 @@ async function loadAll(useCache=true){
     if(promos)   setCached('rp_promos',   promos);
 
     state.products = products || [];
-    state.promotions = (promos || []).map((p,i) => (p._idx = i, p));
+    // Normalize promo headers — sheet's col E (จำนวน) sometimes has blank header
+    // Map known columns by position if the canonical key is missing.
+    const CANON = ['ชื่อโปร','วิธีวัด','ชื่อ','ราคาขายกำหนด','จำนวน','รูปแบบขาย','ลดราคา','แถมสินค้า','Barcode สินค้าแถมEA','จำนวนแถมEA','รายละเอียดโปร','หมายเหตุ','Period','Warehouses','Role','เช็คแล้ว','แถมร่วม','การเคลม','ขอบเขตโปร','ST ตั้งต้น'];
+    state.promotions = (promos || []).map((p,i) => {
+      const origKeys = Object.keys(p);
+      const fixed = {};
+      CANON.forEach((c, idx) => { fixed[c] = origKeys[idx] !== undefined ? (p[origKeys[idx]] ?? '') : ''; });
+      // Preserve any extra fields that don't fit CANON
+      for(const k of origKeys){ if(!(k in fixed) && k) fixed[k] = p[k]; }
+      fixed._idx = i;
+      return fixed;
+    });
     state.deselected.clear();
 
     buildIndexes();
@@ -1070,6 +1083,104 @@ function render(){
   }
 
   wrap.innerHTML = pagesHtml.join('') + deselectedHtml;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   EXCEL EXPORT — 2 คอลัมน์: Promotion / Free (ตามรูปแบบที่ user ส่ง)
+   ══════════════════════════════════════════════════════════════ */
+function buildBuyText(promo){
+  const method = clean(promo['วิธีวัด']).toUpperCase();
+  const key = clean(promo['ชื่อ']);
+  const qty = clean(promo['จำนวน']) || '1';
+  const unit = clean(promo['รูปแบบขาย']).toUpperCase();
+  const unitLabel = UNIT_LABEL[unit] || unit || 'หน่วย';
+  const prod = findProduct(promo);
+  let name;
+  if(method === 'PRODUCT NAME'){
+    name = prod ? (clean(prod['SHORT NAME']) || clean(prod['PRODUCT NAME'])) : key;
+  } else if(method === 'CAT SIZE' || method === 'CAT BRAND'){
+    name = key + ' ขนาดใดก็ได้';
+  } else {
+    name = key;
+  }
+  return `ซื้อ${name} ${qty} ${unitLabel}`;
+}
+function buildFreeText(promo){
+  const giftName = clean(promo['แถมสินค้า']);
+  const giftQty = clean(promo['จำนวนแถมEA']);
+  const disc = clean(promo['ลดราคา']);
+  if(giftName){
+    return `แถมฟรี ${giftName}${giftQty ? ' ' + giftQty + ' ชิ้น' : ''}`;
+  }
+  if(disc) return `ลด ${disc} บาท`;
+  return clean(promo['รายละเอียดโปร']);
+}
+function exportExcel(){
+  if(!window.XLSX){
+    showToast('SheetJS ยังไม่โหลด — รอสักครู่แล้วลองใหม่','warning');
+    return;
+  }
+  const filtered = filterPromos();
+  const selectedOnly = filtered.filter(p => !state.deselected.has(p._idx));
+  const sorted = sortPromos(selectedOnly);
+  if(!sorted.length){
+    showToast('ไม่มีโปรที่เลือก','warning');
+    return;
+  }
+
+  // Build sheet data: header row + one row per promo (no merging in Excel)
+  const rows = [['Promotion', 'Free']];
+  sorted.forEach(p => rows.push([buildBuyText(p), buildFreeText(p)]));
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+
+  // Style header row
+  const headerStyle = (bg) => ({
+    font:{bold:true, sz:12, color:{rgb:'FFFFFF'}, name:'Sarabun'},
+    fill:{fgColor:{rgb:bg}, patternType:'solid'},
+    alignment:{horizontal:'center', vertical:'center', wrapText:true},
+    border:{
+      top:{style:'thin', color:{rgb:'666666'}},
+      bottom:{style:'thin', color:{rgb:'666666'}},
+      left:{style:'thin', color:{rgb:'666666'}},
+      right:{style:'thin', color:{rgb:'666666'}},
+    },
+  });
+  ws['A1'].s = headerStyle('1F4E79');   // Promotion — Excel blue
+  ws['B1'].s = headerStyle('548235');   // Free — Excel green
+
+  // Style data rows
+  const dataStyle = (align) => ({
+    font:{sz:11, name:'Sarabun'},
+    alignment:{horizontal:align, vertical:'center', wrapText:true},
+    border:{
+      top:{style:'thin', color:{rgb:'CCCCCC'}},
+      bottom:{style:'thin', color:{rgb:'CCCCCC'}},
+      left:{style:'thin', color:{rgb:'CCCCCC'}},
+      right:{style:'thin', color:{rgb:'CCCCCC'}},
+    },
+  });
+  for(let r = 1; r < rows.length; r++){
+    const ca = XLSX.utils.encode_cell({r, c:0});
+    const cb = XLSX.utils.encode_cell({r, c:1});
+    if(ws[ca]) ws[ca].s = dataStyle('left');
+    if(ws[cb]) ws[cb].s = dataStyle('left');
+  }
+
+  // Column widths
+  ws['!cols'] = [{wch:55}, {wch:55}];
+  ws['!rows'] = [{hpx:32}].concat(Array.from({length:rows.length-1}, () => ({hpx:26})));
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Promotion');
+
+  const today = new Date();
+  const dd = String(today.getDate()).padStart(2,'0');
+  const mm = String(today.getMonth()+1).padStart(2,'0');
+  const yyyy = today.getFullYear() + 543;
+  const wh = $('#fWarehouse').value;
+  const filename = `Promotion${wh ? '_' + wh : ''}_${dd}${mm}${yyyy}.xlsx`;
+  XLSX.writeFile(wb, filename);
+  showToast(`ส่งออก ${sorted.length} รายการ → ${filename}`,'success');
 }
 
 /* ══════════════════════════════════════════════════════════════
