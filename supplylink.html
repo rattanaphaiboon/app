@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>SupplyLink v7.38.0 — Rattanaphaiboon</title>
+<title>SupplyLink v7.39.0 — Rattanaphaiboon</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+Thai:wght@300;400;500;600;700;800&family=Sacramento&display=swap" rel="stylesheet">
@@ -719,14 +719,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v7.38.0</div>
+<div class="version-badge">SupplyLink v7.39.0</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
-   SupplyLink v7.38.0 — Single-file vanilla JS app
+   SupplyLink v7.39.0 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v7.38.0';
+const VERSION = 'v7.39.0';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -4915,6 +4915,7 @@ function grDetailHTML(a) {
 /* ═══════════ GR ยิงรับสินค้า — scan-to-receive + expiry + แจ้งปัญหา (modal overlay) ═══════════ */
 let _grqr = null, _grqrActive = false, _grqrLast = '', _grqrTorch = null, _grqrTorchOn = false;
 
+function _grsNewLot() { return { recv: { EA: 0, PA: 0, BP: 0, CS: 0 }, prodDate: '', expiry: '', overAgeAck: false }; }
 function openGRScan(apptId) {
   const appt = DATA.appointments.find(x => x.id === apptId);
   if (!appt) { toast('ไม่พบนัด', '', 'err'); return; }
@@ -4922,13 +4923,16 @@ function openGRScan(apptId) {
   loadPOLinesCached(appt.pos).then(raw => {
     hideAppLoading();
     const lines = (raw || []).map(l => {
-      const uc = l.unitCode || 'CS', perEA = Number(l.perEA) || 1, oq = Number(l.qty) || 0;
+      const uc = l.unitCode || 'CS', perEA = Number(l.perEA) || 1;
+      const qty = Number(l.qty) || 0, free = Number(l.free) || 0;
+      const isFoc = qty === 0 && free > 0;                 // บรรทัดของแถมจาก ERP (TRD_QTY=0 · จำนวนอยู่ TRD_Q_FREE) → นับจำนวนแถมเป็นจำนวนที่ต้องรับ
+      const oq = isFoc ? free : qty;
       const su = (l.scanUnits && l.scanUnits.length) ? l.scanUnits : [{ u: uc, code: String(l.sku || ''), per: perEA }];
       return { po: l.po, sku: l.sku, name: l.desc || l.sku, pKey: l.pKey || '', unit: l.unit || '', unitCode: uc, img: l.img || '',
-        orderedQty: oq, orderedEa: Math.round(oq * perEA), perEA: perEA, scanUnits: su,
+        orderedQty: oq, orderedEa: Math.round(oq * perEA), perEA: perEA, scanUnits: su, isFoc: isFoc,
         skuLife: Number(l.skuLife) || 0, isFood: !!l.isFood, expDays: Number(l.expDays) || 0,
         catGroup: l.catGroup || '', maxAgeDays: (l.maxAgeDays == null ? null : Number(l.maxAgeDays)), skuLifePddt: Number(l.skuLifePddt) || 0, noVat: !!l.noVat,
-        recv: { EA: 0, PA: 0, BP: 0, CS: 0 }, prodDate: '', expiry: '', flags: { focMissing: false, wrongPrice: false }, accept: false, overAgeAck: false };
+        activeLot: 0, lots: [_grsNewLot()], flags: { focMissing: false, wrongPrice: false }, accept: false };   // หลายล็อต: แต่ละล็อต จำนวน+วันผลิต+วันหมดอายุ แยก
     });
     const byCode = {}; lines.forEach((l, i) => l.scanUnits.forEach(su => { const c = String(su.code || '').trim(); if (c) byCode[c] = { i: i, u: su.u }; }));
     S._grScan = { apptId: apptId, vendor: appt.vendor, lines: lines, byCode: byCode, unknown: [], lastScan: -1, camOn: false };
@@ -4937,37 +4941,89 @@ function openGRScan(apptId) {
 }
 function _grsDaysLeft(exp) { if (!exp) return null; const d = Math.round((new Date(exp) - new Date(DATA.today)) / 86400000); return isNaN(d) ? null : d; }
 function _grsAge(prod) { if (!prod) return null; const d = Math.round((new Date(DATA.today) - new Date(prod)) / 86400000); return isNaN(d) ? null : d; }   // วันนี้ − วันผลิต
+function _grsLotEa(l, lot) { return l.scanUnits.reduce((s, su) => s + (Number(lot.recv[su.u]) || 0) * (Number(su.per) || 0), 0); }
 function _grsState(l) {
-  const recvEa = l.scanUnits.reduce((s, su) => s + (Number(l.recv[su.u]) || 0) * (Number(su.per) || 0), 0);
-  const diff = recvEa - l.orderedEa;
   const checkAge = (l.maxAgeDays != null);                      // หมวดนี้เช็ค expiry ไหม (null = ไม่เช็ค → ซ่อนช่องวันที่)
-  const age = _grsAge(l.prodDate);                              // อายุนับจากวันผลิต (วัน)
-  const overAge = checkAge && age != null && age > l.maxAgeDays; // เกินกำหนดรับ (soft-warn ต้องรับทราบ)
-  const left = _grsDaysLeft(l.expiry);                          // เหลือถึงหมดอายุ (วัน)
-  const expired = checkAge && left != null && left <= 0;        // หมดอายุแล้ว
-  const observedLife = (l.prodDate && l.expiry) ? Math.round((new Date(l.expiry) - new Date(l.prodDate)) / 86400000) : null; // EXP−MFG
-  const badDates = observedLife != null && observedLife <= 0;   // EXP ≤ MFG → วันที่ผิด (บล็อกส่ง)
-  const lifeMismatch = (observedLife != null && observedLife > 0 && l.skuLifePddt > 0 && Math.abs(observedLife - l.skuLifePddt) > 15);
+  let recvEa = 0;
+  const lotStates = l.lots.map(lot => {
+    const lotEa = _grsLotEa(l, lot); recvEa += lotEa;
+    const age = _grsAge(lot.prodDate);                          // อายุนับจากวันผลิต (วัน)
+    const overAge = checkAge && age != null && age > l.maxAgeDays; // เกินกำหนดรับ (soft-warn ต้องรับทราบ)
+    const left = _grsDaysLeft(lot.expiry);                      // เหลือถึงหมดอายุ (วัน)
+    const expired = checkAge && left != null && left <= 0;      // หมดอายุแล้ว
+    const observedLife = (lot.prodDate && lot.expiry) ? Math.round((new Date(lot.expiry) - new Date(lot.prodDate)) / 86400000) : null; // EXP−MFG
+    const badDates = observedLife != null && observedLife <= 0; // EXP ≤ MFG → วันที่ผิด (บล็อกส่ง)
+    const lifeMismatch = (observedLife != null && observedLife > 0 && l.skuLifePddt > 0 && Math.abs(observedLife - l.skuLifePddt) > 15);
+    const needProd = checkAge && lotEa > 0 && !lot.prodDate;    // #1 ล็อตที่ยิงแล้วต้องมีวันผลิต (required)
+    return { lotEa: lotEa, age: age, overAge: overAge, left: left, expired: expired, observedLife: observedLife, badDates: badDates, lifeMismatch: lifeMismatch, needProd: needProd };
+  });
+  const diff = recvEa - l.orderedEa;
+  const anyExpired = lotStates.some(s => s.expired), anyBad = lotStates.some(s => s.badDates);
+  const anyOverAge = lotStates.some(s => s.overAge);
+  const anyOverUnack = l.lots.some((lot, j) => lotStates[j].overAge && !lot.overAgeAck);   // มีล็อตเกินกำหนดที่ยังไม่ติ๊กรับทราบ
+  const anyNeedProd = lotStates.some(s => s.needProd);
   const problems = [];
   if (diff < 0) problems.push('ขาด'); if (diff > 0) problems.push('เกิน');
-  if (expired) problems.push('หมดอายุ'); if (badDates) problems.push('วันที่ผิด');
+  if (anyExpired) problems.push('หมดอายุ'); if (anyBad) problems.push('วันที่ผิด');
   if (l.flags.focMissing) problems.push('แถมไม่มา'); if (l.flags.wrongPrice) problems.push('ราคาผิด');
-  return { recvEa: recvEa, diff: diff, checkAge: checkAge, age: age, overAge: overAge, left: left, expired: expired,
-    observedLife: observedLife, badDates: badDates, lifeMismatch: lifeMismatch, problems: problems };
+  return { recvEa: recvEa, diff: diff, checkAge: checkAge, lotStates: lotStates,
+    anyOverAge: anyOverAge, anyOverUnack: anyOverUnack, anyBad: anyBad, anyExpired: anyExpired, anyNeedProd: anyNeedProd, problems: problems };
 }
-function _grsCard(l, i) {
-  const st = _grsState(l);
-  const units = l.scanUnits.map(su => {
-    const c = Number(l.recv[su.u]) || 0;
+function _grsRecvSummary(l) {   // รวม recv ต่อหน่วยทุกล็อต → "CS 2 · PA 1 · EA 5" (ตัวช่วยนับ)
+  const tally = {};
+  l.lots.forEach(lot => l.scanUnits.forEach(su => { tally[su.u] = (tally[su.u] || 0) + (Number(lot.recv[su.u]) || 0); }));
+  const parts = l.scanUnits.filter(su => (tally[su.u] || 0) > 0).map(su => tally[su.u] + ' ' + su.u);
+  return parts.join(' · ');
+}
+function _grsLotUnitsHTML(l, i, j, lot) {
+  return l.scanUnits.map(su => {
+    const c = Number(lot.recv[su.u]) || 0;
     return '<div style="display:flex;align-items:center;gap:6px;padding:5px 0">' +
       '<span style="min-width:28px;font-weight:700;font-size:12px">' + su.u + '</span>' +
       '<span class="num" style="flex:1;min-width:0;font-size:10px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(su.code) + (su.per > 1 ? ' ×' + su.per : '') + '</span>' +
-      (c > 0 ? '<span style="color:var(--ok);font-size:11px;font-weight:700">✓ยิงแล้ว</span>' : '<span style="color:var(--ink-4);font-size:10px">รอยิง</span>') +
-      '<button type="button" class="grs-minus" data-i="' + i + '" data-u="' + su.u + '" style="width:26px;height:26px;border:1px solid var(--line);background:#fff;border-radius:6px;font-size:15px;cursor:pointer">−</button>' +
+      (c > 0 ? '<span style="color:var(--ok);font-size:11px;font-weight:700">✓' + c + '</span>' : '<span style="color:var(--ink-4);font-size:10px">รอยิง</span>') +
+      '<button type="button" class="grs-minus" data-i="' + i + '" data-lot="' + j + '" data-u="' + su.u + '" style="width:26px;height:26px;border:1px solid var(--line);background:#fff;border-radius:6px;font-size:15px;cursor:pointer">−</button>' +
       '<span class="num" style="min-width:26px;text-align:center;font-weight:700;font-size:14px">' + c + '</span>' +
-      '<button type="button" class="grs-plus" data-i="' + i + '" data-u="' + su.u + '" style="width:26px;height:26px;border:1px solid var(--brand);color:var(--brand);background:#fff;border-radius:6px;font-size:15px;cursor:pointer">+</button>' +
+      '<button type="button" class="grs-plus" data-i="' + i + '" data-lot="' + j + '" data-u="' + su.u + '" style="width:26px;height:26px;border:1px solid var(--brand);color:var(--brand);background:#fff;border-radius:6px;font-size:15px;cursor:pointer">+</button>' +
     '</div>';
   }).join('');
+}
+function _grsLotHTML(l, i, j, ls) {   // ls = st.lotStates[j]
+  const lot = l.lots[j], multi = l.lots.length > 1, active = l.activeLot === j;
+  const ageChip = ls.age == null ? ''
+    : (ls.overAge ? '<span class="chip chip-sm" style="background:var(--err-bg);color:var(--err)">⛔ อายุ ' + ls.age + 'ว · เกินรับ ' + l.maxAgeDays + 'ว</span>'
+                  : '<span class="chip chip-ok chip-sm">อายุ ' + ls.age + 'ว ✓</span>');
+  const expChip = !lot.expiry ? '' : (ls.badDates ? '<span class="chip chip-sm" style="background:var(--err-bg);color:var(--err)">⚠ หมดอายุ ≤ ผลิต</span>'
+    : (ls.expired ? '<span class="chip chip-sm" style="background:var(--err-bg);color:var(--err)">หมดอายุแล้ว</span>'
+                  : '<span class="chip chip-ok chip-sm">เหลือ ' + ls.left + 'ว</span>'));
+  const dateHTML = l.maxAgeDays != null
+    ? '<div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+        '<span style="font-size:11px;color:' + (ls.needProd ? 'var(--err)' : 'var(--ink-3)') + ';font-weight:' + (ls.needProd ? '700' : '400') + '">วันผลิต' + (ls.needProd ? ' *ต้องกรอก' : '') + ':</span>' +
+        '<input type="date" class="input grs-prod" data-i="' + i + '" data-lot="' + j + '" value="' + esc(lot.prodDate) + '" style="width:150px;height:32px;font-size:12px;border-color:' + (ls.needProd ? 'var(--err)' : 'var(--line)') + '">' +
+        ageChip +
+        '<span style="font-size:11px;color:var(--ink-3);margin-left:4px">หมดอายุ:</span>' +
+        '<input type="date" class="input grs-exp" data-i="' + i + '" data-lot="' + j + '" value="' + esc(lot.expiry) + '" style="width:150px;height:32px;font-size:12px">' +
+        expChip +
+        '<span style="font-size:10.5px;color:var(--ink-4);width:100%">รับได้ถ้าอายุ ≤ ' + l.maxAgeDays + ' วันจากวันผลิต' + (ls.lifeMismatch ? ' · ⚑ อายุจริง ' + ls.observedLife + 'ว ต่างระบบ ' + l.skuLifePddt + 'ว' : '') + '</span>' +
+      '</div>'
+    : '';
+  const ovAck = ls.overAge
+    ? '<label style="margin-top:8px;display:flex;align-items:center;gap:8px;background:var(--err-bg);border:1px solid var(--err);border-radius:8px;padding:8px 10px;font-size:11.5px;color:var(--err);cursor:pointer">' +
+        '<input type="checkbox" class="grs-ageack" data-i="' + i + '" data-lot="' + j + '"' + (lot.overAgeAck ? ' checked' : '') + '>' +
+        '<span><b>เกินกำหนดรับ (อายุ ' + ls.age + 'ว)</b> — ติ๊กรับทราบเพื่อรับเข้า + แจ้งจัดซื้อ</span>' +
+      '</label>' : '';
+  const hdr = multi
+    ? '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
+        '<button type="button" class="grs-lot-active" data-i="' + i + '" data-lot="' + j + '" style="font-size:11px;font-weight:700;border:1px solid ' + (active ? 'var(--brand)' : 'var(--line)') + ';background:' + (active ? 'var(--brand)' : '#fff') + ';color:' + (active ? '#fff' : 'var(--ink-3)') + ';border-radius:6px;padding:3px 10px;cursor:pointer">' + (active ? '● ' : '○ ') + 'ล็อต ' + (j + 1) + (active ? ' · ยิงเข้านี้' : '') + '</button>' +
+        '<span style="flex:1"></span>' +
+        '<button type="button" class="grs-lot-del" data-i="' + i + '" data-lot="' + j + '" style="font-size:11px;color:var(--err);background:none;border:none;cursor:pointer">ลบล็อต</button>' +
+      '</div>' : '';
+  return '<div style="border:1px solid ' + (active && multi ? 'var(--brand)' : 'var(--divider)') + ';border-radius:9px;padding:8px 9px;margin-top:8px;background:' + (active && multi ? 'var(--brand-tint)' : 'var(--surface-sunk)') + '">' +
+    hdr + _grsLotUnitsHTML(l, i, j, lot) + dateHTML + ovAck +
+  '</div>';
+}
+function _grsCard(l, i) {
+  const st = _grsState(l);
   const sc = st.recvEa === 0 ? '<span class="chip chip-sm" style="background:var(--surface-sunk);color:var(--ink-3)">รอยิง</span>'
     : (st.diff === 0 ? '<span class="chip chip-ok chip-sm">✓ ครบ ' + l.orderedEa + '</span>'
     : (st.diff < 0 ? '<span class="chip chip-sm" style="background:#FAEEDA;color:#854F0B">' + st.recvEa + '/' + l.orderedEa + '</span>'
@@ -4975,46 +5031,32 @@ function _grsCard(l, i) {
   const thumb = driveThumb(l.img)
     ? '<img src="' + driveThumb(l.img) + '" loading="lazy" alt="" class="grs-thumb" onerror="this.outerHTML=\'<div class=&quot;grs-thumb-ph&quot;>📦</div>\'">'
     : '<div class="grs-thumb-ph">📦</div>';
-  const ageChip = st.age == null ? ''
-    : (st.overAge ? '<span class="chip chip-sm" style="background:var(--err-bg);color:var(--err)">⛔ อายุ ' + st.age + ' วัน · เกินกำหนดรับ ' + l.maxAgeDays + 'ว</span>'
-                  : '<span class="chip chip-ok chip-sm">อายุ ' + st.age + ' วัน ✓</span>');
-  const expChip = !l.expiry ? '' : (st.badDates ? '<span class="chip chip-sm" style="background:var(--err-bg);color:var(--err)">⚠ วันหมดอายุ ≤ วันผลิต</span>'
-    : (st.expired ? '<span class="chip chip-sm" style="background:var(--err-bg);color:var(--err)">หมดอายุแล้ว</span>'
-                  : '<span class="chip chip-ok chip-sm">เหลือ ' + st.left + ' วัน</span>'));
-  const expHTML = st.checkAge
-    ? '<div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
-        '<span style="font-size:11px;color:var(--ink-3)">วันผลิต:</span>' +
-        '<input type="date" class="input grs-prod" data-i="' + i + '" value="' + esc(l.prodDate) + '" style="width:140px;height:32px;font-size:12px">' +
-        ageChip +
-        '<span style="font-size:11px;color:var(--ink-3);margin-left:4px">หมดอายุ:</span>' +
-        '<input type="date" class="input grs-exp" data-i="' + i + '" value="' + esc(l.expiry) + '" style="width:140px;height:32px;font-size:12px">' +
-        expChip +
-        '<span style="font-size:10.5px;color:var(--ink-4);width:100%">รับได้ถ้าอายุ ≤ ' + l.maxAgeDays + ' วันจากวันผลิต' + (l.catGroup ? ' · หมวด ' + esc(l.catGroup) : '') + (st.lifeMismatch ? ' · ⚑ อายุจริง ' + st.observedLife + 'ว ต่างจากระบบ ' + l.skuLifePddt + 'ว' : '') + '</span>' +
-      '</div>'
-    : '<div style="margin-top:6px;font-size:10.5px;color:var(--ink-4)">หมวดนี้ไม่เช็ควันหมดอายุ</div>';
+  const recvSum = _grsRecvSummary(l);
+  const countHTML = '<div style="margin-top:7px;font-size:11px;padding:5px 8px;border-radius:7px;background:' + (st.diff === 0 ? 'var(--ok-bg)' : (st.diff > 0 ? 'var(--err-bg)' : 'var(--surface-sunk)')) + '">' +
+    'ยิงได้ ' + (recvSum ? '<b>' + recvSum + '</b> = ' : '') + '<b>' + st.recvEa + '</b> ชิ้น / สั่ง ' + l.orderedEa + ' ชิ้น' +
+    (st.diff === 0 ? ' <span style="color:var(--ok);font-weight:700">✓ ครบ</span>' : (st.diff < 0 ? ' <span style="color:#854F0B;font-weight:700">· ยังขาด ' + (-st.diff) + '</span>' : ' <span style="color:var(--err);font-weight:700">· เกิน ' + st.diff + '</span>')) +
+  '</div>';
+  const lotsHTML = l.lots.map((lot, j) => _grsLotHTML(l, i, j, st.lotStates[j])).join('');
+  const addLot = l.maxAgeDays != null
+    ? '<button type="button" class="grs-lot-add" data-i="' + i + '" style="margin-top:8px;width:100%;border:1.5px dashed var(--brand);color:var(--brand);background:var(--brand-tint);border-radius:8px;padding:6px;font-size:11.5px;font-weight:700;cursor:pointer">+ เพิ่มล็อต (คนละวันหมดอายุ)</button>'
+    : '<div style="margin-top:6px;font-size:10.5px;color:var(--ink-4)">หมวดนี้ไม่เช็ควันหมดอายุ (ล็อตเดียว)</div>';
   const flags = '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">' +
     ['focMissing:ของแถมไม่มา', 'wrongPrice:ราคาผิด'].map(f => { const k = f.split(':')[0], lb = f.split(':')[1], on = l.flags[k];
       return '<button type="button" class="grs-flag" data-i="' + i + '" data-flag="' + k + '" style="border:1px solid ' + (on ? 'var(--err)' : 'var(--line)') + ';background:' + (on ? 'var(--err-bg)' : '#fff') + ';color:' + (on ? 'var(--err)' : 'var(--ink-3)') + ';border-radius:7px;padding:4px 9px;font-size:11px;font-weight:600;cursor:pointer">' + (on ? '✓ ' : '') + lb + '</button>'; }).join('') +
   '</div>';
-  const ovAck = st.overAge
-    ? '<label style="margin-top:8px;display:flex;align-items:center;gap:8px;background:var(--err-bg);border:1px solid var(--err);border-radius:8px;padding:8px 10px;font-size:11.5px;color:var(--err);cursor:pointer">' +
-        '<input type="checkbox" class="grs-ageack" data-i="' + i + '"' + (l.overAgeAck ? ' checked' : '') + '>' +
-        '<span><b>เกินกำหนดรับ (อายุ ' + st.age + 'ว เกิน ' + l.maxAgeDays + 'ว)</b> — ติ๊กรับทราบเพื่อรับเข้า + แจ้งจัดซื้อ</span>' +
-      '</label>' : '';
   const acc = st.problems.length
     ? '<label style="margin-top:8px;display:flex;align-items:center;gap:8px;background:#fff7ed;border:1px solid #f59e0b;border-radius:8px;padding:8px 10px;font-size:11.5px;color:#7c2d12;cursor:pointer">' +
         '<input type="checkbox" class="grs-accept" data-i="' + i + '"' + (l.accept ? ' checked' : '') + '>' +
         '<span><b>ปัญหา: ' + st.problems.join(' · ') + '</b> — ติ๊กถ้า supplier ขอให้รับ (ร่วมรับผิดชอบ) → ส่งจัดซื้อตัดสิน</span>' +
       '</label>' : '';
-  return '<div class="grs-card" data-i="' + i + '" style="border:1px solid ' + ((st.problems.length || st.overAge) ? '#f59e0b' : 'var(--line)') + ';border-radius:10px;padding:11px;margin-bottom:10px;background:var(--surface)">' +
+  return '<div class="grs-card" data-i="' + i + '" style="border:1px solid ' + ((st.problems.length || st.anyOverAge) ? '#f59e0b' : 'var(--line)') + ';border-radius:10px;padding:11px;margin-bottom:10px;background:var(--surface)">' +
     '<div style="display:flex;gap:9px;align-items:flex-start">' +
       thumb +
-      '<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:13px">' + esc(l.name) + '</div>' +
+      '<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:13px">' + esc(l.name) + (l.isFoc ? ' <span style="background:#f0fdf4;color:#15803d;border-radius:5px;padding:0 5px;font-size:10px;font-weight:800">แถม FOC</span>' : '') + '</div>' +
         '<div class="num" style="font-size:10.5px;color:var(--ink-3)">สั่ง ' + l.orderedQty + ' ' + esc(l.unit || l.unitCode) + ' = ' + l.orderedEa + ' ชิ้น' + (l.catGroup ? ' · ' + esc(l.catGroup) : '') + (l.maxAgeDays != null ? ' · รับได้ ≤' + l.maxAgeDays + 'ว' : '') + (l.noVat ? ' · <span style="background:#FEF3C7;color:#92400e;border-radius:5px;padding:0 5px;font-weight:700">ไม่มี VAT</span>' : '') + '</div>' +
       '</div>' + sc +
     '</div>' +
-    '<div style="margin-top:8px;border-top:1px solid var(--divider);padding-top:4px">' + units + '</div>' +
-    expHTML + flags + ovAck + acc +
+    countHTML + lotsHTML + addLot + flags + acc +
   '</div>';
 }
 function _grsSummary() { const g = S._grScan; if (!g) return { flagged: 0, total: 0 }; let f = 0; g.lines.forEach(l => { if (_grsState(l).problems.length) f++; }); return { flagged: f, total: g.lines.length }; }
@@ -5076,14 +5118,17 @@ function _wireGRScan() {
   }
   const camBtn = $('#grsCamToggle'); if (camBtn) camBtn.onclick = _grsToggleCam;
   const tb = $('#grsTorch'); if (tb) tb.onclick = _grsToggleTorch;
-  const pa = $('#grsProdAll'); if (pa) pa.onchange = () => { const v = pa.value; if (!v) return; g.lines.forEach(l => { if (l.maxAgeDays != null) { l.prodDate = v; l.overAgeAck = false; } }); _grsRenderList(); _grsRenderHero(); };
-  $$('#grScanModal .grs-plus').forEach(b => b.onclick = () => { const i = +b.dataset.i, u = b.dataset.u; g.lines[i].recv[u] = (g.lines[i].recv[u] || 0) + 1; redraw(i); });
-  $$('#grScanModal .grs-minus').forEach(b => b.onclick = () => { const i = +b.dataset.i, u = b.dataset.u; g.lines[i].recv[u] = Math.max(0, (g.lines[i].recv[u] || 0) - 1); redraw(i); });
-  $$('#grScanModal .grs-prod').forEach(inp => inp.onchange = () => { const i = +inp.dataset.i; g.lines[i].prodDate = inp.value; g.lines[i].overAgeAck = false; redraw(i); });
-  $$('#grScanModal .grs-exp').forEach(inp => inp.onchange = () => { const i = +inp.dataset.i; g.lines[i].expiry = inp.value; redraw(i); });
+  const pa = $('#grsProdAll'); if (pa) pa.onchange = () => { const v = pa.value; if (!v) return; g.lines.forEach(l => { if (l.maxAgeDays != null) l.lots.forEach(lot => { lot.prodDate = v; lot.overAgeAck = false; }); }); _grsRenderList(); _grsRenderHero(); };
+  $$('#grScanModal .grs-plus').forEach(b => b.onclick = () => { const i = +b.dataset.i, j = +b.dataset.lot, u = b.dataset.u; g.lines[i].lots[j].recv[u] = (g.lines[i].lots[j].recv[u] || 0) + 1; redraw(i); });
+  $$('#grScanModal .grs-minus').forEach(b => b.onclick = () => { const i = +b.dataset.i, j = +b.dataset.lot, u = b.dataset.u; g.lines[i].lots[j].recv[u] = Math.max(0, (g.lines[i].lots[j].recv[u] || 0) - 1); redraw(i); });
+  $$('#grScanModal .grs-prod').forEach(inp => inp.onchange = () => { const i = +inp.dataset.i, j = +inp.dataset.lot; g.lines[i].lots[j].prodDate = inp.value; g.lines[i].lots[j].overAgeAck = false; redraw(i); });
+  $$('#grScanModal .grs-exp').forEach(inp => inp.onchange = () => { const i = +inp.dataset.i, j = +inp.dataset.lot; g.lines[i].lots[j].expiry = inp.value; redraw(i); });
   $$('#grScanModal .grs-flag').forEach(b => b.onclick = () => { const i = +b.dataset.i, f = b.dataset.flag; g.lines[i].flags[f] = !g.lines[i].flags[f]; redraw(i); });
-  $$('#grScanModal .grs-ageack').forEach(c => c.onchange = () => { g.lines[+c.dataset.i].overAgeAck = c.checked; });
+  $$('#grScanModal .grs-ageack').forEach(c => c.onchange = () => { const i = +c.dataset.i, j = +c.dataset.lot; g.lines[i].lots[j].overAgeAck = c.checked; });
   $$('#grScanModal .grs-accept').forEach(c => c.onchange = () => { g.lines[+c.dataset.i].accept = c.checked; });
+  $$('#grScanModal .grs-lot-active').forEach(b => b.onclick = () => { const i = +b.dataset.i; g.lines[i].activeLot = +b.dataset.lot; redraw(i); });
+  $$('#grScanModal .grs-lot-add').forEach(b => b.onclick = () => { const i = +b.dataset.i; g.lines[i].lots.push(_grsNewLot()); g.lines[i].activeLot = g.lines[i].lots.length - 1; redraw(i); });
+  $$('#grScanModal .grs-lot-del').forEach(b => b.onclick = () => { const i = +b.dataset.i, j = +b.dataset.lot, L = g.lines[i]; if (L.lots.length <= 1) return; L.lots.splice(j, 1); if (L.activeLot >= L.lots.length) L.activeLot = L.lots.length - 1; redraw(i); });
 }
 // เปิด/ปิดกล้อง (ทางเลือก — เครื่องสแกนยิงเข้าช่อง input อยู่แล้ว)
 function _grsToggleCam() {
@@ -5106,10 +5151,11 @@ function onGRScanCode(code) {
   code = String(code || '').trim(); if (!code) return;
   const hit = g.byCode[code];
   if (hit) {
-    g.lines[hit.i].recv[hit.u] = (g.lines[hit.i].recv[hit.u] || 0) + 1;
+    const L = g.lines[hit.i], aj = L.activeLot || 0;
+    L.lots[aj].recv[hit.u] = (L.lots[aj].recv[hit.u] || 0) + 1;   // ยิงเข้าล็อตที่เลือกอยู่ (บาร์โค้ดเหมือนกันทุกล็อต แยกด้วย EXP)
     g.lastScan = hit.i;
     _grsBeep(); try { navigator.vibrate && navigator.vibrate(50); } catch (e) {}
-    _grsSetStatus('ยิงได้: ' + g.lines[hit.i].name + ' +1 ' + hit.u, 'ok');
+    _grsSetStatus('ยิงได้: ' + L.name + ' +1 ' + hit.u + (L.lots.length > 1 ? ' · ล็อต ' + (aj + 1) : ''), 'ok');
     const c = $('.grs-card[data-i="' + hit.i + '"]');
     if (c) { c.outerHTML = _grsCard(g.lines[hit.i], hit.i); _wireGRScan(); _grsUpdateFoot(); const nc = $('.grs-card[data-i="' + hit.i + '"]'); if (nc) nc.scrollIntoView({ block: 'nearest' }); }
     _grsRenderHero();
@@ -5121,20 +5167,34 @@ function onGRScanCode(code) {
 }
 function submitGRScanResult() {
   const g = S._grScan; if (!g) return;
-  // บล็อกก่อนบันทึก: วันที่ผิด (EXP ≤ MFG) + เกินกำหนดรับที่ยังไม่ติ๊กรับทราบ
   const states = g.lines.map((l, i) => ({ l: l, i: i, st: _grsState(l) }));
-  const bad = states.filter(x => x.st.badDates);
-  if (bad.length) { toast('วันหมดอายุต้องอยู่หลังวันผลิต', 'แก้ไข ' + bad.length + ' รายการก่อนบันทึก', 'err'); const c = $('.grs-card[data-i="' + bad[0].i + '"]'); if (c) c.scrollIntoView({ block: 'center' }); return; }
-  const unAck = states.filter(x => x.st.overAge && !x.l.overAgeAck);
-  if (unAck.length) { toast('มีสินค้าเกินกำหนดรับ ' + unAck.length + ' รายการ', 'ติ๊ก "รับทราบ" ก่อนบันทึก', 'err'); const c = $('.grs-card[data-i="' + unAck[0].i + '"]'); if (c) c.scrollIntoView({ block: 'center' }); return; }
-  // ยิงรับ = แหล่งจริง → เก็บลง state แล้วเด้งเข้าตาราง GR หลัก (ไม่เขียน GR_Scans แยก — dormant) · บันทึกจริงตอนกด "บันทึก GR"
+  const scrollTo = (i) => { const c = $('.grs-card[data-i="' + i + '"]'); if (c) c.scrollIntoView({ block: 'center' }); };
+  // บล็อกก่อนบันทึก: วันที่ผิด (EXP ≤ MFG) ต่อล็อต
+  const bad = states.filter(x => x.st.anyBad);
+  if (bad.length) { toast('วันหมดอายุต้องอยู่หลังวันผลิต', 'แก้ไข ' + bad.length + ' รายการก่อนบันทึก', 'err'); scrollTo(bad[0].i); return; }
+  // #1 บังคับวันผลิต: ทุกล็อตที่ยิงรับแล้วต้องมีวันผลิต
+  const noProd = states.filter(x => x.st.anyNeedProd);
+  if (noProd.length) { toast('ต้องกรอกวันผลิตทุกล็อตที่ยิงรับ', 'เหลือ ' + noProd.length + ' รายการ', 'err'); scrollTo(noProd[0].i); return; }
+  // #4 บังคับยิง: สินค้าที่สั่ง (ไม่ใช่ของแถมที่ไม่มา) ต้องยิงรับแล้ว (recvEa > 0)
+  const noScan = states.filter(x => x.l.orderedEa > 0 && x.st.recvEa === 0 && !(x.l.isFoc && x.l.flags.focMissing));
+  if (noScan.length) { toast('ยังไม่ได้ยิงรับ ' + noScan.length + ' รายการ', 'ทุกสินค้าต้องยิงรับก่อนบันทึก (ยิงหน่วยไหนก็ได้)', 'err'); scrollTo(noScan[0].i); return; }
+  // เกินกำหนดรับที่ยังไม่ติ๊กรับทราบ
+  const unAck = states.filter(x => x.st.anyOverUnack);
+  if (unAck.length) { toast('มีสินค้าเกินกำหนดรับ ' + unAck.length + ' รายการ', 'ติ๊ก "รับทราบ" ก่อนบันทึก', 'err'); scrollTo(unAck[0].i); return; }
+  // ยิงรับ = แหล่งจริง → เก็บลง state แล้วเด้งเข้าตาราง GR หลัก · จำนวน/variance ระดับ SKU (รวมทุกล็อต) · อายุ = ล็อตที่ binding สุด (เหลือน้อยสุด) + รายละเอียดทุกล็อตใน recvDetail
   const lines = states.map(x => {
     const l = x.l, st = x.st, needApproval = st.problems.length > 0;
-    const recvDetail = l.scanUnits.map(su => su.u + ':' + (l.recv[su.u] || 0)).filter(s => !/:0$/.test(s)).join(' ');
-    return { po: l.po, sku: l.sku, name: l.name, pKey: l.pKey, unitCode: l.unitCode, orderedQty: l.orderedQty, perEA: l.perEA,
-      orderedEa: l.orderedEa, recvEa: st.recvEa, recvDetail: recvDetail,
-      prodDate: l.prodDate, expiry: l.expiry, remainingDays: st.left, expDays: l.expDays, expiryOk: !(st.expired || st.badDates), isFood: l.isFood,
-      catGroup: l.catGroup, maxAgeDays: l.maxAgeDays, ageDays: st.age, overAge: st.overAge, overAgeAck: l.overAgeAck,
+    let bind = { lot: l.lots[0], ls: st.lotStates[0] }, bindLeft = Infinity;   // ล็อตที่เหลืออายุน้อยสุด (ที่ยิงแล้ว) = ตัวคุมการรับ
+    l.lots.forEach((lot, j) => { const ls = st.lotStates[j]; if (ls.lotEa > 0 && ls.left != null && ls.left < bindLeft) { bindLeft = ls.left; bind = { lot: lot, ls: ls }; } });
+    if (bindLeft === Infinity) { const k = l.lots.findIndex((lot, j) => st.lotStates[j].lotEa > 0); if (k >= 0) bind = { lot: l.lots[k], ls: st.lotStates[k] }; }
+    const tally = {}; l.lots.forEach(lot => l.scanUnits.forEach(su => tally[su.u] = (tally[su.u] || 0) + (Number(lot.recv[su.u]) || 0)));
+    const unitStr = l.scanUnits.map(su => su.u + ':' + (tally[su.u] || 0)).filter(s => !/:0$/.test(s)).join(' ');
+    const lotStr = l.lots.length > 1 ? ' · ' + l.lots.map((lot, j) => { const e = st.lotStates[j].lotEa; return e > 0 ? 'ล็อต' + (j + 1) + '(' + e + 'ชิ้น' + (lot.expiry ? ' EXP ' + lot.expiry : '') + ')' : ''; }).filter(Boolean).join(' ') : '';
+    return { po: l.po, sku: l.sku, name: l.name, pKey: l.pKey, unitCode: l.unitCode, orderedQty: l.orderedQty, perEA: l.perEA, isFoc: l.isFoc,
+      orderedEa: l.orderedEa, recvEa: st.recvEa, recvDetail: (unitStr + lotStr),
+      prodDate: bind.lot.prodDate, expiry: bind.lot.expiry, remainingDays: bind.ls.left, expDays: l.expDays, expiryOk: !(st.anyExpired || st.anyBad), isFood: l.isFood,
+      catGroup: l.catGroup, maxAgeDays: l.maxAgeDays, ageDays: bind.ls.age, overAge: st.anyOverAge, overAgeAck: st.anyOverAge,
+      lots: l.lots.map((lot, j) => ({ recvEa: st.lotStates[j].lotEa, prodDate: lot.prodDate, expiry: lot.expiry })).filter(o => o.recvEa > 0),
       problems: st.problems.slice(), supplierAccept: l.accept, needApproval: needApproval };
   });
   if (!S._grScanResult) S._grScanResult = {};
