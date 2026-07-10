@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v2.97</title>
+<title>Rattana Online Order v3.01</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -343,7 +343,7 @@ body.dark .dseg.active{color:var(--gold-light)}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v2.97</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.01</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -560,7 +560,15 @@ async function fetchCsvExport(id,gid){ const u=`https://docs.google.com/spreadsh
 
 const TTL=5*60*1000;
 function getCached(k,ignore){ try{const i=JSON.parse(localStorage.getItem(k)); if(!i)return null; if(!ignore && Date.now()-i.ts>TTL) return null; return i.data;}catch{return null} }
-function setCache(k,d){ try{localStorage.setItem(k,JSON.stringify({ts:Date.now(),data:d}));}catch{} }
+function setCache(k,d){ lsSet(k,JSON.stringify({ts:Date.now(),data:d})); }
+/* เขียน localStorage แบบทน quota เต็ม (โดเมนนี้มีหลายแอปใช้ร่วมกัน): เต็ม → ล้างแคชชีท (โหลดใหม่ได้) แล้วลองใหม่ ; ยังไม่ได้ก็ไม่ throw */
+function lsSet(k,v){
+  try{ localStorage.setItem(k,v); return true; }
+  catch(e){
+    try{ ['rop_promo','rop_users','rop_customers','rop_ea','rop_whmap','rop_special','rop_products'].forEach(x=>{ if(x!==k) localStorage.removeItem(x); }); }catch(_){}
+    try{ localStorage.setItem(k,v); return true; }catch(_){ return false; }
+  }
+}
 async function getData(key,fn){ try{const d=await fn(); setCache(key,d); return d;}catch(e){ const c=getCached(key,true); if(c) return c; throw e; } }
 /* IndexedDB cache — สำหรับข้อมูลก้อนใหญ่ (สินค้า ~10MB) ที่ใหญ่เกิน localStorage บนมือถือ */
 function idbOpen(){ return new Promise((res,rej)=>{ const r=indexedDB.open('rop_db',1); r.onupgradeneeded=()=>r.result.createObjectStore('kv'); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
@@ -601,8 +609,8 @@ let cart=loadCart();               // { 'name__TYPE': {key,name,type,unitName,pr
 
 /* ===================== ORDER DRAFT (สถานะรายชิ้น + orderId คงที่ต่อ draft) ===================== */
 let removedItems=(function(){ try{return JSON.parse(localStorage.getItem('rop_removed'))||{};}catch{return{}} })();
-function saveRemoved(){ localStorage.setItem('rop_removed',JSON.stringify(removedItems)); }
-function draftOrderId(){ let id=localStorage.getItem('rop_orderId'); if(!id){ id='ORD'+Date.now(); localStorage.setItem('rop_orderId',id); } return id; }
+function saveRemoved(){ lsSet('rop_removed',JSON.stringify(removedItems)); }
+function draftOrderId(){ let id=localStorage.getItem('rop_orderId'); if(!id){ id='ORD'+Date.now(); lsSet('rop_orderId',id); } return id; }
 function resetDraft(){ localStorage.removeItem('rop_orderId'); removedItems={}; saveRemoved(); }
 function cancelItem(key){ if(cart[key]){ removedItems[key]=Object.assign({},cart[key]); saveRemoved(); delete cart[key]; } }  // ลบจากตะกร้า = ทำเครื่องหมาย "ไม่อนุมัติ"
 // รายการสินค้าสำหรับส่ง backend: ในตะกร้า=activeStatus, ที่ลบแล้ว=ไม่อนุมัติ
@@ -612,9 +620,9 @@ function buildOrderItems(activeStatus){
   Object.values(removedItems).forEach(i=>{const up=itemUnitPrice(i);items.push({name:i.name,qty:i.qty,unit:(i.unitDetail||i.unitName),type:i.type||'ขาย',barcode:i.barcode||'',price:up,total:i.qty*up,promo:((i.promo&&i.promo.join)?i.promo.join(' | '):''),status:'ไม่อนุมัติ'});});
   return items;
 }
-function orderMeta(){
+function orderMeta(draft){
   if(isSpecial(currentCustomer)){                                  // ร้านทำราคาพิเศษ (ร้านส่ง)
-    const id=specialActiveId(currentCustomer);
+    const id = draft ? currentCustomer._inv : specialActiveId(currentCustomer);   // draft=ชื่อ default เสมอ / ตอนกดส่ง=ตามใบกำกับที่เลือก
     return { customerName:id.name, phone:currentCustomer.phone||'', uid:currentCustomer.uid||window._lineUid||'',
       salemanCode:'', salemanName:'', warehouse:'', shopCode:id.code,   // .gs VLOOKUP เซลล์จริงจาก Customer
       special:true, invoice: currentCustomer.invoice!==false };
@@ -633,13 +641,13 @@ let _syncTimer=null;
 // ยิงสถานะ "รออนุมัติราคา" ลงแท็บ order + Supabase ทันทีที่ใส่/ลบ/แก้จำนวน (หน่วง 1.5 วิ)
 function syncOrderSoon(){
   if(!currentCustomer) return;
-  if(isSpecial(currentCustomer)) return;   // ร้านพิเศษ: ไม่ draft-sync เข้าชีท order หลัก (ลงชีทแยกตอนยืนยัน)
   if(!CFG.GAS_URL||CFG.GAS_URL.startsWith('PASTE')) return;
   if(!Object.keys(cart).length && !Object.keys(removedItems).length) return;
   if(_syncTimer) clearTimeout(_syncTimer);
   _syncTimer=setTimeout(()=>{
     const noteEl=document.getElementById('orderNote'); const note=noteEl?clean(noteEl.value):'';
-    postGAS(Object.assign({action:'syncOrder',orderId:draftOrderId(),note,deliver:deliverMode,total:cartTotal(),items:buildOrderItems('รออนุมัติ')},orderMeta()));
+    // ร้านพิเศษ: draft ใช้ชื่อ default (orderMeta(true)) → ลงชีท "Order ร้านส่ง" สถานะ "รออนุมัติ" กันออเดอร์หาย เหมือน ROO
+    postGAS(Object.assign({action:'syncOrder',orderId:draftOrderId(),note,deliver:deliverMode,total:cartTotal(),items:buildOrderItems('รออนุมัติ')},orderMeta(isSpecial(currentCustomer))));
   },1500);
 }
 let currentCustomer=null;
@@ -660,7 +668,7 @@ const PROMO_FIELD={
 /* ===================== CART PERSIST ===================== */
 function loadCart(){ try{return JSON.parse(localStorage.getItem('rop_cart'))||{};}catch{return{}} }
 let _cartDirtyUntil=0;   // เพิ่งแก้ตะกร้าในเครื่องนี้ → อย่าเพิ่งทับด้วยของเซิร์ฟเวอร์ จนกว่าจะ sync ขึ้นเสร็จ
-function saveCart(){ localStorage.setItem('rop_cart',JSON.stringify(cart)); _cartDirtyUntil=Date.now()+5000; syncOrderSoon(); }   // ซิงค์ตะกร้าร่วมผ่านสถานะ "รออนุมัติ" ในชีท order (เลิกใช้แท็บ "ตะกร้า" แล้ว)
+function saveCart(){ lsSet('rop_cart',JSON.stringify(cart)); _cartDirtyUntil=Date.now()+5000; syncOrderSoon(); }   // ซิงค์ตะกร้าร่วมผ่านสถานะ "รออนุมัติ" ในชีท order (เลิกใช้แท็บ "ตะกร้า" แล้ว)
 
 /* ===================== SHARED CART (ซิงค์ข้ามเครื่องผ่านสถานะ "รออนุมัติ" ในชีท order) =====================
    ทุกเครื่องของร้านเดียวกัน เห็นตะกร้าเดียวกัน = รายการที่ยัง "รออนุมัติ"; พอกดส่ง (กลายเป็น "อนุมัติ") → หายทุกเครื่อง */
@@ -681,7 +689,6 @@ function cartItemFromRow(row){
 }
 /* ดึง "ตะกร้าร่วม" = รายการรออนุมัติของร้าน จากชีท order (JSONP) */
 function pullCart(force){
-  if(isSpecial(currentCustomer)) return;   // ร้านพิเศษ: ใช้ตะกร้าในเครื่อง ไม่ซิงค์กับชีท
   const shop=cartShopKey(); if(!shop) return;
   if(!CFG.GAS_URL||CFG.GAS_URL.startsWith('PASTE')) return;
   if(!force && Date.now()<_cartDirtyUntil) return;   // กำลังแก้ในเครื่องนี้ → ข้ามรอบนี้
@@ -690,18 +697,18 @@ function pullCart(force){
     if(r&&r.ok && (force || Date.now()>=_cartDirtyUntil)){
       const items=r.items||[];
       if(r.orderId && items.length){
-        localStorage.setItem('rop_orderId',r.orderId);                 // ใช้ orderId ร่วมทุกเครื่อง → กันออเดอร์เบิ้ล
+        lsSet('rop_orderId',r.orderId);                 // ใช้ orderId ร่วมทุกเครื่อง → กันออเดอร์เบิ้ล
         const obj={}; items.forEach(row=>{ const it=cartItemFromRow(row); if(it){ if(obj[it.key]) obj[it.key].qty+=it.qty; else obj[it.key]=it; } });
-        cart=obj; localStorage.setItem('rop_cart',JSON.stringify(cart));
+        cart=obj; lsSet('rop_cart',JSON.stringify(cart));
         renderCartBadge(); if(document.getElementById('viewCart').classList.contains('active')) renderCart(); renderProducts();
       } else if(Object.keys(cart).length){
-        cart={}; resetDraft(); localStorage.setItem('rop_cart','{}');  // ไม่มีรออนุมัติแล้ว (อนุมัติ/ส่งแล้ว) → เคลียร์ทุกเครื่อง
+        cart={}; resetDraft(); lsSet('rop_cart','{}');  // ไม่มีรออนุมัติแล้ว (อนุมัติ/ส่งแล้ว) → เคลียร์ทุกเครื่อง
         renderCartBadge(); if(document.getElementById('viewCart').classList.contains('active')) renderCart(); renderProducts();
       }
     }
   }catch(e){console.warn('pullCart',e);} finally{ delete window[cb]; const s=document.getElementById(cb); if(s) s.remove(); } };
   const s=document.createElement('script'); s.id=cb;
-  s.src=CFG.GAS_URL+'?action=getPending&shop='+encodeURIComponent(shop)+'&callback='+cb+'&_='+Date.now();
+  s.src=CFG.GAS_URL+'?action=getPending&shop='+encodeURIComponent(shop)+(isSpecial(currentCustomer)?'&special=1':'')+'&callback='+cb+'&_='+Date.now();
   s.onerror=()=>{ delete window[cb]; s.remove(); };
   document.head.appendChild(s);
   setTimeout(()=>{ if(window[cb]){ delete window[cb]; const s2=document.getElementById(cb); if(s2) s2.remove(); } },8000);
@@ -726,7 +733,7 @@ function mapCustomer(row){
 // uid ทั้งหมดของร้าน (ตัวหลัก + ที่เพิ่มภายหลัง) — ร้านเดียวมีได้หลายไลน์
 function uidList(c){ const a=[]; if(c&&c.uid) a.push(clean(c.uid)); if(c&&c.uidsExtra) clean(c.uidsExtra).split(/[,\n;]+/).forEach(u=>{u=clean(u); if(u)a.push(u);}); return a; }
 function custByUid(uid){ uid=clean(uid); if(!uid) return null; return CUSTOMERS.find(c=>uidList(c).includes(uid))||null; }
-function saveSession(c){ localStorage.setItem('rop_customer',JSON.stringify({data:c,exp:Date.now()+30*864e5})); }
+function saveSession(c){ lsSet('rop_customer',JSON.stringify({data:c,exp:Date.now()+30*864e5})); }
 function checkSession(){ try{const r=JSON.parse(localStorage.getItem('rop_customer')); if(r&&Date.now()<r.exp) currentCustomer=r.data;}catch{} }
 function logout(){ localStorage.removeItem('rop_customer'); currentCustomer=null; renderAll(); goShop(); showToast('ออกจากระบบแล้ว','info'); }
 // อัปเดตข้อมูลลูกค้าที่ล็อกอินอยู่ ให้ตรงกับชีทลงทะเบียนล่าสุด (ที่อยู่/เซลล์/คลัง/สถานะ)
@@ -868,13 +875,18 @@ function promoWarehouseOK(p){
   const cw=custShipWh();
   return raw.split(/[,\s]+/).some(w=>w && shipFromSeller(w)===cw);
 }
+/* โปรตามช่องทาง (คอลัมน์ Role): ว่าง=ขึ้นทุกที่ / 3=เฉพาะ ROO / 4=เฉพาะร้านส่ง */
+function promoRoleOK(p){
+  const role=clean(p['Role']); if(!role) return true;
+  return isSpecial(currentCustomer) ? (role==='4') : (role==='3');
+}
 function promoObjsFor(prod){
   const out=[];
   for(const field in promoIndex){
     const v=clean(prod[field]).toLowerCase(); if(!v) continue;
     const hit=promoIndex[field].get(v); if(hit) out.push(...hit);
   }
-  return out.length ? out.filter(promoWarehouseOK) : out;   // กรองตามคลังส่งของลูกค้า
+  return out.length ? out.filter(p=>promoWarehouseOK(p) && promoRoleOK(p)) : out;   // กรองตามคลังส่ง + ช่องทาง (Role) ของลูกค้า
 }
 function promosFor(prod){
   const out=promoObjsFor(prod).map(h=>clean(h['รายละเอียดโปร'])||clean(h['ชื่อโปร']));
@@ -1406,6 +1418,15 @@ function renderPdPrice(){
 }
 function renderPdTiers(){
   const pd=window._pd; const u=pd.units.find(x=>x.type===pd.sel); const el=document.getElementById('pdTiers'); if(!el) return;
+  // ร้านส่ง: ไม่มีสเต็ปราคา แต่มีชิป "เต็มเลท" (CS PALLET) กดเซ็ตจำนวน — เฉพาะหน่วยลัง (CS) ที่มีค่า pallet
+  if(isSpecial(currentCustomer)){
+    const p=findProduct(pd.name); const pallet=numOr0(p&&p['CS PALLET']);
+    if(u.type==='CS' && pallet>0){
+      el.innerHTML='<div class="pd-tiers-title">📦 สั่งเต็มเลท — แตะเพื่อเลือกจำนวน</div>'+
+        `<div class="pd-tier-row ${pd.qty===pallet?'active':''}" onclick="pdSetQty(${pallet})"><span>เต็มเลท (1 เลท)</span><b>${pallet} ${u.name}</b></div>`;
+    } else el.innerHTML='';
+    return;
+  }
   if(!u.tiers || u.tiers.length<2){ el.innerHTML=''; return; }
   let actMin=u.tiers[0].min; u.tiers.forEach(t=>{ if(pd.qty>=t.min) actMin=t.min; });
   const lbl=pdStrip(u.detail)||u.name;
@@ -1723,7 +1744,8 @@ async function loginByPhone(){
     currentCustomer=makeSpecialCustomer(sp, ph);
     if(window._lineUid) linkSpecialUidToServer(ph, window._lineUid);   // เข้าผ่าน LINE → เก็บ User ID ลงชีทร้านพิเศษ + ผู้ติดตาม
     saveSession(currentCustomer); closeModal('loginModal');
-    renderAll(); goShop(); showToast('ยินดีต้อนรับ (ร้านส่ง) '+currentCustomer.name,'success');
+    renderAll(); goShop(); pullCart(true); startCartSync();   // sync ตะกร้าร่วม (draft "รออนุมัติ" ในชีท Order ร้านส่ง) กันออเดอร์หาย
+    showToast('ยินดีต้อนรับ (ร้านส่ง) '+currentCustomer.name,'success');
     return;
   }
   const hit=CUSTOMERS.find(c=>c.phone===ph);
