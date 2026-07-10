@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.322</title>
+<title>Rattana Sales — v8.323</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5205,7 +5205,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.322 · 2026-07-10</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.323 · 2026-07-10</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5216,7 +5216,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.322</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.323</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -5263,6 +5263,12 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
   <button class="drawer-item" id="drawerCN" onclick="closeDrawer();goCN()" style="display:none">
     <span class="drawer-item-icon">🧾</span>
     <span class="drawer-item-label">CN (ใบลดหนี้)</span>
+    <span class="drawer-item-arrow">›</span>
+  </button>
+  <!-- v8.323: supervisor-only ประตูอนุมัติขายเชื่อ (Role 5+ · reveal ใน _debtApprRevealDrawer) -->
+  <button class="drawer-item" id="drawerDebtAppr" onclick="closeDrawer();openDebtApprovalsModal()" style="display:none">
+    <span class="drawer-item-icon">🔴</span>
+    <span class="drawer-item-label">อนุมัติขายเชื่อ</span>
     <span class="drawer-item-arrow">›</span>
   </button>
   <button class="drawer-item" onclick="closeDrawer();goOrders()">
@@ -7032,6 +7038,9 @@ async function loadProgressively() {
     fetchWithCache('debtData', () => fetchSheet(CONFIG.debtSheetId, CONFIG.debtSheetTab), CONFIG.cacheTTLShort)
       .then(d => { SHEET_DATA.debtData = d || []; _buildDebtMap(d); if (SHOPS.length) _applyDebtToShops(); markLoaded('debtData'); console.log('[boot] Debt rows loaded:', (d||[]).length); })
       .catch(e => { console.warn('debtData:', e.message); markLoaded('debtData'); }),
+    fetchWithCache('debtAppr', () => fetchSheet(CONFIG.backendSheetId, 'DebtApproval', null, null), 60 * 1000)   // v8.323: คำขออนุมัติขายเชื่อ (ร้านเกินเครดิต) · fail-open (แท็บยังไม่มี = ว่าง)
+      .then(d => { SHEET_DATA.debtApprovals = d || []; if (typeof _buildDebtApprMap === 'function') _buildDebtApprMap(d); if (typeof _debtApprRevealDrawer === 'function') _debtApprRevealDrawer(); })
+      .catch(e => { console.warn('debtAppr:', e.message); }),
     fetchSheet(CONFIG.backendSheetId, CONFIG.tabs.visits)
       .then(d => {
         // v7.1: ROOT-CAUSE FIX for team-map gold-pin bug (was: pins all gold even when visits exist)
@@ -7467,6 +7476,156 @@ function _ageBadge(age, terms) {
   if (overdue <= 90) return `<span style="background:#ffd5d0;color:#c0392b;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px">เกิน ${overdue}ว.</span>`;
   return `<span style="background:var(--danger);color:#fff;font-size:10px;font-weight:800;padding:2px 8px;border-radius:999px">เกิน ${overdue}ว.</span>`;
 }
+
+// ═══ v8.323: ประตูอนุมัติขายเชื่อ (ร้านเกินเครดิต · เซล Role 3-4 ขอ → หัวหน้า Role≥5 อนุมัติ) ═══
+//   backend พร้อม (Code.gs v8.115): appendDebtApproval / updateDebtApprovalStatus · เก็บแท็บ Backend "DebtApproval" (18 คอลัมน์ TEXT)
+//   text box "แจ้งหัวหน้า" = ฟิลด์ 'เหตุผล' (payload.reason) → หัวหน้าเห็นในคำขอ · spec: handoff/SPEC_debt_credit_approval_gate.md
+//   ⚠️ kill-switch / soft-launch: _DEBT_GATE_ON = false = ปิดประตู (เซลไม่ถูกบล็อก · ฟีเจอร์เทสได้) · true = เปิดประตูจริง (บล็อกเซล Role 3-4 ที่ร้านเกินเครดิต)
+//   deploy ครั้งแรก = false (กันกระทบเซลกลางวันทำงาน) → พี่สั่ง "เปิดประตู" ค่อยแก้เป็น true + redeploy · หรือทดสอบเองในเครื่อง: console พิมพ์ window._DEBT_GATE_ON=true
+window._DEBT_GATE_ON = false;
+window._debtApprRows = window._debtApprRows || {};   // { 'shopCode|smCode' : row } เฉพาะวันหมดอายุ=วันนี้
+function _debtTodayISO() { const d = new Date(); return d.getFullYear() + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0'); }
+function _debtVday(v) { return String(v == null ? '' : v).replace(/-/g, '/').slice(0, 10); }
+function _debtOverdueBills(s) { return (((s && s.debtInvoices) || [])).filter(inv => Number(inv.age || 0) > Number(inv.terms || 0)); }
+function _debtIsOverCredit(s) { return _debtOverdueBills(s).length > 0; }
+function _debtRoleGated() { const r = Number((currentUser && currentUser.role) || (typeof SALESMAN !== 'undefined' && SALESMAN.level) || 0); return r === 3 || r === 4; }   // เฉพาะเซล Role 3-4 · Role 5+ = อนุมัติเอง (ข้าม)
+function _mySmCode() { return String((typeof SALESMAN !== 'undefined' && SALESMAN.code) || (currentUser && currentUser.code) || '').trim(); }
+function _debtApprKey(shopCode, smCode) { return String(shopCode || '').trim() + '|' + String(smCode || '').trim(); }
+function _debtMaxOver(s) { const o = _debtOverdueBills(s); return o.length ? Math.max.apply(null, o.map(i => Math.max(0, Number(i.age || 0) - Number(i.terms || 0)))) : 0; }
+function _buildDebtApprMap(rows) {
+  const today = _debtTodayISO(); const map = {};
+  (rows || []).forEach(r => {
+    if (_debtVday(r['วันหมดอายุ']) !== today) return;
+    const key = _debtApprKey(r['รหัสร้าน'], r['รหัสเซลล์']); const prev = map[key];
+    if (!prev || String(r['เวลาอนุมัติ'] || r['วันเวลา'] || '') >= String(prev['เวลาอนุมัติ'] || prev['วันเวลา'] || '')) map[key] = r;
+  });
+  window._debtApprRows = map;
+}
+function _debtApprStatusFor(shopId) {
+  const r = (window._debtApprRows || {})[_debtApprKey(shopId, _mySmCode())];
+  if (!r) return null;
+  return { reqId: String(r['reqId'] || ''), status: String(r['สถานะ'] || '').trim(), reason: String(r['เหตุผล'] || ''), approver: String(r['ผู้อนุมัติ'] || ''), rejectReason: String(r['เหตุผลปฏิเสธ'] || '') };
+}
+async function _loadDebtApprovals(force) {
+  try {
+    const rows = await fetchWithCache('debtAppr', () => fetchSheet(CONFIG.backendSheetId, 'DebtApproval', null, null), force ? 0 : 60 * 1000);
+    SHEET_DATA.debtApprovals = rows || []; _buildDebtApprMap(rows); _debtApprRevealDrawer();
+  } catch (e) { console.warn('[debtAppr] load failed', e); }
+}
+window._loadDebtApprovals = _loadDebtApprovals;
+function _debtApprRevealDrawer() {
+  try {
+    const role = Number((currentUser && currentUser.role) || (typeof SALESMAN !== 'undefined' && SALESMAN.level) || 0);
+    const el = document.getElementById('drawerDebtAppr'); if (!el) return;
+    if (role >= 5) { const n = _debtPendingForRole().length; el.style.display = 'flex'; const lb = el.querySelector('.drawer-item-label'); if (lb) lb.textContent = 'อนุมัติขายเชื่อ' + (n ? ' (' + n + ')' : ''); }
+    else el.style.display = 'none';
+  } catch (e) {}
+}
+// ── เซล: บล็อก + ขออนุมัติ (text box แจ้งหัวหน้า) ──
+window.showDebtGateModal = function (shopId) {
+  const s = SHOPS.find(x => x.id === shopId); if (!s) return;
+  const modal = document.getElementById('productModal'), mc = document.getElementById('modalContent');
+  if (!modal || !mc) { if (confirm('ร้านนี้เกินเครดิต — ต้องขออนุมัติหัวหน้าก่อนขาย')) {} return; }
+  const st = _debtApprStatusFor(shopId);
+  const debt = Math.round(Number(s.debt || 0)), maxOver = _debtMaxOver(s), nOver = _debtOverdueBills(s).length;
+  const stat = '<div style="padding:14px 16px;background:#fef2f2;border-bottom:1px solid #fecaca;display:grid;grid-template-columns:repeat(3,1fr);gap:8px">'
+    + '<div style="background:#fff;border:1px solid #fecaca;border-radius:8px;padding:8px;text-align:center"><div style="font-size:10px;color:#991B1B;font-weight:700">ยอดค้าง</div><div style="font-size:15px;font-weight:900;color:#DC2626">฿' + debt.toLocaleString() + '</div></div>'
+    + '<div style="background:#fff;border:1px solid #fecaca;border-radius:8px;padding:8px;text-align:center"><div style="font-size:10px;color:#991B1B;font-weight:700">เกินสูงสุด</div><div style="font-size:15px;font-weight:900;color:#DC2626">' + maxOver + '<span style="font-size:10px"> ว.</span></div></div>'
+    + '<div style="background:#fff;border:1px solid #fecaca;border-radius:8px;padding:8px;text-align:center"><div style="font-size:10px;color:#991B1B;font-weight:700">บิลเกิน</div><div style="font-size:15px;font-weight:900;color:#DC2626">' + nOver + '</div></div></div>';
+  let body, headBg = 'linear-gradient(135deg,#DC2626,#991B1B)', headTitle = '⛔ ร้านเกินเครดิต — ขายเชื่อต้องขออนุมัติ';
+  if (st && st.status === 'รอ') {
+    headBg = 'linear-gradient(135deg,#D97706,#B45309)'; headTitle = '🕐 รอหัวหน้าอนุมัติขายเชื่อ';
+    body = '<div style="padding:16px"><div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:12px;font-size:12.5px;color:#92400e">ส่งคำขอแล้ว — เช็คอิน/คีย์ขายร้านนี้ล็อกจนหัวหน้าอนุมัติ<div style="margin-top:6px;font-size:11.5px;color:var(--muted)"><b>ข้อความถึงหัวหน้า:</b> ' + escapeHtml(st.reason || '—') + '</div></div>'
+      + '<button class="btn btn-block" style="margin-top:12px;background:#06C755;color:#fff;border:none" onclick="shareDebtToLine(\'' + escapeAttr(shopId) + '\')">📲 ส่ง LINE หาหัวหน้า</button>'
+      + '<button class="btn btn-outline btn-block" style="margin-top:8px" onclick="_loadDebtApprovals(true).then(function(){showDebtGateModal(\'' + escapeAttr(shopId) + '\')})">🔄 เช็คสถานะอีกครั้ง</button></div>';
+  } else if (st && st.status === 'ไม่อนุมัติ') {
+    headBg = 'linear-gradient(135deg,#6B7280,#374151)'; headTitle = '❌ หัวหน้าไม่อนุมัติขายเชื่อ';
+    body = '<div style="padding:16px"><div style="background:#f3f4f6;border:1px solid #d1d5db;border-radius:10px;padding:12px;font-size:12.5px;color:#374151"><b>เหตุผลที่ไม่อนุมัติ:</b><br>' + escapeHtml(st.rejectReason || '—') + '</div>'
+      + '<label style="display:block;margin-top:12px;font-size:12px;font-weight:700;color:var(--text)">ขออนุมัติใหม่ — ข้อความถึงหัวหน้า</label>'
+      + '<textarea id="debtReason" placeholder="พิมพ์เหตุผล/ข้อความถึงหัวหน้า..." style="width:100%;min-height:70px;margin-top:6px;padding:10px;border:1px solid var(--border);border-radius:9px;font-size:13px;font-family:inherit;box-sizing:border-box"></textarea>'
+      + '<button id="debtReqBtn" class="btn btn-primary btn-block" style="margin-top:10px" onclick="requestDebtApproval(\'' + escapeAttr(shopId) + '\')">🔄 ขออนุมัติใหม่</button></div>';
+  } else {
+    body = '<div style="padding:16px"><div style="font-size:12.5px;color:var(--muted);margin-bottom:10px">ร้านนี้มีบิลเกินวันเครดิต — ต้องขออนุมัติหัวหน้าก่อนถึงจะเช็คอิน + คีย์ขายได้</div>'
+      + '<label style="display:block;font-size:12px;font-weight:700;color:var(--text)">ข้อความถึงหัวหน้า <span style="color:#DC2626">*</span></label>'
+      + '<textarea id="debtReason" placeholder="เช่น ลูกค้ารับปากจ่าย 3 วัน / ของขายดีต้องเติม..." style="width:100%;min-height:80px;margin-top:6px;padding:10px;border:1px solid var(--border);border-radius:9px;font-size:13px;font-family:inherit;box-sizing:border-box"></textarea>'
+      + '<button id="debtReqBtn" class="btn btn-primary btn-block" style="margin-top:12px" onclick="requestDebtApproval(\'' + escapeAttr(shopId) + '\')">📨 ขออนุมัติขายจากหัวหน้า</button></div>';
+  }
+  mc.innerHTML = '<button type="button" class="modal-close-x" onclick="closeModal()">✕</button>'
+    + '<div class="modal-head" style="background:' + headBg + ';color:#fff"><div class="modal-head-info"><div class="modal-title" style="color:#fff">' + headTitle + '</div><div class="modal-sub" style="color:rgba(255,255,255,.92)">' + escapeHtml(s.name || '') + '</div></div></div>' + stat + body;
+  modal.classList.add('active'); document.body.style.overflow = 'hidden';
+};
+window.requestDebtApproval = async function (shopId) {
+  const s = SHOPS.find(x => x.id === shopId); if (!s) return;
+  const ta = document.getElementById('debtReason'); const reason = String(ta ? ta.value : '').trim();
+  if (!reason) { showToast('ใส่ข้อความถึงหัวหน้าก่อน', 'warning'); if (ta) ta.focus(); return; }
+  const btn = document.getElementById('debtReqBtn'); if (btn) { btn.disabled = true; btn.textContent = '⏳ กำลังส่ง...'; }
+  try {
+    const res = await postToAppsScript({
+      action: 'appendDebtApproval', shopCode: s.id, shopName: s.name || '', wh: String(s.debtWarehouse || (typeof _resolveMyWarehouse === 'function' ? _resolveMyWarehouse() : '') || ''),
+      smCode: _mySmCode(), smName: String((typeof SALESMAN !== 'undefined' && SALESMAN.name) || (currentUser && currentUser.name) || ''), email: String((currentUser && currentUser.email) || ''),
+      debtAmount: String(Math.round(Number(s.debt || 0))), overdueDays: String(_debtMaxOver(s)), overdueBills: String(_debtOverdueBills(s).length), reason: reason
+    });
+    if (res && res.ok) {
+      const key = _debtApprKey(shopId, _mySmCode());
+      (window._debtApprRows = window._debtApprRows || {})[key] = { 'reqId': res.reqId, 'สถานะ': res.status || 'รอ', 'เหตุผล': reason, 'รหัสร้าน': s.id, 'รหัสเซลล์': _mySmCode(), 'วันหมดอายุ': _debtTodayISO() };
+      showToast('📨 ส่งคำขอแล้ว — รอหัวหน้าอนุมัติ', 'success'); showDebtGateModal(shopId); _loadDebtApprovals(true);
+    } else { showToast('ส่งไม่สำเร็จ: ' + ((res && res.error) || '?'), 'error'); if (btn) { btn.disabled = false; btn.textContent = '📨 ขออนุมัติขายจากหัวหน้า'; } }
+  } catch (e) { showToast('ส่งไม่สำเร็จ (เน็ตขัดข้อง)', 'error'); if (btn) { btn.disabled = false; btn.textContent = '📨 ขออนุมัติขายจากหัวหน้า'; } }
+};
+window.shareDebtToLine = function (shopId) {
+  const s = SHOPS.find(x => x.id === shopId); if (!s) return; const st = _debtApprStatusFor(shopId);
+  const txt = '🔴 ขออนุมัติขายเชื่อ (ร้านเกินเครดิต)\nร้าน: ' + (s.name || '') + '\nยอดค้าง: ฿' + Math.round(Number(s.debt || 0)).toLocaleString() + '\nเกินกำหนดสูงสุด: ' + _debtMaxOver(s) + ' วัน (' + _debtOverdueBills(s).length + ' บิล)\nเซล: ' + ((typeof SALESMAN !== 'undefined' && SALESMAN.name) || '') + '\nข้อความ: ' + ((st && st.reason) || '') + '\n\n→ เปิดแอป Rattana Sales เมนู "อนุมัติขายเชื่อ"';
+  if (navigator.share) navigator.share({ text: txt }).catch(function () {});
+  else { try { navigator.clipboard.writeText(txt); showToast('คัดลอกข้อความแล้ว — วางในไลน์', 'info'); } catch (e) {} }
+};
+// ── หัวหน้า: รายการรออนุมัติ + อนุมัติ/ปฏิเสธ ──
+function _debtPendingForRole() {
+  const role = Number((currentUser && currentUser.role) || (typeof SALESMAN !== 'undefined' && SALESMAN.level) || 0);
+  if (role < 5) return [];
+  const myWh = (typeof _resolveMyWarehouse === 'function') ? String(_resolveMyWarehouse() || '').toUpperCase() : '';
+  const isFin = String((currentUser && currentUser.dept) || '').trim() === 'บัญชีและการเงิน'; const today = _debtTodayISO();
+  return (SHEET_DATA.debtApprovals || []).filter(r => {
+    if (String(r['สถานะ'] || '').trim() !== 'รอ') return false;
+    if (_debtVday(r['วันหมดอายุ']) !== today) return false;
+    if (role >= 6 || isFin) return true;
+    return String(r['คลัง'] || '').toUpperCase() === myWh;
+  });
+}
+window._debtPendingForRole = _debtPendingForRole;
+function _debtApprRowHtml(r) {
+  const shop = escapeHtml(String(r['ชื่อร้าน'] || r['รหัสร้าน'] || '')), sm = escapeHtml(String(r['ชื่อเซล'] || r['รหัสเซลล์'] || ''));
+  const debt = Math.round(Number(String(r['ยอดค้าง'] || '').replace(/[^0-9.]/g, '')) || 0);
+  const over = escapeHtml(String(r['เกินกำหนดสูงสุด(วัน)'] || '')), nb = escapeHtml(String(r['บิลเกิน(จำนวน)'] || ''));
+  const reason = escapeHtml(String(r['เหตุผล'] || '—')), reqId = escapeAttr(String(r['reqId'] || ''));
+  return '<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px;background:var(--card-bg)">'
+    + '<div style="display:flex;justify-content:space-between;gap:8px"><div style="font-weight:800;font-size:14px">' + shop + '</div><div style="font-weight:900;color:#DC2626;font-size:14px">฿' + debt.toLocaleString() + '</div></div>'
+    + '<div style="font-size:11.5px;color:var(--muted);margin-top:2px">เซล ' + sm + ' · เกิน ' + over + ' ว. · ' + nb + ' บิล</div>'
+    + '<div style="background:var(--row-alt);border-radius:8px;padding:8px 10px;margin-top:8px;font-size:12.5px;color:var(--text)"><b>ข้อความ:</b> ' + reason + '</div>'
+    + '<div style="display:flex;gap:8px;margin-top:10px"><button class="btn btn-outline" style="flex:1;color:#DC2626;border-color:#DC2626" onclick="decideDebtApproval(\'' + reqId + '\',\'reject\')">❌ ไม่อนุมัติ</button>'
+    + '<button class="btn btn-primary" style="flex:1.4;background:#16A34A;border:none" onclick="decideDebtApproval(\'' + reqId + '\',\'approve\')">✅ อนุมัติ</button></div></div>';
+}
+window.openDebtApprovalsModal = async function () {
+  const role = Number((currentUser && currentUser.role) || (typeof SALESMAN !== 'undefined' && SALESMAN.level) || 0);
+  if (role < 5) { showToast('เฉพาะหัวหน้า (Role 5+)', 'warning'); return; }
+  const modal = document.getElementById('productModal'), mc = document.getElementById('modalContent'); if (!modal || !mc) return;
+  mc.innerHTML = '<div style="padding:44px;text-align:center;color:var(--muted);font-size:13px">⏳ กำลังโหลดคำขอ...</div>'; modal.classList.add('active'); document.body.style.overflow = 'hidden';
+  await _loadDebtApprovals(true);
+  const list = _debtPendingForRole();
+  const rows = list.length ? list.map(_debtApprRowHtml).join('') : '<div style="text-align:center;padding:30px;color:var(--muted);font-size:13px">— ไม่มีคำขอขายเชื่อรออนุมัติ —</div>';
+  mc.innerHTML = '<button type="button" class="modal-close-x" onclick="closeModal()">✕</button>'
+    + '<div class="modal-head" style="background:linear-gradient(135deg,#DC2626,#991B1B);color:#fff"><div class="modal-head-info"><div class="modal-title" style="color:#fff">🔴 อนุมัติขายเชื่อ</div><div class="modal-sub" style="color:rgba(255,255,255,.9)">' + list.length + ' คำขอรออนุมัติ · วันนี้</div></div></div>'
+    + '<div class="modal-body" style="padding:12px">' + rows + '</div>';
+};
+window.decideDebtApproval = async function (reqId, decision) {
+  let rejectReason = '';
+  if (decision === 'reject') { rejectReason = (prompt('เหตุผลที่ไม่อนุมัติ (เซลจะเห็น):') || '').trim(); if (!rejectReason) return; }
+  try {
+    const res = await postToAppsScript({ action: 'updateDebtApprovalStatus', reqId: reqId, decision: decision, approverName: String((currentUser && currentUser.name) || ''), approverCode: String((currentUser && currentUser.code) || ''), rejectReason: rejectReason });
+    if (res && res.ok) { showToast(decision === 'approve' ? '✅ อนุมัติแล้ว' : '❌ บันทึกไม่อนุมัติแล้ว', 'success'); await _loadDebtApprovals(true); openDebtApprovalsModal(); }
+    else if (res && res.alreadyDecided) { showToast('รายการนี้ถูกตัดสินไปแล้ว', 'info'); await _loadDebtApprovals(true); openDebtApprovalsModal(); }
+    else showToast('ไม่สำเร็จ: ' + ((res && res.error) || '?'), 'error');
+  } catch (e) { showToast('ไม่สำเร็จ (เน็ตขัดข้อง)', 'error'); }
+};
 
 function _buildDebtDetailHtml(s) {
   if (!s.debt || s.debt <= 0) return '';
@@ -10881,7 +11040,7 @@ window.showOrdersDiag = async function() {
   const cAge  = g(() => { const c = _memCache && _memCache['orders']; return (c && c.ts) ? Math.round((Date.now() - c.ts) / 1000) + 's' : 'ว่าง'; });
   const when  = g(() => new Date().toLocaleString('th-TH', { hour12: false }));
   const lines = [
-    'Rattana Sales · ตรวจสอบข้อมูล · v8.322',
+    'Rattana Sales · ตรวจสอบข้อมูล · v8.323',
     'เวลา: ' + when,
     '──────────────',
     'Role: ' + role + '   คลัง: ' + wh,
@@ -14137,9 +14296,14 @@ function _updateRouteProgress() {
 
 // Direct action handlers from Rich Card — no shop detail page needed (per Surat 2026-05-08, v4.1)
 window.handleShopCheckIn = function(shopId) {
-  // v6.5.226: pre-check debt — Surat: if customer has debt, show pop-up with invoice count,
-  // total amount, overdue days BEFORE check-in. Salesman must confirm to proceed.
   const s = SHOPS.find(x => x.id === shopId);
+  // v8.323: ร้านเกินเครดิต + เซล Role 3-4 → ประตูอนุมัติขายเชื่อ (บล็อกจนหัวหน้าอนุมัติ · Role 5+ ข้าม → soft เดิม · kill-switch _DEBT_GATE_ON)
+  if (s && window._DEBT_GATE_ON !== false && typeof _debtIsOverCredit === 'function' && _debtIsOverCredit(s) && _debtRoleGated()) {
+    const st = (typeof _debtApprStatusFor === 'function') ? _debtApprStatusFor(shopId) : null;
+    if (st && st.status === 'อนุมัติ') { if (typeof doCheckIn === 'function') doCheckIn(shopId); return; }   // อนุมัติแล้ววันนี้ → ปลดล็อก
+    showDebtGateModal(shopId); return;
+  }
+  // v6.5.226: มีหนี้แต่ไม่เกินเครดิต (หรือ Role 5+) → เตือน soft เดิม (รับทราบ → เช็คอินต่อ)
   if (s && Number(s.debt || 0) > 0 && Array.isArray(s.debtInvoices) && s.debtInvoices.length > 0) {
     showDebtBeforeCheckInModal(shopId);
     return;
