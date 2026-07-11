@@ -344,8 +344,12 @@
     @keyframes dotPulse{0%,100%{opacity:1;box-shadow:0 0 4px #f39c12}50%{opacity:.35;box-shadow:none}}
     #resultSection{display:none}
     #resultSection.show{display:block;animation:fadeIn .3s ease}
-    #backToTop{position:fixed;bottom:max(24px,env(safe-area-inset-bottom));right:max(16px,env(safe-area-inset-right));background:var(--gold);color:#fff;border:none;border-radius:50%;width:46px;height:46px;display:none;align-items:center;justify-content:center;box-shadow:var(--shadow-gold);z-index:90;font-size:20px;font-weight:700;cursor:pointer}
+    /* v4.7: ยกปุ่มขึ้นให้พ้นช่องสแกน (bc-dock fixed ล่างสุดบนมือถือ) */
+    #backToTop{position:fixed;bottom:calc(98px + env(safe-area-inset-bottom));right:max(16px,env(safe-area-inset-right));background:var(--gold);color:#fff;border:none;border-radius:50%;width:46px;height:46px;display:none;align-items:center;justify-content:center;box-shadow:var(--shadow-gold);z-index:90;font-size:20px;font-weight:700;cursor:pointer}
+    @media(min-width:980px){#backToTop{bottom:max(24px,env(safe-area-inset-bottom))}}
     #backToTop.show{display:flex}
+    /* v4.6: ขณะเปิดกล้อง ย้ายปุ่มกลับด้านบนไปไว้ด้านบน (ใต้ header) เหนือกล้อง — ไม่ทับปุ่มควบคุมกล้อง */
+    body.cam-open #backToTop{bottom:auto;top:max(84px,calc(64px + env(safe-area-inset-top)))}
 
     @keyframes spin{to{transform:rotate(360deg)}}
     @keyframes slideIn{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}
@@ -868,11 +872,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-<<<<<<< HEAD
-const APP_VERSION = 'v4.4';
-=======
 const APP_VERSION = 'v4.12';
->>>>>>> c65c362 (feat(ui): rename app to Check Stock (header/title/login) — v4.12)
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -1851,6 +1851,7 @@ function startCamera() {
   }).then(ctrl => {
     html5QR = ctrl;
     cameraOpen = true;
+    document.body.classList.add('cam-open');
     setScannerUI(true);
   }).catch(err => {
     showToast('เปิดกล้องไม่ได้: ' + (err.message||err), 'error');
@@ -1863,6 +1864,7 @@ function stopCamera() {
   if (html5QR) { try { html5QR.stop(); } catch {} html5QR = null; }
   currentStream = null; torchOn = false;
   cameraOpen = false;
+  document.body.classList.remove('cam-open');
   document.getElementById('cameraSection').style.display = 'none';
   setScannerUI(false);
 }
@@ -2881,7 +2883,10 @@ function scanExpSet(dateStr) {
     if (opt) expPickSel(id, opt);
   });
 }
-document.addEventListener('click', () => {
+document.addEventListener('click', (e) => {
+  // v4.8: อย่าปิด dropdown ถ้าคลิก/แตะข้างในตัว picker (ปุ่ม, ช่องค้นหา, ตัวเลือก)
+  // ไม่งั้นบนมือถือแตะช่องค้นหาแล้ว dropdown ปิดทันที → พิมพ์ค้นหาไม่ได้
+  if (e.target.closest && e.target.closest('.exp-pick')) return;
   document.querySelectorAll('.exp-pick-drop').forEach(d => { d.style.display='none'; });
 });
 function renderLotRows() {
@@ -3119,7 +3124,7 @@ async function saveCountToSheet() {
         return `${sign}${cs}.${ea}`;
       })();
       const status = r.status==='ok' ? 'ตรง' : r.status==='short' ? 'ขาด' : 'เกิน';
-      // Merge lots with the same expiry date (including both-blank = no-date lots)
+      // รวมล็อตที่วันหมดอายุเดียวกันเข้าด้วยกัน (รวมทั้งแบบไม่มีวันหมดอายุ)
       const merged = new Map();
       lots.forEach(lot => {
         const key = lot.expiryDate || '';
@@ -3127,7 +3132,14 @@ async function saveCountToSheet() {
         const m = merged.get(key);
         ['EA','PA','BP','CS'].forEach(u => { m.counts[u] = (m.counts[u]||0) + (lot.counts[u]||0); });
       });
-      return [...merged.values()].map((lot, li) => {
+      // v4.10: ตัดล็อตที่นับ 0 ทุกหน่วยทิ้ง (ล็อตว่าง/phantom) — กันแถวที่ "ไม่มีข้อมูลนับ แต่ถือสต็อก/ขาดเกิน"
+      // หลายล็อตจริงยังแยกแถวตามเดิม แต่สต็อก/ขาดเกิน/สถานะ ลงเฉพาะแถวแรกที่มีการนับ
+      let outLots = [...merged.values()].filter(lot =>
+        ['EA','PA','BP','CS'].some(u => (lot.counts[u]||0) > 0)
+      );
+      // เผื่อกรณีนับได้ 0 จริง (แต่ระบบมีของ = ขาด) — เก็บ 1 แถวไว้บันทึกสต็อก/ขาดเกิน
+      if (!outLots.length) outLots = [{ counts: {EA:0,PA:0,BP:0,CS:0}, expiryDate: '' }];
+      return outLots.map((lot, li) => {
         const lc = lot.counts;
         const lotPieces = ['EA','PA','BP','CS'].reduce((s,u)=>s+(lc[u]||0)*(r.item.factors[u]||1),0);
         return {
@@ -3138,7 +3150,7 @@ async function saveCountToSheet() {
           systemPieces: li===0 ? r.system : 0,
           diffPieces: li===0 ? r.diff : 0,
           diffCSEA: li===0 ? diffCSEA : '',
-          status: li===0 ? status : '',
+          status: status,   // v4.11: ใส่สถานะรวมของสินค้าทุกแถว (รวมล็อตรอง) — สต็อก/ขาดเกิน ยังโชว์แถวแรกแถวเดียว
           expiryDate: lot.expiryDate || '',
         };
       });
@@ -4045,6 +4057,7 @@ function startCountCamera() {
   }).then(ctrl => {
     countQR = ctrl;
     countCamOpen = true;
+    document.body.classList.add('cam-open');
     setCountCamUI(true);
   }).catch(err => {
     showToast('เปิดกล้องไม่ได้: ' + (err.message||err), 'error');
@@ -4055,6 +4068,7 @@ function stopCountCamera() {
   if (countQR) { try { countQR.stop(); } catch {} countQR = null; }
   currentStream = null; torchOn = false;
   countCamOpen = false;
+  document.body.classList.remove('cam-open');
   document.getElementById('countCameraSection').style.display = 'none';
   setCountCamUI(false);
 }
