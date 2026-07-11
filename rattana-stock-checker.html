@@ -872,7 +872,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.8';
+const APP_VERSION = 'v4.9';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -3114,7 +3114,7 @@ async function saveCountToSheet() {
     empId: counterDisplayEmpId(),
     email: currentUser?.email || '',
     savedAt: new Date().toISOString(),
-    rows: rows.flatMap(r => {
+    rows: rows.map(r => {
       const lots = itemLots(r.item);
       const diffCSEA = (() => {
         if (r.diff === 0) return '0';
@@ -3124,29 +3124,28 @@ async function saveCountToSheet() {
         return `${sign}${cs}.${ea}`;
       })();
       const status = r.status==='ok' ? 'ตรง' : r.status==='short' ? 'ขาด' : 'เกิน';
-      // Merge lots with the same expiry date (including both-blank = no-date lots)
-      const merged = new Map();
+      // v4.9: รวมทุกล็อตของสินค้าให้เหลือ "แถวเดียว" — บวกจำนวนทุกล็อตเข้าด้วยกัน
+      // วันหมดอายุที่ไม่ซ้ำเก็บรวมในช่องเดียว (คั่นด้วย , ) ตัดล็อตว่างที่นับ 0 ทิ้งไปในตัว
+      // เดิมแยกเป็น 1 แถว/วันหมดอายุ ทำให้สินค้าตัวเดียวมี 2 แถว + แถวล็อตว่างที่นับ 0
+      const tot = {EA:0,PA:0,BP:0,CS:0};
+      const exps = [];
       lots.forEach(lot => {
-        const key = lot.expiryDate || '';
-        if (!merged.has(key)) merged.set(key, { counts: {EA:0,PA:0,BP:0,CS:0}, expiryDate: key });
-        const m = merged.get(key);
-        ['EA','PA','BP','CS'].forEach(u => { m.counts[u] = (m.counts[u]||0) + (lot.counts[u]||0); });
+        ['EA','PA','BP','CS'].forEach(u => { tot[u] += (lot.counts[u]||0); });
+        const e = (lot.expiryDate||'').trim();
+        if (e && !exps.includes(e)) exps.push(e);
       });
-      return [...merged.values()].map((lot, li) => {
-        const lc = lot.counts;
-        const lotPieces = ['EA','PA','BP','CS'].reduce((s,u)=>s+(lc[u]||0)*(r.item.factors[u]||1),0);
-        return {
-          key: r.key, name: r.name,
-          cs: lc.CS||0, bp: lc.BP||0, pa: lc.PA||0, ea: lc.EA||0,
-          countedPieces: lotPieces,
-          systemRaw: li===0 ? r.systemRaw : '',
-          systemPieces: li===0 ? r.system : 0,
-          diffPieces: li===0 ? r.diff : 0,
-          diffCSEA: li===0 ? diffCSEA : '',
-          status: li===0 ? status : '',
-          expiryDate: lot.expiryDate || '',
-        };
-      });
+      exps.sort();
+      return {
+        key: r.key, name: r.name,
+        cs: tot.CS||0, bp: tot.BP||0, pa: tot.PA||0, ea: tot.EA||0,
+        countedPieces: r.counted,
+        systemRaw: r.systemRaw,
+        systemPieces: r.system,
+        diffPieces: r.diff,
+        diffCSEA,
+        status,
+        expiryDate: exps.join(', '),
+      };
     }),
   };
   showSpinner('กำลังบันทึกลง Google Sheet...');
@@ -3968,8 +3967,10 @@ function openHistDetail(idx) {
           : `<span style="color:var(--${scDiff<0?'short':'over'});font-weight:700;font-size:12px">${scDiff>0?'+':''}${piecesToCSEA(scDiff, p.factorCS)}</span>`)
         : '';
       const lotRows = hasLots ? sc.lots.map(l => {
-        const exp = l.expiryDate
-          ? `<span class="exp-chip" style="font-size:11px">📅 ${formatThaiDate(l.expiryDate)}</span>`
+        // v4.9: วันหมดอายุอาจถูกรวมหลายวันไว้ในช่องเดียว (คั่นด้วย , ) → แยกเป็นชิปทีละวัน
+        const dates = String(l.expiryDate||'').split(',').map(s=>s.trim()).filter(Boolean);
+        const exp = dates.length
+          ? dates.map(d=>`<span class="exp-chip" style="font-size:11px">📅 ${formatThaiDate(d)}</span>`).join(' ')
           : '<span style="color:var(--muted);font-size:11px">ไม่มีวันหมดอายุ</span>';
         const csea = piecesToCSEA(l.countedPieces||0, p.factorCS);
         return `<div style="display:flex;align-items:center;gap:8px;padding:7px 14px 7px 32px;border-top:1px solid var(--border);font-size:12px">
