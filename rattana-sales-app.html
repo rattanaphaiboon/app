@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.358</title>
+<title>Rattana Sales — v8.359</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5206,7 +5206,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.358 · 2026-07-14</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.359 · 2026-07-14</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5217,7 +5217,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.358</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.359</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -5988,7 +5988,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
   </div>
 
   <!-- ─── Submit ─── -->
-  <button class="btn btn-success btn-lg btn-block" style="margin-top:18px" onclick="submitNewShop()">
+  <button class="btn btn-success btn-lg btn-block" id="newShopSubmitBtn" style="margin-top:18px" onclick="submitNewShop()">
     ✅ ส่งคำขอเปิดร้านใหม่
   </button>
   <button class="btn btn-outline btn-block" style="margin-top:8px" onclick="goHome()">ยกเลิก</button>
@@ -10267,8 +10267,14 @@ async function postToAppsScript(payload, _retries = 3) {
   }
   // All retries failed — queue safe write actions so data isn't lost
   // v6.5.175: appendNoSale removed — visit row carries เหตุผลที่ไม่ซื้อ
-  const queueable = ['appendOrder','appendOrderBatch','appendVisit','appendCN'];
-  if (queueable.includes(payload.action)) writeQueue.add(payload);
+  // v8.359: + appendCustomer/appendProposal — เดิมไม่อยู่ในลิสต์ = ยิงไม่ผ่านแล้ว throw ทิ้งเลย ไม่มีคิว ไม่มี auto-resend
+  //   → เปิดร้านใหม่/เสนอสินค้า หายถาวร (ปลอดภัยที่จะเข้าคิวแล้ว เพราะ v8.359 ย่อรูปเหลือ ~150KB · ดิบ 6.7MB จะทำ localStorage เต็ม)
+  //   ติดธง _queued บน error → caller รู้ว่าข้อมูลปลอดภัยแล้วหรือหายจริง (ห้ามเดาเอง)
+  const queueable = ['appendOrder','appendOrderBatch','appendVisit','appendCN','appendCustomer','appendProposal'];
+  if (queueable.includes(payload.action)) {
+    const _q = writeQueue.add(payload);
+    if (lastErr) lastErr._queued = _q;
+  }
   throw lastErr;
 }
 
@@ -10277,16 +10283,19 @@ async function postToAppsScript(payload, _retries = 3) {
 const writeQueue = {
   KEY: 'rsa_write_queue',
   get()      { try { return JSON.parse(localStorage.getItem(this.KEY) || '[]'); } catch { return []; } },
-  save(q)    { try { localStorage.setItem(this.KEY, JSON.stringify(q)); } catch {} },
+  // v8.359: คืน true/false — เดิมกลืน error เงียบ (localStorage เต็ม quota = ของหาย แต่ยังขึ้น toast "บันทึกไว้แล้ว" = ✅ ปลอมอีกชั้น)
+  save(q)    { try { localStorage.setItem(this.KEY, JSON.stringify(q)); return true; } catch (e) { console.error('[WriteQueue] save failed:', e && e.message); return false; } },
   count()    { return this.get().length; },
 
+  // v8.359: คืน true = เข้าคิวจริง (ข้อมูลปลอดภัย จะ resend เอง) · false = เข้าคิวไม่ได้ (caller ต้องบอกเซลตามจริง ห้ามขึ้น ✅)
   add(payload) {
     const q = this.get();
     q.push({ id: Date.now().toString(36), payload, attempts: 0, ts: Date.now() });
-    this.save(q);
-    console.warn('[WriteQueue] Queued:', payload.action, '— queue size:', q.length);
+    const okSave = this.save(q);
+    console.warn('[WriteQueue] Queued:', payload.action, '— queue size:', q.length, '— saved:', okSave);
     _updateQueueBadge();
-    showToast('⚠️ ส่งไม่ได้ชั่วคราว — บันทึกไว้แล้ว จะส่งใหม่อัตโนมัติ', 'warning');
+    if (okSave) showToast('⚠️ ส่งไม่ได้ชั่วคราว — บันทึกไว้แล้ว จะส่งใหม่อัตโนมัติ', 'warning');
+    return okSave;
   },
 
   async flush() {
@@ -11072,7 +11081,7 @@ window.showOrdersDiag = async function() {
   const cAge  = g(() => { const c = _memCache && _memCache['orders']; return (c && c.ts) ? Math.round((Date.now() - c.ts) / 1000) + 's' : 'ว่าง'; });
   const when  = g(() => new Date().toLocaleString('th-TH', { hour12: false }));
   const lines = [
-    'Rattana Sales · ตรวจสอบข้อมูล · v8.358',
+    'Rattana Sales · ตรวจสอบข้อมูล · v8.359',
     'เวลา: ' + when,
     '──────────────',
     'Role: ' + role + '   คลัง: ' + wh,
@@ -33395,25 +33404,57 @@ window._submitNewShopNoGps = function() {
   submitNewShop();
 };
 
+// ══════════ v8.359: ย่อรูปก่อนส่ง — helper กลางตัวเดียว (ร้านใหม่ · เสนอสินค้า · CN) ══════════
+//   ต้นตอ "เปิดร้านใหม่แล้วหายเงียบ": ร้านใหม่/เสนอสินค้า ส่ง base64 ดิบ — รับได้ถึง 5MB → +33% = payload ~6.7MB
+//   → POST บน 4G ภาคสนาม ชน timeout 30s → retry 3 รอบ ~95 วิ → fail แล้วทิ้ง (ไม่เข้าคิว) = ร้านหายถาวร
+//   900px + jpeg 0.72 → ~150KB (เบาลง ~45 เท่า) · เล็กพอที่จะเข้า writeQueue (localStorage) ได้โดยไม่เต็ม quota
+//   cap 20MB = กันไฟล์ผิดปกติ/หน่วยความจำมือถือ (เดิม cap 5MB = ตีตกรูปมือถือปกติทั้งที่ย่อได้)
+function _shrinkPhoto(file, maxPx, q) {
+  maxPx = maxPx || 900;
+  q = q || 0.72;
+  return new Promise(function (resolve, reject) {
+    if (!file) { reject(new Error('ไม่มีไฟล์')); return; }
+    if (file.size > 20 * 1024 * 1024) { reject(new Error('ไฟล์ใหญ่เกิน 20MB')); return; }
+    const rd = new FileReader();
+    rd.onerror = function () { reject(new Error('อ่านไฟล์ไม่ได้')); };
+    rd.onload = function (ev) {
+      const img = new Image();
+      img.onerror = function () { reject(new Error('อ่านรูปไม่ได้ (ไฟล์อาจไม่ใช่รูป)')); };
+      img.onload = function () {
+        try {
+          let w = img.width, h = img.height;
+          if (!w || !h) { reject(new Error('รูปเสียหาย')); return; }
+          if (w > maxPx || h > maxPx) { const k = Math.min(maxPx / w, maxPx / h); w = Math.round(w * k); h = Math.round(h * k); }
+          const cv = document.createElement('canvas');
+          cv.width = w; cv.height = h;
+          cv.getContext('2d').drawImage(img, 0, 0, w, h);
+          resolve(cv.toDataURL('image/jpeg', q));
+        } catch (e) { reject(e); }
+      };
+      img.src = ev.target.result;
+    };
+    rd.readAsDataURL(file);
+  });
+}
+window._shrinkPhoto = _shrinkPhoto;
+
 function onNewShopPhotoSelected(event) {
   const file = event.target.files[0];
   if (!file) return;
-  if (file.size > 5 * 1024 * 1024) {
-    showToast('รูปใหญ่เกิน 5MB — ลองรูปขนาดเล็กกว่า', 'warning');
-    return;
-  }
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    newShopPhotoData = e.target.result;
+  _shrinkPhoto(file, 900, 0.72).then(function (dataUrl) {
+    newShopPhotoData = dataUrl;
     const upload = document.getElementById('newShopPhotoUpload');
-    upload.classList.add('has-photo');
-    upload.innerHTML = `
-      <img class="photo-upload-preview" src="${newShopPhotoData}" alt="หน้าร้าน">
-      <div style="padding:10px;text-align:center;font-size:12px;color:var(--muted)">แตะเพื่อเปลี่ยนรูป</div>
-    `;
+    if (upload) {
+      upload.classList.add('has-photo');
+      upload.innerHTML = `
+        <img class="photo-upload-preview" src="${newShopPhotoData}" alt="หน้าร้าน">
+        <div style="padding:10px;text-align:center;font-size:12px;color:var(--muted)">แตะเพื่อเปลี่ยนรูป</div>
+      `;
+    }
     showToast('✓ อัพโหลดรูปแล้ว', 'success');
-  };
-  reader.readAsDataURL(file);
+  }).catch(function (e) {
+    showToast('ใช้รูปนี้ไม่ได้: ' + ((e && e.message) || ''), 'warning');
+  });
 }
 
 // v8.154: รหัสร้านชั่วคราว NEW-<YYYYMMDD-HHMMSS>-<รหัสเซล> — เปิดร้านใหม่แล้วคีย์ออเดอร์ได้เลย ไม่ต้องรอ admin ทำรหัสบีพลัส
@@ -33427,7 +33468,8 @@ function _newTempShopCode(){
   return 'NEW-' + stamp + (sc ? '-' + sc : '');
 }
 
-function submitNewShop() {
+async function submitNewShop() {
+  if (window._newShopBusy) return;   // v8.359: กันกดซ้ำระหว่างรอผล (กดรัว = ร้านซ้ำ)
   // Required fields
   const name = document.getElementById('newShopName').value.trim();
   const type = document.getElementById('newShopType').value;
@@ -33536,10 +33578,35 @@ function submitNewShop() {
   };
   SHOPS.push(newShop);
 
-  // Push to Sheet customer detail tab
-  submitNewCustomer(customerDetailRow).catch(e => console.warn('New shop sync error:', e));
+  // ══ v8.359: รอผลจริงก่อนบอกเซลว่าสำเร็จ ══
+  //   เดิม: ยิงแบบไม่ await + ไม่เช็ค data.ok → toast ✅ เด้งทันที + 800ms ล้างฟอร์มเด้งกลับหน้าแรก
+  //   → ยิงไม่ผ่าน/ok:false ก็ยัง ✅ = ร้านหายเงียบ เซลไม่รู้ (บั๊กเดียวกับออเดอร์หาย ok:false ignored ที่แก้ให้ order ไปแล้ว)
+  //   ตอนนี้: ลงชีทจริง (ok:true) → ✅ · ยิงไม่ผ่านแต่เข้าคิวแล้ว → คิว resend เอง (toast ของคิวขึ้นให้แล้ว ไม่ซ้อน)
+  //           เข้าคิวไม่ได้ด้วย → ❌ บอกตรงๆ + คงฟอร์มไว้ให้กดส่งใหม่ + ถอนร้าน phantom ออกจาก SHOPS
+  window._newShopBusy = true;
+  const _btn = document.getElementById('newShopSubmitBtn');
+  const _btnHtml = _btn ? _btn.innerHTML : '';
+  if (_btn) { _btn.disabled = true; _btn.style.opacity = '.6'; _btn.innerHTML = '⏳ กำลังส่ง…'; }
+  let _ok = false, _queued = false, _err = '';
+  try {
+    const res = await submitNewCustomer(customerDetailRow);
+    if (res && res.ok === true) _ok = true;
+    else _err = (res && res.error) || 'หลังบ้านตอบ ok:false';
+  } catch (e) {
+    _queued = !!(e && e._queued);   // postToAppsScript ใส่ธงให้ = เข้า writeQueue สำเร็จ (ข้อมูลปลอดภัย)
+    _err = (e && e.message) || 'ส่งไม่ได้';
+    console.warn('New shop sync error:', _err, '· queued:', _queued);
+  }
+  window._newShopBusy = false;
+  if (_btn) { _btn.disabled = false; _btn.style.opacity = ''; _btn.innerHTML = _btnHtml; }
 
-  showToast('✅ ส่งคำขอเปิดร้านใหม่ — รอ admin อนุมัติ', 'success');
+  if (!_ok && !_queued) {
+    const _i = SHOPS.indexOf(newShop);
+    if (_i >= 0) SHOPS.splice(_i, 1);   // ยังไม่ถึงชีทและไม่ได้เข้าคิว → อย่าทิ้งร้าน phantom ไว้ในเครื่อง
+    showToast('❌ ส่งไม่สำเร็จ — ' + _err + ' · ข้อมูลยังอยู่ในฟอร์ม กดส่งใหม่อีกครั้ง', 'error');
+    return;   // ห้ามล้างฟอร์ม/goHome
+  }
+  if (_ok) showToast('✅ ส่งคำขอเปิดร้านใหม่ — รอ admin อนุมัติ', 'success');
   setTimeout(() => {
     resetNewShopForm();
     goHome();
@@ -34635,13 +34702,9 @@ function resetProposalForm() {
 function onProposalPhotoSelected(event) {
   const file = event.target.files[0];
   if (!file) return;
-  if (file.size > 5 * 1024 * 1024) {
-    showToast('รูปใหญ่เกิน 5MB — ลองรูปเล็กลง', 'warning');
-    return;
-  }
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    proposalPhotoData = e.target.result;
+  // v8.359: ย่อก่อนส่ง (เดิม base64 ดิบ → timeout → appendProposal ทิ้ง = ข้อเสนอหายเงียบ แบบเดียวกับร้านใหม่)
+  _shrinkPhoto(file, 900, 0.72).then(function (dataUrl) {
+    proposalPhotoData = dataUrl;
     const upload = document.getElementById('proposalPhotoUpload');
     if (upload) {
       upload.classList.add('has-photo');
@@ -34650,8 +34713,9 @@ function onProposalPhotoSelected(event) {
         <div style="padding:10px;text-align:center;font-size:12px;color:var(--muted)">แตะเพื่อเปลี่ยนรูป</div>`;
     }
     showToast('✓ อัพโหลดรูปแล้ว', 'success');
-  };
-  reader.readAsDataURL(file);
+  }).catch(function (e) {
+    showToast('ใช้รูปนี้ไม่ได้: ' + ((e && e.message) || ''), 'warning');
+  });
 }
 window.onProposalPhotoSelected = onProposalPhotoSelected;
 
@@ -36131,24 +36195,13 @@ function _cnPhotoRefresh() { const b = document.getElementById('cnPhotoBox'); if
 window._cnPhotoClear = function () { window._cnPhotoB64 = ''; const i = document.getElementById('cnPhotoInput'); if (i) i.value = ''; _cnPhotoRefresh(); };
 window._cnPhotoPick = function (input) {
   const f = input.files && input.files[0]; if (!f) return;
-  const rd = new FileReader();
-  rd.onload = function (ev) {
-    const img = new Image();
-    img.onload = function () {
-      try {
-        const MAX = 900;
-        let w = img.width, h = img.height;
-        if (w > MAX || h > MAX) { const k = Math.min(MAX / w, MAX / h); w = Math.round(w * k); h = Math.round(h * k); }
-        const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
-        cv.getContext('2d').drawImage(img, 0, 0, w, h);
-        window._cnPhotoB64 = cv.toDataURL('image/jpeg', 0.72);
-        _cnPhotoRefresh();
-      } catch (e) { showToast('อ่านรูปไม่ได้: ' + e.message, 'error'); }
-    };
-    img.onerror = function () { showToast('อ่านรูปไม่ได้', 'error'); };
-    img.src = ev.target.result;
-  };
-  rd.readAsDataURL(f);
+  // v8.359: ย้ายมาใช้ _shrinkPhoto ตัวกลาง (เดิม logic เดียวกันเขียน inline ที่นี่ที่เดียว — ค่าเท่าเดิม 900px/0.72)
+  _shrinkPhoto(f, 900, 0.72).then(function (dataUrl) {
+    window._cnPhotoB64 = dataUrl;
+    _cnPhotoRefresh();
+  }).catch(function (e) {
+    showToast('อ่านรูปไม่ได้: ' + ((e && e.message) || ''), 'error');
+  });
 };
 
 // ── สแกนบาร์โค้ด — config ตาม skill Rattana Mart (html5-qrcode@2.3.8 · fps25 · 320×180 · 1920×1080 · zoom1.5 · BarcodeDetector) ❌ห้ามแก้ค่า ──
