@@ -872,7 +872,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.12';
+const APP_VERSION = 'v4.13';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -3177,7 +3177,7 @@ async function saveCountToSheet() {
     try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
     renderCountList();
     renderSummary();
-    historyLoaded = false;  // invalidate history cache so the new save appears next time
+    historyLoaded = false; historyCacheTs = 0;  // invalidate cache (+ กันถือว่า "สด") ให้ดึงใหม่หลังบันทึก
     showToast('บันทึกลง Google Sheet แล้ว ✓ เคลียร์รายการนับแล้ว', 'success');
     setMode('count');
   } catch (e) {
@@ -3190,6 +3190,46 @@ async function saveCountToSheet() {
 // ════════════ HISTORY MODE ════════════
 let historyCache = null;
 let historyLoaded = false;
+let historyCacheTs = 0;          // เวลาที่ดึงข้อมูลล่าสุด (ms)
+let historyFetching = null;      // กันยิงซ้ำพร้อมกัน (de-dupe)
+const HISTORY_LS_KEY = 'rattana_history_cache_v1';
+const HISTORY_FRESH_MS = 60000;  // ถือว่าสดถ้าดึงมาไม่เกิน 60 วิ → ไม่ต้องยิงใหม่
+
+// v4.13: cache ประวัติลง localStorage เพื่อให้เปิดแดชบอร์ด/ประวัติ "ขึ้นทันที"
+// แล้วค่อยดึงของสดมาอัปเดตเบื้องหลัง (stale-while-revalidate) — เดิมต้องรอ GAS อ่าน 5 ชีตทุกครั้ง
+function loadHistoryFromLS() {
+  try {
+    const o = JSON.parse(localStorage.getItem(HISTORY_LS_KEY) || 'null');
+    if (o && Array.isArray(o.rows)) return o;   // { rows, ts }
+  } catch {}
+  return null;
+}
+function saveHistoryToLS() {
+  try { localStorage.setItem(HISTORY_LS_KEY, JSON.stringify({ rows: historyCache || [], ts: historyCacheTs })); } catch {}
+}
+// นำ cache จาก localStorage เข้าหน่วยความจำถ้ายังไม่มี (เรียกก่อน render ครั้งแรก)
+function primeHistoryFromLS() {
+  if (historyLoaded) return true;
+  const ls = loadHistoryFromLS();
+  if (ls) { historyCache = ls.rows; historyCacheTs = ls.ts || 0; historyLoaded = true; return true; }
+  return false;
+}
+function historyIsFresh() { return historyCacheTs && (Date.now() - historyCacheTs < HISTORY_FRESH_MS); }
+// ดึงของสดจาก GAS (ยิงจริงครั้งเดียวแม้เรียกพร้อมกันหลายที่)
+async function fetchHistoryFresh() {
+  if (historyFetching) return historyFetching;
+  historyFetching = (async () => {
+    const res  = await fetch(COUNT_SAVE_URL + '?action=history', { cache: 'no-store' });
+    const json = await res.json();
+    if (!json.ok && !Array.isArray(json.rows)) throw new Error(json.error || 'fetch failed');
+    historyCache  = json.rows || [];
+    historyLoaded = true;
+    historyCacheTs = Date.now();
+    saveHistoryToLS();
+    return historyCache;
+  })();
+  try { return await historyFetching; } finally { historyFetching = null; }
+}
 
 // ── Dashboard table: CS/EA display + search + pagination ──
 const DASH_PAGE_SIZE = 15;
@@ -3307,14 +3347,17 @@ async function loadDashboard(force) {
     document.getElementById('dashBody').innerHTML = '<div class="txt-center txt-muted" style="padding:32px">ยังไม่ได้ตั้งค่า URL</div>';
     return;
   }
-  if (!force && historyLoaded && historyCache) { renderDashboard(historyCache); return; }
+  // มี cache (หน่วยความจำ หรือ localStorage) → โชว์ทันที แล้วค่อยรีเฟรชเบื้องหลัง
+  if (primeHistoryFromLS() && historyCache) {
+    renderDashboard(historyCache);
+    if (!force && historyIsFresh()) return;                 // เพิ่งดึงมา → ไม่ต้องยิงใหม่
+    fetchHistoryFresh().then(rows => renderDashboard(rows)).catch(() => {});
+    return;
+  }
+  // ยังไม่มี cache เลย → โชว์ loading แล้วดึง
   document.getElementById('dashBody').innerHTML = '<div class="txt-center txt-muted" style="padding:32px">⏳ กำลังโหลด...</div>';
   try {
-    const res  = await fetch(COUNT_SAVE_URL + '?action=history', { cache: 'no-store' });
-    const json = await res.json();
-    historyCache  = json.rows || [];
-    historyLoaded = true;
-    renderDashboard(historyCache);
+    renderDashboard(await fetchHistoryFresh());
   } catch(e) {
     document.getElementById('dashBody').innerHTML =
       `<div class="txt-center" style="padding:32px;color:var(--danger)">โหลดไม่สำเร็จ: ${e.message||e}</div>`;
@@ -3768,16 +3811,17 @@ async function loadHistory(force) {
       '<div class="txt-center txt-muted" style="padding:24px 16px">ยังไม่ได้ตั้งค่า Google Sheet</div>';
     return;
   }
-  if (historyLoaded && !force && historyCache) { renderHistory(historyCache); return; }
+  // มี cache (หน่วยความจำ หรือ localStorage) → โชว์ทันที แล้วค่อยรีเฟรชเบื้องหลัง
+  if (primeHistoryFromLS() && historyCache) {
+    renderHistory(historyCache);
+    if (!force && historyIsFresh()) return;
+    fetchHistoryFresh().then(rows => renderHistory(rows)).catch(() => {});
+    return;
+  }
   document.getElementById('historyBody').innerHTML =
     '<div class="txt-center txt-muted" style="padding:24px 16px">⏳ กำลังโหลด...</div>';
   try {
-    const res = await fetch(COUNT_SAVE_URL + '?action=history', { cache: 'no-store' });
-    const json = await res.json();
-    if (!json.ok) throw new Error(json.error || 'fetch failed');
-    historyCache = json.rows || [];
-    historyLoaded = true;
-    renderHistory(historyCache);
+    renderHistory(await fetchHistoryFresh());
   } catch (e) {
     document.getElementById('historyBody').innerHTML =
       `<div class="txt-center" style="padding:24px 16px;color:var(--danger);font-size:13px">โหลดประวัติไม่สำเร็จ: ${e.message||e}</div>`;
