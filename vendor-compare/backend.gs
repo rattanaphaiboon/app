@@ -90,12 +90,13 @@ function getTrendForVendor_(vendor, months) {
   var query =
     'SELECT Month_Year, WH, Channel, ' +
     '       SUM(Exvat) AS exvat, ' +
-    '       SUM(Sales_CSxValue) AS sales_cs ' +
+    '       SUM(Sales_CSxValue) AS sales_cs, ' +
+    '       SUM(Sales_CS) AS sales_cs_raw ' +
     'FROM `' + PROJECT_ID + '.' + DATASET + '.' + VIEW + '` ' +
     "WHERE Cat_Vendor = '" + v + "' " +
     '  AND Month_Year IN (' + inList + ') ' +
     'GROUP BY Month_Year, WH, Channel ORDER BY Month_Year, WH';
-  return runQuery_(query, ['month_year', 'wh', 'channel', 'exvat', 'sales_cs']);
+  return runQuery_(query, ['month_year', 'wh', 'channel', 'exvat', 'sales_cs', 'sales_cs_raw']);
 }
 
 function getSalesForVendor_(vendor, months) {
@@ -105,6 +106,7 @@ function getSalesForVendor_(vendor, months) {
   var query =
     'SELECT Month_Year, Cat_Brand, Cat_Pack, Product_Name, Product_Code, Channel, ' +
     '       SUM(Sales_CSxValue) AS sales_cs, ' +
+    '       SUM(Sales_CS) AS sales_cs_raw, ' +
     '       SUM(Free_CS) AS free_cs, ' +
     '       SUM(Exvat) AS exvat, SUM(TotalBaht) AS total_baht ' +
     'FROM `' + PROJECT_ID + '.' + DATASET + '.' + VIEW + '` ' +
@@ -112,7 +114,7 @@ function getSalesForVendor_(vendor, months) {
     '  AND Month_Year IN (' + inList + ') ' +
     'GROUP BY Month_Year, Cat_Brand, Cat_Pack, Product_Name, Product_Code, Channel ' +
     'ORDER BY Month_Year, Cat_Brand, Cat_Pack, Product_Name';
-  return runQuery_(query, ['month_year', 'cat_brand', 'cat_pack', 'product_name', 'product_code', 'channel', 'sales_cs', 'free_cs', 'exvat', 'total_baht']);
+  return runQuery_(query, ['month_year', 'cat_brand', 'cat_pack', 'product_name', 'product_code', 'channel', 'sales_cs', 'sales_cs_raw', 'free_cs', 'exvat', 'total_baht']);
 }
 
 function getStoresForVendor_(vendor, months) {
