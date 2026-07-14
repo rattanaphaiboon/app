@@ -717,7 +717,7 @@
     <div class="wh-bar mt-8">
       <span class="wh-bar-l">คลัง</span>
       <select id="countWh" class="input input-compact wh-bar-sel" onchange="onCountWhChange()"></select>
-      <span id="stockSrcChip" class="src-chip" style="display:none" onclick="refreshAdjStock(countSession&&countSession.warehouse)"></span>
+      <span id="stockSrcChip" class="src-chip" style="display:none" onclick="refreshStockSrc(countSession&&countSession.warehouse)"></span>
       <button class="btn-pull" onclick="forcePullDraft()" title="ดึงรายการที่เคยนับค้างไว้จากเครื่องอื่น" type="button">↻</button>
     </div>
 
@@ -877,7 +877,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.15';
+const APP_VERSION = 'v4.16';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -896,6 +896,21 @@ const ADJ_STOCK_SHEETS = {
   // W4: { id: '...', sheet: '...' },
   // C4: { id: '...', sheet: '...' },
 };
+// ── ตัวเลือกพิเศษ (v4.16): สินค้าที่ใช้ "แคตตาล็อกแยก + สต็อกแยก" จับคู่ด้วยรหัสสินค้า ──
+// เช่น Colgate/Chaindrite ของ W3 — โหลดข้อมูลสินค้าจากชีต OUTPUT (รหัส/บาร์โค้ด/ตัวคูณ)
+// แล้วดึงสต็อกจากชีตวางของแต่ละแบรนด์ จับคู่ด้วยรหัสสินค้า → สแกน/นับ/เทียบได้เหมือนคลังอื่น
+// บันทึกเข้าประวัติของคลังแม่ (parent)
+const SPECIAL_WH = {
+  W3CG: {
+    label: 'Colgate/Chaindrite', parent: 'W3',
+    catalog: { id: '1NRjpEnu-C2rPTbDD_ZdwXJEoOdCDTbUru4DstU7HDh8', sheet: 'OUTPUT' },
+    stock: [
+      { id: '1YzG2lrMBZmYW9cAhsbYYvCSnWU339z6eXyWO2AdOLPA', sheet: 'วาง Colgate',    fmt: 'colgate' },
+      { id: '1YzG2lrMBZmYW9cAhsbYYvCSnWU339z6eXyWO2AdOLPA', sheet: 'วาง Chaindrite', fmt: 'report'  },
+    ],
+  },
+};
+Object.keys(SPECIAL_WH).forEach(k => { WH_NAMES[k] = SPECIAL_WH[k].label; });
 const UNITS    = ['EA','PA','BP','CS'];
 const UNIT_CSS = { EA:'badge-ea', PA:'badge-pa', BP:'badge-bp', CS:'badge-cs' };
 
@@ -1367,12 +1382,113 @@ async function loadAdjStock(wh, silent=false) {
 // Refresh button handler
 function refreshAdjStock(wh) { loadAdjStock(wh, false); }
 
+// ── SPECIAL CATALOG + STOCK (v4.16) — Colgate/Chaindrite ฯลฯ ──────────────
+// ตัวคูณจากสตริงหน่วย เช่น "ลังx12(CS)" → 12
+function parseUnitFactor(s){ const m=String(s||'').match(/x\s*([\d,]+)/i); return m?parseFloat(m[1].replace(/,/g,'')):0; }
+async function gvizRaw(id, sheet, minRows) {
+  const url = `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheet)}`;
+  for (let i=0;i<4;i++){
+    const t = await fetch(url,{cache:'no-store'}).then(r=>r.text()).catch(()=>'');
+    const rows = parseCsvRaw(t);
+    if (rows.length >= (minRows||2)) return rows;
+    await new Promise(r=>setTimeout(r, 400*(i+1)));
+  }
+  return [];
+}
+// โหลดชีต OUTPUT → สร้าง product แบบเดียวกับแคตตาล็อกหลัก แล้ว merge เข้า index (ทำครั้งเดียว)
+// คอลัมน์ OUTPUT: 0=รหัส 1=Barcode/CTN 2=Barcode/Pack 3=Barcode/Piece 4=ชื่อ 5=บรรจุ/หีบ 7=หน่วย(CS) 8=(BP) 9=(PA) 10=(EA)
+async function loadSpecialCatalog(wh) {
+  const cfg = SPECIAL_WH[wh]; if (!cfg || cfg._codeMap) return;
+  const rows = await gvizRaw(cfg.catalog.id, cfg.catalog.sheet, 2);
+  const codeMap = {};
+  rows.slice(1).forEach(r => {
+    const code = String(r[0]||'').trim(); if (!/^\d{3,}$/.test(code)) return;
+    const name = String(r[4]||'').trim(); if (!name) return;
+    const bc = i => { const c=String(r[i]||'').trim(); return (c && c!=='0' && c.length>3) ? c : ''; };
+    const fCS = parseUnitFactor(r[7]) || parseFloat(String(r[5]||'').replace(/,/g,'')) || 1;
+    const fBP = parseUnitFactor(r[8]) || 1;
+    const fPA = parseUnitFactor(r[9]) || 1;
+    const p = {
+      'PRODUCT NAME': name, 'SHORT NAME': '',
+      'CODE CS': bc(1), 'CODE BP': '', 'CODE PA': bc(2), 'CODE EA': bc(3),
+      'QTY CS': fCS, 'QTY BP': fBP, 'QTY PA': fPA, 'QTY EA': 1,
+      'UNIT CS': String(r[7]||''), 'UNIT BP': String(r[8]||''), 'UNIT PA': String(r[9]||''), 'UNIT EA': String(r[10]||''),
+      _special: wh, _code: code,
+    };
+    codeMap[code] = p;
+    if (!productByKey[productKey(p)]) { productByKey[productKey(p)] = p; allProducts.push(p); }
+    ['CS','BP','PA','EA'].forEach(u => { const c=String(p['CODE '+u]||'').trim(); if(c && c.length>3 && !barcodeIndex[c]) barcodeIndex[c]={product:p,unit:u}; });
+  });
+  cfg._codeMap = codeMap;
+}
+// แปลงเซลล์สต็อกแบบ "18 ลัง" / "6 ชิ้น" → จำนวนชิ้น
+function parseThaiStockCell(cell, fCS, fPA) {
+  const s = String(cell||'').trim(); if (!s) return 0;
+  const m = s.match(/([\d,]+(?:\.\d+)?)\s*(ลัง|กล่อง|แกลลอน|โหล|แพ็ค|แพค|ชิ้น|ซอง|ขวด|หลอด|อัน|ถุง)?/);
+  if (!m) return 0;
+  const n = parseFloat(m[1].replace(/,/g,'')) || 0, u = m[2]||'';
+  if (/ลัง|กล่อง|แกลลอน|โหล/.test(u)) return n * (fCS||1);
+  if (/แพ็ค|แพค/.test(u)) return n * (fPA||1);
+  return n;   // ชิ้น/ซอง/ขวด/หลอด/ฯลฯ = นับเป็นชิ้น
+}
+// ดึงสต็อกจากทุกแหล่ง จับคู่ด้วยรหัส → ทำ adjStockCache[wh] (index: barcode→totalEA)
+async function loadSpecialStock(wh) {
+  const cfg = SPECIAL_WH[wh]; if (!cfg) return 0;
+  await loadSpecialCatalog(wh);
+  const codeStock = {};
+  for (const src of cfg.stock) {
+    const rows = await gvizRaw(src.id, src.sheet, 2);
+    rows.forEach(r => {
+      if (src.fmt === 'colgate') {
+        // 4=รหัส(Article) 7=Conv(ชิ้น/ลัง) 18=Closing Stk[CS] 19=Closing Stk[EA/IP]
+        const code = String(r[4]||'').trim(); const p = cfg._codeMap[code]; if (!p) return;
+        const fCS = parseFloat(String(r[7]||'').replace(/,/g,'')) || Number(p['QTY CS']) || 1; // ใช้ Conv ของชีตก่อน
+        const cs = parseFloat(String(r[18]||'').replace(/,/g,'')) || 0;
+        const ea = parseFloat(String(r[19]||'').replace(/,/g,'')) || 0;
+        codeStock[code] = Math.round(cs*fCS + ea);
+      } else {
+        // Stock Available Report: 0=รหัส 4=Unit1/Unit2(ชิ้น/ลัง) 13=สินค้าคงเหลือ Unit1 14=Unit2
+        const code = String(r[0]||'').trim(); const p = cfg._codeMap[code]; if (!p) return;
+        const fCS = parseFloat(String(r[4]||'').replace(/[^\d.]/g,'')) || Number(p['QTY CS']) || 1; // ตัวคูณลัง จากคอลัมน์ E
+        const fPA = Number(p['QTY PA'])||1;
+        codeStock[code] = Math.round(parseThaiStockCell(r[13],fCS,fPA) + parseThaiStockCell(r[14],fCS,fPA));
+      }
+    });
+  }
+  // จับคู่ด้วย barcode key ที่แม่นตรง (ไม่ใช้ nameIndex เพื่อกันชื่อซ้ำทำสต็อกเพี้ยน)
+  const index = {};
+  Object.keys(codeStock).forEach(code => {
+    const p = cfg._codeMap[code]; if (!p) return;
+    index[productKey(p)] = codeStock[code];
+  });
+  adjStockCache[wh] = { index, nameIndex: {}, reportDate: null };
+  return Object.keys(index).length;
+}
+// orchestrator (UI pattern เดียวกับ loadAdjStock)
+async function loadSpecial(wh, silent=false) {
+  if (adjLoading.has(wh)) return;
+  adjLoading.add(wh); renderStockSrcBar();
+  try {
+    const n = await loadSpecialStock(wh);
+    renderStockSrcBar(); renderCountList(); renderSummary();
+    if (!silent) showToast(`โหลด ${SPECIAL_WH[wh].label} สำเร็จ (${n} รายการ)`, 'success');
+  } catch(e) {
+    if (!silent) showToast(`โหลด ${SPECIAL_WH[wh].label} ไม่สำเร็จ: ${e.message}`, 'error');
+  } finally {
+    adjLoading.delete(wh); renderStockSrcBar();
+  }
+}
+function refreshSpecial(wh) { delete adjStockCache[wh]; loadSpecial(wh, false); }
+// รีเฟรชแหล่งสต็อก (route: พิเศษ → refreshSpecial, ปกติ → refreshAdjStock)
+function refreshStockSrc(wh) { if (SPECIAL_WH[wh]) refreshSpecial(wh); else refreshAdjStock(wh); }
+
 // Small chip in the warehouse row — shows which date the stock data is from
 function renderStockSrcBar() {
   const chip = document.getElementById('stockSrcChip');
   if (!chip) return;
   const wh = countSession && countSession.warehouse;
-  if (!wh || !ADJ_STOCK_SHEETS[wh]) {
+  const special = SPECIAL_WH[wh];
+  if (!wh || (!ADJ_STOCK_SHEETS[wh] && !special)) {
     chip.style.display = 'none';
     return;
   }
@@ -1382,7 +1498,7 @@ function renderStockSrcBar() {
     if (adjLoading.has(wh)) {
       chip.style.display = 'inline-flex';
       chip.className = 'src-chip sc-loading';
-      chip.title = 'กำลังโหลดสต็อกวางเอง...';
+      chip.title = special ? `กำลังโหลด ${special.label}...` : 'กำลังโหลดสต็อกวางเอง...';
       chip.textContent = '⏳';
     } else {
       chip.style.display = 'none';
@@ -1391,10 +1507,15 @@ function renderStockSrcBar() {
   }
   chip.style.display = 'inline-flex';
   const n = Object.keys(meta.index).length;
-  const dateStr = meta.reportDate ? formatThaiDate(meta.reportDate) : 'ไม่ระบุวันที่';
   chip.className = 'src-chip sc-adj';
-  chip.title = `สต็อกวางเอง ${n} รายการ · ข้อมูล ณ ${dateStr} — คลิกเพื่อรีเฟรช`;
-  chip.textContent = `📋 สต็อก ณ ${dateStr}`;
+  if (special) {
+    chip.title = `${special.label} · ${n} รายการ — คลิกเพื่อรีเฟรช`;
+    chip.textContent = `📦 ${special.label} (${n})`;
+  } else {
+    const dateStr = meta.reportDate ? formatThaiDate(meta.reportDate) : 'ไม่ระบุวันที่';
+    chip.title = `สต็อกวางเอง ${n} รายการ · ข้อมูล ณ ${dateStr} — คลิกเพื่อรีเฟรช`;
+    chip.textContent = `📋 สต็อก ณ ${dateStr}`;
+  }
 }
 
 // ── DATA LOADING ─────────────────────────────────────────
@@ -1986,7 +2107,10 @@ function initCountMode() {
       sel.innerHTML = '<option>— ไม่มีคลัง —</option>';
       return;
     }
-    sel.innerHTML = visibleWh.map(w => `<option value="${w}">${w} · ${WH_NAMES[w]||w}</option>`).join('');
+    const specialOpts = Object.keys(SPECIAL_WH)
+      .filter(k => visibleWh.includes(SPECIAL_WH[k].parent))
+      .map(k => `<option value="${k}">${SPECIAL_WH[k].parent} · ${SPECIAL_WH[k].label}</option>`).join('');
+    sel.innerHTML = visibleWh.map(w => `<option value="${w}">${w} · ${WH_NAMES[w]||w}</option>`).join('') + specialOpts;
   }
   if (!countSession) loadCountSession(sel.value || visibleWh[0]);
   renderCountList();
@@ -2013,6 +2137,7 @@ function loadCountSession(wh) {
   // Reflect stock source on the main screen + auto-load ERP if configured
   renderStockSrcBar();
   if (ADJ_STOCK_SHEETS[wh] && !adjStockCache[wh]) loadAdjStock(wh, true);
+  if (SPECIAL_WH[wh] && !adjStockCache[wh]) loadSpecial(wh, true);
 }
 
 function saveCountSession() {
@@ -3134,7 +3259,8 @@ async function saveCountToSheet() {
   const rows = buildSummaryRows();
   if (!rows.length) return;
   const payload = {
-    warehouse: countSession.warehouse,
+    // ตัวเลือกพิเศษ (เช่น W3CG) → บันทึกเข้าประวัติของคลังแม่ (W3)
+    warehouse: SPECIAL_WH[countSession.warehouse] ? SPECIAL_WH[countSession.warehouse].parent : countSession.warehouse,
     sessionStart: countSession.startedAt,
     counterName: counterDisplayName(),
     empId: counterDisplayEmpId(),
