@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.370</title>
+<title>Rattana Sales — v8.371</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5214,7 +5214,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.370 · 2026-07-15</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.371 · 2026-07-15</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5225,7 +5225,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.370</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.371</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -7387,6 +7387,15 @@ function hydrateShopsFromSheet() {
   if (typeof _drecoFetch === 'function' && typeof _drecoMapLoad === 'function' && !_drecoMapLoad()) { try { _drecoFetch(); } catch (e) {} }
   // v8.280: preload นโยบายรับคืน (ป้ายไม่รับคืนใต้ชื่อสินค้า) ตั้งแต่เปิดแอป
   if (typeof _ensureReturnPolicy === 'function') { try { _ensureReturnPolicy(); } catch (e) {} }
+  // v8.371: preload skuแทน — ต้องมาก่อนเซลเริ่มค้น ไม่งั้นรหัสเก่าที่ควรซ่อนยังโผล่ + alias ยังไม่ติด
+  //   โหลดเสร็จแล้ววาดลิสต์ใหม่ (ถ้าเปิดจอสินค้าค้างอยู่) เพราะ _searchText เพิ่งถูกล้าง memo
+  if (typeof _ensureSkuSwap === 'function') {
+    try {
+      _ensureSkuSwap().then(function () {
+        try { if (typeof renderProductList === 'function' && document.getElementById('productList')) renderProductList(_productSearchQuery || ''); } catch (e) {}
+      }).catch(function () {});
+    } catch (e) {}
+  }
   // Apply debt data if already loaded
   if (SHEET_DATA.debtData && SHEET_DATA.debtData.length) _applyDebtToShops();
 }
@@ -9454,6 +9463,80 @@ function levenshtein(a, b) {
 }
 
 // Build searchable text for product (lowercased, joined with spaces)
+// ═══ v8.371 (Surat): skuแทน — รหัสที่จัดซื้อสั่งให้เลิกใช้ → ต้องคีย์รหัสใหม่แทน ═══
+//   ชีท: Purchase Actions tab "skuแทน" · คอลัมน์: รหัสสินค้า | ชื่อสินค้า | รหัสสินค้าทดแทน | ชื่อสินค้าทดแทน
+//   ⚠️ คนละเรื่องกับ findSubstitutes() (v7.17) ที่ชื่อ "สินค้าทดแทน" — อันนั้นดูสต็อกแล้วแนะนำตัวใกล้เคียง (เซลจะรับหรือไม่ก็ได้)
+//      อันนี้เป็นกฎ 1:1 จากจัดซื้อ · จงใจใช้คนละชื่อ ไม่งั้นทั้งคนและโค้ดสับสน
+//   auto-transition (ห้ามซ่อนตายตัว): ของเก่ายังมี → โชว์ต่อ + ป้ายเตือน · ของเก่าหมด → ซ่อน
+//      วัดจริง 15/7: 3 ใน 4 คู่ ของอยู่รหัสเก่าเกือบทั้งหมด (24,935 EA) + จัดซื้อเพิ่งเปิด PO เข้ารหัสเก่า ลง 18/7
+//      ถ้าซ่อนทันที = สินค้าที่ขายวันละ ~4,000 EA หายจากแอป เซลขายไม่ได้ทั้งที่ของเต็มคลัง
+window._skuSwapMap = null;     // Map: รหัสเก่า → { newCode, oldName, newName }
+window._skuSwapAlias = null;   // Map: รหัสใหม่ → 'ชื่อเก่า รหัสเก่า' (ให้ค้นด้วยของเก่าแล้วเจอตัวใหม่)
+async function _ensureSkuSwap() {
+  if (window._skuSwapMap) return window._skuSwapMap;
+  const m = new Map(), a = new Map();
+  try {
+    const rows = await fetchWithCache('skuSwap', () => fetchSheet(CONFIG.purchaseSheetId, 'skuแทน'), 30 * 60 * 1000);
+    (rows || []).forEach(function (r) {
+      const oldC = String(r['รหัสสินค้า'] || '').trim();
+      const newC = String(r['รหัสสินค้าทดแทน'] || '').trim();
+      if (!oldC || !newC || oldC === newC) return;   // แถวว่าง (ชีทมี 49 แถวว่าง) / map ทับตัวเอง = ข้าม
+      const oldN = String(r['ชื่อสินค้า'] || '').trim();
+      m.set(oldC, { newCode: newC, oldName: oldN, newName: String(r['ชื่อสินค้าทดแทน'] || '').trim() });
+      a.set(newC, ((a.get(newC) || '') + ' ' + oldN + ' ' + oldC).trim());
+    });
+  } catch (e) { console.warn('skuSwap:', e && e.message); }
+  window._skuSwapMap = m; window._skuSwapAlias = a;
+  // _searchText ถูก memoize ตั้งแต่ก่อน map มาถึง → ต้องล้าง ไม่งั้น alias ไม่มีวันติด
+  if (a.size) (SHEET_DATA.products || []).forEach(function (p) { if (p && p._searchText) delete p._searchText; });
+  return m;
+}
+window._ensureSkuSwap = _ensureSkuSwap;
+function _skuSwapEntry(p) {
+  const m = window._skuSwapMap; if (!m || !m.size || !p) return null;
+  const c = String(p['CODE EA'] || '').trim();
+  return c ? (m.get(c) || null) : null;
+}
+function _skuSwapTotalEa(p) {
+  let t = 0;
+  ['W1', 'W2', 'W3', 'W4', 'C4'].forEach(function (w) {
+    try { const s = parseStockCsEa(p['STOCK ' + w], getCsSize(p)); if (!s.empty) t += s.totalEa; } catch (e) {}
+  });
+  return t;
+}
+// รหัสเก่าที่ของหมดทุกคลังแล้ว = transition จบ → ซ่อนจากผลค้นหา · ยังมีของ = โชว์ต่อ (ขายให้หมดก่อน)
+function _skuSwapHidden(p) {
+  const e = _skuSwapEntry(p); if (!e) return false;
+  return _skuSwapTotalEa(p) <= 0;
+}
+window._skuSwapHidden = _skuSwapHidden;
+
+// ป้ายบน "รหัสเก่า" ที่ยังมีของ — ถ้าของหมดแล้วการ์ดจะไม่โผล่ตั้งแต่ต้น ป้ายนี้เลยเจอเฉพาะช่วง transition
+function _skuSwapBadgeHtml(p) {
+  const e = _skuSwapEntry(p); if (!e) return '';
+  return '<div style="margin-top:6px;background:#fff6e5;border:1px solid #f0d488;border-radius:9px;padding:7px 10px;font-size:11.5px;font-weight:800;color:#8a5a00;line-height:1.55">'
+    + '🔄 รหัสนี้กำลังจะเปลี่ยนเป็น <b>' + escapeHtml(e.newName || e.newCode) + '</b>'
+    + '<div style="font-weight:600;opacity:.85;margin-top:2px">ขายของเก่าให้หมดก่อน — หมดแล้วระบบสลับให้เอง</div></div>';
+}
+window._skuSwapBadgeHtml = _skuSwapBadgeHtml;
+
+// ป้ายบน "รหัสใหม่" — บอกว่าทำไมค้นชื่อเก่าแล้วเจอตัวนี้
+//   จำเป็น: คู่จริงเปลี่ยนหน่วยด้วย (เบอร์ดี้ แพ็ก6 → ชิ้นเดี่ยว = ราคาต่างกัน 6 เท่า)
+//   ถ้า swap เงียบๆ เซลที่คีย์เร็วจะใส่จำนวนเท่าเดิมแล้วยอดเพี้ยนทั้งบิล
+function _skuSwapAliasBadgeHtml(p) {
+  const a = window._skuSwapAlias, m = window._skuSwapMap;
+  if (!a || !a.size || !m || !p) return '';
+  const c = String(p['CODE EA'] || '').trim();
+  if (!c || !a.has(c)) return '';
+  const olds = [];
+  m.forEach(function (v, k) { if (v.newCode === c) olds.push(v.oldName || k); });
+  if (!olds.length) return '';
+  return '<div style="margin-top:6px;background:#e8f1fd;border:1px solid #a9c9f0;border-radius:9px;padding:7px 10px;font-size:11.5px;font-weight:800;color:#12518f;line-height:1.55">'
+    + '🔄 ใช้แทน <b>' + escapeHtml(olds.join(' · ')) + '</b> (รหัสเดิม)'
+    + '<div style="font-weight:600;opacity:.85;margin-top:2px">เช็คหน่วยกับราคาก่อนคีย์ — อาจคนละหน่วยกับตัวเดิม</div></div>';
+}
+window._skuSwapAliasBadgeHtml = _skuSwapAliasBadgeHtml;
+
 function productSearchText(p) {
   if (p._searchText) return p._searchText;  // memoized
   const parts = [
@@ -9461,6 +9544,12 @@ function productSearchText(p) {
     p['CAT GROUP'], p['CAT VENDOR'], p['CAT SIZE'],
     p['CODE EA'], p['CODE PA'], p['CODE BP'], p['CODE CS'],
   ];
+  // v8.371: ตัวใหม่รับชื่อ/รหัสเก่ามาเป็น alias → เซลค้นด้วยของเก่า (เช่น "เบอร์ดี้ แบล็ค 170มล.แพ็ก6") ก็เจอตัวที่ต้องคีย์
+  const _al = window._skuSwapAlias;
+  if (_al && _al.size) {
+    const c = String(p['CODE EA'] || '').trim();
+    if (c && _al.has(c)) parts.push(_al.get(c));
+  }
   p._searchText = parts.filter(Boolean).map(s => String(s).toLowerCase()).join(' ');
   return p._searchText;
 }
@@ -11089,7 +11178,7 @@ window.showOrdersDiag = async function() {
   const cAge  = g(() => { const c = _memCache && _memCache['orders']; return (c && c.ts) ? Math.round((Date.now() - c.ts) / 1000) + 's' : 'ว่าง'; });
   const when  = g(() => new Date().toLocaleString('th-TH', { hour12: false }));
   const lines = [
-    'Rattana Sales · ตรวจสอบข้อมูล · v8.370',
+    'Rattana Sales · ตรวจสอบข้อมูล · v8.371',
     'เวลา: ' + when,
     '──────────────',
     'Role: ' + role + '   คลัง: ' + wh,
@@ -24802,6 +24891,8 @@ function buildOrderCardV6(p, idx) {
         </div>
       </div>
 
+      ${(typeof _skuSwapBadgeHtml === 'function') ? _skuSwapBadgeHtml(p) : ''}
+      ${(typeof _skuSwapAliasBadgeHtml === 'function') ? _skuSwapAliasBadgeHtml(p) : ''}
       ${(typeof _buildSubstituteBanner === 'function')
           ? _buildSubstituteBanner(p, (currentUser && currentUser.warehouse) || SALESMAN.warehouseId || 'W1')
           : ''}
@@ -26895,6 +26986,12 @@ function renderProductList(filterText = '') {
     }
     products = enriched.map(x => x.p);
     if (products.length > 500) products = products.slice(0, 500);
+  }
+
+  // v8.371: skuแทน — ซ่อนรหัสเก่าที่ของหมดทุกคลังแล้ว (transition จบ)
+  //   ยังมีของ = ไม่ซ่อน ต้องขายให้หมดก่อน · ตัวใหม่รับ alias ชื่อ/รหัสเก่าไปแล้ว ค้นด้วยของเก่าก็ยังเจอตัวที่ถูก
+  if (window._skuSwapMap && window._skuSwapMap.size) {
+    products = products.filter(function (p) { try { return !_skuSwapHidden(p); } catch (e) { return true; } });
   }
 
   // v8.370: ปุ่ม "📍 มีของ <คลัง>" — กรองชั้นสุดท้าย AND ทับชิปที่เลือกอยู่ทุกตัวโดยอัตโนมัติ
