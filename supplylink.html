@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>SupplyLink v7.48.0 — Rattanaphaiboon</title>
+<title>SupplyLink v7.49.0 — Rattanaphaiboon</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+Thai:wght@300;400;500;600;700;800&family=Sacramento&display=swap" rel="stylesheet">
@@ -724,14 +724,14 @@ a { color: var(--brand); text-decoration: none; }
 <div id="app"></div>
 <div id="toast-container"></div>
 <div id="modal-overlay" class="hidden"><div id="modal-box" class="modal-box"></div></div>
-<div class="version-badge">SupplyLink v7.48.0</div>
+<div class="version-badge">SupplyLink v7.49.0</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════
-   SupplyLink v7.48.0 — Single-file vanilla JS app
+   SupplyLink v7.49.0 — Single-file vanilla JS app
    ═══════════════════════════════════════════════════════════════════ */
 
-const VERSION = 'v7.48.0';
+const VERSION = 'v7.49.0';
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbx_qmjYltzn7dEP-rwCmNAXWjFBgiz5quE8H0j5nJ32CaNqJkTx5Ef8eTbf_OvUGnwr/exec';
 const GAS_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 
@@ -1982,7 +1982,7 @@ function ensureOpenPOs() {
 
 // รายการสินค้าใน PO + cache localStorage (TTL 6 ชม.) — เปิดซ้ำติดทันที ไม่ต้องรอ GAS scan
 const PO_LINES_TTL = 6 * 3600 * 1000;
-function _poLinesKey(pos) { return 'sl_polines4_' + pos.slice().sort().join('|'); } // v4 = +img · cache เก่าไม่ใช้
+function _poLinesKey(pos) { return 'sl_polines5_' + pos.slice().sort().join('|'); } // v5 = ล้าง cache เก่าที่ noVat อาจตกหล่น (ข้าวโชว์ก่อน VAT ผิด)
 async function loadPOLinesCached(pos, force) {
   const key = _poLinesKey(pos);
   if (!force) {
@@ -2070,16 +2070,31 @@ async function loadRevDetail(id, force) {
   return S._revDetail[id] || null;
 }
 // สินค้าของ vendor จาก PDDT (picker เพิ่มบรรทัด) — cache ต่อ vendorCode ('self' = ตาม session)
+// localStorage SWR 12 ชม: เปิด picker ติดทันทีจาก cache → refresh เบื้องหลังเงียบๆ (BE scan PDDT ช้า)
+function _vpCacheKey(vendorCode) { return 'sl_vp2_' + (vendorCode || ((curVendor0() || {}).code) || 'self'); }
 async function loadVendorProducts(vendorCode) {
   S._vp = S._vp || {};
   const key = vendorCode || 'self';
   if (S._vp[key] || S._vpLoading === key) return;
+  const ck = _vpCacheKey(vendorCode);
+  try {
+    const c = JSON.parse(localStorage.getItem(ck));
+    if (c && (Date.now() - c.ts) < 43200000 && Array.isArray(c.data)) { S._vp[key] = c.data; _vpRefresh(key, vendorCode, ck); return; }
+  } catch (e) {}
   S._vpLoading = key;
   try {
     const res = await callAPI('getVendorProducts', vendorCode ? { vendorCode: vendorCode } : {});
     S._vp[key] = (res && res.ok && Array.isArray(res.data)) ? res.data : [];
+    if (S._vp[key].length) { try { localStorage.setItem(ck, JSON.stringify({ ts: Date.now(), data: S._vp[key] })); } catch (e) {} }
   } catch (e) { console.error('[getVendorProducts]', e); S._vp[key] = []; }
   S._vpLoading = null;
+}
+function _vpRefresh(key, vendorCode, ck) {   // stale-while-revalidate — อัพเดท cache เงียบๆ (ใช้รอบถัดไป)
+  callAPI('getVendorProducts', vendorCode ? { vendorCode: vendorCode } : {}).then(res => {
+    if (!(res && res.ok && Array.isArray(res.data)) || !res.data.length) return;
+    S._vp[key] = res.data;
+    try { localStorage.setItem(ck, JSON.stringify({ ts: Date.now(), data: res.data })); } catch (e) {}
+  }).catch(() => {});
 }
 
 // Supplier lazy-load — เรื่องที่ส่ง/เป้าหมาย (ไม่โหลดตอน login → login เร็ว · โหลดตอนเปิดหน้านั้น)
@@ -2934,6 +2949,7 @@ function wireAdminPORevs() {
   const ed = $('#rvaEdit');
   if (ed) ed.addEventListener('click', () => {
     S._revAdminEditing = true;
+    loadVendorProducts(r.vendorCode);   // prefetch — เปิด picker เพิ่มสินค้าติดทันที
     S._revEditA = {
       lines: (r.lines || []).map(l => ({ type: l.type, sku: l.sku, barcode: l.barcode, name: l.name, unit: l.unit,
         origQty: l.origQty, origPrice: l.origPrice, origTotal: l.origTotal, newQty: l.newQty, newPrice: l.newPrice, isFoc: l.isFoc, note: l.note || '', noVat: !!l.noVat })),
@@ -2950,7 +2966,8 @@ function wireAdminPORevs() {
   const wirePicks = () => {
     $$('#rvaPickList .rv-pick').forEach(b => b.addEventListener('click', () => {
       A.lines.push({ type: 'added', sku: '', barcode: b.dataset.barcode, name: b.dataset.name, unit: b.dataset.unit,
-        origQty: 0, origPrice: 0, origTotal: 0, newQty: 0, newPrice: 0, isFoc: false, note: '', noVat: false });   // สินค้าเพิ่มมือ — สมมติมี VAT (โหมดก่อน VAT จะคูณ 1.07)
+        origQty: 0, origPrice: 0, origTotal: 0, newQty: 0, newPrice: 0, isFoc: false, note: '',
+        noVat: b.dataset.novat === '1', img: b.dataset.img || '' });   // VAT status + รูป จาก PDDT
       renderContentOnly();
     }));
   };
@@ -7071,6 +7088,7 @@ async function startRevEditor(poId) {
     lines: null, discountType: 'none', discountValue: 0, discountNote: '', notes: '', deliveryDate: '', pickerOpen: false, pickQ: '', saving: false, soImgs: [],
     priceMode: 'incvat' };   // โหมดกรอกราคา: incvat=รวม VAT (default) · exvat=ก่อน VAT (ซัพบางเจ้าถนัด) — เก็บ newPrice เป็นรวม VAT เสมอ
   nav('po-rev-edit');
+  loadVendorProducts();   // prefetch สินค้าของซัพเบื้องหลัง — กด "เพิ่มสินค้า" แล้ว picker ติดทันที
   try {
     const raw = await loadPOLinesCached([String(poId)]);
     S._revEdit.lines = raw.map(l => {
@@ -7185,11 +7203,13 @@ function rvLineCard(l, i) {
   const changed = l.type === 'added' ? 'เพิ่ม' : ((!!l.isFoc !== !!l.origFoc) || Number(l.newQty) !== Number(l.origQty) || Number(l.newPrice) !== Number(l.origPrice)) ? 'แก้' : '';
   const lt = l.isFoc ? 0 : (Number(l.newQty) || 0) * (Number(l.newPrice) || 0);
   const loss = lineIsLoss(l);
-  const hint = rvPriceHint(l);   // สลับตามโหมด (สินค้าไม่มี VAT → ก่อน/รวม = ราคาเต็ม)
-  const vatHint = '<div style="margin-top:6px;display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--ink-3)">' +
-    (l.noVat ? '<span class="chip chip-sm" style="background:#FEF3C7;color:#92400e">ไม่มี VAT</span>' : '') +
-    '<span>' + hint.lbl + ' <b class="rv-exvat num" data-i="' + i + '">฿' + fmtMoney(hint.val) + '</b>' + (l.noVat ? ' (ราคาเต็ม)' : '') + '</span>' +
-  '</div>';
+  const hint = rvPriceHint(l);   // สลับตามโหมด
+  // สินค้าไม่มี VAT (PDDT VAT status=No เช่นข้าว) → ไม่โชว์ตัวเลข "ก่อน VAT" ให้งง — ราคาเต็มอย่างเดียว
+  const vatHint = l.noVat
+    ? '<div style="margin-top:6px;font-size:10.5px"><span class="chip chip-sm" style="background:#FEF3C7;color:#92400e">ไม่มี VAT — ใช้ราคาเต็ม ไม่ถอด/ไม่บวก VAT</span></div>'
+    : '<div style="margin-top:6px;display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--ink-3)">' +
+      '<span>' + hint.lbl + ' <b class="rv-exvat num" data-i="' + i + '">฿' + fmtMoney(hint.val) + '</b></span>' +
+    '</div>';
   return '<div class="card mb-12 rv-card" data-i="'+i+'" style="padding:12px;border-color:'+(loss ? 'var(--err)' : (l.type === 'added' ? 'var(--accent)' : 'var(--line)'))+'">' +
     '<div style="display:flex;gap:8px;align-items:flex-start">' +
       (driveThumb(l.img) ? '<img src="'+driveThumb(l.img)+'" loading="lazy" alt="" style="width:46px;height:46px;flex:none;border-radius:8px;object-fit:cover;border:0.5px solid var(--line);background:var(--surface-sunk)" onerror="this.style.display=\'none\'">' : '') +
@@ -7202,7 +7222,7 @@ function rvLineCard(l, i) {
     '</div>' +
     '<div style="display:flex;gap:8px;margin-top:9px;align-items:flex-end">' +
       '<div style="flex:1"><label class="label-plain" style="font-size:10.5px">จำนวน</label><input type="number" inputmode="decimal" class="input num rv-qty" data-i="'+i+'" value="'+(l.newQty || '')+'" min="0" step="any"></div>' +
-      '<div style="flex:1"><label class="label-plain" style="font-size:10.5px'+(loss ? ';color:var(--err)' : '')+'">ต้นทุน/หน่วย '+(exMode ? 'ก่อนVAT' : 'รวมVAT')+(l.isFoc ? ' (แถม)' : '')+'</label><input type="number" inputmode="decimal" class="input num rv-price" data-i="'+i+'" value="'+rvPriceInputVal(l)+'" min="0" step="any"'+(l.isFoc ? ' disabled' : '')+(loss ? ' style="border-color:var(--err);color:var(--err)"' : '')+'></div>' +
+      '<div style="flex:1"><label class="label-plain" style="font-size:10.5px'+(loss ? ';color:var(--err)' : '')+'">ต้นทุน/หน่วย'+(l.noVat ? '' : (exMode ? ' ก่อนVAT' : ' รวมVAT'))+(l.isFoc ? ' (แถม)' : '')+'</label><input type="number" inputmode="decimal" class="input num rv-price" data-i="'+i+'" value="'+rvPriceInputVal(l)+'" min="0" step="any"'+(l.isFoc ? ' disabled' : '')+(loss ? ' style="border-color:var(--err);color:var(--err)"' : '')+'></div>' +
       '<div style="flex:1;text-align:right;padding-bottom:4px"><div style="font-size:10.5px;color:var(--ink-3)">รวม'+(l.isFoc ? ' (แถม)' : '')+'</div><div class="num bold rv-lt" data-i="'+i+'" style="font-size:14px">฿'+fmtMoney(lt)+'</div></div>' +
     '</div>' +
     vatHint +
@@ -7229,10 +7249,15 @@ function revPickerHTML(key, q) {
   if (!hit.length) return '<div style="padding:16px;text-align:center;color:var(--ink-3);font-size:12px">ไม่พบ — ลองพิมพ์ชื่อ / แบรนด์ / บาร์โค้ด</div>';
   return hit.map(p =>
     '<div style="padding:9px 10px;border-bottom:1px solid var(--divider)">' +
-      '<div style="font-size:12.5px;font-weight:600">'+esc(p.name)+(p.isNew ? ' <span class="chip chip-sm chip-info" style="font-size:9px">ใหม่</span>' : '')+'</div>' +
-      (p.brand ? '<div style="font-size:10.5px;color:var(--accent);font-weight:600">'+esc(p.brand)+'</div>' : '') +
+      '<div style="display:flex;gap:8px;align-items:flex-start">' +
+        (driveThumb(p.img) ? '<img src="'+driveThumb(p.img)+'" loading="lazy" alt="" style="width:38px;height:38px;flex:none;border-radius:7px;object-fit:cover;border:0.5px solid var(--line);background:var(--surface-sunk)" onerror="this.style.display=\'none\'">' : '') +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-size:12.5px;font-weight:600">'+esc(p.name)+(p.isNew ? ' <span class="chip chip-sm chip-info" style="font-size:9px">ใหม่</span>' : '')+(p.noVat ? ' <span class="chip chip-sm" style="font-size:9px;background:#FEF3C7;color:#92400e">ไม่มี VAT</span>' : '')+'</div>' +
+          (p.brand ? '<div style="font-size:10.5px;color:var(--accent);font-weight:600">'+esc(p.brand)+'</div>' : '') +
+        '</div>' +
+      '</div>' +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px">' +
-        p.units.map(u => '<button type="button" class="rv-pick" data-name="'+esc(p.name)+'" data-unit="'+esc(u.label || u.u)+'" data-barcode="'+esc(u.barcode)+'" style="border:1px solid var(--brand);color:var(--brand);background:#fff;border-radius:7px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer">+ '+esc(u.u)+(u.per > 1 ? ' ('+u.per+')' : '')+' <span class="num" style="font-weight:500;color:var(--ink-3)">'+esc(u.barcode)+'</span></button>').join('') +
+        p.units.map(u => '<button type="button" class="rv-pick" data-name="'+esc(p.name)+'" data-unit="'+esc(u.label || u.u)+'" data-barcode="'+esc(u.barcode)+'" data-novat="'+(p.noVat ? '1' : '0')+'" data-img="'+esc(p.img || '')+'" style="border:1px solid var(--brand);color:var(--brand);background:#fff;border-radius:7px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer">+ '+esc(u.u)+(u.per > 1 ? ' ('+u.per+')' : '')+' <span class="num" style="font-weight:500;color:var(--ink-3)">'+esc(u.barcode)+'</span></button>').join('') +
       '</div>' +
     '</div>').join('');
 }
@@ -7319,7 +7344,8 @@ function wireSupplierPORevEdit() {
   const wirePicks = () => {
     $$('#rvPickList .rv-pick').forEach(b => b.addEventListener('click', () => {
       E.lines.push({ type: 'added', sku: '', barcode: b.dataset.barcode, name: b.dataset.name, unit: b.dataset.unit,
-        origQty: 0, origPrice: 0, origTotal: 0, newQty: 0, newPrice: 0, isFoc: false, note: '' });
+        origQty: 0, origPrice: 0, origTotal: 0, newQty: 0, newPrice: 0, isFoc: false, note: '',
+        noVat: b.dataset.novat === '1', img: b.dataset.img || '' });   // VAT status + รูป จาก PDDT (ข้าวไม่มี VAT → ไม่ถอด/บวก)
       toast('เพิ่มแล้ว', b.dataset.name + ' — ใส่จำนวน + ราคาด้วย', 'ok');
       renderKeepScroll();
     }));
