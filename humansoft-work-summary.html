@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>สรุปการทำงาน (ลาแยกประเภท) · HumanSoft · v1.1</title>
+<title>สรุปการทำงาน (ลาแยกประเภท) · HumanSoft · v1.2</title>
 <style>
   :root{
     --bg:#0f172a; --card:#1e293b; --card2:#273449; --line:#334155;
@@ -56,7 +56,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>สรุปการทำงาน · ลาแยกประเภท</h1><span class="badge">v1.1</span>
+    <h1>สรุปการทำงาน · ลาแยกประเภท</h1><span class="badge">v1.2</span>
     <span id="periodChip" style="font-size:12px;color:var(--muted)"></span>
   </header>
   <div class="sub">เลือกช่วงวันที่ → ดึงจำนวนวันทำงาน/ลาแยกประเภท/ขาดงาน จาก HumanSoft → รวมกับทะเบียน (BU/คลัง/สถานะ) → Export Excel</div>
@@ -212,18 +212,26 @@ function parseCsv(text){
 }
 
 // หา index คอลัมน์จากหัวตาราง (ยืดหยุ่น) — คืน registry
+// ไม่เจอคอลัมน์ไหน = เว้นค่านั้น (ปล่อยให้ default จากแผนก/HumanSoft ทำงาน) ไม่เดาผิดตำแหน่ง
 function rowsToReg(rows){
   if(!rows.length) return {};
   const head=rows[0].map(h=>String(h).trim());
-  const find=(re,def)=>{ const i=head.findIndex(h=>re.test(h)); return i>=0?i:def; };
-  const ci=find(/รหัส|code|พนง|emp/i, 0);
-  const bi=find(/^bu$|bu\b|หน่วยธุรกิจ/i, 1);
-  const ki=find(/คลัง|klang|ศูนย์|สาขา/i, 2);
-  const si=find(/สถาน|status/i, 3);
+  const idx=(re)=>head.findIndex(h=>re.test(h));
+  // รหัสพนักงาน (คอลัมน์ 'รหัส...พน' ก่อน แล้วค่อย 'รหัส' อื่น)
+  let ci=idx(/^รหัสพน|employee.?code|emp.?code/i); if(ci<0) ci=idx(/รหัส|code/i); if(ci<0) ci=0;
+  // BU — เอาเฉพาะที่มีคอลัมน์ BU จริง ไม่งั้นเว้นว่าง (แอปเติม default จากแผนกเอง)
+  const bi=idx(/^bu$|business.?unit|หน่วยธุรกิจ/i);
+  // คลัง — เอาคอลัมน์ชื่อ 'W' หรือ 'คลัง'/'ศูนย์' แบบตรงตัวก่อน (กันชนกับ 'คลังและรหัส...')
+  let ki=idx(/^w$|^คลัง$|^ศูนย์$|^สาขา$/i); if(ki<0) ki=idx(/^w[1-9]|ศูนย์|warehouse/i);
+  // สถานะ — เฉพาะ 'สถานะ' ไทย/ผ่านงาน/ฝึกงาน (ไม่จับ 'Status'=Active) ปล่อยให้ HumanSoft เป็นค่าหลัก
+  const si=idx(/^สถานะ$|ผ่านงาน|ฝึกงาน/i);
+  const ai=idx(/^status$/i);        // Active/Inactive — ใช้กรอง (ไม่แสดง)
+  const ni=idx(/ชื่อ.?[- ].?สกุล|ชื่อสกุล|full.?name/i);   // ใช้กรองแถว filler (ไม่มีชื่อ=ไม่ใช่พนักงานจริง)
   const m={};
   for(let r=1;r<rows.length;r++){ const row=rows[r]; const code=(row[ci]||'').trim();
-    if(!code) continue;
-    m[code]={ bu:(row[bi]||'').trim(), klang:(row[ki]||'').trim(), status:(row[si]||'').trim() };
+    if(!/^[0-9]+$/.test(code)) continue;               // รหัสต้องเป็นตัวเลขล้วน
+    if(ni>=0 && !(row[ni]||'').trim()) continue;        // ต้องมีชื่อ-สกุล (ตัดแถว filler/ว่าง)
+    m[code]={ bu: bi>=0?(row[bi]||'').trim():'', klang: ki>=0?(row[ki]||'').trim():'', status: si>=0?(row[si]||'').trim():'', active: ai>=0?(row[ai]||'').trim():'' };
   }
   return m;
 }
@@ -394,13 +402,22 @@ async function pullLive(){
   const from=$('#from').value, to=$('#to').value;
   if(!proxy){ setMsg('ยังไม่ได้ตั้งค่า Proxy URL (กดที่ "ตั้งค่า Proxy")','err'); return; }
   if(!from||!to){ setMsg('เลือกช่วงวันที่ก่อน','err'); return; }
-  const codes = Object.keys(REG); // ดึงเฉพาะพนักงานในทะเบียน
-  if(!codes.length){ setMsg('ยังไม่มีทะเบียนพนักงาน (ใส่รายชื่อรหัสในตั้งค่า)','err'); return; }
   const hms = HumanSoft({proxyUrl:proxy, token});
   const months = monthsBetween(from.slice(0,7), to.slice(0,7));
-  setMsg(`กำลังดึง ${codes.length} คน × ${months.length} เดือน …`);
-  RAW=[];
+  // 1) ดึง "รายชื่อพนักงานจาก HumanSoft" (ไม่ใช่จากทะเบียน — ทะเบียนมีคนที่ไม่อยู่ใน HumanSoft ปนเยอะ)
+  setMsg('กำลังดึงรายชื่อพนักงานจาก HumanSoft …');
+  let codes=[];
+  try{
+    const q = await hms.leaveQuotas(from.slice(0,4));           // list_quotas — คืนพนักงานทั้งหมดใน HumanSoft
+    const data = (q && q.data) ? q.data : (Array.isArray(q)?q:[]);
+    codes = [...new Set(data.map(x=> (x && x.profile && x.profile.employee_code!=null) ? String(x.profile.employee_code) : null).filter(Boolean))];
+  }catch(e){ setMsg('ดึงรายชื่อพนักงานไม่สำเร็จ: '+e.message,'err'); return; }
+  if(!codes.length){ setMsg('ไม่พบพนักงานใน HumanSoft','err'); return; }
+  // 2) ดึงรายวันเฉพาะพนักงานเหล่านั้น (registry ใช้ join เติม BU/คลัง ในขั้น render)
+  RAW=[]; let done=0;
   for(const code of codes){
+    done++;
+    if(done===1 || done%5===0 || done===codes.length) setMsg(`กำลังดึง ${done}/${codes.length} คน …`);
     let merged={code, nick:'', fname:'', status:'', dept:'', wd:0, swap:0, sched:0, t01:0,t02:0,t03:0,t04:0,t05:0,t06:0,t09:0,t10:0,t11:0};
     for(const ym of months){
       try{
@@ -428,8 +445,8 @@ function setMsg(t,cls){ const m=$('#msg'); m.textContent=t; m.className='msg'+(c
 
 /* ═══ events ═══ */
 $('#demo').onclick = ()=>{
-  // เวอร์ชันสาธารณะตัดข้อมูลตัวอย่างออกเพื่อความเป็นส่วนตัว
-  if(!DEMO.length){ setMsg('เวอร์ชันออนไลน์นี้ไม่มีข้อมูลตัวอย่าง (ตัดออกเพื่อความเป็นส่วนตัว) — กรุณาตั้งค่า Proxy + ทะเบียน แล้วกด “ดึงจาก HumanSoft”','err'); return; }
+  if(!DEMO.length){ setMsg('เวอร์ชันออนไลน์นี้ไม่มีข้อมูลตัวอย่าง (ตัดออกเพื่อความเป็นส่วนตัว) — ตั้งค่า Proxy + ทะเบียน แล้วกด “ดึงจาก HumanSoft”','err'); return; }
+  // ตัวอย่าง = ทั้งเดือน พ.ค. 2026 (31 วัน) → วันในกะ = 31 − วันหยุด
   RAW = DEMO.map(r=>({...r, sched: 31 - (+r.hol||0)}));
   if(!Object.keys(REG).length) REG=parseReg(SAMPLE_REG);
   $('#periodChip').textContent='ตัวอย่าง: '+DEMO_PERIOD; render();
