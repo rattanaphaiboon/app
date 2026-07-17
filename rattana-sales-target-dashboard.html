@@ -238,7 +238,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page hidden" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v1.40</small>
+      <small>ยอดขายเทียบเป้าหมาย v1.44</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -451,6 +451,23 @@ function bpMonthYear(dateStr) {
   if (!mm || !yyyy) return null;
   return { mm, yyyy };
 }
+// BQ Month_Year: รองรับ YYYY-MM, MM/YYYY, YYYY/MM
+function bqMonthYear(val) {
+  const s = String(val||'').trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})/);  if (m) return { mm: parseInt(m[2],10), yyyy: parseInt(m[1],10) };
+  m = s.match(/^(\d{1,2})\/(\d{4})$/);     if (m) return { mm: parseInt(m[1],10), yyyy: parseInt(m[2],10) };
+  m = s.match(/^(\d{4})\/(\d{1,2})$/);     if (m) return { mm: parseInt(m[2],10), yyyy: parseInt(m[1],10) };
+  return null;
+}
+const BQ_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby455uABR89cRJP83mgMORtgLkpqiLm7rjZLz27BBg_h3seWNtyAH6H613ZLwrUALN9/exec';
+async function loadBpFromScript() {
+  try {
+    const res = await fetch(BQ_SCRIPT_URL);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.ok ? (data.rows || []) : [];
+  } catch { return []; }
+}
 function statusOf(pct, supported) {
   if (!supported || pct === null) return { label: 'ไม่รองรับการคำนวณ', cls: 'badge-muted' };
   if (pct >= 100) return { label: 'ผ่านเป้า', cls: 'badge-ok' };
@@ -467,12 +484,12 @@ function colorOf(pct) {
 function buildBpIndex(bpRaw) {
   const idx = new Map();
   bpRaw.forEach(r => {
-    const my = bpMonthYear(r['Doc_Date']);
+    const my = bqMonthYear(r['Month_Year']) || bpMonthYear(r['Doc_Date']);
     if (!my) return;
-    const normName = normalizeName(r['Sale NO ROO']);
+    const normName = normalizeName(r['Sale_NO_ROO'] || r['Sale NO ROO']);
     if (!normName) return;
     const key = normName + '||' + my.mm + '/' + my.yyyy;
-    r._exvatcn2 = parseNum(r['EXVat+CN*2']);
+    r._exvatcn2 = parseNum(r['Exvat'] != null ? r['Exvat'] : r['EXVat+CN*2']);
     r._csx = parseNum(r['Sales_CSxValue']);
     if (!idx.has(key)) idx.set(key, []);
     idx.get(key).push(r);
@@ -567,8 +584,9 @@ function computeActualFromBP(parsed, bucket, bpCol) {
   return null;
 }
 
-function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw) {
+function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, prevBpRaw) {
   const bpIndex = buildBpIndex(bpRaw);
+  const prevBpIndex = buildBpIndex(prevBpRaw || []);
   const debtorActualIndex = buildDebtorActualIndex(targetRaw);
   const cnIndex = buildCnIndex(cnRaw);
   const newSkuIndex = buildNewSkuIndex(newSkuRaw);
@@ -727,7 +745,9 @@ function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw) {
       let prevMm = monthInfo.mm - 1, prevYyyy = monthInfo.yyyy;
       if (prevMm === 0) { prevMm = 12; prevYyyy--; }
       const prevKey = normName + '||' + prevMm + '/' + prevYyyy;
-      const prevBucket = bpIndex.get(prevKey) || [];
+      const prevBucket = prevBpIndex.size > 0
+        ? (prevBpIndex.get(prevKey) || [])
+        : (bpIndex.get(prevKey) || []);
       prevActual = computeActualFromBP(parsed, prevBucket, bpCol);
     }
 
@@ -747,12 +767,13 @@ async function loadData(showSpin) {
   if (showSpin) showSpinner('กำลังโหลดข้อมูลยอดขาย...');
   setLoading(true);
   try {
-    const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw] = await Promise.all([
+    const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, prevBpRaw] = await Promise.all([
       loadFromSheets(TARGET_SHEET_ID, TARGET_SHEET_NAME),
       loadFromSheets(BP_SHEET_ID, BP_SHEET_NAME),
       loadFromSheets(CN_SHEET_ID, CN_SHEET_NAME),
       loadFromSheets(BUDGET_SHEET_ID, BUDGET_SHEET_NAME),
       loadFromSheets(NEWSKU_SHEET_ID, NEWSKU_SHEET_NAME),
+      loadBpFromScript(),
     ]);
     state.targetRaw = targetRaw;
     state.bpRaw = bpRaw;
@@ -760,7 +781,7 @@ async function loadData(showSpin) {
     state.budgetRaw = budgetRaw;
     state.newSkuRaw = newSkuRaw;
     setCache('targetCache', targetRaw);
-    state.rows = computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw);
+    state.rows = computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, prevBpRaw);
     buildFilterControls();
     renderAll();
   } catch (e) {
