@@ -1,7 +1,10 @@
 /* ========================================================================
    Rattana HR Eval — Backend (Apps Script Web App)
-   v2.0 — 2026-07-17
+   v2.1 — 2026-07-17
    ========================================================================
+   v2.1 = fix "Users tab not found": ชีท Users ไม่มีแท็บ "Rattana Users for apps"
+          ข้อมูลจริงอยู่แท็บ "Sheet1" (gviz เดิมส่งแท็บแรกให้เงียบๆ เวลาชื่อไม่ตรง)
+          → ชี้ Sheet1 ตรงๆ + เพิ่ม sheetByName_ หาแบบ normalize + fallback แท็บแรก
    v1.x = Calibration save/latest/history (ชีทยังเปิด public ให้ gviz)
    v2.0 = ล็อคชีทหลังบ้าน:
      - เพิ่ม action=login   : verify Google ID token → เช็ค Users sheet → ออก session token (30 วัน)
@@ -25,7 +28,7 @@ const CFG = {
   EVAL_TAB:       'V.1',
   SALARY_TAB:     'New salary',
   CAL_TAB:        'Calibration',
-  USERS_TAB:      'Rattana Users for apps',
+  USERS_TAB:      'Sheet1',   // v2.1: ชื่อแท็บจริงของข้อมูลพนักงาน (ไม่ใช่ "Rattana Users for apps")
   CLIENT_ID:      '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
   SESSION_TTL_DAYS: 30,
 };
@@ -138,7 +141,7 @@ function verifyToken_(token) {
 /* ── Users sheet → profile + scope ────────────────────────────────── */
 
 function loadProfile_(email) {
-  const sh = SpreadsheetApp.openById(CFG.USERS_SHEET_ID).getSheetByName(CFG.USERS_TAB);
+  const sh = sheetByName_(SpreadsheetApp.openById(CFG.USERS_SHEET_ID), CFG.USERS_TAB, true);
   if (!sh) throw new Error('Users tab not found');
   const values = sh.getDataRange().getDisplayValues();
   if (values.length < 2) return null;
@@ -201,7 +204,9 @@ function getData_(email) {
   const ss = SpreadsheetApp.openById(CFG.EVAL_SHEET_ID);
 
   // — V.1: auto-detect header row (แถวที่มี expected headers ≥3 ตัว ใน 10 แถวแรก) —
-  const evalValues = ss.getSheetByName(CFG.EVAL_TAB).getDataRange().getDisplayValues();
+  const evalSheet = sheetByName_(ss, CFG.EVAL_TAB, false);
+  if (!evalSheet) return json_({ ok: false, error: 'tab not found: ' + CFG.EVAL_TAB });
+  const evalValues = evalSheet.getDataRange().getDisplayValues();
   const expected = ['w', 'position', 'dep.', 'name', 'nickname', 'id', 'kpi', 'rtn/way', 'วินัย', 'จิตพิสัย', 'ใบเตือน', 'หมายเหตุ'];
   var headerIdx = 0;
   for (var i = 0; i < Math.min(evalValues.length, 10); i++) {
@@ -224,7 +229,9 @@ function getData_(email) {
   }
 
   // — New salary: header แถว 1 + suffix ชื่อคอลัมน์ซ้ำด้วย column letter (adjust → adjust_M) —
-  const salValues = ss.getSheetByName(CFG.SALARY_TAB).getDataRange().getDisplayValues();
+  const salSheet = sheetByName_(ss, CFG.SALARY_TAB, false);
+  if (!salSheet) return json_({ ok: false, error: 'tab not found: ' + CFG.SALARY_TAB });
+  const salValues = salSheet.getDataRange().getDisplayValues();
   const seen = {};
   const salHeaders = (salValues[0] || []).map(function (h, i) {
     var label = clean_(h) || ('col_' + i);
@@ -260,7 +267,7 @@ function getData_(email) {
 
 function calSheet_() {
   const ss = SpreadsheetApp.openById(CFG.EVAL_SHEET_ID);
-  var sh = ss.getSheetByName(CFG.CAL_TAB);
+  var sh = sheetByName_(ss, CFG.CAL_TAB, false);
   if (!sh) {
     sh = ss.insertSheet(CFG.CAL_TAB);
     sh.appendRow(['Timestamp', 'Round ID', 'Saved By Email', 'Saved By Name', 'Tier', 'Tier Label', 'W Filter',
@@ -334,6 +341,19 @@ function calHistory_() {
 }
 
 /* ── Utils ────────────────────────────────────────────────────────── */
+
+/* v2.1: หาแท็บแบบทนทาน — exact → เทียบแบบ normalize (trim/case-insensitive) →
+   ถ้า fallbackFirst=true คืนแท็บแรก (เลียนแบบพฤติกรรม gviz ที่แอพพึ่งพามาตลอด) */
+function sheetByName_(ss, name, fallbackFirst) {
+  var sh = ss.getSheetByName(name);
+  if (sh) return sh;
+  const want = normKey_(name);
+  const all = ss.getSheets();
+  for (var i = 0; i < all.length; i++) {
+    if (normKey_(all[i].getName()) === want) return all[i];
+  }
+  return fallbackFirst ? all[0] : null;
+}
 
 function clean_(s) {
   return String(s == null ? '' : s).replace(/[\u200B\u200C\u200D\uFEFF]/g, '').replace(/\u00A0/g, ' ').trim();
