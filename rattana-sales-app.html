@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.387</title>
+<title>Rattana Sales — v8.388</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5356,7 +5356,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.387 · 2026-07-17</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.388 · 2026-07-17</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5367,7 +5367,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.387</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.388</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -10936,7 +10936,7 @@ function _saveCartDraft() {
     const odSave = {};
     for (const k in od) { const x = od[k]; if (x && (parseFloat(x.qty) || 0) > 0) odSave[k] = { unit: x.unit, qty: x.qty, price: x.price, pickedTier: x.pickedTier, priceUserEdited: x.priceUserEdited, selectedPromoIdx: x.selectedPromoIdx, promoManual: x.promoManual, approvalReason: x.approvalReason, priceDefault: x.priceDefault }; }
     const _coFlag = !!(currentShopId && typeof visits !== 'undefined' && visits[currentShopId] && visits[currentShopId].checkOutTime);   // v8.321 (Surat): ร้านนี้เช็คเอาท์แล้วไหม → restore จะได้ไม่ลากกลับร้านที่จบแล้ว
-    const json = JSON.stringify({ cart, orderDraft: odSave, visit, currentShopId, checkedOut: _coFlag, ts: Date.now() });
+    const json = JSON.stringify({ cart, orderDraft: odSave, visit, currentShopId, checkedOut: _coFlag, draftOrderId: window._draftOrderId || '', ts: Date.now() });   // v8.388: + draftOrderId (SB net — id เดิมข้าม reload)
     let saved = false;
     try {
       localStorage.setItem('rsa_cart_draft', json);
@@ -10958,6 +10958,7 @@ function _saveCartDraft() {
     if (!saved && worthSaving) {
       try { showToast('⚠️ เซฟตะกร้าไม่ได้ (เครื่องเต็ม) — แจ้ง admin', 'error'); } catch(_e) {}
     }
+    try { _sbQueueDraftSync(); } catch(_e) {}   // v8.388: SB net — sync สแนปช็อตตะกร้าขึ้น Supabase (fire-and-forget)
   } catch(e) {
     console.warn('[cart draft] save failed:', e);
   }
@@ -10974,8 +10975,110 @@ function _clearCartDraft() {
   try { localStorage.removeItem('rsa_cart_draft'); } catch(e) {}
 }
 
+// ══════════ v8.388: SB Live Order Net — ตาข่าย Supabase (sync ตะกร้าสดเป็น draft) ══════════
+//   ทุกครั้งที่ตะกร้าเปลี่ยน (ทุกทางวิ่งผ่าน _saveCartDraft อยู่แล้ว) → ส่งสแนปช็อตทั้งใบไป GAS action 'sbDraftSync'
+//   fire-and-forget: SB พัง/ช้า/ปิด = เงียบ แอปทำงานเหมือนเดิมทุกประการ · GS ยังเป็น source of truth เปิดบิล 100%
+//   ตอนส่งจริง: orderId ตัวเดียวกันถูก reuse → Code.gs hook confirm_order ลบ draft + ลงแถวจริง (id ตรงชีทเป๊ะ)
+//   เปิดใช้ต่อเมื่อ SB_LIVE && ping.sbLive (Code.gs ≥v8.128) — pattern เดียวกับ cnPhoto v8.346
+const SB_LIVE = true;   // kill switch — false = เงียบทั้งระบบ เหมือนไม่มีฟีเจอร์นี้
+function _sbPingCap() {
+  if (window._sbBackendOk !== undefined) return;
+  window._sbBackendOk = false;
+  try {
+    fetch(CONFIG.appsScriptUrl + '?action=ping').then(function (r) { return r.json(); })
+      .then(function (d) {
+        window._sbBackendOk = !!(d && d.sbLive);
+        if (window._sbBackendOk) _sbFlushPending();   // เน็ตเพิ่งกลับ/boot — ส่งสแนปช็อตที่ค้างจากรอบก่อน
+      })
+      .catch(function () {});
+  } catch (e) {}
+}
+function _sbEnabled() { return SB_LIVE && window._sbBackendOk === true; }
+// orderId เกิดตั้งแต่ "เริ่มคีย์" แล้ว reuse ตอนส่งจริง → id บน SB = id บน GS ตัวต่อตัว (เคาะ 2026-07-14)
+function _sbDraftOrderId() {
+  if (!window._draftOrderId) window._draftOrderId = 'ORD' + Date.now().toString().slice(-7);
+  return window._draftOrderId;
+}
+// ล้างตะกร้า/เปลี่ยนร้าน → ลบ draft ของใบเก่าบน SB (ยิง rows ว่าง) แล้วเริ่ม id ใหม่
+function _sbDropDraft() {
+  try {
+    const oid = window._draftOrderId;
+    window._draftOrderId = null;
+    if (oid && _sbEnabled()) postToAppsScript({ action: 'sbDraftSync', orderId: oid, rows: [] }).catch(function () {});
+  } catch (e) {}
+}
+// build แถว draft หัวไทยจาก cart — เฉพาะ field ที่ rpc draft_sync รับ (ราคา ณ ตอนคีย์ · lineId '-D###' ไม่ชนของจริง '-001')
+function _sbDraftRows() {
+  const shop = ((typeof SHOPS !== 'undefined' && SHOPS) || []).find(function (s) { return s.id === currentShopId; });
+  const now = new Date();
+  const unitMap = { piece: 'ชิ้น', pack: 'แพ็ค', bigpack: 'แพ็คใหญ่', case: 'ลัง' };
+  const codeMap = { piece: 'CODE EA', pack: 'CODE PA', bigpack: 'CODE BP', case: 'CODE CS' };
+  const oid = _sbDraftOrderId();
+  return cart.map(function (c, i) {
+    let p = null;
+    try { p = findProduct(c.productId) || null; } catch (e) {}
+    const barcode = (c.isFree && c.giftBarcode) || (p && p.barcodes && p.barcodes[c.unit]) || (p && p[codeMap[c.unit]]) || (p && p['CODE EA']) || String(c.productId || '');
+    return {
+      'วัน': formatDateISO(now),
+      'เวลา': formatTimeThai(now),
+      'email': (currentUser && currentUser.email) || '',
+      'ชื่อ-สกุล': (currentUser && currentUser.name) || '',
+      'รหัสเซลล์': _resolveSalesmanCodeFromUsers(),
+      'คลัง': _resolveWarehouseFromUsers(),
+      'คลังส่ง': (currentUser && currentUser.shipFromWh) || _resolveWarehouseFromUsers(),
+      'ชื่อร้าน': (shop && shop.name) || '',
+      'รหัสร้าน': (shop && (shop.bplusCode || shop.id)) || '',
+      'รูปแบบ': (c.isFree || c.isPromo) ? 'แถม' : 'ขาย',
+      'Barcode': String(barcode),
+      'ชื่อสินค้า': (p && (p.name || p['PRODUCT NAME'])) || c.giftName || String(c.productId || ''),
+      'จำนวน': String(c.qty),
+      'หน่วย': (p && p.unitLabels && p.unitLabels[c.unit]) || unitMap[c.unit] || String(c.unit || ''),
+      'ราคา': String(c.price),
+      'ยอดเงินรวม': String((parseFloat(c.qty) || 0) * (parseFloat(c.price) || 0)),
+      'lineId': oid + '-D' + String(i + 1).padStart(3, '0'),
+    };
+  });
+}
+// เกาะท้าย _saveCartDraft — debounce 4 วิ (คีย์รัวๆ = ส่งครั้งเดียวตอนมือหยุด)
+let _sbDraftTimer = null;
+function _sbQueueDraftSync() {
+  if (window._qtMode) return;              // โหมดใบเสนอราคา — ไม่ใช่ออเดอร์จริง
+  if (!window._cartDraftReady) return;     // ก่อน boot เสร็จ — กันสแนปช็อตว่างไปลบ draft จริง (บทเรียน v8.116)
+  if (!SB_LIVE) return;
+  _sbPingCap();
+  if (_sbDraftTimer) clearTimeout(_sbDraftTimer);
+  _sbDraftTimer = setTimeout(function () { _sbDraftTimer = null; _sbDraftSendNow(); }, 4000);
+}
+function _sbDraftSendNow() {
+  try {
+    if (window._qtMode || !_sbEnabled()) return;
+    let rows = [];
+    if (cart.length) rows = _sbDraftRows();          // มีของ → สแนปช็อต (สร้าง orderId ถ้ายังไม่มี)
+    const oid = window._draftOrderId || '';
+    if (!oid) return;                                 // ไม่เคยมี draft — ไม่มีอะไรต้องส่ง/ลบ
+    const payload = { action: 'sbDraftSync', orderId: oid, rows: rows };
+    try { localStorage.setItem('rsa_sb_pending', JSON.stringify(payload)); } catch (e) {}   // coalesce — เก็บตัวล่าสุดตัวเดียว
+    postToAppsScript(payload).then(function (res) {
+      if (res && res.ok) { try { localStorage.removeItem('rsa_sb_pending'); } catch (e) {} }
+    }).catch(function () {});
+  } catch (e) {}
+}
+// สแนปช็อตที่ส่งไม่สำเร็จรอบก่อน (ปิดเน็ตคีย์) — ยิงซ้ำเมื่อ ping ผ่าน (boot/เน็ตกลับ)
+function _sbFlushPending() {
+  try {
+    const raw = localStorage.getItem('rsa_sb_pending');
+    if (!raw || !_sbEnabled()) return;
+    const p = JSON.parse(raw);
+    if (!p || p.action !== 'sbDraftSync' || !p.orderId) { try { localStorage.removeItem('rsa_sb_pending'); } catch (e) {} return; }
+    postToAppsScript(p).then(function (res) {
+      if (res && res.ok) { try { localStorage.removeItem('rsa_sb_pending'); } catch (e) {} }
+    }).catch(function () {});
+  } catch (e) {}
+}
+
 function _loadCartDraft() {
   window._cartDraftReady = true;   // v8.116: ตั้งทันที (แม้ return early) — หลังจากนี้ _saveCartDraft เซฟได้ตามปกติ ไม่โดน guard
+  try { _sbPingCap(); } catch (e) {}   // v8.388: SB net — เช็ค capability ตั้งแต่ boot (+flush สแนปช็อตที่ค้าง)
   try {
     const raw = localStorage.getItem('rsa_cart_draft');
     // v8.133: ถอด diagnostic toast "📂 เปิดแอป..." (v8.118 ชั่วคราว) — เซฟนิ่งแล้ว ไม่ต้องเด้งทุกครั้งที่เปิด
@@ -10994,6 +11097,7 @@ function _loadCartDraft() {
     }
     cart = savedCart;
     window._orderDraft = savedDraft;   // v8.113: กู้สินค้าที่กำลังคีย์ (ยังไม่ยืนยัน) ด้วย
+    if (d.draftOrderId) window._draftOrderId = String(d.draftOrderId);   // v8.388: SB net — id เดิมข้าม reload (draft บน SB ใบเดียวกัน)
     currentShopId = d.currentShopId;
     // v8.115: ⚠️ ต้องตั้ง _lastDraftShopId = ร้านที่กู้ ด้วย — ไม่งั้น _ensureDraftScope() เห็นร้านไม่ตรง
     //   แล้ว "ล้าง _orderDraft = {}" ทันทีที่เข้า order screen = ของที่คีย์หายเกลี้ยง
@@ -11011,6 +11115,7 @@ function _loadCartDraft() {
         const _co = d.checkedOut || !!(typeof visits !== 'undefined' && currentShopId && visits[currentShopId] && visits[currentShopId].checkOutTime);
         if (_co) {
           cart = []; window._orderDraft = {}; window._lastDraftShopId = null;
+          window._draftOrderId = null;   // v8.388: ใบนั้นส่งแล้ว (confirm_order เก็บกวาด draft บน SB ไปแล้ว)
           _clearCartDraft(); updateCartBar();
           console.log('[cart draft] shop', currentShopId, 'checked out — skip resume + cleared stale draft');
           return;
@@ -11325,7 +11430,7 @@ window.showOrdersDiag = async function() {
   const cAge  = g(() => { const c = _memCache && _memCache['orders']; return (c && c.ts) ? Math.round((Date.now() - c.ts) / 1000) + 's' : 'ว่าง'; });
   const when  = g(() => new Date().toLocaleString('th-TH', { hour12: false }));
   const lines = [
-    'Rattana Sales · ตรวจสอบข้อมูล · v8.387',
+    'Rattana Sales · ตรวจสอบข้อมูล · v8.388',
     'เวลา: ' + when,
     '──────────────',
     'Role: ' + role + '   คลัง: ' + wh,
@@ -11441,6 +11546,7 @@ function cartGuardDiscardAndContinue(nextShopId) {
   if (!confirm(`ยกเลิกตะกร้า ${cart.length} รายการที่ร้านเดิม?\nการกระทำนี้ไม่สามารถย้อนกลับได้`)) return;
   cart = [];
   appliedPromos.clear();
+  try { _sbDropDraft(); } catch (e) {}   // v8.388: SB net — ลบ draft ใบเก่าบน SB + เริ่ม id ใหม่
   currentShopId = null;
   closeModal();
   // Now safe to enter new shop
@@ -15280,6 +15386,7 @@ window.openIncompleteOrdersModal = function(scope) {
 //   ห้ามใส่ชื่อฟังก์ชัน / ชื่อคอลัมน์ / ศัพท์เทคนิค
 //   ปิดไว้ก่อน: โชว์ 2 อันล่าสุด · ที่เหลือกางด้วย <details> (native — ไม่ต้อง re-render หน้า)
 const WHATS_NEW = [
+  { v: '8.388', page: '🛒 คีย์ออเดอร์', txt: 'ออเดอร์ที่กำลังคีย์ปลอดภัยขึ้นอีกชั้น — ทุกรายการที่ยืนยัน ระบบสำรองขึ้นคลาวด์ให้เองเงียบๆ มือถือดับ/แอปเด้งกลางคัน ของที่คีย์ไว้ไม่หาย (ไม่ต้องกดอะไรเพิ่ม ทำงานเองอัตโนมัติ)' },
   { v: '8.387', page: '📦 สินค้า', txt: 'ปุ่ม "📍 คลัง" ปักขวาคู่ปุ่ม "หมวด" (เห็นตลอด ไม่ต้องปัดแถวชิป) — ทุกคนเลือกดูสินค้าที่มีของคลังไหนก็ได้ เช่น กด "สินค้าใหม่" + เลือก W1 = ของใหม่ที่มีของ W1 · คลังตัวเองอยู่บนสุด' },
   { v: '8.384', page: '🚚 ของขาดค้างส่ง', txt: 'ฉลาดขึ้น: SO ที่ยังไม่ถูกดึงเปิดบิล ถ้าร้านเดียวกันมีบิลที่ไม่อ้างเลขจองส่งของตัวเดียวกัน ระบบจับหักกันให้ — มีแถบฟ้า "กันกันอยู่กี่ลัง" กดดูรายใบได้ · Excel เพิ่ม 2 ชีท: ขาดรายใบ (เลือกดูได้ว่าใบไหนดึง SO แล้ว/ยัง) + รายการที่กันกัน' },
   { v: '8.383', page: '🚚 ของขาดค้างส่ง', txt: 'ปุ่ม "⬇️ Excel" มุมขวาบน — เลือกช่วงวันได้ · 4 ชีทในไฟล์เดียว: สรุปขาดตามสินค้า (เรียงผู้ผลิต→แบรนด์→ขนาด) · ขาดแยกคลัง · แถมขาด · แถมเกิน' },
@@ -31472,7 +31579,9 @@ async function confirmOrder() {
 
   // v8.153: ถามรวม/แยกบิล ก่อนสร้าง id (เด้งเฉพาะร้านที่มีบิลย้อนหลัง ≤3 วัน)
   const _billPick = await _resolveBillMerge(shop, currentShopId);
-  const orderId = 'ORD' + Date.now().toString().slice(-7);
+  // v8.388: reuse id ที่เกิดตอนเริ่มคีย์ (SB net) → id บนชีท = id ของ draft บน SB ตัวต่อตัว · consume แล้วใบถัดไปเริ่มใหม่
+  const orderId = (window._draftOrderId && cart.length) ? window._draftOrderId : 'ORD' + Date.now().toString().slice(-7);
+  window._draftOrderId = null;
   const billId = (_billPick && _billPick.billId) ? _billPick.billId : orderId;   // null/แยก → id ตัวเอง
   const now = new Date();
   // v8.72: เก็บธง "ข้อมูลไม่ครบ" keyed by orderId (retry-safe — row builder + retry อ่านค่าถูกตัว)
