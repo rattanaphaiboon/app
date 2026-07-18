@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>สรุปการทำงาน (ลาแยกประเภท) · HumanSoft · v1.6</title>
+<title>สรุปการทำงาน (ลาแยกประเภท) · HumanSoft · v1.7</title>
 <style>
   :root{
     --bg:#0f172a; --card:#1e293b; --card2:#273449; --line:#334155;
@@ -57,7 +57,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>สรุปการทำงาน · ลาแยกประเภท</h1><span class="badge">v1.6</span>
+    <h1>สรุปการทำงาน · ลาแยกประเภท</h1><span class="badge">v1.7</span>
     <span id="periodChip" style="font-size:12px;color:var(--muted)"></span>
   </header>
   <div class="sub">เลือกช่วงวันที่ → ดึงจำนวนวันทำงาน/ลาแยกประเภท/ขาดงาน จาก HumanSoft → รวมกับทะเบียน (BU/คลัง/สถานะ) → Export Excel</div>
@@ -392,19 +392,42 @@ function probationStatus(beginDt, trialDays){
   return (new Date() < end) ? 'ฝึกงาน' : 'ผ่านงาน';
 }
 
-// นับ 1 วันตามรหัสในระเบียนรายวัน (absence_flag_lv) ภายในช่วง
+// นับ 1 วันตามรหัสลาภายในช่วง
 const CODE_KEY = {'01':'t01','02':'t02','03':'t03','04':'t04','05':'t05','06':'t06','09':'t09','10':'t10','11':'t11'};
+// เศษวันของเอกสารลา: ใช้ absence_day ถ้าคำนวณแล้ว(>0); ไม่งั้นประเมินจากช่วงเวลาเทียบกะ (เต็ม=1, ครึ่ง=0.5)
+function leaveFrac(doc, day){
+  let f=+doc.absence_day; if(f>0) return f;
+  const ms=s=> s? new Date(String(s).replace(' ','T')).getTime() : NaN;
+  const eff=ms(doc.effective_hour), exp=ms(doc.expire_hour);
+  const cs=ms(day.work_cycle_start_time), ce=ms(day.work_cycle_end_time);
+  if(isFinite(eff)&&isFinite(exp)&&isFinite(cs)&&isFinite(ce)&&ce>cs){
+    return Math.max(0, Math.min(1, Math.round((exp-eff)/(ce-cs)*2)/2));
+  }
+  return 1;   // ไม่มีข้อมูลเวลา → ถือเต็มวัน
+}
 function aggregateDaily(days, from, to){
   const rec={wd:0,swap:0,sched:0}; Object.values(CODE_KEY).forEach(k=>rec[k]=0);
   (days||[]).forEach(d=>{
     const wdte=d.work_date||''; if(wdte<from || wdte>to) return;
-    const hol=(d.holiday_flag_lv||'00')!=='00';
-    if(!hol) rec.sched+=1;                       // วันในกะ = วันทำงานตามปฏิทิน (ไม่รวมวันหยุด)
+    if((d.holiday_flag_lv||'00')!=='00') return;   // วันหยุด ไม่นับเป็นวันในกะ
+    rec.sched+=1;
+    let dayLeave=0;
+    // 1) ฟิลด์ที่คำนวณแล้ว (เดือนปิดงวด)
     const a=d.absence_flag_lv||'00', ad=+d.absence_day||0;
     const a2=d.absence_2_flag_lv||'00', ad2=+d.absence_2_day||0;
-    if(a==='00' && a2==='00'){ if(!hol) rec.wd+=1; return; }
-    if(CODE_KEY[a]) rec[CODE_KEY[a]] += (ad||1);
-    if(CODE_KEY[a2]) rec[CODE_KEY[a2]] += (ad2||0);
+    if(ad>0 && CODE_KEY[a]){ rec[CODE_KEY[a]]+=ad; dayLeave+=ad; }
+    if(ad2>0 && CODE_KEY[a2]){ rec[CODE_KEY[a2]]+=ad2; dayLeave+=ad2; }
+    // 2) เดือนที่ยังไม่คำนวณ — อ่านเอกสารลาจาก time_leave (absence_day ยังเป็น 0)
+    if(dayLeave===0 && Array.isArray(d.time_leave)){
+      d.time_leave.forEach(doc=>{
+        const code=doc.absence_flag_lv_code;
+        if(!CODE_KEY[code]) return;
+        const f=leaveFrac(doc, d);
+        if(f>0){ rec[CODE_KEY[code]]+=f; dayLeave+=f; }
+      });
+    }
+    // 3) ส่วนที่เหลือ = วันทำงาน (เศษวัน)
+    rec.wd += Math.max(0, 1-dayLeave);
   });
   return rec;
 }
