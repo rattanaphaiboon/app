@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>สรุปการทำงาน (ลาแยกประเภท) · HumanSoft · v1.2</title>
+<title>สรุปการทำงาน (ลาแยกประเภท) · HumanSoft · v1.4</title>
 <style>
   :root{
     --bg:#0f172a; --card:#1e293b; --card2:#273449; --line:#334155;
@@ -56,7 +56,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>สรุปการทำงาน · ลาแยกประเภท</h1><span class="badge">v1.2</span>
+    <h1>สรุปการทำงาน · ลาแยกประเภท</h1><span class="badge">v1.4</span>
     <span id="periodChip" style="font-size:12px;color:var(--muted)"></span>
   </header>
   <div class="sub">เลือกช่วงวันที่ → ดึงจำนวนวันทำงาน/ลาแยกประเภท/ขาดงาน จาก HumanSoft → รวมกับทะเบียน (BU/คลัง/สถานะ) → Export Excel</div>
@@ -132,7 +132,7 @@ function HumanSoft(cfg){
     dailyInMonth:     (code, yearMonth) => call('daily_in_month',{ employee_code:code, year_month:yearMonth }),
     salarySummary:    (code, yearMonth) => call('salary_summary',{ employee_code:code, year_month:yearMonth }),
     searchAttendance: (code,from,to,pg) => call('search_time_attendance',{ employee_code:code, date_from:from, date_to:to, page:pg||1 }),
-    leaveQuotas:      (year, code)      => call('list_quotas',{ quota_year:year, employee_code:code })
+    leaveQuotas:      (year, page)      => call('list_quotas',{ quota_year:year, _page:page||1 })   // _page = พารามิเตอร์เปลี่ยนหน้า (50/หน้า)
   };
 }
 
@@ -404,48 +404,75 @@ async function pullLive(){
   if(!from||!to){ setMsg('เลือกช่วงวันที่ก่อน','err'); return; }
   const hms = HumanSoft({proxyUrl:proxy, token});
   const months = monthsBetween(from.slice(0,7), to.slice(0,7));
-  // 1) ดึง "รายชื่อพนักงานจาก HumanSoft" (ไม่ใช่จากทะเบียน — ทะเบียนมีคนที่ไม่อยู่ใน HumanSoft ปนเยอะ)
+  // 1) ดึง "รายชื่อพนักงานจาก HumanSoft" ทุกหน้า (list_quotas คืน 50/หน้า, วนด้วย _page)
   setMsg('กำลังดึงรายชื่อพนักงานจาก HumanSoft …');
   let codes=[];
   try{
-    const q = await hms.leaveQuotas(from.slice(0,4));           // list_quotas — คืนพนักงานทั้งหมดใน HumanSoft
-    const data = (q && q.data) ? q.data : (Array.isArray(q)?q:[]);
-    codes = [...new Set(data.map(x=> (x && x.profile && x.profile.employee_code!=null) ? String(x.profile.employee_code) : null).filter(Boolean))];
+    const seen=new Set();
+    for(let pg=1; pg<=30; pg++){
+      const q = await hms.leaveQuotas(from.slice(0,4), pg);
+      const data = (q && q.data) ? q.data : (Array.isArray(q)?q:[]);
+      if(!data.length) break;
+      const before=seen.size;
+      data.forEach(x=>{ const c=(x&&x.profile&&x.profile.employee_code!=null)?String(x.profile.employee_code):null; if(c) seen.add(c); });
+      setMsg(`กำลังดึงรายชื่อพนักงาน… ${seen.size} คน`);
+      if(data.length < 50) break;          // หน้าสุดท้าย
+      if(seen.size===before) break;        // ไม่มีคนใหม่ = proxy ยังไม่ส่ง _page (ยังไม่อัป) → หยุด
+    }
+    codes=[...seen];
   }catch(e){ setMsg('ดึงรายชื่อพนักงานไม่สำเร็จ: '+e.message,'err'); return; }
   if(!codes.length){ setMsg('ไม่พบพนักงานใน HumanSoft','err'); return; }
-  // 2) ดึงรายวันเฉพาะพนักงานเหล่านั้น (registry ใช้ join เติม BU/คลัง ในขั้น render)
-  RAW=[]; let done=0;
-  for(const code of codes){
-    done++;
-    if(done===1 || done%5===0 || done===codes.length) setMsg(`กำลังดึง ${done}/${codes.length} คน …`);
-    let merged={code, nick:'', fname:'', status:'', dept:'', wd:0, swap:0, sched:0, t01:0,t02:0,t03:0,t04:0,t05:0,t06:0,t09:0,t10:0,t11:0};
+  // 2) ดึงรายวันเฉพาะพนักงานเหล่านั้น — ดึงพร้อมกันหลายคน (เร็วขึ้น ~6 เท่า)
+  const CONC = 5;                          // ดึงพร้อมกันกี่คน (ลดลงเล็กน้อยเพื่อกัน rate-limit)
+  const results = new Array(codes.length);
+  let done=0, idx=0;
+  async function fetchOne(code){
+    let merged={code, nick:'', fname:'', status:'', dept:'', wd:0, swap:0, sched:0, t01:0,t02:0,t03:0,t04:0,t05:0,t06:0,t09:0,t10:0,t11:0, failed:false};
     for(const ym of months){
-      try{
-        const p = await hms.dailyInMonth(code, ym);   // {profile, ...days}
-        if(p.profile){
-          const pr=p.profile;
-          merged.nick = pr.employee_nickname||merged.nick;
-          merged.fname = ((pr.employee_name||'')+' '+(pr.employee_last_name||'')).trim() || merged.fname;
-          merged.dept = pr.department_name||merged.dept;
-          merged.status = merged.status || probationStatus(pr.begin_dt, pr.trial_range);
-        }
-        const days = p.days || p.daily || (Array.isArray(p)?p:[]);
-        const agg = aggregateDaily(days, from, to);
-        merged.wd+=agg.wd; merged.swap+=agg.swap; merged.sched+=agg.sched;
-        Object.keys(CODE_KEY).forEach(c=>{ merged[CODE_KEY[c]] += agg[CODE_KEY[c]]; });
-      }catch(e){ /* ข้ามเดือนที่ error */ }
+      // retry อัตโนมัติ 4 ครั้ง (กัน fetch fail เงียบใต้ concurrency / rate-limit)
+      let p=null;
+      for(let attempt=0; attempt<4 && !p; attempt++){
+        try{ p = await hms.dailyInMonth(code, ym); }
+        catch(e){ if(attempt<3) await new Promise(r=>setTimeout(r, 800*(attempt+1))); }
+      }
+      if(!p){ merged.failed=true; continue; }
+      if(p.profile){
+        const pr=p.profile;
+        merged.nick = pr.employee_nickname||merged.nick;
+        merged.fname = ((pr.employee_name||'')+' '+(pr.employee_last_name||'')).trim() || merged.fname;
+        merged.dept = pr.department_name||merged.dept;
+        merged.status = merged.status || probationStatus(pr.begin_dt, pr.trial_range);
+      }
+      const days = p.days || p.daily || (Array.isArray(p)?p:[]);
+      const agg = aggregateDaily(days, from, to);
+      merged.wd+=agg.wd; merged.swap+=agg.swap; merged.sched+=agg.sched;
+      Object.keys(CODE_KEY).forEach(c=>{ merged[CODE_KEY[c]] += agg[CODE_KEY[c]]; });
     }
-    RAW.push(merged);
+    done++;
+    if(done%3===0 || done===codes.length) setMsg(`กำลังดึง ${done}/${codes.length} คน …`);
+    return merged;
   }
+  async function worker(){ while(idx<codes.length){ const i=idx++; results[i]=await fetchOne(codes[i]); } }
+  await Promise.all(Array.from({length:Math.min(CONC,codes.length)}, ()=>worker()));
+  // auto-recovery: ใครที่ยังหลุด ดึงซ้ำทีละคน (sequential เลี่ยง rate-limit)
+  let failIdx = results.map((r,i)=>(r&&(r.failed||!r.fname))?i:-1).filter(i=>i>=0);
+  if(failIdx.length){
+    setMsg(`กำลังดึงซ้ำ ${failIdx.length} คนที่ยังไม่สำเร็จ …`);
+    for(const i of failIdx){ results[i]=await fetchOne(codes[i]); }
+    failIdx = results.map((r,i)=>(r&&(r.failed||!r.fname))?i:-1).filter(i=>i>=0);
+  }
+  RAW = results;
   $('#periodChip').textContent = `${from} → ${to}`;
-  render(); setMsg(`ดึงเสร็จ ${RAW.length} คน`);
+  render();
+  if(failIdx.length) setMsg(`ดึงเสร็จ ${RAW.length} คน · ⚠️ ${failIdx.length} คนดึงไม่สำเร็จ — กด "ดึงจาก HumanSoft" ซ้ำอีกครั้ง`,'err');
+  else setMsg(`ดึงเสร็จครบ ${RAW.length} คน ✓`);
 }
 
 function setMsg(t,cls){ const m=$('#msg'); m.textContent=t; m.className='msg'+(cls?' '+cls:''); }
 
 /* ═══ events ═══ */
 $('#demo').onclick = ()=>{
-  if(!DEMO.length){ setMsg('เวอร์ชันออนไลน์นี้ไม่มีข้อมูลตัวอย่าง (ตัดออกเพื่อความเป็นส่วนตัว) — ตั้งค่า Proxy + ทะเบียน แล้วกด “ดึงจาก HumanSoft”','err'); return; }
+  if(!DEMO.length){ setMsg('เวอร์ชันออนไลน์นี้ไม่มีข้อมูลตัวอย่าง (ตัดออกเพื่อความเป็นส่วนตัว) — ตั้งค่า Proxy + ทะเบียน แล้วกด �ดึงจาก HumanSoft�','err'); return; }
   // ตัวอย่าง = ทั้งเดือน พ.ค. 2026 (31 วัน) → วันในกะ = 31 − วันหยุด
   RAW = DEMO.map(r=>({...r, sched: 31 - (+r.hol||0)}));
   if(!Object.keys(REG).length) REG=parseReg(SAMPLE_REG);
