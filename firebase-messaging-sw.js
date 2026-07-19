@@ -47,9 +47,13 @@ self.addEventListener('notificationclick', function (e) {
   e.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (list) {
       for (let i = 0; i < list.length; i++) {
-        if (list[i].url.indexOf('r-flow') > -1 && 'focus' in list[i]) return list[i].focus();
+        const c = list[i];
+        if (c.url.indexOf('r-flow') > -1) {
+          c.postMessage({ type: 'rf-open', link: link });   // แอปเปิดอยู่ → บอกให้เปิดงานนั้นเลย (ไม่ reload)
+          return ('focus' in c) ? c.focus() : null;
+        }
       }
-      if (clients.openWindow) return clients.openWindow(link);
+      if (clients.openWindow) return clients.openWindow(link);   // แอปปิด → เปิด URL ที่มี ?task=<id>
     })
   );
 });
