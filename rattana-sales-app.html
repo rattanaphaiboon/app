@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.403</title>
+<title>Rattana Sales — v8.404</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5356,7 +5356,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.403 · 2026-07-19</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.404 · 2026-07-19</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5367,7 +5367,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.403</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.404</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -6478,6 +6478,9 @@ const CONFIG = {
   // Debt (SQL Data) Sheet — live AR from Bplus
   debtSheetId:   '1LqTqZg1z3e6FtPBbhZsKZd60DL6tZmCi78QQT1MoPq4',
   debtSheetTab:  'SQL Data',
+  // v8.404: Payment Log (debt dashboard เก็บสลิปชำระที่เซลส่ง) — ดึงมาโชว์ซุปตอนอนุมัติขายเชื่อ · sheet ต้องแชร์ "ใครมีลิงก์=ดู"
+  payLogSheetId: '1_0HOGRuu9bFxfiJKYlvW63gSk8Et4x0v3MJPYR8oWTU',
+  payLogTab:     'Payment Log',
   // User auth Sheet
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetTab: 'Sheet1',
@@ -7721,6 +7724,46 @@ async function _loadDebtApprovals(force) {
   } catch (e) { console.warn('[debtAppr] load failed', e); }
 }
 window._loadDebtApprovals = _loadDebtApprovals;
+// v8.404 (Surat): ดึงสลิปชำระที่เซลส่งผ่าน debt dashboard (tab "Payment Log") มาโชว์ซุปตอนอนุมัติขายเชื่อ
+//   match ด้วยรหัสลูกค้า (= รหัสร้าน) · เฉพาะแถวที่มีลิงก์รูป · ล่าสุดก่อน · ภายใน 60 วัน · ไม่แตะ Code.gs (อ่าน gviz อย่างเดียว)
+function _normCust(c) { return String(c == null ? '' : c).replace(/\.0+$/, '').replace(/\s+/g, '').trim(); }
+function _slipSortKey(dateStr, timeStr) {
+  const m = String(dateStr || '').match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if (!m) return '';
+  let y = +m[3]; if (y > 2400) y -= 543;   // พ.ศ. → ค.ศ.
+  const t = String(timeStr || '').replace(/[^\d]/g, '').padEnd(6, '0').slice(0, 6);
+  return String(y) + String(m[2]).padStart(2, '0') + String(m[1]).padStart(2, '0') + t;
+}
+function _slipDaysAgo(dateStr) {
+  const m = String(dateStr || '').match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if (!m) return 9999;
+  let y = +m[3]; if (y > 2400) y -= 543;
+  return Math.floor((Date.now() - new Date(y, +m[2] - 1, +m[1]).getTime()) / 86400000);
+}
+async function _loadPaymentSlips(force) {
+  try {
+    const rows = await fetchWithCache('paySlips', () => fetchSheet(CONFIG.payLogSheetId, CONFIG.payLogTab, null, null), force ? 0 : 5 * 60 * 1000);
+    const map = {};
+    (rows || []).forEach(r => {
+      const url = String(r['ลิงก์รูป'] || '').trim();
+      if (!/^https?:/i.test(url)) return;             // เฉพาะแถวที่มีสลิปจริง (โอน) — เงินสดไม่มีรูป
+      if (_slipDaysAgo(r['วันที่']) > 60) return;      // ภายใน 60 วัน
+      const cust = _normCust(r['รหัสลูกค้า']);
+      if (!cust) return;
+      (map[cust] = map[cust] || []).push({
+        date: String(r['วันที่'] || '').trim(), time: String(r['เวลา'] || '').trim(),
+        amount: parseFloat(String(r['ยอด (บาท)'] || '').replace(/[^0-9.\-]/g, '')) || 0,
+        method: String(r['วิธีชำระ'] || '').trim(), url: url,
+        staff: String(r['พนักงาน'] || '').trim(), doc: String(r['เลขเอกสาร'] || '').trim(),
+        _k: _slipSortKey(r['วันที่'], r['เวลา'])
+      });
+    });
+    Object.keys(map).forEach(k => map[k].sort((a, b) => String(b._k).localeCompare(String(a._k))));   // ล่าสุดก่อน
+    window._paySlipMap = map;
+  } catch (e) { console.warn('[paySlips] load failed', e && e.message); }
+}
+window._loadPaymentSlips = _loadPaymentSlips;
+function _slipsForShop(shopCode) { return (window._paySlipMap || {})[_normCust(shopCode)] || []; }
 function _debtApprRevealDrawer() {
   try {
     const role = Number((currentUser && currentUser.role) || (typeof SALESMAN !== 'undefined' && SALESMAN.level) || 0);
@@ -7823,10 +7866,27 @@ function _debtApprRowHtml(r) {
   const debt = Math.round(Number(String(r['ยอดค้าง'] || '').replace(/[^0-9.]/g, '')) || 0);
   const over = escapeHtml(String(r['เกินกำหนดสูงสุด(วัน)'] || '')), nb = escapeHtml(String(r['บิลเกิน(จำนวน)'] || ''));
   const reason = escapeHtml(String(r['เหตุผล'] || '—')), reqId = escapeAttr(String(r['reqId'] || ''));
+  // v8.404: สลิปชำระที่เซลส่งผ่าน debt dashboard (match รหัสร้าน) — โชว์ให้ซุปเห็นก่อนตัดสิน
+  const _slips = (typeof _slipsForShop === 'function') ? _slipsForShop(r['รหัสร้าน']).slice(0, 6) : [];
+  const slipHtml = _slips.length ? (
+    '<div style="margin-top:8px;padding:8px 10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px">'
+    + '<div style="font-size:11px;font-weight:800;color:#166534;margin-bottom:6px">📎 สลิปชำระที่เซลส่ง (' + _slips.length + ') — แตะดูเต็ม</div>'
+    + '<div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:2px">'
+    + _slips.map(function (sp) {
+        const thumb = (typeof thumbnailUrl === 'function' && typeof normalizePhotoUrl === 'function') ? thumbnailUrl(normalizePhotoUrl(sp.url), 200) : sp.url;
+        return '<div style="flex:0 0 auto;width:88px;text-align:center">'
+          + '<img src="' + escapeAttr(thumb) + '" onclick="window.open(\'' + escapeAttr(sp.url) + '\',\'_blank\')" title="แตะดูสลิปเต็ม" style="width:88px;height:88px;object-fit:cover;border-radius:8px;border:1px solid var(--border);cursor:pointer;background:var(--row-alt)" onerror="this.style.display=\'none\'">'
+          + '<div style="font-size:10.5px;font-weight:800;color:#166534;margin-top:3px">฿' + Math.round(sp.amount).toLocaleString() + '</div>'
+          + '<div style="font-size:9.5px;color:var(--muted);line-height:1.3">' + escapeHtml(sp.method) + '<br>' + escapeHtml(sp.date) + '</div>'
+          + '</div>';
+      }).join('')
+    + '</div></div>'
+  ) : '';
   return '<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px;background:var(--card-bg)">'
     + '<div style="display:flex;justify-content:space-between;gap:8px"><div style="font-weight:800;font-size:14px">' + shop + '</div><div style="font-weight:900;color:#DC2626;font-size:14px">฿' + debt.toLocaleString() + '</div></div>'
     + '<div style="font-size:11.5px;color:var(--muted);margin-top:2px">เซล ' + sm + ' · เกินสูงสุด ' + over + ' ว. · ค้าง ' + nb + ' บิล</div>'
     + '<div style="background:var(--row-alt);border-radius:8px;padding:8px 10px;margin-top:8px;font-size:12.5px;color:var(--text)"><b>ข้อความ:</b> ' + reason + '</div>'
+    + slipHtml
     + '<div style="display:flex;gap:8px;margin-top:10px"><button class="btn btn-outline" style="flex:1;color:#DC2626;border-color:#DC2626" onclick="decideDebtApproval(\'' + reqId + '\',\'reject\')">❌ ไม่อนุมัติ</button>'
     + '<button class="btn btn-primary" style="flex:1.4;background:#16A34A;border:none" onclick="decideDebtApproval(\'' + reqId + '\',\'approve\')">✅ อนุมัติ</button></div></div>';
 }
@@ -7834,6 +7894,7 @@ window.openDebtApprovalsModal = async function () {   // v8.324: รวมเข
   const role = Number((currentUser && currentUser.role) || (typeof SALESMAN !== 'undefined' && SALESMAN.level) || 0);
   if (role < 5) { showToast('เฉพาะหัวหน้า (Role 5+)', 'warning'); return; }
   if (typeof _loadDebtApprovals === 'function') await _loadDebtApprovals(true);
+  if (typeof _loadPaymentSlips === 'function') await _loadPaymentSlips(false);   // v8.404: โหลดสลิปก่อน render (map พร้อม)
   window._apprFilter = 'debt';
   if (typeof window.openApprovalsListModal === 'function') window.openApprovalsListModal(true);
   else showToast('ไม่พบจออนุมัติ', 'error');
@@ -11479,7 +11540,7 @@ window.showOrdersDiag = async function() {
   const cAge  = g(() => { const c = _memCache && _memCache['orders']; return (c && c.ts) ? Math.round((Date.now() - c.ts) / 1000) + 's' : 'ว่าง'; });
   const when  = g(() => new Date().toLocaleString('th-TH', { hour12: false }));
   const lines = [
-    'Rattana Sales · ตรวจสอบข้อมูล · v8.403',
+    'Rattana Sales · ตรวจสอบข้อมูล · v8.404',
     'เวลา: ' + when,
     '──────────────',
     'Role: ' + role + '   คลัง: ' + wh,
@@ -15649,6 +15710,7 @@ window.openIncompleteOrdersModal = function(scope) {
 //   ห้ามใส่ชื่อฟังก์ชัน / ชื่อคอลัมน์ / ศัพท์เทคนิค
 //   ปิดไว้ก่อน: โชว์ 2 อันล่าสุด · ที่เหลือกางด้วย <details> (native — ไม่ต้อง re-render หน้า)
 const WHATS_NEW = [
+  { v: '8.404', page: '💳 อนุมัติขายเชื่อ (หัวหน้า)', txt: 'ในการ์ดอนุมัติขายเชื่อ โชว์ "สลิปชำระเงิน" ที่เซลส่งผ่าน Debt Dashboard ให้หัวหน้าเห็นก่อนตัดสิน (รูปสลิป + ยอด + วิธีชำระ + วันที่ · แตะดูรูปเต็มได้ · ย้อนหลัง 60 วัน) — ร้านเกินเครดิตแต่เพิ่งโอนมา หัวหน้าเห็นหลักฐานแล้วอนุมัติได้เลย' },
   { v: '8.403', page: '💳 หนี้ / ขายเชื่อ', txt: 'ใบลดหนี้ (CN — ยอดติดลบ) ไม่นับเป็น "บิลค้าง" แล้ว — หักลบเข้ายอดรวมอย่างเดียว ไม่ทำให้จำนวนบิล/อายุหนี้เพี้ยน (เช่น ร้านมีบิลจริง 1 ใบ + CN 1 ใบ เดิมนับ 2 บิล ตอนนี้นับ 1) → เกณฑ์ขออนุมัติแม่นขึ้น' },
   { v: '8.402', page: '🛒 เช็คอิน / 💳 หนี้', txt: 'ด่านเครดิตเข้มขึ้น — เพิ่มเกณฑ์ที่ 3: ร้านที่มีบิลค้างยังไม่จ่าย "เกิน 3 ใบ" ต้องให้หัวหน้าอนุมัติก่อนเช็คอิน/ขาย (เดิมดักแค่ 2 ข้อ: บิลเกินกำหนดชำระ + ยอดค้างเกินวงเงิน) · จอบล็อกบอกชัดว่าติดเพราะข้อไหน · การ์ดฝั่งหัวหน้าโชว์จำนวนบิลค้างจริง' },
   { v: '8.401', page: '📊 รายงานขายเชื่อ (หัวหน้า)', txt: 'เมนูใหม่ "📊 รายงานขายเชื่อ" ใน ☰ (เฉพาะหัวหน้า/ผู้จัดการ) — ดูวันนี้เซลขออนุมัติขายเชื่อกี่ใบ อนุมัติ/ไม่อนุมัติ/รอ กี่ใบ · เลือกดูย้อนหลัง 7 วัน / 30 วัน / ทั้งหมด · อันดับเซลที่ขอบ่อย + ร้านที่ติดเกณฑ์เครดิตซ้ำ (ให้ฝ่ายเก็บเงินตามก่อน) · หัวหน้าคลังเห็นเฉพาะคลังตัวเอง ผู้บริหารเห็นทั้งบริษัท' },
@@ -15944,7 +16006,7 @@ window.openApprovalsListModal = function(keepFilter, gotoTab) {
   const pending = window._getPendingApprovals(scope);
   const cnPending = (typeof window._getPendingCNApprovals === 'function') ? window._getPendingCNApprovals(scope) : [];
   const debtList = (typeof _debtPendingForRole === 'function') ? _debtPendingForRole() : [];   // v8.324: ขายเชื่อ (เกินเครดิต) รออนุมัติ
-  if (typeof _loadDebtApprovals === 'function' && !keepFilter) { _loadDebtApprovals(true).then(function () { if (window._apprModalOpen) window.openApprovalsListModal(true); }).catch(function () {}); }   // v8.324: refresh หนี้สดตอนเปิดจอ (re-render 1 รอบ)
+  if (typeof _loadDebtApprovals === 'function' && !keepFilter) { Promise.all([_loadDebtApprovals(true), (typeof _loadPaymentSlips === 'function') ? _loadPaymentSlips(false) : Promise.resolve()]).then(function () { if (window._apprModalOpen) window.openApprovalsListModal(true); }).catch(function () {}); }   // v8.324: refresh หนี้สดตอนเปิดจอ · v8.404: + โหลดสลิปชำระ (re-render 1 รอบ)
   // v8.186: รายการตัดสินแล้วล่าสุด (แทบ "อนุมัติแล้ว")
   const donePrice = (typeof window._getDecidedApprovals === 'function') ? window._getDecidedApprovals(scope) : [];
   const doneCN    = (typeof window._getDecidedCNApprovals === 'function') ? window._getDecidedCNApprovals(scope) : [];
