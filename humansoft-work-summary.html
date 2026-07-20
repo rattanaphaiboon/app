@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>สรุปการทำงาน (ลาแยกประเภท) · HumanSoft · v1.9</title>
+<title>สรุปการทำงาน (ลาแยกประเภท) · HumanSoft · v2.0</title>
 <style>
   :root{
     --bg:#0f172a; --card:#1e293b; --card2:#273449; --line:#334155;
@@ -57,10 +57,10 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>สรุปการทำงาน · ลาแยกประเภท</h1><span class="badge">v1.9</span>
+    <h1>สรุปการทำงาน · ลาแยกประเภท</h1><span class="badge">v2.0</span>
     <span id="periodChip" style="font-size:12px;color:var(--muted)"></span>
   </header>
-  <div class="sub">เลือกช่วงวันที่ → ดึงจำนวนวันทำงาน/ลาแยกประเภท/ขาดงาน จาก HumanSoft → รวมกับทะเบียน (BU/คลัง/สถานะ) → Export Excel</div>
+  <div class="sub">เลือกช่วงวันที่ → ดึงจำนวนวันทำงาน/ลาแยกประเภท/ขาดงาน จาก HumanSoft → รวมกับทะเบียน (BU/คลัง/สถานะ) → Export Excel<br><b>v2.0:</b> นับเป็นลาเฉพาะเอกสารที่ <b>อนุมัติแล้ว</b> — ลาที่ยังรออนุมัติ/ไม่อนุมัติ ถือเป็น <b>ขาดงาน</b> (ตามการสแกน)</div>
 
   <!-- ตั้งค่า + ช่วงวัน -->
   <div class="card">
@@ -394,6 +394,22 @@ function probationStatus(beginDt, trialDays){
 
 // นับ 1 วันตามรหัสลาภายในช่วง
 const CODE_KEY = {'01':'t01','02':'t02','03':'t03','04':'t04','05':'t05','06':'t06','09':'t09','10':'t10','11':'t11'};
+// เอกสารลา "อนุมัติแล้ว" หรือยัง — ใช้ตัดสินว่าจะนับเป็นลาไหม (v2.0)
+//   หลัก: custom_leave.doc_status === 'approved' (machine-readable จาก HumanSoft)
+//   สำรอง: เอกสารรายวันทุกใบ doc_flag === '02'  หรือ  เอกสารเต็ม documents.time_leave[].status === 'อนุมัติ'
+//   ถ้าไม่เข้าเงื่อนไขใดเลย (รออนุมัติ/ไม่อนุมัติ/ไม่ทราบ) → ถือว่า "ยังไม่อนุมัติ" → ไม่นับเป็นลา
+function isLeaveApproved(day, docsById){
+  const cl = day.custom_leave;
+  if(cl && typeof cl.doc_status==='string' && cl.doc_status!==''){
+    return cl.doc_status.toLowerCase()==='approved';
+  }
+  const tl = day.time_leave||[];
+  // สำรอง 1: doc_flag ของเอกสารรายวันทุกใบ = '02' (อนุมัติ)
+  if(tl.length && tl.every(x=>x.doc_flag==='02')) return true;
+  // สำรอง 2: เทียบ doc_id กับเอกสารเต็ม (status === 'อนุมัติ')
+  if(docsById && tl.length && tl.every(x=>{ const f=docsById[x.doc_id]; return f && f.status==='อนุมัติ'; })) return true;
+  return false;
+}
 // เศษวันของเอกสารลา: ใช้ absence_day ถ้าคำนวณแล้ว(>0); ไม่งั้นประเมินจากช่วงเวลาเทียบกะ (เต็ม=1, ครึ่ง=0.5)
 function leaveFrac(doc, day){
   let f=+doc.absence_day; if(f>0) return f;
@@ -405,8 +421,10 @@ function leaveFrac(doc, day){
   }
   return 1;   // ไม่มีข้อมูลเวลา → ถือเต็มวัน
 }
-function aggregateDaily(days, from, to){
+function aggregateDaily(days, from, to, fullDocs){
   const rec={wd:0,swap:0,sched:0}; Object.values(CODE_KEY).forEach(k=>rec[k]=0);
+  // index เอกสารเต็มด้วย doc_id (ใช้เป็น fallback ตรวจสถานะอนุมัติ)
+  const docsById={}; (fullDocs||[]).forEach(f=>{ if(f&&f.doc_id) docsById[f.doc_id]=f; });
   (days||[]).forEach(d=>{
     const wdte=d.work_date||''; if(wdte<from || wdte>to) return;
     if((d.holiday_flag_lv||'00')!=='00') return;   // วันหยุด ไม่นับเป็นวันในกะ
@@ -418,7 +436,9 @@ function aggregateDaily(days, from, to){
     if(ad>0 && CODE_KEY[a]){ rec[CODE_KEY[a]]+=ad; dayLeave+=ad; }
     if(ad2>0 && CODE_KEY[a2]){ rec[CODE_KEY[a2]]+=ad2; dayLeave+=ad2; }
     // 2) เดือนที่ยังไม่คำนวณ — อ่านเอกสารลาจาก time_leave (absence_day ยังเป็น 0)
-    if(dayLeave===0 && Array.isArray(d.time_leave)){
+    //    *เงื่อนไข v2.0: นับเฉพาะเอกสารที่ "อนุมัติแล้ว" เท่านั้น
+    //    ลาที่ยังรออนุมัติ/ไม่อนุมัติ → ไม่นับเป็นลา → ตกไปเข้ากฎขาดงานตามการสแกน (ข้อ 3)
+    if(dayLeave===0 && Array.isArray(d.time_leave) && d.time_leave.length && isLeaveApproved(d, docsById)){
       d.time_leave.forEach(doc=>{
         const code=doc.absence_flag_lv_code;
         if(!CODE_KEY[code]) return;
@@ -494,7 +514,8 @@ async function pullLive(){
         merged.status = merged.status || probationStatus(pr.begin_dt, pr.trial_range);
       }
       const days = p.days || p.daily || (Array.isArray(p)?p:[]);
-      const agg = aggregateDaily(days, from, to);
+      const fullDocs = (p.documents && p.documents.time_leave) ? p.documents.time_leave : [];
+      const agg = aggregateDaily(days, from, to, fullDocs);
       merged.wd+=agg.wd; merged.swap+=agg.swap; merged.sched+=agg.sched;
       Object.keys(CODE_KEY).forEach(c=>{ merged[CODE_KEY[c]] += agg[CODE_KEY[c]]; });
     }
@@ -525,7 +546,7 @@ function setMsg(t,cls){ const m=$('#msg'); m.textContent=t; m.className='msg'+(c
 
 /* ═══ events ═══ */
 $('#demo').onclick = ()=>{
-  if(!DEMO.length){ setMsg('เวอร์ชันออนไลน์นี้ไม่มีข้อมูลตัวอย่าง (ตัดออกเพื่อความเป็นส่วนตัว) — ตั้งค่า Proxy + ทะเบียน แล้วกด �ดึงจาก HumanSoft�','err'); return; }
+  if(!DEMO.length){ setMsg('เวอร์ชันออนไลน์นี้ไม่มีข้อมูลตัวอย่าง (ตัดออกเพื่อความเป็นส่วนตัว) — ตั้งค่า Proxy + ทะเบียน แล้วกด "ดึงจาก HumanSoft"','err'); return; }
   // ตัวอย่าง = ทั้งเดือน พ.ค. 2026 (31 วัน) → วันในกะ = 31 − วันหยุด
   RAW = DEMO.map(r=>({...r, sched: 31 - (+r.hol||0)}));
   if(!Object.keys(REG).length) REG=parseReg(SAMPLE_REG);
