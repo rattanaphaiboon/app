@@ -1002,24 +1002,41 @@ function renderOutlets() {
     eoTargetIdx.set(nm, t);
   });
 
-  // build aoActual from BP sheet: normName → unique Customer_Code count
-  const aoActualIdx = new Map();
+  // build empCode lookup from EO sheet: normName → empCode
+  const eoEmpCodeIdx = new Map();
+  (state.eoRaw || []).forEach(r => {
+    const nm = normalizeName(r['ชื่อพนักงานขาย']);
+    const code = String(r['รหัส']||'').trim();
+    if (nm && code) eoEmpCodeIdx.set(nm, code);
+  });
+
+  // build BP sales map: normName → Map(Customer_Code → sum EXVat+CN*2)
+  const bpSalesIdx = new Map();
   (state.bpRaw || []).forEach(r => {
     const nm = normalizeName(r['Sale NO ROO']);
     const cust = r['Customer_Code'];
     if (!nm || !cust) return;
-    if (!aoActualIdx.has(nm)) aoActualIdx.set(nm, new Set());
-    aoActualIdx.get(nm).add(cust);
+    if (!bpSalesIdx.has(nm)) bpSalesIdx.set(nm, new Map());
+    const custMap = bpSalesIdx.get(nm);
+    custMap.set(cust, (custMap.get(cust)||0) + parseNum(r['EXVat+CN*2']));
   });
 
-  // build empCode/eoActual lookup from state.rows
+  // compute aoActual (unique Customer_Code) and eoActual (Customer_Code ที่ยอด >= threshold) per employee
+  const aoActualIdx = new Map();
+  const eoActualIdx = new Map();
+  bpSalesIdx.forEach((custMap, nm) => {
+    aoActualIdx.set(nm, custMap.size);
+    const empCode = eoEmpCodeIdx.get(nm) || '';
+    const thresh = debtorThreshold(empCode) ?? 2500;
+    const eoCount = [...custMap.values()].filter(v => v >= thresh).length;
+    eoActualIdx.set(nm, eoCount);
+  });
+
+  // build empCode lookup from state.rows for wh
   const empInfoIdx = new Map();
   (state.rows || []).forEach(r => {
     const nm = normalizeName(r.name);
     if (!empInfoIdx.has(nm)) empInfoIdx.set(nm, { empCode: r.empCode, wh: r.wh });
-    const e = empInfoIdx.get(nm);
-    const pv = normalizeText(r.value||'').toUpperCase();
-    if (r.dim.toUpperCase() === 'KPI' && pv === 'EFFECTIVE OUTLET') { e.eoTarget = r.target; e.eoActual = r.actual; }
   });
 
   // build empMap from Outlet sheet (primary source)
@@ -1029,14 +1046,13 @@ function renderOutlets() {
     if (!rawName) return;
     const nm = normalizeName(rawName);
     const info = empInfoIdx.get(nm) || {};
-    const aoSet = aoActualIdx.get(nm);
     empMap.set(nm, {
       name: rawName.replace(/^คุณ\s*/,''),
       empCode: r['รหัส'] || info.empCode || '',
       wh: info.wh || '',
-      aoActual: aoSet ? aoSet.size : null,
-      eoTarget: eoTargetIdx.get(nm) ?? info.eoTarget ?? null,
-      eoActual: info.eoActual ?? null,
+      aoActual: aoActualIdx.get(nm) ?? null,
+      eoTarget: eoTargetIdx.get(nm) ?? null,
+      eoActual: eoActualIdx.get(nm) ?? null,
     });
   });
 
