@@ -8,6 +8,10 @@
  * เมื่อกรอกค่าแล้วต้อง deploy ไฟล์นี้ขึ้น GitHub Pages ที่ path เดียวกับ r-flow.html
  */
 
+// SW เวอร์ชันใหม่มีผลทันที ไม่ต้องรอปิดแอปทุกแท็บ
+self.addEventListener('install', function () { self.skipWaiting(); });
+self.addEventListener('activate', function (e) { e.waitUntil(self.clients.claim()); });
+
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
 
@@ -30,13 +34,24 @@ if (firebaseConfig.apiKey) {
   messaging.onBackgroundMessage(function (payload) {
     const n = (payload && payload.notification) || {};
     const data = (payload && payload.data) || {};
+    const link = data.link || 'r-flow.html';
+    // tag แยกตามงาน → คนละงานเด้งแยกอัน (นับได้) · งานเดิมซ้ำ = ทับอันเดิม ไม่สแปม
+    const m = String(link).match(/[?&]task=([^&#]+)/);
+    const tag = m ? 'task-' + m[1] : 'rflow';
     self.registration.showNotification(n.title || 'R-Flow', {
       body: n.body || '',
       icon: 'r-flow-icon-192.png',
       badge: 'r-flow-icon-192.png',
-      tag: data.tag || undefined,      // งานเดียวกัน = รวมเป็นอันเดียว ไม่สแปม
-      data: { link: data.link || 'r-flow.html' }
-    });
+      tag: tag,
+      data: { link: link }
+    }).then(function () {
+      // เลขแดงบนไอคอนแอป = จำนวนนอติที่ยังค้างอยู่
+      if (self.navigator && self.navigator.setAppBadge) {
+        return self.registration.getNotifications().then(function (list) {
+          return self.navigator.setAppBadge((list && list.length) || 1);
+        });
+      }
+    }).catch(function () {});
   });
 }
 
@@ -44,6 +59,13 @@ if (firebaseConfig.apiKey) {
 self.addEventListener('notificationclick', function (e) {
   e.notification.close();
   const link = (e.notification.data && e.notification.data.link) || 'r-flow.html';
+  // อัปเดตเลขบนไอคอนตามนอติที่ยังเหลือ (แอปจะคำนวณใหม่อีกทีตอนเปิด)
+  if (self.navigator && self.navigator.setAppBadge) {
+    self.registration.getNotifications().then(function (list) {
+      const n = (list && list.length) || 0;
+      return n > 0 ? self.navigator.setAppBadge(n) : (self.navigator.clearAppBadge && self.navigator.clearAppBadge());
+    }).catch(function () {});
+  }
   e.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (list) {
       for (let i = 0; i < list.length; i++) {
