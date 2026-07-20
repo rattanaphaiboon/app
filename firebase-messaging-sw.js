@@ -30,29 +30,33 @@ if (firebaseConfig.apiKey) {
   firebase.initializeApp(firebaseConfig);
   const messaging = firebase.messaging();
 
-  // ข้อความที่ส่งมาตอนแอปปิด/อยู่พื้นหลัง → เด้ง notification เอง
+  /* ⚠️ หลังบ้านต้องส่งเป็น data-only (ไม่มี key `notification`) ไม่งั้น firebase SDK
+     เด้งนอติให้เองแล้วไม่เรียกฟังก์ชันนี้ → ไม่มีเลขแดง + tag ไม่แยกตามงาน
+     (อ่านทั้ง data และ notification ไว้ เผื่อหลังบ้านเวอร์ชันเก่ายังไม่ deploy) */
   messaging.onBackgroundMessage(function (payload) {
+    const d = (payload && payload.data) || {};
     const n = (payload && payload.notification) || {};
-    const data = (payload && payload.data) || {};
-    const link = data.link || 'r-flow.html';
+    const link = d.link || 'r-flow.html';
     // tag แยกตามงาน → คนละงานเด้งแยกอัน (นับได้) · งานเดิมซ้ำ = ทับอันเดิม ไม่สแปม
     const m = String(link).match(/[?&]task=([^&#]+)/);
     const tag = m ? 'task-' + m[1] : 'rflow';
-    self.registration.showNotification(n.title || 'R-Flow', {
-      body: n.body || '',
+    return self.registration.showNotification(d.title || n.title || 'R-Flow', {
+      body: d.body || n.body || '',
       icon: 'r-flow-icon-192.png',
       badge: 'r-flow-icon-192.png',
       tag: tag,
+      renotify: true,
       data: { link: link }
-    }).then(function () {
-      // เลขแดงบนไอคอนแอป = จำนวนนอติที่ยังค้างอยู่
-      if (self.navigator && self.navigator.setAppBadge) {
-        return self.registration.getNotifications().then(function (list) {
-          return self.navigator.setAppBadge((list && list.length) || 1);
-        });
-      }
-    }).catch(function () {});
+    }).then(refreshBadge).catch(function () {});
   });
+}
+
+// เลขแดงบนไอคอนแอป = จำนวนนอติที่ยังค้างอยู่ (อย่างน้อย 1 ถ้าอ่านรายการไม่ได้)
+function refreshBadge() {
+  if (!(self.navigator && self.navigator.setAppBadge)) return;
+  return self.registration.getNotifications()
+    .then(function (list) { return self.navigator.setAppBadge(Math.max((list && list.length) || 0, 1)); })
+    .catch(function () { try { self.navigator.setAppBadge(1); } catch (e) {} });
 }
 
 // กดที่ notification → เปิด/โฟกัสแอปไปที่งานนั้น
