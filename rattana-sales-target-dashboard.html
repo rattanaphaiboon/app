@@ -238,7 +238,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page hidden" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v1.39</small>
+      <small>ยอดขายเทียบเป้าหมาย v1.40</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -249,6 +249,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 
   <div class="tab-nav">
     <button class="tab-btn active" data-tab="detail" onclick="switchTab('detail')">รายละเอียดเป้าหมาย</button>
+    <button class="tab-btn" data-tab="outlets" onclick="switchTab('outlets')">Outlets</button>
   </div>
 
   <div class="content">
@@ -280,6 +281,9 @@ body.dark .ptbl-td{border-color:var(--border)}
         <button class="btn btn-outline btn-sm" onclick="exportDetailExcel()">⭳ Excel</button>
       </div>
       <div id="pivotContainer"></div>
+    </div>
+    <div id="tab-outlets" class="hidden">
+      <div id="outletContent"></div>
     </div>
   </div>
 </div>
@@ -958,12 +962,134 @@ function exportDetailExcel() {
   XLSX.writeFile(wb, 'rattana-sales-target-' + Date.now() + '.xlsx');
 }
 
-function renderAll() { renderPivot(); }
+function renderAll() { renderPivot(); renderOutlets(); }
+
+/* ================= OUTLETS TAB ================= */
+function getChannelGroup(empCode) {
+  const c = String(empCode||'').toUpperCase();
+  if (c.startsWith('HSW') || c.startsWith('GP')) return 'ส่ง';
+  return 'ปลีก';
+}
+
+function renderOutlets() {
+  const el = document.getElementById('outletContent');
+  if (!el) return;
+
+  // build map: empCode → {name, wh, empCode, aoTarget, aoActual, eoActual}
+  const empMap = new Map();
+  (state.rows || []).forEach(r => {
+    const key = r.empCode || r.name;
+    if (!empMap.has(key)) {
+      empMap.set(key, { name: r.name, nickname: r.nickname||'', wh: r.wh, empCode: r.empCode, aoTarget: null, eoTarget: null, aoActual: null, eoActual: null });
+    }
+    const e = empMap.get(key);
+    const pv = normalizeText(r.value||'').toUpperCase();
+    if (r.dim.toUpperCase() === 'KPI' && pv === 'ACTIVE OUTLET') {
+      e.aoTarget = r.target; e.aoActual = r.actual;
+    }
+    if (r.dim.toUpperCase() === 'KPI' && pv === 'EFFECTIVE OUTLET') {
+      e.eoTarget = r.target; e.eoActual = r.actual;
+    }
+  });
+
+  // group by channel
+  const groups = { 'ส่ง': [], 'ปลีก': [] };
+  empMap.forEach(e => {
+    const g = getChannelGroup(e.empCode);
+    if (groups[g]) groups[g].push(e);
+  });
+
+  const fmtPct = (a, t) => {
+    if (a === null || a === undefined || !t) return '<span style="color:var(--muted)">-</span>';
+    const p = (a / t * 100);
+    const col = p >= 100 ? 'var(--success)' : p >= 80 ? 'var(--warning)' : 'var(--danger)';
+    return `<span style="color:${col};font-weight:700">${p.toFixed(2)}%</span>`;
+  };
+  const fmtN = v => v !== null && v !== undefined ? Number(v).toLocaleString() : '<span style="color:var(--muted)">-</span>';
+
+  let html = `<style>
+.otbl{width:100%;border-collapse:collapse;font-size:13px}
+.otbl th,.otbl td{padding:8px 10px;border:1px solid var(--border);text-align:center}
+.otbl thead tr:first-child th{background:var(--navy);color:#fff;font-weight:700;font-size:13px}
+.otbl thead tr:nth-child(2) th{background:var(--navy-mid);color:#fff;font-size:12px}
+.otbl .col-ao{background:rgba(52,152,219,.12)}
+.otbl .col-eo{background:rgba(46,204,113,.12)}
+.otbl .col-s0{background:rgba(243,156,18,.12)}
+.otbl thead .col-ao{background:rgba(52,152,219,.85);color:#fff}
+.otbl thead .col-eo{background:rgba(46,204,113,.85);color:#fff}
+.otbl thead .col-s0{background:rgba(243,156,18,.85);color:#fff}
+.otbl tbody tr:hover{background:rgba(201,168,76,.07)}
+.otbl .grp-head td{background:var(--navy);color:var(--gold);font-weight:700;text-align:left}
+.otbl .sum-row td{background:var(--navy-light);color:#fff;font-weight:700}
+.otbl .seq{color:var(--muted);font-size:12px;width:32px}
+</style>
+<div class="tbl-wrap">
+<table class="otbl">
+<thead>
+<tr>
+  <th rowspan="2" style="width:32px">ลำดับ</th>
+  <th rowspan="2" style="text-align:left;min-width:160px">ชื่อพนักงานขาย</th>
+  <th rowspan="2">รหัส</th>
+  <th colspan="3" class="col-ao">Active Outlet</th>
+  <th colspan="3" class="col-eo">Effective Outlet</th>
+  <th colspan="3" class="col-s0">Store 0 Bath</th>
+</tr>
+<tr>
+  <th class="col-ao">Target</th><th class="col-ao">Actual</th><th class="col-ao">%</th>
+  <th class="col-eo">Target 70%</th><th class="col-eo">Actual</th><th class="col-eo">%</th>
+  <th class="col-s0">In Routh</th><th class="col-s0">0 Bath</th><th class="col-s0">%</th>
+</tr>
+</thead>
+<tbody>`;
+
+  const renderGroup = (label, rows) => {
+    if (!rows.length) return '';
+    let out = `<tr class="grp-head"><td colspan="12" style="padding:6px 12px">📦 ช่องทาง${label}</td></tr>`;
+    let sumAoT=0, sumAoA=0, sumEoT=0, sumEoA=0;
+    rows.forEach((e, i) => {
+      const aoT = e.aoTarget ?? 0;
+      const aoA = e.aoActual ?? null;
+      const eoT = e.eoTarget ?? (aoT ? Math.round(aoT * 0.7) : null);
+      const eoA = e.eoActual ?? null;
+      sumAoT += aoT; sumAoA += (aoA||0); sumEoT += (eoT||0); sumEoA += (eoA||0);
+      out += `<tr>
+        <td class="seq">${i+1}</td>
+        <td style="text-align:left">คุณ ${e.name}</td>
+        <td>${e.empCode}</td>
+        <td class="col-ao">${fmtN(aoT)}</td>
+        <td class="col-ao">${fmtN(aoA)}</td>
+        <td class="col-ao">${fmtPct(aoA, aoT)}</td>
+        <td class="col-eo">${fmtN(eoT)}</td>
+        <td class="col-eo">${fmtN(eoA)}</td>
+        <td class="col-eo">${fmtPct(eoA, eoT)}</td>
+        <td class="col-s0" style="color:var(--muted)">-</td>
+        <td class="col-s0" style="color:var(--muted)">-</td>
+        <td class="col-s0" style="color:var(--muted)">-</td>
+      </tr>`;
+    });
+    const eoTShow = sumEoT || Math.round(sumAoT * 0.7);
+    out += `<tr class="sum-row">
+      <td colspan="3">รวมช่องทาง${label}</td>
+      <td>${sumAoT.toLocaleString()}</td><td>${sumAoA.toLocaleString()}</td><td>${fmtPct(sumAoA, sumAoT)}</td>
+      <td>${eoTShow.toLocaleString()}</td><td>${sumEoA.toLocaleString()}</td><td>${fmtPct(sumEoA, eoTShow)}</td>
+      <td style="color:rgba(255,255,255,.4)">-</td><td style="color:rgba(255,255,255,.4)">-</td><td style="color:rgba(255,255,255,.4)">-</td>
+    </tr>`;
+    return out;
+  };
+
+  html += renderGroup('ส่ง', groups['ส่ง']);
+  html += renderGroup('ปลีก', groups['ปลีก']);
+  html += `</tbody></table></div>
+<p class="txt-sm txt-muted" style="margin-top:8px">* Effective Outlet: ร้านส่ง ≥ 40,000 บาท/เดือน · ร้านปลีก ≥ 2,500 บาท/เดือน &nbsp;|&nbsp; Store 0 Bath: รอข้อมูลชีตใหม่</p>`;
+
+  el.innerHTML = html;
+}
 
 /* ================= TABS / UI ================= */
 function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===tab));
   document.getElementById('tab-detail').classList.toggle('hidden', tab!=='detail');
+  document.getElementById('tab-outlets').classList.toggle('hidden', tab!=='outlets');
 }
 function toggleDark() {
   document.body.classList.toggle('dark');
