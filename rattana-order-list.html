@@ -287,6 +287,8 @@ const fmtN = n => n.toLocaleString('en-US', { maximumFractionDigits:2 });
 const normEmail = s => S(s).replace(/[​‌‍﻿]/g,'').replace(/\s+/g,'').toLowerCase();
 const normCode  = s => S(s).replace(/[​‌‍﻿]/g,'').trim().toUpperCase();
 const esc = s => S(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+// ตัด 0 นำหน้าออกให้เหลืออย่างน้อย 1 ตัว — กันเคส 0 นำหน้าหาย/เกินไม่ตรงกันระหว่างชีท Order กับ PDDT (คนละฝั่งอาจเก็บมาไม่เท่ากัน)
+const normBc = s => S(s).trim().replace(/^0+(?=.)/,'');
 
 function showSpinner(m){ $('spinnerMsg').textContent = m || 'กำลังโหลด…'; $('spinner').classList.add('show'); }
 function hideSpinner(){ $('spinner').classList.remove('show'); }
@@ -441,7 +443,7 @@ async function loadProductsBg(){
       const rec = { b:S(p['CAT BRAND']), s:S(p['CAT SIZE']), n:S(p['PRODUCT NAME']) };
       if (!rec.b && !rec.s) return;
       ['CODE EA','CODE PA','CODE BP','CODE CS'].forEach(cd => {
-        const code = S(p[cd]).trim(); if (code && !m.has(code)) m.set(code, rec);
+        const code = normBc(p[cd]); if (code && !m.has(code)) m.set(code, rec);
       });
     });
     PROD_MAP = m;
@@ -457,10 +459,10 @@ function onProdReady(src){
   $('pddtNote').textContent = `✅ ข้อมูลสินค้า ${PROD_MAP.size.toLocaleString()} บาร์โค้ด (${src === 'cache' ? 'แคช' : 'PDDT'})`;
   enrichProducts(); buildProdDropdowns(); applyFilters();
 }
-/* บาร์โค้ดชีท Order บางแถวมี 0 นำหน้าหาย/เกิน — ลองทั้งตรงตัวและตัด 0 นำหน้า */
+/* บาร์โค้ดชีท Order กับ PDDT บางแถว 0 นำหน้าหาย/เกินไม่ตรงกัน — normalize (ตัด 0 นำหน้า) ทั้ง 2 ฝั่งก่อนจับคู่เสมอ */
 function prodOf(barcode){
-  const b = S(barcode).trim(); if (!b) return null;
-  return PROD_MAP.get(b) || PROD_MAP.get(b.replace(/^0+/,'')) || null;
+  const b = normBc(barcode); if (!b) return null;
+  return PROD_MAP.get(b) || null;
 }
 function enrichProducts(){
   ALL_ROWS.forEach(r => { const p = prodOf(r['Barcode']); r._brand = p ? p.b : ''; r._size = p ? p.s : ''; });
@@ -479,6 +481,7 @@ async function postGas(payload){
     return await res.json();
   } finally { clearTimeout(to); }
 }
+let _loadSeq = 0;   // กัน race condition — เปลี่ยนวันที่/กด ↻ ถี่ๆ แล้ว response เก่าตอบช้ากว่ามาทับของใหม่
 async function loadOrders(){
   if (!CONFIG.appsScriptUrl) {
     $('tbody').innerHTML = `<tr class="empty-row"><td colspan="17">⚙️ ยังไม่ได้ตั้งค่า backend — รอ Surat deploy Apps Script โปรเจกต์ใหม่ (Order lists/Code.gs) แล้วใส่ exec URL</td></tr>`;
@@ -486,13 +489,31 @@ async function loadOrders(){
   }
   const from = toApiDate($('dtFrom').value), to = toApiDate($('dtTo').value);
   if (!from || !to) { showToast('เลือกช่วงวันที่ก่อน', 'warning'); return; }
+  const req = { action:'sbOrders', from, to, limit:20000 };
+  // จำกัดขอบเขตตาม role — ชุดเดียวกับ Sales App (≤4 = ของตัวเอง · 5 = คลังตัวเอง · ≥6 = ทั้งบริษัท)
+  // ❌ ห้ามปล่อยยิงแบบไม่มีตัวกรองถ้าหารหัส/คลังของ user ไม่เจอ — เสี่ยงเห็นข้อมูลทั้งบริษัททั้งที่ควรเห็นแค่ของตัวเอง
+  if (currentUser.role <= 4) {
+    const code = resolveMyCode();
+    if (!code) {
+      showToast('หารหัสเซลของคุณไม่เจอ — โหลดข้อมูลพนักงานใหม่ (กด ↻) หรือแจ้งแอดมิน', 'error');
+      $('tbody').innerHTML = `<tr class="empty-row"><td colspan="17">❌ หารหัสเซลไม่เจอ — โหลดออเดอร์ไม่ได้ (ป้องกันเห็นข้อมูลเกินสิทธิ์)</td></tr>`;
+      return;
+    }
+    req.salesman = code;
+  } else if (currentUser.role === 5) {
+    const wh = normCode(currentUser.warehouse);
+    if (!wh) {
+      showToast('ไม่พบคลังของคุณ — แจ้งแอดมินตรวจสอบ Users sheet', 'error');
+      $('tbody').innerHTML = `<tr class="empty-row"><td colspan="17">❌ ไม่พบคลังของคุณ — โหลดออเดอร์ไม่ได้ (ป้องกันเห็นข้อมูลเกินสิทธิ์)</td></tr>`;
+      return;
+    }
+    req.warehouse = wh;
+  }
+  const mySeq = ++_loadSeq;
   showSpinner('กำลังดึงออเดอร์จาก Supabase…');
   try{
-    const req = { action:'sbOrders', from, to, limit:20000 };
-    // จำกัดขอบเขตตาม role — ชุดเดียวกับ Sales App (≤4 = ของตัวเอง · 5 = คลังตัวเอง · ≥6 = ทั้งบริษัท)
-    if (currentUser.role <= 4)      req.salesman  = resolveMyCode();
-    else if (currentUser.role === 5) req.warehouse = normCode(currentUser.warehouse);
     const res = await postGas(req);
+    if (mySeq !== _loadSeq) return;   // มีคำขอใหม่กว่าเริ่มไปแล้วระหว่างรอ — ทิ้งผลลัพธ์เก่านี้ทิ้ง ไม่ทับของใหม่
     if (!res || !res.ok) throw new Error((res && res.error) || 'ไม่ทราบสาเหตุ');
     ALL_ROWS = (res.rows || []).map(r => {
       const o = {}; ORDER_HEADERS.forEach(h => o[h] = S(r[h]));
@@ -505,10 +526,11 @@ async function loadOrders(){
     if (res.capped) showToast('⚠️ ข้อมูลถึงเพดาน 20,000 แถว — ลดช่วงวันที่ลง', 'warning');
     showToast(`โหลด ${ALL_ROWS.length.toLocaleString()} รายการ ✓`, 'success');
   }catch(e){
+    if (mySeq !== _loadSeq) return;   // request เก่าพัง แต่มีคำขอใหม่กว่าทำงานอยู่ — ไม่ต้องโชว์ error ทับ
     console.error(e);
     showToast('โหลดไม่สำเร็จ: ' + e.message, 'error');
     $('tbody').innerHTML = `<tr class="empty-row"><td colspan="17">❌ ${e.message}</td></tr>`;
-  }finally{ hideSpinner(); }
+  }finally{ if (mySeq === _loadSeq) hideSpinner(); }
 }
 function resolveMyCode(){
   const rec = USER_MAP.byEmail.get(normEmail(currentUser.email));
