@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,viewport-fit=cover">
-<title>Rattana Promotion v1.38</title>
+<title>Rattana Promotion v1.39</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&family=Prompt:wght@400;600;700;800&family=Kanit:wght@400;600;700;800&family=Mitr:wght@400;500;600;700&family=Chakra+Petch:wght@400;600;700&family=IBM+Plex+Sans+Thai:wght@400;600;700&family=Bai+Jamjuree:wght@600;700&family=Anuphan:wght@400;500;600;700;800&family=Noto+Sans+Thai:wght@400;500;600;700;800&family=Sriracha&family=Athiti:wght@400;500;600;700&family=Pridi:wght@400;500;600;700&family=Taviraj:wght@400;500;600;700&family=Charm:wght@400;500;600;700&family=Charmonman:wght@400;700&display=swap" rel="stylesheet">
 <style>
@@ -465,7 +465,7 @@ body.bg-gradient{background:linear-gradient(180deg,#ffe0f0 0%,#e0f0ff 50%,#f0ffe
 <body>
 
 <header>
-  <div class="logo-text">RATTANA <span class="brand">PROMOTION</span><span class="v">v1.38</span></div>
+  <div class="logo-text">RATTANA <span class="brand">PROMOTION</span><span class="v">v1.39</span></div>
   <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="โหลดข้อมูลใหม่">↻ รีเฟรช</button>
   <button class="icon-btn" onclick="exportExcel()" title="ส่งออก Excel รูปแบบ Promotion / Free" style="background:#217346;border-color:#217346">📊 Excel</button>
   <button class="icon-btn gold" onclick="printPromos()" title="พิมพ์/บันทึก PDF (แปลงพื้นหลังขาวของรูปให้โปร่งใสก่อน)">🖨 พิมพ์</button>
@@ -1335,7 +1335,7 @@ function sortKeyFor(promo, key){
     case 'catSize':   return catCol('CAT SIZE');
     case 'catVendor': return catCol('CAT VENDOR');
     case 'name':      return clean(promo['ชื่อ']) || clean(promo['ชื่อโปร']);
-    case 'expire':    return parsePeriod(promo['Period'])?.getTime() ?? FAR_FUTURE;
+    case 'expire':    return promoEnd(promo)?.getTime() ?? FAR_FUTURE;
     case 'warehouse': return warehouseSortKey(promo);
     case 'original':  return promo._idx ?? 0;
   }
@@ -1400,10 +1400,28 @@ const stripCode = s => clean(s).replace(/^[A-Za-z0-9._-]{3,}@\s*/, '');
 function csvToObjects(text){
   const rows = parseCsv(text);
   if(rows.length < 2) return [];
-  const headers = rows[0].map(clean);
+  const raw = rows[0].map(clean);
+  // v1.39 — robust headers:
+  //  • blank header → name it by its LEFT neighbour for the two qty columns
+  //    (Promotion sheet leaves จำนวน / จำนวนแถมEA unlabelled), else a unique placeholder
+  //  • never collapse duplicate/blank headers into one key (that dropped a column and
+  //    shifted every field after it — which made รายละเอียดโปร read หมายเหตุ's value)
+  const seen = {};
+  const headers = raw.map((h, i) => {
+    let name = h;
+    if(!name){
+      const prev = raw[i-1] || '';
+      if(prev === 'ราคาขายกำหนด')            name = 'จำนวน';
+      else if(prev === 'Barcode สินค้าแถมEA') name = 'จำนวนแถมEA';
+      else                                   name = '_col' + i;
+    }
+    if(seen[name] != null){ seen[name]++; name = name + '#' + seen[name]; }
+    else seen[name] = 0;
+    return name;
+  });
   return rows.slice(1)
     .filter(r => r.some(c => clean(c)))
-    .map(r => Object.fromEntries(headers.map((k,i)=>[k, clean(r[i])])));
+    .map(r => { const o = {}; headers.forEach((k, i) => o[k] = clean(r[i])); return o; });
 }
 
 async function fetchSheet(sheetId, sheetName){
@@ -1534,6 +1552,11 @@ function formatBuddhistDate(d){
   const yyyy = d.getFullYear() + 543;
   return `${dd}/${mm}/${yyyy}`;
 }
+// v1.39 — the sheet split "Period" into เริ่มโปร (start) + จบโปร (end).
+// Everything date-related wants the END date; fall back to old single-column names.
+function promoEnd(p){
+  return parsePeriod(clean(p['จบโปร']) || clean(p['Period']) || clean(p['สิ้นสุดโปร']) || '');
+}
 function parsePeriod(s){
   // Accept 2027/07/27, 2027-07-27, 27/07/2027, 27/07/2570
   s = clean(s);
@@ -1587,18 +1610,9 @@ async function loadAll(useCache=true){
     if(promos)   setCached('rp_promos',   promos);
 
     state.products = products || [];
-    // Normalize promo headers — sheet's col E (จำนวน) sometimes has blank header
-    // Map known columns by position if the canonical key is missing.
-    const CANON = ['ชื่อโปร','วิธีวัด','ชื่อ','ราคาขายกำหนด','จำนวน','รูปแบบขาย','ลดราคา','แถมสินค้า','Barcode สินค้าแถมEA','จำนวนแถมEA','รายละเอียดโปร','หมายเหตุ','Period','Warehouses','Role','เช็คแล้ว','แถมร่วม','การเคลม','ขอบเขตโปร','ST ตั้งต้น'];
-    state.promotions = (promos || []).map((p,i) => {
-      const origKeys = Object.keys(p);
-      const fixed = {};
-      CANON.forEach((c, idx) => { fixed[c] = origKeys[idx] !== undefined ? (p[origKeys[idx]] ?? '') : ''; });
-      // Preserve any extra fields that don't fit CANON
-      for(const k of origKeys){ if(!(k in fixed) && k) fixed[k] = p[k]; }
-      fixed._idx = i;
-      return fixed;
-    });
+    // v1.39 — headers are now correct by name (csvToObjects names the blank qty columns
+    // and never drops a column), so no positional remap needed. Just stamp _idx.
+    state.promotions = (promos || []).map((p, i) => (p._idx = i, p));
     state.deselected.clear();
 
     buildIndexes();
@@ -1711,7 +1725,7 @@ function getFilters(){
   };
 }
 function isActive(promo){
-  const end = parsePeriod(promo['Period']);
+  const end = promoEnd(promo);
   if(!end) return true; // no date → assume active
   const today = new Date(); today.setHours(0,0,0,0);
   return end >= today;
@@ -1961,8 +1975,8 @@ function emptyCellHTML(){
 }
 
 function currentPeriodText(list){
-  // Find earliest period date among filtered list
-  const dates = list.map(p => parsePeriod(p['Period'])).filter(Boolean);
+  // Find latest end date among filtered list
+  const dates = list.map(promoEnd).filter(Boolean);
   if(!dates.length) return '';
   const latest = new Date(Math.max(...dates.map(d => d.getTime())));
   return `ถึง ${formatBuddhistDate(latest)}`;
@@ -2117,7 +2131,7 @@ function exportExcel(){
       detailLines.push(buyLines[i]);
       detailLines.push(freeLines[i]);
     });
-    const dates = g.tiers.map(t => parsePeriod(t['Period'])).filter(Boolean);
+    const dates = g.tiers.map(promoEnd).filter(Boolean);
     const endStr = dates.length ? formatBuddhistDate(new Date(Math.min(...dates.map(d => d.getTime())))) : '-';
     // Union of warehouses across all tiers, sorted W1→W4 then any extras
     const whSet = new Set();
