@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>R-Flow — ติดตามงานทีม v2.41</title>
+<title>R-Flow — ติดตามงานทีม v2.42</title>
 <link rel="icon" type="image/png" href="r-flow-icon.png">
 <link rel="manifest" href="r-flow.webmanifest">
 <link rel="apple-touch-icon" href="r-flow-icon.png">
@@ -475,7 +475,7 @@ button.rf-stat::after{content:'›';position:absolute;top:9px;right:14px;font-si
    Design:  Claude Design "Team Task Tracker" (task-tracker/design/) */
 
 const CFG = {
-  version: '2.41',
+  version: '2.42',
   exec: 'https://script.google.com/macros/s/AKfycbx3lmJqh1WYDhKFE-0Il4A4ihdcCsbbHYN6c9JuAXWj3TU-oWHGvate7NmxSAwDYdWfww/exec',
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
   hubUrl: 'https://rattanaphaiboon.github.io/app/rattana-hub.html',
@@ -545,7 +545,21 @@ function hashColor(key){ let h = 0; const s = String(key||'?'); for (let i = 0; 
 function stOf(t){ return SL[t.status] ? t.status : 'todo'; }
 function firstChar(s){ return String(s||'?').trim().charAt(0) || '?'; }
 
-function userByEmail(em){ em = String(em||'').toLowerCase(); return em ? S.users.find(u => u.email === em) : null; }
+/* ── แคชต่อรอบ render — allDec/นับคอมเม้น/หาคนจากอีเมล ถูกเรียกซ้ำหลายรอบต่อ 1 render
+      ก่อนหน้านี้ decorate() วน S.comments ทุกงาน = O(งาน × คอมเม้น) → 300 งาน/1500 คอมเม้น = render 220ms
+      ล้างแคชที่: ต้น render()/renderOverlays() และทุกจุดที่เขียน S.tasks/S.comments/S.users ── */
+let _decMemo = null, _ccMap = null, _uMap = null;
+function invalidateDec(){ _decMemo = null; _ccMap = null; _uMap = null; }
+function ccOf(id){
+  if (!_ccMap) { _ccMap = {}; S.comments.forEach(function(c){ if (c.type !== 'system') _ccMap[c.taskId] = (_ccMap[c.taskId] || 0) + 1; }); }
+  return _ccMap[id] || 0;
+}
+function userByEmail(em){
+  em = String(em||'').toLowerCase();
+  if (!em) return null;
+  if (!_uMap) { _uMap = {}; S.users.forEach(function(u){ if (u && u.email) _uMap[u.email] = u; }); }
+  return _uMap[em] || null;
+}
 function userByName(n){ n = String(n||'').trim(); return n ? S.users.find(u => u.name === n || u.nickname === n) : null; }
 function prepUser(u){
   const nick = u.nickname || String(u.name||u.email).split(' ')[0];
@@ -586,7 +600,7 @@ function dueMeta(t){
 function decorate(t){
   const u = taskUser(t);
   const dm = dueMeta(t);
-  const cc = S.comments.filter(c => c.taskId === t.id && c.type !== 'system').length;
+  const cc = ccOf(t.id);
   const cl = parseCl(t);
   const rawName = u ? dispName(u) : (t.assigneeName || '');
   return {
@@ -631,7 +645,7 @@ function sortL(a){
   if (S.sortMode === 'new') return a.slice().sort((x,y) => newFirst(x.rk, y.rk) || (x.urg - y.urg) || (x.sort - y.sort));
   return a.slice().sort((x,y) => (x.urg - y.urg) || (x.sort - y.sort) || newFirst(x.rk, y.rk));
 }
-function allDec(){ return S.tasks.map(decorate); }
+function allDec(){ if (!_decMemo) _decMemo = S.tasks.map(decorate); return _decMemo; }
 function fDec(){
   const dec = allDec();
   if (!S.memberFilter) return dec;
@@ -695,6 +709,7 @@ function loadCache(){
     const c = JSON.parse(localStorage.getItem('rf_cache') || 'null');
     if (!c || !c.me || c.email !== SESSION.email) return false;
     S.me = c.me; S.users = c.users || []; S.tasks = c.tasks || []; S.comments = c.comments || [];
+    invalidateDec();
     initWarehouseFilter();   // เปิดจาก cache ก็ให้ชิปคลังเป็นคลังตัวเองตั้งแต่เฟรมแรก
     return true;
   } catch(e){ return false; }
@@ -765,6 +780,7 @@ async function loadAll(silent){
     S.users = (j.users || []).map(prepUser);
     S.tasks = j.tasks || [];
     S.comments = j.comments || [];
+    invalidateDec();
     const _nu = notifUnread();   // มีของใหม่เข้ามาระหว่าง sync → เด้ง toast (ข้ามรอบโหลดแรก)
     if (_prevUnread !== null && _nu > _prevUnread) toast('🔔 มีแจ้งเตือนใหม่ ' + (_nu - _prevUnread) + ' รายการ');
     _prevUnread = _nu;
@@ -802,6 +818,7 @@ async function pollComments(){
     const added = fresh.length - (cur.length - tmps.length);
     if (added <= 0) return;                                  // ไม่มีคอมเม้นใหม่ → ไม่ต้อง rebuild (กันจอกระตุก)
     S.comments = S.comments.filter(function(c){ return c.taskId !== taskId; }).concat(fresh, tmps);
+    invalidateDec();
     toast('💬 มีคอมเม้นใหม่ ' + added);
     renderOverlays(); render();
   } catch(e){}
@@ -811,7 +828,8 @@ function startPolling(){
   if (_pollStarted) return;
   _pollStarted = true;
   // ห้าม sync ตอนกรอกฟอร์ม/ลากของ (จอจะกระตุก) — แต่ "เปิดหน้ารายละเอียดอยู่" sync ได้ (เดิมบล็อกไว้ เลยไม่เห็นคอมเม้นใหม่)
-  const canSync = function(){ return SESSION.email && !S.loading && document.visibilityState === 'visible' && !S.formOpen && !S.asgPick && !S.dragId && !S._clDrag; };
+  // + ห้าม sync ตอน "กำลังพิมพ์อยู่" ทุกช่อง — rebuild ระหว่างพิมพ์ทำ focus/ข้อความหลุด (เลื่อนไปรอบหน้าแทน)
+  const canSync = function(){ return SESSION.email && !S.loading && document.visibilityState === 'visible' && !S.formOpen && !S.asgPick && !S.dragId && !S._clDrag && !S.recurForm && !isTyping(); };
   setInterval(function(){ if (canSync()) loadAll(true); }, 75000);
   setInterval(function(){ if (canSync() && S.detailId && !S.closing) pollComments(); }, 15000);
   document.addEventListener('visibilitychange', function(){
@@ -914,6 +932,8 @@ function render(){
   if (!app) return;
   if (S.dragId) return;                  // ระหว่างลากการ์ด ห้าม rebuild DOM — การ์ดที่ลากถูกทำลายแล้ว drop ไม่ทำงาน (กัน sync เบื้องหลังมาชนตอนลาก)
   if (S._clDrag) return;                  // ระหว่างลากจัดลำดับเช็คลิสต์ ห้าม rebuild เช่นกัน
+  invalidateDec();
+  const fs = focusSnap();                // จำช่องที่กำลังพิมพ์อยู่ (เช่น ช่องค้นหา) — innerHTML ทำ focus + ตัวหนังสือหลุด
   const sy = window.scrollY;             // จำตำแหน่ง scroll ก่อน rebuild — innerHTML ทำจอเด้งกลับบนสุด
   const mob = isMob();
   let html = '';
@@ -924,6 +944,30 @@ function render(){
     app.insertAdjacentHTML('beforeend', bnavHtml() + '<button class="rf-fab" onclick="RF.newTask()" title="สร้างงานใหม่">' + IC.plus.replace('width="16" height="16"','width="24" height="24"') + '</button>');
   }
   window.scrollTo(0, sy);                // คืนตำแหน่งเดิม — หน้าไหนตั้งใจขึ้นบนสุด เรียก scrollTo(0,0) เองหลัง render()
+  focusBack(fs);
+}
+
+/* ── กันพิมพ์อยู่แล้วโดนเด้งออก ──
+   ทุกช่องที่มี id: จำ focus + ตำแหน่งเคอร์เซอร์ + ข้อความ ก่อน rebuild แล้วคืนให้หลัง rebuild
+   (ช่องที่เก็บค่าไว้ใน DOM อย่างเดียว เช่น ช่องเพิ่มเช็คลิสต์ ถ้าไม่คืนค่า ข้อความที่พิมพ์ค้างจะหาย) */
+function isTyping(){
+  const ae = document.activeElement;
+  if (!ae) return false;
+  return ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable === true;
+}
+function focusSnap(){
+  const ae = document.activeElement;
+  if (!ae || !ae.id || !isTyping()) return null;
+  const o = { id: ae.id, v: ae.value };
+  try { o.s = ae.selectionStart; o.e = ae.selectionEnd; } catch(err){}
+  return o;
+}
+function focusBack(snap){
+  if (!snap) return;
+  const el = document.getElementById(snap.id);
+  if (!el) return;
+  if (snap.v && !el.value) el.value = snap.v;
+  try { el.focus({ preventScroll: true }); if (snap.s != null) el.setSelectionRange(snap.s, snap.e); } catch(err){}
 }
 
 function skelHtml(){
@@ -1654,14 +1698,11 @@ function renderOverlays(){
   if (!box) return;
   if (S.closing) return;   // ระหว่าง detail ปิด (animation) ห้าม rebuild — กันเด้งเปิดซ้ำ
   if (S._clDrag) return;   // ระหว่างลากจัดลำดับเช็คลิสต์ ห้าม rebuild — แถวที่ลากจะหาย
+  invalidateDec();
   // จำ scroll ภายใน sheet ก่อน rebuild — กันเนื้อหาเด้งขึ้นบนสุดตอนติ๊กเช็คลิสต์/ส่งคอมเม้น/เลือกคนในฟอร์ม (เฉพาะตอน re-render — เปิดใหม่ (fresh) เริ่มบนสุดตามปกติ)
   const keep = {};
-  // จำ focus + ตำแหน่งเคอร์เซอร์ช่องคอมเม้น — sync เบื้องหลังมา rebuild ตอนกำลังพิมพ์ ต้องไม่หลุด
-  let keepCaret = null;
-  {
-    const ae = document.activeElement;
-    if (ae && ae.id === 'cmtInput') { try { keepCaret = { s: ae.selectionStart, e: ae.selectionEnd }; } catch(err){ keepCaret = { s: null, e: null }; } }
-  }
+  // จำช่องที่กำลังพิมพ์ (คอมเม้น / เพิ่มเช็คลิสต์ / แก้ข้อความเช็คลิสต์ / ค้นหาคน) — sync เบื้องหลังมา rebuild ต้องไม่หลุด
+  const fs = focusSnap();
   if (S.detailId && !S.detailFresh) { const el = document.getElementById('cmtScroll'); if (el) keep.cmtScroll = el.scrollTop; }
   if (S.formOpen && !S.formFresh) { const el = document.getElementById('formScroll'); if (el) keep.formScroll = el.scrollTop; }
   if (S.listPop && !S.popFresh) { const el = document.getElementById('popScroll'); if (el) keep.popScroll = el.scrollTop; }
@@ -1677,9 +1718,7 @@ function renderOverlays(){
   S.detailFresh = false; S.formFresh = false; S.popFresh = false; S.menuFresh = false;
   const ci = document.getElementById('cmtInput');
   if (ci && S.cmtDraft) ci.value = S.cmtDraft;
-  if (ci && keepCaret) {   // คืน focus + เคอร์เซอร์ให้อยู่ที่เดิม (กำลังพิมพ์อยู่)
-    try { ci.focus(); if (keepCaret.s != null) ci.setSelectionRange(keepCaret.s, keepCaret.e); } catch(err){}
-  }
+  focusBack(fs);   // คืน focus + เคอร์เซอร์ + ข้อความที่ค้างอยู่
   const sc = document.getElementById('cmtScroll');
   if (sc && S.scrollCmt) {
     const top = document.getElementById('cmtTop');   // คอมเม้นใหม่อยู่บนสุดของโซน → เลื่อนให้หัวโซนคอมเม้นขึ้นมาบน
@@ -1934,7 +1973,7 @@ function formHtml(){
     '<div><div class="rf-flabel">ชื่องาน <span style="color:var(--red)">*</span></div>' +
     '<input id="fTitle" class="rf-finput' + (S.errs.title ? ' err' : '') + '" value="' + esc(f.title || '') + '" oninput="RF.ff(\'title\',this.value)" placeholder="เช่น เช็คสต๊อกสินค้าโซน A">' +
     (S.errs.title ? '<div class="rf-ferr">' + S.errs.title + '</div>' : '') + '</div>' +
-    '<div><div class="rf-flabel">รายละเอียด</div><textarea class="rf-ftext" rows="3" oninput="RF.ff(\'detail\',this.value)" placeholder="อธิบายขอบเขตงาน สิ่งที่ต้องส่งมอบ…">' + esc(f.detail || '') + '</textarea></div>' +
+    '<div><div class="rf-flabel">รายละเอียด</div><textarea id="fDetail" class="rf-ftext" rows="3" oninput="RF.ff(\'detail\',this.value)" placeholder="อธิบายขอบเขตงาน สิ่งที่ต้องส่งมอบ…">' + esc(f.detail || '') + '</textarea></div>' +
     '<div><div class="rf-flabel">ผู้รับผิดชอบ <span style="color:var(--red)">*</span></div><div id="assArea">' + assArea + '</div>' +
     (S.errs.assignee ? '<div class="rf-ferr">' + S.errs.assignee + '</div>' : '') + '</div>' +
     '<div><div class="rf-flabel">ความสำคัญ</div><div class="rf-priobtns" id="prioBtns">' + prio + '</div></div>' +
@@ -1942,7 +1981,7 @@ function formHtml(){
     '<div><div class="rf-flabel">วันเริ่ม</div>' + dateField('startDate', f.startDate, false) + '</div>' +
     '<div><div class="rf-flabel">กำหนดส่ง <span style="color:var(--red)">*</span></div>' + dateField('dueDate', f.dueDate, S.errs.dueDate) +
     (S.errs.dueDate ? '<div class="rf-ferr">' + S.errs.dueDate + '</div>' : '') + '</div></div>' +
-    '<div><div class="rf-flabel">หมายเหตุ</div><textarea class="rf-ftext" rows="2" oninput="RF.ff(\'note\',this.value)" placeholder="ข้อมูลเพิ่มเติม (ถ้ามี)">' + esc(f.note || '') + '</textarea></div>' +
+    '<div><div class="rf-flabel">หมายเหตุ</div><textarea id="fNote" class="rf-ftext" rows="2" oninput="RF.ff(\'note\',this.value)" placeholder="ข้อมูลเพิ่มเติม (ถ้ามี)">' + esc(f.note || '') + '</textarea></div>' +
     '<div><div class="rf-flabel">การมองเห็น</div><div class="rf-privtoggle">' +
       '<button class="rf-privopt' + (f.private ? '' : ' on') + '" onclick="RF.setPriv(\'\')"><div class="ti">🌐 ทุกคนเห็น</div><div class="ds">ทั้งบริษัทเห็น · คอมเม้นได้เฉพาะหัวหน้ากับเจ้าของงาน</div></button>' +
       '<button class="rf-privopt' + (f.private === 'Y' ? ' on' : '') + '" onclick="RF.setPriv(\'Y\')"><div class="ti">👥 เฉพาะทีม</div><div class="ds">เห็นเฉพาะคนในคลังเดียวกัน + หัวหน้า · พนักงานคลังอื่นไม่เห็น</div></button>' +
@@ -2133,23 +2172,23 @@ function recurFormHtml(){
   if (freq === 'weekly') dayPick = '<div class="rf-flabel" style="margin-top:10px">วันไหนบ้าง</div><div class="rf-wchips">' +
     RDOW.map(function(lb, i){ return '<button class="rf-wchip' + (days.indexOf(String(i)) > -1 ? ' on' : '') + '" onclick="RF.recurDay(' + i + ')">' + lb + '</button>'; }).join('') + '</div>';
   else if (freq === 'monthly') dayPick = '<div class="rf-flabel" style="margin-top:10px">วันที่ (คั่นด้วย , เช่น 1,15)</div>' +
-    '<input class="rf-finput" value="' + esc(f.days || '') + '" oninput="RF.recurF(\'days\',this.value)" placeholder="1,15">';
+    '<input id="rcDays" class="rf-finput" value="' + esc(f.days || '') + '" oninput="RF.recurF(\'days\',this.value)" placeholder="1,15">';
   return '<div class="rf-ov ' + (mob ? 'bottom' : 'center') + '" style="z-index:80" onclick="RF.recurClose()">' +
     '<div class="' + (mob ? 'rf-sheet' : 'rf-modal') + '" style="' + (mob ? 'height:auto;max-height:88dvh;' : 'width:520px;max-width:100%;max-height:86vh;') + '" onclick="event.stopPropagation()">' +
     '<div class="rf-fhead"><div class="t" style="font-size:16px">' + (f.id ? 'แก้ไขงานประจำ' : 'เพิ่มงานประจำ') + '</div>' +
     '<button class="rf-xbtn" onclick="RF.recurClose()">' + IC.x + '</button></div>' +
     '<div style="flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:12px">' +
     '<div><div class="rf-flabel">ชื่องาน <span style="color:var(--red)">*</span></div>' +
-    '<input class="rf-finput" value="' + esc(f.title || '') + '" oninput="RF.recurF(\'title\',this.value)" placeholder="เช่น นับสต็อกสินค้าหมุนเร็ว"></div>' +
+    '<input id="rcTitle" class="rf-finput" value="' + esc(f.title || '') + '" oninput="RF.recurF(\'title\',this.value)" placeholder="เช่น นับสต็อกสินค้าหมุนเร็ว"></div>' +
     '<div><div class="rf-flabel">รายละเอียด</div>' +
-    '<textarea class="rf-ftext" rows="2" oninput="RF.recurF(\'detail\',this.value)" placeholder="ข้อมูลเพิ่มเติม (ถ้ามี)">' + esc(f.detail || '') + '</textarea></div>' +
+    '<textarea id="rcDetail" class="rf-ftext" rows="2" oninput="RF.recurF(\'detail\',this.value)" placeholder="ข้อมูลเพิ่มเติม (ถ้ามี)">' + esc(f.detail || '') + '</textarea></div>' +
     '<div><div class="rf-flabel">ผู้รับผิดชอบ</div>' +
     '<select class="rf-finput" onchange="RF.recurF(\'assigneeEmail\',this.value)">' + opts + '</select></div>' +
     '<div><div class="rf-flabel">ความถี่</div><div class="rf-wchips">' + fbtn('daily','ทุกวัน') + fbtn('weekly','ทุกสัปดาห์') + fbtn('monthly','ทุกเดือน') + '</div>' + dayPick + '</div>' +
     '<div><div class="rf-flabel">ให้เสร็จภายในกี่วัน (0 = วันเดียวกัน)</div>' +
     '<input class="rf-finput" type="number" min="0" value="' + esc(String(f.dueOffset == null ? 0 : f.dueOffset)) + '" oninput="RF.recurF(\'dueOffset\',this.value)"></div>' +
     '<div><div class="rf-flabel">รายการย่อย (บรรทัดละ 1 ข้อ)</div>' +
-    '<textarea class="rf-ftext" rows="4" oninput="RF.recurF(\'clText\',this.value)" placeholder="นับ A">' + esc(f.clText || '') + '</textarea></div>' +
+    '<textarea id="rcCl" class="rf-ftext" rows="4" oninput="RF.recurF(\'clText\',this.value)" placeholder="นับ A">' + esc(f.clText || '') + '</textarea></div>' +
     '<label style="display:flex;align-items:center;gap:9px;font-size:14.5px;font-weight:600;cursor:pointer">' +
     '<input type="checkbox"' + (String(f.active || '').toUpperCase() === 'Y' ? ' checked' : '') + ' onchange="RF.recurF(\'active\', this.checked ? \'Y\' : \'\')" style="width:18px;height:18px">เปิดใช้งาน (สร้างงานอัตโนมัติ)</label>' +
     '</div>' +
@@ -2177,7 +2216,7 @@ RF.recurEdit = id => {
   renderOverlays();
 };
 RF.recurClose = () => { S.recurForm = null; renderOverlays(); };
-RF.recurF = (k, v) => { if (S.recurForm) { S.recurForm[k] = v; if (k === 'freq' || k === 'days' || k === 'active') renderOverlays(); } };
+RF.recurF = (k, v) => { if (S.recurForm) { S.recurForm[k] = v; if (k === 'freq' || k === 'active') renderOverlays(); } };   // 'days' เป็นช่องพิมพ์ — re-render ทุกตัวอักษรทำ focus หลุด
 RF.recurDay = i => {
   const f = S.recurForm; if (!f) return;
   const set = String(f.days || '').split(',').map(function(x){ return x.trim(); }).filter(Boolean);
