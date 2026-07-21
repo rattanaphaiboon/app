@@ -238,7 +238,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page hidden" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v1.59</small>
+      <small>ยอดขายเทียบเป้าหมาย v1.60</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -251,6 +251,7 @@ body.dark .ptbl-td{border-color:var(--border)}
     <button class="tab-btn active" data-tab="detail" onclick="switchTab('detail')">รายละเอียดเป้าหมาย</button>
     <button class="tab-btn" data-tab="outlets" onclick="switchTab('outlets')">Outlets</button>
     <button class="tab-btn" data-tab="ontop" onclick="switchTab('ontop')">On Top</button>
+    <button class="tab-btn" data-tab="roo" onclick="switchTab('roo')">ROO</button>
   </div>
 
   <div class="content">
@@ -288,6 +289,9 @@ body.dark .ptbl-td{border-color:var(--border)}
     </div>
     <div id="tab-ontop" class="hidden">
       <div id="onTopContent"></div>
+    </div>
+    <div id="tab-roo" class="hidden">
+      <div id="rooContent"></div>
     </div>
   </div>
 </div>
@@ -981,7 +985,7 @@ function exportDetailExcel() {
   XLSX.writeFile(wb, 'rattana-sales-target-' + Date.now() + '.xlsx');
 }
 
-function renderAll() { renderPivot(); renderOutlets(); renderOnTop(); }
+function renderAll() { renderPivot(); renderOutlets(); renderOnTop(); renderROO(); }
 
 /* ================= OUTLETS TAB ================= */
 function getChannelGroup(empCode) {
@@ -1326,12 +1330,161 @@ function renderOnTop() {
   el.innerHTML = html;
 }
 
+/* ================= ROO ================= */
+function renderROO() {
+  const el = document.getElementById('rooContent');
+  if (!el) return;
+  const bp = state.bpRaw || [];
+
+  const dataMonth = (state.rows||[]).find(r=>r.month)?.month || '';
+  const wd = getWorkingDaysInfo(dataMonth);
+
+  // Cat_BU column order
+  const BU_ORDER = ['Bplus FMCG','Bplus Thaibev Al','Bplus บุหรี่','ข้าว','F&N','House Brand','Nissin'];
+
+  // Collect all Cat_BU values present in data (for ROO rows)
+  const buPresent = new Set();
+  bp.forEach(r => { if (String(r['Sale NO ROO']||'').trim()) buPresent.add(String(r['Cat_BU']||'').trim()); });
+  buPresent.delete('');
+  const buCols = [...BU_ORDER.filter(b => buPresent.has(b)), ...[...buPresent].filter(b => !BU_ORDER.includes(b))];
+
+  // Build employee index grouped by Sale NO ROO
+  const empIdx = new Map();
+  bp.forEach(r => {
+    const nm = String(r['Sale NO ROO']||'').trim();
+    if (!nm) return;
+    if (!empIdx.has(nm)) {
+      empIdx.set(nm, {
+        name: nm,
+        wh: String(r['WH']||'').trim(),
+        code: String(r['Salesman_Code']||'').trim(),
+        custSet: new Set(),
+        exvat: 0,
+        skuPt: 0,
+        bu: new Map(),
+      });
+    }
+    const e = empIdx.get(nm);
+    const cust = String(r['Customer_Code']||'').trim();
+    if (cust) e.custSet.add(cust);
+    e.exvat += parseNum(r['EXVat']);
+    e.skuPt += parseNum(r['SKU Point']);
+    const bu = String(r['Cat_BU']||'').trim();
+    if (bu) e.bu.set(bu, (e.bu.get(bu)||0) + parseNum(r['EXVat']));
+  });
+
+  const fmtN = v => (v !== null && v !== undefined && v !== 0 && !isNaN(v)) ? Math.round(v).toLocaleString() : '-';
+
+  // Group by ช่องทาง using WH prefix: W1/W3/W4 → determine channel from Salesman_Code
+  // PMW/TLW/RPB/GM → ปลีก; HSW/GP → ส่ง
+  const getGroup = code => {
+    const c = String(code||'').toUpperCase();
+    if (c.startsWith('ROW') && c.length >= 6) {
+      const mid = c.slice(3); // e.g. "101" → first char digit, or "HSW..."
+      // Salesman_Code for ROO may be like ROW101 (PMW-based) or ROHSW104
+      // Use numeric middle: 1xx=W1, 3xx=W3, 4xx=W4 all ปลีก typically
+      // Check if code contains HSW → ส่ง
+    }
+    // fallback: if code has H in it → ส่ง
+    return (c.includes('HSW') || c.includes('GP')) ? 'ส่ง' : 'ปลีก';
+  };
+
+  const groups = { 'ส่ง': [], 'ปลีก': [] };
+  empIdx.forEach(e => { const g = getGroup(e.code); if (groups[g]) groups[g].push(e); });
+
+  const buColHeader = b => {
+    const short = b.replace('Bplus ','');
+    return `Bplus<br>${short}`;
+  };
+
+  let html = `<style>
+.rtbl{width:100%;border-collapse:collapse;font-size:12px}
+.rtbl th,.rtbl td{padding:6px 8px;border:1px solid #aab;text-align:center;vertical-align:middle;white-space:nowrap}
+.rtbl thead .r-title{background:var(--navy);color:#fff;font-size:15px;font-weight:700;letter-spacing:.5px}
+.rtbl thead .r-info th{background:#e8f0fe;color:var(--navy);font-size:11px;font-weight:700;padding:4px 8px}
+.rtbl thead .r-h1 th{background:rgba(52,152,219,.85);color:#fff;font-weight:700}
+.rtbl thead .r-h2 th{background:rgba(52,152,219,.55);color:#fff;font-size:11px;line-height:1.3}
+.rtbl tbody tr:hover{background:rgba(201,168,76,.07)}
+.rtbl .grp-head td{background:var(--navy);color:var(--gold);font-weight:700;text-align:left;padding:6px 12px}
+.rtbl .sum-row td{background:var(--navy-light);color:#fff;font-weight:700}
+.rtbl .wh-w1{background:rgba(255,220,50,.18)}
+.rtbl .wh-w3{background:rgba(255,105,180,.15)}
+.rtbl .wh-w4{background:rgba(46,204,113,.15)}
+</style>
+<div class="tbl-wrap"><table class="rtbl">
+<thead>
+<tr class="r-title">
+  <th colspan="${4 + 3 + buCols.length}">
+    <span style="font-size:16px">Rattana Online Order (ROO)</span>
+  </th>
+  <th style="background:#e8f0fe;color:var(--navy);font-size:11px;font-weight:700">Time Used</th>
+  <th style="background:#e8f0fe;color:var(--navy);font-size:11px;font-weight:700">Week</th>
+  <th style="background:#e8f0fe;color:var(--navy);font-size:11px;font-weight:700">วันที่</th>
+  <th style="background:#e8f0fe;color:var(--navy);font-size:11px;font-weight:700">วันทำงาน<br>ทั้งหมด</th>
+  <th style="background:#e8f0fe;color:var(--navy);font-size:11px;font-weight:700">วันทำงาน<br>เหลือ</th>
+</tr>
+<tr class="r-info">
+  <th colspan="${4 + 3 + buCols.length}" style="background:var(--navy)"></th>
+  <th style="font-size:14px;color:var(--navy)">${wd.pct.toFixed(0)}%</th>
+  <th style="font-size:14px;color:var(--navy)">${wd.weekOfMonth}</th>
+  <th style="font-size:14px;color:var(--navy)">${wd.dateStr}</th>
+  <th style="font-size:14px;color:var(--navy)">${wd.totalWork}</th>
+  <th style="font-size:14px;color:var(--navy)">${wd.remaining}</th>
+</tr>
+<tr class="r-h1">
+  <th>ศูนย์</th>
+  <th style="text-align:left;min-width:140px">ชื่อพนักงานขาย</th>
+  <th>รหัส</th>
+  <th>Store</th>
+  <th>Exvat</th>
+  <th>SKU</th>
+  ${buCols.map(b => `<th colspan="1">${b.startsWith('Bplus') ? 'Bplus<br>'+b.slice(6) : b}</th>`).join('')}
+</tr>
+</thead>
+<tbody>`;
+
+  const renderGroup = (label, emps) => {
+    if (!emps.length) return '';
+    let out = `<tr class="grp-head"><td colspan="${4+3+buCols.length}">📦 ช่องทาง${label}</td></tr>`;
+    let sStore=0, sExvat=0, sSku=0;
+    const sBu = new Map();
+    emps.forEach((e, i) => {
+      const whCls = e.wh==='W1'?'wh-w1':e.wh==='W3'?'wh-w3':e.wh==='W4'?'wh-w4':'';
+      sStore += e.custSet.size; sExvat += e.exvat; sSku += e.skuPt;
+      buCols.forEach(b => sBu.set(b, (sBu.get(b)||0) + (e.bu.get(b)||0)));
+      out += `<tr class="${whCls}">
+        <td>${e.wh}</td>
+        <td style="text-align:left">${e.name}</td>
+        <td>${e.code}</td>
+        <td>${e.custSet.size||'-'}</td>
+        <td>${fmtN(e.exvat)}</td>
+        <td>${fmtN(e.skuPt)}</td>
+        ${buCols.map(b => `<td>${fmtN(e.bu.get(b)||0)}</td>`).join('')}
+      </tr>`;
+    });
+    out += `<tr class="sum-row">
+      <td colspan="3">รวมช่องทาง${label}</td>
+      <td>${sStore.toLocaleString()}</td>
+      <td>${Math.round(sExvat).toLocaleString()}</td>
+      <td>${Math.round(sSku).toLocaleString()}</td>
+      ${buCols.map(b => `<td>${fmtN(sBu.get(b)||0)}</td>`).join('')}
+    </tr>`;
+    return out;
+  };
+
+  html += renderGroup('ส่ง', groups['ส่ง']);
+  html += renderGroup('ปลีก', groups['ปลีก']);
+  html += `</tbody></table></div>`;
+  el.innerHTML = html;
+}
+
 /* ================= TABS / UI ================= */
 function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===tab));
   document.getElementById('tab-detail').classList.toggle('hidden', tab!=='detail');
   document.getElementById('tab-outlets').classList.toggle('hidden', tab!=='outlets');
   document.getElementById('tab-ontop').classList.toggle('hidden', tab!=='ontop');
+  document.getElementById('tab-roo').classList.toggle('hidden', tab!=='roo');
 }
 function toggleDark() {
   document.body.classList.toggle('dark');
