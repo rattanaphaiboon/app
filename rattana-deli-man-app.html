@@ -751,7 +751,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.73';
+const APP_VERSION='3.74';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1897,37 +1897,81 @@ function exportReportExcel(){
 
 /* ========== CUSTOMERS (ข้อมูลร้านค้า) ========== */
 const customerSearchState={q:'',selected:null};
-function renderCustomers(){
+/* v3.74: เร่งหน้าข้อมูลร้านบนมือถือ —
+   1) แยกช่องค้นหาออกจากลิสต์: พิมพ์แล้วอัปเดตเฉพาะรายการ (input ไม่ถูกสร้างใหม่ → คีย์บอร์ด/โฟกัสไม่หลุด)
+   2) debounce การค้นหา (กันกรอง+เรนเดอร์ทุกตัวอักษร)
+   3) โหลดรูปเฉพาะการ์ดที่เลื่อนถึง (IntersectionObserver) แทนโหลด 50 รูปเต็มพร้อมกัน
+   4) ย่อรูป Google Drive เป็น thumbnail เล็ก (ลิงก์ /view เดิมโหลดเป็นรูปไม่ได้เลย)
+   5) แบ่งหน้าเริ่ม 40 + ปุ่ม "แสดงเพิ่ม" */
+const CUST_PAGE=40;
+let _custLimit=CUST_PAGE, _custSearchTimer=null, _custImgObs=null;
+function custThumb_(u){
+  if(!u) return '';
+  const m=String(u).match(/drive\.google\.com\/file\/d\/([^/]+)/);
+  return m?('https://drive.google.com/thumbnail?id='+m[1]+'&sz=w120'):u;   // Drive → thumbnail 120px; อื่น ๆ (Glide ฯลฯ) คืนเดิม
+}
+function custImgObserver_(){
+  if(_custImgObs) return _custImgObs;
+  if(!('IntersectionObserver' in window)) return null;
+  _custImgObs=new IntersectionObserver((ents,obs)=>{
+    ents.forEach(en=>{
+      if(!en.isIntersecting) return;
+      const img=en.target, src=img.getAttribute('data-src');
+      if(src){ img.src=src; img.removeAttribute('data-src'); }
+      obs.unobserve(img);
+    });
+  },{rootMargin:'120px'});
+  return _custImgObs;
+}
+function filteredCustomers_(){
   const q=customerSearchState.q.toLowerCase().trim();
-  const LIMIT=50;
-  const filtered=q?state.customers.filter(c=>
+  if(!q) return state.customers;
+  return state.customers.filter(c=>
     (c.name||'').toLowerCase().includes(q)||
     (c.code||'').toLowerCase().includes(q)||
     (c.phone||'').includes(q)||
-    (c.address||'').toLowerCase().includes(q)
-  ).slice(0,LIMIT):state.customers.slice(0,LIMIT);
+    (c.address||'').toLowerCase().includes(q));
+}
+function renderCustomers(){
+  _custLimit=CUST_PAGE;
   $('customersBody').innerHTML=`
     <div class="field">
-      <input class="input" id="custSearch" value="${esc(customerSearchState.q)}" oninput="customerSearchState.q=this.value;renderCustomers()" placeholder="🔍 ค้นหาชื่อร้าน / รหัส / เบอร์โทร / ที่อยู่..." autocomplete="off">
-      <small class="txt-muted mt-4">มีทั้งหมด ${fmtInt(state.customers.length)} ร้าน · แสดงสูงสุด ${LIMIT} รายการ${state._bgLoading?' · กำลังโหลด...':''}</small>
+      <input class="input" id="custSearch" value="${esc(customerSearchState.q)}" oninput="onCustSearch_(this.value)" placeholder="🔍 ค้นหาชื่อร้าน / รหัส / เบอร์โทร / ที่อยู่..." autocomplete="off">
+      <small class="txt-muted mt-4" id="custCount"></small>
     </div>
-    <div class="cust-grid mt-12">
-      ${filtered.length?filtered.map(c=>`
-        <div class="cust-card" onclick="openCustomerInfo('${esc(c.code).replace(/'/g,"\\'")}')">
-          <div class="photo">
-            ${c.photoUrl?`<img src="${esc(c.photoUrl)}" loading="lazy" onload="this.classList.add('loaded')" onerror="this.remove()">`:''}
-          </div>
-          <div class="info">
-            <div class="name">${esc(c.name)}</div>
-            <div class="code">${esc(c.code)} ${c.warehouse?`· ${esc(c.warehouse)}`:''}</div>
-            ${c.salesman?`<div class="meta">👤 ${esc(c.salesman)}</div>`:''}
-            ${c.phone?`<div class="meta">☎ ${esc(c.phone)}</div>`:''}
-            ${c.address?`<div class="meta">📍 ${esc(c.address)}</div>`:''}
-          </div>
-        </div>
-      `).join(''):`<div class="txt-center txt-muted p-16">ไม่พบร้านค้า</div>`}
-    </div>
-  `;
+    <div class="cust-grid mt-12" id="custList"></div>
+    <div class="txt-center mt-12" id="custMore"></div>`;
+  renderCustomerList();
+}
+function onCustSearch_(v){
+  customerSearchState.q=v; _custLimit=CUST_PAGE;
+  clearTimeout(_custSearchTimer);
+  _custSearchTimer=setTimeout(renderCustomerList,220);
+}
+function custShowMore_(){ _custLimit+=CUST_PAGE; renderCustomerList(); }
+function renderCustomerList(){
+  const box=$('custList'); if(!box) return;
+  if(_custImgObs) _custImgObs.disconnect();   // เลิกเฝ้ารูปชุดเก่าก่อนสร้างใหม่
+  const all=filteredCustomers_(), shown=all.slice(0,_custLimit), q=customerSearchState.q.trim();
+  const cnt=$('custCount');
+  if(cnt) cnt.textContent=`มีทั้งหมด ${fmtInt(state.customers.length)} ร้าน · ${q?('พบ '+fmtInt(all.length)+' · '):''}แสดง ${fmtInt(shown.length)}${state._bgLoading?' · กำลังโหลด...':''}`;
+  box.innerHTML=shown.length?shown.map(c=>{
+    const t=custThumb_(c.photoUrl);
+    return `<div class="cust-card" onclick="openCustomerInfo('${esc(c.code).replace(/'/g,"\\'")}')">
+      <div class="photo">${t?`<img data-src="${esc(t)}" decoding="async" onload="this.classList.add('loaded')" onerror="this.remove()">`:''}</div>
+      <div class="info">
+        <div class="name">${esc(c.name)}</div>
+        <div class="code">${esc(c.code)} ${c.warehouse?`· ${esc(c.warehouse)}`:''}</div>
+        ${c.salesman?`<div class="meta">👤 ${esc(c.salesman)}</div>`:''}
+        ${c.phone?`<div class="meta">☎ ${esc(c.phone)}</div>`:''}
+        ${c.address?`<div class="meta">📍 ${esc(c.address)}</div>`:''}
+      </div>
+    </div>`;
+  }).join(''):`<div class="txt-center txt-muted p-16">ไม่พบร้านค้า</div>`;
+  const obs=custImgObserver_();
+  box.querySelectorAll('img[data-src]').forEach(img=>{ if(obs) obs.observe(img); else { img.src=img.getAttribute('data-src'); img.removeAttribute('data-src'); } });
+  const more=$('custMore');
+  if(more) more.innerHTML=(all.length>_custLimit)?`<button class="btn btn-outline btn-sm" onclick="custShowMore_()">แสดงเพิ่มอีก (${fmtInt(all.length-_custLimit)})</button>`:'';
 }
 function openCustomerInfo(code){
   const c=state.customers.find(x=>x.code===code); if(!c) return;
