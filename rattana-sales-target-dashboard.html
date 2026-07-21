@@ -238,7 +238,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page hidden" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v1.48</small>
+      <small>ยอดขายเทียบเป้าหมาย v1.49</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -250,6 +250,7 @@ body.dark .ptbl-td{border-color:var(--border)}
   <div class="tab-nav">
     <button class="tab-btn active" data-tab="detail" onclick="switchTab('detail')">รายละเอียดเป้าหมาย</button>
     <button class="tab-btn" data-tab="outlets" onclick="switchTab('outlets')">Outlets</button>
+    <button class="tab-btn" data-tab="ontop" onclick="switchTab('ontop')">On Top</button>
   </div>
 
   <div class="content">
@@ -285,6 +286,9 @@ body.dark .ptbl-td{border-color:var(--border)}
     <div id="tab-outlets" class="hidden">
       <div id="outletContent"></div>
     </div>
+    <div id="tab-ontop" class="hidden">
+      <div id="onTopContent"></div>
+    </div>
   </div>
 </div>
 
@@ -308,6 +312,7 @@ const OUTLET_SHEET_ID = '1Ekf5knNodR-gjOVIjg_7y87HRcb-qYn_HdgwaLI8_dY';
 const OUTLET_SHEET_NAME = 'Active Outlet';
 const EO_SHEET_ID = '1Ekf5knNodR-gjOVIjg_7y87HRcb-qYn_HdgwaLI8_dY';
 const EO_SHEET_NAME = 'Effective Outlet';
+const ON_TOP_SHEET_NAME = 'On Top';
 
 const AUTH_CONFIG = {
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
@@ -710,7 +715,7 @@ async function loadData(showSpin) {
   if (showSpin) showSpinner('กำลังโหลดข้อมูลยอดขาย...');
   setLoading(true);
   try {
-    const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, outletRaw, eoRaw, customerRaw] = await Promise.all([
+    const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, outletRaw, eoRaw, customerRaw, onTopRaw] = await Promise.all([
       loadFromSheets(TARGET_SHEET_ID, TARGET_SHEET_NAME),
       loadFromSheets(BP_SHEET_ID, BP_SHEET_NAME),
       loadFromSheets(CN_SHEET_ID, CN_SHEET_NAME),
@@ -719,6 +724,7 @@ async function loadData(showSpin) {
       loadFromSheets(OUTLET_SHEET_ID, OUTLET_SHEET_NAME),
       loadFromSheets(EO_SHEET_ID, EO_SHEET_NAME),
       loadFromSheets(CUSTOMER_SHEET_ID, CUSTOMER_SHEET_NAME),
+      loadFromSheets(OUTLET_SHEET_ID, ON_TOP_SHEET_NAME),
     ]);
     state.targetRaw = targetRaw;
     state.bpRaw = bpRaw;
@@ -728,6 +734,7 @@ async function loadData(showSpin) {
     state.outletRaw = outletRaw;
     state.eoRaw = eoRaw;
     state.customerRaw = customerRaw;
+    state.onTopRaw = onTopRaw;
     setCache('targetCache', targetRaw);
     state.rows = computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw);
     buildFilterControls();
@@ -974,7 +981,7 @@ function exportDetailExcel() {
   XLSX.writeFile(wb, 'rattana-sales-target-' + Date.now() + '.xlsx');
 }
 
-function renderAll() { renderPivot(); renderOutlets(); }
+function renderAll() { renderPivot(); renderOutlets(); renderOnTop(); }
 
 /* ================= OUTLETS TAB ================= */
 function getChannelGroup(empCode) {
@@ -1187,11 +1194,108 @@ function renderOutlets() {
   el.innerHTML = html;
 }
 
+/* ================= ON TOP ================= */
+function renderOnTop() {
+  const el = document.getElementById('onTopContent');
+  if (!el) return;
+  const rows = state.onTopRaw || [];
+  if (!rows.length) { el.innerHTML = '<p class="txt-muted" style="padding:16px">ไม่มีข้อมูล On Top</p>'; return; }
+
+  const dataMonth = (state.rows||[]).find(r=>r.month)?.month || '';
+  const wd = getWorkingDaysInfo(dataMonth);
+  const timeUsedPct = wd.pct;
+
+  const fmtN = v => (v !== null && v !== undefined && v !== '') ? Number(String(v).replace(/,/g,'')).toLocaleString() : '<span style="color:var(--muted)">-</span>';
+  const fmtD = v => (v !== null && v !== undefined && v !== '') ? parseFloat(String(v).replace(/,/g,'')).toFixed(2) : '<span style="color:var(--muted)">-</span>';
+  const fmtAch = (actual, target) => {
+    const a = parseFloat(String(actual||'').replace(/,/g,''));
+    const t = parseFloat(String(target||'').replace(/,/g,''));
+    if (!actual || actual==='' || isNaN(a) || !t) return '<span style="color:var(--muted)">-</span>';
+    const col = (a/t*100) >= timeUsedPct ? 'var(--success)' : 'var(--danger)';
+    return `<span style="color:${col};font-weight:700">${a.toLocaleString()}</span>`;
+  };
+
+  // group by ช่องทาง, carry forward empty cells
+  let lastCh = '';
+  const grouped = [];
+  rows.forEach(r => {
+    const ch = String(r['ช่องทาง']||'').trim() || lastCh;
+    lastCh = ch;
+    grouped.push({...r, _ch: ch});
+  });
+
+  // compute rowspans for ช่องทาง
+  const chSpan = {};
+  grouped.forEach(r => { chSpan[r._ch] = (chSpan[r._ch]||0) + 1; });
+  const chSeen = new Set();
+
+  let html = `<style>
+.ottbl{width:100%;border-collapse:collapse;font-size:13px}
+.ottbl th,.ottbl td{padding:8px 10px;border:1px solid var(--border);text-align:center;white-space:nowrap}
+.ottbl thead tr:first-child th{background:var(--navy);color:#fff;font-weight:700}
+.ottbl thead tr:nth-child(2) th{background:rgba(52,152,219,.85);color:#fff;font-weight:700}
+.ottbl thead tr:nth-child(3) th{background:rgba(52,152,219,.55);color:#fff;font-size:12px}
+.ottbl tbody tr:hover{background:rgba(201,168,76,.07)}
+.ottbl .col-ch{background:rgba(243,156,18,.1);font-weight:700}
+.ottbl td.num{text-align:right;font-variant-numeric:tabular-nums}
+</style>
+<div class="tbl-wrap">
+<table class="ottbl">
+<thead>
+<tr>
+  <th rowspan="3">ช่องทาง</th>
+  <th rowspan="3">ศูนย์</th>
+  <th rowspan="3" style="text-align:left;min-width:160px">ชื่อพนักงานขาย</th>
+  <th rowspan="3">รหัส</th>
+  <th colspan="6">บจก.ซี.พี.ฟู้ดสโตร์</th>
+</tr>
+<tr>
+  <th colspan="4">ข้าวตราฉัตร</th>
+  <th colspan="2">กระจายร้าน</th>
+</tr>
+<tr>
+  <th>เป้า (ตัน)</th><th>ทำได้ (ตัน)</th>
+  <th>เป้า (บาท)</th><th>ทำได้ (บาท)</th>
+  <th>เป้า (ร้านค้า)</th><th>ทำได้ (ร้านค้า)</th>
+</tr>
+</thead>
+<tbody>`;
+
+  grouped.forEach(r => {
+    const ch = r._ch;
+    const isFirst = !chSeen.has(ch);
+    if (isFirst) chSeen.add(ch);
+    const aoTon  = r['เป้า (ตัน)'];
+    const acTon  = r['ทำได้ (ตัน)'];
+    const aoBaht = r['เป้า (บาท)'];
+    const acBaht = r['ทำได้ (บาท)'];
+    const aoStr  = r['เป้า (ร้านค้า)'];
+    const acStr  = r['ทำได้ (ร้านค้า)'];
+    html += `<tr>
+      ${isFirst ? `<td rowspan="${chSpan[ch]}" class="col-ch">${ch}</td>` : ''}
+      <td>${r['ศูนย์']||''}</td>
+      <td style="text-align:left">${String(r['ชื่อพนักงานขาย']||'').trim()}</td>
+      <td>${r['รหัส']||''}</td>
+      <td class="num">${fmtD(aoTon)}</td>
+      <td class="num">${fmtAch(acTon, aoTon)}</td>
+      <td class="num">${fmtN(aoBaht)}</td>
+      <td class="num">${fmtAch(acBaht, aoBaht)}</td>
+      <td class="num">${fmtN(aoStr)}</td>
+      <td class="num">${fmtAch(acStr, aoStr)}</td>
+    </tr>`;
+  });
+
+  html += `</tbody></table></div>
+<p class="txt-sm txt-muted" style="margin-top:8px">* ทำได้: สีเขียว ≥ Time Used (${timeUsedPct.toFixed(1)}%) · สีแดง น้อยกว่า</p>`;
+  el.innerHTML = html;
+}
+
 /* ================= TABS / UI ================= */
 function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===tab));
   document.getElementById('tab-detail').classList.toggle('hidden', tab!=='detail');
   document.getElementById('tab-outlets').classList.toggle('hidden', tab!=='outlets');
+  document.getElementById('tab-ontop').classList.toggle('hidden', tab!=='ontop');
 }
 function toggleDark() {
   document.body.classList.toggle('dark');
