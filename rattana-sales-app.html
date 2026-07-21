@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.425</title>
+<title>Rattana Sales — v8.426</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5358,7 +5358,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.425 · 2026-07-21</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.426 · 2026-07-21</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5369,7 +5369,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.425</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.426</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -10665,6 +10665,12 @@ function matchesGroup(product, cfg) {
 // ═══════════════════════════════════════════════════════════
 // v6.5.22: postToAppsScript with auto-retry (3 attempts, exponential backoff)
 // Failed writes go to writeQueue so nothing is lost
+// v6.5.175: appendNoSale removed — visit row carries เหตุผลที่ไม่ซื้อ
+// v8.359: + appendCustomer/appendProposal — เดิมไม่อยู่ในลิสต์ = ยิงไม่ผ่านแล้ว throw ทิ้งเลย ไม่มีคิว ไม่มี auto-resend
+// v8.426: ยกออกมาเป็นฟังก์ชัน — ใช้ทั้งตอนเช็ค ok:false และตอนตัดสินใจเข้าคิว
+const _QUEUEABLE_ACTIONS = ['appendOrder','appendOrderBatch','appendVisit','appendCN','appendCustomer','appendProposal'];
+function queueableAction(a) { return _QUEUEABLE_ACTIONS.indexOf(String(a || '')) >= 0; }
+
 async function postToAppsScript(payload, _retries = 3) {
   if (!CONFIG.appsScriptUrl) {
     console.log('[AppsScript STUB]', payload);
@@ -10687,6 +10693,15 @@ async function postToAppsScript(payload, _retries = 3) {
       } finally { clearTimeout(_to); }
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
+      // v8.426 (Surat 21/7): GAS ตอบ HTTP 200 พร้อม ok:false ได้ (lock timeout ตอนหลายเซลกดพร้อมกัน /
+      //   แท็บหาย / error ที่ถูก catch รวม) — เดิม return ออกไปเลย ไม่ retry ไม่เข้าคิว
+      //   คนเรียกส่วนใหญ่ (pushVisitToSheet / _submitCN เดิม) ไม่เคยดูค่าที่คืน → แถวหายถาวร เงียบสนิท
+      //   ตอนนี้โยนเป็น error เพื่อให้เข้าลูป retry + คิวเหมือนเน็ตล่ม
+      //   ⚠️ ปลอดภัยเพราะทุก action ที่เข้าคิวมีคีย์กันซ้ำครบแล้ว:
+      //      order=lineId · visit=visitId · customer=รหัสร้านชั่วคราว · CN=cnLineId · proposal=proposalId (Code.gs v8.139)
+      if (data && data.ok === false && queueableAction(payload.action)) {
+        throw new Error('หลังบ้านตอบ ok:false: ' + String(data.error || 'unknown').slice(0, 120));
+      }
       return data; // return regardless of data.ok — let caller decide
     } catch (e) {
       lastErr = e;
@@ -10698,8 +10713,7 @@ async function postToAppsScript(payload, _retries = 3) {
   // v8.359: + appendCustomer/appendProposal — เดิมไม่อยู่ในลิสต์ = ยิงไม่ผ่านแล้ว throw ทิ้งเลย ไม่มีคิว ไม่มี auto-resend
   //   → เปิดร้านใหม่/เสนอสินค้า หายถาวร (ปลอดภัยที่จะเข้าคิวแล้ว เพราะ v8.359 ย่อรูปเหลือ ~150KB · ดิบ 6.7MB จะทำ localStorage เต็ม)
   //   ติดธง _queued บน error → caller รู้ว่าข้อมูลปลอดภัยแล้วหรือหายจริง (ห้ามเดาเอง)
-  const queueable = ['appendOrder','appendOrderBatch','appendVisit','appendCN','appendCustomer','appendProposal'];
-  if (queueable.includes(payload.action)) {
+  if (queueableAction(payload.action)) {
     const _q = writeQueue.add(payload);
     if (lastErr) lastErr._queued = _q;
   }
@@ -10744,8 +10758,19 @@ const writeQueue = {
       const q = this.get();
       if (!q.length) return;
       console.log('[WriteQueue] Flushing', q.length, 'items');
-      const doneIds = {}, errById = {}, doneShops = [];
+      const doneIds = {}, errById = {}, doneShops = [], triedIds = {};
+      const _now = Date.now();
       for (const item of q) {
+        // v8.426: backoff — v8.424 เก็บของค้างตลอดกาลแล้ว ถ้ายิงทุก 30 วิไม่หยุด
+        //   ใบที่พังถาวร (มีรูป ~200KB) = 2,880 ครั้ง/วัน ≈ 500MB เน็ตเซล + เผาโควต้า GAS
+        //   พลาด n ครั้ง → เว้น min(n, 10) นาที ก่อนลองใหม่ (เพดาน 10 นาที ยังลองเรื่อยๆ ไม่ยอมแพ้)
+        const _tries = Number(item.attempts) || 0;
+        if (_tries > 0) {
+          const _waitMs = Math.min(_tries, 10) * 60000;
+          const _last = Number(item.lastTry) || 0;
+          if (_last && (_now - _last) < _waitMs) continue;   // ยังไม่ถึงรอบ — ข้ามไว้ก่อน (ไม่ถือว่าสำเร็จ ไม่ถือว่าพลาด)
+        }
+        triedIds[item.id] = _now;
         try {
           const _ctrl = new AbortController();
           const _to = setTimeout(() => _ctrl.abort(), 30000);
@@ -10775,6 +10800,7 @@ const writeQueue = {
       const fresh = this.get();
       const keep = fresh.filter(function (it) { return !doneIds[it.id]; });
       keep.forEach(function (it) {
+        if (triedIds[it.id]) it.lastTry = triedIds[it.id];   // v8.426: เก็บเวลาที่ลองล่าสุดลงคิวจริง — backoff ถึงจะทำงาน
         const err = errById[it.id];
         if (err) { it.attempts = (Number(it.attempts) || 0) + 1; it.lastErr = err; }
       });
@@ -11040,8 +11066,19 @@ async function _autoVerifyPhantoms() {
   _phantomSweepInFlight = true;
   try {
     const now = Date.now();
+    // v8.426 (Surat 21/7): ข้ามใบที่ "อยู่ในคิวอยู่แล้ว" — เดิมไม่เช็ค (ต่างจาก _autoResendStuck ที่เช็ค)
+    //   GAS ล่มแต่เครื่อง online → sweep ทุก 60 วิ ยิงซ้ำ → postToAppsScript เข้าคิวสำเนาใหม่ทุกครั้ง
+    //   1 ชม. = 60 สำเนาของใบเดิม → localStorage บวม → เซลเปิดร้านใหม่ตอนนั้น "เข้าคิวไม่ได้" เพราะโควต้าเต็ม
+    const _inQ = new Set();
+    try {
+      writeQueue.get().forEach(function (item) {
+        const a = item && item.payload && item.payload.action;
+        if (a === 'appendOrderBatch' && Array.isArray(item.payload.rows)) { item.payload.rows.forEach(function (r) { if (r && r.orderId) _inQ.add(String(r.orderId)); }); }
+        else if (a === 'appendOrder' && item.payload.row && item.payload.row.orderId) _inQ.add(String(item.payload.row.orderId));
+      });
+    } catch (e) {}
     const suspects = (submittedOrders || []).filter(o =>
-      o && o.id && o.synced && !o._sheetConfirmed && !o.isPushing && (now - (o._lastPhantomChk || 0) > 60000)
+      o && o.id && o.synced && !o._sheetConfirmed && !o.isPushing && !_inQ.has(String(o.id)) && (now - (o._lastPhantomChk || 0) > 60000)
     );
     let changed = 0;
     for (const o of suspects) {
@@ -11788,7 +11825,7 @@ window.showOrdersDiag = async function() {
   const cAge  = g(() => { const c = _memCache && _memCache['orders']; return (c && c.ts) ? Math.round((Date.now() - c.ts) / 1000) + 's' : 'ว่าง'; });
   const when  = g(() => new Date().toLocaleString('th-TH', { hour12: false }));
   const lines = [
-    'Rattana Sales · ตรวจสอบข้อมูล · v8.425',
+    'Rattana Sales · ตรวจสอบข้อมูล · v8.426',
     'เวลา: ' + when,
     '──────────────',
     'Role: ' + role + '   คลัง: ' + wh,
@@ -37481,6 +37518,7 @@ function goProposalForm() {
 window.goProposalForm = goProposalForm;
 
 function resetProposalForm() {
+  window._proposalId = null;   // v8.426: ฟอร์มใหม่ = รหัสกันซ้ำใหม่
   proposalPhotoData = null;
   ['proposalName','proposalNotes','proposalPrice','proposalSalesPerWeek'].forEach(id => {
     const el = document.getElementById(id);
@@ -37521,7 +37559,8 @@ function onProposalPhotoSelected(event) {
 }
 window.onProposalPhotoSelected = onProposalPhotoSelected;
 
-function submitProposal() {
+async function submitProposal() {
+  if (window._proposalBusy) return;   // v8.426: กันกดรัว
   const name = (document.getElementById('proposalName')?.value || '').trim();
   const notes = (document.getElementById('proposalNotes')?.value || '').trim();
   const priceRaw = (document.getElementById('proposalPrice')?.value || '').trim();
@@ -37560,12 +37599,35 @@ function submitProposal() {
     'เวลาพิจารณา':      '',
     'เหตุผลปฏิเสธ':    '',
     '_photo':          proposalPhotoData || '',   // Apps Script uploads to Drive + writes URL into "รูป"
+    // v8.426: คีย์กันซ้ำ — ล็อกต่อ 1 ฟอร์ม กดส่งซ้ำ/คิว resend ก็ค่าเดิม (Code.gs v8.139 dedup ด้วย proposalId)
+    'proposalId':      (window._proposalId = window._proposalId || ('PP' + Date.now().toString(36) + '-' + (SALESMAN.code || 'x'))),
   };
 
   console.log('Will append to Sheet "ขอสั่งสินค้า":', { ...row, _photo: row._photo ? `(${Math.round(row._photo.length/1024)}KB)` : '' });
-  postToAppsScript({ action: 'appendProposal', row }).catch(e => console.warn('Proposal sync error:', e));
+  // v8.426 (Surat 21/7): เลิก fire-and-forget — เดิมยิงแล้วขึ้น ✅ ทันทีไม่รอผล + ล้างฟอร์ม + goHome
+  //   เน็ตหลุด/หลังบ้านพัง = คำเสนอหายเงียบ เซลเห็น ✅ เหมือนกันเป๊ะ (บั๊คเดียวกับร้านใหม่ที่แก้ไปแล้ว)
+  window._proposalBusy = true;
+  let _ok = false, _queued = false, _err = '';
+  try {
+    const res = await postToAppsScript({ action: 'appendProposal', row });
+    if (res && res.ok === true) _ok = true; else _err = (res && res.error) || 'หลังบ้านตอบ ok:false';
+  } catch (e) {
+    _queued = !!(e && e._queued);
+    _err = (e && e.message) || 'ส่งไม่ได้';
+  }
+  window._proposalBusy = false;
 
+  if (!_ok && !_queued) {
+    showToast('❌ ส่งไม่สำเร็จ — ' + _err + ' · ข้อมูลยังอยู่ในฟอร์ม กดส่งใหม่อีกครั้ง', 'error');
+    return;   // ห้ามล้างฟอร์ม/goHome
+  }
+  if (!_ok) {
+    if (typeof _renderStuckQueue === 'function') _renderStuckQueue();
+    showToast('⏳ ยังไม่ถึงชีท — บันทึกไว้ในเครื่องแล้ว ระบบจะส่งใหม่ให้เอง', 'warning');
+    return;   // เข้าคิว ≠ สำเร็จ — คงฟอร์มไว้ (รหัสกันซ้ำล็อกอยู่ กดส่งซ้ำไม่เกิดแถวซ้ำ)
+  }
   showToast('✅ ส่งคำเสนอแล้ว — รอจัดซื้อพิจารณา', 'success');
+  window._proposalId = null;   // ลงชีทแล้ว — ใบถัดไปเริ่มรหัสใหม่
   setTimeout(() => {
     resetProposalForm();
     goHome();
@@ -38746,13 +38808,21 @@ window._removeCNItem = _removeCNItem;
 async function _submitCN() {
   if (_cnDraft.items.length === 0) return;
   const shop = SHOPS.find(s => s.id === currentShopId);
-  const cnId = 'CN' + Date.now().toString().slice(-7);
+  // v8.426 (Surat 21/7): cnId ต้องคงที่ต่อ 1 ใบ — เดิมสร้างใหม่ทุกครั้งที่กดส่ง
+  //   กดส่งซ้ำ/คิว resend ได้ cnId ใหม่ → หลังบ้านกันซ้ำไม่ได้ → ใบลดหนี้ซ้ำทั้งใบ (เงินลูกค้า)
+  if (!_cnDraft.cnId) _cnDraft.cnId = 'CN' + Date.now().toString().slice(-7) + Math.floor(Math.random() * 900 + 100);
+  const cnId = _cnDraft.cnId;
   const now = new Date();
   closeModal();
   showToast('กำลังส่งใบลดหนี้...', 'info');
-  try {
-    for (const it of _cnDraft.items) {
-      await submitCNRow({
+  // v8.426: ห้าม loop ขาดกลางคัน — เดิมรายการที่ 3 พลาด = 4-5 ไม่ถูกส่งและไม่เข้าคิวเลย
+  //   เก็บผลรายบรรทัด แล้วค่อยสรุปทีเดียว · ล้างตะกร้าเฉพาะตอนสำเร็จครบทุกบรรทัด
+  let _sent = 0; const _failed = [];
+  for (let _i = 0; _i < _cnDraft.items.length; _i++) {
+    const it = _cnDraft.items[_i];
+    try {
+      const _res = await submitCNRow({
+        'cnLineId':      cnId + '-' + String(_i + 1).padStart(3, '0'),   // v8.426: คีย์กันซ้ำรายบรรทัด (Code.gs v8.139)
         'วัน':           formatDateISO(now),
         'เวลา':          formatTimeThai(now),
         'email':        (currentUser && currentUser.email) || SALESMAN.email || '',
@@ -38776,13 +38846,26 @@ async function _submitCN() {
         'สถานะอนุมัติ':  'รออนุมัติ',   // v8.83: ทุก CN รอหัวหน้าอนุมัติ (server ก็บังคับซ้ำ)
         'photoBase64':   (window._cnPhotoBackendOk === true) ? String(it.photo || '') : '',   // v8.346: ส่งรูปเฉพาะเมื่อหลังบ้าน ≥v8.125 (cnPhoto flag) — Code.gs เก่าจะยัด base64 ลงเซลล์ เกิน 50k ตัวอักษร CN พังทั้งใบ
       });
+      // v8.426: หลังบ้านตอบ HTTP 200 พร้อม ok:false ได้ (lock timeout / แท็บหาย) — เดิมไม่เช็ค = นับเป็นสำเร็จ
+      if (_res && _res.ok === false) throw new Error(String((_res && _res.error) || 'หลังบ้านตอบ ok:false'));
+      _sent++;
+    } catch (e) {
+      _failed.push({ name: it.name, err: String((e && e.message) || 'ส่งไม่ได้'), queued: !!(e && e._queued) });
+      console.error('CN submit failed:', it.name, e);
     }
-    showToast(`✅ ส่งใบลดหนี้ — รอหัวหน้าอนุมัติ ${_cnDraft.items.length} รายการ`, 'success');
-    _cnDraft = { items: [] };
-  } catch (e) {
-    console.error('CN submit failed:', e);
-    showToast('ส่งไม่สำเร็จ: ' + e.message, 'error');
   }
+  const _queuedN = _failed.filter(function (f) { return f.queued; }).length;
+  const _lostN   = _failed.length - _queuedN;
+  if (!_failed.length) {
+    showToast(`✅ ส่งใบลดหนี้ — รอหัวหน้าอนุมัติ ${_sent} รายการ`, 'success');
+    _cnDraft = { items: [] };   // ล้างตะกร้าเฉพาะตอนขึ้นชีทครบทุกบรรทัดจริง
+  } else if (_lostN === 0) {
+    showToast(`⏳ ขึ้นชีทแล้ว ${_sent} · อีก ${_queuedN} รายการยังไม่ถึงชีท บันทึกไว้ในเครื่องแล้ว จะส่งใหม่ให้เอง`, 'warning');
+    // คงตะกร้าไว้ — กดส่งซ้ำได้ไม่เกิดใบซ้ำ เพราะ cnId/cnLineId เดิมถูกล็อกไว้แล้ว
+  } else {
+    showToast(`❌ ส่งไม่สำเร็จ ${_lostN} รายการ — ของยังอยู่ในตะกร้า กดส่งใหม่อีกครั้ง`, 'error');
+  }
+  if (typeof _renderStuckQueue === 'function') _renderStuckQueue();
 }
 window._submitCN = _submitCN;
 
