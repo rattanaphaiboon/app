@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Order Picker v1.6</title>
+<title>Order Picker v1.8</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -103,26 +103,23 @@ td.num,#panel-orders td.num{text-align:center;font-variant-numeric:tabular-nums}
     <div id="googleSignInBtn"></div>
     <div id="loginSpinner">⏳ กำลังเข้าสู่ระบบ…</div>
     <div id="loginError"></div>
-    <div class="login-ver">เวอร์ชัน v1.6</div>
+    <div class="login-ver">เวอร์ชัน v1.8</div>
   </div>
 </div>
 
 <div id="app" style="display:none">
 
 <header class="appbar">
-  <div class="title">📦 Order Picker <span class="ver">v1.6</span></div>
+  <div class="title">📦 Order Picker <span class="ver">v1.8</span></div>
   <div style="flex:1"></div>
+  <span class="who-box">👤 <b id="whoEmail" style="color:#fff">-</b> <span class="logout-link" onclick="logout()">ออกจากระบบ</span></span>
+  <button class="hub-btn" onclick="reload()" title="โหลดใหม่จาก Supabase" style="background:#1e3a8a;color:#fff;padding:7px 10px">🔄</button>
   <a class="hub-btn" href="index.html">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 12H5M12 19l-7-7 7-7"/></svg> Hub
   </a>
 </header>
-
-<div class="demo-banner" id="srcBanner">
-  🔌 <b>ต่อ Supabase</b> — <code>roo_sales</code> @ <code>ncmgqigufxmlgiqfisdf</code>
-  &nbsp;·&nbsp; <span id="srcStatus" style="font-weight:700">⏳ กำลังโหลด…</span>
-  &nbsp;·&nbsp; <button onclick="reload()" style="border:1px solid var(--gold);background:#fff;color:var(--navy);border-radius:6px;padding:2px 10px;font-weight:700;cursor:pointer;font-size:12px">🔄 โหลดใหม่</button>
-  &nbsp;·&nbsp; <span class="who-box" style="color:#334155">👤 <b id="whoEmail" style="color:var(--navy)">-</b> <span class="logout-link" onclick="logout()">ออกจากระบบ</span></span>
-</div>
+<!-- v1.7: srcStatus ซ่อนไว้ (ไม่มี banner แล้ว) — error/warn เด้ง toast แทน · #srcStatus/#srcBanner ให้ setSrcStatus อ้างได้โดยไม่พัง -->
+<span id="srcStatus" style="display:none"></span><span id="srcBanner" style="display:none"></span>
 
 <div class="filterbar">
   <div class="chipgrp" id="dateChips">
@@ -254,10 +251,21 @@ const GAS_URL = '';
 /* ค่าคอลัมน์ที่ทน key เพี้ยน (ชื่อไทย/eng/case ต่าง) */
 function pick(r, keys){ for(const k of keys){ const v=r[k]; if(v!==undefined && v!==null && v!=='') return v; } return ''; }
 
+/* v1.7: เอาเฉพาะบิลที่ "อนุมัติ" แล้วเท่านั้น — ตัด รออนุมัติ / ไม่อนุมัติ / ปฏิเสธ / ว่าง ออก
+ * (ยังไม่ยืนยัน = ห้ามดึงมา Export) · ระวังคำไทยซ้อน: "รออนุมัติ"/"ไม่อนุมัติ" ก็มีคำว่า "อนุมัติ" */
+function isApproved(s){
+  s = String(s||'').trim();
+  if(!s) return false;                                       // ว่าง = ยังไม่ยืนยัน → ไม่เอา
+  if(/รอ|ไม่|ปฏิเสธ|reject|pending/i.test(s)) return false;  // กัน "รออนุมัติ"/"ไม่อนุมัติ"/"ปฏิเสธ"
+  return /อนุมัติ|approve/i.test(s);                          // ต้องมีคำ "อนุมัติ"
+}
+
 /* Normalize 1 row → shape ที่แอปใช้ */
-function normalizeRow(r, i){
+function normalizeRow(r, i, srcTable){
+  const src = (typeof srcTable==='string' && srcTable) ? srcTable : 'roo';   // 'roo' = roo_sales · 'special' = roo_special_sales
   return {
     seq: i,
+    srcTable: src,
     date: String(pick(r,['วัน','date','order_date'])||'').slice(0,10),
     time: String(pick(r,['เวลา','time'])||''),
     name: String(pick(r,['ชื่อ-สกุล','ชื่อ - สกุล','salesman_name','name'])||''),
@@ -295,56 +303,60 @@ async function loadOrders(){
   if(USE_MOCK){
     setSrcStatus('🧪 ใช้ mock data (USE_MOCK=true)', 'warn');
     return MOCK_ROWS.filter(r=> !/ยกเลิก/.test(r['ยกเลิก']||''))
-                    .filter(r=> !/รออนุมัติ|ปฏิเสธ/.test(r['สถานะอนุมัติ']||''))
+                    .filter(r=> isApproved(r['สถานะอนุมัติ']))
                     .map(normalizeRow);
   }
   try{
-    // v1.2 fix: PostgREST parse ชื่อคอลัมน์ไทย (`วัน`/`เวลา`) ใน URL ไม่ได้ (Content-Type 400 "column ว does not exist")
-    // → ยิงแค่ select=* + limit · filter/sort ฝั่ง client (ข้อมูล < 5000 rows ทำเร็วอยู่แล้ว)
-    const url = `${SUPABASE_URL}/rest/v1/roo_sales?select=*&limit=5000`;
-    const res = await fetch(url, {
-      headers:{'apikey':SUPABASE_ANON,'Authorization':'Bearer '+SUPABASE_ANON,'Prefer':'count=exact'}
-    });
-    if(!res.ok){ throw new Error('HTTP '+res.status+' '+res.statusText); }
-    const total = res.headers.get('content-range');   // "0-1/2" or "*/0"
-    const rows = await res.json();
-    if(!Array.isArray(rows)){ throw new Error('response ไม่ใช่ array — '+JSON.stringify(rows).slice(0,120)); }
+    // v1.7: ยิง 2 ตารางพร้อมกัน — roo_sales (=ROO) + roo_special_sales (=ปลีก/ส่ง)
+    // v1.2 note: PostgREST parse ชื่อคอลัมน์ไทยใน URL ไม่ได้ → ยิงแค่ select=* + limit · filter/sort ฝั่ง client
+    const H = {'apikey':SUPABASE_ANON,'Authorization':'Bearer '+SUPABASE_ANON,'Prefer':'count=exact'};
+    const [rRoo, rSpec] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/roo_sales?select=*&limit=5000`, {headers:H}),
+      fetch(`${SUPABASE_URL}/rest/v1/roo_special_sales?select=*&limit=5000`, {headers:H}).catch(()=>null)
+    ]);
+    if(!rRoo.ok){ throw new Error('roo_sales HTTP '+rRoo.status+' '+rRoo.statusText); }
+    const rowsRoo = await rRoo.json();
+    if(!Array.isArray(rowsRoo)){ throw new Error('roo_sales response ไม่ใช่ array — '+JSON.stringify(rowsRoo).slice(0,120)); }
+    let rowsSpec = [];
+    if(rSpec && rSpec.ok){ try{ const j = await rSpec.json(); if(Array.isArray(j)) rowsSpec = j; }catch(_){ /* special อ่านไม่ได้ = ข้าม */ } }
 
-    if(rows.length===0){
+    if(rowsRoo.length===0 && rowsSpec.length===0){
       // Supabase ตอบ 200 แต่ 0 rows → RLS ปิด anon
-      setSrcStatus(`⚠️ ต่อ Supabase ได้ (${total||'?'}) แต่ได้ 0 แถว — <b>RLS block anon</b> · ไปแท็บ 📐 Schema เพื่อ copy SQL เปิด policy`, 'warn');
-      // Fallback: ใช้ mock ให้เห็นหน้า UI ทำงาน
+      setSrcStatus('ต่อ Supabase ได้ แต่ได้ 0 แถว — RLS block anon · ไปแท็บ 📐 Schema เพื่อเปิด policy', 'warn');
       return MOCK_ROWS.filter(r=> !/ยกเลิก/.test(r['ยกเลิก']||''))
-                      .filter(r=> !/รออนุมัติ|ปฏิเสธ/.test(r['สถานะอนุมัติ']||''))
-                      .map(normalizeRow);
+                      .filter(r=> isApproved(r['สถานะอนุมัติ']))
+                      .map((r,i)=>normalizeRow(r,i,'roo'));
     }
+
+    // ล้าง (ยกเลิก/รออนุมัติ/ปฏิเสธ) + normalize + ติด srcTable
+    const clean = (rows, src) => rows
+      .filter(r=> !/ยกเลิก/.test(String(r['ยกเลิก']||'')))
+      .filter(r=> isApproved(r['สถานะอนุมัติ']))
+      .map((r,i)=> normalizeRow(r, i, src));
 
     // Filter/sort ฝั่ง client — เอา 30 วันล่าสุด, sort desc (ทำเองเพราะ URL param ไทยพัง)
     const from = dateMinus(todayBKK(), 30);
-    const filtered = rows.filter(r=> !/ยกเลิก/.test(String(r['ยกเลิก']||'')))
-                         .filter(r=> !/รออนุมัติ|ปฏิเสธ/.test(String(r['สถานะอนุมัติ']||'')))
-                         .map(normalizeRow)
-                         .filter(r=> r.date >= from)
-                         .sort((a,b)=> b.date.localeCompare(a.date) || String(b.time||'').localeCompare(String(a.time||'')));
-    setSrcStatus(`✅ Supabase · ${filtered.length.toLocaleString()} แถว (30 วันล่าสุด · จากทั้งหมด ${rows.length.toLocaleString()})`, 'ok');
-    return filtered;
+    const all = [...clean(rowsRoo,'roo'), ...clean(rowsSpec,'special')]
+      .filter(r=> r.date >= from)
+      .sort((a,b)=> b.date.localeCompare(a.date) || String(b.time||'').localeCompare(String(a.time||'')));
+    all.forEach((r,i)=> r.seq=i);   // re-seq ทั่วทั้ง 2 ตาราง (กัน seq ซ้ำข้ามตาราง)
+    setSrcStatus(`✅ Supabase · ${all.length.toLocaleString()} แถว (ROO ${rowsRoo.length} + พิเศษ ${rowsSpec.length} · 30 วันล่าสุด)`, 'ok');
+    return all;
   }catch(e){
     console.error('[Supabase] loadOrders failed', e);
     setSrcStatus(`❌ Supabase error: ${esc(e.message||e)} — ใช้ mock ชั่วคราว`, 'err');
     return MOCK_ROWS.filter(r=> !/ยกเลิก/.test(r['ยกเลิก']||''))
-                    .filter(r=> !/รออนุมัติ|ปฏิเสธ/.test(r['สถานะอนุมัติ']||''))
+                    .filter(r=> isApproved(r['สถานะอนุมัติ']))
                     .map(normalizeRow);
   }
 }
 
 function setSrcStatus(html, level){
-  const el=document.getElementById('srcStatus'); if(!el) return;
-  el.innerHTML=html;
-  const b=document.getElementById('srcBanner');
-  if(!b) return;
-  if(level==='ok'){ b.style.background='#f0fdf4'; b.style.borderBottomColor='#16a34a'; }
-  else if(level==='err'){ b.style.background='#fef2f2'; b.style.borderBottomColor='#dc2626'; }
-  else { b.style.background='#fffbeb'; b.style.borderBottomColor='var(--gold)'; }
+  const el=document.getElementById('srcStatus'); if(el) el.innerHTML=html;   // เก็บไว้เผื่อ debug
+  // v1.7: ไม่มี banner แล้ว — ok=log เฉย ๆ · err/warn เด้ง toast (ตัด HTML ออกก่อน)
+  const txt = String(html||'').replace(/<[^>]+>/g,'');
+  if(level==='err' || level==='warn'){ toast('⚠️ '+txt); }
+  console.log('[src]', level||'', txt);
 }
 async function reload(){ setSrcStatus('⏳ กำลังโหลด…',''); DATA_ORDERS = await loadOrders(); selectedBills.clear(); buildBills().filter(b=>!b.done).forEach(b=>selectedBills.add(b.orderId)); render(); }
 
@@ -442,11 +454,15 @@ function isROO(o){
   if(/^OR/i.test(String(o.orderId||''))) return true;
   return false;
 }
+/* v1.7: ประเภทตาม prefix รหัสเซล — PM→ปลีก · HS→ส่ง · RO→ROO (แก้ mapping ที่นี่ที่เดียว) */
+const CHAN_PREFIX = { 'PM':'ปลีก', 'HS':'ส่ง', 'RO':'ROO' };
 /* หา "ประเภท" (chan) ของบิล: ROO / ปลีก / ส่ง / '' */
 function chanOf(o){
-  if(isROO(o)) return 'ROO';
-  const role = (USERS[o.salesman]||{}).role||0;
-  return role===3 ? 'ปลีก' : role===4 ? 'ส่ง' : '';
+  // roo_sales = ROO ทั้งตาราง · หรือเข้าเงื่อนไข isROO (ชื่อ (ROO)/orderId OR/รหัสเซลว่าง)
+  if(o.srcTable==='roo' || isROO(o)) return 'ROO';
+  // ที่เหลือ (roo_special_sales) จัดตาม prefix 2 ตัวหน้าของรหัสเซล
+  const p = String(o.salesman||'').trim().toUpperCase().slice(0,2);
+  return CHAN_PREFIX[p] || '';
 }
 
 /* ============================================================
@@ -662,6 +678,19 @@ function renderOrders(){
 
 function renderSchema(){
   document.getElementById('panel-schema').innerHTML = `
+  <div class="schema-box" style="border-color:#16a34a;background:#f0fdf4">
+    <h3 style="color:#166534">🆕 v1.7: อ่าน 2 ตาราง + จัดประเภทตาม prefix รหัสเซล</h3>
+    <p style="font-size:13px;line-height:1.7">แอปยิง 2 ตารางพร้อมกัน:<br>
+    • <code>roo_sales</code> → นับเป็น <b>ROO</b> ทั้งตาราง<br>
+    • <code>roo_special_sales</code> → จัดประเภทตาม prefix รหัสเซล: <code>PM…</code>=<b>ปลีก</b> · <code>HS…</code>=<b>ส่ง</b> · <code>RO…</code>=<b>ROO</b> (แก้ mapping ที่ <code>CHAN_PREFIX</code> ในไฟล์)</p>
+    <p style="font-size:13px;margin:8px 0 6px"><b>⚠️ ตอนนี้ <code>roo_special_sales</code> ยัง anon อ่านได้ 0 แถว (RLS block) → ปลีก/ส่ง เลยยังไม่โผล่</b> · เปิดให้อ่านเหมือน <code>roo_sales</code>:</p>
+    <pre>ALTER TABLE public.roo_special_sales DISABLE ROW LEVEL SECURITY;
+-- ถ้าจะให้ Export มาร์ค "จัดแล้ว" ลงตารางนี้ด้วย ต้อง GRANT UPDATE เหมือน roo_sales:
+GRANT UPDATE ("สถานะจัด","แอดมินจัด","วันสั่งจัด","เวลาสั่งจัด")
+  ON public.roo_special_sales TO anon;</pre>
+    <p style="font-size:12px;color:var(--muted);margin-top:8px">แล้วกด 🔄 (มุมขวาบน) โหลดใหม่ · แถบสถานะ ✅/⚠️ ย้ายไปเด้งเป็น toast แล้ว (ตัด banner บนออกเพราะเกะกะ)</p>
+  </div>
+
   <div class="schema-box" style="border-color:var(--red);background:#fef2f2">
     <h3 style="color:var(--red)">🚨 ยัง 0 rows แม้ GRANT ผ่านแล้ว → ทางเร็วสุด: <b>ปิด RLS ไปเลย</b></h3>
     <p style="font-size:13px;margin-bottom:10px"><b>อาการ:</b> <code>has_table_privilege('anon',...)=true</code> ✅ แต่ anon ยังอ่าน 0 rows → แปลว่า RLS เปิดอยู่แต่ <b>policy ไม่ match anon จริง</b> (สร้างพลาด/ซ้อน/PostgREST cache ค้าง)<br>

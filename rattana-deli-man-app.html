@@ -603,8 +603,12 @@ body.dark .banner-gold{color:var(--gold-light)}
         <div class="stat-card success" style="cursor:pointer" onclick="showSumBillsModal('ok')" title="แตะดูรายการบิล"><div class="s-label">✓ ชำระครบ</div><div class="s-value" id="sumOk">0</div><div class="s-sub">บิล · แตะดู</div></div>
         <div class="stat-card danger" style="cursor:pointer" onclick="showSumBillsModal('short')" title="แตะดูรายการบิล"><div class="s-label">⚠️ ชำระขาด</div><div class="s-value" id="sumShort">0</div><div class="s-sub">บิล · แตะดู</div></div>
       </div>
+      <div class="card" id="sumBreakdownCard">
+        <div class="card-head"><h3>💰 รายละเอียดการรับชำระ</h3></div>
+        <div class="card-body" id="sumBreakdown"></div>
+      </div>
       <div class="card">
-        <div class="card-head"><h3>✅ งานอนุมัติแล้ว (ของฉัน)</h3><span class="txt-sm txt-muted" id="sumApprovedCount">0 ชุดงาน</span></div>
+        <div class="card-head"><h3>📋 งานของฉัน (ทุกสถานะ)</h3><span class="txt-sm txt-muted" id="sumApprovedCount">0 ชุดงาน</span></div>
         <div class="card-body" id="sumApprovedList"></div>
       </div>
     </div>
@@ -751,7 +755,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.72';
+const APP_VERSION='3.76';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -935,7 +939,9 @@ async function fetchSheet(sheetId,sheetName,opts){
   const fresh=opts&&opts.fresh;
   const cb=fresh?('&_cb='+Date.now()):'';
   // v3.51: บังคับ headers=1 — gviz auto-detect เดาหัวตารางผิดในบางชีท (เช่น Customer) ทำให้หัวคอลัมน์เพี้ยน+ข้อมูลร้านว่างทั้งหมด
-  const url=`https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&headers=1&sheet=${encodeURIComponent(sheetName)}${cb}`;
+  // v3.73: opts.tq = gviz query เลือกเฉพาะคอลัมน์ที่ใช้ (เช่น 'select A,B,C') — ลดขนาดโหลด/เวลา parse มหาศาลในชีทใหญ่
+  const tq=(opts&&opts.tq)?('&tq='+encodeURIComponent(opts.tq)):'';
+  const url=`https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&headers=1${tq}&sheet=${encodeURIComponent(sheetName)}${cb}`;
   const ctrl=('AbortController' in window)?new AbortController():null;
   const to=setTimeout(()=>{ if(ctrl) ctrl.abort(); }, (opts&&opts.timeoutMs)||15000);
   try{
@@ -1266,7 +1272,10 @@ async function loadCustomers(){
   const cached=getCachedSheet('customers_v351',CACHE_TTL_LONG);
   if(cached){ state.customers=cached; enrichBills(); return; }
   try{
-    const rows=await fetchSheet(CFG.customerSheetId,CFG.customerSheetName);
+    // v3.73: ดึงเฉพาะ 8 คอลัมน์ที่ใช้จริง (A=ชื่อ B=รหัส C=ที่อยู่ F=เบอร์ G=Location K=WH N=เซลล์ T=รูป)
+    //        ชีท Customer มี 40 คอลัมน์ 5,300+ แถว (~3.7MB) → เลือกคอลัมน์เหลือ ~1.6MB โหลด+parse เร็วขึ้นมาก
+    let rows=await fetchSheet(CFG.customerSheetId,CFG.customerSheetName,{tq:'select A,B,C,F,G,K,N,T'});
+    if(!rows||!rows.length) rows=await fetchSheet(CFG.customerSheetId,CFG.customerSheetName);   // fallback: ถ้า query ไม่คืนข้อมูล ดึงแบบเต็ม
     state.customers=rows.map(r=>{
       // โครงสร้างชีท: A=ชื่อร้านค้า, B=รหัส บีพลัส, C=ที่อยู่, F=เบอร์โทร, G=Location, N=เซลล์ผู้ดูแล, T=รูป
       const loc=cleanCell(r['Location']||'');
@@ -1892,37 +1901,81 @@ function exportReportExcel(){
 
 /* ========== CUSTOMERS (ข้อมูลร้านค้า) ========== */
 const customerSearchState={q:'',selected:null};
-function renderCustomers(){
+/* v3.74: เร่งหน้าข้อมูลร้านบนมือถือ —
+   1) แยกช่องค้นหาออกจากลิสต์: พิมพ์แล้วอัปเดตเฉพาะรายการ (input ไม่ถูกสร้างใหม่ → คีย์บอร์ด/โฟกัสไม่หลุด)
+   2) debounce การค้นหา (กันกรอง+เรนเดอร์ทุกตัวอักษร)
+   3) โหลดรูปเฉพาะการ์ดที่เลื่อนถึง (IntersectionObserver) แทนโหลด 50 รูปเต็มพร้อมกัน
+   4) ย่อรูป Google Drive เป็น thumbnail เล็ก (ลิงก์ /view เดิมโหลดเป็นรูปไม่ได้เลย)
+   5) แบ่งหน้าเริ่ม 40 + ปุ่ม "แสดงเพิ่ม" */
+const CUST_PAGE=40;
+let _custLimit=CUST_PAGE, _custSearchTimer=null, _custImgObs=null;
+function custThumb_(u){
+  if(!u) return '';
+  const m=String(u).match(/drive\.google\.com\/file\/d\/([^/]+)/);
+  return m?('https://drive.google.com/thumbnail?id='+m[1]+'&sz=w120'):u;   // Drive → thumbnail 120px; อื่น ๆ (Glide ฯลฯ) คืนเดิม
+}
+function custImgObserver_(){
+  if(_custImgObs) return _custImgObs;
+  if(!('IntersectionObserver' in window)) return null;
+  _custImgObs=new IntersectionObserver((ents,obs)=>{
+    ents.forEach(en=>{
+      if(!en.isIntersecting) return;
+      const img=en.target, src=img.getAttribute('data-src');
+      if(src){ img.src=src; img.removeAttribute('data-src'); }
+      obs.unobserve(img);
+    });
+  },{rootMargin:'120px'});
+  return _custImgObs;
+}
+function filteredCustomers_(){
   const q=customerSearchState.q.toLowerCase().trim();
-  const LIMIT=50;
-  const filtered=q?state.customers.filter(c=>
+  if(!q) return state.customers;
+  return state.customers.filter(c=>
     (c.name||'').toLowerCase().includes(q)||
     (c.code||'').toLowerCase().includes(q)||
     (c.phone||'').includes(q)||
-    (c.address||'').toLowerCase().includes(q)
-  ).slice(0,LIMIT):state.customers.slice(0,LIMIT);
+    (c.address||'').toLowerCase().includes(q));
+}
+function renderCustomers(){
+  _custLimit=CUST_PAGE;
   $('customersBody').innerHTML=`
     <div class="field">
-      <input class="input" id="custSearch" value="${esc(customerSearchState.q)}" oninput="customerSearchState.q=this.value;renderCustomers()" placeholder="🔍 ค้นหาชื่อร้าน / รหัส / เบอร์โทร / ที่อยู่..." autocomplete="off">
-      <small class="txt-muted mt-4">มีทั้งหมด ${fmtInt(state.customers.length)} ร้าน · แสดงสูงสุด ${LIMIT} รายการ${state._bgLoading?' · กำลังโหลด...':''}</small>
+      <input class="input" id="custSearch" value="${esc(customerSearchState.q)}" oninput="onCustSearch_(this.value)" placeholder="🔍 ค้นหาชื่อร้าน / รหัส / เบอร์โทร / ที่อยู่..." autocomplete="off">
+      <small class="txt-muted mt-4" id="custCount"></small>
     </div>
-    <div class="cust-grid mt-12">
-      ${filtered.length?filtered.map(c=>`
-        <div class="cust-card" onclick="openCustomerInfo('${esc(c.code).replace(/'/g,"\\'")}')">
-          <div class="photo">
-            ${c.photoUrl?`<img src="${esc(c.photoUrl)}" loading="lazy" onload="this.classList.add('loaded')" onerror="this.remove()">`:''}
-          </div>
-          <div class="info">
-            <div class="name">${esc(c.name)}</div>
-            <div class="code">${esc(c.code)} ${c.warehouse?`· ${esc(c.warehouse)}`:''}</div>
-            ${c.salesman?`<div class="meta">👤 ${esc(c.salesman)}</div>`:''}
-            ${c.phone?`<div class="meta">☎ ${esc(c.phone)}</div>`:''}
-            ${c.address?`<div class="meta">📍 ${esc(c.address)}</div>`:''}
-          </div>
-        </div>
-      `).join(''):`<div class="txt-center txt-muted p-16">ไม่พบร้านค้า</div>`}
-    </div>
-  `;
+    <div class="cust-grid mt-12" id="custList"></div>
+    <div class="txt-center mt-12" id="custMore"></div>`;
+  renderCustomerList();
+}
+function onCustSearch_(v){
+  customerSearchState.q=v; _custLimit=CUST_PAGE;
+  clearTimeout(_custSearchTimer);
+  _custSearchTimer=setTimeout(renderCustomerList,220);
+}
+function custShowMore_(){ _custLimit+=CUST_PAGE; renderCustomerList(); }
+function renderCustomerList(){
+  const box=$('custList'); if(!box) return;
+  if(_custImgObs) _custImgObs.disconnect();   // เลิกเฝ้ารูปชุดเก่าก่อนสร้างใหม่
+  const all=filteredCustomers_(), shown=all.slice(0,_custLimit), q=customerSearchState.q.trim();
+  const cnt=$('custCount');
+  if(cnt) cnt.textContent=`มีทั้งหมด ${fmtInt(state.customers.length)} ร้าน · ${q?('พบ '+fmtInt(all.length)+' · '):''}แสดง ${fmtInt(shown.length)}${state._bgLoading?' · กำลังโหลด...':''}`;
+  box.innerHTML=shown.length?shown.map(c=>{
+    const t=custThumb_(c.photoUrl);
+    return `<div class="cust-card" onclick="openCustomerInfo('${esc(c.code).replace(/'/g,"\\'")}')">
+      <div class="photo">${t?`<img data-src="${esc(t)}" decoding="async" onload="this.classList.add('loaded')" onerror="this.remove()">`:''}</div>
+      <div class="info">
+        <div class="name">${esc(c.name)}</div>
+        <div class="code">${esc(c.code)} ${c.warehouse?`· ${esc(c.warehouse)}`:''}</div>
+        ${c.salesman?`<div class="meta">👤 ${esc(c.salesman)}</div>`:''}
+        ${c.phone?`<div class="meta">☎ ${esc(c.phone)}</div>`:''}
+        ${c.address?`<div class="meta">📍 ${esc(c.address)}</div>`:''}
+      </div>
+    </div>`;
+  }).join(''):`<div class="txt-center txt-muted p-16">ไม่พบร้านค้า</div>`;
+  const obs=custImgObserver_();
+  box.querySelectorAll('img[data-src]').forEach(img=>{ if(obs) obs.observe(img); else { img.src=img.getAttribute('data-src'); img.removeAttribute('data-src'); } });
+  const more=$('custMore');
+  if(more) more.innerHTML=(all.length>_custLimit)?`<button class="btn btn-outline btn-sm" onclick="custShowMore_()">แสดงเพิ่มอีก (${fmtInt(all.length-_custLimit)})</button>`:'';
 }
 function openCustomerInfo(code){
   const c=state.customers.find(x=>x.code===code); if(!c) return;
@@ -5404,9 +5457,9 @@ function isBillOk_(j,b){
 // v2.87/v2.88: modal โชว์รายการบิล ชำระครบ/ชำระขาด — คลิก stat card จะเปิดมา
 // v2.88: ใช้ isBillOk_/isBillShort_ → combined-payee ไม่ถูกนับเป็นขาด (เพราะจ่ายผ่าน master)
 function showSumBillsModal(kind){
-  const data=state._summaryFiltered||{myApproved:[]};
+  const data=state._summaryFiltered||{myJobs:[]};
   const bills=[];
-  data.myApproved.forEach(j=>{
+  data.myJobs.forEach(j=>{
     (j.bills||[]).forEach(b=>{
       const ok=isBillOk_(j,b);
       const shorted=isBillShort_(j,b);
@@ -5481,27 +5534,42 @@ async function renderSupSummary(){
     ].filter(Boolean).map(s=>String(s).toLowerCase()).join('|');
     return hay.indexOf(q)>=0;
   };
-  // filter: งานที่ตัวเองขับ + อนุมัติแล้ว + อนุมัติในวันที่เลือก + match query
-  const myApproved=state.jobs.filter(j=>isMyOwnJob(j)&&j.status==='approved'&&j.approvedAt&&new Date(j.approvedAt).toDateString()===selDate&&matchQ(j))
-    .sort((a,b)=>(b.approvedAt||0)-(a.approvedAt||0));
-  // stats จากบิลของงาน myApproved ในวันนี้
+  // v3.75: สรุปงานโชว์เลยไม่ต้องรออนุมัติ — งานที่ตัวเองขับทุกสถานะที่เริ่มงานแล้ว
+  //         (กำลังส่ง/รออนุมัติ/อนุมัติ/ตีกลับ) จัดกลุ่มตาม "วันเริ่มงาน" ไม่ใช่วันอนุมัติ
+  const jobTs_=(j)=>j.startedAt||j.submittedAt||j.approvedAt||j.createdAt||0;
+  const myJobs=state.jobs.filter(j=>isMyOwnJob(j)&&j.status!=='available'&&jobTs_(j)&&new Date(jobTs_(j)).toDateString()===selDate&&matchQ(j))
+    .sort((a,b)=>jobTs_(b)-jobTs_(a));
+  // stats จากบิลของงาน myJobs ในวันนี้
   // v2.88: ครบ/ขาด ใช้ isBillOk_/isBillShort_ → combined-payee (จ่ายผ่านบิลหลัก) นับเป็นครบ
-  const dayBills=myApproved.flatMap(j=>j.bills);
+  const dayBills=myJobs.flatMap(j=>j.bills);
   const dayCol=dayBills.reduce((s,b)=>s+payTotal(b.payment),0);
   const dayTarget=dayBills.reduce((s,b)=>s+(parseFloat(b.amount)||0),0);
-  const okBills=myApproved.reduce((n,j)=>n+j.bills.filter(b=>isBillOk_(j,b)).length,0);
-  const shortBills=myApproved.reduce((n,j)=>n+j.bills.filter(b=>isBillShort_(j,b)).length,0);
+  const okBills=myJobs.reduce((n,j)=>n+j.bills.filter(b=>isBillOk_(j,b)).length,0);
+  const shortBills=myJobs.reduce((n,j)=>n+j.bills.filter(b=>isBillShort_(j,b)).length,0);
   const _set=(id,v)=>{ const e=$(id); if(e) e.textContent=v; };
   _set('sumToday',fmtInt(dayCol));
   _set('sumTarget',fmtInt(dayTarget));
   _set('sumOk',okBills);
   _set('sumShort',shortBills);
-  _set('sumApprovedCount',`${myApproved.length} ชุดงาน`);
+  _set('sumApprovedCount',`${myJobs.length} ชุดงาน`);
+  // v3.76: รายละเอียดการรับชำระแยกประเภท (ธนบัตร/เหรียญ/โอน/เช็ค/CN) — รวมทุกบิลของงานในวันนั้น
+  const _psum=(k)=>dayBills.reduce((s,b)=>s+(parseFloat((b.payment||{})[k])||0),0);
+  const pB=_psum('banknotes'), pC=_psum('coins'), pT=_psum('transfer1')+_psum('transfer2'), pQ=_psum('cheque'), pCN=_psum('creditNote');
+  const pCash=pB+pC+pT+pQ;   // เงินรับจริง (ไม่รวม CN)
+  const _pRow=(ic,lb,v)=>`<div class="flex-between" style="padding:7px 0"><span>${ic} ${lb}</span><span style="font-variant-numeric:tabular-nums${v?'':';color:var(--muted)'}">${fmtInt(v)}</span></div>`;
+  const bd=$('sumBreakdown');
+  if(bd) bd.innerHTML=
+    _pRow('💵','ธนบัตร',pB)+
+    _pRow('🪙','เหรียญ',pC)+
+    _pRow('🏦','เงินโอน',pT)+
+    _pRow('🧾','เช็ค',pQ)+
+    `<div class="flex-between" style="padding:8px 0;border-top:1px solid var(--border);margin-top:2px"><span class="txt-bold">รวมเงินสด/โอน/เช็ค</span><span class="txt-bold txt-gold" style="font-variant-numeric:tabular-nums">${fmtInt(pCash)}</span></div>`+
+    _pRow('📄','ใบลดหนี้ (CN)',pCN);
   // v2.87: เก็บ filtered result ไว้ให้ modal อ่านได้ตอนคลิก stat card
-  state._summaryFiltered={myApproved};
+  state._summaryFiltered={myJobs};
   const box=$('sumApprovedList');
-  if(box) box.innerHTML=myApproved.length?myApproved.map(j=>renderSummaryJobRow(j)).join(''):
-    `<div class="txt-center txt-muted p-16">${q?'ไม่พบงานที่ตรงกับคำค้นหา':'ไม่มีงานอนุมัติในวันที่เลือก'}</div>`;
+  if(box) box.innerHTML=myJobs.length?myJobs.map(j=>renderSummaryJobRow(j)).join(''):
+    `<div class="txt-center txt-muted p-16">${q?'ไม่พบงานที่ตรงกับคำค้นหา':'ไม่มีงานในวันที่เลือก'}</div>`;
 }
 function renderSummaryJobRow(j){
   const total=j.bills.reduce((s,b)=>s+b.amount,0);
@@ -5509,12 +5577,18 @@ function renderSummaryJobRow(j){
   const cn=j.bills.filter(b=>b.status==='cn').length;
   const failed=j.bills.filter(b=>b.status==='failed').length;
   const short=j.bills.filter(b=>isBillShort_(j,b)).length;
-  const approvedTime=j.approvedAt?formatThaiDateTime(j.approvedAt):'';
-  // v2.90: badge 'อนุมัติแล้ว' ขึ้นข้างบน (แถวเดียวกับ job id) — ให้เห็นสถานะทันที ไม่ต้องเลื่อนหา
+  // v3.75: badge + เวลา ตามสถานะจริง (ไม่ใช่ 'อนุมัติแล้ว' อย่างเดียว) — เห็นงานทุกสถานะ
+  const st=j.status;
+  const stCls=st==='approved'?'badge-ok':st==='rejected'?'badge-danger':st==='pending_approval'?'badge-warn':'badge-info';
+  const stLbl=st==='approved'?'✓ อนุมัติแล้ว':st==='rejected'?'↩️ ตีกลับ':st==='pending_approval'?'⏳ รออนุมัติ':st==='in_progress'?'🚚 กำลังส่ง':esc(st);
+  const stTs=st==='approved'?j.approvedAt:st==='rejected'?j.rejectedAt:st==='pending_approval'?j.submittedAt:j.startedAt;
+  const stTsLbl=st==='approved'?'✓ อนุมัติ':st==='rejected'?'↩️ ตีกลับ':st==='pending_approval'?'📤 ส่ง':'⏱ เริ่ม';
+  const stBy=st==='approved'?j.approvedBy:st==='rejected'?j.rejectedBy:'';
+  const stTime=stTs?formatThaiDateTime(stTs):'';
   return `<div class="job-card" onclick="openReview('${j.id}')">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
       <div class="job-id">${esc(j.id)}</div>
-      <span class="badge badge-ok">✓ อนุมัติแล้ว</span>
+      <span class="badge ${stCls}">${stLbl}</span>
     </div>
     <div class="job-head">
       <div>
@@ -5525,7 +5599,7 @@ function renderSummaryJobRow(j){
           ${failed?`<span class="txt-danger txt-bold">ส่งไม่ได้ ${failed}</span>`:''}
           ${short?`<span class="txt-danger txt-bold">⚠️ ขาด ${short}</span>`:''}
         </div>
-        ${approvedTime?`<div class="txt-xs txt-muted mt-4">✓ ${esc(approvedTime)}${j.approvedBy?' · โดย '+esc(j.approvedBy):''}</div>`:''}
+        ${stTime?`<div class="txt-xs txt-muted mt-4">${stTsLbl} ${esc(stTime)}${stBy?' · โดย '+esc(stBy):''}</div>`:''}
       </div>
       <div class="txt-right">
         <div class="job-amount">${fmt(collected)} / ${fmt(total)}</div>
