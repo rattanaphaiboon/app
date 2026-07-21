@@ -238,7 +238,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page hidden" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v1.68</small>
+      <small>ยอดขายเทียบเป้าหมาย v1.69</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -292,6 +292,7 @@ body.dark .ptbl-td{border-color:var(--border)}
     </div>
     <div id="tab-roo" class="hidden">
       <div id="rooContent"></div>
+      <div id="rooSummaryContent" style="margin-top:24px"></div>
     </div>
   </div>
 </div>
@@ -318,6 +319,7 @@ const EO_SHEET_ID = '1Ekf5knNodR-gjOVIjg_7y87HRcb-qYn_HdgwaLI8_dY';
 const EO_SHEET_NAME = 'Effective Outlet';
 const ON_TOP_SHEET_NAME = 'On Top';
 const ROO_SHEET_NAME = 'Roo';
+const ONLINE_SHEET_NAME = 'Online';
 
 const AUTH_CONFIG = {
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
@@ -720,7 +722,7 @@ async function loadData(showSpin) {
   if (showSpin) showSpinner('กำลังโหลดข้อมูลยอดขาย...');
   setLoading(true);
   try {
-    const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, outletRaw, eoRaw, customerRaw, onTopRaw, rooRaw] = await Promise.all([
+    const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, outletRaw, eoRaw, customerRaw, onTopRaw, rooRaw, onlineRaw] = await Promise.all([
       loadFromSheets(TARGET_SHEET_ID, TARGET_SHEET_NAME),
       loadFromSheets(BP_SHEET_ID, BP_SHEET_NAME),
       loadFromSheets(CN_SHEET_ID, CN_SHEET_NAME),
@@ -731,6 +733,7 @@ async function loadData(showSpin) {
       loadFromSheets(CUSTOMER_SHEET_ID, CUSTOMER_SHEET_NAME),
       loadFromSheets(OUTLET_SHEET_ID, ON_TOP_SHEET_NAME),
       loadFromSheets(OUTLET_SHEET_ID, ROO_SHEET_NAME),
+      loadFromSheets(OUTLET_SHEET_ID, ONLINE_SHEET_NAME),
     ]);
     state.targetRaw = targetRaw;
     state.bpRaw = bpRaw;
@@ -742,6 +745,7 @@ async function loadData(showSpin) {
     state.customerRaw = customerRaw;
     state.onTopRaw = onTopRaw;
     state.rooRaw = rooRaw;
+    state.onlineRaw = onlineRaw;
     setCache('targetCache', targetRaw);
     state.rows = computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw);
     buildFilterControls();
@@ -988,7 +992,7 @@ function exportDetailExcel() {
   XLSX.writeFile(wb, 'rattana-sales-target-' + Date.now() + '.xlsx');
 }
 
-function renderAll() { renderPivot(); renderOutlets(); renderOnTop(); renderROO(); }
+function renderAll() { renderPivot(); renderOutlets(); renderOnTop(); renderROO(); renderROOSummary(); }
 
 /* ================= OUTLETS TAB ================= */
 function getChannelGroup(empCode) {
@@ -1455,6 +1459,134 @@ function renderROO() {
   html += renderGroup('ปลีก', groups['ปลีก']);
   html += `</tbody></table></div>`;
   el.innerHTML = html;
+}
+
+/* ================= ROO SUMMARY ================= */
+function renderROOSummary() {
+  const el = document.getElementById('rooSummaryContent');
+  if (!el) return;
+  const rows = state.onlineRaw || [];
+  if (!rows.length) { el.innerHTML = ''; return; }
+
+  const dataMonth = (state.rows||[]).find(r=>r.month)?.month || '';
+  const wd = getWorkingDaysInfo(dataMonth);
+  const timeUsedPct = wd.pct;
+  const daysUsed = Math.max(1, wd.totalWork - wd.remaining);
+
+  // find column keys
+  const allKeys = Object.keys(rows[0] || {});
+  const nk = s => s.replace(/\s+/g,'').toLowerCase();
+  const findKey = (...terms) => allKeys.find(k => terms.every(t => nk(k).includes(nk(t)))) || '';
+  const kName = findKey('ชื่อ') || allKeys[0];
+  const kTgt  = findKey('เป้าหมาย') || findKey('เป้า');
+
+  // data rows = all except "รวม" row (compute total ourselves)
+  const dataRows = rows.filter(r => nk(String(r[kName]||'')) !== 'รวม' && String(r[kName]||'').trim() !== '');
+
+  // build BP indexes
+  const nameSet = new Set(dataRows.map(r => String(r[kName]||'').trim()));
+  const sStore = new Map(), sExvat = new Map(), sSku = new Map(), sSkuPt = new Map();
+  const rooAll = { store: new Set(), exvat: 0, sku: new Set(), skuPt: 0 };
+
+  (state.bpRaw || []).forEach(r => {
+    const sn  = String(r['Salesman_Name']||'').trim();
+    const cust = String(r['Customer_Code']||'').trim();
+    const prod = String(r['Product_Name']||'').trim();
+    const exv  = parseNum(r['EXVat+CN*2']);
+    const sp   = parseNum(r['SKU Point']);
+    if (nameSet.has(sn)) {
+      if (cust) { if (!sStore.has(sn)) sStore.set(sn, new Set()); sStore.get(sn).add(cust); }
+      sExvat.set(sn, (sExvat.get(sn)||0) + exv);
+      if (prod) { if (!sSku.has(sn)) sSku.set(sn, new Set()); sSku.get(sn).add(prod); }
+      sSkuPt.set(sn, (sSkuPt.get(sn)||0) + sp);
+    }
+    if (sn.includes('(ROO)')) {
+      if (cust) rooAll.store.add(cust);
+      rooAll.exvat += exv;
+      if (prod) rooAll.sku.add(prod);
+      rooAll.skuPt += sp;
+    }
+  });
+
+  const fmtPct = (a, t) => {
+    if (!t) return '<span style="color:var(--muted)">-</span>';
+    const p = a / t * 100;
+    const col = p >= timeUsedPct ? 'var(--success)' : 'var(--danger)';
+    return `<span style="color:${col};font-weight:700">${p.toFixed(2)}%</span>`;
+  };
+
+  let totTgt=0, totActual=0, totOutlet=0, totAllSku=0, totSkuPt=0;
+  let bodyHtml = '';
+
+  dataRows.forEach(r => {
+    const nm  = String(r[kName]||'').trim();
+    const tgt = kTgt ? parseNum(r[kTgt]) : 0;
+    let storeSet, exvat, skuSet, skuPt;
+    if (sStore.has(nm) || sExvat.has(nm)) {
+      storeSet = sStore.get(nm) || new Set();
+      exvat    = sExvat.get(nm) || 0;
+      skuSet   = sSku.get(nm)   || new Set();
+      skuPt    = sSkuPt.get(nm) || 0;
+    } else {
+      // fallback: aggregate all (ROO) for rows like "Rattana Online Order (ROO)"
+      storeSet = rooAll.store; exvat = rooAll.exvat;
+      skuSet   = rooAll.sku;   skuPt = rooAll.skuPt;
+    }
+    const outlet      = storeSet.size;
+    const allSku      = skuSet.size;
+    const ranVan      = outlet > 0 ? outlet / daysUsed : 0;
+    const skuPerStore = outlet > 0 ? allSku / outlet   : 0;
+    totTgt += tgt; totActual += exvat; totOutlet += outlet;
+    totAllSku += allSku; totSkuPt += skuPt;
+    bodyHtml += `<tr>
+      <td style="text-align:left">${nm}</td>
+      <td>${tgt ? Math.round(tgt).toLocaleString() : '-'}</td>
+      <td>${exvat ? Math.round(exvat).toLocaleString() : '-'}</td>
+      <td>${fmtPct(exvat, tgt)}</td>
+      <td>${outlet || '-'}</td>
+      <td>${ranVan ? ranVan.toFixed(1) : '-'}</td>
+      <td>${skuPerStore ? skuPerStore.toFixed(1) : '-'}</td>
+      <td>${allSku || '-'}</td>
+      <td>${skuPt ? Math.round(skuPt).toLocaleString() : '-'}</td>
+    </tr>`;
+  });
+
+  const totRanVan      = daysUsed > 0 ? totOutlet / daysUsed : 0;
+  const totSkuPerStore = totOutlet > 0 ? totAllSku / totOutlet : 0;
+  bodyHtml += `<tr class="sum-row">
+    <td style="text-align:left"><b>รวม</b></td>
+    <td>${totTgt ? Math.round(totTgt).toLocaleString() : '-'}</td>
+    <td>${totActual ? Math.round(totActual).toLocaleString() : '-'}</td>
+    <td>${fmtPct(totActual, totTgt)}</td>
+    <td>${totOutlet.toLocaleString()}</td>
+    <td>${totRanVan ? totRanVan.toFixed(1) : '-'}</td>
+    <td>${totSkuPerStore ? totSkuPerStore.toFixed(1) : '-'}</td>
+    <td>${totAllSku.toLocaleString()}</td>
+    <td>${totSkuPt ? Math.round(totSkuPt).toLocaleString() : '-'}</td>
+  </tr>`;
+
+  el.innerHTML = `<div class="tbl-wrap"><table class="rtbl">
+<thead>
+<tr class="r-title">
+  <th colspan="4" style="text-align:left;font-size:15px">Rattana Online Order (ROO)</th>
+  <th>Time Used</th><th>Week</th><th>วันที่</th><th>วันทำงาน<br>ทั้งหมด</th><th>วันทำงาน<br>เหลือ</th>
+</tr>
+<tr style="background:#e8f0fe;color:var(--navy);font-weight:700;text-align:center">
+  <td colspan="4"></td>
+  <td>${wd.pct.toFixed(0)}%</td>
+  <td>${wd.weekOfMonth}</td>
+  <td>${wd.dateStr}</td>
+  <td>${wd.totalWork}</td>
+  <td>${wd.remaining}</td>
+</tr>
+<tr class="r-h1">
+  <th style="text-align:left;min-width:180px"></th>
+  <th>เป้าหมาย</th><th>ทำได้</th><th>%</th>
+  <th>Outlet</th><th>ร้าน/วัน</th><th>SKU/ร้าน</th><th>All SKU</th><th>SKU Point</th>
+</tr>
+</thead>
+<tbody>${bodyHtml}</tbody>
+</table></div>`;
 }
 
 /* ================= TABS / UI ================= */
