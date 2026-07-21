@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.424</title>
+<title>Rattana Sales — v8.425</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5358,7 +5358,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.424 · 2026-07-21</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.425 · 2026-07-21</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5369,7 +5369,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.424</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.425</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -10718,7 +10718,9 @@ const writeQueue = {
   // v8.359: คืน true = เข้าคิวจริง (ข้อมูลปลอดภัย จะ resend เอง) · false = เข้าคิวไม่ได้ (caller ต้องบอกเซลตามจริง ห้ามขึ้น ✅)
   add(payload) {
     const q = this.get();
-    q.push({ id: Date.now().toString(36), payload, attempts: 0, ts: Date.now() });
+    // v8.425: id ต้องไม่ซ้ำจริง — เดิม Date.now().toString(36) เฉยๆ สองชิ้นในมิลลิวินาทีเดียวกัน = id ซ้ำ
+    //   flush รุ่นใหม่ลบของที่สำเร็จ "ตาม id" → id ซ้ำ = ลบผิดตัว ของที่ยังไม่ส่งหายไปด้วย
+    q.push({ id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8), payload, attempts: 0, ts: Date.now() });
     const okSave = this.save(q);
     console.warn('[WriteQueue] Queued:', payload.action, '— queue size:', q.length, '— saved:', okSave);
     _updateQueueBadge();
@@ -10726,43 +10728,85 @@ const writeQueue = {
     return okSave;
   },
 
+  // v8.425 (Surat 21/7): เขียนใหม่ทั้งฟังก์ชัน — เดิมมี 4 รูรั่วซ้อนกัน ทำให้ของ "หายทั้งที่ขึ้น ✅"
+  //   (1) อ่านคิวต้นรอบ (snapshot) แล้วจบรอบ save(failed) ทับทั้งก้อน
+  //       → ของที่ add() เข้ามา "ระหว่าง" flush โดนลบทิ้งทันที (เน็ตช้า flush 40 วิ = ช่องโหว่ 40 วิ)
+  //       นี่คือคำอธิบายเคสจริง 21/7 ที่ร้านหายพร้อม toast "✅ ส่งสำเร็จทั้งหมด"
+  //   (2) ไม่มี in-flight guard ทั้งที่ถูกเรียกจาก 7 จุด (timer/online/visibility/ปุ่ม) → flush ซ้อนกัน ส่งซ้ำ + save ทับกันเอง
+  //   (3) fetch ไม่มี timeout (postToAppsScript มี 30 วิ) → ค้างยาว ยิ่งเปิดช่องให้ (1)(2)
+  //   (4) ไม่เช็คค่าที่ save() คืน → localStorage เต็ม = คิวไม่ถูกอัพเดท ส่งซ้ำรอบหน้าเงียบๆ
+  //   ตอนนี้: guard + timeout 30 วิ + ลบ "เฉพาะ id ที่สำเร็จ" จากคิวสด (merge) + เช็คผล save
   async flush() {
     if (!CONFIG.appsScriptUrl) return;
-    let q = this.get();
-    if (!q.length) return;
-    console.log('[WriteQueue] Flushing', q.length, 'items');
-    const failed = [];
-    for (const item of q) {
-      try {
-        const res = await fetch(CONFIG.appsScriptUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify(item.payload),
-        });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json().catch(() => null);   // v8.203: เช็ค data.ok — เดิมดูแค่ HTTP 200 → GAS error (ok:false) ถูกลบจาก queue เหมือนสำเร็จ → ออเดอร์หาย
-        if (!data || data.ok === false) throw new Error('app ok:false: ' + ((data && data.error) || 'unknown'));
-        console.log('[WriteQueue] ✓ Flushed:', item.id, item.payload.action);
-      } catch (e) {
-        // v8.424 (Surat 21/7): ❌ ห้ามทิ้งของเงียบ — เดิม `if (attempts < 10) failed.push(item)`
-        //   ครบ 10 ครั้งแล้วไม่ push กลับ = ลบทิ้งถาวร ไม่มี toast ไม่มี log ไม่เหลืออะไรให้กู้
-        //   เคสจริง 21/7: ร้าน "บริษัท แอคทิเวชั่น ฮับ จำกัด" ที่ศิริพร (PMW303) เปิด หายทั้งใบ ต้องกรอกมือใหม่
-        //   ซ้ำร้าย failed ว่าง (เพราะโดนทิ้งหมด) → เข้าเงื่อนไขล่าง ขึ้น "✅ ส่งสำเร็จทั้งหมด" + ลบ rsa_orders ทิ้งอีก = หาย 2 ชั้น
-        //   ตอนนี้: เก็บไว้ตลอด ให้ retry เรื่อยๆ · ครบ 10 ครั้ง = ขึ้นเตือนค้างจอ ให้คนมาจัดการ ไม่ใช่ลบ
-        item.attempts = (item.attempts || 0) + 1;
-        item.lastErr  = String((e && e.message) || e).slice(0, 140);
-        failed.push(item);
-        console.warn('[WriteQueue] ✗ Still failed:', item.id, item.payload && item.payload.action, 'attempt', item.attempts, e.message);
+    if (this._inFlight) { console.log('[WriteQueue] flush ซ้อน — ข้ามรอบนี้'); return; }
+    this._inFlight = true;
+    try {
+      const q = this.get();
+      if (!q.length) return;
+      console.log('[WriteQueue] Flushing', q.length, 'items');
+      const doneIds = {}, errById = {}, doneShops = [];
+      for (const item of q) {
+        try {
+          const _ctrl = new AbortController();
+          const _to = setTimeout(() => _ctrl.abort(), 30000);
+          let res;
+          try {
+            res = await fetch(CONFIG.appsScriptUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+              body: JSON.stringify(item.payload),
+              signal: _ctrl.signal,
+            });
+          } finally { clearTimeout(_to); }
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json().catch(() => null);   // v8.203: เช็ค data.ok — เดิมดูแค่ HTTP 200 → GAS error (ok:false) ถูกลบจาก queue เหมือนสำเร็จ → ออเดอร์หาย
+          if (!data || data.ok === false) throw new Error('app ok:false: ' + ((data && data.error) || 'unknown'));
+          doneIds[item.id] = 1;
+          if (item.payload && item.payload.action === 'appendCustomer') doneShops.push(item);
+          console.log('[WriteQueue] ✓ Flushed:', item.id, item.payload.action);
+        } catch (e) {
+          // v8.424: ❌ ห้ามทิ้งของเงียบ — เดิม `if (attempts < 10) failed.push(item)` = ครบ 10 ครั้งลบถาวร
+          //   เก็บไว้ตลอด ให้ retry เรื่อยๆ · ครบ 10 ครั้ง = ขึ้นแถบเตือนค้างจอ ให้คนมาจัดการ ไม่ใช่ลบ
+          errById[item.id] = String((e && e.message) || e).slice(0, 140);
+          console.warn('[WriteQueue] ✗ Still failed:', item.id, item.payload && item.payload.action, e.message);
+        }
       }
+      // merge: อ่านคิว "สด" อีกครั้ง (อาจมีของเข้ามาระหว่าง flush) แล้วเอาออกเฉพาะ id ที่สำเร็จจริง
+      const fresh = this.get();
+      const keep = fresh.filter(function (it) { return !doneIds[it.id]; });
+      keep.forEach(function (it) {
+        const err = errById[it.id];
+        if (err) { it.attempts = (Number(it.attempts) || 0) + 1; it.lastErr = err; }
+      });
+      const okSave = this.save(keep);
+      if (!okSave) {
+        console.error('[WriteQueue] save หลัง flush ไม่สำเร็จ (localStorage เต็ม?) — คิวยังเป็นก้อนเดิม');
+        showToast('⚠️ เครื่องเก็บข้อมูลเต็ม — ข้อมูลที่ค้างยังอยู่ แต่เคลียร์รายการไม่ได้ แจ้งแอดมิน', 'error');
+      }
+      _updateQueueBadge();
+
+      // v8.425: ต้อง "คิวว่างจริง" ด้วย — ของที่เพิ่งเข้าคิวระหว่าง flush ยังไม่ได้ส่ง
+      //   ไม่งั้นขึ้น "✅ ส่งสำเร็จทั้งหมด" + ลบ rsa_orders ทั้งที่ยังมีของค้าง (พบตอนเทสรอบนี้)
+      const sentAll = Object.keys(doneIds).length === q.length;
+      if (sentAll && q.length > 0 && keep.length === 0) {
+        showToast('✅ ส่งข้อมูลที่ค้างไว้สำเร็จทั้งหมด', 'success');
+        try { localStorage.removeItem('rsa_orders'); } catch {}
+      }
+      // v8.425: ร้านใหม่ที่คิวส่งขึ้นชีทสำเร็จเอง — ต้องปลดรหัสชั่วคราว + บอกเซล
+      //   ไม่งั้นรหัสค้างอยู่ พอเซลคีย์ร้านถัดไปบนฟอร์มเดิม payload จะถือรหัสเก่า
+      //   → handleAppendCustomer มองว่าซ้ำ คืน {ok:true, dedup:true} ไม่เขียนอะไร → ร้านใบใหม่หายพร้อม ✅
+      //   (ตั้งใจ "ไม่" ล้างฟอร์ม — เซลอาจกำลังพิมพ์ร้านถัดไปทับอยู่ ล้างแล้วงานหาย)
+      doneShops.forEach(function (it) {
+        const row = (it.payload && it.payload.row) || {};
+        const tmp = String(row['รหัสร้านชั่วคราว'] || '').trim();
+        if (tmp && window._newShopTempCode === tmp) window._newShopTempCode = null;
+        showToast('🏪 ร้าน "' + String(row['ชื่อร้านค้า'] || '').slice(0, 30) + '" ขึ้นชีทแล้ว', 'success');
+      });
+      if (typeof _renderQueuedShops === 'function') _renderQueuedShops();
+      if (typeof _renderStuckQueue === 'function') _renderStuckQueue();
+    } finally {
+      this._inFlight = false;
     }
-    this.save(failed);
-    _updateQueueBadge();
-    if (failed.length === 0 && q.length > 0) {
-      // ถึงตรงนี้ = สำเร็จจริงทุกชิ้น (เดิมของที่โดนทิ้งก็ทำให้ failed ว่างได้ → ✅ ปลอม)
-      showToast('✅ ส่งข้อมูลที่ค้างไว้สำเร็จทั้งหมด', 'success');
-      try { localStorage.removeItem('rsa_orders'); } catch {}
-    }
-    if (typeof _renderStuckQueue === 'function') _renderStuckQueue();
   },
 
   // v8.424: ของที่ส่งไม่ผ่านหลายรอบแล้ว (เดิมถูกลบทิ้งตรงนี้) — ใช้ขึ้นเตือน + ลิสต์ให้กดส่งใหม่
@@ -11744,7 +11788,7 @@ window.showOrdersDiag = async function() {
   const cAge  = g(() => { const c = _memCache && _memCache['orders']; return (c && c.ts) ? Math.round((Date.now() - c.ts) / 1000) + 's' : 'ว่าง'; });
   const when  = g(() => new Date().toLocaleString('th-TH', { hour12: false }));
   const lines = [
-    'Rattana Sales · ตรวจสอบข้อมูล · v8.424',
+    'Rattana Sales · ตรวจสอบข้อมูล · v8.425',
     'เวลา: ' + when,
     '──────────────',
     'Role: ' + role + '   คลัง: ' + wh,
