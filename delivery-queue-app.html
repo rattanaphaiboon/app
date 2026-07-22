@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0"/>
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
-<title>🚛 จัดคิวรถส่งสินค้า Rattana v8.80</title>
+<title>🚛 จัดคิวรถส่งสินค้า Rattana v8.81</title>
 <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -569,7 +569,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v8.80</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v8.81</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -5112,6 +5112,8 @@ function setDeliveryDate(dateObj){
   const m=String(dateObj.getMonth()+1).padStart(2,'0');
   const y=dateObj.getFullYear();
   _deliveryDate=`${d}/${m}/${y}`;
+  try{localStorage.setItem('dq_v4_deliv_date',_deliveryDate);}catch(e){} // v8.81: จำวันที่ส่งหลังรีเฟรช
+  if(typeof _jrSaveLayout==='function')_jrSaveLayout();
   const label=dateObj.toLocaleDateString('th-TH',{day:'numeric',month:'short'});
   const btn=document.getElementById('btn-delivery-date');
   if(btn)btn.innerHTML=`📅 ${label}`;
@@ -7305,11 +7307,12 @@ function _mgDerive(g){let plate=null,trip=null,same=true,any=false;
     else if(plate!==null)same=false;}
   return (any&&same&&plate)?{plate,trip}:null;}
 
-function buildStoreGroups(){
+// v8.81: แยกเป็น 2 ส่วน (build stores / zone groups) เพื่อ restore layout ได้ (จำจัดรถหลังรีเฟรช)
+function _mgBuildStores(){
   if(!_manualDay)_manualDay=_mgDefaultDay();
-  const capW=_mgSixCapW(),capV=_mgSixCapV(),RET=1000,ZONE_KM=18;
+  const RET=1000;
   const dayBills=bills.filter(b=>_mgMatchDay(b.days));
-  // รวมเป็น "ร้าน" ด้วย ชื่อ(normalize)+จังหวัด (มัดร้านชื่อเดียวกัน)
+  // รวมเป็น "ร้าน" ด้วย ชื่อ(normalize)+จังหวัด (มัดร้านชื่อเดียวกัน) — key เสถียรข้าม session ใช้ restore ได้
   const sMap={};
   dayBills.forEach(b=>{
     const nm=_mgNorm(b.arName)||b.arCode||b.ref;
@@ -7330,7 +7333,16 @@ function buildStoreGroups(){
     return s;
   });
   _manualStores=sMap;
-  // จับโซน: แยกตาม seg+จังหวัด แล้ว cluster GPS ≤ZONE_KM
+  return stores;
+}
+function _mgGroupSort(a,b){
+  if(a.seg!==b.seg)return a.seg==='big'?-1:1;
+  if(a.prov!==b.prov)return (a.prov||'').localeCompare(b.prov||'','th');
+  return (a.zoneName||'').localeCompare(b.zoneName||'','th');
+}
+// จับโซน (seg+จังหวัด · cluster GPS ≤18km) → ซอยพอดีรถ 6 ล้อ ตามความใกล้ · คืน array กลุ่ม
+function _mgZoneGroups(stores){
+  const capW=_mgSixCapW(),capV=_mgSixCapV(),ZONE_KM=18;
   const zones=[],noGps=[];
   stores.forEach(s=>{
     if(s.lat==null){noGps.push(s);return;}
@@ -7342,10 +7354,8 @@ function buildStoreGroups(){
   const ngz={};
   noGps.forEach(s=>{const k=s.seg+'|'+s.province;(ngz[k]||(ngz[k]={seg:s.seg,prov:s.province,stores:[],noGps:true})).stores.push(s);});
   Object.values(ngz).forEach(z=>zones.push(z));
-  // ซอยแต่ละโซน ≤ รถ 6 ล้อ (น้ำหนัก+ปริมาตร) — เรียง TSP แล้วหั่นสะสม
   const groups=[];
-  // v8.76: ซอยโซน — โซนที่พอดี 1 คัน = คันเดียว · โซนที่ต้องหลายคัน = ซอยตาม "ความใกล้"
-  //   (จุดที่อยู่ใกล้กันอยู่คันเดียวกัน — ไม่แยกขาไป/ขากลับแล้ว)
+  // v8.76: โซนพอดี 1 คัน = คันเดียว · โซนหลายคัน = ซอยตาม "ความใกล้" (จุดใกล้กันอยู่คันเดียวกัน)
   zones.forEach(z=>{
     let chunks;
     if(z.noGps){ chunks=[z.stores]; }
@@ -7363,13 +7373,64 @@ function buildStoreGroups(){
       _mgSync(g);g.assign=_mgDerive(g);groups.push(g);
     });
   });
-  groups.sort((a,b)=>{
-    if(a.seg!==b.seg)return a.seg==='big'?-1:1;
-    if(a.prov!==b.prov)return (a.prov||'').localeCompare(b.prov||'','th');
-    return (a.zoneName||'').localeCompare(b.zoneName||'','th');
+  groups.sort(_mgGroupSort);
+  return groups;
+}
+function buildStoreGroups(){
+  const stores=_mgBuildStores();
+  _manualGroups=_mgZoneGroups(stores);
+  // v8.52: cache key = วัน|จำนวนบิล — บิลว่าง(ยังโหลดไม่เสร็จ) ไม่ cache · บิลเปลี่ยน(รีเฟรช) → rebuild
+  _manualBuiltDay=bills.length?(_manualDay.short+'|'+bills.length):null;
+  _jrSaveLayout(); // v8.81: จำ layout auto ไว้ให้รีเฟรชแล้วกู้คืน
+  return _manualGroups;
+}
+// ══ v8.81: จำ "จัดรถอะไรไว้" — เซฟ layout (รอบ+วันที่+กลุ่ม+รถ) ต่อวัน · รีเฟรชแล้วกู้คืน ไม่ล้างงาน ══
+const _JR_LAYOUT_KEY='dq_v4_jr_layout', _JR_DAY_KEY='dq_v4_manual_day';
+function _jrSaveDay(){ try{ if(_manualDay)localStorage.setItem(_JR_DAY_KEY,JSON.stringify({short:_manualDay.short,full:_manualDay.full})); }catch(e){} }
+function _jrLoadDay(){ try{const d=JSON.parse(localStorage.getItem(_JR_DAY_KEY)||'null'); if(d&&d.short)return {short:d.short,full:d.full,label:d.full}; }catch(e){} return null; }
+function _jrSaveLayout(){
+  if(!_manualDay||!bills.length||!_manualGroups.length)return;
+  try{
+    let all; try{all=JSON.parse(localStorage.getItem(_JR_LAYOUT_KEY)||'{}');}catch(e){all={};}
+    if(!all||typeof all!=='object')all={};
+    all[_manualDay.short]={ deliveryDate:_deliveryDate||'',
+      groups:_manualGroups.map(g=>({seg:g.seg,prov:g.prov,line:g.line||'',zoneName:g.zoneName,split:g.split||null,noGps:!!g.noGps,
+        keys:g.stores.map(u=>u.key),assign:g.assign?{plate:g.assign.plate,trip:g.assign.trip}:null})) };
+    localStorage.setItem(_JR_LAYOUT_KEY,JSON.stringify(all));
+    _jrSaveDay(); // v8.81: จำรอบส่งคู่กับ layout เสมอ (แม้ใช้รอบ default) กันรีเฟรชข้ามวันแล้วเปลี่ยนรอบ
+  }catch(e){}
+}
+function _jrClearLayout(){ try{let all=JSON.parse(localStorage.getItem(_JR_LAYOUT_KEY)||'{}'); if(all&&_manualDay){delete all[_manualDay.short];localStorage.setItem(_JR_LAYOUT_KEY,JSON.stringify(all));}}catch(e){} }
+function _jrRestoreLayout(){
+  let all; try{all=JSON.parse(localStorage.getItem(_JR_LAYOUT_KEY)||'null');}catch(e){}
+  const entry=all&&_manualDay&&all[_manualDay.short];
+  if(!entry||!entry.groups||!entry.groups.length)return false;
+  const stores=_mgBuildStores();
+  if(!stores.length)return false;
+  const byKey={}; stores.forEach(u=>byKey[u.key]=u);
+  const used=new Set(); const groups=[]; let changed=false;
+  entry.groups.forEach(sg=>{
+    const st=(sg.keys||[]).map(k=>byKey[k]).filter(Boolean);
+    if(!st.length)return;             // ร้านในกลุ่มนี้ไม่เหลือแล้ว (ส่งไปหมด) → ข้าม
+    st.forEach(u=>used.add(u.key));
+    const g={id:'mg'+(_mgIdSeq++),seg:sg.seg,prov:sg.prov,line:sg.line||'',zoneName:sg.zoneName,split:sg.split||null,noGps:!!sg.noGps,stores:st,assign:null};
+    _mgSync(g);
+    if(sg.assign&&sg.assign.plate&&TRUCKS.find(t=>t.plate===sg.assign.plate)){ // รถยังมีในคลังนี้ → คืนการจัดรถ
+      g.assign={plate:sg.assign.plate,trip:sg.assign.trip||1};
+      st.forEach(u=>u.bills.forEach(ref=>{if(queue[ref]!==g.assign.plate||tripMap[ref]!==g.assign.trip){queue[ref]=g.assign.plate;tripMap[ref]=g.assign.trip;changed=true;}}));
+    }
+    groups.push(g);
   });
-  // v8.52: cache key = วัน|จำนวนบิล — ถ้าบิลว่าง(ยังโหลดไม่เสร็จ) ไม่ cache · บิลเปลี่ยน(รีเฟรช) → rebuild
-  _manualGroups=groups;_manualBuiltDay=bills.length?(_manualDay.short+'|'+bills.length):null;return groups;
+  if(!groups.length)return false;
+  // ร้านใหม่ (บิลเข้ามาหลังจัด) ที่ยังไม่อยู่กลุ่มไหน → auto-group ต่อท้าย ไม่ให้ตกหล่น
+  const leftover=stores.filter(u=>!used.has(u.key));
+  if(leftover.length)groups.push(..._mgZoneGroups(leftover));
+  groups.sort(_mgGroupSort);
+  _manualGroups=groups;
+  _manualBuiltDay=bills.length?(_manualDay.short+'|'+bills.length):null;
+  if(entry.deliveryDate&&!_deliveryDate)_deliveryDate=entry.deliveryDate;
+  if(changed)saveQ(); // เขียน queue เฉพาะตอนต่างจริง — กันป้าย "ยังไม่เซฟ" เด้งทุกครั้งที่รีเฟรช
+  return true;
 }
 function _mgLoose(){const inG=new Set();_manualGroups.forEach(g=>g.stores.forEach(u=>inG.add(u.uid)));
   return Object.values(_manualStores).filter(u=>!inG.has(u.uid));}
@@ -7696,6 +7757,7 @@ function jrShowBillPopup(uid){
 function jrToggleLabels(){_jrShowLabels=!_jrShowLabels;const b=document.getElementById('jrLblBtn');if(b)b.textContent=_jrShowLabels?'🏷️ ซ่อนชื่อ':'🏷️ แสดงชื่อ';const mp=document.getElementById('jrMap');if(mp)mp.classList.toggle('jr-nolabels',!_jrShowLabels);}
 function jrFitMap(){if(_jrMap&&_jrLastPts.length){try{_jrMap.fitBounds(L.latLngBounds([[HQ.lat,HQ.lng],..._jrLastPts]),{padding:[28,28]});}catch(e){}}}
 function _mgRefreshViews(){ // อัปเดตหน้าที่กำลังดูอยู่ (จัดคิว manual หรือ จัดรถ)
+  _jrSaveLayout(); // v8.81: จำการแก้กลุ่ม/จัดรถ ทุกครั้ง
   if(currentTab==='jadrot'&&typeof jrRenderAll==='function'){jrRenderAll();return;}
   if(typeof renderManualPanel==='function')renderManualPanel();
 }
@@ -7709,11 +7771,14 @@ function jrRouteKm(g){
 function jrGroupAmt(g){return g.stores.reduce((s,u)=>s+u.bills.reduce((a,r)=>a+((billMap[r]||{}).totalAmt||0),0),0);}
 function _jrFmtAmt(n){return '฿'+Math.round(n||0).toLocaleString('en-US');}
 function jrEnsureBuilt(){
-  if(!_manualDay)_manualDay=_mgDefaultDay();
-  if(_manualBuiltDay!==_manualDay.short+'|'+bills.length)buildStoreGroups();
+  if(!_manualDay)_manualDay=_jrLoadDay()||_mgDefaultDay();            // v8.81: กู้รอบส่งที่เคยเลือก
+  if(!_deliveryDate){try{_deliveryDate=localStorage.getItem('dq_v4_deliv_date')||'';}catch(e){}}
+  if(_manualBuiltDay!==_manualDay.short+'|'+bills.length){
+    if(!_jrRestoreLayout())buildStoreGroups();                        // v8.81: กู้ layout เดิมก่อน · ไม่มีค่อย build ใหม่
+  }
 }
-function jrRegen(){_manualBuiltDay=null;_jrSel=null;jrRenderAll();}
-function jrSetDay(s,f){_manualDay={short:s,full:f,label:f};_manualBuiltDay=null;_jrSel=null;jrRenderAll();}
+function jrRegen(){_jrClearLayout();_manualBuiltDay=null;_jrSel=null;jrRenderAll();} // ↺ = ล้าง layout เดิม จัดใหม่หมด
+function jrSetDay(s,f){_manualDay={short:s,full:f,label:f};_jrSaveDay();_manualBuiltDay=null;_jrSel=null;jrRenderAll();}
 function jrRenderRound(){ // v8.71: dropdown รอบส่ง (วันในสัปดาห์) + auto-fill วันที่ส่ง
   const sel=document.getElementById('jrRound'); if(!sel)return;
   if(!_manualDay)_manualDay=_mgDefaultDay();
@@ -7723,7 +7788,10 @@ function jrRenderRound(){ // v8.71: dropdown รอบส่ง (วันใน
   for(let i=1;i<7;i++)h+=`<option value="${_MG_F[i]}" ${(_MG_S[i]===_manualDay.short)?'selected':''}>${_MG_F[i]}${counts[i]?' ('+counts[i]+')':''}</option>`;
   sel.innerHTML=h;
   const inp=document.getElementById('jrDate');
-  if(inp&&!inp.value){const i=_MG_S.indexOf(_manualDay.short);if(i>=0){const t=new Date();let add=(i-t.getDay()+7)%7;const dt=new Date(t);dt.setDate(t.getDate()+add);inp.value=dt.toISOString().slice(0,10);if(typeof setDeliveryDate==='function')setDeliveryDate(dt);}}
+  if(inp&&!inp.value){
+    if(_deliveryDate){const p=_deliveryDate.split('/');if(p.length===3)inp.value=`${p[2]}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`;} // v8.81: วันที่ที่จำไว้
+    else{const i=_MG_S.indexOf(_manualDay.short);if(i>=0){const t=new Date();let add=(i-t.getDay()+7)%7;const dt=new Date(t);dt.setDate(t.getDate()+add);inp.value=dt.toISOString().slice(0,10);if(typeof setDeliveryDate==='function')setDeliveryDate(dt);}}
+  }
 }
 function jrPickRound(full){
   const i=_MG_F.indexOf(full); if(i<0)return;
