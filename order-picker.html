@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Order Picker v1.8</title>
+<title>Order Picker v1.13</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -103,14 +103,14 @@ td.num,#panel-orders td.num{text-align:center;font-variant-numeric:tabular-nums}
     <div id="googleSignInBtn"></div>
     <div id="loginSpinner">⏳ กำลังเข้าสู่ระบบ…</div>
     <div id="loginError"></div>
-    <div class="login-ver">เวอร์ชัน v1.8</div>
+    <div class="login-ver">เวอร์ชัน v1.11</div>
   </div>
 </div>
 
 <div id="app" style="display:none">
 
 <header class="appbar">
-  <div class="title">📦 Order Picker <span class="ver">v1.8</span></div>
+  <div class="title">📦 Order Picker <span class="ver">v1.13</span></div>
   <div style="flex:1"></div>
   <span class="who-box">👤 <b id="whoEmail" style="color:#fff">-</b> <span class="logout-link" onclick="logout()">ออกจากระบบ</span></span>
   <button class="hub-btn" onclick="reload()" title="โหลดใหม่จาก Supabase" style="background:#1e3a8a;color:#fff;padding:7px 10px">🔄</button>
@@ -248,6 +248,35 @@ const WRITE_STATUS = true;
  * ตั้งค่า = paste /exec URL ของ Apps Script (action:'markDone' รับ orderIds+by)  */
 const GAS_URL = '';
 
+/* v1.13: วันส่ง จากชีท Customer (ชีท regSheet · แท็บ Customer) — อ่านอย่างเดียว 100% ไม่แตะ Supabase
+ * match ด้วยชื่อร้าน (col A) → วันส่ง (col P) · ใช้ gviz + headers=1 (กัน header มั่ว) เบากว่า CSV เต็ม */
+const CUSTOMER_SHEET_ID = '18RSfuDdCadccWS_3v_Ggi70_X8FGEIVGrGUedkQLYUw';
+const CUSTOMER_GID = '1169768881';
+let STORE_DAY = {};   // normStore(ชื่อร้าน) -> วันส่ง
+function normStore(s){ return String(s||'').replace(/\s+/g,'').toLowerCase(); }
+function dayOfStore(store){ return STORE_DAY[normStore(store)] || ''; }
+async function loadStoreDays(){
+  try{
+    const url = `https://docs.google.com/spreadsheets/d/${CUSTOMER_SHEET_ID}/gviz/tq?gid=${CUSTOMER_GID}&headers=1&tq=${encodeURIComponent('select A, P')}`;
+    const txt = await (await fetch(url)).text();
+    const json = JSON.parse(txt.replace(/^[\s\S]*?setResponse\(/,'').replace(/\);?\s*$/,''));
+    const map = {};
+    for(const r of ((json.table&&json.table.rows)||[])){
+      const c=r.c||[], name=c[0]&&c[0].v, day=c[1]&&c[1].v;
+      const k = normStore(name);
+      if(k && day && !map[k]) map[k] = String(day).trim();
+    }
+    STORE_DAY = map;
+    console.log('[storeDay] โหลดวันส่งจากชีท Customer:', Object.keys(map).length, 'ร้าน');
+  }catch(e){ console.warn('[storeDay] โหลดวันส่งไม่ได้ (ข้าม · ฟีเจอร์เสริม)', e); }
+}
+/* badge วันส่ง (สีม่วงอ่อน · '—' ถ้าไม่เจอ/ชีทไม่กรอก) */
+function dayBadge(store){
+  const d = dayOfStore(store);
+  if(!d) return '<span style="color:var(--muted);font-size:11px">—</span>';
+  return `<span title="วันส่งจากชีท Customer" style="background:#eef2ff;color:#3730a3;font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;white-space:nowrap">🚚 ${esc(d)}</span>`;
+}
+
 /* ค่าคอลัมน์ที่ทน key เพี้ยน (ชื่อไทย/eng/case ต่าง) */
 function pick(r, keys){ for(const k of keys){ const v=r[k]; if(v!==undefined && v!==null && v!=='') return v; } return ''; }
 
@@ -266,6 +295,7 @@ function normalizeRow(r, i, srcTable){
   return {
     seq: i,
     srcTable: src,
+    id: pick(r,['id']),   // v1.11: PK ต่อบรรทัด (ASCII) → ใช้ PATCH เจาะจงบรรทัดที่อนุมัติเท่านั้น
     date: String(pick(r,['วัน','date','order_date'])||'').slice(0,10),
     time: String(pick(r,['เวลา','time'])||''),
     name: String(pick(r,['ชื่อ-สกุล','ชื่อ - สกุล','salesman_name','name'])||''),
@@ -375,13 +405,15 @@ function nowBKK(){
 
 /* Supabase PATCH — orderId=in.(a,b,c) filter · ต้องมี GRANT UPDATE ให้ anon ก่อน (SQL อยู่ในแท็บ Schema)
  * v1.6: เพิ่ม console.log ทุกขั้น + retry แบบ eq. ต่อ orderId ถ้า in.() ได้ 0 rows (edge case) */
-async function markDoneSupabase(orderIds, admin){
-  console.log('[markDone] เรียกด้วย', {orderIds, admin, WRITE_STATUS});
-  if(!WRITE_STATUS || !orderIds || !orderIds.length) return {ok:false, n:0, skipped:true};
+async function markDoneSupabase(ids, admin, table, col){
+  table = table || 'roo_sales';   // v1.9: roo_sales หรือ roo_special_sales ตามที่มาของบิล
+  col = col || 'id';              // v1.11: มาร์คด้วย id (เจาะบรรทัดอนุมัติ) แทน orderId (ที่โดนทุกบรรทัดรวม 'ไม่อนุมัติ')
+  console.log('[markDone] เรียกด้วย', {table, col, ids, admin, WRITE_STATUS});
+  if(!WRITE_STATUS || !ids || !ids.length) return {ok:false, n:0, skipped:true};
   const {date, time} = nowBKK();
   const payload = { 'สถานะจัด':'จัดแล้ว', 'แอดมินจัด':admin||'', 'วันสั่งจัด':date, 'เวลาสั่งจัด':time };
-  const filter = 'orderId=in.('+orderIds.map(o=>encodeURIComponent(o)).join(',')+')';
-  const url = `${SUPABASE_URL}/rest/v1/roo_sales?${filter}`;
+  const filter = col+'=in.('+ids.map(v=>encodeURIComponent(v)).join(',')+')';
+  const url = `${SUPABASE_URL}/rest/v1/${table}?${filter}`;
   console.log('[markDone] PATCH →', url); console.log('[markDone] payload →', payload);
   try{
     const res = await fetch(url, {
@@ -412,20 +444,32 @@ async function markDoneGAS(orderIds, admin){
   }catch(e){ return {ok:false, n:0, err:e.message||String(e)}; }
 }
 
-async function markDoneAfterExport(orderIds){
-  if(!WRITE_STATUS || !orderIds.length) return;
+/* v1.11: รับ lines (บรรทัดที่อนุมัติแล้วเท่านั้น = อยู่ใน DATA_ORDERS) → PATCH ด้วย id แยกตาราง
+ * (เดิม PATCH ด้วย orderId ทำให้บรรทัด 'ไม่อนุมัติ' ที่ orderId เดียวกันโดนมาร์ค 'จัดแล้ว' ไปด้วย) */
+async function markDoneAfterExport(lines){
+  if(!WRITE_STATUS || !lines || !lines.length) return;
   const admin = getAdmin();
-  if(!admin){ alert('⚠️ ยังไม่ได้ใส่อีเมลในช่อง 📧 "อีเมลของคุณ" ที่ banner ด้านบน\n\nExcel ดาวน์โหลดเรียบร้อยแล้ว\nแต่ระบบข้ามการมาร์ค "จัดแล้ว" ใน Supabase\n\n→ ใส่อีเมลใน banner แล้วกด Export อีกครั้ง'); return; }
-  const [sr, gr] = await Promise.all([markDoneSupabase(orderIds, admin), markDoneGAS(orderIds, admin)]);
+  if(!admin){ alert('⚠️ ยังไม่ได้เข้าสู่ระบบ (ไม่มีอีเมล)\n\nExcel ดาวน์โหลดเรียบร้อยแล้ว\nแต่ระบบข้ามการมาร์ค "จัดแล้ว" ใน Supabase'); return; }
+  const okId = v => v!=null && v!=='';
+  const rooIds     = [...new Set(lines.filter(l=>l.srcTable!=='special').map(l=>l.id).filter(okId))];
+  const specIds    = [...new Set(lines.filter(l=>l.srcTable==='special').map(l=>l.id).filter(okId))];
+  const allOrderIds= [...new Set(lines.map(l=>l.orderId))];   // GAS (Google Sheets) ยังมาร์คด้วย orderId
+  const [srRoo, srSpec, gr] = await Promise.all([
+    rooIds.length  ? markDoneSupabase(rooIds,  admin, 'roo_sales',         'id') : Promise.resolve({ok:false,n:0,skipped:true}),
+    specIds.length ? markDoneSupabase(specIds, admin, 'roo_special_sales', 'id') : Promise.resolve({ok:false,n:0,skipped:true}),
+    markDoneGAS(allOrderIds, admin)
+  ]);
+  const okN  = (srRoo.ok?srRoo.n:0) + (srSpec.ok?srSpec.n:0);
+  const errs = [srRoo.err && ('roo_sales: '+srRoo.err), srSpec.err && ('roo_special_sales: '+srSpec.err)].filter(Boolean);
   const parts = [];
-  if(sr.ok) parts.push(`✅ Supabase ${sr.n} บรรทัด`);
-  else if(sr.err) parts.push(`❌ Supabase: ${sr.err}`);
+  if(okN) parts.push(`✅ Supabase ${okN} บรรทัด`);
+  if(errs.length) parts.push('❌ '+errs.join(' · '));
   if(gr.ok) parts.push(`✅ GS ${gr.n}`);
   else if(gr.err) parts.push(`⚠️ GS: ${gr.err}`);
   else if(gr.skipped) parts.push(`⏸ GS: ยังไม่ตั้ง GAS_URL`);
   if(parts.length) toast(parts.join(' · '));
-  if(sr.ok){ DATA_ORDERS = await loadOrders(); render(); }   // reload → บิลย้ายไป tab นำเข้าแล้ว
-  else if(sr.err){ alert('❌ มาร์ค "จัดแล้ว" ใน Supabase ไม่สำเร็จ\n\n'+sr.err+'\n\nExcel ดาวน์โหลดเรียบร้อยแล้ว\nเปิด DevTools (F12) → Console เพื่อดู log เต็ม'); }
+  if(srRoo.ok || srSpec.ok){ DATA_ORDERS = await loadOrders(); render(); }   // reload → บิลย้ายไป tab นำเข้าแล้ว + รันเลขต่อเนื่อง
+  if(errs.length){ alert('❌ มาร์ค "จัดแล้ว" ไม่สำเร็จบางส่วน\n\n'+errs.join('\n')+'\n\nExcel ดาวน์โหลดเรียบร้อยแล้ว\n\n⚠️ ถ้าขึ้น "0 rows" ของ roo_special_sales = RLS เปิดอยู่แต่ไม่มี policy UPDATE\n→ Supabase SQL Editor รัน: ALTER TABLE public.roo_special_sales DISABLE ROW LEVEL SECURITY;\n(SQL เต็มอยู่ในแท็บ 📐 Schema)'); }
 }
 
 /* ============================================================
@@ -506,7 +550,7 @@ function buildBills(){
     if(!o.orderId) continue;
     if(!bills[o.orderId]){
       bills[o.orderId]={orderId:o.orderId, date:o.date, time:o.time||'', salesman:o.salesman,
-        salesmanName: u.name||o.name||'', chan, roleLab: chan || 'R0',
+        salesmanName: u.name||o.name||'', chan, roleLab: chan || 'R0', srcTable:o.srcTable||'roo',
         store:o.store, wh:shipWh(o), lines:0, total:0, keyTS:0, seq:Infinity, isROO:isROO(o),
         done:false, doneBy:'', doneDate:'', doneTime:'', deliver:''};
     }
@@ -518,9 +562,9 @@ function buildBills(){
     if(o.done){ b.done=true; b.doneBy=o.doneBy||b.doneBy; b.doneDate=o.doneDate||b.doneDate; b.doneTime=o.doneTime||b.doneTime; }
     if(o.deliver && !b.deliver) b.deliver=o.deliver;   // v1.6: เก็บรูปแบบการจัดส่ง (line แรกที่มีค่า)
   }
-  return Object.values(bills).sort((a,b)=>
-    String(a.date).localeCompare(String(b.date)) ||
-    (a.keyTS||0)-(b.keyTS||0) ||
+  return Object.values(bills).sort((a,b)=>          // v1.10: ใหม่สุดขึ้นบน (date/เวลา desc)
+    String(b.date).localeCompare(String(a.date)) ||
+    (b.keyTS||0)-(a.keyTS||0) ||
     (a.seq-b.seq) ||
     a.orderId.localeCompare(b.orderId)
   );
@@ -530,6 +574,11 @@ function buildBills(){
    RENDER
    ============================================================ */
 function render(){
+  // v1.10: จำตำแหน่ง scroll ของตารางในแท็บที่เปิดอยู่ ก่อน rebuild (กันเด้งขึ้นบนตอนติ๊ก checkbox)
+  const _activePanel = document.querySelector('.panel.active');
+  const _tw0 = _activePanel && _activePanel.querySelector('.tbl-wrap');
+  const _prevScroll = _tw0 ? _tw0.scrollTop : 0;
+
   const bills = buildBills();
   const pending = bills.filter(b=>!b.done);   // v1.6: บิลที่ยังไม่จัด → tab "เลือกบิล"
   const done    = bills.filter(b=> b.done);   // v1.6: บิลที่จัดแล้ว → tab "นำเข้าแล้ว"
@@ -565,6 +614,12 @@ function render(){
   renderSchema();
 
   document.getElementById('exportBtn').disabled = selLines.length===0;
+
+  // v1.10: คืนตำแหน่ง scroll เดิม (tbl-wrap ถูกสร้างใหม่หลัง innerHTML)
+  if(_activePanel && _prevScroll){
+    const tw = _activePanel.querySelector('.tbl-wrap');
+    if(tw) tw.scrollTop = _prevScroll;
+  }
 }
 
 /* deliver badge — สั้น + สีต่างตามประเภท (ยึดค่าจริงจาก Supabase · ไม่มี default) */
@@ -591,14 +646,14 @@ function renderBills(bills){
     <td>${esc(b.date)}</td><td>${esc(b.time)}</td>
     <td>${esc(b.salesman)} <span style="color:var(--muted);font-size:11px">${esc(b.salesmanName||'')}</span></td>
     <td><span class="chip" style="background:${b.chan==='ROO'?'#f3e8ff':b.chan==='ปลีก'?'#dbeafe':b.chan==='ส่ง'?'#dcfce7':'#f1f5f9'};color:${b.chan==='ROO'?'#6b21a8':b.chan==='ปลีก'?'#1d4ed8':b.chan==='ส่ง'?'#166534':'#64748b'};padding:1px 8px;font-size:11px">${esc(b.roleLab)}</span></td>
-    <td>${esc(b.store)}</td><td>${esc(b.wh)}</td><td>${deliverBadge(b.deliver)}</td><td>${esc(b.orderId)}</td>
+    <td>${esc(b.store)}</td><td>${esc(b.wh)}</td><td>${deliverBadge(b.deliver)}</td><td>${dayBadge(b.store)}</td><td>${esc(b.orderId)}</td>
     <td class="num">${b.lines}</td><td class="num">${b.total.toLocaleString()}</td>
   </tr>`;
   }).join('');
   p.innerHTML = head +
-    `<div class="note">ติ๊กบิลที่จะจัด → กด <b>⬇️ Export Excel (bplus)</b> (มุมขวาบน) · หลัง Export บิลจะถูกมาร์ค "จัดแล้ว" → ย้ายไป tab <b>📥 นำเข้าแล้ว</b> อัตโนมัติ</div>
+    `<div class="note">ติ๊กบิลที่จะจัด → กด <b>⬇️ Export Excel (bplus)</b> (มุมขวาบน) · หลัง Export บิลจะถูกมาร์ค "จัดแล้ว" → ย้ายไป tab <b>📥 นำเข้าแล้ว</b> อัตโนมัติ · <b>วันส่ง</b> = ดึงจากชีท Customer (ดูเฉย ๆ)</div>
      <div class="tbl-wrap"><table><thead><tr>
-       <th>✓</th><th>วันคีย์</th><th>เวลา</th><th>เซล</th><th>ประเภท</th><th>ร้าน</th><th>คลังส่ง</th><th>รูปแบบส่ง</th><th>billId</th><th>รายการ</th><th>ยอด</th>
+       <th>✓</th><th>วันคีย์</th><th>เวลา</th><th>เซล</th><th>ประเภท</th><th>ร้าน</th><th>คลังส่ง</th><th>รูปแบบส่ง</th><th>วันส่ง</th><th>billId</th><th>รายการ</th><th>ยอด</th>
      </tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
@@ -610,24 +665,25 @@ function renderDone(bills){
     <td>${esc(b.date)}</td><td>${esc(b.time)}</td>
     <td>${esc(b.salesman)} <span style="color:var(--muted);font-size:11px">${esc(b.salesmanName||'')}</span></td>
     <td><span class="chip" style="background:${b.chan==='ROO'?'#f3e8ff':b.chan==='ปลีก'?'#dbeafe':b.chan==='ส่ง'?'#dcfce7':'#f1f5f9'};color:${b.chan==='ROO'?'#6b21a8':b.chan==='ปลีก'?'#1d4ed8':b.chan==='ส่ง'?'#166534':'#64748b'};padding:1px 8px;font-size:11px">${esc(b.roleLab)}</span></td>
-    <td>${esc(b.store)}</td><td>${esc(b.wh)}</td><td>${deliverBadge(b.deliver)}</td><td>${esc(b.orderId)}</td>
+    <td>${esc(b.store)}</td><td>${esc(b.wh)}</td><td>${deliverBadge(b.deliver)}</td><td>${dayBadge(b.store)}</td><td>${esc(b.orderId)}</td>
     <td class="num">${b.lines}</td><td class="num">${b.total.toLocaleString()}</td>
     <td><span style="color:#166534;font-weight:600;font-size:12px">${esc(b.doneBy||'-')}</span></td>
     <td style="font-size:11px;color:var(--muted)">${esc(b.doneDate||'')} ${esc(b.doneTime||'')}</td>
-    <td><button onclick="unmarkBill('${esc(b.orderId)}')" style="background:#fff;border:1px solid var(--border);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;color:#b91c1c;font-weight:600">↩ คืนสถานะ</button></td>
+    <td><button onclick="unmarkBill('${esc(b.orderId)}','${esc(b.srcTable||'roo')}')" style="background:#fff;border:1px solid var(--border);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;color:#b91c1c;font-weight:600">↩ คืนสถานะ</button></td>
   </tr>`).join('');
   p.innerHTML =
     `<div class="note">📥 บิลที่ Export ไปแล้ว (มาร์ค "จัดแล้ว" ใน Supabase) · ${bills.length} บิล · <b>คืนสถานะ</b> = ล้างสถานะจัด → บิลกลับไป tab แรก</div>
      <div class="tbl-wrap"><table><thead><tr>
-       <th>วันคีย์</th><th>เวลา</th><th>เซล</th><th>ประเภท</th><th>ร้าน</th><th>คลังส่ง</th><th>รูปแบบส่ง</th><th>billId</th><th>รายการ</th><th>ยอด</th><th>โดย</th><th>วัน·เวลาจัด</th><th></th>
+       <th>วันคีย์</th><th>เวลา</th><th>เซล</th><th>ประเภท</th><th>ร้าน</th><th>คลังส่ง</th><th>รูปแบบส่ง</th><th>วันส่ง</th><th>billId</th><th>รายการ</th><th>ยอด</th><th>โดย</th><th>วัน·เวลาจัด</th><th></th>
      </tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 /* คืนสถานะ (unmark) — PATCH สถานะจัด='' เพื่อเอาบิลกลับไป tab แรก */
-async function unmarkBill(orderId){
+async function unmarkBill(orderId, srcTable){
   if(!confirm('คืนสถานะบิล '+orderId+' → กลับไปแท็บ "เลือกบิล"?')) return;
+  const table = srcTable==='special' ? 'roo_special_sales' : 'roo_sales';   // v1.11: ยิงให้ถูกตาราง (เดิม fix roo_sales เสมอ → บิล special คืนไม่ได้)
   const payload = { 'สถานะจัด':'', 'แอดมินจัด':'', 'วันสั่งจัด':null, 'เวลาสั่งจัด':null };
-  const url = `${SUPABASE_URL}/rest/v1/roo_sales?orderId=eq.${encodeURIComponent(orderId)}`;
+  const url = `${SUPABASE_URL}/rest/v1/${table}?orderId=eq.${encodeURIComponent(orderId)}`;
   try{
     const res = await fetch(url, {
       method:'PATCH',
@@ -851,8 +907,9 @@ function docBookFor(o){ return isROO(o) ? 'BV28' : docBook(o.salesman); }
 
 async function exportXlsx(){
   const bills = buildBills();
-  const selBills = bills.filter(b=>selectedBills.has(b.orderId));
-  if(!selBills.length){ toast('ยังไม่ได้เลือกบิล'); return; }
+  // v1.12: เฉพาะบิลที่ "ยังไม่จัด" ที่ติ๊กไว้ — ไม่ re-export บิลที่นำเข้าแล้ว (ที่ orderId ค้างใน selectedBills รอบก่อน)
+  const selBills = bills.filter(b=>!b.done && selectedBills.has(b.orderId));
+  if(!selBills.length){ toast('ยังไม่ได้เลือกบิล (ที่ยังไม่จัด)'); return; }
 
   const runDate = todayBKK();
   const _rd = runDate.split('-');
@@ -886,8 +943,9 @@ async function exportXlsx(){
   };
 
   const selOrderIds = new Set(selBills.map(b=>b.orderId));
+  // v1.10: เรียงแถว Excel ใหม่สุดขึ้นบน (seq เรียงตาม date desc อยู่แล้ว · บรรทัดของบิลเดียวกันติดกัน)
   const selLines = DATA_ORDERS.filter(o=> selOrderIds.has(o.orderId) && passDate(o.date))
-    .sort((a,b)=> a.orderId.localeCompare(b.orderId) || a.seq-b.seq);
+    .sort((a,b)=> a.seq-b.seq);
 
   /* running number ต่อ "เล่ม" (book) — ไล่ตามลำดับร้าน (bill แรกที่คีย์ = 001)
    * ROO orders → เล่ม BV28 ร่วมกัน (มี 3 ร้าน → BV28690709/001, /002, /003)
@@ -895,6 +953,16 @@ async function exportXlsx(){
   const bvByOrder = {}, seqByBook = {};
   const firstLineByOrder = {};   // orderId → first line ใน selLines (ใช้ตัดสิน book)
   selLines.forEach(o=>{ if(firstLineByOrder[o.orderId]===undefined) firstLineByOrder[o.orderId]=o; });
+  /* v1.9: รันเลขต่อเนื่องต่อวัน — เริ่มต่อจากจำนวนบิลที่ "จัดแล้ววันนี้" ต่อเล่ม (ไม่รีเซ็ต 001 ทุก export)
+   * นับจาก DATA_ORDERS ทั้งหมด (ไม่สน filter หน้าจอ) กันเลขซ้ำข้ามการกรองวัน · doneDate=วันสั่งจัด=วันนี้ */
+  const doneToday = {}, _seenDone = new Set();
+  for(const o of DATA_ORDERS){
+    if(o.done && o.doneDate===runDate && o.orderId && !_seenDone.has(o.orderId)){
+      _seenDone.add(o.orderId);
+      const bk = docBookFor(o);
+      doneToday[bk] = (doneToday[bk]||0)+1;
+    }
+  }
   /* จัดลำดับ orderId ตาม seq/orderId (deterministic) ก่อนแจกเลข → รันเลขเสถียร */
   const orderIdsSorted = Object.keys(firstLineByOrder).sort((a,b)=>{
     const oa=firstLineByOrder[a], ob=firstLineByOrder[b];
@@ -903,7 +971,8 @@ async function exportXlsx(){
   orderIdsSorted.forEach(oid=>{
     const o = firstLineByOrder[oid];
     const book = docBookFor(o);
-    seqByBook[book] = (seqByBook[book]||0)+1;
+    if(seqByBook[book]===undefined) seqByBook[book] = (doneToday[book]||0);   // เริ่มต่อจากที่จัดแล้ววันนี้
+    seqByBook[book] += 1;
     bvByOrder[oid] = book+bvDate+'/'+String(seqByBook[book]).padStart(3,'0');
   });
   const bplus = selLines.map(o=> bplusFields(o, bvByOrder[o.orderId]));
@@ -931,9 +1000,11 @@ async function exportXlsx(){
   XLSX.writeFile(wb, `ใบจอง-${runDate}.xlsx`);
   toast(`✅ ดาวน์โหลดแล้ว · ${selBills.length} บิล · ${bRows.length} บรรทัด`);
 
-  /* v1.6: mark สถานะจัด → Supabase + Google Sheets (await เพื่อให้ PATCH เสร็จก่อน · เดิม fire-and-forget อาจโดน browser หยุด async task) */
-  const orderIds = [...new Set(selBills.map(b=>b.orderId))];
-  await markDoneAfterExport(orderIds);
+  /* v1.12: เอาบิลที่ export แล้วออกจากตะกร้า → รอบถัดไปเลือกใหม่เฉพาะร้านที่จะจัด (ไม่ค้างจากรอบเก่า) */
+  selBills.forEach(b=> selectedBills.delete(b.orderId));
+
+  /* v1.11: mark สถานะจัด → ด้วย id ของบรรทัดที่อนุมัติ (selLines) แยกตาราง (await ให้ PATCH เสร็จก่อน) */
+  await markDoneAfterExport(selLines);
 }
 
 /* ============================================================
@@ -948,6 +1019,7 @@ async function init(){
   setWh('all');
   buildBills().filter(b=>!b.done).forEach(b=> selectedBills.add(b.orderId));   // default = เลือกทุก pending
   render();
+  loadStoreDays().then(render);   // v1.13: ดึงวันส่งจากชีท Customer (background) แล้ว re-render เติมคอลัมน์
 }
 
 /* ============================================================

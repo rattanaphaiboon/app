@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.423</title>
+<title>Rattana Sales — v8.436</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5358,7 +5358,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.423 · 2026-07-21</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.436 · 2026-07-22</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5369,7 +5369,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.423</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.436</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <button class="icon-btn" onclick="window.open('https://rattanaphaiboon.github.io/app/rattana-hub.html','_blank')" id="hubBtn" title="Rattana Hub — รวมแอปทั้งหมด">🏠</button>
@@ -5410,6 +5410,12 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
   <button class="drawer-item" id="drawerTeamMap" onclick="closeDrawer();goTeamMap()" style="display:none">
     <span class="drawer-item-icon">👥</span>
     <span class="drawer-item-label">แผนที่ทีม</span>
+    <span class="drawer-item-arrow">›</span>
+  </button>
+  <!-- v8.427: หัวหน้าเห็นของค้างส่งของทีม (ไม่ต้องรอเซลเปิดแอป) -->
+  <button class="drawer-item" id="drawerStuck" onclick="closeDrawer();_openTeamStuck()" style="display:none">
+    <span class="drawer-item-icon">⚠️</span>
+    <span class="drawer-item-label">ข้อมูลค้างส่งของทีม</span>
     <span class="drawer-item-arrow">›</span>
   </button>
   <!-- v7.42: supervisor-only demand report -->
@@ -6050,6 +6056,9 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
       <div class="page-sub">ลงข้อมูลร้านใหม่ → admin จะอนุมัติ</div>
     </div>
   </div>
+
+  <!-- v8.424: 🏪 ร้านที่ยังไม่ถึงชีท — ของค้างในคิวเครื่องนี้ เซลเห็นเอง กดส่งใหม่เอง · เติมโดย _renderQueuedShops() -->
+  <div id="queuedShopsBox"></div>
 
   <div class="card card-gold">
     <div class="flex-row" style="margin-bottom:6px">
@@ -7157,7 +7166,11 @@ async function enterApp() {
   initAppUI();
 
   // v6.5.22: flush any writes that failed in a previous session
+  // v8.424: + แถบเตือนของค้าง — ขึ้นทันทีตั้งแต่เปิดแอป ไม่ต้องรอ flush รอบแรก (ของค้างข้ามวันจะได้ไม่เงียบ)
+  if (typeof _renderStuckQueue === 'function') _renderStuckQueue();
   setTimeout(() => { writeQueue.flush(); _updateQueueBadge(); }, 3000);
+  // v8.428: หัวหน้า (Role ≥5) — ดึงของค้างของทีมมาโชว์บนหน้าแรก (เงียบ ไม่บล็อกอะไร)
+  setTimeout(() => { if (typeof _loadTeamStuck === 'function') _loadTeamStuck(true); }, 6000);
 
   // ─── v4.5 FAST BOOT — try IndexedDB cache first (instant UI for non-orders data) ───
   let hadCache = false;
@@ -7243,8 +7256,15 @@ async function loadProgressively() {
       .then(d => { SHEET_DATA.syncStatus = d || []; markLoaded('syncStatus'); })
       .catch(e => { console.warn('syncStatus:', e.message); markLoaded('syncStatus'); }),
     fetchWithCache('debtData', () => fetchSheet(CONFIG.debtSheetId, CONFIG.debtSheetTab), CONFIG.cacheTTLShort)
-      .then(d => { SHEET_DATA.debtData = d || []; _buildDebtMap(d); if (SHOPS.length) _applyDebtToShops(); markLoaded('debtData'); console.log('[boot] Debt rows loaded:', (d||[]).length); })
-      .catch(e => { console.warn('debtData:', e.message); markLoaded('debtData'); }),
+      .then(d => { SHEET_DATA.debtData = d || []; window._debtLoadFailed = false; _buildDebtMap(d); if (SHOPS.length) _applyDebtToShops(); markLoaded('debtData'); console.log('[boot] Debt rows loaded:', (d||[]).length); if (typeof _renderDebtLoadWarn === 'function') _renderDebtLoadWarn(); })
+      // v8.432: โหลดหนี้พัง = ด่านเครดิตไม่ทำงานทั้งวัน (SHOPS คง debt:0 → _debtIsOverCredit เท็จทุกร้าน)
+      //   เดิมเงียบสนิท ไม่มี retry ไม่มีใครรู้ · ตอนนี้ลองใหม่ + ขึ้นแถบเตือนค้างจอ
+      //   ❌ ไม่บล็อกการขาย (ตามแนว v8.44 — เสี่ยงออเดอร์หายมากกว่าข้อมูลขาด) แต่ต้องไม่เงียบ
+      .catch(e => {
+        console.warn('debtData:', e.message); window._debtLoadFailed = true; markLoaded('debtData');
+        if (typeof _renderDebtLoadWarn === 'function') _renderDebtLoadWarn();
+        if (typeof _retryDebtLoad === 'function') _retryDebtLoad();
+      }),
     fetchWithCache('debtAppr', () => fetchSheet(CONFIG.backendSheetId, 'DebtApproval', null, null), 60 * 1000)   // v8.323: คำขออนุมัติขายเชื่อ (ร้านเกินเครดิต) · fail-open (แท็บยังไม่มี = ว่าง)
       .then(d => { SHEET_DATA.debtApprovals = d || []; if (typeof _buildDebtApprMap === 'function') _buildDebtApprMap(d); if (typeof _debtApprRevealDrawer === 'function') _debtApprRevealDrawer(); })
       .catch(e => { console.warn('debtAppr:', e.message); }),
@@ -7705,14 +7725,140 @@ function _ageBadge(age, terms) {
 //   v8.400 (Surat 17/7): เปิดประตูจริง — เกณฑ์ 3 ข้อ: บิลเกินเทอมวันเครดิต (อายุหนี้>เงื่อนไข ครอบ "บิลเก่าค้างแล้วเปิดใหม่") + ยอดรวมเกินวงเงิน
 window._DEBT_GATE_ON = true;
 window._debtApprRows = window._debtApprRows || {};   // { 'shopCode|smCode' : row } เฉพาะวันหมดอายุ=วันนี้
-function _debtTodayISO() { const d = new Date(); return d.getFullYear() + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0'); }
+// v8.432: ต้องใช้เวลาไทยเสมอ — ฝั่ง Code.gs stamp 'วันหมดอายุ' ด้วย Asia/Bangkok
+//   เดิม client ใช้ new Date() ของเครื่อง → มือถือตั้ง timezone ผิด (เช่น UTC) ช่วง 00:00-07:00
+//   จะเห็นวันที่ย้อนหลัง 1 วัน → ใบที่หมดอายุแล้วยังใช้ได้อีกวัน (หรือใบที่ยังไม่หมดถูกตัดทิ้ง)
+function _debtTodayISO(offsetDays) {
+  const t = Date.now() + (Number(offsetDays) || 0) * 86400000;
+  const d = new Date(t + (7 * 60 + new Date(t).getTimezoneOffset()) * 60000);   // → เวลาไทย (UTC+7)
+  return d.getFullYear() + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0');
+}
 function _debtVday(v) { return String(v == null ? '' : v).replace(/-/g, '/').slice(0, 10); }
-function _debtOverdueBills(s) { return (((s && s.debtInvoices) || [])).filter(inv => Number(inv.age || 0) > Number(inv.terms || 0)); }
-function _debtOverLimit(s) { const lim = Number((s && s.creditLimit) || 0); return lim > 0 && Number((s && s.debt) || 0) > lim; }   // v8.400: เกณฑ์ 2 — ยอดค้างรวมเกินวงเงิน (วงเงิน 0/ว่าง = ไม่เช็ค)
+
+// ═══ v8.432 (Surat 21/7): โหลดข้อมูลหนี้ไม่ได้ → ต้องรู้ตัว ไม่ใช่เงียบ ═══
+//   ถ้าไม่มีข้อมูลหนี้ ด่านเครดิตจะมองว่าทุกร้านไม่มีหนี้ = ปล่อยผ่านหมดทั้งวันโดยไม่มีใครรู้
+//   ลองโหลดใหม่เอง (3 ครั้ง ห่างขึ้นเรื่อยๆ) + ขึ้นแถบเตือนจนกว่าจะได้ข้อมูล
+function _retryDebtLoad() {
+  const n = (window._debtRetryN = (Number(window._debtRetryN) || 0) + 1);
+  if (n > 3) return;
+  setTimeout(function () {
+    fetchSheet(CONFIG.debtSheetId, CONFIG.debtSheetTab)
+      .then(function (d) {
+        SHEET_DATA.debtData = d || []; window._debtLoadFailed = false; window._debtRetryN = 0;
+        _buildDebtMap(d); if (SHOPS.length) _applyDebtToShops();
+        _renderDebtLoadWarn();
+        console.log('[debt] retry สำเร็จ —', (d || []).length, 'แถว');
+      })
+      .catch(function (e) { console.warn('[debt] retry', n, 'ไม่สำเร็จ:', e && e.message); _renderDebtLoadWarn(); _retryDebtLoad(); });
+  }, n * 20000);
+}
+window._retryDebtLoad = _retryDebtLoad;
+
+function _renderDebtLoadWarn() {
+  let bar = document.getElementById('debtLoadWarnBar');
+  if (!window._debtLoadFailed) { if (bar) bar.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'debtLoadWarnBar';
+    bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9997;background:#92400E;color:#fff;padding:8px 12px;font-size:11.5px;font-weight:800;display:flex;align-items:center;gap:10px;box-shadow:0 -2px 12px rgba(0,0,0,.25)';
+    document.body.appendChild(bar);
+  }
+  bar.innerHTML = '<span style="flex:1;min-width:0">⚠️ โหลดข้อมูลหนี้ไม่ได้ — ตัวเช็คเครดิตยังไม่ทำงาน อย่าเพิ่งขายเชื่อร้านที่ไม่แน่ใจ</span>'
+    + '<button onclick="_retryDebtLoad()" style="flex-shrink:0;padding:5px 11px;border:none;border-radius:8px;background:#fff;color:#92400E;font-size:11px;font-weight:900;cursor:pointer;font-family:inherit">🔄 ลองใหม่</button>';
+}
+window._renderDebtLoadWarn = _renderDebtLoadWarn;
+// ═══ v8.429 (Surat 21/7): หนี้ที่เป็นของ "เซลคนอื่น" ไม่ต้องขออนุมัติ ═══
+//   เคสจริง: ร้านเอฟเอ็ม FM (แพงพวย) มีหลายเซลขาย · บิลค้างเป็นของ ศรณ์วรัชญ์
+//   แต่ จารุพัฒน์ เข้าไปขายกลับโดนบล็อกด้วย
+//   ⚠️ ROO — คนเดียวกันมี 2 รหัสในชีทหนี้:
+//      PMW102 ↔ ROW102 = จารุพัฒน์ หอมวิเชียร · PMW304 ↔ ROW304 = ปวริศ ทองก้อน (รวม 8 คน)
+//      ชื่อฝั่ง ROO เขียนว่า 'คุณ จารุพัฒน์ หอมวิเชียร (ROO)' → ต้องตัด (…) ทิ้งก่อนเทียบ
+//      ไม่งั้นหนี้ ROO ของตัวเองจะถูกนับเป็น "ของคนอื่น" แล้วปล่อยผ่าน = รูรั่ว
+//   ❌ ห้ามจับคู่ด้วย "เลขท้ายรหัส" — เลข 101 ชนกัน 4 คน (ชัยสิทธิ์/สรวิชญ์/สุภาพร/ลูกค้าหน้าร้าน)
+//      เทียบด้วย "ชื่อ" เป็นหลัก + รหัสตรงเป๊ะเป็นตัวช่วย
+//   เทียบไม่ได้ (บิลไม่มีชื่อ/ไม่มีรหัส) → ถือว่าเป็นของเรา = บล็อกไว้ก่อน (ปลอดภัยกว่าปล่อย)
+// v8.431: normalize ชื่อเซลให้ทน — ชีทหนี้มีของจริงเขียน '--คุณ สมคิด คุ้มวงค์' (90 แถว) และ '-คุณ ณัฐพล เจิมจันทร์'
+//   _normSalesmanName ตัดคำนำหน้าเฉพาะตำแหน่งแรก → ขีดนำหน้าทำให้ตัดไม่ออก → ชื่อไม่มีวันตรงกับ Users
+const _DEBT_NO_OWNER = ['ขายเอง', 'ลูกค้าหน้าร้าน'];   // v8.431: ค่า placeholder ไม่ใช่คน (รวม 192 แถว)
+function _debtNormSm(v) {
+  const s = String(v || '').replace(/\([^)]*\)/g, ' ').replace(/^[\s\-–—._]+/, '');
+  return _normSalesmanName(s);
+}
+function _debtIsNoOwner(bn) {
+  return !bn || _DEBT_NO_OWNER.some(function (k) { return bn.indexOf(_normSalesmanName(k)) === 0; });
+}
+// v8.431: รู้ให้ชัดว่า "เราคือใคร" — ถ้าไม่รู้ ห้ามใช้ตรรกะกรองตามเซล (ต้องบล็อกไว้ก่อน)
+function _debtMyIdentity() {
+  const name = _debtNormSm((currentUser && currentUser.name) || (typeof SALESMAN !== 'undefined' && SALESMAN.name) || '');
+  let code = '';
+  try { code = String((typeof _resolveSalesmanCodeFromUsers === 'function' ? _resolveSalesmanCodeFromUsers() : '') || (typeof SALESMAN !== 'undefined' && SALESMAN.code) || '').trim().toUpperCase(); } catch (e) {}
+  return { name: name, code: code, ok: !!(name || code) };
+}
+window._debtMyIdentity = _debtMyIdentity;
+function _debtBillIsMine(inv) {
+  const me = _debtMyIdentity();
+  // ⚠️ v8.431 (แก้บั๊คร้ายแรงของ v8.429): ถ้า "เรา" ไม่มีทั้งชื่อและรหัส ต้องถือว่าทุกบิลเป็นของเรา
+  //   ไม่งั้นบิลที่มีเจ้าของทุกใบคืน false → เกณฑ์ 1+3 ถูกปิดเงียบทั้งคน = ด่านไม่ทำงานเลย
+  //   เคสจริง: Users มี 18 บัญชี role 3 Active ที่ทั้ง 'ชื่อ - สกุล' และ 'รหัสเซลล์' ว่าง (เครื่อง handheld)
+  if (!me.ok) return true;
+  const bn = _debtNormSm(inv && inv.salesman);
+  const bc = String((inv && inv.salesmanCode) || '').trim().toUpperCase();
+  if (_debtIsNoOwner(bn) && !bc) return true;       // บิลไม่ระบุเจ้าของ → นับเป็นของเรา (ไม่ปล่อยผ่านเงียบ)
+  if (_debtIsNoOwner(bn)) return true;              // v8.431: 'ขายเอง'/'ลูกค้าหน้าร้าน' = ไม่ใช่คน → ไม่ยกให้ใคร แต่ต้องยังบล็อก
+  if (bn && me.name && bn === me.name) return true; // ชื่อตรง (ครอบ ROO เพราะตัดวงเล็บแล้ว)
+  if (bc && me.code && bc === me.code) return true; // รหัสตรงเป๊ะ
+  return false;
+}
+window._debtBillIsMine = _debtBillIsMine;
+function _debtOtherOwners(s) {
+  const names = {};
+  (((s && s.debtInvoices) || [])).forEach(function (inv) {
+    if (Number(inv.age || 0) > Number(inv.terms || 0) && !_debtBillIsMine(inv)) {
+      const n = String((inv && inv.salesman) || '').replace(/\([^)]*\)/g, '').trim();
+      if (n) names[n] = 1;
+    }
+  });
+  return Object.keys(names);
+}
+window._debtOtherOwners = _debtOtherOwners;
+// v8.430 (Surat 21/7): แยกหนี้ตาม "เจ้าของบิล" — เซลจะได้รู้ว่าต้องไปตามใครเก็บ ไม่ต้องเดา
+//   รวมชื่อ ROO เข้ากับชื่อปกติ (ตัดวงเล็บแล้ว) → จารุพัฒน์ + จารุพัฒน์(ROO) = ก้อนเดียว
+function _debtOwnerSplit(s) {
+  const map = {};
+  (((s && s.debtInvoices) || [])).forEach(function (inv) {
+    const mine = _debtBillIsMine(inv);
+    const raw = String((inv && inv.salesman) || '').replace(/\([^)]*\)/g, '').trim();
+    const key = mine ? ' me' : (raw || '(ไม่ระบุ)');
+    if (!map[key]) map[key] = { name: mine ? 'ของคุณ' : (raw || '(ไม่ระบุ)'), mine: mine, amt: 0, bills: 0, overdue: 0 };
+    map[key].amt += Number(inv.amount) || 0;
+    map[key].bills++;
+    if (Number(inv.age || 0) > Number(inv.terms || 0)) map[key].overdue++;
+  });
+  return Object.keys(map).map(function (k) { return map[k]; })
+    .sort(function (a, b) { return (b.mine - a.mine) || (b.amt - a.amt); });
+}
+window._debtOwnerSplit = _debtOwnerSplit;
+// v8.429: นับเฉพาะบิลเกินเทอม "ของเซลคนนี้" (ของคนอื่นไม่บล็อกแล้ว)
+function _debtOverdueBills(s) { return (((s && s.debtInvoices) || [])).filter(inv => Number(inv.age || 0) > Number(inv.terms || 0) && _debtBillIsMine(inv)); }
+// v8.400: เกณฑ์ 2 — ยอดค้างรวมเกินวงเงิน (วงเงิน 0/ว่าง = ไม่เช็ค)
+// ⚠️ v8.429: ข้อนี้ "ไม่" กรองตามเซล และห้ามกรอง — วงเงินผูกกับ "ร้าน" ไม่ใช่กับเซล
+//   ร้านเดียวมีวงเงินก้อนเดียว ใครขายก็กินก้อนเดียวกัน · ถ้ากรองตามเซลจะเปิดช่องให้
+//   ร้านที่ค้างเกินวงเงินรับของเพิ่มได้เรื่อยๆ แค่สลับคนไปขาย (เคสจริงมีร้านค้าง ฿1.3 ล้าน 2 เซล)
+function _debtOverLimit(s) { const lim = Number((s && s.creditLimit) || 0); return lim > 0 && Number((s && s.debt) || 0) > lim; }
 window._DEBT_MAX_UNPAID_BILLS = 3;   // v8.402: เกณฑ์ 3 — บิลค้างยังไม่จ่าย "เกิน" จำนวนนี้ (เกิน 3 = ตั้งแต่ใบที่ 4 ขึ้นไป) → ต้องให้ซุปอนุมัติ
-function _debtUnpaidCount(s) { return ((s && s.debtInvoices) || []).length; }   // v8.402: จำนวนบิลค้างยังไม่จ่ายทั้งหมด (D-MAN กรองแล้ว = ยังค้างจริง)
+// v8.402: จำนวนบิลค้างยังไม่จ่าย (D-MAN กรองแล้ว = ยังค้างจริง)
+// v8.429: นับเฉพาะของเซลคนนี้ — ร้านที่หลายเซลขาย บิลของคนอื่นไม่ทำให้เราติดเกณฑ์
+function _debtUnpaidCount(s) { return ((s && s.debtInvoices) || []).filter(_debtBillIsMine).length; }
 function _debtManyUnpaid(s) { return _debtUnpaidCount(s) > (Number(window._DEBT_MAX_UNPAID_BILLS) || 3); }   // v8.402: เกณฑ์ 3 — ค้างสะสมหลายใบ (แม้รายใบยังไม่เกินเทอม)
-function _debtIsOverCredit(s) { return _debtOverdueBills(s).length > 0 || _debtOverLimit(s) || _debtManyUnpaid(s); }   // v8.402: บิลเกินเทอม OR เกินวงเงิน OR ค้างเกิน 3 ใบ (v8.400 มีแค่ 2 ข้อแรก)
+// v8.402: บิลเกินเทอม OR เกินวงเงิน OR ค้างเกิน 3 ใบ (v8.400 มีแค่ 2 ข้อแรก)
+// v8.432 (Surat 21/7): ยอดค้างสุทธิ ≤ 0 = ไม่ต้องอนุมัติ
+//   ร้านที่ใบลดหนี้ (CN) มากกว่าหนี้ = บริษัทติดค้างร้าน ไม่ใช่ร้านติดหนี้เรา → ไม่มีเหตุต้องบล็อก
+//   เดิมยังบล็อกเพราะเกณฑ์ 1 ดูรายบิล ไม่ได้ดูยอดสุทธิ · ซ้ำร้ายร้านพวกนี้ถูกกรองออกจากจอหนี้
+//   (_filterShopDebtForRole ตัด debt<=0 ทิ้ง) → เซลโดนบล็อกโดยไม่มีข้อมูลอะไรให้ดูเลย · เจอ 107 ร้าน
+function _debtIsOverCredit(s) {
+  if (Number((s && s.debt) || 0) <= 0) return false;
+  return _debtOverdueBills(s).length > 0 || _debtOverLimit(s) || _debtManyUnpaid(s);
+}
 // v8.402 (audit): ด่านขายเชื่อต้องดัก "การขาย" ด้วย ไม่ใช่แค่เช็คอิน — เดิมกด "ไม่ซื้อ" ให้ร้าน checkedout แล้วเปิดออเดอร์ขายได้ ข้ามด่านสนิท
 //   คืน true = ต้องบล็อกการขายเชื่อ (role 3-4 + ติดเกณฑ์ + ยังไม่อนุมัติวันนี้) · openGate=true → เปิดจอขออนุมัติให้เลย · ใช้กับ goOrder/confirmOrder/_openHistProduct (CN=ลดหนี้ ไม่บล็อก)
 function _debtBlockSell(shopId, openGate) {
@@ -7729,7 +7875,15 @@ function _debtBlockSell(shopId, openGate) {
 }
 window._debtBlockSell = _debtBlockSell;
 function _debtRoleGated() { const r = Number((currentUser && currentUser.role) || (typeof SALESMAN !== 'undefined' && SALESMAN.level) || 0); return r === 3 || r === 4; }   // เฉพาะเซล Role 3-4 · Role 5+ = อนุมัติเอง (ข้าม)
-function _mySmCode() { return String((typeof SALESMAN !== 'undefined' && SALESMAN.code) || (currentUser && currentUser.code) || '').trim(); }
+// v8.431: currentUser ไม่เคยมี property 'code' (มีแค่ salesmanCode / empId / bplusCode) → fallback เดิมตายสนิท
+//   พอ v8.421 ทำให้ SALESMAN.code = '' เมื่อ Users ไม่มีรหัสเซล → _mySmCode() = '' → ขออนุมัติไม่ได้เลย
+//   เคสจริง: Users มี 38 คน role 3-4 Active ที่ 'รหัสเซลล์' ว่าง · เจอร้านเกินวงเงิน = ทางตัน
+//   ❌ ห้าม fallback ไป empId (กฎ v8.421 — รหัสพนักงานห้ามไหลลงช่องรหัสเซล) → ใช้ email เป็นกุญแจสำรองแทน
+function _mySmCode() { return String((typeof SALESMAN !== 'undefined' && SALESMAN.code) || (currentUser && currentUser.salesmanCode) || '').trim(); }
+function _myApprKeyId() {   // กุญแจสำหรับ DebtApproval — ไม่มีรหัสเซล ให้ใช้อีเมลแทน (ดีกว่าส่งค่าว่างแล้วพัง)
+  return _mySmCode() || String((currentUser && currentUser.email) || (typeof SALESMAN !== 'undefined' && SALESMAN.email) || '').trim();
+}
+window._myApprKeyId = _myApprKeyId;
 function _debtApprKey(shopCode, smCode) { return String(shopCode || '').trim() + '|' + String(smCode || '').trim(); }
 function _debtMaxOver(s) { const o = _debtOverdueBills(s); return o.length ? Math.max.apply(null, o.map(i => Math.max(0, Number(i.age || 0) - Number(i.terms || 0)))) : 0; }
 function _buildDebtApprMap(rows) {
@@ -7742,7 +7896,7 @@ function _buildDebtApprMap(rows) {
   window._debtApprRows = map;
 }
 function _debtApprStatusFor(shopId) {
-  const r = (window._debtApprRows || {})[_debtApprKey(shopId, _mySmCode())];
+  const r = (window._debtApprRows || {})[_debtApprKey(shopId, _myApprKeyId())];   // v8.431: ใช้กุญแจเดียวกับตอนส่งขอ
   if (!r) return null;
   return { reqId: String(r['reqId'] || ''), status: String(r['สถานะ'] || '').trim(), reason: String(r['เหตุผล'] || ''), approver: String(r['ผู้อนุมัติ'] || ''), rejectReason: String(r['เหตุผลปฏิเสธ'] || ''), exp: _debtVday(r['วันหมดอายุ']) };   // v8.410: + วันหมดอายุ (อนุมัติอยู่ได้ 3 วัน)
 }
@@ -7825,6 +7979,12 @@ window.showDebtGateModal = function (shopId) {
   const countBanner = (typeof _debtManyUnpaid === 'function' && _debtManyUnpaid(s))
     ? '<div style="padding:8px 16px;background:#fef2f2;border-bottom:1px solid #fecaca;font-size:11.5px;font-weight:800;color:#DC2626;text-align:center">📑 มีบิลค้างยังไม่จ่าย ' + nTotal + ' ใบ (เกินเกณฑ์ ' + (Number(window._DEBT_MAX_UNPAID_BILLS) || 3) + ' ใบ)</div>'
     : '';
+  // v8.429: บอกให้ชัดว่ามีบิลเกินกำหนดของ "เซลคนอื่น" อยู่ด้วย — ไม่ได้ทำให้ติดเกณฑ์แล้ว
+  //   แต่หัวหน้าควรเห็น จะได้รู้ภาพรวมหนี้ทั้งร้าน ไม่ใช่เห็นแค่ส่วนของเซลคนนี้
+  const _others = (typeof _debtOtherOwners === 'function') ? _debtOtherOwners(s) : [];
+  const otherBanner = _others.length
+    ? '<div style="padding:8px 16px;background:#f8fafc;border-bottom:1px solid #e2e8f0;font-size:11px;color:#475569;text-align:center">ℹ️ ร้านนี้ยังมีบิลเกินกำหนดของเซลคนอื่นด้วย: <b>' + escapeHtml(_others.join(' · ')) + '</b> (ไม่นับเป็นเกณฑ์ของคุณ)</div>'
+    : '';
   const stat = '<div style="padding:14px 16px;background:#fef2f2;border-bottom:1px solid #fecaca;display:grid;grid-template-columns:repeat(3,1fr);gap:8px">'
     + '<div style="background:#fff;border:1px solid #fecaca;border-radius:8px;padding:8px;text-align:center"><div style="font-size:10px;color:#991B1B;font-weight:700">ยอดค้าง</div><div style="font-size:15px;font-weight:900;color:#DC2626">฿' + debt.toLocaleString() + '</div></div>'
     + '<div style="background:#fff;border:1px solid #fecaca;border-radius:8px;padding:8px;text-align:center"><div style="font-size:10px;color:#991B1B;font-weight:700">เกินสูงสุด</div><div style="font-size:15px;font-weight:900;color:#DC2626">' + maxOver + '<span style="font-size:10px"> ว.</span></div></div>'
@@ -7852,7 +8012,7 @@ window.showDebtGateModal = function (shopId) {
       + '<button id="debtReqBtn" class="btn btn-primary btn-block" style="margin-top:12px" onclick="requestDebtApproval(\'' + escapeAttr(shopId) + '\')">📨 ขออนุมัติขายจากหัวหน้า</button></div>';
   }
   mc.innerHTML = '<button type="button" class="modal-close-x" onclick="closeModal()">✕</button>'
-    + '<div class="modal-head" style="background:' + headBg + ';color:#fff"><div class="modal-head-info"><div class="modal-title" style="color:#fff">' + headTitle + '</div><div class="modal-sub" style="color:rgba(255,255,255,.92)">' + escapeHtml(s.name || '') + '</div></div></div>' + stat + limBanner + countBanner + body;
+    + '<div class="modal-head" style="background:' + headBg + ';color:#fff"><div class="modal-head-info"><div class="modal-title" style="color:#fff">' + headTitle + '</div><div class="modal-sub" style="color:rgba(255,255,255,.92)">' + escapeHtml(s.name || '') + '</div></div></div>' + stat + limBanner + countBanner + otherBanner + body;
   modal.classList.add('active'); document.body.style.overflow = 'hidden';
 };
 window.requestDebtApproval = async function (shopId) {
@@ -7863,12 +8023,12 @@ window.requestDebtApproval = async function (shopId) {
   try {
     const res = await postToAppsScript({
       action: 'appendDebtApproval', shopCode: s.id, shopName: s.name || '', wh: String((typeof _resolveMyWarehouse === 'function' ? _resolveMyWarehouse() : '') || s.debtWarehouse || ''),   // v8.325: คลัง = ของเซล (ให้ตรง scope หัวหน้า Role 5 · เดิม debtWarehouse อาจคนละ format)
-      smCode: _mySmCode(), smName: String((typeof SALESMAN !== 'undefined' && SALESMAN.name) || (currentUser && currentUser.name) || ''), email: String((currentUser && currentUser.email) || ''),
+      smCode: _myApprKeyId(), smName: String((typeof SALESMAN !== 'undefined' && SALESMAN.name) || (currentUser && currentUser.name) || ''), email: String((currentUser && currentUser.email) || ''),
       debtAmount: String(Math.round(Number(s.debt || 0))), overdueDays: String(_debtMaxOver(s)), overdueBills: String((typeof _debtUnpaidCount === 'function') ? _debtUnpaidCount(s) : _debtOverdueBills(s).length), reason: reason   // v8.402: ส่ง "บิลค้างรวม" (เกณฑ์ 3 อาจติดโดยไม่มีบิลเกินเทอม → เดิมส่ง overdue=0 หัวหน้างง)
     });
     if (res && res.ok) {
-      const key = _debtApprKey(shopId, _mySmCode());
-      (window._debtApprRows = window._debtApprRows || {})[key] = { 'reqId': res.reqId, 'สถานะ': res.status || 'รอ', 'เหตุผล': reason, 'รหัสร้าน': s.id, 'รหัสเซลล์': _mySmCode(), 'วันหมดอายุ': (function(){ var d=new Date(); d.setDate(d.getDate()+2); return d.getFullYear()+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+String(d.getDate()).padStart(2,'0'); })() };
+      const key = _debtApprKey(shopId, _myApprKeyId());
+      (window._debtApprRows = window._debtApprRows || {})[key] = { 'reqId': res.reqId, 'สถานะ': res.status || 'รอ', 'เหตุผล': reason, 'รหัสร้าน': s.id, 'รหัสเซลล์': _myApprKeyId(), 'วันหมดอายุ': _debtTodayISO(2) };   // v8.432: เวลาไทยเสมอ (เดิมใช้เวลาเครื่อง)
       showToast('📨 ส่งคำขอแล้ว — รอหัวหน้าอนุมัติ', 'success'); showDebtGateModal(shopId); _loadDebtApprovals(true);
     } else { showToast('ส่งไม่สำเร็จ: ' + ((res && res.error) || '?'), 'error'); if (btn) { btn.disabled = false; btn.textContent = '📨 ขออนุมัติขายจากหัวหน้า'; } }
   } catch (e) { showToast('ส่งไม่สำเร็จ (เน็ตขัดข้อง)', 'error'); if (btn) { btn.disabled = false; btn.textContent = '📨 ขออนุมัติขายจากหัวหน้า'; } }
@@ -7930,7 +8090,9 @@ function _debtBillsHtml(shopCode) {
 }
 function _debtApprRowHtml(r) {
   const shop = escapeHtml(String(r['ชื่อร้าน'] || r['รหัสร้าน'] || '')), sm = escapeHtml(String(r['ชื่อเซล'] || r['รหัสเซลล์'] || ''));
-  const debt = Math.round(Number(String(r['ยอดค้าง'] || '').replace(/[^0-9.]/g, '')) || 0);
+  // v8.431: เดิม strip เครื่องหมายลบทิ้ง → ร้านที่ CN มากกว่าหนี้ (ยอดค้าง '-43') โชว์เป็น "฿43" แดง
+  //   หัวหน้าเห็นเหมือนร้านเป็นหนี้ ทั้งที่บริษัทติดค้างร้าน · ถ้าเป็น -250,000 ยิ่งตัดสินใจผิดหนัก
+  const debt = Math.round(numv(r['ยอดค้าง']) || 0);
   const over = escapeHtml(String(r['เกินกำหนดสูงสุด(วัน)'] || '')), nb = escapeHtml(String(r['บิลเกิน(จำนวน)'] || ''));
   const reason = escapeHtml(String(r['เหตุผล'] || '—')), reqId = escapeAttr(String(r['reqId'] || ''));
   // v8.404: สลิปชำระที่เซลส่งผ่าน debt dashboard (match รหัสร้าน) — โชว์ให้ซุปเห็นก่อนตัดสิน
@@ -7973,7 +8135,7 @@ window.decideDebtApproval = async function (reqId, decision) {
   let rejectReason = '';
   if (decision === 'reject') { rejectReason = (prompt('เหตุผลที่ไม่อนุมัติ (เซลจะเห็น):') || '').trim(); if (!rejectReason) return; }
   try {
-    const res = await postToAppsScript({ action: 'updateDebtApprovalStatus', reqId: reqId, decision: decision, approverName: String((currentUser && currentUser.name) || ''), approverCode: String((currentUser && currentUser.code) || ''), rejectReason: rejectReason });
+    const res = await postToAppsScript({ action: 'updateDebtApprovalStatus', reqId: reqId, decision: decision, approverName: String((currentUser && currentUser.name) || ''), approverCode: String((currentUser && (currentUser.salesmanCode || currentUser.empId)) || ''), rejectReason: rejectReason });
     if (res && res.ok) { showToast(decision === 'approve' ? '✅ อนุมัติแล้ว' : '❌ บันทึกไม่อนุมัติแล้ว', 'success'); await _loadDebtApprovals(true); _debtApprRefreshView(); }
     else if (res && res.alreadyDecided) { showToast('รายการนี้ถูกตัดสินไปแล้ว', 'info'); await _loadDebtApprovals(true); _debtApprRefreshView(); }
     else showToast('ไม่สำเร็จ: ' + ((res && res.error) || '?'), 'error');
@@ -10660,6 +10822,12 @@ function matchesGroup(product, cfg) {
 // ═══════════════════════════════════════════════════════════
 // v6.5.22: postToAppsScript with auto-retry (3 attempts, exponential backoff)
 // Failed writes go to writeQueue so nothing is lost
+// v6.5.175: appendNoSale removed — visit row carries เหตุผลที่ไม่ซื้อ
+// v8.359: + appendCustomer/appendProposal — เดิมไม่อยู่ในลิสต์ = ยิงไม่ผ่านแล้ว throw ทิ้งเลย ไม่มีคิว ไม่มี auto-resend
+// v8.426: ยกออกมาเป็นฟังก์ชัน — ใช้ทั้งตอนเช็ค ok:false และตอนตัดสินใจเข้าคิว
+const _QUEUEABLE_ACTIONS = ['appendOrder','appendOrderBatch','appendVisit','appendCN','appendCustomer','appendProposal'];
+function queueableAction(a) { return _QUEUEABLE_ACTIONS.indexOf(String(a || '')) >= 0; }
+
 async function postToAppsScript(payload, _retries = 3) {
   if (!CONFIG.appsScriptUrl) {
     console.log('[AppsScript STUB]', payload);
@@ -10682,6 +10850,15 @@ async function postToAppsScript(payload, _retries = 3) {
       } finally { clearTimeout(_to); }
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
+      // v8.426 (Surat 21/7): GAS ตอบ HTTP 200 พร้อม ok:false ได้ (lock timeout ตอนหลายเซลกดพร้อมกัน /
+      //   แท็บหาย / error ที่ถูก catch รวม) — เดิม return ออกไปเลย ไม่ retry ไม่เข้าคิว
+      //   คนเรียกส่วนใหญ่ (pushVisitToSheet / _submitCN เดิม) ไม่เคยดูค่าที่คืน → แถวหายถาวร เงียบสนิท
+      //   ตอนนี้โยนเป็น error เพื่อให้เข้าลูป retry + คิวเหมือนเน็ตล่ม
+      //   ⚠️ ปลอดภัยเพราะทุก action ที่เข้าคิวมีคีย์กันซ้ำครบแล้ว:
+      //      order=lineId · visit=visitId · customer=รหัสร้านชั่วคราว · CN=cnLineId · proposal=proposalId (Code.gs v8.139)
+      if (data && data.ok === false && queueableAction(payload.action)) {
+        throw new Error('หลังบ้านตอบ ok:false: ' + String(data.error || 'unknown').slice(0, 120));
+      }
       return data; // return regardless of data.ok — let caller decide
     } catch (e) {
       lastErr = e;
@@ -10693,8 +10870,7 @@ async function postToAppsScript(payload, _retries = 3) {
   // v8.359: + appendCustomer/appendProposal — เดิมไม่อยู่ในลิสต์ = ยิงไม่ผ่านแล้ว throw ทิ้งเลย ไม่มีคิว ไม่มี auto-resend
   //   → เปิดร้านใหม่/เสนอสินค้า หายถาวร (ปลอดภัยที่จะเข้าคิวแล้ว เพราะ v8.359 ย่อรูปเหลือ ~150KB · ดิบ 6.7MB จะทำ localStorage เต็ม)
   //   ติดธง _queued บน error → caller รู้ว่าข้อมูลปลอดภัยแล้วหรือหายจริง (ห้ามเดาเอง)
-  const queueable = ['appendOrder','appendOrderBatch','appendVisit','appendCN','appendCustomer','appendProposal'];
-  if (queueable.includes(payload.action)) {
+  if (queueableAction(payload.action)) {
     const _q = writeQueue.add(payload);
     if (lastErr) lastErr._queued = _q;
   }
@@ -10705,7 +10881,24 @@ async function postToAppsScript(payload, _retries = 3) {
 // v6.5.22: Ensures zero data loss even when Apps Script is cold/overloaded
 const writeQueue = {
   KEY: 'rsa_write_queue',
-  get()      { try { return JSON.parse(localStorage.getItem(this.KEY) || '[]'); } catch { return []; } },
+  // v8.427 (Surat 21/7): คิวพัง ห้ามคืน [] เงียบ — เดิม catch {} แล้ว return [] ทันที
+  //   blob เสียหาย (เขียนไม่จบตอน quota เต็ม / แท็บอื่นเขียนชน) → get() ว่าง → add() ครั้งถัดไป save() ทับถาวร
+  //   = ของค้างทั้งคิวหายโดยไม่มีใครรู้ว่าเคยมี · ตอนนี้: สำรอง blob ไว้กู้ + เตือน + ไม่ทับของเดิมทิ้งเงียบ
+  get() {
+    const raw = localStorage.getItem(this.KEY);
+    if (!raw) return [];
+    try {
+      const v = JSON.parse(raw);
+      return Array.isArray(v) ? v : [];
+    } catch (e) {
+      try {
+        localStorage.setItem(this.KEY + '_broken_' + Date.now().toString(36), String(raw).slice(0, 400000));
+        console.error('[WriteQueue] คิวเสียหาย — สำรอง blob ไว้แล้ว:', e && e.message);
+      } catch (e2) {}
+      try { showToast('⚠️ ข้อมูลค้างส่งในเครื่องเสียหาย — เก็บสำรองไว้แล้ว แจ้งแอดมินด่วน', 'error'); } catch (e3) {}
+      return [];
+    }
+  },
   // v8.359: คืน true/false — เดิมกลืน error เงียบ (localStorage เต็ม quota = ของหาย แต่ยังขึ้น toast "บันทึกไว้แล้ว" = ✅ ปลอมอีกชั้น)
   save(q)    { try { localStorage.setItem(this.KEY, JSON.stringify(q)); return true; } catch (e) { console.error('[WriteQueue] save failed:', e && e.message); return false; } },
   count()    { return this.get().length; },
@@ -10713,7 +10906,9 @@ const writeQueue = {
   // v8.359: คืน true = เข้าคิวจริง (ข้อมูลปลอดภัย จะ resend เอง) · false = เข้าคิวไม่ได้ (caller ต้องบอกเซลตามจริง ห้ามขึ้น ✅)
   add(payload) {
     const q = this.get();
-    q.push({ id: Date.now().toString(36), payload, attempts: 0, ts: Date.now() });
+    // v8.425: id ต้องไม่ซ้ำจริง — เดิม Date.now().toString(36) เฉยๆ สองชิ้นในมิลลิวินาทีเดียวกัน = id ซ้ำ
+    //   flush รุ่นใหม่ลบของที่สำเร็จ "ตาม id" → id ซ้ำ = ลบผิดตัว ของที่ยังไม่ส่งหายไปด้วย
+    q.push({ id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8), payload, attempts: 0, ts: Date.now() });
     const okSave = this.save(q);
     console.warn('[WriteQueue] Queued:', payload.action, '— queue size:', q.length, '— saved:', okSave);
     _updateQueueBadge();
@@ -10721,35 +10916,113 @@ const writeQueue = {
     return okSave;
   },
 
+  // v8.425 (Surat 21/7): เขียนใหม่ทั้งฟังก์ชัน — เดิมมี 4 รูรั่วซ้อนกัน ทำให้ของ "หายทั้งที่ขึ้น ✅"
+  //   (1) อ่านคิวต้นรอบ (snapshot) แล้วจบรอบ save(failed) ทับทั้งก้อน
+  //       → ของที่ add() เข้ามา "ระหว่าง" flush โดนลบทิ้งทันที (เน็ตช้า flush 40 วิ = ช่องโหว่ 40 วิ)
+  //       นี่คือคำอธิบายเคสจริง 21/7 ที่ร้านหายพร้อม toast "✅ ส่งสำเร็จทั้งหมด"
+  //   (2) ไม่มี in-flight guard ทั้งที่ถูกเรียกจาก 7 จุด (timer/online/visibility/ปุ่ม) → flush ซ้อนกัน ส่งซ้ำ + save ทับกันเอง
+  //   (3) fetch ไม่มี timeout (postToAppsScript มี 30 วิ) → ค้างยาว ยิ่งเปิดช่องให้ (1)(2)
+  //   (4) ไม่เช็คค่าที่ save() คืน → localStorage เต็ม = คิวไม่ถูกอัพเดท ส่งซ้ำรอบหน้าเงียบๆ
+  //   ตอนนี้: guard + timeout 30 วิ + ลบ "เฉพาะ id ที่สำเร็จ" จากคิวสด (merge) + เช็คผล save
   async flush() {
     if (!CONFIG.appsScriptUrl) return;
-    let q = this.get();
-    if (!q.length) return;
-    console.log('[WriteQueue] Flushing', q.length, 'items');
-    const failed = [];
-    for (const item of q) {
-      try {
-        const res = await fetch(CONFIG.appsScriptUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify(item.payload),
-        });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json().catch(() => null);   // v8.203: เช็ค data.ok — เดิมดูแค่ HTTP 200 → GAS error (ok:false) ถูกลบจาก queue เหมือนสำเร็จ → ออเดอร์หาย
-        if (!data || data.ok === false) throw new Error('app ok:false: ' + ((data && data.error) || 'unknown'));
-        console.log('[WriteQueue] ✓ Flushed:', item.id, item.payload.action);
-      } catch (e) {
-        item.attempts = (item.attempts || 0) + 1;
-        if (item.attempts < 10) failed.push(item); // keep up to 10 attempts (~hours)
-        console.warn('[WriteQueue] ✗ Still failed:', item.id, e.message);
+    if (this._inFlight) { console.log('[WriteQueue] flush ซ้อน — ข้ามรอบนี้'); return; }
+    this._inFlight = true;
+    try {
+      // v8.427: ส่ง "ร้านใหม่" ก่อนเสมอ — ออเดอร์ที่คีย์ให้ร้านนั้นอ้างรหัส NEW-... อยู่
+      //   ถ้าแถวลูกค้าไปไม่ถึงชีทก่อน ชีท Order จะมีรหัสร้านที่หาไม่เจอใน Customer
+      const q = this.get().slice().sort(function (a, b) {
+        const pa = (a.payload && a.payload.action === 'appendCustomer') ? 0 : 1;
+        const pb = (b.payload && b.payload.action === 'appendCustomer') ? 0 : 1;
+        return pa - pb;
+      });
+      if (!q.length) return;
+      console.log('[WriteQueue] Flushing', q.length, 'items');
+      const doneIds = {}, errById = {}, doneShops = [], triedIds = {};
+      const _now = Date.now();
+      for (const item of q) {
+        // v8.426: backoff — v8.424 เก็บของค้างตลอดกาลแล้ว ถ้ายิงทุก 30 วิไม่หยุด
+        //   ใบที่พังถาวร (มีรูป ~200KB) = 2,880 ครั้ง/วัน ≈ 500MB เน็ตเซล + เผาโควต้า GAS
+        //   พลาด n ครั้ง → เว้น min(n, 10) นาที ก่อนลองใหม่ (เพดาน 10 นาที ยังลองเรื่อยๆ ไม่ยอมแพ้)
+        const _tries = Number(item.attempts) || 0;
+        if (_tries > 0) {
+          const _waitMs = Math.min(_tries, 10) * 60000;
+          const _last = Number(item.lastTry) || 0;
+          if (_last && (_now - _last) < _waitMs) continue;   // ยังไม่ถึงรอบ — ข้ามไว้ก่อน (ไม่ถือว่าสำเร็จ ไม่ถือว่าพลาด)
+        }
+        triedIds[item.id] = _now;
+        try {
+          const _ctrl = new AbortController();
+          const _to = setTimeout(() => _ctrl.abort(), 30000);
+          let res;
+          try {
+            res = await fetch(CONFIG.appsScriptUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+              body: JSON.stringify(item.payload),
+              signal: _ctrl.signal,
+            });
+          } finally { clearTimeout(_to); }
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json().catch(() => null);   // v8.203: เช็ค data.ok — เดิมดูแค่ HTTP 200 → GAS error (ok:false) ถูกลบจาก queue เหมือนสำเร็จ → ออเดอร์หาย
+          if (!data || data.ok === false) throw new Error('app ok:false: ' + ((data && data.error) || 'unknown'));
+          doneIds[item.id] = 1;
+          if (item.payload && item.payload.action === 'appendCustomer') doneShops.push(item);
+          console.log('[WriteQueue] ✓ Flushed:', item.id, item.payload.action);
+        } catch (e) {
+          // v8.424: ❌ ห้ามทิ้งของเงียบ — เดิม `if (attempts < 10) failed.push(item)` = ครบ 10 ครั้งลบถาวร
+          //   เก็บไว้ตลอด ให้ retry เรื่อยๆ · ครบ 10 ครั้ง = ขึ้นแถบเตือนค้างจอ ให้คนมาจัดการ ไม่ใช่ลบ
+          errById[item.id] = String((e && e.message) || e).slice(0, 140);
+          console.warn('[WriteQueue] ✗ Still failed:', item.id, item.payload && item.payload.action, e.message);
+        }
       }
+      // merge: อ่านคิว "สด" อีกครั้ง (อาจมีของเข้ามาระหว่าง flush) แล้วเอาออกเฉพาะ id ที่สำเร็จจริง
+      const fresh = this.get();
+      const keep = fresh.filter(function (it) { return !doneIds[it.id]; });
+      keep.forEach(function (it) {
+        if (triedIds[it.id]) it.lastTry = triedIds[it.id];   // v8.426: เก็บเวลาที่ลองล่าสุดลงคิวจริง — backoff ถึงจะทำงาน
+        const err = errById[it.id];
+        if (err) { it.attempts = (Number(it.attempts) || 0) + 1; it.lastErr = err; }
+      });
+      const okSave = this.save(keep);
+      if (!okSave) {
+        console.error('[WriteQueue] save หลัง flush ไม่สำเร็จ (localStorage เต็ม?) — คิวยังเป็นก้อนเดิม');
+        showToast('⚠️ เครื่องเก็บข้อมูลเต็ม — ข้อมูลที่ค้างยังอยู่ แต่เคลียร์รายการไม่ได้ แจ้งแอดมิน', 'error');
+      }
+      _updateQueueBadge();
+
+      // v8.425: ต้อง "คิวว่างจริง" ด้วย — ของที่เพิ่งเข้าคิวระหว่าง flush ยังไม่ได้ส่ง
+      //   ไม่งั้นขึ้น "✅ ส่งสำเร็จทั้งหมด" + ลบ rsa_orders ทั้งที่ยังมีของค้าง (พบตอนเทสรอบนี้)
+      const sentAll = Object.keys(doneIds).length === q.length;
+      if (sentAll && q.length > 0 && keep.length === 0) {
+        showToast('✅ ส่งข้อมูลที่ค้างไว้สำเร็จทั้งหมด', 'success');
+        try { localStorage.removeItem('rsa_orders'); } catch {}
+      }
+      // v8.425: ร้านใหม่ที่คิวส่งขึ้นชีทสำเร็จเอง — ต้องปลดรหัสชั่วคราว + บอกเซล
+      //   ไม่งั้นรหัสค้างอยู่ พอเซลคีย์ร้านถัดไปบนฟอร์มเดิม payload จะถือรหัสเก่า
+      //   → handleAppendCustomer มองว่าซ้ำ คืน {ok:true, dedup:true} ไม่เขียนอะไร → ร้านใบใหม่หายพร้อม ✅
+      //   (ตั้งใจ "ไม่" ล้างฟอร์ม — เซลอาจกำลังพิมพ์ร้านถัดไปทับอยู่ ล้างแล้วงานหาย)
+      doneShops.forEach(function (it) {
+        const row = (it.payload && it.payload.row) || {};
+        const tmp = String(row['รหัสร้านชั่วคราว'] || '').trim();
+        if (tmp && window._newShopTempCode === tmp) window._newShopTempCode = null;
+        showToast('🏪 ร้าน "' + String(row['ชื่อร้านค้า'] || '').slice(0, 30) + '" ขึ้นชีทแล้ว', 'success');
+      });
+      if (typeof _renderQueuedShops === 'function') _renderQueuedShops();
+      if (typeof _renderStuckQueue === 'function') _renderStuckQueue();
+      if (typeof _reportStuckToBackend === 'function') _reportStuckToBackend();   // v8.427: ให้หัวหน้าเห็นของค้าง
+    } finally {
+      this._inFlight = false;
     }
-    this.save(failed);
-    _updateQueueBadge();
-    if (failed.length === 0 && q.length > 0) {
-      showToast('✅ ส่งข้อมูลที่ค้างไว้สำเร็จทั้งหมด', 'success');
-      try { localStorage.removeItem('rsa_orders'); } catch {}
-    }
+  },
+
+  // v8.424: ของที่ส่งไม่ผ่านหลายรอบแล้ว (เดิมถูกลบทิ้งตรงนี้) — ใช้ขึ้นเตือน + ลิสต์ให้กดส่งใหม่
+  stuck(minAttempts) {
+    const n = Number(minAttempts) || 10;
+    return this.get().filter(function (it) { return (Number(it.attempts) || 0) >= n; });
+  },
+  byAction(action) {
+    return this.get().filter(function (it) { return it.payload && it.payload.action === action; });
   },
 };
 
@@ -10768,6 +11041,249 @@ function _updateQueueBadge() {
   badge.textContent = n;
   badge.style.display = n > 0 ? '' : 'none';
 }
+
+// ═══ v8.424 (Surat 21/7): ของค้างในคิว "ต้องเห็นด้วยตา" ไม่ใช่เลขแดงจิ๋วบนปุ่มรีเฟรช ═══
+//   เดิมของที่ส่งไม่ผ่านครบ 10 ครั้งถูกลบทิ้งเงียบ · ตอนนี้เก็บไว้ตลอด → ต้องมีที่ให้คนเห็นและกดส่งใหม่
+//   ⚠️ ไม่แตะ flow ขาย: ออเดอร์/เยี่ยมร้าน/CN ยังส่งทางเดิมทุกอย่าง แค่ "ไม่ถูกลบทิ้ง" + มีที่โชว์เพิ่ม
+const _QUEUE_LABEL = { appendCustomer: '🏪 ร้านใหม่', appendOrder: '🛒 ออเดอร์', appendOrderBatch: '🛒 ออเดอร์',
+                       appendVisit: '📍 เยี่ยมร้าน', appendCN: '📋 ใบลดหนี้', appendProposal: '💡 เสนอสินค้า' };
+// v8.427: ร้านนี้ยังค้างคิวอยู่ไหม (แถวลูกค้ายังไม่ถึงชีท) — ใช้ติดป้ายบนการ์ดร้าน + เร่ง flush ก่อนคีย์ออเดอร์
+function _shopPendingInQueue(code) {
+  const c = String(code || '').trim();
+  if (!c || c.indexOf('NEW-') !== 0) return false;   // เฉพาะร้านที่ยังใช้รหัสชั่วคราว
+  try {
+    return writeQueue.byAction('appendCustomer').some(function (it) {
+      const r = (it.payload && it.payload.row) || {};
+      return String(r['รหัสร้านชั่วคราว'] || '').trim() === c;
+    });
+  } catch (e) { return false; }
+}
+window._shopPendingInQueue = _shopPendingInQueue;
+
+function _queueItemName(it) {
+  const p = (it && it.payload) || {};
+  const r = p.row || (Array.isArray(p.rows) ? p.rows[0] : null) || {};
+  return String(r['ชื่อร้านค้า'] || r['ชื่อร้าน'] || p.orderId || '').trim();
+}
+function _queueItemWhen(it) {
+  const t = Number(it && it.ts) || 0;
+  if (!t) return '';
+  const d = new Date(t);
+  return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0')
+    + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+window._retryQueueNow = async function (btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ กำลังส่ง…'; }
+  try { await writeQueue.flush(); } catch (e) {}
+  if (btn) { btn.disabled = false; btn.textContent = '🔄 ส่งใหม่ทั้งหมด'; }
+  _renderQueuedShops(); _renderStuckQueue(); _updateQueueBadge();
+  const left = writeQueue.count();
+  showToast(left ? ('ยังส่งไม่ได้ ' + left + ' รายการ — ลองใหม่เมื่อเน็ตดีขึ้น') : '✅ ส่งครบแล้ว', left ? 'warning' : 'success');
+};
+
+// การ์ด "ร้านที่ยังไม่ถึงชีท" ในจอเปิดร้านใหม่
+function _renderQueuedShops() {
+  const box = document.getElementById('queuedShopsBox');
+  if (!box) return;
+  const list = writeQueue.byAction('appendCustomer');
+  if (!list.length) { box.innerHTML = ''; return; }
+  const rows = list.map(function (it) {
+    const nm = _queueItemName(it) || '(ไม่มีชื่อร้าน)';
+    const tries = Number(it.attempts) || 0;
+    return '<div style="background:var(--card-bg);border:1px solid #f0c674;border-radius:10px;padding:8px 10px;margin-bottom:6px">'
+      + '<div style="font-size:12.5px;font-weight:800;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🏪 ' + escapeHtml(nm) + '</div>'
+      + '<div style="font-size:10.5px;color:var(--muted);margin-top:2px">คีย์เมื่อ ' + escapeHtml(_queueItemWhen(it))
+      + (tries ? ' · ลองส่งแล้ว ' + tries + ' ครั้ง' : '')
+      + (it.lastErr ? ' · ' + escapeHtml(String(it.lastErr).slice(0, 60)) : '') + '</div></div>';
+  }).join('');
+  box.innerHTML = '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:10px 12px;margin-bottom:14px">'
+    + '<div style="font-size:13px;font-weight:900;color:#92400e;margin-bottom:3px">⏳ ร้านที่ยังไม่ถึงชีท (' + list.length + ')</div>'
+    + '<div style="font-size:11px;color:#a16207;margin-bottom:9px">คีย์ไว้แล้วแต่ยังส่งขึ้นชีทไม่สำเร็จ — <b>ข้อมูลยังอยู่ในเครื่อง ไม่หาย</b> กดส่งใหม่ได้เลย</div>'
+    + rows
+    + '<button onclick="_retryQueueNow(this)" style="width:100%;padding:9px;border:none;border-radius:9px;background:#16A34A;color:#fff;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit">🔄 ส่งใหม่ทั้งหมด</button>'
+    + '</div>';
+}
+window._renderQueuedShops = _renderQueuedShops;
+
+// แถบเตือนค้างจอ — ของที่ส่งไม่ผ่าน "หลายรอบแล้ว" (เดิมจุดนี้คือจุดที่โดนลบทิ้ง)
+function _renderStuckQueue() {
+  let bar = document.getElementById('stuckQueueBar');
+  const stuck = (typeof writeQueue !== 'undefined' && writeQueue.stuck) ? writeQueue.stuck(10) : [];
+  if (!stuck.length) { if (bar) bar.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'stuckQueueBar';
+    bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9998;background:#B91C1C;color:#fff;padding:9px 12px;font-size:12px;font-weight:800;display:flex;align-items:center;gap:10px;box-shadow:0 -2px 12px rgba(0,0,0,.25)';
+    document.body.appendChild(bar);
+  }
+  const kinds = {};
+  stuck.forEach(function (it) { const k = _QUEUE_LABEL[it.payload && it.payload.action] || 'ข้อมูล'; kinds[k] = (kinds[k] || 0) + 1; });
+  const detail = Object.keys(kinds).map(function (k) { return k + ' ' + kinds[k]; }).join(' · ');
+  bar.innerHTML = '<span style="flex:1;min-width:0">⚠️ มีข้อมูลค้างส่งไม่ขึ้นชีท ' + stuck.length + ' รายการ (' + escapeHtml(detail) + ') — ยังอยู่ในเครื่อง ไม่หาย</span>'
+    + '<button onclick="_retryQueueNow(this)" style="flex-shrink:0;padding:6px 12px;border:none;border-radius:8px;background:#fff;color:#B91C1C;font-size:11.5px;font-weight:900;cursor:pointer;font-family:inherit">🔄 ส่งใหม่ทั้งหมด</button>';
+}
+window._renderStuckQueue = _renderStuckQueue;
+
+// ═══ v8.427 (Surat 21/7): รายงานของค้างขึ้นหลังบ้าน — หัวหน้าจะได้เห็นโดยไม่ต้องรอเซลเปิดแอป ═══
+//   ยิงเฉพาะของที่ค้าง ≥5 ครั้ง (ไม่ใช่เน็ตกระตุกชั่วคราว) · กันยิงถี่ 10 นาที/ครั้ง
+//   ส่งสำเร็จแล้วยิง cleared=1 ให้ลบแถวออกเอง · ล้มเหลว = เงียบ ห้ามกวนการขาย
+const _STUCK_MIN_TRIES = 5, _STUCK_REPORT_MS = 600000;
+async function _reportStuckToBackend(force) {
+  try {
+    if (!CONFIG.appsScriptUrl) return;
+    const now = Date.now();
+    if (!force && (now - (window._lastStuckReport || 0) < _STUCK_REPORT_MS)) return;
+    const stuck = writeQueue.stuck(_STUCK_MIN_TRIES);
+    const known = (window._reportedStuckIds = window._reportedStuckIds || {});
+    const items = stuck.map(function (it) {
+      known[it.id] = 1;
+      return { itemId: it.id, smCode: SALESMAN.code || '', smName: SALESMAN.name || '', wh: SALESMAN.warehouseId || '',
+               kind: _QUEUE_LABEL[it.payload && it.payload.action] || String((it.payload && it.payload.action) || ''),
+               detail: _queueItemName(it), attempts: String(it.attempts || ''),
+               keyedAt: _queueItemWhen(it), lastErr: String(it.lastErr || '') };
+    });
+    const live = {}; stuck.forEach(function (it) { live[it.id] = 1; });
+
+    // v8.428 (Surat 21/7): + ออเดอร์ที่ "ส่งแล้วแต่ยังไม่ลงชีท" — คนละกองกับคิว
+    //   ใบที่ยิงไปแล้วแต่ verify ไม่เจอในชีท (phantom) จะถูก demote เป็น synced=false แล้ววนส่งซ้ำเอง
+    //   ถ้าวนไม่จบ (GAS ล่มนาน / เน็ตเซลแย่ทั้งวัน) เดิมไม่มีใครเห็นเลยนอกจากเครื่องเซลคนนั้น
+    //   รายงานเฉพาะใบที่ค้างเกิน 30 นาที — กันตีตื่นตอนกดส่งปกติที่ยังไม่ทันเสร็จ
+    try {
+      const OLD_MS = 30 * 60000;
+      ((typeof submittedOrders !== 'undefined' && submittedOrders) || []).forEach(function (o) {
+        if (!o || !o.id || o.synced) return;
+        const t = new Date(String(o.date || '').replace(/\//g, '-') + 'T' + String(o.time || '00:00').replace('.', ':') + ':00').getTime();
+        const ageMs = isNaN(t) ? OLD_MS + 1 : (now - t);
+        if (ageMs < OLD_MS) return;
+        const id = 'ORD:' + o.id;
+        known[id] = 1; live[id] = 1;
+        items.push({ itemId: id, smCode: SALESMAN.code || '', smName: SALESMAN.name || '', wh: SALESMAN.warehouseId || '',
+          kind: '🛒 ออเดอร์ไม่ลงชีท',
+          detail: String(o.shopName || o.shopId || '') + ' · ' + o.id + ' · ' + (o.items ? o.items.length : 0) + ' รายการ · ฿' + Math.round(Number(o.total) || 0).toLocaleString(),
+          attempts: '', keyedAt: String(o.date || '') + ' ' + String(o.time || ''),
+          lastErr: 'ยิงแล้วแต่ยังไม่พบในชีท — ระบบกำลังส่งซ้ำ' });
+      });
+    } catch (e) {}
+    Object.keys(known).forEach(function (id) {
+      if (!live[id]) { items.push({ itemId: id, cleared: 1 }); delete known[id]; }
+    });
+    if (!items.length) return;
+    window._lastStuckReport = now;
+    await fetch(CONFIG.appsScriptUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'reportStuck', items: items }) });
+  } catch (e) { console.warn('[stuck] report ไม่สำเร็จ (ไม่กระทบการขาย):', e && e.message); }
+}
+window._reportStuckToBackend = _reportStuckToBackend;
+
+// ═══ v8.428 (Surat 21/7): เตือนหัวหน้าเชิงรุกบนหน้าแรก — ไม่ต้องเปิดเมนูไปหาเอง ═══
+//   เน้น "ค้างข้ามวัน" เป็นสีแดง (ของวันนี้ = เหลือง ยังพอรอได้) → ไม่มีใบไหนค้างข้ามสัปดาห์โดยไม่มีใครเห็น
+//   โหลดเงียบตอนเปิดแอป (Role ≥5) · โหลดไม่ได้ = ไม่โชว์อะไร ห้ามกวนการขาย
+function _stuckIsOld(r) {
+  const s = String((r && r['แจ้งล่าสุด']) || '').slice(0, 10).replace(/-/g, '/');
+  if (!s) return false;
+  const d = new Date();
+  const today = d.getFullYear() + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0');
+  return s < today;
+}
+function _renderTeamStuckCard() {
+  const slots = document.querySelectorAll('.team-stuck-slot');
+  if (!slots.length) return;
+  const role = Number((currentUser && currentUser.role) || (typeof SALESMAN !== 'undefined' && SALESMAN.level) || 0);
+  const list = (role >= 5) ? (window._teamStuckCache || []) : [];
+  if (!list.length) { slots.forEach(function (el) { el.innerHTML = ''; }); return; }
+  const old = list.filter(_stuckIsOld);
+  const people = {}; list.forEach(function (r) { people[r['ชื่อ-สกุล'] || r['รหัสเซลล์'] || '?'] = 1; });
+  const kinds = {}; list.forEach(function (r) { const k = String(r['ชนิด'] || 'อื่นๆ'); kinds[k] = (kinds[k] || 0) + 1; });
+  const kindTxt = Object.keys(kinds).map(function (k) { return k + ' ' + kinds[k]; }).join(' · ');
+  const red = old.length > 0;
+  const html = '<div onclick="_openTeamStuck(\'wh\')" style="cursor:pointer;background:' + (red ? '#FEF2F2' : '#fffbeb')
+    + ';border:1px solid ' + (red ? '#FCA5A5' : '#fde68a') + ';border-left:4px solid ' + (red ? '#DC2626' : '#F59E0B')
+    + ';border-radius:12px;padding:10px 12px;margin-bottom:10px">'
+    + '<div style="display:flex;align-items:center;gap:8px">'
+      + '<span style="font-size:16px">' + (red ? '🚨' : '⚠️') + '</span>'
+      + '<div style="flex:1;min-width:0">'
+        + '<div style="font-size:13px;font-weight:900;color:' + (red ? '#B91C1C' : '#92400e') + '">'
+          + (red ? ('มีข้อมูลค้างข้ามวัน ' + old.length + ' รายการ') : ('ทีมมีข้อมูลค้างส่ง ' + list.length + ' รายการ')) + '</div>'
+        + '<div style="font-size:11px;color:' + (red ? '#B91C1C' : '#a16207') + ';margin-top:2px">'
+          + escapeHtml(kindTxt) + ' · เซล ' + Object.keys(people).length + ' คน — แตะดูรายละเอียด</div>'
+      + '</div>'
+      + '<span style="font-size:16px;color:var(--muted)">›</span>'
+    + '</div></div>';
+  slots.forEach(function (el) { el.innerHTML = html; });
+}
+window._renderTeamStuckCard = _renderTeamStuckCard;
+
+async function _loadTeamStuck(force) {
+  try {
+    const role = Number((currentUser && currentUser.role) || (typeof SALESMAN !== 'undefined' && SALESMAN.level) || 0);
+    if (role < 5) return;
+    const now = Date.now();
+    if (!force && (now - (window._teamStuckTs || 0) < 600000)) { _renderTeamStuckCard(); return; }
+    window._teamStuckTs = now;
+    const res = await postToAppsScript({ action: 'listStuck', scope: 'wh', warehouse: SALESMAN.warehouseId || '' });
+    window._teamStuckCache = (res && res.ok) ? (res.items || []) : [];
+    _renderTeamStuckCard();
+  } catch (e) { console.warn('[teamStuck] โหลดไม่ได้ (ไม่กระทบการขาย):', e && e.message); }
+}
+window._loadTeamStuck = _loadTeamStuck;
+
+// v8.427: จอหัวหน้า — ข้อมูลค้างส่งของทีม (อ่านจากแท็บ _StuckQueue · Code.gs v8.140)
+function _teamStuckHtml(items, scope, loading) {
+  const list = items || [];
+  const byWho = {};
+  list.forEach(function (r) {
+    const k = (r['ชื่อ-สกุล'] || r['รหัสเซลล์'] || '—') + '|' + (r['คลัง'] || '');
+    (byWho[k] = byWho[k] || []).push(r);
+  });
+  const keys = Object.keys(byWho);
+  const head = '<div style="font-size:11.5px;color:var(--muted);margin-bottom:10px">เซลคีย์ไว้แล้วแต่ยังส่งขึ้นชีทไม่สำเร็จ — <b>ข้อมูลยังอยู่ในเครื่องเซล ไม่หาย</b> ให้ตามเซลเปิดแอปในที่เน็ตดี</div>'
+    + '<div style="display:flex;gap:6px;margin-bottom:10px">'
+      + '<button onclick="_openTeamStuck(\'wh\')" class="btn ' + (scope === 'wh' ? 'btn-primary' : 'btn-outline') + '" style="flex:1;padding:7px;font-size:12px">คลังฉัน</button>'
+      + '<button onclick="_openTeamStuck(\'all\')" class="btn ' + (scope === 'all' ? 'btn-primary' : 'btn-outline') + '" style="flex:1;padding:7px;font-size:12px">ทั้งบริษัท</button>'
+    + '</div>';
+  if (loading) return head + '<div style="text-align:center;padding:24px 8px;color:var(--muted);font-size:13px">⏳ กำลังโหลด…</div>';
+  if (!keys.length) {
+    return head + '<div style="text-align:center;padding:24px 8px;color:var(--muted);font-size:13px">✅ ไม่มีข้อมูลค้างส่ง</div>';
+  }
+  const body = keys.map(function (k) {
+    const rows = byWho[k], nm = k.split('|')[0], wh = k.split('|')[1];
+    return '<div style="background:var(--card-bg);border:1px solid #fde68a;border-radius:10px;padding:9px 11px;margin-bottom:7px">'
+      + '<div style="font-size:12.5px;font-weight:800">👤 ' + escapeHtml(nm) + (wh ? ' <span style="font-weight:600;color:var(--muted)">(' + escapeHtml(wh) + ')</span>' : '') + ' · ค้าง ' + rows.length + ' รายการ</div>'
+      + rows.map(function (r) {
+          return '<div style="font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5">'
+            + escapeHtml(String(r['ชนิด'] || '')) + ' · ' + escapeHtml(String(r['รายละเอียด'] || '—'))
+            + '<br><span style="font-size:10px">คีย์ ' + escapeHtml(String(r['คีย์เมื่อ'] || '-'))
+            + ' · ลองส่ง ' + escapeHtml(String(r['ลองส่งแล้ว'] || '0')) + ' ครั้ง'
+            + ' · แจ้งล่าสุด ' + escapeHtml(String(r['แจ้งล่าสุด'] || '-')) + '</span></div>';
+        }).join('')
+      + '</div>';
+  }).join('');
+  return head + body;
+}
+
+function _openTeamStuckModal(items, scope, loading) {
+  openModal({
+    title: '⚠️ ข้อมูลค้างส่งของทีม',
+    subtitle: loading ? 'กำลังโหลด…' : ((items || []).length + ' รายการ'),
+    body: '<div style="max-height:calc(100dvh - 190px);overflow-y:auto;overscroll-behavior:contain;margin:0 -14px;padding:0 14px 8px">'
+        + _teamStuckHtml(items, scope, loading) + '</div>',
+  });
+}
+
+window._openTeamStuck = async function (scope) {
+  scope = scope || 'wh';
+  _openTeamStuckModal([], scope, true);
+  let items = [];
+  try {
+    const res = await postToAppsScript({ action: 'listStuck', scope: scope, warehouse: SALESMAN.warehouseId || '' });
+    if (res && res.ok) items = res.items || [];
+    else showToast('โหลดไม่สำเร็จ' + ((res && res.error) ? ': ' + res.error : ''), 'error');
+  } catch (e) {
+    showToast('โหลดไม่สำเร็จ — เช็คเน็ตแล้วลองใหม่', 'error');
+  }
+  _openTeamStuckModal(items, scope, false);
+};
 
 async function submitOrderRow(orderRow) { return postToAppsScript({ action:'appendOrder', row: orderRow }); }
 async function submitVisitRow(visit)    { return postToAppsScript({ action:'appendVisit', row: visit });    }
@@ -10904,8 +11420,19 @@ async function _autoVerifyPhantoms() {
   _phantomSweepInFlight = true;
   try {
     const now = Date.now();
+    // v8.426 (Surat 21/7): ข้ามใบที่ "อยู่ในคิวอยู่แล้ว" — เดิมไม่เช็ค (ต่างจาก _autoResendStuck ที่เช็ค)
+    //   GAS ล่มแต่เครื่อง online → sweep ทุก 60 วิ ยิงซ้ำ → postToAppsScript เข้าคิวสำเนาใหม่ทุกครั้ง
+    //   1 ชม. = 60 สำเนาของใบเดิม → localStorage บวม → เซลเปิดร้านใหม่ตอนนั้น "เข้าคิวไม่ได้" เพราะโควต้าเต็ม
+    const _inQ = new Set();
+    try {
+      writeQueue.get().forEach(function (item) {
+        const a = item && item.payload && item.payload.action;
+        if (a === 'appendOrderBatch' && Array.isArray(item.payload.rows)) { item.payload.rows.forEach(function (r) { if (r && r.orderId) _inQ.add(String(r.orderId)); }); }
+        else if (a === 'appendOrder' && item.payload.row && item.payload.row.orderId) _inQ.add(String(item.payload.row.orderId));
+      });
+    } catch (e) {}
     const suspects = (submittedOrders || []).filter(o =>
-      o && o.id && o.synced && !o._sheetConfirmed && !o.isPushing && (now - (o._lastPhantomChk || 0) > 60000)
+      o && o.id && o.synced && !o._sheetConfirmed && !o.isPushing && !_inQ.has(String(o.id)) && (now - (o._lastPhantomChk || 0) > 60000)
     );
     let changed = 0;
     for (const o of suspects) {
@@ -11652,7 +12179,7 @@ window.showOrdersDiag = async function() {
   const cAge  = g(() => { const c = _memCache && _memCache['orders']; return (c && c.ts) ? Math.round((Date.now() - c.ts) / 1000) + 's' : 'ว่าง'; });
   const when  = g(() => new Date().toLocaleString('th-TH', { hour12: false }));
   const lines = [
-    'Rattana Sales · ตรวจสอบข้อมูล · v8.423',
+    'Rattana Sales · ตรวจสอบข้อมูล · v8.434',
     'เวลา: ' + when,
     '──────────────',
     'Role: ' + role + '   คลัง: ' + wh,
@@ -14297,6 +14824,9 @@ function renderHomeDashboard() {
     } else if (dashboardView === 'company') {
       el.innerHTML = renderCompanyDashboard();
     }
+    // v8.428: เติมการ์ดเตือนของค้างของทีมหลัง render (สล็อตถูกสร้างว่างมาทุกครั้ง)
+    if (typeof _renderTeamStuckCard === 'function') _renderTeamStuckCard();
+    if (typeof _loadTeamStuck === 'function') _loadTeamStuck(false);   // มี cache = ไม่ยิงซ้ำ (กันถี่ 10 นาที)
     console.log('[renderHomeDashboard] done — innerHTML length:', el.innerHTML.length);
   } catch (e) {
     console.error('Dashboard render error:', e);
@@ -14373,6 +14903,7 @@ function renderMyDashboard() {
 
   return `
     ${(typeof buildWhatsNewCard === 'function') ? buildWhatsNewCard() : ''}
+    <div class="team-stuck-slot"></div>
     <div id="kpiAckSlot">${(typeof buildPendingApprovalsCard === 'function') ? buildPendingApprovalsCard(_kpiAckScope) : ''}</div>
     ${promoAbnormalBanner}
     ${promoIssuesBanner}
@@ -15516,7 +16047,12 @@ window.buildTransactionsOverviewCard = function(scope) {
   let totalDebt = 0, overdueCount = 0;
   debtShops.forEach(s => {
     totalDebt += s.debt || 0;
+    // v8.431: เซล Role 3-4 นับเฉพาะบิลของตัวเอง — ให้ตรงกับด่านที่กรองตามเซลแล้ว (v8.429)
+    //   เดิมนับของทุกเซล → ชิปขึ้น "12 เกินเครดิต" แต่โดนบล็อกจริง 3 ร้าน = เลขไม่ตรงกับที่เจอ
+    //   หัวหน้า (Role ≥5) ยังนับทั้งร้านเหมือนเดิม เพราะต้องเห็นภาพรวม
+    const _onlyMine = (typeof _debtRoleGated === 'function') && _debtRoleGated();
     (s.debtInvoices || []).forEach(inv => {
+      if (_onlyMine && typeof _debtBillIsMine === 'function' && !_debtBillIsMine(inv)) return;
       if (Math.max(0, (inv.age||0) - (inv.terms||0)) > 0) overdueCount++;
     });
   });
@@ -15940,6 +16476,22 @@ window.openDebtSummaryModal = function() {
     const wh = String(s.debtWarehouse||'').trim();
     const days = s.debtDays || 0;
     const ageCls = days >= 90 ? '#DC2626' : days >= 60 ? '#E89C1B' : days >= 30 ? '#a87800' : '#1e8449';
+    // v8.430 (Surat): บอกว่าบิลไหนของใคร — ร้านที่หลายเซลขาย เซลจะได้รู้ว่าต้องตามใครเก็บ
+    //   โชว์เฉพาะตอนมีเจ้าของมากกว่า 1 คน (ร้านปกติเจ้าของเดียวไม่ต้องรก)
+    let ownerLine = '';
+    try {
+      const _sp = (typeof _debtOwnerSplit === 'function') ? _debtOwnerSplit(s) : [];
+      if (_sp.length > 1) {
+        ownerLine = '<div style="font-size:10.5px;color:var(--muted);margin-top:5px;padding-top:5px;border-top:1px dashed var(--border);line-height:1.6">'
+          + _sp.map(function (o) {
+              return '<span style="display:inline-block;margin-right:9px">'
+                + (o.mine ? '<b style="color:var(--text)">👤 ของคุณ</b>' : '👤 ' + escapeHtml(o.name))
+                + ' ฿' + Math.round(o.amt).toLocaleString() + ' <span style="opacity:.75">(' + o.bills + ' บิล'
+                + (o.overdue ? ' · เกินกำหนด ' + o.overdue : '') + ')</span></span>';
+            }).join('')
+          + '</div>';
+      }
+    } catch (e) {}
     let gateBtn = '';
     if (_gatedRole && typeof _debtIsOverCredit === 'function' && _debtIsOverCredit(s)) {
       const ap = (typeof _debtApprStatusFor === 'function') ? _debtApprStatusFor(s.id) : null;
@@ -15960,6 +16512,7 @@ window.openDebtSummaryModal = function() {
           ${wh?`<span>· 🏭 ${escapeHtml(wh)}</span>`:''}
           ${s.flag?`<span>· 🚩 ${escapeHtml(s.flag)}</span>`:''}
         </div>
+        ${ownerLine}
         ${gateBtn}
       </div>`;
   }).join('');
@@ -16723,6 +17276,7 @@ function renderWarehouseDashboard() {
 
   return `
     ${(typeof buildWhatsNewCard === 'function') ? buildWhatsNewCard() : ''}
+    <div class="team-stuck-slot"></div>
     <div id="kpiAckSlot">${(typeof buildPendingApprovalsCard === 'function') ? buildPendingApprovalsCard('warehouse') : ''}</div>
     ${promoAbnormalBanner}
     ${promoIssuesBanner}
@@ -16835,6 +17389,7 @@ function renderCompanyDashboard() {
 
   return `
     ${(typeof buildWhatsNewCard === 'function') ? buildWhatsNewCard() : ''}
+    <div class="team-stuck-slot"></div>
     <div id="kpiAckSlot">${(typeof buildPendingApprovalsCard === 'function') ? buildPendingApprovalsCard('company') : ''}</div>
     ${promoAbnormalBanner}
     ${promoIssuesBanner}
@@ -17383,6 +17938,11 @@ function _buildShopCardHTML(s) {
     ? `<div class="shc-amount-chip" style="background:rgba(201,168,76,.16);color:#8a6d1f">🔁 รูท ${_rtDays.length} วัน · ${escapeHtml(_rtDays.join(' · '))}</div>`
     : '';
 
+  // v8.427 (Surat): ร้านที่เพิ่งเปิดแต่แถวลูกค้ายังไม่ถึงชีท — ขายได้ตามเดิม แต่ต้องรู้ตัวว่ายังไม่จบ
+  const pendingShopChip = (typeof _shopPendingInQueue === 'function' && _shopPendingInQueue(s.bplusCode))
+    ? `<div class="shc-amount-chip" style="background:#fffbeb;color:#92400e;border:1px solid #fde68a">⏳ ร้านนี้ยังไม่ถึงชีท — ระบบกำลังส่งให้</div>`
+    : '';
+
   return `
     <div class="shop-card-v2 ${cardStateCls}" onclick="goShop('${s.id}')">
       <div class="shc-banner">
@@ -17392,7 +17952,7 @@ function _buildShopCardHTML(s) {
         <div class="shc-name-overlay">${escapeHtml(s.name)}</div>
       </div>
       <div class="shc-body">
-        ${amountChip}${boChip}${multiDayChip}
+        ${amountChip}${boChip}${multiDayChip}${pendingShopChip}
         <div class="shc-addr">📍 <span>${escapeHtml(addrLine)}</span></div>
         <div class="shc-row">${phoneBtn}${mapsBtn}${ciBtn}</div>
         <div class="shc-row">${btnNo}${btnCN}${btnOrder}</div>
@@ -20618,6 +21178,61 @@ function _kpiChipsPeriod(rows, cfg) {
 //   กติกาเหล็ก: ทุกตัวเลขนับเฉพาะ 8:00-17:00 · นอกช่วง = คีย์งานที่บ้าน โชว์ 🏠 เป็นข้อมูล ไม่นับ ไม่ flag
 //   overlay ของตัวเอง (#skcPop) — closeModal() ล้าง #cardModalOverlay ที่การ์ด KPI อยู่ → ใช้ openModal ไม่ได้
 const SKC_WIN_S = 8, SKC_WIN_E = 17;
+
+// ═══ v8.435 (Surat 21/7): "เวลาที่หายทั้งวัน" = 8 ชม. − เวลาที่พิสูจน์ได้ว่าทำงาน ═══
+//   Surat: "ต้องดูว่าไปจากคลังไปร้านแรกหักลบแล้วเท่าไร · แต่ละร้านใช้เวลาเดินทางเท่าไร หักออกไป · และหักพัก 1 ชม"
+//   v8.434 เดิมนับ "เช้า+ระหว่างร้าน+ท้ายวัน" ตรงๆ → เซลที่รูทไกล (คลัง→ร้านแรก 36 กม. = 1 ชม.) โดนนับเป็นหายฟรี
+//   ฐาน = 8:00–17:00 (9 ชม.) − พักเที่ยง 1 ชม. = 8 ชม. · หักพักเที่ยงทุกคน ไม่มีเงื่อนไข
+//   ทำงานจริง = เดินทางเข้างาน (คลัง→ร้านแรก) + อยู่หน้าร้าน + เดินทางระหว่างร้าน
+//   หายทั้งวัน = 8 ชม. − ทำงานจริง   (กินทั้ง "เช้ายังไม่เริ่ม" · "หายระหว่างวัน" · "เลิกก่อนเวลา" ในตัวเดียว)
+//   ⚠️ 2 คอลัมน์ใหม่มาจาก Code.gs v8.141 — วันก่อนหน้านั้นว่าง → fallback ใช้ 'เวลาเดินทาง-นาที' + ติดธง est
+const SKC_LUNCH_MIN = 60;
+function _kpiLostAll(row) {
+  const WORK = (SKC_WIN_E - SKC_WIN_S) * 60 - SKC_LUNCH_MIN;   // 480 นาที = 9 ชม. − พักเที่ยง
+  const fm = _kpiHhmm2min(String((row && row['ร้านแรก-เวลา']) || ''));
+  if (fm == null) return { commute: 0, inStore: 0, travel: 0, worked: 0, total: 0, work: WORK, hasData: false, est: false };
+  const rawC = String((row && row['เดินทางเข้างาน-นาที']) || '').trim();
+  const rawT = String((row && row['เดินทางระหว่างร้าน-นาที']) || '').trim();
+  const commute = _kpiNumv(rawC);
+  const travel = rawT ? _kpiNumv(rawT) : _kpiNumv((row && row['เวลาเดินทาง-นาที']) || 0);
+  const inStore = _kpiNumv((row && row['เวลาในร้านรวม-นาที']) || 0);
+  const worked = Math.min(WORK, commute + inStore + travel);
+  return { commute: commute, inStore: inStore, travel: travel, worked: worked, total: Math.max(0, WORK - worked), work: WORK, hasData: true, est: !rawC };
+}
+window._kpiLostAll = _kpiLostAll;
+
+// v8.435: กล่องสรุป "หายทั้งวัน" — โชว์ตัวหักทีละก้อน บวกกันได้ตรงยอด และเทียบกับ 8 ชม.
+//   arg 2 เก็บ signature เดิมไว้ (ผู้เรียกส่ง gapsOverride มา) — ยอดหายไม่ได้คิดจาก gap แล้ว จึงไม่ใช้
+function _kpiLostAllHtml(row, _unusedGapsOverride) {
+  const L = _kpiLostAll(row);
+  if (!L.hasData) return '';
+  const pct = Math.round(L.total / L.work * 100);
+  const wh = String((row && row['คลัง']) || '').trim();
+  const bar = function (v, c) { return '<div style="height:100%;width:' + (Math.max(0, v) / L.work * 100) + '%;background:' + c + '"></div>'; };
+  const rowLi = function (icon, label, min, note, col) {
+    return '<div style="display:flex;align-items:baseline;gap:6px;font-size:11.5px;padding:3px 0">'
+      + '<span style="flex:1;color:var(--muted)">' + icon + ' ' + label + (note ? ' <span style="font-size:10px;opacity:.75">' + note + '</span>' : '') + '</span>'
+      + '<b style="color:' + col + '">' + _fmtHrMin(min) + '</b></div>';
+  };
+  return '<div style="background:var(--row-alt);border-radius:10px;padding:11px 12px;margin-top:10px">'
+    + '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:7px">'
+      + '<span style="font-size:12px;font-weight:800;color:var(--text)">⏳ เวลาที่หายทั้งวัน</span>'
+      + '<span style="font-size:15px;font-weight:900;color:' + (pct >= 30 ? 'var(--danger)' : '#1e7d4f') + '">' + _fmtHrMin(L.total) + ' <span style="font-size:11px;font-weight:700;color:var(--muted)">/ 8ชม. (' + pct + '%)</span></span>'
+    + '</div>'
+    + '<div style="display:flex;height:9px;border-radius:99px;overflow:hidden;background:#e5e7eb;margin-bottom:8px">'
+      + bar(L.commute, '#0EA5E9') + bar(L.inStore, '#16A34A') + bar(L.travel, '#65A30D') + bar(L.total, '#DC2626')
+    + '</div>'
+    + rowLi('🚗', 'ไปร้านแรก', L.commute, '(จากคลัง' + (wh ? ' ' + escapeHtml(wh) : '') + ')', '#0EA5E9')
+    + rowLi('🏪', 'อยู่หน้าร้าน', L.inStore, '', '#16A34A')
+    + rowLi('🛵', 'เดินทางระหว่างร้าน', L.travel, '', '#65A30D')
+    + '<div style="border-top:1px dashed var(--border);margin-top:5px;padding-top:5px">'
+      + rowLi('⏳', '<b style="color:var(--text)">หายทั้งวัน</b>', L.total, '(8ชม. − ที่ทำงานจริง)', 'var(--danger)') + '</div>'
+    + '<div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5">เวลางาน 8:00–17:00 หักพักเที่ยง 1 ชม. = <b>8 ชม.</b> · เวลาเดินทางคิดจากพิกัดจริง (ระยะทาง × 1.3 ÷ 40 กม./ชม. + 5 นาที) หักให้แล้วทั้งขาเข้างานและระหว่างร้าน'
+      + (L.est ? '<br>⚠️ วันนี้ยังไม่มีข้อมูล "ไปร้านแรก" (วันก่อน ' + escapeHtml('Code.gs v8.141') + ') — ตัวเลขหายจะสูงกว่าจริง' : '')
+    + '</div>'
+    + '</div>';
+}
+window._kpiLostAllHtml = _kpiLostAllHtml;
 window._skcRow = null;   // แถว DailySalesKPI ของวันที่การ์ดกำลังโชว์ (เซ็ตโดย _kpiChipsDaily/Period)
 function _skcJson(v, fb) { try { const a = JSON.parse(String(v || '') || 'null'); return a == null ? fb : a; } catch (e) { return fb; } }
 function _skcArr(v) { const a = _skcJson(v, null); return Array.isArray(a) ? a : null; }   // v8.379: คอลัมน์ JSON ที่คาด array — format เพี้ยน/เป็น object → null (กัน .map พังทั้ง popup)
@@ -20625,7 +21240,14 @@ function _skcRowsAsc(n) {
   const rows = (window._skpiRows || []).slice().sort((a, b) => String(a['วัน'] || '').localeCompare(String(b['วัน'] || '')));
   return n ? rows.slice(-n) : rows;
 }
-function _skcDayShort(d) { const m = String(d || '').match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/); return m ? (+m[3] + '/' + +m[2]) : String(d || ''); }
+// v8.433 (Surat): ใส่ชื่อวันด้วย — "จ. 20/7" อ่านแล้วรู้ทันทีว่าเป็นวันไหนของสัปดาห์ (รูทคนละวันคนละร้าน เทียบกันไม่ได้ถ้าไม่รู้วัน)
+function _skcDayShort(d) {
+  const m = String(d || '').match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  if (!m) return String(d || '');
+  const dt = new Date(+m[1], +m[2] - 1, +m[3]);
+  const wd = ['อา.', 'จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.'][dt.getDay()] || '';
+  return (wd ? wd + ' ' : '') + (+m[3]) + '/' + (+m[2]);
+}
 function _skcTgt(topic, def) { const c = (window._kpiCfg && window._kpiCfg.topics && window._kpiCfg.topics[topic]) || null; return (c && String(c.target || '').trim()) || def; }
 function _skcHourOut(row) {
   const h = _skcJson(row && row['เช็คอินรายชั่วโมง'], null); if (!h) return [];
@@ -20695,8 +21317,11 @@ const _SKC_R = {
     }
     const lines = hist.map(function (r, i) {
       const v = String(r['ร้านแรก-เวลา'] || '—'), m = _kpiHhmm2min(v), b = (m != null && tm != null && m > tm), lastI = i === hist.length - 1;
+      // v8.433 (Surat): + ชื่อร้านแรกของวันนั้น — รู้ว่าเริ่มที่ร้านไหน เทียบกับระยะทางจากบ้านได้
+      const sh = String(r['ร้านแรก-ชื่อ'] || '').trim();
       return '<div class="li" style="padding:6px 10px;margin-bottom:4px"><div class="li-top"><span class="li-n" style="font-weight:' + (lastI ? 800 : 600) + '">' + _skcDayShort(r['วัน']) + (lastI ? ' · ล่าสุด' : '') + '</span>'
-        + '<span class="li-v" style="color:' + (b ? 'var(--danger)' : '#1e7d4f') + '">' + escapeHtml(v) + (b ? ' 🔴' : ' 🟢') + '</span></div></div>';
+        + '<span class="li-v" style="color:' + (b ? 'var(--danger)' : '#1e7d4f') + '">' + escapeHtml(v) + (b ? ' 🔴' : ' 🟢') + '</span></div>'
+        + (sh ? '<div class="li-s" style="margin-top:2px">🏪 ' + escapeHtml(sh) + '</div>' : '') + '</div>';
     }).join('');
     return { t: '🌅 เวลาร้านแรก', s: escapeHtml(String(row['วัน'] || '')) + ' · เป้า ' + escapeHtml(tgtS) + ' น. · นับ 8:00-17:00',
       b: '<div class="hero"><div class="hero-r"><div class="hero-big" style="color:' + (bad ? 'var(--danger)' : '#1e7d4f') + '">' + escapeHtml(first) + '</div>'
@@ -20851,7 +21476,8 @@ const _SKC_R = {
     return { t: '👻 หายระหว่างวัน', s: escapeHtml(String(row['วัน'] || '')) + ' · ช่วงไม่มีเช็คอินเกิน 60 นาที · เป้าไม่เกิน ' + tgt + ' นาที/วัน',
       b: '<div class="hero"><div class="hero-r"><div class="hero-big" style="color:' + (_over ? 'var(--danger)' : '#1e7d4f') + '">' + _shownCnt + ' ครั้ง</div>'
         + '<div class="hero-sub">หายจริงรวม <b style="color:' + (_over ? 'var(--danger)' : '#1e7d4f') + '">' + _fmtHrMin(_shownMin) + '</b> · เป้าไม่เกิน ' + _fmtHrMin(tgt) + '</div>'
-        + (_over ? '<div class="verdict v-bad">🔴 เกินเป้า ' + _fmtHrMin(_shownMin - tgt) + '</div>' : '<div class="verdict v-good">🟢 อยู่ในเป้า</div>') + '</div></div>' + tl
+        + (_over ? '<div class="verdict v-bad">🔴 เกินเป้า ' + _fmtHrMin(_shownMin - tgt) + '</div>' : '<div class="verdict v-good">🟢 อยู่ในเป้า</div>') + '</div></div>'
+        + _kpiLostAllHtml(row, _shownMin) + tl
         + '<div class="stats"><div class="stat"><div class="stat-n">' + _fmtHrMin(inStore) + '</div><div class="stat-l">ในร้านรวม</div></div>'
         + '<div class="stat"><div class="stat-n">' + _fmtHrMin(travel) + '</div><div class="stat-l">เดินทาง (คาด)</div></div>'
         + '<div class="stat hl"><div class="stat-n">' + _fmtHrMin(ghostMin) + '</div><div class="stat-l">หายไป</div></div></div>'
@@ -21203,7 +21829,16 @@ async function _kpiAckPreload(scope, dayOverride) {   // v8.414: + dayOverride �
       const _baht = _kn('ยอดขายรวม-บาท');
       const _fB = '฿' + (_baht >= 1000 ? (Math.round(_baht / 100) / 10) + 'k' : Math.round(_baht));
       const _pctV = Math.round(_kn('เปอร์เซ็นต์เยี่ยม'));   // v8.414 (Surat): โชว์ เต็มรูทกี่ร้าน / เยี่ยมกี่ร้าน / % / ขายได้กี่ร้าน
-      const redSum = '🏪 เยี่ยม ' + _kn('ร้านที่เยี่ยม') + '/' + _kn('ร้านทั้งหมด') + ' ร้าน (' + _pctV + '%) · ขาย ' + _sold + ' ร้าน · 💰 ' + _fB + ' · 🕐 ' + _kt('ร้านแรก-เวลา') + '–' + _kt('ร้านสุดท้าย-เวลา') + ' · หาย ' + _fmtHrMin(_kn('เวลาหายรวม-นาที'));
+      // v8.433 (Surat): 🕐 → "ทำงาน" (อ่านออกว่าเป็นช่วงเวลาทำงาน ไม่ใช่นาฬิกาลอยๆ)
+      //   + "สาย" ต่อท้าย — เช็คอินร้านแรกช้ากว่าเป้ากี่นาที · เดิมต้องกดเข้าไปดูเองถึงจะรู้
+      //   เคสจริง: เริ่มร้านแรก 11:49 = ช่วงเช้าหายไป 2ชม.49น. แต่ยอด "หาย" ไม่ได้รวมช่วงนี้เลย
+      const _fT = _kpiHhmm2min(_kt('ร้านแรก-เวลา')), _tT = _kpiHhmm2min(_skcTgt('เวลาร้านแรก', '09:00'));
+      const _lateM = (_fT != null && _tT != null) ? (_fT - _tT) : null;
+      const _lateTxt = (_lateM != null && _lateM > 0) ? ' (สาย ' + _fmtHrMin(_lateM) + ')' : '';
+      // v8.435 (Surat): "หายทั้งวัน / 8ชม." = 9 ชม. − พักเที่ยง − เวลาเดินทางจริง (เข้างาน+ระหว่างร้าน) − อยู่หน้าร้าน
+      const _L = _kpiLostAll(r);
+      const _lostTxt = _L.hasData ? (' · หายทั้งวัน ' + _fmtHrMin(_L.total) + ' / 8ชม.') : '';
+      const redSum = '🏪 เยี่ยม ' + _kn('ร้านที่เยี่ยม') + '/' + _kn('ร้านทั้งหมด') + ' ร้าน (' + _pctV + '%) · ขาย ' + _sold + ' ร้าน · 💰 ' + _fB + ' · ทำงาน ' + _kt('ร้านแรก-เวลา') + '–' + _kt('ร้านสุดท้าย-เวลา') + _lateTxt + _lostTxt;
       pending.push({ code: code, name: String(r['ชื่อ-สกุล'] || code).trim(), wh: String(r['คลัง'] || '').trim(), red: red, redSum: redSum });
     });
     pending.sort((a, b) => b.red - a.red);   // แย่ก่อน (ธงแดงเยอะสุดขึ้นบน)
@@ -21550,7 +22185,7 @@ async function _skpiConfirm() {
     const res = await postToAppsScript({
       action: 'kpiConfirm', day: window._skpiLatestDay || '', smCode: st.code || '', smName: st.name || '',
       grade: window._skpiGrade || '', redFlags: window._skpiRedFlags || '',
-      supervisor: (currentUser && (currentUser.name || currentUser.code)) || '', comment: comment
+      supervisor: (currentUser && (currentUser.name || currentUser.salesmanCode)) || '', comment: comment   // v8.431: currentUser ไม่มี .code
     });
     if (res && res.ok) {
       if (btn) { btn.textContent = '✅ รับทราบแล้ว'; btn.classList.add('done'); }
@@ -21917,6 +22552,8 @@ function _maybeShowTeamMapDrawer() {
   if (dmrBtn) dmrBtn.style.display = isSup ? '' : 'none';
   const cnBtn = document.getElementById('drawerCN');   // v8.56 · v8.61: เปิดให้ Role 3-4 เห็น CN ตัวเอง
   if (cnBtn) cnBtn.style.display = (role >= 3) ? '' : 'none';
+  const stBtn = document.getElementById('drawerStuck');   // v8.427: ของค้างส่งของทีม (Role ≥5)
+  if (stBtn) stBtn.style.display = isSup ? '' : 'none';
 }
 window._maybeShowTeamMapDrawer = _maybeShowTeamMapDrawer;
 
@@ -23959,10 +24596,40 @@ window._renderDeadstockNew = _renderDeadstockNew;
 window._dsnAdd = _dsnAdd;
 // ════════ /ประวัติการซื้อ 6 เดือน ════════
 
+// ═══ v8.436 (Surat 22/7): เช็คอินก่อนชีท Users มาถึง = รหัสเซลผิดเงียบๆ ═══
+//   เคสจริง 21/7: 5 เซลเช็คอินช่วง 7:26–8:24 ตอนแอปเพิ่งเปิด Users ยังโหลดไม่เสร็จ
+//   → ช่องรหัสเซลได้รหัสพนักงาน (66102) แต่ออเดอร์อีก 1 นาทีต่อมาได้รหัสจริง (PMW301)
+//   → KPI แตกเป็น 2 แถว หัวหน้าเห็นเซลเป็น 0% ทั้งที่ขายได้ ฿120,353
+//   กติกา: ห้ามบล็อกการขาย — รอสูงสุด 8 วิ ถ้าไม่มาก็ปล่อยผ่าน (หลังบ้าน v8.142 กู้จาก email ให้อีกชั้น)
+function _usersReady() {
+  return !!(typeof SHEET_DATA !== 'undefined' && SHEET_DATA.users && SHEET_DATA.users.length);
+}
+function _waitUsersReady(maxMs) {
+  return new Promise(function (resolve) {
+    if (_usersReady()) return resolve(true);
+    const t0 = Date.now(), lim = maxMs || 8000;
+    const iv = setInterval(function () {
+      if (_usersReady()) { clearInterval(iv); resolve(true); }
+      else if (Date.now() - t0 > lim) { clearInterval(iv); resolve(false); }
+    }, 200);
+  });
+}
+window._usersReady = _usersReady;
+window._waitUsersReady = _waitUsersReady;
+
 // Check in — always get fresh GPS first (v6.5.23: never use stale position for check-in)
-function doCheckIn(shopId) {
+function doCheckIn(shopId, _waited) {
   const s = SHOPS.find(x => x.id === shopId);
   if (!s) return;
+  // v8.436: Users ยังไม่มา = รหัสเซลจะผิด → รอก่อน (รอบเดียว · ไม่บล็อก)
+  if (!_usersReady() && !_waited) {
+    showToast('⏳ กำลังเตรียมข้อมูล — อีกครู่เดียว', 'info');
+    _waitUsersReady(8000).then(function (ok) {
+      if (!ok) showToast('⚠️ โหลดข้อมูลพนักงานไม่ทัน (เน็ตช้า) — เช็คอินให้แล้ว แต่ถ้าเจอบ่อยแจ้งแอดมิน', 'warning');
+      doCheckIn(shopId, true);
+    });
+    return;
+  }
   if (window._checkinBusy) { showToast('⏳ กำลังเช็คอิน — แตะครั้งเดียวพอ', 'info'); return; }   // v8.249: กันกดรัว (ระหว่างหา GPS → กัน visit ซ้ำ)
   // v6.5.57: enforce single active check-in — must check out previous shop first
   const activeId = Object.keys(visits).find(sid => visits[sid] && !visits[sid].checkOutTime);
@@ -24172,7 +24839,13 @@ window._closeAsNoSaleAndCheckin = function(activeId, nextId) {
 };
 
 // v6.5.57: "ไม่ซื้อ" / "ร้านปิด" without prior check-in — auto check-in + immediate close
-function quickNoSale(shopId, reason) {
+function quickNoSale(shopId, reason, _waited) {
+  // v8.436: สร้าง visit เหมือนกัน → ต้องรอ Users เหมือน doCheckIn (ไม่งั้นรหัสเซลว่าง = แถวผี)
+  if (!_usersReady() && !_waited) {
+    showToast('⏳ กำลังเตรียมข้อมูล — อีกครู่เดียว', 'info');
+    _waitUsersReady(8000).then(function () { quickNoSale(shopId, reason, true); });
+    return;
+  }
   const v = visits[shopId];
   if (v && !v.checkOutTime) {
     // Already checked in → just finish with reason
@@ -32276,6 +32949,11 @@ async function confirmOrder() {
   const deliveryDate = ddEl ? (ddEl.value || '').trim() : '';
 
   // v8.153: ถามรวม/แยกบิล ก่อนสร้าง id (เด้งเฉพาะร้านที่มีบิลย้อนหลัง ≤3 วัน)
+  // v8.427 (Surat): ร้านเพิ่งเปิดแล้วแถวลูกค้ายังค้างคิว → เร่งส่งให้ถึงชีทก่อน
+  //   ไม่งั้นออเดอร์ลงชีทอ้างรหัส NEW-... ที่ยังหาไม่เจอใน Customer · best-effort ไม่บล็อกการขาย
+  if (typeof _shopPendingInQueue === 'function' && _shopPendingInQueue(shop && shop.bplusCode)) {
+    try { await writeQueue.flush(); } catch (e) {}
+  }
   const _billPick = await _resolveBillMerge(shop, currentShopId);
   // v8.388: reuse id ที่เกิดตอนเริ่มคีย์ (SB net) → id บนชีท = id ของ draft บน SB ตัวต่อตัว · consume แล้วใบถัดไปเริ่มใหม่
   const orderId = (window._draftOrderId && cart.length) ? window._draftOrderId : _newOrderId();   // v8.422: เลขใหม่ต้องเช็คซ้ำก่อนใช้
@@ -35337,6 +36015,7 @@ function goNewShop() {
   if (whEl) whEl.textContent = SALESMAN.warehouseId + ' (' + SALESMAN.warehouse + ')';
   if (smEl) smEl.textContent = SALESMAN.name || '-';
   showScreen('screenNewShop');
+  if (typeof _renderQueuedShops === 'function') _renderQueuedShops();   // v8.424: โชว์ร้านที่ยังไม่ถึงชีทตั้งแต่เปิดจอ
   updateCartBar();
   // Init searchable dropdowns (Data Center → ประเภทร้านค้าส่วนกลาง / ตำบล,อำเภอ,จังหวัด ส่วนกลาง)
   // Use timeout so DOM is ready + Data Center has had a chance to load
@@ -35697,6 +36376,7 @@ function _piSwitchUnit(unitCode) {
 window._piSwitchUnit = _piSwitchUnit;
 
 function resetNewShopForm() {
+  window._newShopTempCode = null;   // v8.424: ฟอร์มใหม่ = รหัสร้านชั่วคราวใหม่ (ล็อกไว้เฉพาะตอนกดส่งซ้ำใบเดิม)
   ['newShopName','newShopAddrNum','newShopMoo','newShopTumbon','newShopZip',
    'newShopPhone','newShopTaxId','newShopNotes','newShopType','newShopContact'].forEach(id => {
     const el = document.getElementById(id);
@@ -36073,10 +36753,23 @@ function _shrinkPhoto(file, maxPx, q) {
           let w = img.width, h = img.height;
           if (!w || !h) { reject(new Error('รูปเสียหาย')); return; }
           if (w > maxPx || h > maxPx) { const k = Math.min(maxPx / w, maxPx / h); w = Math.round(w * k); h = Math.round(h * k); }
-          const cv = document.createElement('canvas');
-          cv.width = w; cv.height = h;
-          cv.getContext('2d').drawImage(img, 0, 0, w, h);
-          resolve(cv.toDataURL('image/jpeg', q));
+          // v8.427 (Surat 21/7): บีบจน "ได้ขนาดจริง" ไม่ใช่ย่อรอบเดียวแล้วปล่อย
+          //   900px @ q0.72 รูปหน้าร้านรายละเอียดเยอะได้ 350-550KB จริง (base64 ×1.35)
+          //   คิวเก็บใน localStorage (iOS ~5MB ต่อ origin แชร์ทุก key) → เปิด 6-8 ร้านตอนเน็ตแย่ = เต็ม
+          //   → ร้านถัดไป "เข้าคิวไม่ได้" เซลติดตัน · ลดคุณภาพ/ขนาดทีละขั้นจนไม่เกินเพดาน
+          const BUDGET = 190 * 1024;   // ~190KB ต่อรูป (เผื่อ base64 +35% ≈ 256KB ในคิว)
+          let out = '', _w = w, _h = h, _q = q;
+          for (let i = 0; i < 6; i++) {
+            const cv = document.createElement('canvas');
+            cv.width = _w; cv.height = _h;
+            cv.getContext('2d').drawImage(img, 0, 0, _w, _h);
+            out = cv.toDataURL('image/jpeg', _q);
+            if (out.length <= BUDGET) break;
+            if (_q > 0.45) _q = Math.max(0.45, _q - 0.12);        // ลดคุณภาพก่อน (ภาพยังคมพอ)
+            else { _w = Math.round(_w * 0.8); _h = Math.round(_h * 0.8); }   // ยังใหญ่ → ย่อขนาด
+          }
+          console.log('[shrinkPhoto]', Math.round(out.length / 1024) + 'KB', _w + 'x' + _h, 'q=' + _q.toFixed(2));
+          resolve(out);
         } catch (e) { reject(e); }
       };
       img.src = ev.target.result;
@@ -36168,7 +36861,11 @@ async function submitNewShop() {
   const locationStr = newShopGPS ? `${newShopGPS.lat.toFixed(7)},${newShopGPS.lng.toFixed(7)}` : '';
   // v8.82: ถ้าไม่มีพิกัด (เซลกดข้าม) → ติดธงใน หมายเหตุ ให้แอดมินรู้ว่าต้องเติมพิกัด
   const notesOut = newShopGPS ? notes : ((notes ? notes + ' · ' : '') + '⚠️ ไม่มีพิกัด GPS — รออัปเดต');
-  const _tempCode = _newTempShopCode();   // v8.154: รหัสร้านชั่วคราว — เซลคีย์ได้เลยไม่ต้องรอรหัสบีพลัส
+  // v8.154: รหัสร้านชั่วคราว — เซลคีย์ได้เลยไม่ต้องรอรหัสบีพลัส
+  // v8.424: ล็อกไว้ต่อ 1 ฟอร์ม — กดส่งซ้ำ (เคสเข้าคิวแล้วกดใหม่) ต้องได้รหัสเดิม
+  //   ไม่งั้นรหัสเปลี่ยนทุกครั้ง = คีย์กันซ้ำฝั่งหลังบ้าน (handleAppendCustomer ดู 'รหัสร้านชั่วคราว') ไม่ทำงาน → ร้านซ้ำ 2 แถว
+  if (!window._newShopTempCode) window._newShopTempCode = _newTempShopCode();
+  const _tempCode = window._newShopTempCode;
   const customerDetailRow = {
     'ชื่อร้านค้า':         name,
     'รหัส บีพลัส':          _tempCode,             // v8.155: ลง NEW-... เลย — ว่าง=แอปเช็คอิน/อัปเดตร้านไม่ได้ ("Missing rowId") · admin ทับด้วยรหัสจริงทีหลัง
@@ -36254,7 +36951,19 @@ async function submitNewShop() {
     showToast('❌ ส่งไม่สำเร็จ — ' + _err + ' · ข้อมูลยังอยู่ในฟอร์ม กดส่งใหม่อีกครั้ง', 'error');
     return;   // ห้ามล้างฟอร์ม/goHome
   }
-  if (_ok) showToast('✅ ส่งคำขอเปิดร้านใหม่ — รอ admin อนุมัติ', 'success');
+  // v8.424 (Surat 21/7): เข้าคิว ≠ สำเร็จ — ห้ามล้างฟอร์ม/เด้งกลับหน้าแรก
+  //   เดิมทาง _queued ไหลลงไปล้างฟอร์ม+goHome เหมือนสำเร็จเป๊ะ ต่างกันแค่ toast วูบเดียว
+  //   → เซลเชื่อว่าเปิดร้านแล้ว พอคิวส่งไม่สำเร็จ ร้านหายไปเฉยๆ ไม่มีใครรู้ (เคสจริง แอคทิเวชั่น ฮับ 21/7)
+  //   ค้างหน้าเดิม + แถบเหลืองบอกตรงๆ ว่ายังไม่ถึงชีท · รหัสชั่วคราวยังล็อกอยู่ กดส่งใหม่ไม่เกิดร้านซ้ำ
+  if (!_ok) {
+    _renderQueuedShops(); _renderStuckQueue(); _updateQueueBadge();
+    const box = document.getElementById('queuedShopsBox');
+    if (box && box.scrollIntoView) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    showToast('⏳ ยังไม่ถึงชีท — บันทึกไว้ในเครื่องแล้ว ระบบจะส่งใหม่ให้เอง (ดูรายการด้านบน)', 'warning');
+    return;   // ห้ามล้างฟอร์ม/goHome จนกว่าจะลงชีทจริง
+  }
+  showToast('✅ ส่งคำขอเปิดร้านใหม่ — รอ admin อนุมัติ', 'success');
+  window._newShopTempCode = null;   // ลงชีทแล้ว — ใบถัดไปเริ่มรหัสใหม่
   setTimeout(() => {
     resetNewShopForm();
     goHome();
@@ -37327,6 +38036,7 @@ function goProposalForm() {
 window.goProposalForm = goProposalForm;
 
 function resetProposalForm() {
+  window._proposalId = null;   // v8.426: ฟอร์มใหม่ = รหัสกันซ้ำใหม่
   proposalPhotoData = null;
   ['proposalName','proposalNotes','proposalPrice','proposalSalesPerWeek'].forEach(id => {
     const el = document.getElementById(id);
@@ -37367,7 +38077,8 @@ function onProposalPhotoSelected(event) {
 }
 window.onProposalPhotoSelected = onProposalPhotoSelected;
 
-function submitProposal() {
+async function submitProposal() {
+  if (window._proposalBusy) return;   // v8.426: กันกดรัว
   const name = (document.getElementById('proposalName')?.value || '').trim();
   const notes = (document.getElementById('proposalNotes')?.value || '').trim();
   const priceRaw = (document.getElementById('proposalPrice')?.value || '').trim();
@@ -37406,12 +38117,35 @@ function submitProposal() {
     'เวลาพิจารณา':      '',
     'เหตุผลปฏิเสธ':    '',
     '_photo':          proposalPhotoData || '',   // Apps Script uploads to Drive + writes URL into "รูป"
+    // v8.426: คีย์กันซ้ำ — ล็อกต่อ 1 ฟอร์ม กดส่งซ้ำ/คิว resend ก็ค่าเดิม (Code.gs v8.139 dedup ด้วย proposalId)
+    'proposalId':      (window._proposalId = window._proposalId || ('PP' + Date.now().toString(36) + '-' + (SALESMAN.code || 'x'))),
   };
 
   console.log('Will append to Sheet "ขอสั่งสินค้า":', { ...row, _photo: row._photo ? `(${Math.round(row._photo.length/1024)}KB)` : '' });
-  postToAppsScript({ action: 'appendProposal', row }).catch(e => console.warn('Proposal sync error:', e));
+  // v8.426 (Surat 21/7): เลิก fire-and-forget — เดิมยิงแล้วขึ้น ✅ ทันทีไม่รอผล + ล้างฟอร์ม + goHome
+  //   เน็ตหลุด/หลังบ้านพัง = คำเสนอหายเงียบ เซลเห็น ✅ เหมือนกันเป๊ะ (บั๊คเดียวกับร้านใหม่ที่แก้ไปแล้ว)
+  window._proposalBusy = true;
+  let _ok = false, _queued = false, _err = '';
+  try {
+    const res = await postToAppsScript({ action: 'appendProposal', row });
+    if (res && res.ok === true) _ok = true; else _err = (res && res.error) || 'หลังบ้านตอบ ok:false';
+  } catch (e) {
+    _queued = !!(e && e._queued);
+    _err = (e && e.message) || 'ส่งไม่ได้';
+  }
+  window._proposalBusy = false;
 
+  if (!_ok && !_queued) {
+    showToast('❌ ส่งไม่สำเร็จ — ' + _err + ' · ข้อมูลยังอยู่ในฟอร์ม กดส่งใหม่อีกครั้ง', 'error');
+    return;   // ห้ามล้างฟอร์ม/goHome
+  }
+  if (!_ok) {
+    if (typeof _renderStuckQueue === 'function') _renderStuckQueue();
+    showToast('⏳ ยังไม่ถึงชีท — บันทึกไว้ในเครื่องแล้ว ระบบจะส่งใหม่ให้เอง', 'warning');
+    return;   // เข้าคิว ≠ สำเร็จ — คงฟอร์มไว้ (รหัสกันซ้ำล็อกอยู่ กดส่งซ้ำไม่เกิดแถวซ้ำ)
+  }
   showToast('✅ ส่งคำเสนอแล้ว — รอจัดซื้อพิจารณา', 'success');
+  window._proposalId = null;   // ลงชีทแล้ว — ใบถัดไปเริ่มรหัสใหม่
   setTimeout(() => {
     resetProposalForm();
     goHome();
@@ -38592,13 +39326,21 @@ window._removeCNItem = _removeCNItem;
 async function _submitCN() {
   if (_cnDraft.items.length === 0) return;
   const shop = SHOPS.find(s => s.id === currentShopId);
-  const cnId = 'CN' + Date.now().toString().slice(-7);
+  // v8.426 (Surat 21/7): cnId ต้องคงที่ต่อ 1 ใบ — เดิมสร้างใหม่ทุกครั้งที่กดส่ง
+  //   กดส่งซ้ำ/คิว resend ได้ cnId ใหม่ → หลังบ้านกันซ้ำไม่ได้ → ใบลดหนี้ซ้ำทั้งใบ (เงินลูกค้า)
+  if (!_cnDraft.cnId) _cnDraft.cnId = 'CN' + Date.now().toString().slice(-7) + Math.floor(Math.random() * 900 + 100);
+  const cnId = _cnDraft.cnId;
   const now = new Date();
   closeModal();
   showToast('กำลังส่งใบลดหนี้...', 'info');
-  try {
-    for (const it of _cnDraft.items) {
-      await submitCNRow({
+  // v8.426: ห้าม loop ขาดกลางคัน — เดิมรายการที่ 3 พลาด = 4-5 ไม่ถูกส่งและไม่เข้าคิวเลย
+  //   เก็บผลรายบรรทัด แล้วค่อยสรุปทีเดียว · ล้างตะกร้าเฉพาะตอนสำเร็จครบทุกบรรทัด
+  let _sent = 0; const _failed = [];
+  for (let _i = 0; _i < _cnDraft.items.length; _i++) {
+    const it = _cnDraft.items[_i];
+    try {
+      const _res = await submitCNRow({
+        'cnLineId':      cnId + '-' + String(_i + 1).padStart(3, '0'),   // v8.426: คีย์กันซ้ำรายบรรทัด (Code.gs v8.139)
         'วัน':           formatDateISO(now),
         'เวลา':          formatTimeThai(now),
         'email':        (currentUser && currentUser.email) || SALESMAN.email || '',
@@ -38622,13 +39364,26 @@ async function _submitCN() {
         'สถานะอนุมัติ':  'รออนุมัติ',   // v8.83: ทุก CN รอหัวหน้าอนุมัติ (server ก็บังคับซ้ำ)
         'photoBase64':   (window._cnPhotoBackendOk === true) ? String(it.photo || '') : '',   // v8.346: ส่งรูปเฉพาะเมื่อหลังบ้าน ≥v8.125 (cnPhoto flag) — Code.gs เก่าจะยัด base64 ลงเซลล์ เกิน 50k ตัวอักษร CN พังทั้งใบ
       });
+      // v8.426: หลังบ้านตอบ HTTP 200 พร้อม ok:false ได้ (lock timeout / แท็บหาย) — เดิมไม่เช็ค = นับเป็นสำเร็จ
+      if (_res && _res.ok === false) throw new Error(String((_res && _res.error) || 'หลังบ้านตอบ ok:false'));
+      _sent++;
+    } catch (e) {
+      _failed.push({ name: it.name, err: String((e && e.message) || 'ส่งไม่ได้'), queued: !!(e && e._queued) });
+      console.error('CN submit failed:', it.name, e);
     }
-    showToast(`✅ ส่งใบลดหนี้ — รอหัวหน้าอนุมัติ ${_cnDraft.items.length} รายการ`, 'success');
-    _cnDraft = { items: [] };
-  } catch (e) {
-    console.error('CN submit failed:', e);
-    showToast('ส่งไม่สำเร็จ: ' + e.message, 'error');
   }
+  const _queuedN = _failed.filter(function (f) { return f.queued; }).length;
+  const _lostN   = _failed.length - _queuedN;
+  if (!_failed.length) {
+    showToast(`✅ ส่งใบลดหนี้ — รอหัวหน้าอนุมัติ ${_sent} รายการ`, 'success');
+    _cnDraft = { items: [] };   // ล้างตะกร้าเฉพาะตอนขึ้นชีทครบทุกบรรทัดจริง
+  } else if (_lostN === 0) {
+    showToast(`⏳ ขึ้นชีทแล้ว ${_sent} · อีก ${_queuedN} รายการยังไม่ถึงชีท บันทึกไว้ในเครื่องแล้ว จะส่งใหม่ให้เอง`, 'warning');
+    // คงตะกร้าไว้ — กดส่งซ้ำได้ไม่เกิดใบซ้ำ เพราะ cnId/cnLineId เดิมถูกล็อกไว้แล้ว
+  } else {
+    showToast(`❌ ส่งไม่สำเร็จ ${_lostN} รายการ — ของยังอยู่ในตะกร้า กดส่งใหม่อีกครั้ง`, 'error');
+  }
+  if (typeof _renderStuckQueue === 'function') _renderStuckQueue();
 }
 window._submitCN = _submitCN;
 
