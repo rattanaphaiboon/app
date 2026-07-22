@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>R-Flow — ติดตามงานทีม v2.54</title>
+<title>R-Flow — ติดตามงานทีม v2.55</title>
 <link rel="icon" type="image/png" href="r-flow-icon.png">
 <link rel="manifest" href="r-flow.webmanifest">
 <link rel="apple-touch-icon" href="r-flow-icon.png">
@@ -563,7 +563,7 @@ button.rf-stat::after{content:'›';position:absolute;top:9px;right:14px;font-si
    Design:  Claude Design "Team Task Tracker" (task-tracker/design/) */
 
 const CFG = {
-  version: '2.54',
+  version: '2.55',
   exec: 'https://script.google.com/macros/s/AKfycbx3lmJqh1WYDhKFE-0Il4A4ihdcCsbbHYN6c9JuAXWj3TU-oWHGvate7NmxSAwDYdWfww/exec',
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
   hubUrl: 'https://rattanaphaiboon.github.io/app/rattana-hub.html',
@@ -951,6 +951,7 @@ async function loadAll(silent){
     maybeFirstNag();
     rtLoadMine();
     if (_pendingTaskOpen && S.tasks.some(function(t){ return t.id === _pendingTaskOpen; })) { RF.openTask(_pendingTaskOpen); _pendingTaskOpen = ''; }   // เปิดงานจากลิงก์นอติ หลังข้อมูลพร้อม
+    if (_pendingRoutine) { _pendingRoutine = false; RF.openRoutine(); }   // เปิดจากนอติงานประจำ (?routine=1)
   } catch(e){
     const msg = String(e.message || e);
     if (/user not found|user inactive/i.test(msg)) {
@@ -1035,11 +1036,16 @@ function initPullRefresh(){
 // deep-link จากนอติ: ลิงก์มี ?task=<id> → เปิดงานนั้น
 function taskFromLink(u){ try { const m = String(u || '').match(/[?&#]task=([^&#]+)/); return m ? decodeURIComponent(m[1]) : ''; } catch(e){ return ''; } }
 function openTaskFromLink(u){ const id = taskFromLink(u); if (id && S.tasks.some(function(t){ return t.id === id; })) { RF.openTask(id); return true; } return false; }
+let _pendingRoutine = false;
+function routineFromLink(u){ return /[?&]routine=1/.test(String(u || '')); }
 function setupDeepLink(){
   _pendingTaskOpen = taskFromLink(location.href);   // แอปเปิดจากนอติ (ปิดอยู่) → จำไว้เปิดหลังโหลดเสร็จ
+  _pendingRoutine = routineFromLink(location.href); // นอติงานประจำใช้ ?routine=1 (ไม่มี task id)
   try {
     if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', function(e){
-      if (e.data && e.data.type === 'rf-open') openTaskFromLink(e.data.link);   // แอปเปิดอยู่ กดนอติ → เปิดงานทันที
+      if (!e.data || e.data.type !== 'rf-open') return;
+      if (routineFromLink(e.data.link)) { RF.openRoutine(); return; }            // แอปเปิดอยู่ กดนอติงานประจำ
+      openTaskFromLink(e.data.link);                                             // แอปเปิดอยู่ กดนอติงาน → เปิดงานทันที
     });
   } catch(e){}
 }
@@ -2653,7 +2659,8 @@ RF.rtTick = (id, i, done) => {
   renderOverlays();
   api('tickRoutine', { id: id, i: i, done: done }).then(function(j){
     if (j.log) { const k = S.rt.logs.indexOf(log); if (k >= 0) S.rt.logs[k] = j.log; }
-    S.rt.mine = null; renderOverlays(); render();
+    rtSyncMine(j.log || log);              // ⚠️ ต้องอัปเดตการ์ดหน้าภาพรวมด้วย ถ้าเซ็ต null การ์ดจะหายไปเลย
+    renderOverlays(); render();
   }).catch(function(e){
     log.items = bak; log.done = bd; log.status = bs; renderOverlays();
     toast('บันทึกไม่สำเร็จ: ' + e.message);
@@ -2664,9 +2671,16 @@ RF.rtLeave = (id, on) => {
   if (on) { note = prompt('เหตุผล (ลา / หยุด / อบรม …)', 'ลา'); if (note === null) return; }
   api('markLeave', { id: id, note: note, off: !on }).then(function(j){
     if (j.log) { const k = S.rt.logs.findIndex(function(l){ return l.id === id; }); if (k >= 0) S.rt.logs[k] = j.log; }
-    S.rt.mine = null; renderOverlays(); render(); toast(on ? 'ทำเครื่องหมายแล้ว' : 'เอาเครื่องหมายออกแล้ว');
+    rtSyncMine(j.log); renderOverlays(); render(); toast(on ? 'ทำเครื่องหมายแล้ว' : 'เอาเครื่องหมายออกแล้ว');
   }).catch(function(e){ toast('ไม่สำเร็จ: ' + e.message); });
 };
+// ใบที่เพิ่งอัปเดต ถ้าเป็นของเราและเป็นของวันนี้ → อัปเดตการ์ดบนหน้าภาพรวมตามไปด้วย
+function rtSyncMine(log){
+  if (!log || !S.me) return;
+  if (String(log.email || '').toLowerCase() !== S.me.email) return;
+  if (String(log.date || '').slice(0, 10) !== todayIso()) return;
+  S.rt.mine = log;
+}
 /* การ์ดบนหน้าภาพรวม — โหลดแยกเบาๆ (อ่านแค่แถวของเราวันนี้) ไม่ถ่วงการเปิดแอป */
 let _rtMineTried = false;
 function rtLoadMine(){
