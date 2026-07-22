@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Order Picker v1.8</title>
+<title>Order Picker v1.9</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -103,14 +103,14 @@ td.num,#panel-orders td.num{text-align:center;font-variant-numeric:tabular-nums}
     <div id="googleSignInBtn"></div>
     <div id="loginSpinner">⏳ กำลังเข้าสู่ระบบ…</div>
     <div id="loginError"></div>
-    <div class="login-ver">เวอร์ชัน v1.8</div>
+    <div class="login-ver">เวอร์ชัน v1.9</div>
   </div>
 </div>
 
 <div id="app" style="display:none">
 
 <header class="appbar">
-  <div class="title">📦 Order Picker <span class="ver">v1.8</span></div>
+  <div class="title">📦 Order Picker <span class="ver">v1.9</span></div>
   <div style="flex:1"></div>
   <span class="who-box">👤 <b id="whoEmail" style="color:#fff">-</b> <span class="logout-link" onclick="logout()">ออกจากระบบ</span></span>
   <button class="hub-btn" onclick="reload()" title="โหลดใหม่จาก Supabase" style="background:#1e3a8a;color:#fff;padding:7px 10px">🔄</button>
@@ -375,13 +375,14 @@ function nowBKK(){
 
 /* Supabase PATCH — orderId=in.(a,b,c) filter · ต้องมี GRANT UPDATE ให้ anon ก่อน (SQL อยู่ในแท็บ Schema)
  * v1.6: เพิ่ม console.log ทุกขั้น + retry แบบ eq. ต่อ orderId ถ้า in.() ได้ 0 rows (edge case) */
-async function markDoneSupabase(orderIds, admin){
-  console.log('[markDone] เรียกด้วย', {orderIds, admin, WRITE_STATUS});
+async function markDoneSupabase(orderIds, admin, table){
+  table = table || 'roo_sales';   // v1.9: roo_sales หรือ roo_special_sales ตามที่มาของบิล
+  console.log('[markDone] เรียกด้วย', {table, orderIds, admin, WRITE_STATUS});
   if(!WRITE_STATUS || !orderIds || !orderIds.length) return {ok:false, n:0, skipped:true};
   const {date, time} = nowBKK();
   const payload = { 'สถานะจัด':'จัดแล้ว', 'แอดมินจัด':admin||'', 'วันสั่งจัด':date, 'เวลาสั่งจัด':time };
   const filter = 'orderId=in.('+orderIds.map(o=>encodeURIComponent(o)).join(',')+')';
-  const url = `${SUPABASE_URL}/rest/v1/roo_sales?${filter}`;
+  const url = `${SUPABASE_URL}/rest/v1/${table}?${filter}`;
   console.log('[markDone] PATCH →', url); console.log('[markDone] payload →', payload);
   try{
     const res = await fetch(url, {
@@ -412,20 +413,30 @@ async function markDoneGAS(orderIds, admin){
   }catch(e){ return {ok:false, n:0, err:e.message||String(e)}; }
 }
 
-async function markDoneAfterExport(orderIds){
-  if(!WRITE_STATUS || !orderIds.length) return;
+/* v1.9: รับ selBills (มี orderId + srcTable) → แยก PATCH ตามตารางต้นทาง */
+async function markDoneAfterExport(bills){
+  if(!WRITE_STATUS || !bills || !bills.length) return;
   const admin = getAdmin();
-  if(!admin){ alert('⚠️ ยังไม่ได้ใส่อีเมลในช่อง 📧 "อีเมลของคุณ" ที่ banner ด้านบน\n\nExcel ดาวน์โหลดเรียบร้อยแล้ว\nแต่ระบบข้ามการมาร์ค "จัดแล้ว" ใน Supabase\n\n→ ใส่อีเมลใน banner แล้วกด Export อีกครั้ง'); return; }
-  const [sr, gr] = await Promise.all([markDoneSupabase(orderIds, admin), markDoneGAS(orderIds, admin)]);
+  if(!admin){ alert('⚠️ ยังไม่ได้เข้าสู่ระบบ (ไม่มีอีเมล)\n\nExcel ดาวน์โหลดเรียบร้อยแล้ว\nแต่ระบบข้ามการมาร์ค "จัดแล้ว" ใน Supabase'); return; }
+  const rooIds  = [...new Set(bills.filter(b=>b.srcTable!=='special').map(b=>b.orderId))];
+  const specIds = [...new Set(bills.filter(b=>b.srcTable==='special').map(b=>b.orderId))];
+  const allIds  = [...rooIds, ...specIds];
+  const [srRoo, srSpec, gr] = await Promise.all([
+    rooIds.length  ? markDoneSupabase(rooIds,  admin, 'roo_sales')         : Promise.resolve({ok:false,n:0,skipped:true}),
+    specIds.length ? markDoneSupabase(specIds, admin, 'roo_special_sales') : Promise.resolve({ok:false,n:0,skipped:true}),
+    markDoneGAS(allIds, admin)
+  ]);
+  const okN  = (srRoo.ok?srRoo.n:0) + (srSpec.ok?srSpec.n:0);
+  const errs = [srRoo.err && ('roo_sales: '+srRoo.err), srSpec.err && ('roo_special_sales: '+srSpec.err)].filter(Boolean);
   const parts = [];
-  if(sr.ok) parts.push(`✅ Supabase ${sr.n} บรรทัด`);
-  else if(sr.err) parts.push(`❌ Supabase: ${sr.err}`);
+  if(okN) parts.push(`✅ Supabase ${okN} บรรทัด`);
+  if(errs.length) parts.push('❌ '+errs.join(' · '));
   if(gr.ok) parts.push(`✅ GS ${gr.n}`);
   else if(gr.err) parts.push(`⚠️ GS: ${gr.err}`);
   else if(gr.skipped) parts.push(`⏸ GS: ยังไม่ตั้ง GAS_URL`);
   if(parts.length) toast(parts.join(' · '));
-  if(sr.ok){ DATA_ORDERS = await loadOrders(); render(); }   // reload → บิลย้ายไป tab นำเข้าแล้ว
-  else if(sr.err){ alert('❌ มาร์ค "จัดแล้ว" ใน Supabase ไม่สำเร็จ\n\n'+sr.err+'\n\nExcel ดาวน์โหลดเรียบร้อยแล้ว\nเปิด DevTools (F12) → Console เพื่อดู log เต็ม'); }
+  if(srRoo.ok || srSpec.ok){ DATA_ORDERS = await loadOrders(); render(); }   // reload → บิลย้ายไป tab นำเข้าแล้ว + รันเลขต่อเนื่อง
+  if(errs.length){ alert('❌ มาร์ค "จัดแล้ว" ไม่สำเร็จบางส่วน\n\n'+errs.join('\n')+'\n\nExcel ดาวน์โหลดเรียบร้อยแล้ว\n\n⚠️ ตาราง roo_special_sales ต้อง GRANT UPDATE ให้ anon ก่อน (SQL อยู่ในแท็บ 📐 Schema)\nเปิด DevTools (F12) → Console เพื่อดู log เต็ม'); }
 }
 
 /* ============================================================
@@ -506,7 +517,7 @@ function buildBills(){
     if(!o.orderId) continue;
     if(!bills[o.orderId]){
       bills[o.orderId]={orderId:o.orderId, date:o.date, time:o.time||'', salesman:o.salesman,
-        salesmanName: u.name||o.name||'', chan, roleLab: chan || 'R0',
+        salesmanName: u.name||o.name||'', chan, roleLab: chan || 'R0', srcTable:o.srcTable||'roo',
         store:o.store, wh:shipWh(o), lines:0, total:0, keyTS:0, seq:Infinity, isROO:isROO(o),
         done:false, doneBy:'', doneDate:'', doneTime:'', deliver:''};
     }
@@ -895,6 +906,16 @@ async function exportXlsx(){
   const bvByOrder = {}, seqByBook = {};
   const firstLineByOrder = {};   // orderId → first line ใน selLines (ใช้ตัดสิน book)
   selLines.forEach(o=>{ if(firstLineByOrder[o.orderId]===undefined) firstLineByOrder[o.orderId]=o; });
+  /* v1.9: รันเลขต่อเนื่องต่อวัน — เริ่มต่อจากจำนวนบิลที่ "จัดแล้ววันนี้" ต่อเล่ม (ไม่รีเซ็ต 001 ทุก export)
+   * นับจาก DATA_ORDERS ทั้งหมด (ไม่สน filter หน้าจอ) กันเลขซ้ำข้ามการกรองวัน · doneDate=วันสั่งจัด=วันนี้ */
+  const doneToday = {}, _seenDone = new Set();
+  for(const o of DATA_ORDERS){
+    if(o.done && o.doneDate===runDate && o.orderId && !_seenDone.has(o.orderId)){
+      _seenDone.add(o.orderId);
+      const bk = docBookFor(o);
+      doneToday[bk] = (doneToday[bk]||0)+1;
+    }
+  }
   /* จัดลำดับ orderId ตาม seq/orderId (deterministic) ก่อนแจกเลข → รันเลขเสถียร */
   const orderIdsSorted = Object.keys(firstLineByOrder).sort((a,b)=>{
     const oa=firstLineByOrder[a], ob=firstLineByOrder[b];
@@ -903,7 +924,8 @@ async function exportXlsx(){
   orderIdsSorted.forEach(oid=>{
     const o = firstLineByOrder[oid];
     const book = docBookFor(o);
-    seqByBook[book] = (seqByBook[book]||0)+1;
+    if(seqByBook[book]===undefined) seqByBook[book] = (doneToday[book]||0);   // เริ่มต่อจากที่จัดแล้ววันนี้
+    seqByBook[book] += 1;
     bvByOrder[oid] = book+bvDate+'/'+String(seqByBook[book]).padStart(3,'0');
   });
   const bplus = selLines.map(o=> bplusFields(o, bvByOrder[o.orderId]));
@@ -931,9 +953,8 @@ async function exportXlsx(){
   XLSX.writeFile(wb, `ใบจอง-${runDate}.xlsx`);
   toast(`✅ ดาวน์โหลดแล้ว · ${selBills.length} บิล · ${bRows.length} บรรทัด`);
 
-  /* v1.6: mark สถานะจัด → Supabase + Google Sheets (await เพื่อให้ PATCH เสร็จก่อน · เดิม fire-and-forget อาจโดน browser หยุด async task) */
-  const orderIds = [...new Set(selBills.map(b=>b.orderId))];
-  await markDoneAfterExport(orderIds);
+  /* v1.9: mark สถานะจัด → แยกตาราง roo_sales / roo_special_sales (await ให้ PATCH เสร็จก่อน) */
+  await markDoneAfterExport(selBills);
 }
 
 /* ============================================================
