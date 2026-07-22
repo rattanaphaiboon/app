@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0"/>
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
-<title>🚛 จัดคิวรถส่งสินค้า Rattana v8.73</title>
+<title>🚛 จัดคิวรถส่งสินค้า Rattana v8.74</title>
 <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -569,7 +569,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v8.73</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v8.74</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -7333,16 +7333,33 @@ function buildStoreGroups(){
   Object.values(ngz).forEach(z=>zones.push(z));
   // ซอยแต่ละโซน ≤ รถ 6 ล้อ (น้ำหนัก+ปริมาตร) — เรียง TSP แล้วหั่นสะสม
   const groups=[];
+  // v8.74: ซอยกลุ่มตามฝั่งถนน — โซนที่พอดี 1 คัน = คันเดียว (เรียงวนฝั่ง ไป→กลับ)
+  //   โซนที่ต้องหลายคัน = แยก "ฝั่งไป" กับ "ฝั่งกลับ" คนละคัน (แต่ละคันวิ่งฝั่งเดียว)
   zones.forEach(z=>{
-    const ord=z.noGps?z.stores:_mgNNOrder(z.stores);
-    const chunks=[];let cur=[],cw=0,cv=0;
-    ord.forEach(s=>{if(cur.length&&((cw+s.w)>capW||(capV>0&&(cv+s.v)>capV))){chunks.push(cur);cur=[];cw=0;cv=0;}cur.push(s);cw+=s.w;cv+=s.v;});
-    if(cur.length)chunks.push(cur);
-    chunks.forEach((chunk,ci)=>{
+    const chunks=[]; // {stores, side:''|'go'|'back', split:null|'i/n'}
+    const chunkBy=(list,sideKey)=>{ // ซอย list ตามความจุรถ 6 ล้อ — นับซอยแยกในแต่ละฝั่ง
+      const cc=[]; let cur=[],cw=0,cv=0;
+      list.forEach(s=>{if(cur.length&&((cw+s.w)>capW||(capV>0&&(cv+s.v)>capV))){cc.push(cur);cur=[];cw=0;cv=0;}cur.push(s);cw+=s.w;cv+=s.v;});
+      if(cur.length)cc.push(cur);
+      cc.forEach((c,i)=>chunks.push({stores:c,side:sideKey,split:cc.length>1?((i+1)+'/'+cc.length):null}));
+    };
+    if(z.noGps){ chunks.push({stores:z.stores,side:'',split:null}); }
+    else{
+      const parts=_mgSideParts(z.stores);
+      const zW=z.stores.reduce((a,s)=>a+s.w,0), zV=z.stores.reduce((a,s)=>a+s.v,0);
+      const fitsOne=zW<=capW&&(capV<=0||zV<=capV);
+      if(fitsOne){ chunks.push({stores:parts.order,side:'',split:null}); } // คันเดียว เรียงวนฝั่ง (ไป→กลับ)
+      else{
+        chunkBy(parts.go,'go'); chunkBy(parts.back,'back');                 // หลายคัน → แยกฝั่งไป/ฝั่งกลับ
+        if(parts.no&&parts.no.length)chunks.push({stores:parts.no,side:'',split:null});
+      }
+    }
+    chunks.forEach(ch=>{
+      const chunk=ch.stores;
       const distr=chunk.map(s=>s.district).filter(Boolean);
       const zoneName=(distr[0]||z.stores[0].route||'ไม่ระบุพื้นที่')+(z.prov?' · '+z.prov:'');
       const g={id:'mg'+(_mgIdSeq++),seg:z.seg,prov:z.prov,line:(chunk[0]&&chunk[0].route)||'',
-        zoneName,noGps:!!z.noGps,split:chunks.length>1?((ci+1)+'/'+chunks.length):null,stores:chunk,assign:null};
+        zoneName,noGps:!!z.noGps,split:ch.split,side:ch.side,stores:chunk,assign:null};
       _mgSync(g);g.assign=_mgDerive(g);groups.push(g);
     });
   });
@@ -7356,9 +7373,26 @@ function buildStoreGroups(){
 }
 function _mgLoose(){const inG=new Set();_manualGroups.forEach(g=>g.stores.forEach(u=>inG.add(u.uid)));
   return Object.values(_manualStores).filter(u=>!inG.has(u.uid));}
-function _mgOrdered(g){
-  const gps=g.stores.filter(u=>u.lat!=null),no=g.stores.filter(u=>u.lat==null);
-  return _mgNNOrder(gps).concat(no);
+// v8.74: จัดตามฝั่งถนน — แกน HQ→ร้านไกลสุด · ซ้ายของแนวขาไป (cross≥0)=ฝั่งไป · ขวา=ฝั่งกลับ
+//   คืน go(ใกล้→ไกล) + back(ไกล→ใกล้) = วิ่งฝั่งเดียวจนสุดแล้วค่อยข้ามกลับ (เหมือน reorderBySide)
+function _mgSideParts(arr){
+  const gps=arr.filter(u=>u.lat!=null&&u.lng!=null);
+  const no=arr.filter(u=>u.lat==null||u.lng==null);
+  if(gps.length<2)return {go:gps.slice(),back:[],no,order:gps.concat(no)};
+  let far=gps[0],fd=-1;
+  gps.forEach(u=>{const d=haversine(HQ.lat,HQ.lng,u.lat,u.lng);if(d>fd){fd=d;far=u;}});
+  const ax=far.lng-HQ.lng, ay=far.lat-HQ.lat, alen=Math.hypot(ax,ay)||1;
+  const proj=u=>((u.lng-HQ.lng)*ax+(u.lat-HQ.lat)*ay)/alen; // ระยะตามแนวขาไป
+  const cross=u=>ax*(u.lat-HQ.lat)-ay*(u.lng-HQ.lng);
+  const go=gps.filter(u=>cross(u)>=0).sort((a,b)=>proj(a)-proj(b));   // ฝั่งไป ใกล้→ไกล
+  const back=gps.filter(u=>cross(u)<0).sort((a,b)=>proj(b)-proj(a));  // ฝั่งกลับ ไกล→ใกล้
+  return {go,back,no,order:[...go,...back,...no]};
+}
+function _mgOrdered(g){ return _mgSideParts(g.stores).order; }
+function _mgSideBadge(g){ // ป้ายฝั่งบนการ์ดกลุ่ม (เฉพาะกลุ่มที่ถูกแยกตามฝั่ง)
+  if(g.side==='go')return ' <span style="font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;background:#EAF3DE;color:#15803D">🟢 ฝั่งไป</span>';
+  if(g.side==='back')return ' <span style="font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;background:#FEF3E2;color:#C47000">🟠 ฝั่งกลับ</span>';
+  return '';
 }
 function mgRecommendGroup(u){
   // v8.70: แนะนำเฉพาะกลุ่ม "จังหวัดเดียวกัน" (อำเภอเดียวกันมาก่อน) · ไม่มี → null = เปิดคันใหม่
@@ -7519,7 +7553,7 @@ function renderManualPanel(){
   const cardHtml=(g)=>{
     const assigned=g.assign&&g.assign.plate?g.assign:null, exp=_mgExpanded===g.id;
     const segTxt=g.seg==='big'?'รถใหญ่':'รถปลีก';
-    const badges=`<span class="mg-seg ${g.seg}">${segTxt}</span>`+(g.split?` <span class="mg-split">✂ ซอย ${g.split}</span>`:'')+(g.noGps?` <span class="mg-nogps">ไม่มีพิกัด</span>`:'');
+    const badges=`<span class="mg-seg ${g.seg}">${segTxt}</span>`+_mgSideBadge(g)+(g.split?` <span class="mg-split">✂ ซอย ${g.split}</span>`:'')+(g.noGps?` <span class="mg-nogps">ไม่มีพิกัด</span>`:'');
     const head=`<div class="mg-name">${g.zoneName} ${badges}</div><div class="mg-meta">${g.stores.length} ร้าน · <b>${_mgFmtW(g.w)}</b> · <b>${_mgFmtV(g.v)}</b>${g.line?' · สาย '+g.line:''}</div>`;
     const right=assigned?`<div class="mg-assigned"><span class="mg-tbadge">🚚 ${assigned.plate}</span><span class="mg-tripb">เที่ยว ${assigned.trip}</span>
         <button class="mg-pick change" onclick="openManualPick('${g.id}',this)">เปลี่ยน</button>
@@ -7658,8 +7692,8 @@ function _mgRefreshViews(){ // อัปเดตหน้าที่กำล�
   if(typeof renderManualPanel==='function')renderManualPanel();
 }
 function jrRouteKm(g){
-  const gps=g.stores.filter(u=>u.lat!=null); if(!gps.length)return 0;
-  const ord=_mgNNOrder(gps); let km=0,pl=HQ.lat,pn=HQ.lng;
+  const ord=_mgOrdered(g).filter(u=>u.lat!=null); if(!ord.length)return 0; // v8.74: ลำดับฝั่ง (ตรงกับเส้นที่วาด)
+  let km=0,pl=HQ.lat,pn=HQ.lng;
   ord.forEach(u=>{km+=haversine(pl,pn,u.lat,u.lng);pl=u.lat;pn=u.lng;});
   km+=haversine(pl,pn,HQ.lat,HQ.lng); // กลับคลัง
   return km;
@@ -7796,7 +7830,7 @@ function jrRenderGroups(){
   const c=document.getElementById('jrGroupCnt'); if(c)c.textContent=_manualGroups.length;
   host.innerHTML=_manualGroups.length?_manualGroups.map(g=>{
     const a=g.assign&&g.assign.plate?g.assign:null, km=jrRouteKm(g), amt=jrGroupAmt(g);
-    const badges=`<span class="mg-seg ${g.seg}">${g.seg==='big'?'รถใหญ่':'รถปลีก'}</span>`+(g.split?` <span class="mg-split">✂ ${g.split}</span>`:'')+(g.noGps?` <span class="mg-nogps">ไม่มีพิกัด</span>`:'');
+    const badges=`<span class="mg-seg ${g.seg}">${g.seg==='big'?'รถใหญ่':'รถปลีก'}</span>`+_mgSideBadge(g)+(g.split?` <span class="mg-split">✂ ${g.split}</span>`:'')+(g.noGps?` <span class="mg-nogps">ไม่มีพิกัด</span>`:'');
     const right=a?`<div class="mg-assigned"><span class="mg-tbadge">🚚 ${a.plate}</span><span class="mg-tripb">ท.${a.trip}</span><button class="mg-pick change" onclick="event.stopPropagation();openManualPick('${g.id}',this)">เปลี่ยน</button><button class="mg-unas" onclick="event.stopPropagation();unassignManualGroup('${g.id}')">✕</button></div>`
       :`<button class="mg-pick" onclick="event.stopPropagation();openManualPick('${g.id}',this)">🚚 เลือกรถ + เที่ยว</button>`;
     return `<div class="mg-card ${a?'done':''} ${_jrSel===g.id?'jr-sel':''}" ondragover="jrDragOver(event,this)" ondragleave="this.classList.remove('jr-drop')" ondrop="jrDrop(event,'${g.id}',this)" onclick="jrSelGroup('${g.id}')">
