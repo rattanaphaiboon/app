@@ -502,6 +502,20 @@ body.dark .banner-gold{color:var(--gold-light)}
       </div>
     </div>
 
+    <!-- MISSING PHOTOS: แนบสลิป/เช็คที่ขาด (v3.80) -->
+    <div class="section" id="sec-missing-photos">
+      <div class="card card-gold">
+        <div class="card-head">
+          <h3>📸 แนบสลิป/เช็คที่ขาด</h3>
+          <div class="row gap-8">
+            <button class="btn btn-outline btn-sm" onclick="renderMissingPhotos()">🔄 รีเฟรช</button>
+            <button class="btn btn-outline btn-sm" onclick="switchTab('sec-home')">↩ กลับหน้าหลัก</button>
+          </div>
+        </div>
+        <div class="card-body" id="missingPhotosBody"></div>
+      </div>
+    </div>
+
     <!-- RETURN: รับคืน → CN sheet -->
     <div class="section" id="sec-returns">
       <div class="card card-gold">
@@ -755,7 +769,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.79';
+const APP_VERSION='3.80';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1616,6 +1630,7 @@ function renderCurrent(){
   else if(id==='sec-sup-summary') renderSupSummary();
   else if(id==='sec-sup-history') renderSupHistory();
   else if(id==='sec-sup-review') {/* handled by openReview */}
+  else if(id==='sec-missing-photos') renderMissingPhotos();   // v3.80
   else if(id==='sec-settings') renderSettings();
   updateTabBadges();   // v2.49: refresh badge งานค้างทุกครั้งที่ render
 }
@@ -1626,22 +1641,116 @@ const HOME_MODULES=[
   {id:'pickup',     icon:'🚛', label:'บันทึกเที่ยวส่ง',  sub:'รับงาน · เก็บเงิน · ตีกลับ',     target:'sec-driver-home', ready:true},
   {id:'transfer',   icon:'🏬', label:'โอนย้าย-ขนสินค้า',  sub:'เที่ยวพิเศษ',                     target:'sec-transfer',    ready:true},
   {id:'returns',    icon:'📦', label:'รับคืน',           sub:'รับสินค้าคืนจากลูกค้า',           target:'sec-returns',     ready:true},
+  {id:'missing-photos', icon:'📸', label:'แนบสลิปที่ขาด', sub:'รูปสลิป/เช็คที่ยังไม่มี',        target:'sec-missing-photos', ready:true},   // v3.80
   {id:'reports',    icon:'📊', label:'รายงาน',           sub:'สรุปยอด · ดาวน์โหลด',             target:'sec-reports',     ready:true},
   {id:'customers',  icon:'🏪', label:'ข้อมูลร้านค้า',     sub:'ค้นหา · พิกัด · ผู้ดูแล',        target:'sec-customers',   ready:true},
 ];
 function renderHome(){
-  $('homeGrid').innerHTML=HOME_MODULES.map(m=>`
-    <div class="home-card ${m.ready?'':'disabled'}" onclick="${m.ready?`switchTab('${m.target}')`:`showComingSoon('${esc(m.label)}')`}">
+  const missN=(typeof missingPhotoList_==='function')?missingPhotoList_().length:0;   // v3.80: นับสลิปที่ต้องแนบเพิ่ม
+  $('homeGrid').innerHTML=HOME_MODULES.map(m=>{
+    let sub=m.sub, warn=false;
+    if(m.id==='missing-photos'){ if(missN){ sub='⚠️ '+missN+' รายการรอแนบรูป'; warn=true; } else sub='ครบแล้ว 🎉'; }
+    return `<div class="home-card ${m.ready?'':'disabled'}" onclick="${m.ready?`switchTab('${m.target}')`:`showComingSoon('${esc(m.label)}')`}">
       <div>
         <div class="home-card-text">${esc(m.label)}</div>
-        <div class="home-card-sub">${esc(m.sub)}</div>
+        <div class="home-card-sub"${warn?' style="color:var(--danger,#e07a5f);font-weight:600"':''}>${esc(sub)}</div>
       </div>
       <div class="home-card-icon">${m.icon}</div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 function showComingSoon(name){
   showToast(`"${name}" อยู่ระหว่างพัฒนา`,'info');
+}
+
+/* ========== v3.80: แนบสลิป/เช็คที่ขาด (คนขับ) ==========
+   หาบิลของตัวเองที่ "มียอดโอน/เช็ค แต่ช่องรูปยังไม่เป็นลิงก์" → ให้แนบใหม่ → อัปขึ้น Drive + เขียนลิงก์ลงชีท */
+function isPhotoLink_(v){ return String(v||'').indexOf('http')===0; }   // ลิงก์จริงเท่านั้นถือว่ามีรูป (ว่าง/marker = ไม่มี)
+function missingPhotoList_(){
+  const out=[];
+  const cutoff=Date.now()-60*86400000;   // v3.80: โฟกัสบิล 60 วันล่าสุด (กันบิลเก่ามากก่อนมีฟีเจอร์รูปมาท่วมลิสต์)
+  (state.jobs||[]).forEach(j=>{
+    if(!isMyOwnJob(j)) return;
+    (j.bills||[]).forEach(b=>{
+      if(b.savedAt && b.savedAt<cutoff) return;   // เก่ากว่า 60 วัน → ข้าม (ไม่มี savedAt = เก็บไว้ก่อน)
+      const p=b.payment||{};
+      [{slot:'slip1',key:'transfer1Photo',amt:parseFloat(p.transfer1)||0,label:'สลิปโอน'},
+       {slot:'slip2',key:'transfer2Photo',amt:parseFloat(p.transfer2)||0,label:'สลิปโอน 2'},
+       {slot:'cheque',key:'chequePhoto',amt:parseFloat(p.cheque)||0,label:'รูปเช็ค'}].forEach(s=>{
+        if(s.amt>0 && !isPhotoLink_(p[s.key])){
+          out.push({jobId:j.id,doc:b.doc,name:b.name,amt:s.amt,slot:s.slot,key:s.key,label:s.label,
+            when:b.savedAt||0,plate:(j.team&&j.team.plate)||''});
+        }
+      });
+    });
+  });
+  out.sort((a,b)=>(b.when||0)-(a.when||0));   // ล่าสุดก่อน
+  return out;
+}
+function renderMissingPhotos(){
+  const box=$('missingPhotosBody'); if(!box) return;
+  const items=missingPhotoList_();
+  if(!items.length){ box.innerHTML='<div class="txt-center txt-muted p-16">🎉 ไม่มีรูปสลิป/เช็คที่ต้องแนบเพิ่ม</div>'; return; }
+  box.innerHTML=`<div class="txt-sm txt-muted mb-8">มี <b>${items.length}</b> รายการที่ยังไม่มีรูป — แตะ 🖼 เพื่อแนบจากคลังรูป/ถ่ายใหม่</div>`+
+    items.map((it,i)=>{
+      const uid='mp_'+i;
+      const esd=esc(it.doc).replace(/'/g,"\\'"), esj=esc(it.jobId).replace(/'/g,"\\'");
+      return `<div class="card" style="padding:10px 12px;margin-bottom:8px">
+        <div class="flex-between" style="gap:8px;align-items:flex-start">
+          <div style="min-width:0;flex:1">
+            <div class="txt-bold" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.name||it.doc)}</div>
+            <div class="txt-xs txt-muted">${esc(it.doc)} · <span class="txt-gold">${esc(it.label)} ${fmt(it.amt)} ฿</span></div>
+            <div class="txt-xs txt-muted">🚗 ${esc(it.plate||'-')}${it.when?' · '+esc(formatThaiDateTime(it.when)):''}</div>
+          </div>
+          <div style="white-space:nowrap;display:flex;gap:6px" id="${uid}_act">
+            <label class="btn btn-outline btn-sm" style="cursor:pointer">📷<input type="file" accept="image/*" capture="environment" hidden onchange="attachMissingPhoto(event,'${esj}','${esd}','${it.slot}','${it.key}','${uid}')"></label>
+            <label class="btn btn-gold btn-sm" style="cursor:pointer">🖼 แนบ<input type="file" accept="image/*" hidden onchange="attachMissingPhoto(event,'${esj}','${esd}','${it.slot}','${it.key}','${uid}')"></label>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+}
+function attachMissingPhoto(ev,jobId,doc,slot,key,uid){
+  const f=ev.target.files[0]; if(!f) return;
+  const act=$(uid+'_act'); if(act) act.innerHTML='<span class="txt-xs txt-muted">⏳ กำลังอัปโหลด…</span>';
+  const reader=new FileReader();
+  reader.onload=e=>{
+    const img=new Image();
+    img.onload=async ()=>{
+      const max=1280; let w=img.width,h=img.height;
+      if(w>max||h>max){ const r=Math.min(max/w,max/h); w*=r; h*=r; }
+      const c=document.createElement('canvas'); c.width=w; c.height=h;
+      c.getContext('2d').drawImage(img,0,0,w,h);
+      const data=c.toDataURL('image/jpeg',0.78);
+      try{
+        const url=getAppsUrl();
+        if(!url){ throw new Error('ยังไม่ได้ตั้งค่า URL'); }
+        const ctrl=('AbortController' in window)?new AbortController():null;
+        const to=setTimeout(()=>{ if(ctrl) ctrl.abort(); },30000);
+        const rr=await fetch(url,{method:'POST',mode:'cors',headers:{'Content-Type':'text/plain'},
+          body:JSON.stringify({action:'set_bill_photo',jobId:jobId,docNo:doc,slot:slot,dataUrl:data}),signal:ctrl?ctrl.signal:undefined});
+        clearTimeout(to);
+        const jr=await rr.json().catch(()=>({}));
+        if(jr&&jr.ok&&jr.url&&isPhotoLink_(jr.url)){
+          const j=state.jobs.find(x=>x.id===jobId);
+          const b=j&&(j.bills||[]).find(x=>x.doc===doc);
+          if(b){ (b.payment=b.payment||{})[key]=jr.url; persistJobs(); }
+          showToast('แนบรูป '+doc+' สำเร็จ ✓','success');
+          renderMissingPhotos(); renderHome();
+        } else {
+          if(act) act.innerHTML='<span class="txt-xs txt-danger">❌ ไม่สำเร็จ</span>';
+          showToast('อัปโหลดไม่สำเร็จ'+((jr&&jr.error)?' — '+jr.error:''),'error');
+          setTimeout(renderMissingPhotos,1800);
+        }
+      }catch(err){
+        if(act) act.innerHTML='<span class="txt-xs txt-danger">❌ เน็ตมีปัญหา</span>';
+        showToast('อัปโหลดไม่สำเร็จ (ตรวจอินเทอร์เน็ต)','error');
+        setTimeout(renderMissingPhotos,1800);
+      }
+    };
+    img.src=e.target.result;
+  };
+  reader.readAsDataURL(f);
 }
 
 /* ========== REPORTS (รายงานการเก็บเงิน) — v3.03: list-style grouped by date, clickable ========== */
@@ -6462,7 +6571,7 @@ async function syncJobsFromSheet(opts){
   return sheetJobs.length;
 }
 
-const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.79 (+ action upload_photo: อัปรูปสลิป/เช็คทันทีที่แนบ กันรูปหาย | v3.78 กัน marker '[photo-pending-sync]' เขียนทับ + เมนูกู้ลิงก์รูป | v3.70 GPS ตอนกรอกบิล) */
+const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.80 (+ action set_bill_photo: คนขับแนบสลิป/เช็คที่ขาดให้บิลเดิม → เขียนลิงก์ลงชีท | v3.79 upload_photo อัปทันทีที่แนบ | v3.78 กัน marker '[photo-pending-sync]' + เมนูกู้ลิงก์รูป) */
 const SHEET_INPUT='บันทึกเที่ยวส่ง';
 const SHEET_CIN='บันทึกบิลและการชำระ';
 const SHEET_CN='CN';
@@ -6512,7 +6621,7 @@ const HEADERS_CIN=['เลขใบคุม','Doc_Date','Doc_No','Customer_Code
 function doGet(e){
   let drive='unknown';
   try{ DriveApp.getRootFolder().getName(); drive='OK'; }catch(err){ drive='NOT_AUTHORIZED'; }
-  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.79',drive:drive}))
+  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.80',drive:drive}))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -6546,6 +6655,22 @@ function doPost(e){
       }
     }
 
+    // ===== v3.80: แนบรูปสลิป/เช็คให้บิลเดิม (หน้า "แนบสลิปที่ขาด") → อัปขึ้น Drive + เขียนลิงก์ลง Cin =====
+    if(data.action==='set_bill_photo'){
+      const lock=LockService.getScriptLock(); lock.waitLock(30000);
+      try{
+        const jobId=String(data.jobId||''), docNo=String(data.docNo||'');
+        const map={slip1:{col:'รูปสลิปที่1',pre:'SLIP1_'},slip2:{col:'รูปสลิปที่2',pre:'SLIP2_'},cheque:{col:'รูปเช็ค',pre:'CHEQUE_'}};
+        const m=map[data.slot];
+        if(!m) return ContentService.createTextOutput(JSON.stringify({ok:false,error:'slot ไม่ถูกต้อง'})).setMimeType(ContentService.MimeType.JSON);
+        const url=uploadPaymentPhoto_(data.dataUrl||'', m.pre+jobId+'_'+docNo+'.jpg');
+        if(!url||String(url).indexOf('http')!==0) return ContentService.createTextOutput(JSON.stringify({ok:false,error:'อัปโหลดรูปไม่สำเร็จ'})).setMimeType(ContentService.MimeType.JSON);
+        const fields={}; fields[m.col]=url;   // รูปเช็ค มี 2 คอลัมน์ → updateRowsByHeader_ เขียนทั้งคู่
+        const updated=updateRowsByHeader_(ss,SHEET_CIN,['เลขใบคุม','Doc_No'],[jobId,docNo],fields);
+        return ContentService.createTextOutput(JSON.stringify({ok:true,url:url,updated:updated})).setMimeType(ContentService.MimeType.JSON);
+      } finally { lock.releaseLock(); }
+    }
+
     // ===== v3.29: บันทึกพิกัดร้านที่คนขับจับ GPS ที่หน้าร้าน — ลงชีท "พิกัดร้าน" =====
     if(data.action==='save_shop_coords'){
       const lock=LockService.getScriptLock(); lock.waitLock(30000);
@@ -6558,7 +6683,7 @@ function doPost(e){
         fmtColsOpen_(sh,['รหัสร้าน','เลขใบคุม','Doc_No'],'@');   // v3.35: เปิดปลาย คลุมแถวใหม่
         fmtColsOpen_(sh,['Lat','Lng'],'0.000000');
         fmtColsOpen_(sh,['วันเวลา'],'yyyy-mm-dd hh:mm:ss');
-        return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.79'})).setMimeType(ContentService.MimeType.JSON);
+        return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.80'})).setMimeType(ContentService.MimeType.JSON);
       }finally{ lock.releaseLock(); }
     }
 
@@ -7005,7 +7130,7 @@ function doPost(e){
       fmtColsOpen_(cinSh,['วัน+เวลา ที่ส่งสินค้า','U_ADD','วันที่โอนครั้งที่1','วันที่โอนครั้งที่2','แก้ไขเมื่อ','วันที่','วันเวลาอนุมัติ'],'yyyy-mm-dd hh:mm:ss');
     }
 
-    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.79'}))
+    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.80'}))
       .setMimeType(ContentService.MimeType.JSON);
   }catch(err){
     return ContentService.createTextOutput(JSON.stringify({ok:false,error:String(err)}))
