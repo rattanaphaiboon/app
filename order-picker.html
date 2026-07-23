@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Order Picker v1.15</title>
+<title>Order Picker v1.18</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -110,7 +110,7 @@ td.num,#panel-orders td.num{text-align:center;font-variant-numeric:tabular-nums}
 <div id="app" style="display:none">
 
 <header class="appbar">
-  <div class="title">📦 Order Picker <span class="ver">v1.15</span></div>
+  <div class="title">📦 Order Picker <span class="ver">v1.18</span></div>
   <div style="flex:1"></div>
   <span class="who-box">👤 <b id="whoEmail" style="color:#fff">-</b> <span class="logout-link" onclick="logout()">ออกจากระบบ</span></span>
   <button class="hub-btn" onclick="reload()" title="โหลดใหม่จาก Supabase" style="background:#1e3a8a;color:#fff;padding:7px 10px">🔄</button>
@@ -143,6 +143,12 @@ td.num,#panel-orders td.num{text-align:center;font-variant-numeric:tabular-nums}
     <button class="chip" data-w="W2" onclick="setWh('W2')">W2</button>
     <button class="chip" data-w="W3" onclick="setWh('W3')">W3</button>
     <button class="chip" data-w="W4" onclick="setWh('W4')">W4</button>
+  </div>
+  <div class="chipgrp" id="deliverChips">
+    <span class="lbl">รูปแบบส่ง</span>
+    <button class="chip on" data-dl="all" onclick="setDeliver('all')">ทั้งหมด</button>
+    <button class="chip" data-dl="pickup" onclick="setDeliver('pickup')">🏠 รับเอง</button>
+    <button class="chip" data-dl="deliver" onclick="setDeliver('deliver')">🚚 ส่งถึงร้าน</button>
   </div>
   <input type="text" id="fStore" placeholder="🔍 ร้าน/สินค้า" style="min-width:160px">
   <div style="flex:1"></div>
@@ -255,6 +261,9 @@ const CUSTOMER_SHEET_ID = '18RSfuDdCadccWS_3v_Ggi70_X8FGEIVGrGUedkQLYUw';
 const CUSTOMER_GID = '1169768881';
 let STORE_DAY = {};   // normStore(ชื่อร้าน) -> วันส่ง
 function normStore(s){ return String(s||'').replace(/\s+/g,'').toLowerCase(); }
+/* v1.18: normName = normalize ชื่อเซล (ตัด (ROO) + ช่องว่าง) เพื่อจับคู่กับชีท Data Center */
+function normName(s){ return String(s||'').replace(/\(roo\)/ig,'').replace(/\s+/g,'').toLowerCase(); }
+let NAME_INFO = {};   // normName(ชื่อเซล) -> {code, book} (รหัส HS จริง + เล่ม จากชีท Data Center)
 function dayOfStore(store){ return STORE_DAY[normStore(store)] || ''; }
 async function loadStoreDays(){
   try{
@@ -272,22 +281,32 @@ async function loadStoreDays(){
   }catch(e){ console.warn('[storeDay] โหลดวันส่งไม่ได้ (ข้าม · ฟีเจอร์เสริม)', e); }
 }
 
-/* v1.15: โหลดเล่มเอกสาร (ห้องเอกสารB) จากชีท Data Center — รหัสเซล(col AM) → เล่ม(col AP) */
+/* v1.15/1.18: โหลดเล่มเอกสาร + ชื่อ จากชีท Data Center — รหัสเซล(AM) · ชื่อ(AN) · ห้องเอกสารB(AP)
+ * สร้าง 2 map: DOC_BOOKS(รหัส→เล่ม) + NAME_INFO(ชื่อ→{รหัส,เล่ม}) สำหรับจับ ROH→HS จริงด้วยชื่อ */
 const DATACENTER_GID = '467187215';
 async function loadDocBooks(){
   try{
-    const url = `https://docs.google.com/spreadsheets/d/${CUSTOMER_SHEET_ID}/gviz/tq?gid=${DATACENTER_GID}&headers=1&tq=${encodeURIComponent('select AM, AP')}`;
+    const url = `https://docs.google.com/spreadsheets/d/${CUSTOMER_SHEET_ID}/gviz/tq?gid=${DATACENTER_GID}&headers=1&tq=${encodeURIComponent('select AM, AN, AP')}`;
     const txt = await (await fetch(url)).text();
     const json = JSON.parse(txt.replace(/^[\s\S]*?setResponse\(/,'').replace(/\);?\s*$/,''));
-    const map = {};
+    const map = {}, byName = {};
     for(const r of ((json.table&&json.table.rows)||[])){
-      const c=r.c||[], code=c[0]&&c[0].v, book=c[1]&&c[1].v;
+      const c=r.c||[], code=c[0]&&c[0].v, name=c[1]&&c[1].v, book=c[2]&&c[2].v;
       const k = String(code||'').trim().toUpperCase();
       if(k && book) map[k] = String(book).trim();
+      const nk = normName(name);
+      if(nk && k && !byName[nk]) byName[nk] = { code:k, book: book?String(book).trim():'' };   // first-win ต่อชื่อ
     }
-    DOC_BOOKS = map;
-    console.log('[docBooks] โหลดเล่มเอกสารจากชีท Data Center:', Object.keys(map).length, 'รหัส');
+    DOC_BOOKS = map; NAME_INFO = byName;
+    console.log('[docBooks] Data Center:', Object.keys(map).length, 'เล่ม ·', Object.keys(byName).length, 'ชื่อ');
   }catch(e){ console.warn('[docBooks] โหลดเล่มไม่ได้ (ข้าม · จะขึ้น NA-<รหัส>)', e); }
+}
+/* v1.18: รหัสเซลตัวจริง — ส่ง(ROH) แปลงเป็นรหัส HS จริงด้วยชื่อ · อื่นใช้รหัสเดิม */
+function realSalesman(o){
+  const orig = String(o.salesman||'').trim().toUpperCase();
+  if(chanOf(o)!=='ส่ง') return orig;
+  const info = NAME_INFO[normName(o.name)];
+  return (info && info.code) ? info.code : orig;
 }
 /* badge วันส่ง (สีม่วงอ่อน · '—' ถ้าไม่เจอ/ชีทไม่กรอก) */
 function dayBadge(store){
@@ -498,7 +517,7 @@ let DATA_ORDERS = [];
 let selectedBills = new Set();
 let dateSel = new Set();
 let _dateMode = 't';
-let fRole='all', fWh='all';
+let fRole='all', fWh='all', fDeliver='all';   // v1.16: fDeliver = all/pickup(รับเอง)/deliver(ส่งถึงร้าน)
 
 function todayBKK(){ return today; }
 function dateMinus(iso,n){ const d=new Date(iso+'T12:00:00Z'); d.setUTCDate(d.getUTCDate()-n); return d.toISOString().slice(0,10); }
@@ -506,7 +525,7 @@ function toBuddhistDMY(iso){ const [y,m,d]=String(iso).split('-'); return `${d}/
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function toast(m){ const t=document.getElementById('toast'); t.textContent=m; t.style.display='block'; setTimeout(()=>t.style.display='none',2500); }
 function shipWh(o){ return String(o.whSend1||o.wh||'').trim().toUpperCase(); }
-function keyTSof(o){ const base=Date.parse(o.date+'T00:00:00')||0; const m=String(o.time||'').match(/(\d{1,2}):(\d{2})/); return base+(m?(+m[1])*3600000+(+m[2])*60000:0); }
+function keyTSof(o){ const base=Date.parse(o.date+'T00:00:00')||0; const m=String(o.time||'').match(/(\d{1,2})[:.](\d{2})/); return base+(m?(+m[1])*3600000+(+m[2])*60000:0); }   /* v1.16: รับเวลาแบบ 11.03 (จุด) ด้วย ไม่ใช่แค่ 11:03 → เรียงเวลาได้ */
 function roleLabel(r){ return r==='ROO'?'ROO':r===4?'ส่ง':r===3?'ปลีก':'R'+r; }
 /* ROO order = บิลจากแอป ROO (ลูกค้าสั่งเองผ่าน LINE)
  * ตรวจจับด้วย 3 signal (any hit): (1) รหัสเซลล์ ว่าง (2) ชื่อ-สกุล ลงท้าย "(ROO)" (3) orderId ขึ้นต้น "OR" (เช่น ORD...) */
@@ -521,10 +540,13 @@ function isROO(o){
 const CHAN_PREFIX = { 'PM':'ปลีก', 'HS':'ส่ง', 'RO':'ROO' };
 /* หา "ประเภท" (chan) ของบิล: ROO / ปลีก / ส่ง / '' */
 function chanOf(o){
-  // v1.14: ยึด "รหัสเซล" เป็นหลัก — PM→ปลีก · HS→ส่ง · RO→ROO (มาก่อนสัญญาณ ROO)
-  const p = String(o.salesman||'').trim().toUpperCase().slice(0,2);
-  if(CHAN_PREFIX[p]) return CHAN_PREFIX[p];
-  // รหัสเซลไม่เข้า prefix ชัด → ใช้สัญญาณ ROO (ตาราง roo_sales / ชื่อ (ROO) / orderId OR / รหัสเซลว่าง)
+  const code = String(o.salesman||'').trim().toUpperCase();
+  // v1.17: เซล HS (ร้านส่ง) = ขึ้นต้น "HS" หรือมี "H" เป็นตัวที่ 3 (เช่น ROH = HS ที่แปลงมาเป็น ROO) → ส่ง
+  if(code.slice(0,2)==='HS' || code[2]==='H') return 'ส่ง';
+  // ที่เหลือยึดรหัสเซล — PM→ปลีก · RO→ROO
+  const c = CHAN_PREFIX[code.slice(0,2)];
+  if(c) return c;
+  // ไม่เข้า prefix ชัด → สัญญาณ ROO (ตาราง roo_sales / ชื่อ (ROO) / orderId OR / รหัสเซลว่าง)
   if(o.srcTable==='roo' || isROO(o)) return 'ROO';
   return '';
 }
@@ -552,6 +574,10 @@ function refreshDateChips(){
 function passDate(d){ if(dateSel.size) return dateSel.has(d); return true; }
 function setRole(v){ fRole=v; document.querySelectorAll('#roleChips .chip').forEach(c=>c.classList.toggle('on',c.dataset.r===v)); render(); }
 function setWh(v){ fWh=v; document.querySelectorAll('#whChips .chip').forEach(c=>c.classList.toggle('on',c.dataset.w===v)); render(); }
+function setDeliver(v){ fDeliver=v; document.querySelectorAll('#deliverChips .chip').forEach(c=>c.classList.toggle('on',c.dataset.dl===v)); render(); }   // v1.16
+/* v1.16: จำแนกรูปแบบส่งของบิล → 'pickup'(รับเอง) / 'deliver'(ส่งถึงร้าน) / '' (ไม่ระบุ) */
+function deliverKind(d){ d=String(d||'').trim(); if(!d) return ''; return /รับ|เอง/.test(d) ? 'pickup' : 'deliver'; }
+function passDeliver(d){ return fDeliver==='all' || deliverKind(d)===fDeliver; }
 document.getElementById('fStore').addEventListener('input',()=>{ clearTimeout(window._st); window._st=setTimeout(render,250); });
 
 /* ============================================================
@@ -569,8 +595,10 @@ function buildBills(){
     if(fStore && !((o.store+' '+o.storeCode+' '+o.product+' '+o.barcode).toLowerCase().includes(fStore))) continue;
     if(!o.orderId) continue;
     if(!bills[o.orderId]){
-      bills[o.orderId]={orderId:o.orderId, date:o.date, time:o.time||'', salesman:o.salesman,
-        salesmanName: u.name||o.name||'', chan, roleLab: chan || 'R0', srcTable:o.srcTable||'roo',
+      // v1.17: เซลประเภทส่ง (HS) → ตัด "(ROO)" ท้ายชื่อออก โชว์ชื่อปกติ · v1.18: โชว์รหัส HS จริง (ROH→HSW)
+      const smName = (u.name||o.name||''), smShow = chan==='ส่ง' ? smName.replace(/\s*\(ROO\)\s*$/i,'').trim() : smName;
+      bills[o.orderId]={orderId:o.orderId, date:o.date, time:o.time||'', salesman:realSalesman(o),
+        salesmanName: smShow, chan, roleLab: chan || 'R0', srcTable:o.srcTable||'roo',
         store:o.store, wh:shipWh(o), lines:0, total:0, keyTS:0, seq:Infinity, isROO:isROO(o),
         done:false, doneBy:'', doneDate:'', doneTime:'', deliver:''};
     }
@@ -582,7 +610,9 @@ function buildBills(){
     if(o.done){ b.done=true; b.doneBy=o.doneBy||b.doneBy; b.doneDate=o.doneDate||b.doneDate; b.doneTime=o.doneTime||b.doneTime; }
     if(o.deliver && !b.deliver) b.deliver=o.deliver;   // v1.6: เก็บรูปแบบการจัดส่ง (line แรกที่มีค่า)
   }
-  return Object.values(bills).sort((a,b)=>          // v1.10: ใหม่สุดขึ้นบน (date/เวลา desc)
+  return Object.values(bills)
+    .filter(b=> passDeliver(b.deliver))            // v1.16: กรองตามรูปแบบส่ง (บิลระดับ)
+    .sort((a,b)=>          // v1.10: ใหม่สุดขึ้นบน (date/เวลา desc)
     String(b.date).localeCompare(String(a.date)) ||
     (b.keyTS||0)-(a.keyTS||0) ||
     (a.seq-b.seq) ||
@@ -922,11 +952,13 @@ function switchTab(t){
  * - ROO order → BV28 (เล่มกลาง เพราะไม่มีรหัสเซล)
  * - Order อื่น → lookup จาก DOC_BOOKS ตามรหัสเซล
  * - ไม่รู้จัก → NA-<code> (flag ว่าต้องเพิ่มเล่ม) */
-/* v1.15: เล่มเอกสาร — ROO ทุกรหัส → BV28 · HSW105(ไม่มีเล่มตัวเอง) → BK03 · อื่น → ชีท Data Center · ไม่เจอ → NA-<รหัส> */
+/* v1.18: เล่มเอกสาร — ROO ทุกรหัส → BV28 · ส่ง(ROH): จับชื่อ→เล่ม HS จริง (นพดล→HSW104→BK04)
+ * override วิรชัย(HSW105)→BK03 · ไม่เจอ → NA-<รหัส> */
 function docBookFor(o){
   if(chanOf(o)==='ROO') return 'BV28';
-  const code = String(o.salesman||'').trim().toUpperCase();
-  return BOOK_OVERRIDE[code] || DOC_BOOKS[code] || ('NA-'+code);
+  const rc = realSalesman(o);                       // HSW104 สำหรับ ROH102
+  const info = NAME_INFO[normName(o.name)];
+  return BOOK_OVERRIDE[rc] || (info && info.book) || DOC_BOOKS[rc] || ('NA-'+rc);
 }
 
 async function exportXlsx(){
@@ -949,7 +981,7 @@ async function exportXlsx(){
       debtor: o.storeCode,
       endDisc: '',
       branch: '0', dept: 'SP01', project: '0',
-      salesman: o.salesman,
+      salesman: realSalesman(o),   // v1.18: bplus ใช้รหัส HS จริง (ROH→HSW)
       note: ('billId'+String(o.orderId||'')+' '+o.note).trim(),
       delivDate: delivDMY,                                        // ตายตัว = พรุ่งนี้
       barcode: o.barcode,
