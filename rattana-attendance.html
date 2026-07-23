@@ -1487,8 +1487,9 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
           <div class="face-guide"></div>
           <div class="cam-face-badge" id="camFaceBadge"></div>
           <div class="cam-overlay" id="empCamOverlay">
-            <div class="cam-spinner"></div>
+            <div class="cam-spinner" id="empCamSpinner"></div>
             <div class="cam-overlay-text" id="empCamText">กำลังเปิดกล้อง...</div>
+            <button id="empCamRetry" onclick="startEmpCamera()" style="display:none;margin-top:12px;background:var(--gold);color:#1A2230;border:0;border-radius:10px;padding:10px 22px;font-weight:700;font-size:14px">🔄 ลองเปิดกล้องอีกครั้ง</button>
           </div>
         </div>
         <!-- status -->
@@ -3373,7 +3374,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '7.1';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '7.2';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -4680,19 +4681,69 @@ function livenessActionLabel(a) {
 /* ============================================================
    EMPLOYEE CAMERA + MATCHING
    ============================================================ */
+/* v7.2 — เปิดกล้องแบบทนทาน: มี timeout, ไม่ await play() (iOS ค้าง), fallback constraint, บอกสาเหตุจริง */
+let _empCamBusy = false;
+function camTimeout_(p, ms) {
+  return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('GUM_TIMEOUT')), ms))]);
+}
+function camWaitFrame_(v, ms) {
+  return new Promise(res => {
+    if (v.videoWidth) return res(true);
+    const done = () => { clearTimeout(t); clearInterval(iv); v.removeEventListener('loadedmetadata', on); v.removeEventListener('playing', on); };
+    const on = () => { if (v.videoWidth) { done(); res(true); } };
+    const t = setTimeout(() => { done(); res(!!v.videoWidth); }, ms);
+    const iv = setInterval(on, 200);
+    v.addEventListener('loadedmetadata', on); v.addEventListener('playing', on);
+  });
+}
+function camErrText_(e) {
+  const n = (e && (e.name || e.message)) || '';
+  if (n === 'GUM_TIMEOUT')       return '⚠ กล้องไม่ตอบสนอง — ปิดแอปที่ใช้กล้องอยู่ (กล้อง/วิดีโอคอล) แล้วลองใหม่';
+  if (n === 'NoFrame')           return '⚠ เปิดกล้องได้แต่ไม่มีภาพ — ปิดแอปอื่นที่ใช้กล้อง แล้วลองใหม่';
+  if (n === 'NotAllowedError' || n === 'SecurityError')
+                                 return '⚠ ยังไม่อนุญาตกล้อง — แตะ 🔒 ข้าง URL → สิทธิ์ → กล้อง → อนุญาต แล้วรีเฟรช';
+  if (n === 'NotReadableError' || n === 'TrackStartError')
+                                 return '⚠ กล้องถูกแอปอื่นใช้อยู่ — ปิดแอปกล้อง/วิดีโอคอลก่อน';
+  if (n === 'NotFoundError' || n === 'DevicesNotFoundError') return '⚠ ไม่พบกล้องบนเครื่องนี้';
+  if (n === 'OverconstrainedError') return '⚠ กล้องหน้าไม่รองรับ — ลองใหม่อีกครั้ง';
+  if (n === 'NoMediaDevices')    return '⚠ เบราว์เซอร์นี้ใช้กล้องไม่ได้ — เปิดใน Chrome / Safari (อย่าเปิดใน LINE)';
+  return '⚠ เปิดกล้องไม่สำเร็จ (' + n + ')';
+}
 async function startEmpCamera() {
+  if (_empCamBusy) return;
+  _empCamBusy = true;
+  const v = document.getElementById('empVideo');
   try {
     setEmpOverlay(true, 'กำลังเปิดกล้อง...');
-    empStream = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ facingMode:'user', width:{ideal:640}, height:{ideal:640} } });
-    const v = document.getElementById('empVideo'); v.srcObject = empStream; await v.play();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('NoMediaDevices');
+
+    // ปล่อยกล้องเดิมก่อน กันจองค้าง
+    if (empStream) { try { empStream.getTracks().forEach(t => t.stop()); } catch (_) {} empStream = null; }
+    if (v) { try { v.srcObject = null; } catch (_) {} }
+
+    const gum = c => navigator.mediaDevices.getUserMedia(c);
+    try {
+      empStream = await camTimeout_(gum({ audio:false, video:{ facingMode:'user', width:{ideal:640}, height:{ideal:640} } }), 12000);
+    } catch (e1) {
+      if (e1 && e1.message === 'GUM_TIMEOUT') throw e1;
+      console.warn('[cam] fallback to video:true —', e1 && e1.name);
+      empStream = await camTimeout_(gum({ audio:false, video:true }), 12000);
+    }
+
+    v.srcObject = empStream;
+    v.play().catch(() => {});                 // ❗ ห้าม await — iOS บางรุ่น promise ไม่ resolve เลย
+    const got = await camWaitFrame_(v, 8000);
+    if (!got) throw new Error('NoFrame');
+
     setEmpOverlay(false);
     if (!faceapiReady) await loadFaceModels();
     if (faceapiReady) startEmpMatching();
   } catch (e) {
-    console.error(e);
-    setEmpOverlay(true, '⚠ เปิดกล้องไม่สำเร็จ');
+    console.error('[cam]', e && e.name, e && e.message, e);
+    if (empStream) { try { empStream.getTracks().forEach(t => t.stop()); } catch (_) {} empStream = null; }
+    setEmpOverlay(true, camErrText_(e), true);
     toast('เปิดกล้องไม่ได้', 'error');
-  }
+  } finally { _empCamBusy = false; }
 }
 function stopEmpCamera() {
   if (empMatchInterval) { clearInterval(empMatchInterval); empMatchInterval = null; }
@@ -4702,14 +4753,18 @@ function stopEmpCamera() {
   if (v) v.srcObject = null;
   const wrap = document.getElementById('empCamWrap');
   if (wrap) wrap.className = 'camera-wrap home-cam';
-  setEmpOverlay(true, 'กล้องปิด · กดเปิดเพื่อเริ่ม');
+  setEmpOverlay(true, 'กล้องปิด · กดเปิดเพื่อเริ่ม', true);
   updateFaceCheck(null);
 }
-function setEmpOverlay(show, text) {
+function setEmpOverlay(show, text, isErr) {
   const o = document.getElementById('empCamOverlay');
   if (o) o.classList.toggle('hidden', !show);
   const t = document.getElementById('empCamText');
   if (t) t.textContent = text || '';
+  const sp = document.getElementById('empCamSpinner');
+  if (sp) sp.style.display = isErr ? 'none' : '';
+  const rt = document.getElementById('empCamRetry');
+  if (rt) rt.style.display = isErr ? '' : 'none';
 }
 function startEmpMatching() {
   if (!faceapiReady) return;
@@ -7123,14 +7178,14 @@ async function startCheckinFlow() {
   overlay.style.display = 'block';
   document.body.style.overflow = 'hidden';
 
-  // Make sure face models loaded
+  // v7.2: เปิดกล้อง + GPS ก่อน แล้วค่อยโหลดโมเดล (กันโมเดลโหลดช้าแล้วกล้องไม่ติด)
+  startEmpCamera();
+  setTimeout(() => getGps(), 300);
   if (!faceapiReady) {
     toast('กำลังโหลดโมเดลใบหน้า...', 'info');
     await loadFaceModels();
+    if (faceapiReady && empStream) startEmpMatching();
   }
-  // Start camera + GPS
-  await startEmpCamera();
-  setTimeout(() => getGps(), 500);
 }
 
 function cancelCheckinFlow() {
