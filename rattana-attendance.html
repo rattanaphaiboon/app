@@ -1522,6 +1522,9 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
             <button class="btn btn-outline" onclick="getGps()">รีเฟรช GPS</button>
           </div>
           <div class="btn-row mt-12">
+            <button class="btn btn-outline" onclick="reloadMyFace()">👤 โหลดใบหน้าที่ลงทะเบียนไว้ใหม่</button>
+          </div>
+          <div class="btn-row mt-12">
             <button class="btn btn-outline" onclick="forceInOutToggle()">🔄 สลับ เข้า ⇄ ออก</button>
             <button class="btn btn-outline" onclick="resetTodayLogs()" style="color:var(--danger)">ล้างวันนี้</button>
             <button class="btn btn-outline" onclick="syncLogsFromSheet().then(evaluateAction)">🔄 Sync Sheet</button>
@@ -3374,7 +3377,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '7.2';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '7.3';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -3712,7 +3715,7 @@ async function authorizeUser(email, googleName, picture) {
   const u = matches[0];
   const role = resolveRole(u);
   currentUser = {
-    empId: u.empId || `auto-${Math.random().toString(36).slice(2,8)}`,
+    empId: String(u.empId || '').trim() || `auto-${Math.random().toString(36).slice(2,8)}`,
     name: u.name,
     email: u.email,
     nickname: u.nickname,
@@ -3787,7 +3790,7 @@ async function doSheetLogin() {
     }
     const u = json.user;
     currentUser = {
-      empId:       u.empId || u.username || username,
+      empId:       String(u.empId || u.username || username || '').trim(),
       name:        u.name || username,
       email:       u.email || '',
       nickname:    u.nickname || '',
@@ -3892,13 +3895,13 @@ function buildTeamFromSheet(selectedSupervisorName) {
   );
   // Build face data lookup: remote (Sheet) takes priority over local
   const remoteFaceMap = {};
-  remoteFaceData.forEach(f => { if (f.empId) remoteFaceMap[f.empId] = f; });
+  remoteFaceData.forEach(f => { if (f.empId) remoteFaceMap[empKey_(f.empId)] = f; });
   const localTeam = LS.get('team', []) || [];
   const localMap = {};
-  localTeam.forEach(m => { localMap[m.empId] = m; });
+  localTeam.forEach(m => { localMap[empKey_(m.empId)] = m; });
   team = subordinates.map(u => {
-    const remote = remoteFaceMap[u.empId];
-    const local = localMap[u.empId];
+    const remote = remoteFaceMap[empKey_(u.empId)];
+    const local = localMap[empKey_(u.empId)];
     // Priority: remote face > local face
     let descriptor = null, photo = null, registeredAt = null, registeredBy = null;
     if (remote?.descriptor) {
@@ -4009,6 +4012,31 @@ function parseCsvToObjects(text) {
   return out;
 }
 
+/* v7.3 — เทียบรหัสพนักงานแบบ normalize (Apps Script คืนเลขเป็น number บ้าง string บ้าง
+   ทำให้ '11202' === 11202 เป็น false → หาใบหน้าตัวเองไม่เจอ) */
+function empKey_(x) { return String(x == null ? '' : x).trim(); }
+
+/* หาใบหน้าตัวเองใน remoteFaceData → เทียบด้วยรหัสก่อน ถ้าไม่เจอค่อยเทียบชื่อ */
+function findMyFace_() {
+  if (!currentUser) return null;
+  const id = empKey_(currentUser.empId);
+  const nm = (currentUser.name || '').trim();
+  return remoteFaceData.find(f => f.descriptor && id && empKey_(f.empId) === id)
+      || remoteFaceData.find(f => f.descriptor && nm && (f.name || '').trim() === nm)
+      || null;
+}
+function adoptMyFace_(tag) {
+  const myFace = findMyFace_();
+  if (!myFace) { console.log('[face] ' + tag + ': ไม่พบใบหน้าของ empId=' + empKey_(currentUser && currentUser.empId) + ' ใน FaceData (' + remoteFaceData.length + ' คน)'); return false; }
+  registeredDescriptor = myFace.descriptor;
+  if (myFace.photo) LS.set('facePhoto', myFace.photo);
+  if (myFace.registeredAt) LS.set('faceRegisteredAt', new Date(myFace.registeredAt).getTime());
+  LS.set('faceDescriptor', Array.from(myFace.descriptor));
+  console.log('[face] ' + tag + ': โหลดใบหน้าตัวเองจาก FaceData แล้ว (' + empKey_(myFace.empId) + ')');
+  try { renderFaceReg(); evaluateAction(); } catch (_) {}
+  return true;
+}
+
 /* Specific loaders */
 async function loadFaceDataSheet() {
   const id = config.faceDataSheetId || config.usersSheetId;
@@ -4021,7 +4049,7 @@ async function loadFaceDataSheet() {
       if (r.descriptor) descriptor = new Float32Array(JSON.parse(r.descriptor));
     } catch(e) { console.warn('bad descriptor for', r.empId); }
     return {
-      empId: r.empId,
+      empId: empKey_(r.empId),
       name: r.name || '',
       descriptor,
       photo: r.photo || '',
@@ -4032,16 +4060,7 @@ async function loadFaceDataSheet() {
   LS.set('remoteFaceData', remoteFaceData.map(f => ({...f, descriptor: f.descriptor ? Array.from(f.descriptor) : null})));
   // ตรวจว่ามีใบหน้าตัวเองใน FaceData Sheet หรือไม่
   // ถ้ามี → ใช้แทน local (ใบหน้าจาก Sheet เป็น source of truth)
-  if (currentUser?.empId) {
-    const myFace = remoteFaceData.find(f => f.empId === currentUser.empId && f.descriptor);
-    if (myFace) {
-      registeredDescriptor = myFace.descriptor;
-      if (myFace.photo) LS.set('facePhoto', myFace.photo);
-      if (myFace.registeredAt) LS.set('faceRegisteredAt', new Date(myFace.registeredAt).getTime());
-      LS.set('faceDescriptor', Array.from(myFace.descriptor));
-      console.log('[v4.5] Loaded own face from FaceData Sheet');
-    }
-  }
+  adoptMyFace_('CSV');
   return true;
 }
 
@@ -4310,7 +4329,7 @@ async function loadFaceDataViaApi() {
       if (r.descriptor) descriptor = new Float32Array(JSON.parse(r.descriptor));
     } catch(e) {}
     return {
-      empId: String(r.empId),
+      empId: empKey_(r.empId),
       name: r.name || '',
       descriptor,
       photo: r.photo || '',
@@ -4319,15 +4338,7 @@ async function loadFaceDataViaApi() {
     };
   });
   LS.set('remoteFaceData', remoteFaceData.map(f => ({...f, descriptor: f.descriptor ? Array.from(f.descriptor) : null})));
-  if (currentUser?.empId) {
-    const myFace = remoteFaceData.find(f => f.empId === currentUser.empId && f.descriptor);
-    if (myFace) {
-      registeredDescriptor = myFace.descriptor;
-      if (myFace.photo) LS.set('facePhoto', myFace.photo);
-      if (myFace.registeredAt) LS.set('faceRegisteredAt', new Date(myFace.registeredAt).getTime());
-      LS.set('faceDescriptor', Array.from(myFace.descriptor));
-    }
-  }
+  adoptMyFace_('API');
   return true;
 }
 
@@ -4412,6 +4423,23 @@ async function refreshUsersSheet() {
     }
     renderTeamList(); renderDashboard(); renderSystemInfo();
     toast(`โหลดแล้ว ${allUsers.length} คน ✓`, 'success');
+  } finally { hideSpinner(); }
+}
+
+/* v7.3 — ดึง FaceData ใหม่แล้วหยิบใบหน้าตัวเองมาใช้ (พนักงานกดเองได้จาก "ตัวเลือกขั้นสูง") */
+async function reloadMyFace() {
+  showSpinner('กำลังโหลดใบหน้าที่ลงทะเบียนไว้...');
+  try {
+    let ok = false;
+    if (config.appsScriptUrl) ok = await loadFaceDataViaApi();
+    if (!ok) ok = await loadFaceDataSheet();
+    if (!ok) { toast('โหลด FaceData ไม่สำเร็จ — เช็คเน็ต/ล็อกอินใหม่', 'error'); return; }
+    if (registeredDescriptor) {
+      toast('✓ พบใบหน้าที่ลงทะเบียนไว้แล้ว — สแกนได้เลย', 'success');
+    } else {
+      toast(`ไม่พบใบหน้าของรหัส ${empKey_(currentUser && currentUser.empId)} ใน FaceData (มี ${remoteFaceData.length} คน) — แจ้งหัวหน้าลงใบหน้าใหม่`, 'warning');
+    }
+    renderFaceReg(); evaluateAction();
   } finally { hideSpinner(); }
 }
 
@@ -5136,7 +5164,7 @@ function evaluateAction() {
   btn.classList.toggle('checkout', next==='out');
 
   const reasons = [];
-  if (faceapiReady && !registeredDescriptor) reasons.push('❗ ยังไม่ได้ลงทะเบียนใบหน้า — ติดต่อ HR');
+  if (faceapiReady && !registeredDescriptor) reasons.push('❗ ยังไม่พบใบหน้า — กด "ตัวเลือกขั้นสูง" → โหลดใบหน้าใหม่');
   else if (faceapiReady && (!lastFaceMatch || !lastFaceMatch.found)) reasons.push('👤 มองตรงกล้องให้เห็นใบหน้า');
   else if (faceapiReady && lastFaceMatch && !lastFaceMatch.ok) reasons.push('❌ ใบหน้าไม่ตรง');
 
@@ -7041,6 +7069,9 @@ function initApp() {
     const stEl = document.getElementById('cfgStartTime'); if (stEl) stEl.value = settings.startTime;
     const lvEl = document.getElementById('cfgLiveness'); if (lvEl) lvEl.value = settings.liveness;
   }
+
+  // v7.3: กู้ใบหน้าตัวเองจากแคช FaceData (กรณีเปลี่ยนเครื่อง/ล้างแคช faceDescriptor)
+  if (!registeredDescriptor && remoteFaceData.length) adoptMyFace_('cache');
 
   renderFaceReg(); renderSystemInfo(); renderTodayStatus(); renderDashboard(); renderTeamList();
   renderQuickStart();
