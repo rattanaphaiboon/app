@@ -773,7 +773,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.87';
+const APP_VERSION='3.88';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -4362,6 +4362,7 @@ function openBillForm(idx){
           <div class="pay-head"><span class="pay-label">📃 ใบลดหนี้</span></div>
           ${payNumInput('creditNote',b.payment.creditNote,ro,'ยอดใบลดหนี้')}
           <div id="cnLinkNote" class="txt-xs txt-gold" style="margin-top:4px"></div>
+          <div id="issuedCnBox" style="margin-top:8px"></div>
         </div>
 
         <!-- v3.50: กรณีตักพาเลท — พับได้ / บันทึกเพิ่มเฉยๆ ไม่กระทบยอดที่ต้องเก็บ -->
@@ -4404,6 +4405,7 @@ function openBillForm(idx){
   renderPayBox();
   recalcPayTotal();
   applyCNCredit(idx);   // v2.11: ถ้ามี CN ตรงเลขบิลนี้ → เติมยอดใบลดหนี้ให้ (แก้ได้)
+  applyIssuedCN_(idx);   // v3.88: ใบลดหนี้ที่ออกแล้วในระบบ (IS) → ให้เลือกหักยอด (ไม่ต้องทำ CN)
   if(!ro) checkBillLocation_(j,b);   // v3.70: จับ GPS เทียบพิกัดร้าน (เงียบๆ) → เตือนถ้าไกลร้าน
 }
 
@@ -4540,6 +4542,73 @@ function applyCNCredit(idx){
   };
   if(Array.isArray(state.cnHistory)) paint();   // มีแคช → วาดทันที
   loadCNHistory().then(paint).catch(()=>{});     // แล้วรีเฟรชจากชีท CN
+}
+
+/* ===== v3.88: ใบลดหนี้ที่ออกแล้วในระบบ (ชีท IS) — จับด้วยเลขบิล (TRD_REFER_REF = Doc_No)
+   → โชว์ในหน้าเก็บเงินให้คนขับ "เลือก" เพื่อหักยอด (creditNote) โดยไม่ต้องทำ CN ในแอป ===== */
+const IS_SHEET='IS';
+const _issuedCNDone={};
+async function fetchIssuedCN_(doc){
+  doc=String(doc||'').trim(); if(!doc) return;
+  if(!state.issuedCN) state.issuedCN={};
+  if(state.issuedCN[doc]) return;                     // ดึงแล้ว
+  if(_issuedCNDone[doc]) return; _issuedCNDone[doc]=1;
+  try{
+    const tq="select B,I,K,M,N,O where P = '"+_dsdcEsc(doc)+"'";   // DI_REF, SKU_NAME, TRD_QTY, TRD_U_PRC, TRD_G_AMT, DI_REMARK
+    const url='https://docs.google.com/spreadsheets/d/'+DSDC_SRC_ID+'/gviz/tq?tqx=out:csv&sheet='+encodeURIComponent(IS_SHEET)+'&tq='+encodeURIComponent(tq)+'&_cb='+Date.now();
+    const ctrl=('AbortController' in window)?new AbortController():null;
+    const to=setTimeout(()=>{ if(ctrl) ctrl.abort(); },45000);
+    const res=await fetch(url,{cache:'no-store',signal:ctrl?ctrl.signal:undefined});
+    clearTimeout(to);
+    if(!res.ok) throw new Error('IS HTTP '+res.status);
+    const rows=parseCsv(await res.text());
+    const byCn={};   // รวมรายการต่อ 1 เลข CN (DI_REF)
+    rows.forEach(r=>{
+      const cnDoc=cleanCell(r['DI_REF']); if(!cnDoc) return;
+      const amt=parseFloat(cleanCell(r['TRD_G_AMT']||'0').replace(/,/g,''))||0;
+      if(!byCn[cnDoc]) byCn[cnDoc]={cnDoc,reason:cleanCell(r['DI_REMARK']||''),amount:0,items:[]};
+      byCn[cnDoc].amount+=amt;
+      byCn[cnDoc].items.push({sku:cleanCell(r['SKU_NAME']),qty:parseFloat(cleanCell(r['TRD_QTY']||'0').replace(/,/g,''))||0,price:parseFloat(cleanCell(r['TRD_U_PRC']||'0').replace(/,/g,''))||0,amount:amt});
+      if(!byCn[cnDoc].reason){ const rm=cleanCell(r['DI_REMARK']||''); if(rm) byCn[cnDoc].reason=rm; }
+    });
+    state.issuedCN[doc]=Object.values(byCn);
+  }catch(e){ console.warn('IS CN fetch failed:',e); state.issuedCN[doc]=state.issuedCN[doc]||[]; }
+}
+function applyIssuedCN_(idx){
+  const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
+  const b=j.bills[idx]; if(!b) return;
+  const ro=(j.status==='approved');
+  const render=()=>{
+    if(_billIdx!==idx) return;
+    const el=$('issuedCnBox'); if(!el) return;
+    const list=(state.issuedCN||{})[b.doc];
+    if(!Array.isArray(list)){ el.innerHTML='<div class="txt-xs txt-muted" style="margin-top:4px">⏳ ตรวจใบลดหนี้ที่ออกแล้ว…</div>'; return; }
+    if(!list.length){ el.innerHTML=''; return; }
+    const picked=b.payment._cnPicked||{};
+    el.innerHTML=`<div style="padding:10px 12px;border-radius:10px;border:1px solid var(--gold);background:var(--gold-soft)">
+      <div class="txt-sm txt-bold mb-8">📄 พบใบลดหนี้ที่ออกแล้วในระบบ${ro?'':' — แตะเลือกเพื่อหักยอด'}</div>
+      ${list.map(c=>`<label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--border);cursor:${ro?'default':'pointer'}">
+        <input type="checkbox" ${picked[c.cnDoc]?'checked':''} ${ro?'disabled':''} onchange="toggleIssuedCN_(${idx},'${esc(c.cnDoc).replace(/'/g,"\\'")}',this.checked)" style="width:20px;height:20px;margin-top:2px;flex:none">
+        <div style="flex:1;min-width:0">
+          <div class="txt-sm"><b>${esc(c.cnDoc)}</b> · <span class="txt-gold txt-bold">${fmt(c.amount)} ฿</span></div>
+          <div class="txt-xs txt-muted" style="white-space:normal">${esc(c.reason||'-')} · ${c.items.length} รายการ</div>
+        </div></label>`).join('')}
+    </div>`;
+  };
+  if((state.issuedCN||{})[b.doc]) render();
+  else { render(); fetchIssuedCN_(b.doc).then(render).catch(render); }
+}
+function toggleIssuedCN_(idx,cnDoc,checked){
+  const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
+  const b=j.bills[idx]; if(!b) return;
+  if(j.status==='approved') return;
+  if(!b.payment._cnPicked) b.payment._cnPicked={};
+  if(checked) b.payment._cnPicked[cnDoc]=true; else delete b.payment._cnPicked[cnDoc];
+  const list=(state.issuedCN||{})[b.doc]||[];
+  const sum=list.filter(c=>b.payment._cnPicked[c.cnDoc]).reduce((s,c)=>s+(parseFloat(c.amount)||0),0);   // creditNote = ผลรวม CN ที่เลือก
+  b.payment.creditNote=sum;
+  const el=$('p_creditNote'); if(el) el.value=sum||'';
+  recalcPayTotal(); persistJobs();
 }
 /* ===== ประเภทการจ่าย (checkbox + กล่องเด้ง) — v1.68 ===== */
 function initPayTypes(p){
