@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Order Picker v1.17</title>
+<title>Order Picker v1.18</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -110,7 +110,7 @@ td.num,#panel-orders td.num{text-align:center;font-variant-numeric:tabular-nums}
 <div id="app" style="display:none">
 
 <header class="appbar">
-  <div class="title">📦 Order Picker <span class="ver">v1.17</span></div>
+  <div class="title">📦 Order Picker <span class="ver">v1.18</span></div>
   <div style="flex:1"></div>
   <span class="who-box">👤 <b id="whoEmail" style="color:#fff">-</b> <span class="logout-link" onclick="logout()">ออกจากระบบ</span></span>
   <button class="hub-btn" onclick="reload()" title="โหลดใหม่จาก Supabase" style="background:#1e3a8a;color:#fff;padding:7px 10px">🔄</button>
@@ -261,6 +261,9 @@ const CUSTOMER_SHEET_ID = '18RSfuDdCadccWS_3v_Ggi70_X8FGEIVGrGUedkQLYUw';
 const CUSTOMER_GID = '1169768881';
 let STORE_DAY = {};   // normStore(ชื่อร้าน) -> วันส่ง
 function normStore(s){ return String(s||'').replace(/\s+/g,'').toLowerCase(); }
+/* v1.18: normName = normalize ชื่อเซล (ตัด (ROO) + ช่องว่าง) เพื่อจับคู่กับชีท Data Center */
+function normName(s){ return String(s||'').replace(/\(roo\)/ig,'').replace(/\s+/g,'').toLowerCase(); }
+let NAME_INFO = {};   // normName(ชื่อเซล) -> {code, book} (รหัส HS จริง + เล่ม จากชีท Data Center)
 function dayOfStore(store){ return STORE_DAY[normStore(store)] || ''; }
 async function loadStoreDays(){
   try{
@@ -278,22 +281,32 @@ async function loadStoreDays(){
   }catch(e){ console.warn('[storeDay] โหลดวันส่งไม่ได้ (ข้าม · ฟีเจอร์เสริม)', e); }
 }
 
-/* v1.15: โหลดเล่มเอกสาร (ห้องเอกสารB) จากชีท Data Center — รหัสเซล(col AM) → เล่ม(col AP) */
+/* v1.15/1.18: โหลดเล่มเอกสาร + ชื่อ จากชีท Data Center — รหัสเซล(AM) · ชื่อ(AN) · ห้องเอกสารB(AP)
+ * สร้าง 2 map: DOC_BOOKS(รหัส→เล่ม) + NAME_INFO(ชื่อ→{รหัส,เล่ม}) สำหรับจับ ROH→HS จริงด้วยชื่อ */
 const DATACENTER_GID = '467187215';
 async function loadDocBooks(){
   try{
-    const url = `https://docs.google.com/spreadsheets/d/${CUSTOMER_SHEET_ID}/gviz/tq?gid=${DATACENTER_GID}&headers=1&tq=${encodeURIComponent('select AM, AP')}`;
+    const url = `https://docs.google.com/spreadsheets/d/${CUSTOMER_SHEET_ID}/gviz/tq?gid=${DATACENTER_GID}&headers=1&tq=${encodeURIComponent('select AM, AN, AP')}`;
     const txt = await (await fetch(url)).text();
     const json = JSON.parse(txt.replace(/^[\s\S]*?setResponse\(/,'').replace(/\);?\s*$/,''));
-    const map = {};
+    const map = {}, byName = {};
     for(const r of ((json.table&&json.table.rows)||[])){
-      const c=r.c||[], code=c[0]&&c[0].v, book=c[1]&&c[1].v;
+      const c=r.c||[], code=c[0]&&c[0].v, name=c[1]&&c[1].v, book=c[2]&&c[2].v;
       const k = String(code||'').trim().toUpperCase();
       if(k && book) map[k] = String(book).trim();
+      const nk = normName(name);
+      if(nk && k && !byName[nk]) byName[nk] = { code:k, book: book?String(book).trim():'' };   // first-win ต่อชื่อ
     }
-    DOC_BOOKS = map;
-    console.log('[docBooks] โหลดเล่มเอกสารจากชีท Data Center:', Object.keys(map).length, 'รหัส');
+    DOC_BOOKS = map; NAME_INFO = byName;
+    console.log('[docBooks] Data Center:', Object.keys(map).length, 'เล่ม ·', Object.keys(byName).length, 'ชื่อ');
   }catch(e){ console.warn('[docBooks] โหลดเล่มไม่ได้ (ข้าม · จะขึ้น NA-<รหัส>)', e); }
+}
+/* v1.18: รหัสเซลตัวจริง — ส่ง(ROH) แปลงเป็นรหัส HS จริงด้วยชื่อ · อื่นใช้รหัสเดิม */
+function realSalesman(o){
+  const orig = String(o.salesman||'').trim().toUpperCase();
+  if(chanOf(o)!=='ส่ง') return orig;
+  const info = NAME_INFO[normName(o.name)];
+  return (info && info.code) ? info.code : orig;
 }
 /* badge วันส่ง (สีม่วงอ่อน · '—' ถ้าไม่เจอ/ชีทไม่กรอก) */
 function dayBadge(store){
@@ -582,9 +595,9 @@ function buildBills(){
     if(fStore && !((o.store+' '+o.storeCode+' '+o.product+' '+o.barcode).toLowerCase().includes(fStore))) continue;
     if(!o.orderId) continue;
     if(!bills[o.orderId]){
-      // v1.17: เซลประเภทส่ง (HS) → ตัด "(ROO)" ท้ายชื่อออก โชว์ชื่อปกติ
+      // v1.17: เซลประเภทส่ง (HS) → ตัด "(ROO)" ท้ายชื่อออก โชว์ชื่อปกติ · v1.18: โชว์รหัส HS จริง (ROH→HSW)
       const smName = (u.name||o.name||''), smShow = chan==='ส่ง' ? smName.replace(/\s*\(ROO\)\s*$/i,'').trim() : smName;
-      bills[o.orderId]={orderId:o.orderId, date:o.date, time:o.time||'', salesman:o.salesman,
+      bills[o.orderId]={orderId:o.orderId, date:o.date, time:o.time||'', salesman:realSalesman(o),
         salesmanName: smShow, chan, roleLab: chan || 'R0', srcTable:o.srcTable||'roo',
         store:o.store, wh:shipWh(o), lines:0, total:0, keyTS:0, seq:Infinity, isROO:isROO(o),
         done:false, doneBy:'', doneDate:'', doneTime:'', deliver:''};
@@ -939,11 +952,13 @@ function switchTab(t){
  * - ROO order → BV28 (เล่มกลาง เพราะไม่มีรหัสเซล)
  * - Order อื่น → lookup จาก DOC_BOOKS ตามรหัสเซล
  * - ไม่รู้จัก → NA-<code> (flag ว่าต้องเพิ่มเล่ม) */
-/* v1.15: เล่มเอกสาร — ROO ทุกรหัส → BV28 · HSW105(ไม่มีเล่มตัวเอง) → BK03 · อื่น → ชีท Data Center · ไม่เจอ → NA-<รหัส> */
+/* v1.18: เล่มเอกสาร — ROO ทุกรหัส → BV28 · ส่ง(ROH): จับชื่อ→เล่ม HS จริง (นพดล→HSW104→BK04)
+ * override วิรชัย(HSW105)→BK03 · ไม่เจอ → NA-<รหัส> */
 function docBookFor(o){
   if(chanOf(o)==='ROO') return 'BV28';
-  const code = String(o.salesman||'').trim().toUpperCase();
-  return BOOK_OVERRIDE[code] || DOC_BOOKS[code] || ('NA-'+code);
+  const rc = realSalesman(o);                       // HSW104 สำหรับ ROH102
+  const info = NAME_INFO[normName(o.name)];
+  return BOOK_OVERRIDE[rc] || (info && info.book) || DOC_BOOKS[rc] || ('NA-'+rc);
 }
 
 async function exportXlsx(){
@@ -966,7 +981,7 @@ async function exportXlsx(){
       debtor: o.storeCode,
       endDisc: '',
       branch: '0', dept: 'SP01', project: '0',
-      salesman: o.salesman,
+      salesman: realSalesman(o),   // v1.18: bplus ใช้รหัส HS จริง (ROH→HSW)
       note: ('billId'+String(o.orderId||'')+' '+o.note).trim(),
       delivDate: delivDMY,                                        // ตายตัว = พรุ่งนี้
       barcode: o.barcode,
