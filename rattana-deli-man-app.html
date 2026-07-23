@@ -776,7 +776,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.91';
+const APP_VERSION='3.92';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -4588,15 +4588,23 @@ function applyIssuedCN_(idx){
     const list=(state.issuedCN||{})[b.doc];
     if(!Array.isArray(list)){ el.innerHTML='<div class="txt-xs txt-muted" style="margin-top:4px">⏳ ตรวจใบลดหนี้ที่ออกแล้ว…</div>'; return; }
     if(!list.length){ el.innerHTML=''; return; }
+    // v3.92: โหลดจากชีท (มีเลข CN ในหมายเหตุ แต่ยังไม่มี _cnPicked) → ติ๊กให้ตามเลข CN เดิม (ไม่แตะยอดรวม)
+    if((!b.payment._cnPicked||!Object.keys(b.payment._cnPicked).length) && b.payment.creditNoteRef){
+      const pk={}; String(b.payment.creditNoteRef).split(',').forEach(x=>{ x=x.trim(); if(x) pk[x]=true; });
+      b.payment._cnPicked=pk;
+    }
     const picked=b.payment._cnPicked||{};
+    const isSum=list.filter(c=>picked[c.cnDoc]).reduce((s,c)=>s+(parseFloat(c.amount)||0),0);        // ยอดมีเอกสาร (IS)
+    const manual=Math.max(0,(parseFloat(b.payment.creditNote)||0)-isSum);                            // ยอดไม่มีเอกสาร (พิมพ์เอง)
     el.innerHTML=`<div style="padding:10px 12px;border-radius:10px;border:1px solid var(--gold);background:var(--gold-soft)">
-      <div class="txt-sm txt-bold mb-8">📄 พบใบลดหนี้ที่ออกแล้วในระบบ${ro?'':' — แตะเลือกเพื่อหักยอด'}</div>
+      <div class="txt-sm txt-bold mb-8">📄 พบใบลดหนี้ที่ออกแล้วในระบบ${ro?'':' — แตะเลือกเพื่อหักยอด (รวมกับที่พิมพ์เอง)'}</div>
       ${list.map(c=>`<label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--border);cursor:${ro?'default':'pointer'}">
         <input type="checkbox" ${picked[c.cnDoc]?'checked':''} ${ro?'disabled':''} onchange="toggleIssuedCN_(${idx},'${esc(c.cnDoc).replace(/'/g,"\\'")}',this.checked)" style="width:20px;height:20px;margin-top:2px;flex:none">
         <div style="flex:1;min-width:0">
           <div class="txt-sm"><b>${esc(c.cnDoc)}</b> · <span class="txt-gold txt-bold">${fmt(c.amount)} ฿</span></div>
           <div class="txt-xs txt-muted" style="white-space:normal">${esc(c.reason||'-')} · ${c.items.length} รายการ</div>
         </div></label>`).join('')}
+      ${(isSum>0&&manual>0.005)?`<div class="txt-xs" style="border-top:1px solid var(--border);padding-top:7px;margin-top:2px">รวมใบลดหนี้ <b class="txt-gold">${fmt(b.payment.creditNote)} ฿</b> = มีเอกสาร ${fmt(isSum)} + ไม่มีเอกสาร ${fmt(manual)}</div>`:''}
     </div>`;
   };
   if((state.issuedCN||{})[b.doc]) render();
@@ -4606,15 +4614,19 @@ function toggleIssuedCN_(idx,cnDoc,checked){
   const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
   const b=j.bills[idx]; if(!b) return;
   if(j.status==='approved') return;
-  if(!b.payment._cnPicked) b.payment._cnPicked={};
-  if(checked) b.payment._cnPicked[cnDoc]=true; else delete b.payment._cnPicked[cnDoc];
   const list=(state.issuedCN||{})[b.doc]||[];
+  if(!b.payment._cnPicked) b.payment._cnPicked={};
+  // v3.92: รวมยอด 2 แบบ — คงส่วน "ไม่มีเอกสาร" (พิมพ์เอง) ไว้ แล้วบวก/ลบเฉพาะส่วน "มีเอกสาร" (IS) ที่ติ๊ก
+  const oldIS=list.filter(c=>b.payment._cnPicked[c.cnDoc]).reduce((s,c)=>s+(parseFloat(c.amount)||0),0);   // ยอด IS ก่อนเปลี่ยน
+  if(checked) b.payment._cnPicked[cnDoc]=true; else delete b.payment._cnPicked[cnDoc];
   const picks=Object.keys(b.payment._cnPicked);
-  const sum=list.filter(c=>b.payment._cnPicked[c.cnDoc]).reduce((s,c)=>s+(parseFloat(c.amount)||0),0);   // creditNote = ผลรวม CN ที่เลือก
-  b.payment.creditNote=sum;
-  b.payment.creditNoteRef=picks.join(', ');   // v3.89: เลข CN ที่เลือก → เขียนลงชีทบิลด้วย
-  const el=$('p_creditNote'); if(el) el.value=sum||'';
+  const newIS=list.filter(c=>b.payment._cnPicked[c.cnDoc]).reduce((s,c)=>s+(parseFloat(c.amount)||0),0);   // ยอด IS หลังเปลี่ยน
+  const manual=Math.max(0,(parseFloat(b.payment.creditNote)||0)-oldIS);   // ส่วนไม่มีเอกสาร (คงไว้)
+  b.payment.creditNote=manual+newIS;                                       // ใบลดหนี้รวม = ไม่มีเอกสาร + มีเอกสาร
+  b.payment.creditNoteRef=picks.join(', ');   // เลข CN (มีเอกสาร) → ต่อท้ายหมายเหตุ
+  const el=$('p_creditNote'); if(el) el.value=b.payment.creditNote||'';
   recalcPayTotal(); persistJobs();
+  applyIssuedCN_(idx);   // re-render การ์ด → อัปเดตบรรทัดสรุป "รวมใบลดหนี้ = มีเอกสาร + ไม่มีเอกสาร"
 }
 /* ===== ประเภทการจ่าย (checkbox + กล่องเด้ง) — v1.68 ===== */
 function initPayTypes(p){
