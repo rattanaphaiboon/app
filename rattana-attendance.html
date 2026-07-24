@@ -3377,7 +3377,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '7.3';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '7.4';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -3448,6 +3448,7 @@ let registeredDescriptor = null;   // own face descriptor
 
 /* Employee mode state */
 let empStream = null, empMatchInterval = null;
+let _checkinBusy = false;          // v7.4: กันปุ่มถูกเปิดใหม่/กดซ้ำระหว่างกำลังบันทึก
 let lastFaceMatch = null;
 let lastGps = null;
 
@@ -5157,6 +5158,7 @@ function resetTodayLogs() {
 function evaluateAction() {
   const btn = document.getElementById('btnAction');
   if (!btn) return;
+  if (_checkinBusy) return;          // v7.4: กำลังบันทึกอยู่ — อย่าเปิดปุ่มใหม่
   const txt = document.getElementById('btnActionText');
   const sub = document.getElementById('btnActionSub');
   const lineTime = document.getElementById('lineTime');
@@ -5202,8 +5204,10 @@ function evaluateAction() {
   }
 }
 async function doSelfCheckIn() {
+  if (_checkinBusy) return;                                  // v7.4: กันกดซ้ำระหว่างบันทึก
   if (!lastGps?.withinRadius) { toast('📍 นอกรัศมี — เข้าใกล้สาขามากกว่านี้', 'error'); return; }
   if (faceapiReady && registeredDescriptor && (!lastFaceMatch?.ok)) { toast('❌ ใบหน้าไม่ตรง', 'error'); return; }
+  _checkinBusy = true;
 
   const btn = document.getElementById('btnAction');
   const sub = document.getElementById('btnActionSub');
@@ -5221,6 +5225,7 @@ async function doSelfCheckIn() {
   if (dupLog) {
     const mins = Math.round((Date.now() - new Date(dupLog.ts).getTime()) / 60000);
     toast(`⚠ สแกน${type === 'in' ? 'เข้า' : 'ออก'}ไปแล้ว ${mins} นาทีก่อน — รอครบ 1 ชม.`, 'warning');
+    _checkinBusy = false;
     if (btn) btn.disabled = false;
     if (sub) sub.textContent = '';
     return;
@@ -5242,6 +5247,12 @@ async function doSelfCheckIn() {
 
   // 1) Save local first (offline backup)
   saveLog(logData);
+
+  // v7.4: สแกนเสร็จ → ปิดจอสแกน กลับหน้าแรกทันที (ไม่ต้องรอเน็ต) แล้วค่อย sync เบื้องหลัง
+  const timeStr = new Date().toLocaleTimeString('th-TH', { hour:'2-digit', minute:'2-digit' });
+  cancelCheckinFlow();
+  renderTodayStatus(); renderHomeTodayCard();
+  toast(`${type === 'out' ? '✓ บันทึกออกงาน' : '✓ บันทึกเข้างาน'} ${timeStr} น. · กำลังส่งขึ้นระบบ...`, 'success');
 
   // 2) Send to Apps Script (real-time write to Sheet)
   let synced = false;
@@ -5267,9 +5278,9 @@ async function doSelfCheckIn() {
   }
 
   // Toast แสดง error จริง ไม่ใช่ generic message
-  const baseMsg = type === 'out' ? '✓ บันทึกออกงาน' : '✓ บันทึกเข้างาน';
+  const baseMsg = (type === 'out' ? '✓ บันทึกออกงาน' : '✓ บันทึกเข้างาน') + ' ' + timeStr + ' น.';
   if (synced) {
-    toast(baseMsg + ' · ☁️ Sheet', 'success');
+    toast(baseMsg + ' · ☁️ ขึ้นระบบแล้ว', 'success');
   } else if (config.appsScriptUrl) {
     const isAuthErr = syncError && (syncError.toLowerCase().includes('unauthorized') || syncError.toLowerCase().includes('invalid idtoken'));
     if (isAuthErr) {
@@ -5286,17 +5297,15 @@ async function doSelfCheckIn() {
 
   // v2.7: หลัง sync สำเร็จ → sync logs กลับมาจาก Sheet → update today card
   window._forceNextType = null;
-  setTimeout(async () => {
-    cancelCheckinFlow();
-    renderTodayStatus(); renderTodayPage(); renderHistory(); renderDashboard();
-    if (synced) {
-      await syncLogsFromSheet({ silent: true });
-      renderHomeTodayCard();
-      evaluateAction();
-    } else {
-      renderHomeTodayCard();
-    }
-  }, 1500);
+  _checkinBusy = false;
+  renderTodayStatus(); renderTodayPage(); renderHistory(); renderDashboard();
+  if (synced) {
+    await syncLogsFromSheet({ silent: true });
+    renderHomeTodayCard();
+    evaluateAction();
+  } else {
+    renderHomeTodayCard();
+  }
 }
 
 function saveLog(data) {
@@ -5378,18 +5387,21 @@ async function confirmOffSiteCheckOut(btn) {
   };
 
   saveLog(logData);
+
+  // v7.4: ปิดจอสแกน กลับหน้าแรกทันที แล้ว sync เบื้องหลัง
+  modal?.remove();
+  cancelCheckinFlow();
+  renderTodayStatus(); renderHomeTodayCard();
+  toast(`✓ Check-out นอกพื้นที่ · ${fullReason} · กำลังส่งขึ้นระบบ...`, 'success');
+
   let synced = false;
   if (config.appsScriptUrl) {
     try { await apiCheckin({...logData, retroactive:false}); synced = true; }
     catch(e) { console.error(e); }
   }
-
-  modal?.remove();
-  toast(`✓ Check-out นอกพื้นที่ · ${fullReason}${synced?' · ☁️':''}`, 'success');
-  setTimeout(() => {
-    cancelCheckinFlow();
-    renderTodayStatus(); renderTodayPage(); renderHistory(); renderDashboard();
-  }, 1500);
+  if (synced) toast(`☁️ ส่งขึ้นระบบแล้ว`, 'success');
+  else if (config.appsScriptUrl) toast(`⚠ ยังส่งขึ้นระบบไม่ได้ — เก็บไว้ในเครื่อง จะ sync อัตโนมัติ`, 'warning');
+  renderTodayStatus(); renderTodayPage(); renderHistory(); renderDashboard(); renderHomeTodayCard();
 }
 
 /* ============================================================
