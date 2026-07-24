@@ -778,7 +778,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.96';
+const APP_VERSION='3.97';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1074,10 +1074,11 @@ async function handleGoogleLogin(resp){
     const canDeliver=true;
     const canApproveCN=String(dept).indexOf('คลัง')>=0&&userRole>=3;   // v1.99: แผนกคลัง + Role ถึงระดับอนุมัติ (≥3)
     const canApprovePallet=String(dept).indexOf('บัญชี')>=0&&userRole>=3;   // v3.68: ฝ่ายบัญชี (บัญชีและการเงิน) + Role ≥3 → อนุมัติค่าพาเลท
+    const canCoRecord=String(dept).indexOf('บัญชี')>=0;   // v3.97: ฝ่ายบัญชี → ช่วยบันทึกเก็บเงินร่วมกับขนส่งได้ (เปิดใบคุมที่คนขับจับไปแล้วมาแก้/บันทึก)
     const role=canApprove?'supervisor':'driver';
 
     const displayName=name&&nick?`${name} (${nick})`:(name||nick);
-    state.user={email,name,nickname:nick,displayName,empId,dept,warehouse:wh,userRole,canApprove,canDeliver,canApproveCN,canApprovePallet,picture:payload.picture||''};
+    state.user={email,name,nickname:nick,displayName,empId,dept,warehouse:wh,userRole,canApprove,canDeliver,canApproveCN,canApprovePallet,canCoRecord,picture:payload.picture||''};
     state.role=role;
     persistUser();
     await bootApp();
@@ -1108,6 +1109,7 @@ function checkSession(){
   if((state.user.userRole||0)>=3){ state.user.canApprove=true; state.role='supervisor'; }
   state.user.canApproveCN=String(state.user.dept||'').indexOf('คลัง')>=0&&(state.user.userRole||0)>=3;  // v1.99: คำนวณใหม่ทุกครั้ง
   state.user.canApprovePallet=String(state.user.dept||'').indexOf('บัญชี')>=0&&(state.user.userRole||0)>=3;  // v3.68: ฝ่ายบัญชี — คำนวณใหม่ทุกครั้ง
+  state.user.canCoRecord=String(state.user.dept||'').indexOf('บัญชี')>=0;  // v3.97: ฝ่ายบัญชี ช่วยบันทึกเก็บเงินร่วมกับขนส่ง — คำนวณใหม่ทุกครั้ง
   if(s.jobs) state.jobs=s.jobs;
   return true;
 }
@@ -3870,16 +3872,70 @@ function renderMyJobsList(){
       <div class="card-head"><h3>${head}</h3><span class="txt-sm txt-muted">${list.length}</span></div>
       <div class="card-body">${list.map(renderRow).join('')}</div>
     </div>`:'';
+  // v3.97: ฝ่ายบัญชี — กล่อง "ช่วยบันทึกงานขนส่ง" (เปิดใบคุมที่คนขับจับไปแล้วมาแก้/บันทึกเก็บเงินร่วมกัน)
+  const coRec=state.user.canCoRecord?`
+    <div class="card mt-12" id="coRecCard">
+      <div class="card-head"><h3>🚚 ช่วยบันทึกงานขนส่ง</h3></div>
+      <div style="padding:4px 16px 0">
+        <input id="coRecSearch" class="input" type="search" inputmode="search" autocomplete="off" placeholder="🔍 ค้นหา เลขใบคุม / คนขับ / ทะเบียน / คลัง" oninput="onCoRecSearch_(this.value)" style="width:100%">
+      </div>
+      <div class="card-body" id="coRecList"></div>
+    </div>`:'';
   $('activeJobContent').innerHTML=`
     ${groupCard('card card-gold','🚚 กำลังทำอยู่',inProg)}
     ${groupCard('card mt-12','⏳ รออนุมัติ',pending)}
     ${groupCard('card mt-12','✅ อนุมัติแล้ว',approved)}
-    ${mine.length===0?`<div class="card"><div class="card-body txt-center p-16">
+    ${(mine.length===0&&!state.user.canCoRecord)?`<div class="card"><div class="card-body txt-center p-16">
       <div class="txt-xl mb-8">📦</div>
       <div class="txt-muted">ยังไม่มีงาน — ไปรับงานก่อน</div>
       <button class="btn btn-gold mt-12" onclick="switchTab('sec-driver-home')">→ บันทึกเที่ยวส่ง</button>
     </div></div>`:''}
+    ${coRec}
   `;
+  if(state.user.canCoRecord) paintCoRecList_();
+}
+/* v3.97: งานขนส่งที่ฝ่ายบัญชีช่วยบันทึกได้ = งานที่คนขับจับไปแล้ว (in_progress/rejected) ไม่ใช่ของบัญชีเอง */
+function coRecordJobs_(){
+  const q=(state.coRecQ||'').trim().toLowerCase();
+  let list=state.jobs.filter(j=>j.team&&(j.status==='in_progress'||j.status==='rejected')&&!isMyOwnJob(j));
+  if(q) list=list.filter(j=>((j.id||'')+' '+((j.team&&j.team.driver)||'')+' '+((j.team&&j.team.plate)||'')+' '+(j.warehouse||'')).toLowerCase().includes(q));
+  list.sort((a,b)=>(b.startedAt||0)-(a.startedAt||0));
+  return list;
+}
+let _coRecSearchT=null;
+function onCoRecSearch_(v){
+  state.coRecQ=v;
+  if(_coRecSearchT) clearTimeout(_coRecSearchT);
+  _coRecSearchT=setTimeout(paintCoRecList_,220);   // input วางนอก list → ไม่เด้ง focus
+}
+function paintCoRecList_(){
+  const box=$('coRecList'); if(!box) return;
+  const list=coRecordJobs_(), q=(state.coRecQ||'').trim();
+  if(!list.length){ box.innerHTML=`<div class="txt-center txt-muted p-16">${q?'ไม่พบงานที่ค้นหา':'ยังไม่มีงานขนส่งที่กำลังส่ง'}</div>`; return; }
+  const CAP=25, shown=list.slice(0,CAP);
+  box.innerHTML=shown.map(j=>{
+    const total=(j.bills||[]).reduce((s,b)=>s+(b.amount||0),0);
+    const done=(j.bills||[]).filter(b=>b.status!=='pending').length;
+    const stCls=j.status==='rejected'?'badge-danger':'badge-info';
+    const stLbl=j.status==='rejected'?'↩️ ตีกลับ':'กำลังส่ง';
+    return `<div class="job-card" onclick="openMyJob('${esc(j.id)}')" style="cursor:pointer">
+      <div class="job-head">
+        <div>
+          <div class="job-id">${esc(j.id)}</div>
+          <div class="job-meta">
+            <span>👤 ${esc((j.team&&j.team.driver)||'-')}</span>
+            <span>🚗 ${esc((j.team&&j.team.plate)||'-')}</span>
+            <span>🏪 ${esc(j.warehouse||'-')}</span>
+          </div>
+        </div>
+        <div class="txt-right">
+          <div class="job-amount">${fmt(total)} ฿</div>
+          <span class="badge ${stCls} mt-4">${stLbl}</span>
+        </div>
+      </div>
+      <div class="txt-xs txt-muted mt-4">📄 ${done}/${(j.bills||[]).length} บิล</div>
+    </div>`;
+  }).join('')+(list.length>CAP?`<div class="txt-center txt-muted p-8 txt-xs">แสดง ${CAP} จาก ${list.length} — พิมพ์ค้นหาเพื่อลดจำนวน</div>`:'');
 }
 function openMyJob(id){
   state.activeJobId=id;
@@ -3912,10 +3968,12 @@ function renderActiveJob(){
     const bp=b.status==='pending'?0:1;
     return ap-bp;
   });
+  const coHelp=(state.user.canCoRecord&&!isMyOwnJob(j));   // v3.97: บัญชีเปิดงานของคนขับมาช่วยบันทึก
   let html=`
     <div class="row mb-12">
-      <button class="btn btn-outline btn-sm" onclick="backToMyJobsList()">← กลับงานของฉัน</button>
+      <button class="btn btn-outline btn-sm" onclick="backToMyJobsList()">← กลับ${coHelp?'':'งานของฉัน'}</button>
     </div>
+    ${coHelp?`<div class="mb-12" style="padding:9px 12px;border-radius:10px;border:1px solid var(--gold);background:var(--gold-soft);font-size:13px">👥 <b>บัญชีช่วยบันทึก</b> — งานของคนขับ <b>${esc((j.team&&j.team.driver)||'-')}</b> · แก้/บันทึกเก็บเงินได้ (ไม่กระทบชื่อคนขับ)</div>`:''}
     <div class="card card-gold">
       <div class="card-head">
         <h3>📦 ชุดงาน ${esc(j.id)}</h3>
@@ -3936,7 +3994,7 @@ function renderActiveJob(){
           ${j.submittedAt?`📤 ส่งหัวหน้า ${formatThaiDateTime(j.submittedAt)}<br>`:''}
           ${j.rejectedAt?`↩️ ตีกลับ ${formatThaiDateTime(j.rejectedAt)} โดย ${esc(j.rejectedBy||'-')}`:''}
         </div>
-        ${j.status==='in_progress'?`<div class="row mt-12" style="justify-content:flex-end">
+        ${(j.status==='in_progress'&&!coHelp)?`<div class="row mt-12" style="justify-content:flex-end">
           <button class="btn btn-outline btn-sm txt-danger" onclick="cancelPickup()">🗑 ยกเลิกการรับงานนี้</button>
         </div>`:''}
       </div>
