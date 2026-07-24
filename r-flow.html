@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>R-Flow — ติดตามงานทีม v2.59</title>
+<title>R-Flow — ติดตามงานทีม v2.60</title>
 <link rel="icon" type="image/png" href="r-flow-icon.png">
 <link rel="manifest" href="r-flow.webmanifest">
 <link rel="apple-touch-icon" href="r-flow-icon.png">
@@ -577,7 +577,7 @@ button.rf-stat::after{content:'›';position:absolute;top:9px;right:14px;font-si
    Design:  Claude Design "Team Task Tracker" (task-tracker/design/) */
 
 const CFG = {
-  version: '2.59',
+  version: '2.60',
   exec: 'https://script.google.com/macros/s/AKfycbx3lmJqh1WYDhKFE-0Il4A4ihdcCsbbHYN6c9JuAXWj3TU-oWHGvate7NmxSAwDYdWfww/exec',
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
   hubUrl: 'https://rattanaphaiboon.github.io/app/rattana-hub.html',
@@ -3146,6 +3146,27 @@ function pushBtnHtml(cls){
   if (pushOn()) return '<button class="' + (cls || 'rf-darkbtn') + '" style="color:var(--green)" onclick="RF.enablePush()" title="แตะเพื่อลงทะเบียนเครื่องนี้ซ้ำ">' + bell + 'เปิดแจ้งเตือนแล้ว ✓</button>';
   return '<button class="' + (cls || 'rf-darkbtn') + '" onclick="RF.enablePush()">' + bell + 'เปิดแจ้งเตือน</button>';
 }
+/* ── ย้ายโปรเจ็ค Firebase แล้วรหัสอุปกรณ์เก่าไม่ยอมเปลี่ยน ──────────────────────────
+   เบราว์เซอร์เก็บ PushSubscription ที่ผูกกับ VAPID key เดิมไว้ ถ้าไม่ยกเลิกก่อน
+   getToken() จะคืน "ของเดิม" กลับมา → หลังบ้านยิงแล้วได้ 403 PERMISSION_DENIED เงียบๆ
+   จึงต้องจำไว้ว่าเครื่องนี้ลงทะเบียนกับโปรเจ็คไหน · เปลี่ยนเมื่อไหร่ = ล้างของเก่าก่อนขอใหม่
+   (เคสจริง 2026-07-24: ย้าย r-flow-7d729 → r-notification-913fd แล้วนอติเงียบทั้งระบบ) */
+const PUSH_PROJ_KEY = 'rf_push_proj';
+function pushProjNow(){ return String((CFG.firebase && CFG.firebase.projectId) || ''); }
+function pushProjChanged(){
+  try { return localStorage.getItem(PUSH_PROJ_KEY) !== pushProjNow(); } catch(e){ return false; }
+}
+function pushProjSave(){ try { localStorage.setItem(PUSH_PROJ_KEY, pushProjNow()); } catch(e){} }
+// ต้องยกเลิก subscription เก่า "หลัง" service worker ตัวใหม่ active แล้ว ไม่งั้นสมัครใหม่ด้วย config เก่าอีกรอบ
+function pushResetOldSub(reg){
+  if (!pushProjChanged()) return Promise.resolve();
+  return Promise.resolve()
+    .then(function(){ return reg.update(); })                       // ดึง firebase-messaging-sw.js ตัวใหม่มาก่อน
+    .catch(function(){})
+    .then(function(){ return reg.pushManager.getSubscription(); })
+    .then(function(s){ return s ? s.unsubscribe() : null; })
+    .catch(function(){});
+}
 let _fbLoaded = false;
 function loadFirebase(){
   if (_fbLoaded && window.firebase) return Promise.resolve();
@@ -3165,10 +3186,12 @@ RF.enablePush = () => {
       if (perm !== 'granted') { toast('ยังไม่ได้อนุญาตแจ้งเตือน'); render(); return null; }   // แถบเตือนเปลี่ยนข้อความเป็น "ไปเปิดที่ตั้งค่าเครื่อง"
       return loadFirebase()
         .then(() => { if (!firebase.apps.length) firebase.initializeApp(CFG.firebase); return navigator.serviceWorker.register('firebase-messaging-sw.js'); })
+        .then(reg => pushResetOldSub(reg).then(() => reg))     // ย้ายโปรเจ็คแล้ว → ล้าง subscription เก่าก่อน ไม่งั้นได้ token เดิมคืนมา
         .then(reg => firebase.messaging().getToken({ vapidKey: CFG.vapidKey, serviceWorkerRegistration: reg }))
         .then(token => {
           if (!token) { toast('ขอ token ไม่สำเร็จ'); return; }
           try { localStorage.setItem('rf_push_on', '1'); } catch(e){}
+          pushProjSave();
           pushListen();
           return api('savePushToken', { token: token, ua: navigator.userAgent }).then(() => { toast('เปิดแจ้งเตือนแล้ว ✓'); render(); });
         });
@@ -3192,11 +3215,20 @@ function initPushOnBoot(){
     if (!pushConfigured() || !SESSION.email) return;
     if (!('serviceWorker' in navigator) || !('Notification' in window)) return;
     if (Notification.permission !== 'granted' || localStorage.getItem('rf_push_on') !== '1') return;
+    const migrating = pushProjChanged();
     loadFirebase()
       .then(function(){ if (!firebase.apps.length) firebase.initializeApp(CFG.firebase); return navigator.serviceWorker.register('firebase-messaging-sw.js'); })
+      .then(function(reg){ return pushResetOldSub(reg).then(function(){ return reg; }); })
       .then(function(reg){ return firebase.messaging().getToken({ vapidKey: CFG.vapidKey, serviceWorkerRegistration: reg }); })
-      .then(function(token){ if (token){ pushListen(); api('savePushToken', { token: token, ua: navigator.userAgent }).catch(function(){}); } })
-      .catch(function(){});
+      .then(function(token){
+        if (!token) return;
+        pushProjSave();
+        pushListen();
+        api('savePushToken', { token: token, ua: navigator.userAgent })
+          .then(function(){ if (migrating) toast('🔔 ต่อระบบแจ้งเตือนใหม่เรียบร้อย'); })
+          .catch(function(){});
+      })
+      .catch(function(e){ if (migrating) toast('ต่อระบบแจ้งเตือนใหม่ไม่สำเร็จ — กดปุ่มเปิดแจ้งเตือนในเมนูอีกครั้ง'); });
   } catch(e){}
 }
 
