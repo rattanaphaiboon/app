@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0"/>
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
-<title>🚛 จัดคิวรถส่งสินค้า Rattana v9.3</title>
+<title>🚛 จัดคิวรถส่งสินค้า Rattana v9.4</title>
 <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -570,7 +570,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.3</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.4</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -1470,6 +1470,22 @@ let customerInfoMap={}; // bpCode → {route, days, order, prov, dist} จาก
 let drivers=[]; // [{name, nickname, display}]
 let slmnTruckMap={}; // v8.21: SLMN_CODE → รถประจำ (ชีท "เลือกรถ") — ใช้เฉพาะเซลล์ขายปลีก
 let ASSIGN_CONFIG=null; // v8.21: config นโยบายจัดรถ จากชีท "order-weight"
+// ══ v9.4: เกณฑ์อายุบิลตอน ⚡ จัดอัตโนมัติ แยกชนิดร้าน — ปลีก(R) 3 วัน · ส่ง(D) 5 วัน ══
+//   จำแนก mirror segOf: HS=ส่ง · PM/RO=ปลีก · TL >1ตัน=ส่ง ≤1ตัน=ปลีก · W3=ปลีกหมด
+const RS_LOOKBACK_DAYS={R:3, D:5};
+const RS_RETAIL_TL_KG=1000;
+function _nnRS(s){ return (s||'').toString().trim().replace(/\(.*?\)/g,'').replace(/\s+/g,'').toUpperCase(); }
+function _storeWmapRS(bills){ const m={}; (bills||[]).forEach(b=>{const nm=_nnRS(b.arName); if(nm)m[nm]=(m[nm]||0)+(b.totalW||0);}); return m; }
+function _segRSof(b, storeW){
+  if(typeof currentWarehouse!=='undefined'&&currentWarehouse==='W3')return 'R';
+  const c=(b.slmnCode||'').toUpperCase();
+  if(c.startsWith('HS'))return 'D';
+  if(c.startsWith('TL')||c.startsWith('PM')||c.startsWith('RO')){
+    const nm=_nnRS(b.arName); const w=(nm&&storeW&&storeW[nm]>0)?storeW[nm]:(b.totalW||0);
+    return w>RS_RETAIL_TL_KG?'D':'R';
+  }
+  return 'D';
+}
 
 // v8.21: &headers=1 บังคับ gviz ใช้ row 1 เป็น header ตรงๆ — กัน gviz auto-sample
 //   (ชีท Customer คอลัมน์ type ปนกัน → gviz เดา label ผิดเอาค่าตัวอย่างมาต่อ → header เพี้ยน
@@ -2357,7 +2373,10 @@ function renderBillTable(){
   const _dated=bills.map(b=>_parseD(b.date)).filter(Boolean);
   // v8.21: cap latest ที่ "วันนี้" — กันบิลอนาคตทำ cutoff เลื่อนไปข้างหน้า
   const _todayMs=new Date().setHours(0,0,0,0);
-  const _cutoffMs=_dated.length?Math.min(Math.max(..._dated.map(d=>d.getTime())),_todayMs)-5*86400000:0;
+  const _latestMsWN=_dated.length?Math.min(Math.max(..._dated.map(d=>d.getTime())),_todayMs):0;
+  // v9.4: cutoff แยกชนิดร้าน (mirror confirmAutoAssign) — ปลีก 3 วัน · ส่ง 5 วัน
+  const _storeWRS=_storeWmapRS(bills);
+  const _cutByBill=b=>_latestMsWN?(_latestMsWN-RS_LOOKBACK_DAYS[_segRSof(b,_storeWRS)]*864e5):0;
   const _hasSlmn=bills.some(b=>b.slmnCode);
   const whyNotAuto=b=>{
     // v8.21: ถ้าเคยผ่าน filter แต่ bestTruck ไม่รับ → บอกตรงๆ ไม่ต้องไล่ filter อื่น
@@ -2373,9 +2392,11 @@ function renderBillTable(){
       if(!c.startsWith('TL')&&!c.startsWith('HS')&&!slmnTruckMap[c])return `❌ SLMN "${c}" ไม่ใช่ TL/HS + ไม่มีในชีท เลือกรถ`;
     }
     const d=_parseD(b.date);
-    if(d&&_cutoffMs&&d.getTime()<_cutoffMs){
-      const cutoffStr=new Date(_cutoffMs).toLocaleDateString('en-GB');
-      return `❌ DI_DATE เก่ากว่า 5 วัน (${b.date} < cutoff ${cutoffStr})`;
+    const _cutMs=_cutByBill(b);
+    if(d&&_cutMs&&d.getTime()<_cutMs){
+      const _seg=_segRSof(b,_storeWRS), _dd=RS_LOOKBACK_DAYS[_seg];
+      const cutoffStr=new Date(_cutMs).toLocaleDateString('en-GB');
+      return `❌ DI_DATE เก่ากว่า ${_dd} วัน (${_seg==='R'?'ปลีก':'ส่ง'}) (${b.date} < cutoff ${cutoffStr})`;
     }
     const dayOK=b.days.split(/[,\s\/]+/).some(d=>{d=d.trim();return d===_tmrS||d===_tmrF;});
     if(!dayOK){
@@ -3044,13 +3065,15 @@ function confirmAutoAssign(){
       // v8.21: cap latest ที่ "วันนี้" — กันบิลอนาคตทำ cutoff เลื่อนไปข้างหน้า
       const _todayCapMs=new Date().setHours(0,0,0,0);
       const _latestMs=Math.min(Math.max(..._dated.map(d=>d.getTime())),_todayCapMs);
-      const _cutoffMs=_latestMs-5*24*60*60*1000;
+      // v9.4: เกณฑ์อายุแยกชนิดร้าน — ปลีก(R) 3 วัน · ส่ง(D) 5 วัน
+      const _cutR=_latestMs-RS_LOOKBACK_DAYS.R*864e5, _cutD=_latestMs-RS_LOOKBACK_DAYS.D*864e5;
+      const _storeWRS=_storeWmapRS(bills);
       _dateOKFn=b=>{
         const d=_parseDIDate(b.date);
         if(!d)return true;
-        return d.getTime()>=_cutoffMs;
+        return d.getTime()>=(_segRSof(b,_storeWRS)==='R'?_cutR:_cutD);
       };
-      console.log(`📅 Auto-assign DI_DATE filter: latest=${new Date(_latestMs).toISOString().slice(0,10)} cutoff=${new Date(_cutoffMs).toISOString().slice(0,10)}`);
+      console.log(`📅 v9.4 lookback แยกชนิด: latest=${new Date(_latestMs).toISOString().slice(0,10)} · ปลีก≥${new Date(_cutR).toISOString().slice(0,10)}(${RS_LOOKBACK_DAYS.R}วัน) · ส่ง≥${new Date(_cutD).toISOString().slice(0,10)}(${RS_LOOKBACK_DAYS.D}วัน)`);
     }
     // v8.21: filter step-by-step + fallback ถ้า DI_DATE 3-day filter คัดทิ้งหมด
     // v8.30: ร้านที่มี "รถประจำ" (slmnTruckMap) → เอาแม้ไม่มี GPS/รูท (จัดใส่รถประจำ ไว้ท้ายสุด)
