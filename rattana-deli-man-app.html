@@ -74,6 +74,8 @@ header .spacer{flex:1}
   .tab-btn .tab-ic{font-size:22px}
   .content{padding-bottom:96px}
   #backToTop{bottom:max(102px,calc(85px + env(safe-area-inset-bottom)))}
+  /* v3.96: คีย์บอร์ดขึ้น (โฟกัสช่องพิมพ์) → ซ่อนแถบเมนูล่าง + ปุ่มขึ้นบน — กัน iOS ดัน element fixed ลอยขึ้นมาทับเนื้อหากลางจอ */
+  body.kb-open .tab-nav,body.kb-open #backToTop{display:none}
 }
 
 /* Layout */
@@ -776,7 +778,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.95';
+const APP_VERSION='3.96';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1767,6 +1769,20 @@ function attachMissingPhoto(ev,jobId,doc,slot,key,uid){
 /* ========== REPORTS (รายงานการเก็บเงิน) — v3.03: list-style grouped by date, clickable ========== */
 // v3.13: reportOpen เก็บกลุ่มที่กำลังเปิด (default พับหมด) — key format: 'D:date' | 'V:date|driver' | 'J:date|driver|jobId'
 const reportState={range:'week',q:'',wh:'all'};
+// v3.96: ช่องค้นหา #rptSearch แยกออกจาก list — renderReports=shell (เรนเดอร์ input ครั้งเดียว), พิมพ์แล้ว debounce 220ms อัปเดตเฉพาะ #rptSummary/#rptList (ไม่รื้อ input ทุกตัวอักษร → focus/คีย์บอร์ดไม่หลุดบนมือถือ) — reference_mobile_list_perf กับดัก#1
+const REPORT_RANGES={
+  today:{label:'วันนี้',days:0},
+  week:{label:'7 วัน',days:6},
+  month:{label:'30 วัน',days:29},
+  all:{label:'ทั้งหมด',days:null},
+};
+let _rptSearchTimer=null;
+function reportRangeFrom_(key){
+  const r=REPORT_RANGES[key]||REPORT_RANGES.week;
+  if(r.days==null) return 0;
+  const now=new Date(); now.setHours(0,0,0,0);
+  return now.getTime()-r.days*86400000;   // today: days=0 → เที่ยงคืนวันนี้
+}
 if(!window._reportOpen) window._reportOpen=new Set();
 function toggleReportGroup(k){
   if(window._reportOpen.has(k)) window._reportOpen.delete(k);
@@ -1774,24 +1790,54 @@ function toggleReportGroup(k){
   renderReports();
 }
 function renderReports(){
-  const now=new Date(); now.setHours(0,0,0,0);
-  const ranges={
-    today:{label:'วันนี้',from:now.getTime()},
-    week:{label:'7 วัน',from:now.getTime()-6*86400000},
-    month:{label:'30 วัน',from:now.getTime()-29*86400000},
-    all:{label:'ทั้งหมด',from:0},
-  };
-  const cur=ranges[reportState.range]||ranges.week;
+  // v3.96: shell — เรนเดอร์ input/select/pills ครั้งเดียว แล้วเรียก renderReportsList() เติมข้อมูล
+  const wh=String(reportState.wh||'all');
+  // whList: คลังของงานที่อนุมัติแล้วทั้งหมด (ไม่ขึ้นกับ range/q/wh filter) → option คงที่ ไม่ต้องสร้างใหม่ตอนพิมพ์
+  const whSet=new Set();
+  state.jobs.forEach(j=>{ if(j.status==='approved'&&j.warehouse) whSet.add(String(j.warehouse)); });
+  const whList=[...whSet].sort();
+  $('reportsBody').innerHTML=`
+    <div class="card card-gold">
+      <div class="card-head">
+        <h3>✨ อนุมัติแล้ว</h3>
+        <div class="row" style="gap:6px">
+          <input class="input" style="height:34px;font-size:16px;padding:0 10px;min-width:140px" id="rptSearch" value="${esc(reportState.q)}" oninput="onReportSearch_(this.value)" placeholder="🔍 ค้นหา" autocomplete="off">
+          <select class="input" style="height:34px;font-size:16px;padding:0 8px;width:auto;min-width:90px" onchange="reportState.wh=this.value;renderReportsList()">
+            <option value="all"${wh==='all'?' selected':''}>ทุกคลัง</option>
+            ${whList.map(w=>`<option value="${esc(w)}"${w===wh?' selected':''}>${esc(w)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="card-body" style="padding:6px 8px">
+        <div class="row" style="gap:4px;margin-bottom:6px">
+          ${Object.entries(REPORT_RANGES).map(([k,v])=>`<button class="pill" style="padding:5px 10px;font-size:12px;min-height:28px;${k===reportState.range?'background:var(--navy);color:#fff;border-color:var(--navy)':''}" onclick="reportState.range='${k}';renderReports()">${esc(v.label)}</button>`).join('')}
+          <div style="flex:1"></div>
+          <button class="btn btn-outline btn-sm" onclick="exportReportExcel()">⬇ Excel</button>
+        </div>
+        <div class="row" id="rptSummary" style="gap:8px;font-size:11px;color:var(--muted);padding:4px 2px 8px;border-bottom:1px solid var(--border);margin-bottom:6px"></div>
+        <div id="rptList"></div>
+      </div>
+    </div>
+  `;
+  renderReportsList();
+}
+// v3.96: พิมพ์ค้นหา → อัปเดต state + debounce 220ms แล้วเรนเดอร์เฉพาะ list (input persist ไม่ถูกรื้อ)
+function onReportSearch_(v){
+  reportState.q=v;
+  if(_rptSearchTimer) clearTimeout(_rptSearchTimer);
+  _rptSearchTimer=setTimeout(renderReportsList,220);
+}
+function renderReportsList(){
+  const listBox=$('rptList'); if(!listBox) return;   // shell ยังไม่ถูกเรนเดอร์
+  const from=reportRangeFrom_(reportState.range);
   const q=String(reportState.q||'').toLowerCase().trim();
   const wh=String(reportState.wh||'all');
   const allBills=[];
-  const whSet=new Set();
   state.jobs.forEach(j=>{
     if(j.status!=='approved') return;   // เฉพาะงานที่อนุมัติแล้ว
-    if(j.warehouse) whSet.add(String(j.warehouse));
     (j.bills||[]).forEach(b=>{
       if(b.status==='pending'||!b.status) return;
-      if(b.savedAt&&b.savedAt<cur.from) return;
+      if(b.savedAt&&b.savedAt<from) return;
       if(wh!=='all'&&String(j.warehouse||'')!==wh) return;
       if(q){
         const hay=(b.name+' '+b.doc+' '+j.id+' '+(b.code||'')).toLowerCase();
@@ -1815,50 +1861,28 @@ function renderReports(){
     if(!byDrv.has(drvKey)) byDrv.set(drvKey,[]);
     byDrv.get(drvKey).push(b);
   });
-  const whList=[...whSet].sort();
-  $('reportsBody').innerHTML=`
-    <div class="card card-gold">
-      <div class="card-head">
-        <h3>✨ อนุมัติแล้ว</h3>
-        <div class="row" style="gap:6px">
-          <input class="input" style="height:34px;font-size:16px;padding:0 10px;min-width:140px" id="rptSearch" value="${esc(reportState.q)}" oninput="reportState.q=this.value;renderReports();setTimeout(()=>{const el=$('rptSearch');if(el){el.focus();el.setSelectionRange(el.value.length,el.value.length)}},0)" placeholder="🔍 ค้นหา">
-          <select class="input" style="height:34px;font-size:16px;padding:0 8px;width:auto;min-width:90px" onchange="reportState.wh=this.value;renderReports()">
-            <option value="all"${wh==='all'?' selected':''}>ทุกคลัง</option>
-            ${whList.map(w=>`<option value="${esc(w)}"${w===wh?' selected':''}>${esc(w)}</option>`).join('')}
-          </select>
+  const sumBox=$('rptSummary');
+  if(sumBox) sumBox.innerHTML=`
+    <span>บิล: <b style="color:var(--text)">${fmtInt(allBills.length)}</b></span>
+    <span>ยอดเก็บ: <b style="color:var(--gold-ink)">${fmtInt(sumCollected)}</b></span>
+    <span>/ ${fmtInt(sumTarget)} บาท</span>`;
+  listBox.innerHTML=allBills.length?[...groups.entries()].map(([date,byDrv])=>{
+    return `<div style="color:var(--muted);font-family:var(--font-mono);font-size:13px;font-weight:700;padding:10px 4px 6px 4px;letter-spacing:.5px">${esc(date)}</div>
+    ${[...byDrv.entries()].map(([drv,bills])=>{
+      const drvSum=bills.reduce((s,b)=>s+b.total,0);
+      const jobIds=[...new Set(bills.map(b=>b.jobId))];
+      return `<div onclick="openDriverBillsModal('${esc(date).replace(/'/g,"\\'")}','${esc(drv).replace(/'/g,"\\'")}')" style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--card-bg);border:1px solid var(--border);border-left:3px solid var(--gold);border-radius:var(--radius-sm);margin:0 0 5px;cursor:pointer;-webkit-tap-highlight-color:transparent">
+        <div style="min-width:0">
+          <div style="font-size:13px;font-weight:700;color:var(--text);line-height:1.25">👤 ${esc(drv)}</div>
+          <div style="font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-top:2px">${jobIds.length===1?esc(jobIds[0]):jobIds.length+' ใบคุม'}</div>
         </div>
-      </div>
-      <div class="card-body" style="padding:6px 8px">
-        <div class="row" style="gap:4px;margin-bottom:6px">
-          ${Object.entries(ranges).map(([k,v])=>`<button class="pill" style="padding:5px 10px;font-size:12px;min-height:28px;${k===reportState.range?'background:var(--navy);color:#fff;border-color:var(--navy)':''}" onclick="reportState.range='${k}';renderReports()">${esc(v.label)}</button>`).join('')}
-          <div style="flex:1"></div>
-          <button class="btn btn-outline btn-sm" onclick="exportReportExcel()">⬇ Excel</button>
+        <div style="text-align:right;white-space:nowrap;flex-shrink:0">
+          <div style="font-family:var(--font-mono);font-size:13px;font-weight:700;color:var(--gold-ink)">${fmtInt(drvSum)}฿</div>
+          <div style="font-size:11px;color:var(--muted)">${bills.length} บิล ›</div>
         </div>
-        <div class="row" style="gap:8px;font-size:11px;color:var(--muted);padding:4px 2px 8px;border-bottom:1px solid var(--border);margin-bottom:6px">
-          <span>บิล: <b style="color:var(--text)">${fmtInt(allBills.length)}</b></span>
-          <span>ยอดเก็บ: <b style="color:var(--gold-ink)">${fmtInt(sumCollected)}</b></span>
-          <span>/ ${fmtInt(sumTarget)} บาท</span>
-        </div>
-        ${allBills.length?[...groups.entries()].map(([date,byDrv])=>{
-          return `<div style="color:var(--muted);font-family:var(--font-mono);font-size:13px;font-weight:700;padding:10px 4px 6px 4px;letter-spacing:.5px">${esc(date)}</div>
-          ${[...byDrv.entries()].map(([drv,bills])=>{
-            const drvSum=bills.reduce((s,b)=>s+b.total,0);
-            const jobIds=[...new Set(bills.map(b=>b.jobId))];
-            return `<div onclick="openDriverBillsModal('${esc(date).replace(/'/g,"\\'")}','${esc(drv).replace(/'/g,"\\'")}')" style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--card-bg);border:1px solid var(--border);border-left:3px solid var(--gold);border-radius:var(--radius-sm);margin:0 0 5px;cursor:pointer;-webkit-tap-highlight-color:transparent">
-              <div style="min-width:0">
-                <div style="font-size:13px;font-weight:700;color:var(--text);line-height:1.25">👤 ${esc(drv)}</div>
-                <div style="font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-top:2px">${jobIds.length===1?esc(jobIds[0]):jobIds.length+' ใบคุม'}</div>
-              </div>
-              <div style="text-align:right;white-space:nowrap;flex-shrink:0">
-                <div style="font-family:var(--font-mono);font-size:13px;font-weight:700;color:var(--gold-ink)">${fmtInt(drvSum)}฿</div>
-                <div style="font-size:11px;color:var(--muted)">${bills.length} บิล ›</div>
-              </div>
-            </div>`;
-          }).join('')}`;
-        }).join(''):`<div class="txt-center txt-muted" style="padding:24px 12px">ไม่มีข้อมูลในช่วงเวลานี้</div>`}
-      </div>
-    </div>
-  `;
+      </div>`;
+    }).join('')}`;
+  }).join(''):`<div class="txt-center txt-muted" style="padding:24px 12px">ไม่มีข้อมูลในช่วงเวลานี้</div>`;
 }
 function reportListItem(b){
   // v3.16: การ์ดขาว compact แบบภาพเดิม — ชื่อร้าน bold บน, ทะเบียน · ใบคุม บรรทัดล่าง
@@ -8152,6 +8176,13 @@ applyUiScale_();   // ปรับทันทีตอนโหลด
 // v3.93: เอา listener 'resize' ออก — บนมือถือ resize เด้งรัวตอน scroll (แถบ URL ซ่อน/โผล่) + ตอนเปิดคีย์บอร์ด
 //        → applyUiScale_ → relayout ทั้งหน้า (zoom) → แอปค้าง กดไม่ได้. สเกลอิงขนาดตัวอักษร ไม่เกี่ยวขนาดจอ จึงไม่ต้องคิดใหม่ตอน resize
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden) applyUiScale_(); });   // กลับเข้าแอปแล้วเช็คใหม่ (เผื่อเพิ่งเปลี่ยนขนาดตัวอักษรในตั้งค่าเครื่อง)
+
+/* v3.96: คีย์บอร์ดขึ้น (โฟกัสช่องพิมพ์) → ใส่คลาส kb-open → CSS ซ่อนแถบเมนูล่าง (มือถือ) กันมันลอยทับเนื้อหากลางจอบน iOS · พิมพ์เสร็จโผล่กลับ */
+(function(){
+  const isField=el=>!!el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA')&&el.type!=='checkbox'&&el.type!=='radio'&&el.type!=='button'&&el.type!=='submit';
+  document.addEventListener('focusin',e=>{ if(isField(e.target)) document.body.classList.add('kb-open'); });
+  document.addEventListener('focusout',()=>{ setTimeout(()=>{ if(!isField(document.activeElement)) document.body.classList.remove('kb-open'); },80); });   // 80ms กันวูบตอนย้ายช่องต่อช่อง
+})();
 
 document.addEventListener('DOMContentLoaded',()=>{
   applyUiScale_();
