@@ -17,12 +17,13 @@ importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-com
 
 // ▼▼▼ ใส่ค่าให้ตรงกับ CFG.firebase ใน r-flow.html ▼▼▼
 const firebaseConfig = {
-  apiKey: 'AIzaSyB4vKh2UjTJcGlQMN9gk4N5Kmsn3ze11Wg',
-  authDomain: 'r-flow-7d729.firebaseapp.com',
-  projectId: 'r-flow-7d729',
-  storageBucket: 'r-flow-7d729.firebasestorage.app',
-  messagingSenderId: '297989335377',
-  appId: '1:297989335377:web:21afc034988c0baec24b70'
+  apiKey: 'AIzaSyB9HMRkjw6uMnyYmIpNjvZEolK9wm9RiOM',
+  authDomain: 'r-notification-913fd.firebaseapp.com',
+  projectId: 'r-notification-913fd',
+  storageBucket: 'r-notification-913fd.firebasestorage.app',
+  messagingSenderId: '490344945360',
+  appId: '1:490344945360:web:62a2a571c2e360245970d5',
+  measurementId: 'G-P3CYL4NQBE'
 };
 // ▲▲▲ ─────────────────────────────────────────── ▲▲▲
 
