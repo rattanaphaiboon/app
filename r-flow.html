@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>R-Flow — ติดตามงานทีม v2.74</title>
+<title>R-Flow — ติดตามงานทีม v2.75</title>
 <link rel="icon" type="image/png" href="r-flow-icon.png">
 <link rel="manifest" href="r-flow.webmanifest">
 <link rel="apple-touch-icon" href="r-flow-icon.png">
@@ -632,7 +632,7 @@ button.rf-stat::after{content:'›';position:absolute;top:9px;right:14px;font-si
     <div class="rf-loginlogo"><img src="r-flow-icon-192.png?v=26" alt="" onerror="this.parentNode.textContent='ง'"></div>
     <div style="font-size:22px;font-weight:700">R-Flow</div>
     <div style="font-size:14px;color:var(--muted);margin-top:3px">ระบบติดตามงานทีม · รัตนไพบูลย์</div>
-    <div style="font-size:11.5px;font-weight:700;color:var(--accent-ink);background:var(--accent-soft);border-radius:99px;padding:2px 10px;display:inline-block;margin:10px 0 22px 0">v2.37</div>
+    <div id="verBadge" style="font-size:11.5px;font-weight:700;color:var(--accent-ink);background:var(--accent-soft);border-radius:99px;padding:2px 10px;display:inline-block;margin:10px 0 22px 0">v2.75</div>
     <div id="gsiBtn" style="display:flex;justify-content:center"></div>
     <div id="loginSpin" style="display:none;margin-top:18px"><div class="rf-spin"></div><div style="font-size:13px;color:var(--muted);margin-top:8px">กำลังตรวจสอบสิทธิ์…</div></div>
     <div id="loginErr" class="rf-loginerr"></div>
@@ -650,7 +650,7 @@ button.rf-stat::after{content:'›';position:absolute;top:9px;right:14px;font-si
    Design:  Claude Design "Team Task Tracker" (task-tracker/design/) */
 
 const CFG = {
-  version: '2.74',
+  version: '2.75',
   exec: 'https://script.google.com/macros/s/AKfycbx3lmJqh1WYDhKFE-0Il4A4ihdcCsbbHYN6c9JuAXWj3TU-oWHGvate7NmxSAwDYdWfww/exec',
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
   hubUrl: 'https://rattanaphaiboon.github.io/app/rattana-hub.html',
@@ -691,7 +691,7 @@ const AVC = ['#2264D1','#7C3AED','#C2410C','#B42D6B','#4D7C0F','#0E7A6E','#B4530
 const S = {
   me: null, users: [], tasks: [], comments: [],
   view: 'dash', q: '', loading: true,
-  detailId: null, closing: false,
+  detailId: null, closing: false, taskPending: null,
   formOpen: false, form: null, errs: {}, assigneeQ: '', collabQ: '', hCarrierQ: '', hDestQ: '', saving: false,
   memberFilter: null, memberOpen: false, wlOpen: {},
   filterWs: [], fwOpen: false, filterHandoff: false, filterDept: null, clEdit: null, asgPick: null, asgQ: '', dashMine: true, mwTab: 'in', recur: null, recurForm: null, recurAssQ: '',
@@ -1081,7 +1081,7 @@ async function loadAll(silent){
     calSyncIfStale();
     maybeFirstNag();
     rtLoadMine();
-    if (_pendingTaskOpen && S.tasks.some(function(t){ return t.id === _pendingTaskOpen; })) { RF.openTask(_pendingTaskOpen); _pendingTaskOpen = ''; }   // เปิดงานจากลิงก์นอติ หลังข้อมูลพร้อม
+    resolvePendingOpen();   // เปิดงานจากลิงก์นอติ หลังข้อมูลพร้อม (ถ้ายังไม่พบ → หน้ารอบอกสาเหตุ)
     if (_pendingRoutine) { _pendingRoutine = false; RF.openRoutine(); }   // เปิดจากนอติงานประจำ (?routine=1)
   } catch(e){
     const msg = String(e.message || e);
@@ -1164,20 +1164,73 @@ function initPullRefresh(){
   document.addEventListener('touchcancel', function(){ hide(); pulling = false; dist = 0; });
 }
 
-// deep-link จากนอติ: ลิงก์มี ?task=<id> → เปิดงานนั้น
+/* ── deep-link จากนอติ: ลิงก์มี ?task=<id> → เปิดงานนั้น ──
+   โหมดตรวจ (debug): เปิดแอปด้วย ?debug=1 ครั้งเดียว → toast ทุกครั้งที่ SW ส่งเรื่องมา (ปิดด้วย ?debug=0)
+   ไว้ไล่เคสมือถือรุ่นแปลกๆ ว่ากดนอติแล้วข้อความถึงแอปไหม โดยไม่ต้องต่อคอมฯ เปิด console */
+function pushDebugOn(){ try { return localStorage.getItem('rf_push_debug') === '1'; } catch(e){ return false; } }
+function pushLog(msg, obj){
+  try { console.log('[R-Flow push] ' + msg, obj === undefined ? '' : obj); } catch(e){}
+  if (pushDebugOn()) { try { toast('🐞 ' + msg); } catch(e){} }
+}
 function taskFromLink(u){ try { const m = String(u || '').match(/[?&#]task=([^&#]+)/); return m ? decodeURIComponent(m[1]) : ''; } catch(e){ return ''; } }
-function openTaskFromLink(u){ const id = taskFromLink(u); if (id && S.tasks.some(function(t){ return t.id === id; })) { RF.openTask(id); return true; } return false; }
+// meta = ข้อมูลจากตัวนอติเอง (ชื่องาน/คนสั่ง) — ใช้โชว์ระหว่างรอโหลด ไม่ต้องรอ backend
+function openTaskFromLink(u, meta){
+  const id = taskFromLink(u);
+  if (!id) return false;
+  if (S.tasks.some(function(t){ return t.id === id; })) { pushLog('เปิดงาน ' + id + ' (มีในเครื่องแล้ว)'); RF.openTask(id); return true; }
+  pushLog('งาน ' + id + ' ยังไม่มีในเครื่อง → เปิดหน้ารอ + ดึงข้อมูลใหม่');
+  openTaskPending(id, meta);   // งานเพิ่งถูกสร้าง/ยังไม่ sync → เปิดหน้ารอทันที แล้วค่อยโหลด
+  return true;
+}
+let _pendTimer = null;
+function openTaskPending(id, meta){
+  meta = meta || {};
+  S.taskPending = { id: id, title: String(meta.title || ''), sub: String(meta.sub || ''), failed: false, fresh: true };
+  _pendingTaskOpen = id;
+  S.detailId = null; S.closing = false; S.listPop = null; S.menuOpen = false;
+  renderOverlays(); syncHistory();
+  loadAll(true);
+  if (_pendTimer) clearTimeout(_pendTimer);
+  _pendTimer = setTimeout(function(){                         // เน็ตค้าง/โหลดไม่จบ → ให้ปุ่มลองใหม่ ไม่ปล่อยหมุนค้าง
+    if (S.taskPending && !S.detailId) { S.taskPending.failed = true; renderOverlays(); }
+  }, 15000);
+}
+// โหลดเสร็จแล้ว → เปิดงานที่ค้างอยู่ (จากลิงก์ตอนเปิดแอป หรือจากนอติตอนแอปเปิดอยู่)
+function resolvePendingOpen(){
+  const id = _pendingTaskOpen || (S.taskPending && S.taskPending.id) || '';
+  if (!id) return;
+  if (S.tasks.some(function(t){ return t.id === id; })) {
+    _pendingTaskOpen = ''; if (_pendTimer) { clearTimeout(_pendTimer); _pendTimer = null; }
+    pushLog('โหลดเสร็จ → เปิดงาน ' + id);
+    RF.openTask(id);
+    return;
+  }
+  _pendingTaskOpen = '';                                       // โหลดสดแล้วยังไม่มี = ถูกลบ หรือไม่มีสิทธิ์เห็น
+  pushLog('โหลดเสร็จแล้วยังไม่พบงาน ' + id);
+  if (S.taskPending) { S.taskPending.failed = true; S.taskPending.gone = true; renderOverlays(); }
+  else toast('ไม่พบงานนี้ — อาจถูกลบ หรือคุณไม่มีสิทธิ์เห็น');
+}
 let _pendingRoutine = false;
 function routineFromLink(u){ return /[?&]routine=1/.test(String(u || '')); }
 function setupDeepLink(){
+  try {
+    const dbg = String(location.search || '').match(/[?&]debug=([01])/);
+    if (dbg) localStorage.setItem('rf_push_debug', dbg[1]);
+  } catch(e){}
   _pendingTaskOpen = taskFromLink(location.href);   // แอปเปิดจากนอติ (ปิดอยู่) → จำไว้เปิดหลังโหลดเสร็จ
   _pendingRoutine = routineFromLink(location.href); // นอติงานประจำใช้ ?routine=1 (ไม่มี task id)
   try {
-    if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', function(e){
-      if (!e.data || e.data.type !== 'rf-open') return;
-      if (routineFromLink(e.data.link)) { RF.openRoutine(); return; }            // แอปเปิดอยู่ กดนอติงานประจำ
-      openTaskFromLink(e.data.link);                                             // แอปเปิดอยู่ กดนอติงาน → เปิดงานทันที
-    });
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', function(e){
+        if (!e.data || e.data.type !== 'rf-open') return;
+        pushLog('ได้รับจากนอติ: ' + (e.data.link || ''), e.data);
+        if (routineFromLink(e.data.link)) { RF.openRoutine(); return; }          // แอปเปิดอยู่ กดนอติงานประจำ
+        const d = e.data.data || {};
+        openTaskFromLink(e.data.link, { title: d.taskTitle || e.data.body || '', sub: d.fromName ? ((e.data.title || 'แจ้งเตือน') + ' · จาก ' + d.fromName) : (e.data.title || '') });
+      });
+      // ⚠️ คิวข้อความของ ServiceWorkerContainer เริ่มต้นปิดอยู่ — addEventListener อย่างเดียวบางเบราว์เซอร์ไม่ได้รับเลย
+      if (navigator.serviceWorker.startMessages) navigator.serviceWorker.startMessages();
+    }
   } catch(e){}
 }
 
@@ -1210,7 +1263,7 @@ const IC = {
 const RF = {};
 
 /* ── back button ปิด sheet แทนออกจากแอป (push dummy history เมื่อเปิด modal) ── */
-function anyModalOpen(){ return S.formOpen || S.menuOpen || !!S.listPop || !!S.asgPick || !!S.recurForm || (!!S.detailId && !S.closing); }
+function anyModalOpen(){ return S.formOpen || S.menuOpen || !!S.listPop || !!S.asgPick || !!S.recurForm || !!S.taskPending || (!!S.detailId && !S.closing); }
 function syncHistory(){ if (anyModalOpen() && !S._histPushed) { S._histPushed = true; try { history.pushState({ rf: 1 }, ''); } catch(e){} } }
 function dropHistory(){ if (S._histPushed && !anyModalOpen()) { S._histPushed = false; try { history.back(); } catch(e){} } }
 window.addEventListener('popstate', function(){
@@ -1221,6 +1274,7 @@ window.addEventListener('popstate', function(){
   else if (S.formOpen) RF.closeForm(true);
   else if (S.menuOpen) RF.closeMenu(true);
   else if (S.listPop) RF.closePop(true);
+  else if (S.taskPending) RF.closePending(true);
   else if (S.detailId && !S.closing) RF.closeDetail(true);
   syncHistory();                         // ยังมี sheet อื่นซ้อนอยู่ → กัน back ทะลุ
 });
@@ -2173,6 +2227,7 @@ function renderOverlays(){
   if (S.listPop && !S.popFresh) { const el = document.getElementById('popScroll'); if (el) keep.popScroll = el.scrollTop; }
   let h = '';
   if (S.detailId) h += detailHtml();
+  else if (S.taskPending) h += pendingTaskHtml();   // กดนอติแล้วงานยังไม่ sync มา → โชว์หน้ารอทันที
   if (S.formOpen) h += formHtml();
   if (S.listPop) h += popHtml();
   if (S.asgPick) h += asgPickHtml();
@@ -2181,6 +2236,7 @@ function renderOverlays(){
   box.innerHTML = h;
   // entry animation เล่นเฉพาะตอนเปิดครั้งแรก — re-render ระหว่างเปิด (ส่งคอมเม้น/ติ๊กเช็คลิสต์) ไม่เล่นซ้ำ
   S.detailFresh = false; S.formFresh = false; S.popFresh = false; S.menuFresh = false;
+  if (S.taskPending) S.taskPending.fresh = false;
   const ci = document.getElementById('cmtInput');
   if (ci && S.cmtDraft) ci.value = S.cmtDraft;
   focusBack(fs);   // คืน focus + เคอร์เซอร์ + ข้อความที่ค้างอยู่
@@ -2192,6 +2248,41 @@ function renderOverlays(){
     S.scrollCmt = false; delete keep.cmtScroll;
   }
   Object.keys(keep).forEach(function(id){ const el = document.getElementById(id); if (el) el.scrollTop = keep[id]; });
+}
+
+/* หน้ารอ — กดนอติแล้วงานยังไม่มีในเครื่อง (เพิ่งถูกสร้างวินาทีนี้) โชว์ทันทีพร้อมชื่องานจากตัวนอติ
+   ดีกว่าปล่อยหน้านิ่งจนผู้ใช้นึกว่ากดพลาด · โหลดเสร็จ resolvePendingOpen() จะสลับเป็นหน้างานจริงให้เอง */
+function pendingTaskHtml(){
+  const p = S.taskPending; if (!p) return '';
+  const mob = isMob();
+  const skel = function(w, h2, mt){ return '<div class="rf-skel" style="width:' + w + ';height:' + h2 + 'px' + (mt ? ';margin-top:' + mt + 'px' : '') + '"></div>'; };
+  const head = p.title
+    ? '<h2 class="rf-dh-title">' + esc(p.title) + '</h2>'
+    : '<div style="flex:1;min-width:0">' + skel('72%', 20) + '</div>';
+  let body;
+  if (p.failed) {
+    body = '<div style="text-align:center;padding:26px 10px">' +
+      '<div style="font-size:34px">' + (p.gone ? '🔍' : '📡') + '</div>' +
+      '<div style="font-size:15px;font-weight:700;margin-top:10px">' + (p.gone ? 'ไม่พบงานนี้' : 'โหลดงานไม่สำเร็จ') + '</div>' +
+      '<div style="font-size:13.5px;color:var(--muted);margin-top:6px;line-height:1.5">' +
+      (p.gone ? 'งานอาจถูกลบไปแล้ว หรือคุณไม่มีสิทธิ์เห็นงานนี้' : 'เน็ตอาจหลุดระหว่างโหลด ลองอีกครั้งได้เลย') + '</div>' +
+      '<div style="display:flex;gap:8px;justify-content:center;margin-top:16px">' +
+      (p.gone ? '' : '<button class="rf-editbtn" onclick="RF.retryPending()">↻ ลองอีกครั้ง</button>') +
+      '<button class="rf-editbtn" onclick="RF.closePending()">ปิด</button></div></div>';
+  } else {
+    body = '<div style="display:flex;align-items:center;gap:10px;color:var(--muted);font-size:14px;font-weight:600">' +
+      '<div class="rf-spin" style="width:18px;height:18px;border-width:2.5px;margin:0"></div>กำลังโหลดงาน…</div>' +
+      (p.sub ? '<div style="font-size:13.5px;color:var(--muted)">' + esc(p.sub) + '</div>' : '') +
+      '<div style="display:flex;gap:10px">' + skel('50%', 46) + skel('50%', 46) + '</div>' +
+      skel('100%', 74) + skel('100%', 56) + skel('64%', 56);
+  }
+  const anim = p.fresh ? '' : 'animation:none';   // re-render ระหว่างรอ (poll เข้ามา) ต้องไม่เล่น entry animation ซ้ำ
+  return '<div class="rf-ov ' + (mob ? 'bottom' : 'right') + '" style="' + anim + '" onclick="RF.closePending()">' +
+    '<div class="' + (mob ? 'rf-sheet' : 'rf-panel') + '" style="' + anim + '" onclick="event.stopPropagation()">' +
+    '<div class="rf-dhead">' + (mob ? '<div class="rf-grab"></div>' : '') +
+    '<div class="rf-dh-titlerow">' + head +
+    '<button class="rf-xbtn" onclick="RF.closePending()">' + IC.x + '</button></div></div>' +
+    '<div class="rf-dbody">' + body + '</div></div></div>';
 }
 
 function detailHtml(){
@@ -3609,6 +3700,7 @@ function pushListen(){
     firebase.messaging().onMessage(function(p){
       const d = (p && p.data) || {}, n = (p && p.notification) || {};   // หลังบ้านส่ง data-only → อ่านจาก data ก่อน
       const ti = d.title || n.title || 'แจ้งเตือน', bo = d.body || n.body || '';
+      pushLog('นอติเข้าตอนเปิดแอปอยู่: ' + ti, d);
       toast('🔔 ' + ti + (bo ? ' — ' + bo : ''));
       loadAll(true);                                                     // ดึงงานใหม่มาเลย ไม่ต้องรอรอบ poll
     });
@@ -3702,10 +3794,21 @@ RF.qPickPerson = em => {
   const u = userByEmail(e);
   toast('แสดงงานทั้งหมดของ ' + (u ? dispName(u) : e));
 };
+/* หน้ารอตอนกดนอติ (deep-link) — ฟังก์ชันหลักอยู่บนสุดของไฟล์ ส่วนนี้แค่ผูกเข้า RF */
+RF.closePending = (fromPop) => {
+  if (!fromPop && S._histPushed) { try { history.back(); return; } catch(e){} }
+  if (_pendTimer) { clearTimeout(_pendTimer); _pendTimer = null; }
+  S.taskPending = null; _pendingTaskOpen = ''; renderOverlays();
+};
+RF.retryPending = () => { const p = S.taskPending; if (!p) return; openTaskPending(p.id, { title: p.title, sub: p.sub }); };
+// เปิด/ปิดโหมดตรวจแจ้งเตือน (toast ทุก event ที่ SW ส่งมา) — เรียกจาก console หรือเปิดแอปด้วย ?debug=1
+RF.pushDebug = function(on){ try { localStorage.setItem('rf_push_debug', on === false ? '0' : '1'); } catch(e){} toast(on === false ? 'ปิดโหมดตรวจแจ้งเตือนแล้ว' : '🐞 เปิดโหมดตรวจแจ้งเตือนแล้ว'); };
 let closeTimer = null;
 RF.openTask = id => {
   if (!S.tasks.some(t => t.id === id)) { toast('ไม่พบงานนี้ — อาจถูกลบไปแล้ว'); return; }
   if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
+  if (_pendTimer) { clearTimeout(_pendTimer); _pendTimer = null; }
+  S.taskPending = null;
   S.detailId = id; S.closing = false; S.detailFresh = true; S.cmtDraft = ''; S.cmtImgs = []; S.cmtSending = false; S.cmtUpN = 0; S.cmtUpTot = 0; S.cmtMentions = {}; S.cmtMentionQ = null; S.q = ''; S.listPop = null; render(); renderOverlays(); syncHistory();
 };
 RF.closeDetail = (fromPop) => {
@@ -4430,6 +4533,7 @@ mq.addEventListener('change', () => { render(); renderOverlays(); });
   const td = pd(todayIso());
   S.calSel = todayIso(); S.calY = td.getFullYear(); S.calM = td.getMonth(); S.calWeekStart = weekStartOf(todayIso());
   initGsi();
+  { const vb = document.getElementById('verBadge'); if (vb) vb.textContent = 'v' + CFG.version; }   // เลขเวอร์ชันหน้าแรก ผูกกับ CFG ตัวเดียว ไม่ต้องแก้ 2 ที่
   setupDeepLink();   // จำ ?task= จากลิงก์นอติ + ฟัง message จาก service worker
   if (SESSION.email) {
     if (loadCache()) { S.loading = false; showApp(); render(); loadAll(true); }   // มี cache → โชว์ทันที + sync เงียบ

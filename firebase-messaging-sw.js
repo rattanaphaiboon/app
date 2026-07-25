@@ -66,7 +66,9 @@ if (firebaseConfig.apiKey) {
       badge: d.icon || appCfg.icon,
       tag: tag,
       renotify: true,
-      data: { link: link, app: appKey }
+      // taskTitle/fromName = ข้อมูลงานที่หลังบ้านแนบมา — แอปเอาไปโชว์หน้ารอตอนกดนอติได้เลยก่อน sync จริง
+      // (หลังบ้านเวอร์ชันเก่ายังไม่ส่ง 2 ค่านี้ → ใช้ body ซึ่งเป็นชื่องานอยู่แล้วในเคสมอบงาน)
+      data: { link: link, app: appKey, taskTitle: d.taskTitle || d.body || n.body || '', fromName: d.fromName || '' }
     }).then(refreshBadge).catch(function () {});
   });
 }
@@ -99,7 +101,9 @@ self.addEventListener('notificationclick', function (e) {
       for (let i = 0; i < list.length; i++) {
         const c = list[i];
         if (c.url.indexOf(appCfg.urlFrag) > -1) {
-          c.postMessage({ type: appCfg.msgType, link: link });   // แอปเปิดอยู่ → บอกให้เปิดหน้านั้นเลย (ไม่ reload)
+          // แอปเปิดอยู่ → บอกให้เปิดหน้านั้นเลย (ไม่ reload) · แนบ title/body/data ไปด้วย
+          // แอปเอาไปโชว์หน้ารอได้ทันทีถ้างานยังไม่ sync มา (ไม่ต้องรอ backend ตอบก่อนถึงจะมีอะไรให้ดู)
+          c.postMessage({ type: appCfg.msgType, link: link, title: e.notification.title || '', body: e.notification.body || '', data: e.notification.data || {} });
           return ('focus' in c) ? c.focus() : null;
         }
       }
