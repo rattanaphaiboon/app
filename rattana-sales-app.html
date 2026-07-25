@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.458</title>
+<title>Rattana Sales — v8.459</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5531,7 +5531,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.458 · 2026-07-25</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.459 · 2026-07-25</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5542,7 +5542,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.458</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.459</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -7188,21 +7188,57 @@ function _vendorNorm(s) {
     .trim();
 }
 window._vendorNorm = _vendorNorm;
-// คืน { key, label } · key = ชื่อ vendor normalize แล้ว (ใช้ match) · label = ชื่อสั้นโชว์เซล · key='' = เซลนี้ไม่ถูกล็อก
+// v8.459: เซตชื่อ vendor (normalize) ที่ "มีจริงในสต็อก" — ใช้ตรวจว่าค่าที่ตั้งในชีทตรงสินค้าจริงไหม (cache ตามจำนวนสินค้า)
+let _vnormSet = null, _vnormSetLen = -1;
+function _knownVendorNorms() {
+  const list = (typeof SHEET_DATA !== 'undefined' && SHEET_DATA.products) || [];
+  if (_vnormSet && _vnormSetLen === list.length) return _vnormSet;
+  const s = new Set();
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i]; const sheet = (p && p._sheet) || p || {};
+    const v = _vendorNorm(sheet['CAT VENDOR']);
+    if (v) s.add(v);
+  }
+  _vnormSet = s; _vnormSetLen = list.length;
+  return s;
+}
+// คืน { key, label, bad } · key = ชื่อ vendor normalize (ใช้ match) · label = ชื่อสั้นโชว์เซล · key='' = ไม่ถูกล็อก
+// v8.459: FAIL-CLOSED — ถ้าช่อง "เงื่อนไขพิเศษ" มีข้อความที่ไม่ใช่เงื่อนไขที่รู้จัก (exclusive/เลือกคลังได้/nissin only)
+//   → ถือเป็น vendor-lock เสมอ (key = normalize ของข้อความนั้น) · resolve ไม่ตรง vendor จริง = ไม่มีสินค้าไหนผ่าน = จอว่าง
+//   เจตนา (Surat): ตั้งค่าผิด/อ่านไม่ออก → "ปิดจอไว้ก่อน" ปลอดภัยกว่าปล่อยเห็นสินค้าทุก vendor โดยไม่มีใครรู้
+let _vlCache = null, _vlCacheKey = null;
 function _vendorLock() {
   const sp = (typeof _userSpecialCond === 'function') ? _userSpecialCond() : { cond: '' };
-  const parts = String(sp.cond || '').split(/[,;\/]/).map(x => x.trim()).filter(Boolean);
-  for (let i = 0; i < parts.length; i++) {
-    const t = parts[i];
-    if (t.toLowerCase() === 'nissin only') return { key: _vendorNorm('นิสชิน'), label: 'นิสชิน ฟูดส์' };
-    if (/^(บจก|บริษัท|หจก|ห้างหุ้นส่วน)/.test(t)) {
-      const k = _vendorNorm(t);
-      if (k) return { key: k, label: t.replace(/^(บริษัท|บจก\.?|หจก\.?|ห้างหุ้นส่วนจำกัด|ห้างหุ้นส่วน)\s*/, '').trim() || t };
-    }
-  }
-  return { key: '', label: '' };
+  const hasProd = (((typeof SHEET_DATA !== 'undefined' && SHEET_DATA.products) || []).length > 0);
+  const ck = String((typeof currentUser !== 'undefined' && currentUser && currentUser.email) || '') + '|' + String(sp.cond || '') + '|' + (hasProd ? '1' : '0');
+  if (_vlCache && _vlCacheKey === ck) return _vlCache;
+  const out = _computeVendorLock(String(sp.cond || ''), hasProd);
+  _vlCache = out; _vlCacheKey = ck;
+  return out;
 }
 window._vendorLock = _vendorLock;
+function _computeVendorLock(cond, hasProd) {
+  const parts = cond.split(/[,;\/]/).map(x => x.trim()).filter(Boolean);
+  const NONLOCK = ['exclusive', 'เลือกคลังได้'];   // เงื่อนไขที่รู้จัก + ไม่เกี่ยวกับ vendor-lock (ห้าม fail-closed พวกนี้)
+  for (let i = 0; i < parts.length; i++) {
+    const t = parts[i];
+    const low = t.toLowerCase();
+    if (low === 'nissin only') return { key: _vendorNorm('นิสชิน'), label: 'นิสชิน ฟูดส์', bad: false };
+    if (NONLOCK.indexOf(low) >= 0) continue;
+    const k = _vendorNorm(t);
+    if (!k) continue;   // norm แล้วว่าง (เช่นใส่แต่วงเล็บ) — ข้าม ไม่ล็อก
+    // token นี้ = ตั้งใจล็อก vendor · เช็คว่าตรง CAT VENDOR จริงไหม (เฉพาะตอนสินค้าโหลดแล้ว)
+    let matched = true;
+    if (hasProd) {
+      matched = false;
+      _knownVendorNorms().forEach(v => { if (!matched && v.indexOf(k) >= 0) matched = true; });
+      if (!matched) console.warn('[vendorLock] เงื่อนไขพิเศษ "' + t + '" ไม่ตรง CAT VENDOR ใดในสต็อก → ปิดจอสินค้า (fail-closed)');
+    }
+    const short = t.replace(/^(บริษัท|บจก\.?|หจก\.?|ห้างหุ้นส่วนจำกัด|ห้างหุ้นส่วน)\s*/, '').trim() || t;
+    return { key: k, label: short, bad: !matched };   // bad=true → key ยังไม่ว่าง = ทุกสินค้าไม่ผ่าน = จอว่าง (fail-closed)
+  }
+  return { key: '', label: '', bad: false };
+}
 // true ถ้าสินค้า p ขายได้ (ผ่าน vendor-lock) · เซลไม่ถูกล็อก = ขายได้ทุกอย่าง
 function _isVendorLockOk(p) {
   const vl = _vendorLock();
