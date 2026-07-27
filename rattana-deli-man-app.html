@@ -799,7 +799,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.123';
+const APP_VERSION='3.124';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -3961,17 +3961,14 @@ async function cancelPickup(){
   // v3.38: จับ CN ที่ผูกกับงานนี้ = ตามใบคุม (รหัสใบคุม) หรือ ตามเลขบิลของงานนี้ (เผื่อ CN ที่ รหัสใบคุม ว่าง/ไม่ตรง)
   const _billDocs=new Set((j.bills||[]).map(b=>String(b.doc||'').trim().toUpperCase()).filter(Boolean));
   const _isCNofJob=c=>normJobId(c.jobId)===normJobId(jobId)||_billDocs.has(String(c.docNo||'').trim().toUpperCase());
-  const cnCount=(state.cnHistory||[]).filter(_isCNofJob).length;
-  // v3.123: ยกเลิกงานจะลบ CN ของงานนี้ด้วย — ถ้ามี CN ที่ "คนอื่นทำ" ห้ามยกเลิก (กันลบ CN ของคนอื่น) ให้เจ้าของ CN ลบเองก่อน
-  const _foreignCN=(state.cnHistory||[]).filter(c=>_isCNofJob(c)&&!cnIsMine_(c));
-  if(_foreignCN.length){
-    const _pv=_foreignCN.slice(0,3).map(c=>String(c.docNo||'-')).join(', ');
-    showToast(`ยกเลิกงานไม่ได้ — มี CN ${_foreignCN.length} ใบที่คนอื่นทำ (${_pv}) · ให้เจ้าของ CN ลบเองก่อน`,'warning');
-    return;
-  }
+  // v3.124: ยกเลิกงานได้แม้มี CN ของคนอื่น — แต่ "CN ของคนอื่นจะถูกเก็บไว้ ไม่ลบ" (เดิม v3.123 บล็อกยกเลิก → deadlock ตอนเลือกใบคุมผิด)
+  const _jobCNs=(state.cnHistory||[]).filter(_isCNofJob);
+  const _foreignCN=_jobCNs.filter(c=>!cnIsMine_(c));   // CN คนอื่นทำ → เก็บไว้
+  const _ownCNcount=_jobCNs.length-_foreignCN.length;
   const warn=[];
-  if(billsDone>0) warn.push(`• บันทึกเก็บเงิน ${billsDone} บิล`);
-  if(cnCount>0)   warn.push(`• รายการ CN (รับคืน) ${cnCount} ใบ`);
+  if(billsDone>0)       warn.push(`• บันทึกเก็บเงิน ${billsDone} บิล`);
+  if(_ownCNcount>0)     warn.push(`• รายการ CN (รับคืน) ${_ownCNcount} ใบ`);
+  if(_foreignCN.length) warn.push(`• CN ของคนอื่น ${_foreignCN.length} ใบ → เก็บไว้ (ไม่ลบ)`);
   const msg=warn.length
     ? `⚠️ ยกเลิกงาน ${jobId} จะลบทุกอย่างที่เกี่ยวกับงานนี้ออก:\n${warn.join('\n')}\n• พิกัดร้านที่จับไว้\n\nลบทั้งหมดแล้วคืนเป็นงานว่าง?`
     : `ยกเลิกการรับงาน ${jobId} และคืนเป็นงานว่าง?`;
@@ -3982,8 +3979,8 @@ async function cancelPickup(){
   j.startedAt=null;
   j.submittedAt=null;
   j.bills.forEach(b=>{ b.status='pending'; b.payment={}; b.isCN=false; b.failReason=''; b.nextResp=''; b.note=''; b.savedAt=null; });
-  // v3.34/v3.38: ล้าง CN ของงานนี้ออกจาก local ด้วย (ตามใบคุม หรือ เลขบิล) กันค้างในประวัติ CN จนกว่าจะ refresh
-  if(cnCount>0){ state.cnHistory=(state.cnHistory||[]).filter(c=>!_isCNofJob(c)); }
+  // v3.124: ล้างเฉพาะ CN "ของตัวเอง" ออกจาก local — CN ของคนอื่นเก็บไว้ (ไม่ลบ)
+  if(_ownCNcount>0){ state.cnHistory=(state.cnHistory||[]).filter(c=>!(_isCNofJob(c)&&cnIsMine_(c))); }
   state.activeJobId=null;
   state.driverJobView='list';
   // v1.66: กันงานเด้งกลับตอน auto-refresh จนกว่าชีทจะลบเสร็จ
@@ -3993,7 +3990,8 @@ async function cancelPickup(){
   const url=getAppsUrl();
   if(url){
     const docNos=(j.bills||[]).map(b=>String(b.doc||'').trim()).filter(Boolean);   // v3.38: ส่งเลขบิลไปลบ CN ที่ รหัสใบคุม ว่าง/ไม่ตรงด้วย
-    fetch(url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'cancel_job',jobId,docNos})})
+    const keepCNDocs=_foreignCN.map(c=>String(c.docNo||'').trim()).filter(Boolean);   // v3.124: CN ของคนอื่น → GAS ไม่ลบ (เก็บไว้)
+    fetch(url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'cancel_job',jobId,docNos,keepCNDocs})})
       .catch(e=>console.warn('cancel_job sync:',e));
   }
   showToast(`ยกเลิก + ลบข้อมูลงาน ${jobId} แล้ว`,'info');
@@ -7020,7 +7018,7 @@ async function syncJobsFromSheet(opts){
   return sheetJobs.length;
 }
 
-const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.122 (+ เมนู fixCinSalesmanColumn: แก้ Salesman_Name หน้า Cin ด้วยรหัส → SLMN_NAME | v3.120 fixCNSalesmanColumn ใช้ไฟล์ SLMN | v3.90 แท็ก [CN: ...] ในหมายเหตุ | v3.85 INPUT กันข้อมูลหาย) */
+const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.124 (cancel_job เก็บ CN ของคนอื่น (keepCNDocs) ไม่ลบทิ้ง | v3.122 เมนู fixCinSalesmanColumn แก้ Salesman_Name หน้า Cin ด้วยรหัส | v3.120 fixCNSalesmanColumn ใช้ไฟล์ SLMN | v3.90 แท็ก [CN: ...]) */
 const SHEET_INPUT='บันทึกเที่ยวส่ง';
 const SHEET_CIN='บันทึกบิลและการชำระ';
 const SHEET_CN='CN';
@@ -7070,7 +7068,7 @@ const HEADERS_CIN=['เลขใบคุม','Doc_Date','Doc_No','Customer_Code
 function doGet(e){
   let drive='unknown';
   try{ DriveApp.getRootFolder().getName(); drive='OK'; }catch(err){ drive='NOT_AUTHORIZED'; }
-  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.122',drive:drive}))
+  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.124',drive:drive}))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -7132,7 +7130,7 @@ function doPost(e){
         fmtColsOpen_(sh,['รหัสร้าน','เลขใบคุม','Doc_No'],'@');   // v3.35: เปิดปลาย คลุมแถวใหม่
         fmtColsOpen_(sh,['Lat','Lng'],'0.000000');
         fmtColsOpen_(sh,['วันเวลา'],'yyyy-mm-dd hh:mm:ss');
-        return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.122'})).setMimeType(ContentService.MimeType.JSON);
+        return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.124'})).setMimeType(ContentService.MimeType.JSON);
       }finally{ lock.releaseLock(); }
     }
 
@@ -7169,10 +7167,10 @@ function doPost(e){
         const removed={};
         removed.input=delRowsByHeader_(ss,SHEET_INPUT,'รหัสใบคุม',jobId)+delRowsByHeader_(ss,SHEET_INPUT,'🔒 Row ID',jobId);
         removed.cin=delRowsByHeader_(ss,SHEET_CIN,'เลขใบคุม',jobId);                 // บันทึกบิล/การชำระ
-        removed.cn=delRowsByHeader_(ss,SHEET_CN,'รหัสใบคุม',jobId);                  // v3.34: CN (รับคืน) ของงานนี้ (ตามใบคุม)
-        // v3.38: เผื่อ CN ที่ 'รหัสใบคุม' ว่าง/ไม่ตรง → ลบตาม 'เลขที่บิล DS' ของบิลในงานนี้ด้วย
+        // v3.124: ลบ CN ของงานนี้ (ตามใบคุม + เลขบิล) แต่ "เก็บ CN ของคนอื่น" (เลขบิลอยู่ใน keepCNDocs) ไว้ ไม่ลบ
+        var _keepCN={}; (Array.isArray(data.keepCNDocs)?data.keepCNDocs:[]).forEach(function(d){ d=String(d||'').trim().toUpperCase(); if(d) _keepCN[d]=1; });
         var _cnDocs=Array.isArray(data.docNos)?data.docNos:[];
-        _cnDocs.forEach(function(dn){ dn=String(dn||'').trim(); if(dn) removed.cn+=delRowsByHeader_(ss,SHEET_CN,'เลขที่บิล DS',dn); });
+        removed.cn=delCNForJobExcept_(ss,jobId,_cnDocs,_keepCN);   // v3.34/v3.38 รวมเป็นตัวเดียว + กันลบ CN คนอื่น (v3.124)
         removed.coords=delRowsByHeader_(ss,'พิกัดร้าน','เลขใบคุม',jobId);            // v3.34: พิกัดร้านที่จับตอนงานนี้
         removed.redeliv=delRowsByHeader_(ss,SHEET_REDELIVERY,'เลขใบคุมเดิม',jobId);   // v3.43: ลบคิวส่งซ้ำของใบคุมนี้ด้วย
         return ContentService.createTextOutput(JSON.stringify({ok:true,cancelled:jobId,removed:removed})).setMimeType(ContentService.MimeType.JSON);
@@ -7583,7 +7581,7 @@ function doPost(e){
       fmtColsOpen_(cinSh,['วัน+เวลา ที่ส่งสินค้า','U_ADD','วันที่โอนครั้งที่1','วันที่โอนครั้งที่2','แก้ไขเมื่อ','วันที่','วันเวลาอนุมัติ'],'yyyy-mm-dd hh:mm:ss');
     }
 
-    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.122'}))
+    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.124'}))
       .setMimeType(ContentService.MimeType.JSON);
   }catch(err){
     return ContentService.createTextOutput(JSON.stringify({ok:false,error:String(err)}))
@@ -7748,6 +7746,26 @@ function delRowsByHeader_(ss,name,h1,v1,h2,v2){
     if(String(d[i][c1]).trim()!==t1) continue;
     if(h2!==undefined&&String(d[i][c2]).trim()!==t2) continue;
     sh.deleteRow(i+1); n++;
+  }
+  return n;
+}
+/* v3.124: ลบ CN ของงานนี้ (ตามใบคุม jobId หรือ เลขบิล docNos) แต่ข้าม "เลขที่บิล DS" ที่อยู่ใน keepSet (CN ของคนอื่น → เก็บไว้ ไม่ลบ) */
+function delCNForJobExcept_(ss,jobId,docNos,keepSet){
+  const sh=ss.getSheetByName(SHEET_CN); if(!sh) return 0;
+  const hmap=headerMap_(sh);
+  const cJob=hmap['รหัสใบคุม']?hmap['รหัสใบคุม'][0]:undefined;
+  const cDoc=hmap['เลขที่บิล DS']?hmap['เลขที่บิล DS'][0]:undefined;
+  if(cDoc===undefined) return 0;
+  const jid=String(jobId||'').trim();
+  const docUp={}; (docNos||[]).forEach(function(x){ x=String(x||'').trim().toUpperCase(); if(x) docUp[x]=1; });
+  const keep=keepSet||{};
+  const data=sh.getDataRange().getValues();
+  var n=0;
+  for(var i=data.length-1;i>=1;i--){
+    const doc=String(data[i][cDoc]||'').trim().toUpperCase();
+    if(keep[doc]) continue;   // CN ของคนอื่น → เก็บไว้
+    const jobMatch=(cJob!==undefined)&&(jid!=='')&&String(data[i][cJob]||'').trim()===jid;
+    if(jobMatch||docUp[doc]){ sh.deleteRow(i+1); n++; }
   }
   return n;
 }
