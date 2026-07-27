@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <title>Rattana OM Report v10.29</title>
+  <title>Rattana OM Report v10.31</title>
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
@@ -297,7 +297,7 @@
 <header>
   <div class="header-row1">
     <button id="sidebarToggle" onclick="toggleSidebar()" title="ซ่อน/แสดง Sidebar">☰</button>
-    <div class="logo-text">Rattana <span>OM Report</span> <span class="ver-badge">v10.30 · 2026-07-27</span></div>
+    <div class="logo-text">Rattana <span>OM Report</span> <span class="ver-badge">v10.31 · 2026-07-27</span></div>
     <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรชข้อมูล">↻</button>
     <button class="icon-btn" id="btnDark" onclick="toggleDark()" title="Dark mode">🌙</button>
     <button class="icon-btn" onclick="exportExcel()" title="Export Excel">📥</button>
@@ -320,6 +320,7 @@
   <button class="tab-btn" id="tabSumBtn" onclick="switchTab('sumdata',this)">📊 Sum Data</button>
   <button class="tab-btn" id="tabSuggestBtn" onclick="switchTab('suggest',this)">📍 Suggestion อำเภอ</button>
   <button class="tab-btn" id="tabRawBtn" onclick="switchTab('rawdata',this)">📄 ข้อมูลดิบ</button>
+  <button class="tab-btn" id="tabOverviewBtn" onclick="switchTab('overview',this)">🌐 ภาพรวม</button>
   <div class="sb-info" id="infoBar2"><span style="color:rgba(255,255,255,.35)">⏳ กำลังโหลด...</span></div>
   <div class="sb-info"><div class="sb-period" id="periodBadge"></div></div>
 </aside>
@@ -928,6 +929,12 @@
   </div>
   <div id="productCol1" style="display:none"></div>
 </div><!-- /pane-product -->
+
+<div class="tab-pane" id="pane-overview">
+  <div id="overviewContent" style="padding:12px">
+    <div style="text-align:center;padding:40px;color:var(--muted);font-size:13px">🌐 เลือกแท็บ ภาพรวม เพื่อโหลดข้อมูลทั้งหมด</div>
+  </div>
+</div><!-- /pane-overview -->
 
 </div><!-- /content -->
 </div><!-- /main-content -->
@@ -1726,7 +1733,113 @@ function switchTab(id, btn) {
     if (id === 'suggest') renderSuggestTab();
     if (id === 'rawdata') renderRawDataTab();
     if (id === 'product') renderProductTab();
+    if (id === 'overview') renderOverviewTab();
   }
+}
+
+// ── Overview Tab ─────────────────────────────────
+async function renderOverviewTab() {
+  const el = document.getElementById('overviewContent');
+  el.innerHTML = '<div style="text-align:center;padding:48px;color:var(--muted);font-size:13px">⏳ กำลังโหลดข้อมูลทุกเส้น...</div>';
+
+  const results = await Promise.all(SALESPEOPLE.map(async name => {
+    const key = 'rattana_om_v1_' + name;
+    let data = getCached(key);
+    if (!data) {
+      try { data = await fetchSheet(name); setCache(key, data); } catch { data = []; }
+    }
+    return { name, data };
+  }));
+
+  // find latest month across all
+  const allMonths = results.flatMap(r => r.data.map(d => d['Month_Year'])).filter(Boolean);
+  if (!allMonths.length) {
+    el.innerHTML = '<div style="text-align:center;padding:48px;color:var(--muted)">ไม่พบข้อมูล</div>';
+    return;
+  }
+  const latestMonth = allMonths.sort().reverse()[0];
+  // prev 3 months
+  const { year: ly, month: lm } = (s => { const [y,m]=s.split('/').map(Number); return{year:y,month:m}; })(latestMonth);
+  const prevMths = [];
+  for (let i=3;i>=1;i--){ let m=lm-i,y=ly; while(m<=0){m+=12;y--;} prevMths.push(`${y}/${String(m).padStart(2,'0')}`); }
+
+  const rows = results.map(({ name, data }) => {
+    let latest=0, prevTot=0, stores=new Set();
+    data.forEach(r => {
+      const v = parseFloat(r['Exvat']||0);
+      const m = r['Month_Year']||'';
+      const c = r['Customer_Code']||r['Customer_Name']||'';
+      if (m===latestMonth) { latest+=v; if(c) stores.add(c); }
+      if (prevMths.includes(m)) prevTot+=v;
+    });
+    const avg = prevTot/3;
+    const delta = latest-avg;
+    const pct = avg>0 ? delta/avg*100 : 0;
+    return { name, latest, avg, delta, pct, stores: stores.size };
+  });
+
+  const totLatest = rows.reduce((s,r)=>s+r.latest,0);
+  const totAvg    = rows.reduce((s,r)=>s+r.avg,0);
+  const totDelta  = totLatest-totAvg;
+  const totPct    = totAvg>0 ? totDelta/totAvg*100 : 0;
+
+  const fmt = v => v.toLocaleString('th-TH',{maximumFractionDigits:0});
+  const fmtPct = v => (v>0?'+':'')+v.toFixed(1)+'%';
+  const deltaColor = d => d>=0?'var(--success)':'var(--danger)';
+
+  // stat cards
+  const cards = `
+  <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:16px">
+    <div class="stat-card"><div class="s-label">ยอดขายรวมเดือนล่าสุด</div><div class="s-value">${fmt(totLatest)}</div><div class="s-sub">${latestMonth}</div></div>
+    <div class="stat-card ${totDelta>=0?'success':'danger'}"><div class="s-label">เทียบค่าเฉลี่ย 3 เดือน</div><div class="s-value" style="color:${deltaColor(totDelta)}">${totDelta>=0?'+':''}${fmt(totDelta)}</div><div class="s-sub">${fmtPct(totPct)}</div></div>
+  </div>`;
+
+  // table rows sorted worst first
+  const sorted = [...rows].sort((a,b)=>a.delta-b.delta);
+  const trows = sorted.map((r,i) => `
+    <tr style="cursor:pointer" onclick="document.getElementById('ddSaleLabel').textContent='${r.name}';document.getElementById('ddSalePanel').style.display='none';loadSheet('${r.name}');switchTab('summary',document.querySelector('.tab-btn[onclick*=\\'summary\\']'))">
+      <td style="font-size:12px;color:var(--muted);text-align:center">${i+1}</td>
+      <td style="font-weight:600">${r.name}</td>
+      <td class="num">${fmt(r.latest)}</td>
+      <td class="num" style="color:var(--muted)">${fmt(r.avg)}</td>
+      <td class="num" style="color:${deltaColor(r.delta)};font-weight:700">${r.delta>=0?'+':''}${fmt(r.delta)}</td>
+      <td class="num" style="color:${deltaColor(r.delta)}">${fmtPct(r.pct)}</td>
+      <td class="num" style="color:var(--muted)">${r.stores}</td>
+    </tr>`).join('');
+
+  el.innerHTML = `
+  ${cards}
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.4px;text-transform:uppercase">ภาพรวมทีมขาย · ${latestMonth}</div>
+    <button class="btn btn-sm btn-outline" onclick="renderOverviewTab()">🔄 รีเฟรช</button>
+  </div>
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th style="width:32px">#</th>
+          <th>พนักงานขาย</th>
+          <th class="num">ยอดล่าสุด</th>
+          <th class="num">ค่าเฉลี่ย 3 ด.</th>
+          <th class="num">±ยอด</th>
+          <th class="num">%</th>
+          <th class="num">ร้านค้า</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${trows}
+        <tr style="background:var(--navy);color:#fff;font-weight:700">
+          <td colspan="2" style="color:var(--gold)">รวมทั้งทีม</td>
+          <td class="num">${fmt(totLatest)}</td>
+          <td class="num" style="color:rgba(255,255,255,.6)">${fmt(totAvg)}</td>
+          <td class="num" style="color:${deltaColor(totDelta)}">${totDelta>=0?'+':''}${fmt(totDelta)}</td>
+          <td class="num" style="color:${deltaColor(totDelta)}">${fmtPct(totPct)}</td>
+          <td></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div style="margin-top:8px;font-size:11px;color:var(--muted);text-align:center">คลิกที่แถวพนักงานเพื่อดูรายละเอียด</div>`;
 }
 
 // ── Quarter helpers ───────────────────────────────
