@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Expense — บันทึกรายการเบิก v1.3</title>
+<title>Rattana Expense — บันทึกรายการเบิก v1.4</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -182,7 +182,7 @@ body.dark .config-warn{background:#3a2e15;color:#e8c86a}
 <!-- ── App ── -->
 <div class="page hidden" id="appScreen">
   <header>
-    <div class="logo-text">RATTANA <span>EXPENSE</span><span class="logo-ver">v1.3</span></div>
+    <div class="logo-text">RATTANA <span>EXPENSE</span><span class="logo-ver">v1.4</span></div>
     <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
     <button class="icon-btn" onclick="logout()" title="ออกจากระบบ">⎋</button>
     <a href="https://rattanaphaiboon.github.io/app/rattana-hub.html" class="hub-btn" title="กลับ Hub">🏠 Hub</a>
@@ -419,7 +419,7 @@ async function onFilesSelected(fileList){
       const isPdf=file.type==='application/pdf';
       if(isPdf && file.size>20*1024*1024){showToast(`${file.name} ใหญ่เกิน 20MB`,'error');continue;}
       const data=isPdf?await readFileB64(file):await compressImage(file);
-      pendingBills.push({localId:nextLocalId++,dataUrl:data.dataUrl,base64:data.base64,mimeType:data.mimeType,filename:file.name,isPdf,status:'pending',fields:null,imageUrl:''});
+      pendingBills.push({localId:nextLocalId++,uid:genUid(),dataUrl:data.dataUrl,base64:data.base64,mimeType:data.mimeType,filename:file.name,isPdf,status:'pending',fields:null,imageUrl:''});
     }catch(e){showToast(`เพิ่มไฟล์ ${file.name} ไม่สำเร็จ`,'error');}
   }
   document.getElementById('fileInput').value='';document.getElementById('cameraInput').value='';renderThumbs();
@@ -439,6 +439,8 @@ function renderThumbs(){
   document.getElementById('btnClearQueue').disabled=pendingBills.length===0;
 }
 
+// uid คงที่ต่อ 1 ไฟล์ตลอด session — ใช้กันบันทึกซ้ำเวลาเน็ตสะดุดแล้วกดใหม่
+function genUid(){return (self.crypto&&self.crypto.randomUUID)?self.crypto.randomUUID():'u'+Date.now().toString(36)+Math.random().toString(36).slice(2,10);}
 async function startExtraction(){
   if(!proxyConfigured()){showToast('ยังไม่ได้ตั้งค่า PROXY_CONFIG ด้านบนของไฟล์','error');return;}
   const todo=pendingBills.filter(b=>b.status==='pending'||b.status==='error');
@@ -447,20 +449,28 @@ async function startExtraction(){
   document.getElementById('reviewCardWrap').classList.remove('hidden');
   document.getElementById('progressTrack').classList.remove('hidden');
   document.getElementById('progressLabel').classList.remove('hidden');
+  document.getElementById('progressFill').style.width='0%';
   let done=0;
-  for(const bill of todo){
-    bill.status='reading';renderReviewCards();
-    document.getElementById('progressLabel').textContent=`กำลังอ่านบิล ${done+1}/${todo.length}...`;
-    try{
-      const res=await callProxy('extractBill',{dataBase64:bill.base64,mimeType:bill.mimeType,filename:bill.filename});
-      bill.fields=res.fields;bill.imageUrl=res.imageUrl||'';bill.status='done';
-      bill.fields.whtRate=whtRateForCategory(bill.fields.item);   // ผูก WHT กับหมวด (ตรงบัญชี ไม่พึ่ง AI)
-      recomputeBill(bill.localId);
-    }catch(e){bill.status='error';bill.errorMsg=e.message;}
-    done++;
-    document.getElementById('progressFill').style.width=`${Math.round(done/todo.length*100)}%`;
-    renderReviewCards();
-  }
+  // อ่านหลายบิลพร้อมกัน (สูงสุด 4 คิว) — เร็วกว่าอ่านทีละใบหลายเท่า
+  const CONCURRENCY=4;
+  const queue=[...todo];
+  const worker=async()=>{
+    while(queue.length){
+      const bill=queue.shift();
+      bill.status='reading';renderReviewCards();
+      try{
+        const res=await callProxy('extractBill',{dataBase64:bill.base64,mimeType:bill.mimeType,filename:bill.filename});
+        bill.fields=res.fields;bill.imageUrl=res.imageUrl||'';bill.status='done';
+        bill.fields.whtRate=whtRateForCategory(bill.fields.item);   // ผูก WHT กับหมวด (ตรงบัญชี ไม่พึ่ง AI)
+        recomputeBill(bill.localId);
+      }catch(e){bill.status='error';bill.errorMsg=e.message;}
+      done++;
+      document.getElementById('progressFill').style.width=`${Math.round(done/todo.length*100)}%`;
+      document.getElementById('progressLabel').textContent=`อ่านแล้ว ${done}/${todo.length} บิล...`;
+      renderReviewCards();
+    }
+  };
+  await Promise.all(Array.from({length:Math.min(CONCURRENCY,todo.length)},worker));
   document.getElementById('progressLabel').textContent=`เสร็จแล้ว ${done}/${todo.length}`;
   document.getElementById('btnExtract').disabled=false;
 }
@@ -502,11 +512,13 @@ function renderReviewCards(){
     if(b.status==='reading')return`<div class="bill-card"><div class="flex gap-8"><span class="mini-spin"></span> กำลังให้ AI อ่านบิล...</div></div>`;
     if(b.status==='error')return`<div class="bill-card"><div class="flex-between"><span class="txt-danger txt-sm">อ่านไม่สำเร็จ: ${esc(b.errorMsg)}</span><button class="btn btn-outline btn-sm" onclick="retryBill(${b.localId})">ลองใหม่</button></div></div>`;
     const f=b.fields;if(!f)return'';
-    return`<div class="bill-card">
+    const issues=billIssues(f);
+    return`<div class="bill-card"${issues.length?' style="border:2px solid #dc2626"':''}>
       <div class="bill-card-top">
         <div class="bill-thumb">${mediaThumb(b)}</div>
         <div class="flex-between w-full">${confidenceBadge(f.confidence)}<button class="btn btn-outline btn-sm" onclick="removePendingBill(${b.localId})">ลบ</button></div>
       </div>
+      ${issues.length?`<div class="txt-sm mt-8" style="color:#dc2626;font-weight:600">⚠️ ข้อมูลไม่ครบ ต้องเติม: ${issues.join(', ')}</div>`:''}
       ${f.notes?`<div class="txt-sm txt-muted mt-8">📝 ${esc(f.notes)}</div>`:''}
       <div class="bill-fields">
         <div class="field"><label>วันที่ตามบิล</label><input class="input input-sm" type="date" value="${esc(f.date||'')}" onchange="updateBillField(${b.localId},'date',this.value)"></div>
@@ -534,17 +546,31 @@ function updateReviewSummary(){
   document.getElementById('btnSaveAll').disabled=done.length===0;
 }
 
+// ช่องที่ "ต้องมี" ก่อนบันทึกลงชีทบัญชี
+function billIssues(f){
+  const iss=[];
+  if(f.baseAmount==null&&f.netTotal==null)iss.push('ยอดเงิน');
+  if(!String(f.vendor||'').trim())iss.push('เจ้าหนี้');
+  return iss;
+}
 async function saveAllBills(){
   const done=pendingBills.filter(b=>b.status==='done'&&b.fields);
   if(!done.length)return;
+  // เตือนถ้ามีบิลที่ยอดเงิน/เจ้าหนี้ยังว่าง — กันข้อมูลไม่ครบหลุดลงชีทบัญชี
+  const bad=done.filter(b=>billIssues(b.fields).length);
+  if(bad.length){
+    const names=bad.map(b=>'• '+(b.fields.vendor||b.fields.billNo||b.fields.item||'บิล')+' (ขาด: '+billIssues(b.fields).join(', ')+')').join('\n');
+    if(!confirm(`มี ${bad.length} บิลที่ข้อมูลยังไม่ครบ:\n${names}\n\nแนะนำให้เติมให้ครบก่อนบันทึก\nยืนยันบันทึกทั้งหมดต่อไปหรือไม่?`))return;
+  }
   showSpinner('กำลังบันทึกลงชีท...');
   try{
-    const bills=done.map(b=>({...b.fields,imageUrl:b.imageUrl}));
-    await callProxy('saveBills',{bills});
+    const bills=done.map(b=>({...b.fields,imageUrl:b.imageUrl,uid:b.uid}));
+    const r=await callProxy('saveBills',{bills});
     const ts=new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
     done.forEach(b=>sessionLog.unshift({...b.fields,savedAt:ts}));
     renderSessionLog();
-    showToast(`บันทึก ${done.length} บิลเรียบร้อย ✓`,'success');
+    const skip=Number(r.skipped)||0;
+    showToast(skip?`บันทึก ${r.saved} บิล (ข้าม ${skip} ที่บันทึกไปแล้ว) ✓`:`บันทึก ${done.length} บิลเรียบร้อย ✓`,'success');
     pendingBills=pendingBills.filter(b=>b.status!=='done');
     renderThumbs();renderReviewCards();
     switchTab('log');
