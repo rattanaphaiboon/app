@@ -799,11 +799,13 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.119';
+const APP_VERSION='3.122';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName:'Rattana Users for apps',
+  slmnSheetId:'1aIJPHRGG07xEusXZ6qCUDmaQOg5ScmZwDjyr6VWz8Kg',   // v3.120: ไฟล์รหัสเซลล์ (SLMN_CODE→SLMN_NAME)
+  slmnSheetName:'SLMN',
   carsSheetId:'1OvXga8M0XuUEMYqWPj_AIcBHTEI_vA_WXXNJpqUk0aQ',
   carsSheetName:'Car',
   customerSheetId:'1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI',
@@ -1146,6 +1148,16 @@ async function loadUsers(){
   });
   state.supervisors=[...supSet];
   state.drivers=rows.filter(r=>cleanCell(r['แผนก'])==='คลังและขนส่ง'&&String(r['Status']||'').trim().toLowerCase()==='active');
+}
+
+/* v3.120: โหลดรหัสเซลล์จากไฟล์ SLMN (A=SLMN_CODE, B=SLMN_NAME, C=NICKNAME) → ชื่อเซลล์มาตรฐาน = SLMN_NAME
+   จับด้วยรหัส (salesmanCode จาก DS_DC ตรงกับ SLMN_CODE เป๊ะ); fallback จับด้วยชื่อ/ชื่อเล่นสำหรับเคสไม่มีรหัส */
+async function loadSalesStaff(){
+  const rows=await fetchSheet(CFG.slmnSheetId,CFG.slmnSheetName);
+  const list=rows.map(r=>{ const full=cleanCell(r['SLMN_NAME']);
+    return {code:cleanCell(r['SLMN_CODE']), full, nick:cleanCell(r['NICKNAME']), fullname:full.replace(/^คุณ\s*/,'')}; })
+    .filter(s=>s.code&&s.full);
+  if(list.length){ state.salesStaff=list; setCachedSheet('salesStaff_v3120',list); }
 }
 
 async function loadVehicles(){
@@ -2321,11 +2333,12 @@ function tryRestoreReturnDraft(){
 }
 
 /* v3.53: รายชื่อพนักงาน "แผนกขาย" (ไฟล์เดียวกับคนขับ) → {full:"ชื่อ-สกุล (ชื่อเล่น)", code, fullname} */
-function salesStaff_(){
-  return (state.users||[])
-    .filter(r=>cleanCell(r['แผนก'])==='ขาย'&&String(r['Status']||'').trim().toLowerCase()==='active')
-    .map(d=>{ const nk=cleanCell(d['ชื่อเล่น']); const fn=cleanCell(d['ชื่อ - สกุล']||d['ชื่อ-สกุล']||'');
-      return {full:(fn?`${fn} (${nk})`:nk), code:cleanCell(d['รหัสขาย Bplus']), fullname:fn, nick:nk}; });   // v3.117: +nick
+function salesStaff_(){ return state.salesStaff||[]; }   // v3.120: มาจากไฟล์ SLMN (loadSalesStaff) → {code, full=SLMN_NAME, nick=NICKNAME, fullname}
+/* v3.122: ชื่อเซลล์มาตรฐานจากรหัส (SLMN_CODE→SLMN_NAME) — ใช้ตอนเขียน Cin (Salesman_Name) กัน DS_DC ส่งชื่อเล่นมา; ไม่เจอรหัสคืน fallback */
+function slmnNameByCode_(code,fallback){
+  const c=String(code||'').trim(); if(!c) return fallback||'';
+  const hit=(state.salesStaff||[]).find(s=>s.code===c);
+  return hit?hit.full:(fallback||'');
 }
 function _normNm_(s){ return String(s||'').replace(/^คุณ\s*/,'').replace(/\s+/g,' ').trim(); }
 /* v3.117: ทำชื่อเซลล์ให้เป็นรูปแบบมาตรฐาน "ชื่อ นามสกุล (ชื่อเล่น)" — จับพนักงานแผนกขายด้วย ชื่อเต็ม/ชื่อเล่น/มีชื่ออยู่ในสตริง; ไม่เจอคงเดิม */
@@ -3889,6 +3902,18 @@ async function confirmPickup(){   // v3.43: async — งานส่งซ้�
   if(!j){ showToast('กรุณาเลือกเลขใบคุม','warning'); return; }
   const plate=ddValue('ddPlate');
   if(!plate){ showToast('กรุณาเลือกทะเบียนรถ','warning'); return; }
+  // v3.121: มีงานค้างเก่า "วันก่อนหน้า" ที่ยังไม่ปิด (in_progress = ไม่ได้กดขออนุมัติ / rejected = ตีกลับยังไม่แก้) → รับงานใหม่ไม่ได้
+  //   (งานที่รับวันนี้ยังไม่บล็อก — เฉพาะที่รับข้ามวันแล้วยังไม่ส่งอนุมัติ ต้องเคลียร์ก่อน)
+  const _startToday=new Date(); _startToday.setHours(0,0,0,0);
+  const _drvNew=String(expandPersonName_(ddValue('ddDriver')||state.user.displayName||state.user.nickname||state.user.name)||'').trim();
+  const _stale=(state.jobs||[]).filter(x=> x && x.id!==j.id
+    && (x.status==='in_progress'||x.status==='rejected')
+    && x.startedAt && x.startedAt < _startToday.getTime()
+    && String((x.team&&x.team.driver)||'').trim()===_drvNew);
+  if(_stale.length){
+    showToast('มีงานค้างเก่ายังไม่ปิด: '+_stale.map(x=>x.id).join(', ')+' — กด "ส่งหัวหน้าอนุมัติ" หรือ "ยกเลิกงาน" เดิมให้เรียบร้อยก่อน ถึงจะรับงานใหม่ได้','warning');
+    return;
+  }
   // v3.43: งานส่งซ้ำ — จองก่อน (กันคนอื่นรับซ้ำข้ามเครื่อง) แล้วย้ายเข้า state.jobs เป็นงานจริง
   if(j.isRedelivery){
     showToast('กำลังรับงานส่งซ้ำ…','info');
@@ -5289,7 +5314,7 @@ function saveBillWithVerify_(j,b,saveBtn,changedDocs){
     newStaff:newStaffPayload_(j),   // v3.65: พนง.ใหม่ — ไม่รู้ค่า = ไม่ส่งคีย์ (GAS คงค่าเดิมในชีท)
     warehouse:j.warehouse||'W1',special:j.special||null,
     startedAt:j.startedAt,submittedAt:j.submittedAt,approvedAt:j.approvedAt,approvedBy:j.approvedBy,rejectedAt:j.rejectedAt,rejectedBy:j.rejectedBy,rejectReason:j.rejectReason,
-    bills:j.bills.filter(billFilter).map(x=>({doc:x.doc,docDate:x.docDate,code:x.code,name:x.name,salesman:x.salesman,salesmanCode:x.salesmanCode,amount:x.amount,status:x.status,isCN:!!x.isCN,failReason:x.failReason||'',nextResp:x.nextResp||'',note:x.note||'',creditDays:x.creditDays||0,payment:x.payment,total:payTotal(x.payment),palletCount:x.palletCount||'',amountPerPallet:x.amountPerPallet||'',amountTotal:x.amountTotal||'',geoStatus:x.geoStatus||'',geoDist:x.geoDist||'',geoCoord:x.geoCoord||'',savedAt:x.savedAt}))};
+    bills:j.bills.filter(billFilter).map(x=>({doc:x.doc,docDate:x.docDate,code:x.code,name:x.name,salesman:slmnNameByCode_(x.salesmanCode,x.salesman),salesmanCode:x.salesmanCode,amount:x.amount,status:x.status,isCN:!!x.isCN,failReason:x.failReason||'',nextResp:x.nextResp||'',note:x.note||'',creditDays:x.creditDays||0,payment:x.payment,total:payTotal(x.payment),palletCount:x.palletCount||'',amountPerPallet:x.amountPerPallet||'',amountTotal:x.amountTotal||'',geoStatus:x.geoStatus||'',geoDist:x.geoDist||'',geoCoord:x.geoCoord||'',savedAt:x.savedAt}))};
   _lastQueuedDoc=b.doc;
   queueSync(payload,'save_job|'+j.id+'|'+[...(changedDocs||[b.doc])].join(','));   // ส่งเข้าคิว → flush เบื้องหลัง
   notifyPalletDiscord(j,b);   // v3.69: มีค่าพาเลท → เด้งแจ้งฝ่ายบัญชี (ห้อง HQ) ทันที
@@ -6290,6 +6315,14 @@ async function approveJob(id){
       showToast('ยังปิดงานไม่ได้ — มี CN รออนุมัติของบิล: '+blockers.join(', ')+' (ให้คลังอนุมัติ CN ก่อน)','warning');
       return;
     }
+    // v3.120: บิลจ่ายไม่ครบ (ยอดขาด) ห้ามอนุมัติปิดงาน — ยกเว้นบิลที่มาร์ค "ไม่ชำระ" (isBillShort_ ยกเว้นให้แล้ว) → ต้องตีกลับให้คนขับเก็บให้ครบ หรือใส่ไม่ชำระ
+    const shortBills=j.bills.filter(b=>isBillShort_(j,b));
+    if(shortBills.length){
+      const preview=shortBills.slice(0,3).map(b=>b.doc).join(', ');
+      const more=shortBills.length>3?` และอีก ${shortBills.length-3}`:'';
+      showToast(`ปิดงานไม่ได้ — มี ${shortBills.length} บิลจ่ายไม่ครบ (${preview}${more}) · ตีกลับให้คนขับเก็บให้ครบ หรือใส่ "ไม่ชำระ" ก่อน`,'warning');
+      return;
+    }
     if(btn){ btn.innerHTML='⏳ กำลังบันทึกเข้าชีท...'; }
     showToast('กำลังบันทึกเข้าชีท…','info');
     j.status='approved';
@@ -6302,7 +6335,7 @@ async function approveJob(id){
       newStaff:newStaffPayload_(j),   // v3.65: พนง.ใหม่ — ไม่รู้ค่า = ไม่ส่งคีย์ (GAS คงค่าเดิม)
       warehouse:j.warehouse||'W1',special:j.special||null,
       startedAt:j.startedAt,submittedAt:j.submittedAt,approvedAt:j.approvedAt,approvedBy:j.approvedBy,rejectedAt:j.rejectedAt,rejectedBy:j.rejectedBy,rejectReason:j.rejectReason,
-      bills:j.bills.filter(x=>x.status&&x.status!=='pending').map(x=>({doc:x.doc,docDate:x.docDate,code:x.code,name:x.name,salesman:x.salesman,salesmanCode:x.salesmanCode,amount:x.amount,status:x.status,isCN:!!x.isCN,failReason:x.failReason||'',nextResp:x.nextResp||'',note:x.note||'',creditDays:x.creditDays||0,payment:x.payment,total:payTotal(x.payment),palletCount:x.palletCount||'',amountPerPallet:x.amountPerPallet||'',amountTotal:x.amountTotal||'',geoStatus:x.geoStatus||'',geoDist:x.geoDist||'',geoCoord:x.geoCoord||'',savedAt:x.savedAt}))};
+      bills:j.bills.filter(x=>x.status&&x.status!=='pending').map(x=>({doc:x.doc,docDate:x.docDate,code:x.code,name:x.name,salesman:slmnNameByCode_(x.salesmanCode,x.salesman),salesmanCode:x.salesmanCode,amount:x.amount,status:x.status,isCN:!!x.isCN,failReason:x.failReason||'',nextResp:x.nextResp||'',note:x.note||'',creditDays:x.creditDays||0,payment:x.payment,total:payTotal(x.payment),palletCount:x.palletCount||'',amountPerPallet:x.amountPerPallet||'',amountTotal:x.amountTotal||'',geoStatus:x.geoStatus||'',geoDist:x.geoDist||'',geoCoord:x.geoCoord||'',savedAt:x.savedAt}))};
     console.log('[approveJob] sending payload',{jobId:payload.jobId,status:payload.status,approvedBy:payload.approvedBy,approvedAt:payload.approvedAt,billCount:payload.bills.length});   // v2.58: debug
     const r=await postSyncGAS_(payload);
     console.log('[approveJob] postSyncGAS_ result',r);   // v2.58: debug
@@ -6716,7 +6749,7 @@ async function syncToSheets(job){
     bills:job.bills.filter(b=>b.status&&b.status!=='pending').map(b=>({
       doc:b.doc, docDate:b.docDate,
       code:b.code, name:b.name,
-      salesman:b.salesman, salesmanCode:b.salesmanCode,
+      salesman:slmnNameByCode_(b.salesmanCode,b.salesman), salesmanCode:b.salesmanCode,
       amount:b.amount,
       status:b.status, isCN:!!b.isCN,
       failReason:b.failReason||'', nextResp:b.nextResp||'', note:b.note||'',
@@ -6981,7 +7014,7 @@ async function syncJobsFromSheet(opts){
   return sheetJobs.length;
 }
 
-const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.119 (fix เมนู fixCNSalesmanColumn: ไฟล์ Users ชื่อแท็บไม่ตรง → fallback แท็บแรกเหมือน gviz | v3.90 แท็ก [CN: ...] ในหมายเหตุ | v3.85 INPUT กันข้อมูลหาย | v3.80 set_bill_photo) */
+const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.122 (+ เมนู fixCinSalesmanColumn: แก้ Salesman_Name หน้า Cin ด้วยรหัส → SLMN_NAME | v3.120 fixCNSalesmanColumn ใช้ไฟล์ SLMN | v3.90 แท็ก [CN: ...] ในหมายเหตุ | v3.85 INPUT กันข้อมูลหาย) */
 const SHEET_INPUT='บันทึกเที่ยวส่ง';
 const SHEET_CIN='บันทึกบิลและการชำระ';
 const SHEET_CN='CN';
@@ -7031,7 +7064,7 @@ const HEADERS_CIN=['เลขใบคุม','Doc_Date','Doc_No','Customer_Code
 function doGet(e){
   let drive='unknown';
   try{ DriveApp.getRootFolder().getName(); drive='OK'; }catch(err){ drive='NOT_AUTHORIZED'; }
-  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.119',drive:drive}))
+  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.122',drive:drive}))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -7093,7 +7126,7 @@ function doPost(e){
         fmtColsOpen_(sh,['รหัสร้าน','เลขใบคุม','Doc_No'],'@');   // v3.35: เปิดปลาย คลุมแถวใหม่
         fmtColsOpen_(sh,['Lat','Lng'],'0.000000');
         fmtColsOpen_(sh,['วันเวลา'],'yyyy-mm-dd hh:mm:ss');
-        return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.119'})).setMimeType(ContentService.MimeType.JSON);
+        return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.122'})).setMimeType(ContentService.MimeType.JSON);
       }finally{ lock.releaseLock(); }
     }
 
@@ -7544,7 +7577,7 @@ function doPost(e){
       fmtColsOpen_(cinSh,['วัน+เวลา ที่ส่งสินค้า','U_ADD','วันที่โอนครั้งที่1','วันที่โอนครั้งที่2','แก้ไขเมื่อ','วันที่','วันเวลาอนุมัติ'],'yyyy-mm-dd hh:mm:ss');
     }
 
-    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.119'}))
+    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.122'}))
       .setMimeType(ContentService.MimeType.JSON);
   }catch(err){
     return ContentService.createTextOutput(JSON.stringify({ok:false,error:String(err)}))
@@ -8168,37 +8201,36 @@ function restorePendingPhotos_(){
   }
   SpreadsheetApp.getUi().alert('✓ กู้ลิงก์รูป (v2)\\n- ไฟล์ในโฟลเดอร์: '+fileCount+'\\n- กู้คืนสำเร็จ: '+restored+'\\n- ยังหาไฟล์ไม่เจอ: '+notfound+(sampleMiss?'\\n\\nตัวอย่างชื่อที่ระบบหา:\\n'+sampleMiss:''));
 }
-/* v3.119: แก้ชื่อเซลล์แถวเก่าในชีท CN ให้เป็นรูปแบบมาตรฐาน "ชื่อ นามสกุล (ชื่อเล่น)" — จับพนักงานแผนกขาย (active) จากไฟล์ Users (รหัส/ชื่อเต็ม/ชื่อเล่น/มีชื่อในสตริง)
-   v3.119 fix: ชื่อแท็บในไฟล์ Users ไม่ใช่ 'Rattana Users for apps' → getSheetByName คืน null (แต่ gviz ฝั่งแอปแอบใช้แท็บแรก) → GAS fallback ไปแท็บแรกให้เหมือน gviz */
+/* v3.120: แก้ชื่อเซลล์แถวเก่าในชีท CN ให้เป็น SLMN_NAME — จับจากไฟล์ SLMN (A=SLMN_CODE, B=SLMN_NAME, C=NICKNAME)
+   แถวเก่าใน CN ไม่มีรหัสเซลล์ → จับด้วยชื่อ/ชื่อเล่น (SLMN_NAME/NICKNAME) แล้วแทนที่ด้วย SLMN_NAME (แอปฝั่งใหม่จับด้วยรหัสอยู่แล้ว) */
 function fixCNSalesmanColumn(){
   const ss=SpreadsheetApp.getActiveSpreadsheet();
   const sh=ss.getSheetByName(SHEET_CN);
   if(!sh){ SpreadsheetApp.getUi().alert('ไม่พบชีท '+SHEET_CN); return; }
-  const USERS_ID='1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';
-  const USERS_SHEET='Rattana Users for apps';
+  const SLMN_ID='1aIJPHRGG07xEusXZ6qCUDmaQOg5ScmZwDjyr6VWz8Kg';
+  const SLMN_SHEET='SLMN';
   const norm=function(s){ return String(s||'').replace(/^คุณ[ ]*/,'').replace(/[ ][ ]+/g,' ').trim(); };
   const sales=[]; var usedSheetName='';
   try{
-    const usersSS=SpreadsheetApp.openById(USERS_ID);
-    var usrs=usersSS.getSheetByName(USERS_SHEET);
-    if(!usrs) usrs=usersSS.getSheets()[0];   // v3.119: gviz คืนแท็บแรกเงียบๆ ถ้าชื่อแท็บไม่ตรง → GAS ก็ใช้แท็บแรกให้เหมือนกัน
-    if(!usrs) throw new Error('ไฟล์ Users ไม่มีชีทเลย');
-    usedSheetName=usrs.getName();
-    const d=usrs.getDataRange().getValues();
+    const slmnSS=SpreadsheetApp.openById(SLMN_ID);
+    var ssh=slmnSS.getSheetByName(SLMN_SHEET);
+    if(!ssh) ssh=slmnSS.getSheets()[0];   // v3.119: gviz คืนแท็บแรกเงียบๆ ถ้าชื่อแท็บไม่ตรง → GAS ก็ใช้แท็บแรกให้เหมือนกัน
+    if(!ssh) throw new Error('ไฟล์ SLMN ไม่มีชีทเลย');
+    usedSheetName=ssh.getName();
+    const d=ssh.getDataRange().getValues();
     const hdr=d[0].map(function(x){ return String(x).trim(); });
     const c=function(n){ return hdr.indexOf(n); };
-    const cDept=c('แผนก'), cSt=c('Status'), cNick=c('ชื่อเล่น'), cFull=(c('ชื่อ - สกุล')>=0?c('ชื่อ - สกุล'):c('ชื่อ-สกุล'));
+    const cName=c('SLMN_NAME'), cNick=c('NICKNAME');
+    if(cName<0){ SpreadsheetApp.getUi().alert('ไม่พบคอลัมน์ SLMN_NAME ในไฟล์ SLMN'); return; }
     for(var i=1;i<d.length;i++){
       const r=d[i];
-      if(cDept<0||String(r[cDept]).trim()!=='ขาย') continue;
-      if(cSt>=0&&String(r[cSt]).trim().toLowerCase()!=='active') continue;
+      const full=String(r[cName]||'').trim();
+      if(!full) continue;
       const nk=cNick>=0?String(r[cNick]).trim():'';
-      const fn=cFull>=0?String(r[cFull]).trim():'';
-      if(!nk&&!fn) continue;
-      sales.push({full:(fn?fn+' ('+nk+')':nk), fullname:fn, nick:nk});
+      sales.push({full:full, fullname:norm(full), nick:nk});   // fullname = ชื่อโดยตัด "คุณ " นำหน้า
     }
-  }catch(e){ SpreadsheetApp.getUi().alert('อ่านชีทพนักงานขายไม่ได้: '+e); return; }
-  if(!sales.length){ SpreadsheetApp.getUi().alert('ไม่พบพนักงานแผนกขาย (active) ในไฟล์ Users'); return; }
+  }catch(e){ SpreadsheetApp.getUi().alert('อ่านไฟล์ SLMN ไม่ได้: '+e); return; }
+  if(!sales.length){ SpreadsheetApp.getUi().alert('ไม่พบรายชื่อเซลล์ในไฟล์ SLMN'); return; }
   const normalize=function(name){
     const rn=norm(name); if(!rn) return name||'';
     for(var i=0;i<sales.length;i++){ if(norm(sales[i].full)===rn) return sales[i].full; }
@@ -8225,6 +8257,64 @@ function fixCNSalesmanColumn(){
   range.setValues(out);
   SpreadsheetApp.getUi().alert('✓ แก้ชื่อเซลล์ในชีท CN เรียบร้อย\\n- อ่านพนักงานขายจากแท็บ: "'+usedSheetName+'" ('+sales.length+' คน)\\n- แถวทั้งหมด: '+out.length+'\\n- แก้ไข: '+changed+(samples.length?'\\n\\nตัวอย่าง:\\n'+samples.join('\\n'):''));
 }
+/* v3.122: แก้ Salesman_Name ในหน้า "บันทึกบิลและการชำระ" (Cin) ให้เป็น SLMN_NAME — จับด้วย Salesman_Code === SLMN_CODE (เป๊ะ), fallback จับด้วยชื่อ/ชื่อเล่น */
+function fixCinSalesmanColumn(){
+  const ss=SpreadsheetApp.getActiveSpreadsheet();
+  const sh=ss.getSheetByName(SHEET_CIN);
+  if(!sh){ SpreadsheetApp.getUi().alert('ไม่พบชีท '+SHEET_CIN); return; }
+  const SLMN_ID='1aIJPHRGG07xEusXZ6qCUDmaQOg5ScmZwDjyr6VWz8Kg';
+  const SLMN_SHEET='SLMN';
+  const norm=function(s){ return String(s||'').replace(/^คุณ[ ]*/,'').replace(/[ ][ ]+/g,' ').trim(); };
+  const byCode={}; const sales=[]; var usedSheetName='';
+  try{
+    const slmnSS=SpreadsheetApp.openById(SLMN_ID);
+    var ssh=slmnSS.getSheetByName(SLMN_SHEET);
+    if(!ssh) ssh=slmnSS.getSheets()[0];   // fallback แท็บแรก
+    if(!ssh) throw new Error('ไฟล์ SLMN ไม่มีชีทเลย');
+    usedSheetName=ssh.getName();
+    const d=ssh.getDataRange().getValues();
+    const hdr=d[0].map(function(x){ return String(x).trim(); });
+    const c=function(n){ return hdr.indexOf(n); };
+    const cCode=c('SLMN_CODE'), cName=c('SLMN_NAME'), cNick=c('NICKNAME');
+    if(cCode<0||cName<0){ SpreadsheetApp.getUi().alert('ไม่พบคอลัมน์ SLMN_CODE / SLMN_NAME ในไฟล์ SLMN'); return; }
+    for(var i=1;i<d.length;i++){
+      const r=d[i]; const code=String(r[cCode]||'').trim(); const full=String(r[cName]||'').trim();
+      if(!full) continue;
+      if(code) byCode[code]=full;
+      const nk=cNick>=0?String(r[cNick]).trim():'';
+      sales.push({full:full, fullname:norm(full), nick:nk});
+    }
+  }catch(e){ SpreadsheetApp.getUi().alert('อ่านไฟล์ SLMN ไม่ได้: '+e); return; }
+  if(!sales.length){ SpreadsheetApp.getUi().alert('ไม่พบรายชื่อเซลล์ในไฟล์ SLMN'); return; }
+  const normByName=function(name){
+    const rn=norm(name); if(!rn) return name||'';
+    for(var i=0;i<sales.length;i++){ if(norm(sales[i].full)===rn) return sales[i].full; }
+    for(var i=0;i<sales.length;i++){ if(sales[i].nick&&norm(sales[i].nick)===rn) return sales[i].full; }
+    for(var i=0;i<sales.length;i++){ if(sales[i].nick&&norm(sales[i].nick)&&rn.indexOf('('+norm(sales[i].nick)+')')>=0) return sales[i].full; }
+    for(var i=0;i<sales.length;i++){ if(sales[i].fullname&&rn.indexOf(sales[i].fullname)>=0) return sales[i].full; }
+    return name||'';
+  };
+  const hmap=headerMap_(sh);
+  const cCodeCol=hmap['Salesman_Code']?hmap['Salesman_Code'][0]:-1;
+  const cNameCol=hmap['Salesman_Name']?hmap['Salesman_Name'][0]:-1;
+  if(cNameCol<0){ SpreadsheetApp.getUi().alert('ไม่พบคอลัมน์ Salesman_Name ในชีท '+SHEET_CIN); return; }
+  const last=sh.getLastRow(); if(last<2){ SpreadsheetApp.getUi().alert('ไม่มีข้อมูล'); return; }
+  const codes=cCodeCol>=0?sh.getRange(2,cCodeCol+1,last-1,1).getValues():null;
+  const range=sh.getRange(2,cNameCol+1,last-1,1);
+  const vals=range.getValues();
+  var byCodeN=0, byNameN=0; const samples=[];
+  const out=vals.map(function(row,idx){
+    const cur=String(row[0]||'');
+    const code=codes?String(codes[idx][0]||'').trim():'';
+    var nn=cur;
+    if(code&&byCode[code]){ nn=byCode[code]; if(nn!==cur) byCodeN++; }
+    else if(cur.trim()){ const x=normByName(cur); if(x!==cur){ nn=x; byNameN++; } }
+    if(nn!==cur&&samples.length<6) samples.push((code||'-')+' : '+cur+'  →  '+nn);
+    return [nn];
+  });
+  range.setValues(out);
+  SpreadsheetApp.getUi().alert('✓ แก้ Salesman_Name หน้าบันทึกบิลและการชำระ เรียบร้อย\\n- อ่านเซลล์จากแท็บ: "'+usedSheetName+'" ('+sales.length+' คน)\\n- แถวทั้งหมด: '+out.length+'\\n- แก้ด้วยรหัส: '+byCodeN+'\\n- แก้ด้วยชื่อ/ชื่อเล่น: '+byNameN+(samples.length?'\\n\\nตัวอย่าง:\\n'+samples.join('\\n'):''));
+}
 function onOpen(){
   try{
     SpreadsheetApp.getUi().createMenu('🚚 D-Man')
@@ -8237,7 +8327,8 @@ function onOpen(){
       .addItem('📅 แก้ Doc_Date แถวเก่า (สลับวัน/เดือน)','fixDocDateColumn')
       .addItem('💵 แก้ รวมยอดชำระ แถวเก่า (ตัดใบลดหนี้)','fixTotalPaidColumn')   // v3.67
       .addItem('🖼 กู้ลิงก์รูป [photo-pending-sync]','restorePendingPhotos_')   // v3.78
-      .addItem('🧾 แก้ชื่อเซลล์ใน CN ให้เป็นมาตรฐาน','fixCNSalesmanColumn')   // v3.118
+      .addItem('🧾 แก้ชื่อเซลล์ใน CN ให้เป็นมาตรฐาน','fixCNSalesmanColumn')   // v3.120
+      .addItem('🧾 แก้ชื่อเซลล์หน้าบันทึกบิล (Cin) ด้วยรหัส','fixCinSalesmanColumn')   // v3.122
       .addToUi();
   }catch(e){}
 }`;
@@ -8309,7 +8400,7 @@ async function refreshData(){
   showSpinner('อัพเดทข้อมูล...');
   try{
     if(outboxCount()){ await flushOutbox(); }               // v3.28: ส่ง outbox ก่อน กันดึงชีทเก่าทับ
-    await Promise.all([loadUsers(),loadVehicles(),loadCustomers(),loadChoices()]);
+    await Promise.all([loadUsers(),loadVehicles(),loadCustomers(),loadChoices(),loadSalesStaff()]);
     if(!outboxCount()) await syncJobsFromSheet({force:true}).catch(()=>{});   // v2.53: กด refresh → บังคับ fetch ใหม่ (ข้ามถ้ายังค้าง)
     showToast('อัพเดทข้อมูลแล้ว ✓','success');
     renderCurrent();
@@ -8349,6 +8440,8 @@ async function bootApp(){
     if(cachedProd){ state.products=cachedProd; }
     const cachedBD=getCachedSheet(BILLDETAILS_CACHE_KEY,CACHE_TTL_LONG);
     if(cachedBD && Object.keys(cachedBD).length) state.billDetails=cachedBD;   // v3.36: ข้าม cache ว่าง
+    const cachedSS=getCachedSheet('salesStaff_v3120',CACHE_TTL_LONG);
+    if(cachedSS && cachedSS.length) state.salesStaff=cachedSS;   // v3.120: ชื่อเซลล์ (SLMN) hydrate ทันที
     // render ทันทีด้วยข้อมูลที่มีอยู่ในเครื่อง
     if(dataDepTabs.includes(state.currentTab)) renderCurrent();
     updateOutboxBadge();                        // v3.28: โชว์จำนวนที่ค้างจาก session ก่อน (ถ้ามี)
@@ -8358,6 +8451,7 @@ async function bootApp(){
       loadVehicles().catch(()=>{}),
       loadCustomers().catch(()=>{}),   // 24h cache — skip fetch ถ้ายัง fresh อยู่
       loadChoices().catch(()=>{}),
+      loadSalesStaff().catch(()=>{}),   // v3.120: รหัสเซลล์ (SLMN) → ชื่อเซลล์ CN
     ]).then(()=>loadJobs().catch(()=>{}))
       .then(()=>flushOutbox().catch(()=>{}))                     // v3.28: ส่ง outbox ค้างจาก session ก่อน
       .then(()=>{ if(outboxCount()) return; return syncJobsFromSheet({force:true}).catch(()=>{}); })   // ข้าม sync ถ้ายังค้าง (กันเขียนทับ)
