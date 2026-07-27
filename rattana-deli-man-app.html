@@ -522,6 +522,20 @@ body.dark .banner-gold{color:var(--gold-light)}
       </div>
     </div>
 
+    <!-- CN MISSING: บิลที่มีใบลดหนี้แต่ไม่มี CN (v3.107) -->
+    <div class="section" id="sec-cn-missing">
+      <div class="card card-gold">
+        <div class="card-head">
+          <h3>⚠️ ใบลดหนี้ที่ไม่มี CN</h3>
+          <div class="row gap-8">
+            <button class="btn btn-outline btn-sm" onclick="renderCNMissing()">🔄 รีเฟรช</button>
+            <button class="btn btn-outline btn-sm" onclick="switchTab('sec-home')">↩ กลับหน้าหลัก</button>
+          </div>
+        </div>
+        <div class="card-body" id="cnMissingBody"></div>
+      </div>
+    </div>
+
     <!-- RETURN: รับคืน → CN sheet -->
     <div class="section" id="sec-returns">
       <div class="card card-gold">
@@ -779,7 +793,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.106';
+const APP_VERSION='3.107';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1644,6 +1658,7 @@ function renderCurrent(){
   else if(id==='sec-sup-history') renderSupHistory();
   else if(id==='sec-sup-review') {/* handled by openReview */}
   else if(id==='sec-missing-photos') renderMissingPhotos();   // v3.80
+  else if(id==='sec-cn-missing') renderCNMissing();   // v3.107
   else if(id==='sec-settings') renderSettings();
   updateTabBadges();   // v2.49: refresh badge งานค้างทุกครั้งที่ render
 }
@@ -1655,14 +1670,17 @@ const HOME_MODULES=[
   {id:'transfer',   icon:'🏬', label:'โอนย้าย-ขนสินค้า',  sub:'เที่ยวพิเศษ',                     target:'sec-transfer',    ready:true},
   {id:'returns',    icon:'📦', label:'รับคืน',           sub:'รับสินค้าคืนจากลูกค้า',           target:'sec-returns',     ready:true},
   {id:'missing-photos', icon:'📸', label:'แนบสลิปที่ขาด', sub:'รูปสลิป/เช็คที่ยังไม่มี',        target:'sec-missing-photos', ready:true},   // v3.80
+  {id:'cn-missing',  icon:'⚠️', label:'ใบลดหนี้ไม่มี CN', sub:'บิลที่หักใบลดหนี้แต่ไม่มี CN',   target:'sec-cn-missing',  ready:true},   // v3.107
   {id:'reports',    icon:'📊', label:'รายงาน',           sub:'สรุปยอด · ดาวน์โหลด',             target:'sec-reports',     ready:true},
   {id:'customers',  icon:'🏪', label:'ข้อมูลร้านค้า',     sub:'ค้นหา · พิกัด · ผู้ดูแล',        target:'sec-customers',   ready:true},
 ];
 function renderHome(){
   const missN=(typeof missingPhotoList_==='function')?missingPhotoList_().length:0;   // v3.80: นับสลิปที่ต้องแนบเพิ่ม
+  const cnMissN=(typeof unbackedCreditList_==='function')?unbackedCreditList_().length:0;   // v3.107: นับบิลใบลดหนี้ไม่มี CN
   $('homeGrid').innerHTML=HOME_MODULES.map(m=>{
     let sub=m.sub, warn=false;
     if(m.id==='missing-photos'){ if(missN){ sub='⚠️ '+missN+' รายการรอแนบรูป'; warn=true; } else sub='ครบแล้ว 🎉'; }
+    if(m.id==='cn-missing'){ if(cnMissN){ sub='⚠️ '+cnMissN+' บิลไม่มี CN'; warn=true; } else sub='ครบแล้ว 🎉'; }
     return `<div class="home-card ${m.ready?'':'disabled'}" onclick="${m.ready?`switchTab('${m.target}')`:`showComingSoon('${esc(m.label)}')`}">
       <div>
         <div class="home-card-text">${esc(m.label)}</div>
@@ -1722,6 +1740,56 @@ function renderMissingPhotos(){
             <label class="btn btn-outline btn-sm" style="cursor:pointer">📷<input type="file" accept="image/*" capture="environment" hidden onchange="attachMissingPhoto(event,'${esj}','${esd}','${it.slot}','${it.key}','${uid}')"></label>
             <label class="btn btn-gold btn-sm" style="cursor:pointer">🖼 แนบ<input type="file" accept="image/*" hidden onchange="attachMissingPhoto(event,'${esj}','${esd}','${it.slot}','${it.key}','${uid}')"></label>
           </div>
+        </div>
+      </div>`;
+    }).join('');
+}
+/* ===== v3.107: ตรวจบิลที่มีใบลดหนี้ แต่ไม่มี CN รองรับ (CN ในแอป หรือ CN จากระบบ IS) → ขึ้นเตือน ===== */
+function canSeeAllCNMissing_(){ const u=state.user||{}; return !!(u.canApprove||u.canApproveCN||(parseInt(u.userRole)||0)>3); }
+function unbackedCreditList_(){
+  const out=[];
+  const cutoff=Date.now()-120*86400000;   // โฟกัส 120 วันล่าสุด
+  const seeAll=canSeeAllCNMissing_();
+  (state.jobs||[]).forEach(j=>{
+    if(!seeAll && !isMyOwnJob(j)) return;               // Role ต่ำ → เห็นเฉพาะของตัวเอง / หัวหน้า·คลัง·Role>3 → เห็นทุกคน
+    (j.bills||[]).forEach(b=>{
+      const p=b.payment||{};
+      const cn=parseFloat(p.creditNote)||0;
+      if(cn<=0.005) return;                              // ไม่มีใบลดหนี้ → ข้าม
+      if(b.savedAt && b.savedAt<cutoff) return;          // เก่ากว่า 120 วัน → ข้าม
+      if(String(p.creditNoteRef||'').trim()) return;     // มี CN จากระบบ IS (แท็ก [CN:]) → รองรับแล้ว
+      const doc=String(b.doc||'').trim().toUpperCase();
+      const hasAppCN=(state.cnHistory||[]).some(c=>String(c.docNo||'').trim().toUpperCase()===doc&&c.returnType!=='คืนเต็มทั้งบิล');
+      if(hasAppCN) return;                               // มี CN ในแอป (คืนบางส่วน) docNo ตรง → รองรับแล้ว
+      out.push({jobId:j.id,doc:b.doc,name:b.name,cn,when:b.savedAt||0,
+        plate:(j.team&&j.team.plate)||'',driver:(j.team&&j.team.driver)||j.driver||'',warehouse:j.warehouse||''});
+    });
+  });
+  out.sort((a,b)=>(b.when||0)-(a.when||0));   // ล่าสุดก่อน
+  return out;
+}
+function gotoJobFromWarning_(jobId){
+  const j=state.jobs.find(x=>x.id===jobId); if(!j){ showToast('ไม่พบงานนี้แล้ว','warning'); return; }
+  state.activeJobId=jobId; state.driverJobView='detail';
+  switchTab('sec-driver-job');   // ไปหน้ารายละเอียดงาน → แตะบิลเพื่อทำ CN / แก้ใบลดหนี้
+}
+function renderCNMissing(){
+  const box=$('cnMissingBody'); if(!box) return;
+  const items=unbackedCreditList_();
+  if(!items.length){ box.innerHTML='<div class="txt-center txt-muted p-16">🎉 ไม่มีบิลที่หักใบลดหนี้โดยไม่มี CN</div>'; return; }
+  const seeAll=canSeeAllCNMissing_();
+  const totalCN=items.reduce((s,it)=>s+(it.cn||0),0);
+  box.innerHTML=`<div class="txt-sm txt-muted mb-8">พบ <b class="txt-danger">${items.length}</b> บิลที่หักใบลดหนี้แต่ไม่มี CN${seeAll?' <span class="txt-gold">(ทุกคน)</span>':''} · รวม <b class="txt-gold">${fmt(totalCN)} ฿</b> — แตะ "เปิดงาน" เพื่อไปทำ CN หรือแก้บิล</div>`+
+    items.map(it=>{
+      const esj=esc(it.jobId).replace(/'/g,"\\'");
+      return `<div class="card" style="padding:10px 12px;margin-bottom:8px;border-left:3px solid var(--danger)">
+        <div class="flex-between" style="gap:8px;align-items:flex-start">
+          <div style="min-width:0;flex:1">
+            <div class="txt-bold" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.name||it.doc)}</div>
+            <div class="txt-xs txt-muted">${esc(it.doc)} · <span class="txt-danger txt-bold">ใบลดหนี้ ${fmt(it.cn)} ฿</span></div>
+            <div class="txt-xs txt-muted">📦 ${esc(it.jobId)}${it.warehouse?' · 🏪 '+esc(it.warehouse):''}${it.driver?' · 👤 '+esc(it.driver):''}${it.when?' · '+esc(formatThaiDateTime(it.when)):''}</div>
+          </div>
+          <button class="btn btn-outline btn-sm" style="white-space:nowrap" onclick="gotoJobFromWarning_('${esj}')">→ เปิดงาน</button>
         </div>
       </div>`;
     }).join('');
