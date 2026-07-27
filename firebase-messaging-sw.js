@@ -66,7 +66,9 @@ if (firebaseConfig.apiKey) {
       badge: d.icon || appCfg.icon,
       tag: tag,
       renotify: true,
-      data: { link: link, app: appKey }
+      // taskTitle/fromName = ข้อมูลงานที่หลังบ้านแนบมา — แอปเอาไปโชว์หน้ารอตอนกดนอติได้เลยก่อน sync จริง
+      // (หลังบ้านเวอร์ชันเก่ายังไม่ส่ง 2 ค่านี้ → ใช้ body ซึ่งเป็นชื่องานอยู่แล้วในเคสมอบงาน)
+      data: { link: link, app: appKey, taskTitle: d.taskTitle || d.body || n.body || '', fromName: d.fromName || '' }
     }).then(refreshBadge).catch(function () {});
   });
 }
@@ -80,12 +82,19 @@ function refreshBadge() {
     .catch(function () { try { self.navigator.setAppBadge(1); } catch (e) {} });
 }
 
-// กดที่ notification → เปิด/โฟกัสแอปไปที่งานนั้น
+/* กดที่ notification → เปิด/โฟกัสแอปไปที่งานนั้น
+   ⚠️ `notification.data` หายได้จริง (iOS PWA + Android บางรุ่นที่ปลุก SW ใหม่ตอนกด) → link ตกเป็นหน้าเปล่า
+      แล้วแอปที่เปิดค้างจะแค่ถูก focus = ผู้ใช้เห็น "งานที่เปิดล่าสุด" ทุกครั้งไม่ว่ากดนอติอันไหน
+      กัน 2 ชั้น: อ่านจาก data ก่อน → ไม่มีก็ถอด task id จาก `tag` (tag = 'task-<id>' อยู่แล้ว ไม่หายไปกับ data) */
 self.addEventListener('notificationclick', function (e) {
   e.notification.close();
-  const appKey = (e.notification.data && e.notification.data.app) || 'rflow';
+  const nd = e.notification.data || {};
+  const tg = String(e.notification.tag || '');
+  const appKey = (nd.app && APPS[nd.app]) ? nd.app : (tg.indexOf('sales') === 0 ? 'sales' : 'rflow');
   const appCfg = appCfgFor(appKey);
-  const link = (e.notification.data && e.notification.data.link) || appCfg.defaultLink;
+  let link = nd.link || '';
+  if (!link && appKey === 'rflow' && tg.indexOf('task-') === 0) link = 'r-flow.html?task=' + tg.slice(5);
+  if (!link) link = appCfg.defaultLink;
   // อัปเดตเลขบนไอคอนตามนอติที่ยังเหลือ (แอปจะคำนวณใหม่อีกทีตอนเปิด)
   if (self.navigator && self.navigator.setAppBadge) {
     self.registration.getNotifications().then(function (list) {
@@ -99,11 +108,18 @@ self.addEventListener('notificationclick', function (e) {
       for (let i = 0; i < list.length; i++) {
         const c = list[i];
         if (c.url.indexOf(appCfg.urlFrag) > -1) {
-          c.postMessage({ type: appCfg.msgType, link: link });   // แอปเปิดอยู่ → บอกให้เปิดหน้านั้นเลย (ไม่ reload)
+          // แอปเปิดอยู่ → บอกให้เปิดหน้านั้นเลย (ไม่ reload) · แนบ title/body/data ไปด้วย
+          // แอปเอาไปโชว์หน้ารอได้ทันทีถ้างานยังไม่ sync มา (ไม่ต้องรอ backend ตอบก่อนถึงจะมีอะไรให้ดู)
+          c.postMessage({ type: appCfg.msgType, link: link, tag: tg, title: e.notification.title || '', body: e.notification.body || '', data: nd });
           return ('focus' in c) ? c.focus() : null;
         }
       }
-      if (clients.openWindow) return clients.openWindow(link);   // แอปปิด → เปิด URL ของแอปนั้น
+      // แอปปิด → เปิด URL ของแอปนั้น · บาง PWA จะ "โฟกัสหน้าต่างเดิม" แทนที่จะโหลด URL ใหม่
+      // → ส่งข้อความตามไปด้วย เผื่อได้ instance เดิมที่ไม่ได้อ่าน ?task= จาก URL
+      if (clients.openWindow) return clients.openWindow(link).then(function (c) {
+        if (c) { try { c.postMessage({ type: appCfg.msgType, link: link, tag: tg, title: e.notification.title || '', body: e.notification.body || '', data: nd }); } catch (err) {} }
+        return c;
+      });
     })
   );
 });
