@@ -32,6 +32,8 @@ header{background:var(--navy);color:#fff;padding:12px 16px;position:sticky;top:0
 .icon-btn{background:transparent;color:#fff;border:1px solid rgba(255,255,255,.2);width:38px;height:38px;border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;font-size:17px;transition:background .15s;flex-shrink:0}
 .icon-btn:hover{background:rgba(255,255,255,.12)}
 .user-chip{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:4px 12px;font-size:12px;color:#fff;cursor:pointer;white-space:nowrap}
+.sale-filter-select{background:rgba(255,255,255,.12);border:1px solid rgba(201,168,76,.5);border-radius:20px;padding:4px 12px;font-size:12px;color:#fff;font-family:inherit;outline:none;cursor:pointer;max-width:160px}
+.sale-filter-select option{background:var(--navy);color:#fff}
 
 /* Tab nav */
 .tab-nav{display:flex;background:var(--navy);border-bottom:3px solid var(--gold);padding:0 8px;gap:4px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
@@ -290,8 +292,9 @@ body.dark .pvol{color:var(--gold-light)}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v9.9</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v10.0</span></div>
       </div>
+      <select id="saleFilter" style="display:none" class="sale-filter-select" onchange="onSaleFilterChange(this.value)"></select>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
     <button class="icon-btn" onclick="toggleDark()" title="Dark mode">🌙</button>
@@ -527,7 +530,11 @@ const TTL = 5 * 60 * 1000;
 
 // ── STATE ────────────────────────────────────────────────────────────────
 let currentUser = null;
-let allRows     = [];   // all rows for this user
+let viewAsName  = null; // admin override: name selected from dropdown
+let allRows     = [];   // rows for active seller
+let allRawRows  = [];   // all rows unfiltered (role>=5 only)
+let allCustomerRows = []; // all customer rows unfiltered (role>=5 only)
+let allBudgetRows   = []; // all budget rows (role>=5 only)
 let filteredRows = [];  // after date filter
 let userBudget  = 0;   // budget for current user from Budget sheet
 let homeCustomerRows = []; // customer rows for home store table
@@ -672,6 +679,61 @@ function logout() {
   location.reload();
 }
 
+// ── ADMIN SALE FILTER ────────────────────────────────────────────────────
+function getActiveSellerName() {
+  return viewAsName || String(currentUser?.name||'').trim();
+}
+
+function populateSaleFilter(allSalesRows) {
+  const sel = document.getElementById('saleFilter');
+  if (!sel) return;
+  const pfx = ['คุณ ','นาย ','นาง ','นางสาว ','ด.ช. ','ด.ญ. '];
+  const strip = s => { let v=String(s||'').trim(); for(const p of pfx) if(v.startsWith(p)) return v.slice(p.length).trim(); return v; };
+  const names = [...new Set(allSalesRows.map(r => strip(r['Sale NO ROO'])).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'th'));
+  const current = getActiveSellerName();
+  sel.innerHTML = names.map(n => `<option value="${n}"${n===current?' selected':''}>${n}</option>`).join('');
+  sel.style.display = 'inline-block';
+}
+
+function onSaleFilterChange(name) {
+  viewAsName = name;
+  const pfx = ['คุณ ','นาย ','นาง ','นางสาว ','ด.ช. ','ด.ญ. '];
+  const strip = s => { let v=String(s||'').trim(); for(const p of pfx) if(v.startsWith(p)) return v.slice(p.length).trim(); return v; };
+
+  // Re-filter sales rows in memory
+  allRows = allRawRows.filter(r => strip(r['Sale NO ROO']) === name);
+
+  // Re-filter customer rows in memory
+  if (allCustomerRows.length) {
+    const cKeys = Object.keys(allCustomerRows[0] || {});
+    const _sellerCol = cKeys.find(k => k.replace(/\s/g,'') === 'เซลล์ผู้ดูแล') || 'เซลล์ผู้ดูแล';
+    const _nameCol   = cKeys.find(k => k.replace(/\s/g,'') === 'ชื่อร้านค้า')   || 'ชื่อร้านค้า';
+    const _routeCol  = cKeys.find(k => k.replace(/\s/g,'') === 'ชื่อรูท')        || 'ชื่อรูท';
+    const _codeCol   = cKeys.find(k => k.replace(/\s/g,'') === 'รหัสบีพลัส')     || 'รหัสบีพลัส';
+    homeCustomerRows = allCustomerRows.filter(r => strip(r[_sellerCol]||'') === name);
+    homeCustomerRows._nameCol = _nameCol;
+    homeCustomerRows._routeCol = _routeCol;
+    lowCustomerRows = homeCustomerRows;
+    lowCustomerRows._codeCol  = _codeCol;
+    lowCustomerRows._nameCol  = _nameCol;
+    lowCustomerRows._routeCol = _routeCol;
+  }
+
+  // Re-lookup budget in memory
+  if (allBudgetRows.length) {
+    const bKeys = Object.keys(allBudgetRows[0]);
+    const bNameKey = bKeys.find(k => k.replace(/[\s_]/g,'').toUpperCase() === 'SALENOROO' || k.toLowerCase().includes('sale')) || bKeys[0];
+    const bValKey  = bKeys.find(k => k.replace(/[\s_]/g,'').toUpperCase() === 'BUDGET') || 'Budget';
+    const bRow = allBudgetRows.find(r => strip(r[bNameKey]||'') === name);
+    userBudget = bRow ? parseNum(bRow[bValKey]) : 0;
+  }
+
+  // Reset tab state so they re-render with new data
+  skuLoaded = false;
+  lowStoreLoaded = false;
+  applyFilters();
+}
+
 // ── APP START ─────────────────────────────────────────────────────────────
 function startApp() {
   document.getElementById('loginScreen').style.display = 'none';
@@ -686,26 +748,33 @@ async function loadData(showSpin=true) {
   if (showSpin) showSpinner('กำลังโหลดข้อมูลยอดขาย...');
   setBar(true);
   try {
-    const cacheKey = `salesData_${currentUser.empId}`;
-    let rows = getCached(cacheKey);
-    if (!rows) {
-      const all = await fetchSheet(SALES_SHEET_ID, SALES_SHEET);
-      // Strip Thai name prefixes from Sale NO ROO before comparing with ชื่อ-สกุล
-      const prefixes = ['คุณ ','นาย ','นาง ','นางสาว ','ด.ช. ','ด.ญ. '];
-      const stripPrefix = s => { let v = String(s||'').trim(); for(const p of prefixes) if(v.startsWith(p)) return v.slice(p.length).trim(); return v; };
-      const userName = String(currentUser.name||'').trim();
-      rows = all.filter(r => stripPrefix(r['Sale NO ROO']) === userName);
-      const sampleExVat = rows.slice(0,3).map(r=>r['EXVat+CN*2']);
-      const totalExVat = rows.reduce((s,r)=>s+parseNum(r['EXVat+CN*2']),0);
-      console.log(`[loadData] userName="${userName}" matched=${rows.length}/${all.length} rows, sampleEXVat+CN*2=${JSON.stringify(sampleExVat)}, total=${totalExVat.toFixed(2)}`);
-      setCache(cacheKey, rows);
+    const isAdmin = (currentUser.role || 0) >= 5;
+    const prefixes = ['คุณ ','นาย ','นาง ','นางสาว ','ด.ช. ','ด.ญ. '];
+    const stripPfx = s => { let v=String(s||'').trim(); for(const p of prefixes) if(v.startsWith(p)) return v.slice(p.length).trim(); return v; };
+
+    const cacheKey = `salesData_${isAdmin ? 'admin' : currentUser.empId}`;
+    let fetchedAll = getCached(cacheKey);
+    if (!fetchedAll) {
+      fetchedAll = await fetchSheet(SALES_SHEET_ID, SALES_SHEET);
+      setCache(cacheKey, fetchedAll);
     }
-    allRows = rows;
+
+    if (isAdmin) {
+      allRawRows = fetchedAll;
+      populateSaleFilter(fetchedAll);
+      const active = viewAsName || String(currentUser.name||'').trim();
+      allRows = fetchedAll.filter(r => stripPfx(r['Sale NO ROO']) === active);
+    } else {
+      const userName = String(currentUser.name||'').trim();
+      allRows = fetchedAll.filter(r => stripPfx(r['Sale NO ROO']) === userName);
+    }
+    console.log(`[loadData] active="${getActiveSellerName()}" matched=${allRows.length}/${fetchedAll.length}`);
     document.getElementById('lastUpdate').textContent = 'อัพเดท: ' + new Date().toLocaleTimeString('th-TH');
 
-    // โหลด Budget ของ user นี้
+    // โหลด Budget
     try {
       const budgetRows = await fetchSheet(BUDGET_SHEET_ID, BUDGET_SHEET);
+      if (isAdmin) allBudgetRows = budgetRows;
       const bKeys = budgetRows.length ? Object.keys(budgetRows[0]) : [];
       const bNameKey = bKeys.find(k => k.replace(/[\s_]/g,'').toUpperCase() === 'SALENOROO'
         || k.replace(/[\s_]/g,'').toUpperCase() === 'SALENOROО'
@@ -713,16 +782,13 @@ async function loadData(showSpin=true) {
       const bValKey  = bKeys.find(k => k.replace(/[\s_]/g,'').toUpperCase() === 'BUDGET') || 'Budget';
       const stripP = s => {
         let v = String(s||'').trim();
-        // strip Thai name prefixes (with or without space after)
         const pList = ['คุณ ','นาย ','นาง ','นางสาว ','ด.ช. ','ด.ญ. ','คุณ','นาย','นาง','นางสาว'];
         for (const p of pList) if (v.startsWith(p)) { v = v.slice(p.length).trim(); break; }
         return v;
       };
-      const myName2 = String(currentUser?.name||'').trim();
+      const myName2 = getActiveSellerName();
       const bRow = budgetRows.find(r => stripP(r[bNameKey]||'') === myName2);
-      console.log('[budget] keys=', bKeys, 'nameKey=', bNameKey, 'valKey=', bValKey, 'myName=', myName2, 'sample=', budgetRows.slice(0,2).map(r=>r[bNameKey]), 'found=', !!bRow);
       userBudget = bRow ? parseNum(bRow[bValKey]) : 0;
-      console.log(`[budget] nameKey="${bNameKey}" valKey="${bValKey}" myName="${myName2}" found=${!!bRow} budget=${userBudget}`);
     } catch(e) {
       console.warn('[budget] load failed:', e.message);
       userBudget = 0;
@@ -731,14 +797,13 @@ async function loadData(showSpin=true) {
     // โหลด Customer sheet สำหรับตารางรายร้าน
     try {
       const allCust = await fetchSheet(CUSTOMER_SHEET_ID, CUSTOMER_SHEET_NAME);
+      if (isAdmin) allCustomerRows = allCust;
       const cKeys = allCust.length ? Object.keys(allCust[0]) : [];
       const _sellerCol = cKeys.find(k => k.replace(/\s/g,'') === 'เซลล์ผู้ดูแล') || 'เซลล์ผู้ดูแล';
       const _nameCol   = cKeys.find(k => k.replace(/\s/g,'') === 'ชื่อร้านค้า')   || 'ชื่อร้านค้า';
       const _routeCol  = cKeys.find(k => k.replace(/\s/g,'') === 'ชื่อรูท')        || 'ชื่อรูท';
-      const prfx = ['คุณ ','นาย ','นาง ','นางสาว ','ด.ช. ','ด.ญ. '];
-      const stripCust = s => { let v=String(s||'').trim(); for(const p of prfx) if(v.startsWith(p)) return v.slice(p.length).trim(); return v; };
-      const myName = String(currentUser?.name||'').trim();
-      homeCustomerRows = allCust.filter(r => stripCust(r[_sellerCol]||'') === myName);
+      const myName = getActiveSellerName();
+      homeCustomerRows = allCust.filter(r => stripPfx(r[_sellerCol]||'') === myName);
       homeCustomerRows._nameCol  = _nameCol;
       homeCustomerRows._routeCol = _routeCol;
       // reuse for lowStore tab so it doesn't need to reload
@@ -1379,7 +1444,7 @@ function processSkuData(allSales) {
   document.getElementById('skuMonthBadge').style.display = 'inline-flex';
 
   skuSalesByProduct = {};
-  const myName = String(currentUser?.name||'').trim();
+  const myName = getActiveSellerName();
   mySkuProducts = new Set();
 
   for (const r of rows) {
