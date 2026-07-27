@@ -3374,7 +3374,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '7.7';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '7.8';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -4143,7 +4143,7 @@ async function loadCheckinLogSheet() {
       distance: +r.distance || 0,
       faceDist: r.faceDist ? +r.faceDist : null,
       scannedBy: r.scannedBy || 'self',
-      retroactive: r.retroactive ? { reason: r.reason || '', note: '' } : null,
+      retroactive: r.retroactive === 'TRUE' ? { reason: r.reason || '', note: '' } : null,
       ts: ts.toISOString(),
       timeStr: ts.toLocaleTimeString('th-TH', {hour:'2-digit',minute:'2-digit'}),
       dateKey: localDateKey(ts),
@@ -4626,7 +4626,7 @@ function saveSharedSession(userData) {
         email: (userData.email || '').toLowerCase(),
         name: userData.name || '',
         nickname: userData.nickname || '',
-        role: parseInt(userData.role, 10) || 1,
+        role: parseInt(userData.userRoleInt, 10) || parseInt(userData.role, 10) || 1,
         dept: userData.department || userData.dept || '',
         company: userData.company || 'บริษัท รัตนไพบูลย์ สมุทรสงคราม 2555',
         warehouse: userData.branch || userData.warehouse || '',
@@ -4815,6 +4815,7 @@ async function empMatchTick() {
   const det = await faceapi
     .detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({ inputSize:320, scoreThreshold:0.5 }))
     .withFaceLandmarks().withFaceDescriptor();
+  if (!empStream || !empMatchInterval) return;   // v7.8: กล้องถูกปิดระหว่าง await — อย่าเขียน state ค้าง
   if (!det) {
     document.getElementById('empCamWrap').className = 'camera-wrap home-cam';
     lastFaceMatch = { found:false };
@@ -5140,7 +5141,7 @@ function nextActionType(empId) {
   const tl = todayLogsForUser(empId);
   if (tl.length === 0) return 'in';
   // logs.unshift() เก็บล่าสุดที่ index 0 — หา punch ล่าสุดจาก timestamp
-  const sorted = tl.slice().sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  const sorted = tl.slice().sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
   const lastType = sorted[0].type;
   return lastType === 'in' ? 'out' : 'in';
 }
@@ -5253,7 +5254,7 @@ async function doSelfCheckIn() {
     type,
     lat: lastGps.lat, lng: lastGps.lng, accuracy: lastGps.accuracy,
     distance: lastGps.distance, locCode: lastGps.locCode, locName: lastGps.locName,
-    faceDist: lastFaceMatch ? +lastFaceMatch.distance.toFixed(3) : null,
+    faceDist: (lastFaceMatch && lastFaceMatch.distance != null) ? +lastFaceMatch.distance.toFixed(3) : null,
     photo, scannedBy: 'self',
   };
 
@@ -5393,7 +5394,7 @@ async function confirmOffSiteCheckOut(btn) {
     lat: lastGps.lat, lng: lastGps.lng, accuracy: lastGps.accuracy,
     distance: lastGps.distance, locCode: lastGps.locCode || 'OFFSITE',
     locName: lastGps.locName || 'นอกพื้นที่',
-    faceDist: lastFaceMatch ? +lastFaceMatch.distance.toFixed(3) : null,
+    faceDist: (lastFaceMatch && lastFaceMatch.distance != null) ? +lastFaceMatch.distance.toFixed(3) : null,
     photo, scannedBy: 'self',
     offSite: true, reason: fullReason,
   };
@@ -5446,7 +5447,7 @@ async function startKioskCamera() {
   try {
     if (!faceapiReady) await loadFaceModels();
     kioskState.stream = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ facingMode:'user', width:{ideal:640}, height:{ideal:640} } });
-    const v = document.getElementById('kioskVideo'); v.srcObject = kioskState.stream; await v.play();
+    const v = document.getElementById('kioskVideo'); v.srcObject = kioskState.stream; v.play().catch(()=>{}); await camWaitFrame_(v, 8000);
     setKioskHeadline('มองตรงกล้อง', 'วางใบหน้าให้อยู่ในกรอบ', '');
     kioskState.detectInterval = setInterval(kioskDetectTick, 400);
   } catch (e) {
@@ -5462,7 +5463,9 @@ function exitKiosk() {
   kioskState.active = false;
   kioskState.phase = 'searching';
   kioskState.candidate = null;
+  if (kioskState.liveness?.tickerInterval) clearInterval(kioskState.liveness.tickerInterval);  // v7.8: กัน interval รั่ว
   kioskState.liveness = null;
+  kioskState._tickBusy = false;
 }
 function setKioskHeadline(headline, detail, kind) {
   const h = document.getElementById('kHeadline');
@@ -5493,8 +5496,11 @@ function resetKioskPhase() {
 
 async function kioskDetectTick() {
   if (!kioskState.active || !faceapiReady) return;
+  if (kioskState._tickBusy) return;                 // v7.8: กัน tick ซ้อน (detect ช้ากว่า 400ms → match ซ้ำ)
   const v = document.getElementById('kioskVideo');
-  if (!v.videoWidth) return;
+  if (!v || !v.videoWidth) return;
+  kioskState._tickBusy = true;
+  try {
 
   /* Phase: searching → look for face → match against team */
   if (kioskState.phase === 'searching') {
@@ -5533,9 +5539,11 @@ async function kioskDetectTick() {
   else if (kioskState.phase === 'liveness') {
     await kioskLivenessTick(v);
   }
+  } finally { kioskState._tickBusy = false; }        // v7.8
 }
 
 function onKioskMatched() {
+  if (kioskState.phase !== 'searching') return;      // v7.8: กันเรียกซ้ำ
   const c = kioskState.candidate;
   setKioskHeadline(`สวัสดี ${c.member.name}`, `ระยะใบหน้า ${c.distance.toFixed(3)}`, 'warn');
 
@@ -5683,7 +5691,7 @@ function openAddMember(member) {
 async function startAddCamera() {
   try {
     addStream = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ facingMode:'user', width:{ideal:480}, height:{ideal:480} } });
-    const v = document.getElementById('addVideo'); v.srcObject = addStream; await v.play();
+    const v = document.getElementById('addVideo'); v.srcObject = addStream; v.play().catch(()=>{}); await camWaitFrame_(v, 8000);
     document.getElementById('addCamOverlay').classList.add('hidden');
     if (!faceapiReady) await loadFaceModels();
   } catch (e) { toast('เปิดกล้องไม่ได้', 'error'); }
@@ -6082,21 +6090,37 @@ function computeDay(dayLogs, cfg, leaveDay){
   if(ov>0) worked -= ov;
   worked = Math.max(0, Math.min(worked, cap));
 
-  let leaveFrac = leaveDay ? leaveDay.frac : 0;            // ลาครึ่งวัน + มาทำอีกครึ่ง
+  const leaveFrac = leaveDay ? leaveDay.frac : 0;          // ลาครึ่งวัน + มาทำอีกครึ่ง
   const late = Math.max(0, inM - (csIn+grace));
-  const dayFrac = worked>=cap*0.5 ? 1 : (worked>0?0.5:0);
+  let dayFrac = worked>=cap*0.5 ? 1 : (worked>0?0.5:0);
+  dayFrac = Math.min(dayFrac, Math.max(0, 1 - leaveFrac));  // v7.8: วันเดียว ลา+ทำงาน รวมไม่เกิน 1
   return {status:'work', in:inM, out:outM, worked, late, day:dayFrac, leave:leaveDay||null, scans:n};
 }
 
+/* v7.8 — parse วันที่ทนทุกรูปแบบ: ISO 'YYYY-MM-DD', 'DD/MM/YYYY' (พ.ศ./ค.ศ.), Thai แบบมีคำ 'D เดือน พ.ศ.' */
+const _THMON = {'มกราคม':1,'กุมภาพันธ์':2,'มีนาคม':3,'เมษายน':4,'พฤษภาคม':5,'มิถุนายน':6,'กรกฎาคม':7,'สิงหาคม':8,'กันยายน':9,'ตุลาคม':10,'พฤศจิกายน':11,'ธันวาคม':12,
+  'ม.ค.':1,'ก.พ.':2,'มี.ค.':3,'เม.ย.':4,'พ.ค.':5,'มิ.ย.':6,'ก.ค.':7,'ส.ค.':8,'ก.ย.':9,'ต.ค.':10,'พ.ย.':11,'ธ.ค.':12};
+function parseAnyDate(s){
+  if(!s) return null;
+  if(s instanceof Date) return isNaN(s)?null:s;
+  s=String(s).trim();
+  let m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);                       // ISO
+  if(m) return new Date(+m[1], +m[2]-1, +m[3]);
+  m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);                         // DD/MM/YYYY
+  if(m){ let y=+m[3]; if(y>2400) y-=543; return new Date(y, +m[2]-1, +m[1]); }
+  m=s.match(/(\d{1,2})\s+([^\s\d]+)\s+(\d{4})/);                       // Thai แบบมีคำ
+  if(m && _THMON[m[2]]){ let y=+m[3]; if(y>2400) y-=543; return new Date(y, _THMON[m[2]]-1, +m[1]); }
+  const d=new Date(s); return isNaN(d)?null:d;
+}
 /* map ใบลาอนุมัติ → { 'YYYY-MM-DD': {type,typeLabel,frac} } */
 function leavesByDay(leaves){
   const map={};
   (leaves||[]).forEach(l=>{
     if(String(l.status||'pending').toLowerCase()!=='approved') return;
-    const s=l.startDate||l.dateFrom, e=l.endDate||l.dateTo||s;
-    if(!s) return;
+    let d=parseAnyDate(l.dateFrom||l.startDate), end=parseAnyDate(l.dateTo||l.endDate||l.dateFrom||l.startDate);
+    if(!d) return;
+    if(!end) end=d;
     const frac = (l.halfDay||l.unit==='half'||(l.days&&l.days<1)) ? 0.5 : 1;
-    let d=new Date(s+'T00:00:00'), end=new Date((e)+'T00:00:00');
     for(; d<=end; d.setDate(d.getDate()+1)){
       const k=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
       map[k]={ type:l.type, typeLabel:l.typeLabel||leaveTypeLabel(l.type), frac };
@@ -7206,13 +7230,14 @@ function shSaveShift(){
 function shClearCell(){
   const s=_shift, ac=s.activeCell; if(!ac) return;
   const emp=s.employees.find(e=>e.id===ac.empId)||{};
-  delete s.shifts[ac.empId+'|'+ac.iso]; shSave();
+  const key=ac.empId+'|'+ac.iso, prev=s.shifts[key];   // v7.8: เก็บไว้ revert ถ้าล้มเหลว
+  delete s.shifts[key]; shSave();
   // ล้างในชีท "จัดกะ" ด้วย (เขียนทับเป็นค่าว่าง → getShifts จะไม่มีกะ)
   callAppsScript('submitShift', {
     saka: s.saka||'', company: s.khlang||'', name: emp.name||'', empId: emp.code||'',
     date: shSheetDate(ac.iso), start:'', end:'', holiday:'', ot:'', bypassQuota: !!s.canEdit,
   }).then(()=>{ toast('✓ ล้างกะแล้ว','success'); shReloadQuota(); })
-   .catch(err=>{ toast((err&&err.message)||'ล้างกะไม่สำเร็จ','warning'); shReloadQuota(); });
+   .catch(err=>{ if(prev){ s.shifts[key]=prev; shSave(); drawShift(); } toast((err&&err.message)||'ล้างกะไม่สำเร็จ','warning'); shReloadQuota(); });
   shClosePicker();
 }
 function shOpenAdd(){ if(!_shift.canEdit){ toast('คุณมีสิทธิ์ดูอย่างเดียว','info'); return; } _shift.addOpen=true;_shift.newName='';_shift.newCode='';_shift.newDept='';drawShift();}
@@ -8146,8 +8171,6 @@ const DOC_TYPES = [
   { value:'',            label:'—' },
   { value:'salary_cert', label:'หนังสือรับรองเงินเดือน' },
   { value:'tax_50bis',   label:'ใบ 50 ทวิ' },
-  { value:'slip_3m',     label:'สลิปเงินเดือน 3 เดือน' },
-  { value:'slip_6m',     label:'สลิปเงินเดือน 6 เดือน' },
   { value:'work_cert',   label:'เอกสารรับรองการทำงาน' },
 ];
 const DOC_PURPOSES = [
@@ -8965,8 +8988,8 @@ async function loadApprovals() {
       (ptt.staff || []).forEach(addMember);
     } catch (_) {}
 
-    const noTeamData = !teamIds.size && !teamNames.size && !(allUsers || []).length;   // ข้อมูลยังไม่โหลด
-    const items = (isHR || noTeamData) ? all : all.filter(it =>
+    // v7.8: เฉพาะ HR เห็นทั้งหมด — หัวหน้ากรองเป็นทีมตัวเองเสมอ (เดิม fail-open เห็นทั้งบริษัทตอน roster ยังไม่โหลด)
+    const items = isHR ? all : all.filter(it =>
       teamIds.has(String(it.empId || '').trim()) || teamNames.has((it.name || '').trim()));
     _approvalItems = items;
 
