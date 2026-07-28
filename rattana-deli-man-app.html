@@ -847,7 +847,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.144';
+const APP_VERSION='3.146';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -3721,14 +3721,20 @@ function checkLoadPool_(){
   return pool.sort((a,b)=>String(a.id).localeCompare(String(b.id),'th'));
 }
 function billItems_(doc){ return state.billDetails[doc]||[]; }
-/* v3.143: รวมสินค้าทุกบิลในใบคุม → สินค้าเดียวกัน (barcode|unit หรือ sku|unit) บวกจำนวนกัน */
-function checkAggItems_(job){
+/* v3.146: ติ๊ก = ระดับ (ร้าน doc × สินค้า itemIndex) → state.checkLoad[jobId][doc]={i:true} — ฐานของทั้ง 2 มุมมอง */
+function checkChk_(jobId,doc){ const v=state.checkLoad&&state.checkLoad[jobId]&&state.checkLoad[jobId][doc]; return (v&&typeof v==='object')?v:{}; }
+function billDone_(jobId,doc){ const items=billItems_(doc); if(!items.length) return false; const c=checkChk_(jobId,doc); return items.every((_,i)=>!!c[i]); }
+function billItemProg_(jobId,doc){ const items=billItems_(doc), c=checkChk_(jobId,doc); return {done:items.filter((_,i)=>c[i]).length,total:items.length}; }
+/* มุมมองรวมสินค้า — รวมทุกบิล เก็บ instance (doc,i) → คิดยอดขึ้นแล้ว (loadedQty) + ติ๊กทุก instance ได้ */
+function checkAggProducts_(job,jobId){
   const map=new Map();
-  (job.bills||[]).forEach(b=>{ billItems_(b.doc).forEach(it=>{
+  (job.bills||[]).forEach(b=>{ const doc=b.doc; billItems_(doc).forEach((it,i)=>{
     const bc=String(it.barcode||'').trim(), sku=String(it.sku||'').trim(), unit=String(it.unit||'').trim();
     const key=(bc||sku||'?')+'|'+unit;
-    const g=map.get(key)||{key,sku:sku||bc||'สินค้า',barcode:bc,unit,qty:0};
-    g.qty+=parseFloat(it.qty)||0; map.set(key,g);
+    const g=map.get(key)||{key,sku:sku||bc||'สินค้า',barcode:bc,unit,qty:0,loadedQty:0,inst:[],allDone:true};
+    const q=parseFloat(it.qty)||0; g.qty+=q; g.inst.push({doc,i});
+    if(checkChk_(jobId,doc)[i]) g.loadedQty+=q; else g.allDone=false;
+    map.set(key,g);
   }); });
   return [...map.values()].sort((a,b)=>String(a.sku).localeCompare(String(b.sku),'th'));
 }
@@ -3757,10 +3763,60 @@ function prefetchCheckDocs_(id){
   const j=state.jobs.find(x=>String(x.id)===String(id)); if(!j) return;
   ensureBillDetailsForDocs_((j.bills||[]).map(b=>b.doc)).then(n=>{ if(n&&state.currentTab==='sec-checkload'&&String(state._checkChosenJob)===String(id)) paintCheckList_(); });
 }
-function pickCheckJob_(id){ state._checkChosenJob=id; paintCheckList_(); prefetchCheckDocs_(id); }
-function toggleCheckProd_(jobId,idx){ const p=(state._checkAgg||[])[idx]; if(!p) return; state.checkLoad=state.checkLoad||{}; const m=(state.checkLoad[jobId]&&typeof state.checkLoad[jobId]==='object')?state.checkLoad[jobId]:(state.checkLoad[jobId]={}); if(m[p.key]) delete m[p.key]; else m[p.key]=true; saveCheckLoad_(); paintCheckList_(); }
-function checkAllProd_(jobId,on){ state.checkLoad=state.checkLoad||{}; if(on){ const m={}; (state._checkAgg||[]).forEach(p=>m[p.key]=true); state.checkLoad[jobId]=m; } else delete state.checkLoad[jobId]; saveCheckLoad_(); paintCheckList_(); }
+function pickCheckJob_(id){ state._checkChosenJob=id; state._checkExpanded={}; paintCheckList_(); prefetchCheckDocs_(id); }
+function setCheckView_(v){ state._checkView=v; paintCheckList_(); }
+function toggleStore_(doc){ state._checkExpanded=state._checkExpanded||{}; if(state._checkExpanded[doc]) delete state._checkExpanded[doc]; else state._checkExpanded[doc]=true; paintCheckList_(); }
+function toggleCheckItem_(jobId,doc,i){ state.checkLoad=state.checkLoad||{}; const jm=state.checkLoad[jobId]=state.checkLoad[jobId]||{}; const dm=(jm[doc]&&typeof jm[doc]==='object')?jm[doc]:(jm[doc]={}); if(dm[i]) delete dm[i]; else dm[i]=true; saveCheckLoad_(); paintCheckList_(); }
+function checkAllInStore_(jobId,doc,on){ state.checkLoad=state.checkLoad||{}; const jm=state.checkLoad[jobId]=state.checkLoad[jobId]||{}; if(on){ const m={}; billItems_(doc).forEach((_,i)=>m[i]=true); jm[doc]=m; } else delete jm[doc]; saveCheckLoad_(); paintCheckList_(); }
+function toggleAggProduct_(jobId,idx){ const p=(state._checkAgg||[])[idx]; if(!p) return; state.checkLoad=state.checkLoad||{}; const jm=state.checkLoad[jobId]=state.checkLoad[jobId]||{}; const on=!p.allDone; p.inst.forEach(ins=>{ const dm=(jm[ins.doc]&&typeof jm[ins.doc]==='object')?jm[ins.doc]:(jm[ins.doc]={}); if(on) dm[ins.i]=true; else delete dm[ins.i]; }); saveCheckLoad_(); paintCheckList_(); }
 function saveCheckLoad_(){ try{ localStorage.setItem('dman_checkload',JSON.stringify(state.checkLoad||{})); }catch(e){} }
+/* v3.145: ค้นหาสินค้า (พิมพ์) — กรองแถวโดยไม่ re-render (คงโฟกัสช่องค้นหา) */
+function onCheckSearch_(v){ state._checkSearch=v; applyCheckSearch_(); }
+function applyCheckSearch_(){
+  const q=String(state._checkSearch||'').trim().toLowerCase();
+  document.querySelectorAll('#checkloadBody > [data-search]').forEach(el=>{ el.style.display=(!q||el.getAttribute('data-search').indexOf(q)>=0)?'':'none'; });
+}
+/* v3.145: สแกนค้นหาสินค้า (บาร์โค้ด) — เปิดตัวสแกนเดิม โหมด 'checkload' → เจอบาร์โค้ด = ติ๊กสินค้านั้นว่าขึ้นรถ */
+function openCheckScan_(){
+  const id=state._checkChosenJob; if(!id){ showToast('เลือกใบคุมก่อน','warning'); return; }
+  _scanMode='checkload';
+  const ttl=$('scanTitle'); if(ttl) ttl.textContent='📷 สแกนหาสินค้า (ขึ้นรถ)';
+  $('scanBody').innerHTML=`
+    <div id="checkScanStatus" class="banner-gold" style="margin:0 0 10px"></div>
+    <video id="scanVideo" playsinline muted></video>
+    <div id="scanCamMsg" class="txt-xs txt-muted" style="margin:4px 0"></div>
+    <div class="row gap-8 mb-8">
+      <button class="btn btn-outline" style="flex:1" id="btnScanCam" onclick="toggleScanCam()">📷 เปิดกล้องสแกน</button>
+      <button class="btn btn-outline btn-torch" id="btnScanTorch" style="display:none" onclick="toggleScanTorch()">🔦 เปิดไฟ</button>
+    </div>
+    <div class="field" style="margin-bottom:10px"><label>พิมพ์ / ยิงบาร์โค้ด</label>
+      <div class="row gap-8"><input class="input" id="scanManual" inputmode="numeric" placeholder="บาร์โค้ด แล้วกด Enter" autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();checkManualScan();}"><button class="btn btn-gold btn-sm" onclick="checkManualScan()">เช็ค</button></div>
+    </div>
+    <div id="scanFound" class="txt-sm"></div>`;
+  openModal('modalScan');
+  updateCheckScanStatus_();
+}
+function updateCheckScanStatus_(){
+  const el=$('checkScanStatus'); if(!el) return;
+  const agg=state._checkAgg||[];
+  const done=agg.filter(p=>p.allDone).length;
+  el.textContent=`สินค้าขึ้นครบแล้ว ${done}/${agg.length} รายการ — เล็งบาร์โค้ดสินค้า`;
+}
+function checkloadScanHit_(code){
+  const agg=state._checkAgg||[], id=state._checkChosenJob, found=$('scanFound');
+  const p=agg.find(x=>x.barcode&&barcodeMatch(x.barcode,code));
+  if(!p){ if(found) found.innerHTML='<span class="txt-danger">❌ ไม่พบสินค้าบาร์โค้ด '+esc(code)+' ในใบคุมนี้</span>'; if(navigator.vibrate) navigator.vibrate([50,40,50]); return; }
+  // v3.146: ติ๊ก instance ที่ยังไม่ขึ้น "ตัวถัดไป" (ยิงทีละร้าน/กล่อง) — ครบทุกร้านแล้วแจ้ง
+  state.checkLoad=state.checkLoad||{}; const jm=state.checkLoad[id]=state.checkLoad[id]||{};
+  const next=p.inst.find(ins=>!checkChk_(id,ins.doc)[ins.i]);
+  if(!next){ if(found) found.innerHTML=`<span class="txt-gold">☑️ ${esc(p.sku)} — ติ๊กครบทุกร้านแล้ว (${p.inst.length} ร้าน)</span>`; if(navigator.vibrate) navigator.vibrate(40); return; }
+  const dm=(jm[next.doc]&&typeof jm[next.doc]==='object')?jm[next.doc]:(jm[next.doc]={}); dm[next.i]=true; saveCheckLoad_();
+  if(navigator.vibrate) navigator.vibrate(60);
+  if(state.currentTab==='sec-checkload') paintCheckList_();   // recompute _checkAgg
+  const loaded=p.inst.filter(ins=>checkChk_(id,ins.doc)[ins.i]).length;
+  if(found) found.innerHTML=`<span class="txt-success">✅ ${esc(p.sku)} · ${checkQtyFmt_(p.qty)} ${esc(p.unit||'')} — ขึ้นรถแล้ว (${loaded}/${p.inst.length} ร้าน)</span>`;
+  updateCheckScanStatus_();
+}
 function paintCheckList_(){
   const body=$('checkloadBody'); if(!body) return;
   const id=state._checkChosenJob;
@@ -3768,36 +3824,62 @@ function paintCheckList_(){
   if(!j){ body.innerHTML='<div class="txt-center txt-muted" style="padding:24px 12px">👆 เลือกใบคุมด้านบน เพื่อเริ่มเช็คของขึ้นรถ</div>'; return; }
   const bills=(j.bills||[]);
   const jid=esc(String(j.id)).replace(/'/g,"\\'");
-  // v3.143: รวมสินค้าทุกบิลในใบคุม → ลิสต์เดียว (ไม่แยกร้าน) ติ๊กทีละสินค้า
-  const agg=checkAggItems_(j); state._checkAgg=agg;
-  const chk=(state.checkLoad&&state.checkLoad[id]&&typeof state.checkLoad[id]==='object')?state.checkLoad[id]:{};
-  const done=agg.filter(p=>!!chk[p.key]).length;
-  const all=agg.length>0&&done===agg.length;
-  const pct=agg.length?Math.round(done/agg.length*100):0;
-  const totalQty=agg.reduce((s,p)=>s+p.qty,0), doneQty=agg.reduce((s,p)=>s+(chk[p.key]?p.qty:0),0);
+  const view=state._checkView||'store';
+  const agg=checkAggProducts_(j,id); state._checkAgg=agg;
+  const prodDone=agg.filter(p=>p.allDone).length, allProd=agg.length>0&&prodDone===agg.length;
+  const pct=agg.length?Math.round(prodDone/agg.length*100):0;
+  const totalQty=agg.reduce((s,p)=>s+p.qty,0), doneQty=agg.reduce((s,p)=>s+p.loadedQty,0);
+  const storesDone=bills.filter(b=>billDone_(id,b.doc)).length;
   const triedAll=bills.length>0&&bills.every(b=>!!_dsdcDone['B|'+String(b.doc||'').trim()]);
-  body.innerHTML=`
+  const header=`
     <div class="card"><div class="card-body">
-      <div class="flex-between"><span class="txt-bold">📦 ${esc(j.id)}</span><span class="txt-bold ${all?'txt-success':'txt-gold'}">${done}/${agg.length} รายการ</span></div>
-      <div style="height:9px;background:var(--row-alt);border-radius:6px;overflow:hidden;margin:9px 0"><div style="height:100%;width:${pct}%;background:${all?'var(--success)':'var(--gold)'};transition:width .2s"></div></div>
-      <div class="txt-xs txt-muted txt-center">รวมจาก ${bills.length} บิล · ${agg.length} รายการ · ${checkQtyFmt_(doneQty)}/${checkQtyFmt_(totalQty)} หน่วย</div>
-      ${all&&agg.length?'<div class="txt-success txt-bold txt-center" style="margin-top:4px">✅ ของขึ้นรถครบทุกรายการ พร้อมออกรถ</div>':''}
+      <div class="flex-between"><span class="txt-bold">📦 ${esc(j.id)}</span><span class="txt-bold ${allProd?'txt-success':'txt-gold'}">${prodDone}/${agg.length} สินค้า</span></div>
+      <div style="height:9px;background:var(--row-alt);border-radius:6px;overflow:hidden;margin:9px 0"><div style="height:100%;width:${pct}%;background:${allProd?'var(--success)':'var(--gold)'};transition:width .2s"></div></div>
+      <div class="txt-xs txt-muted txt-center">${bills.length} ร้าน (ครบ ${storesDone}/${bills.length}) · ${checkQtyFmt_(doneQty)}/${checkQtyFmt_(totalQty)} หน่วย</div>
+      ${allProd&&agg.length?'<div class="txt-success txt-bold txt-center" style="margin-top:4px">✅ ของขึ้นรถครบแล้ว พร้อมออกรถ</div>':''}
     </div></div>
-    ${agg.length?agg.map((p,i)=>{ const on=!!chk[p.key]; return `
-      <div class="pay-row" style="cursor:pointer${on?';border-color:rgba(34,197,94,.45);background:rgba(34,197,94,.07)':''}" onclick="toggleCheckProd_('${jid}',${i})">
+    <div class="row" style="gap:0;margin-bottom:10px;border:1px solid var(--border);border-radius:10px;overflow:hidden">
+      <button class="btn btn-sm ${view==='store'?'btn-gold':'btn-outline'}" style="flex:1;border:none;border-radius:0" onclick="setCheckView_('store')">🏪 แยกร้าน</button>
+      <button class="btn btn-sm ${view==='agg'?'btn-gold':'btn-outline'}" style="flex:1;border:none;border-radius:0" onclick="setCheckView_('agg')">📦 รวมสินค้า</button>
+    </div>
+    ${agg.length?`<div class="row" style="gap:8px;margin-bottom:10px">
+      <input class="input" id="checkSearch" placeholder="🔎 ค้นหาสินค้า / ร้าน / บาร์โค้ด" value="${esc(state._checkSearch||'')}" oninput="onCheckSearch_(this.value)" style="flex:1;min-width:0">
+      <button class="btn btn-gold btn-sm" style="white-space:nowrap" onclick="openCheckScan_()">📷 สแกน</button>
+    </div>`:''}`;
+  if(!agg.length){ body.innerHTML=header+`<div class="card"><div class="card-body txt-center txt-muted">${triedAll?'ไม่พบรายการสินค้าของใบคุมนี้ในระบบ':'⏳ กำลังโหลดรายการสินค้า...'}</div></div>`; if(state._checkSearch) applyCheckSearch_(); return; }
+  let listHtml='';
+  if(view==='agg'){
+    listHtml=agg.map((p,i)=>{ const on=p.allDone, part=p.loadedQty>0&&!on; return `
+      <div class="pay-row" data-search="${esc((String(p.sku)+' '+String(p.barcode||'')).toLowerCase())}" style="cursor:pointer${on?';border-color:rgba(34,197,94,.45);background:rgba(34,197,94,.07)':''}" onclick="toggleAggProduct_('${jid}',${i})">
         <div class="flex-between" style="align-items:flex-start;gap:8px">
-          <div style="min-width:0;flex:1">
-            <div class="txt-bold" style="white-space:normal">${on?'✅':'⬜'} ${esc(p.sku)}</div>
-            <div class="txt-xs txt-muted">${p.barcode?esc(p.barcode):''}</div>
-          </div>
-          <div class="txt-right txt-bold" style="white-space:nowrap">${checkQtyFmt_(p.qty)} ${esc(p.unit||'')}</div>
+          <div style="min-width:0;flex:1"><div class="txt-bold" style="white-space:normal">${on?'✅':(part?'🟡':'⬜')} ${esc(p.sku)}</div><div class="txt-xs txt-muted">${p.barcode?esc(p.barcode):''}${p.inst.length>1?' · '+p.inst.length+' ร้าน':''}</div></div>
+          <div class="txt-right txt-bold" style="white-space:nowrap">${checkQtyFmt_(p.loadedQty)}/${checkQtyFmt_(p.qty)} ${esc(p.unit||'')}</div>
         </div>
-      </div>`; }).join(''):`<div class="card"><div class="card-body txt-center txt-muted">${triedAll?'ไม่พบรายการสินค้าของใบคุมนี้ในระบบ':'⏳ กำลังโหลดรายการสินค้า...'}</div></div>`}
-    ${agg.length?`<div class="row" style="gap:8px;margin-top:10px">
-      <button class="btn btn-outline btn-block" onclick="checkAllProd_('${jid}',true)">✅ ติ๊กทั้งหมด</button>
-      <button class="btn btn-outline btn-block" onclick="checkAllProd_('${jid}',false)">↺ ล้างทั้งหมด</button>
-    </div>`:''}
-  `;
+      </div>`; }).join('');
+  } else {
+    state._checkExpanded=state._checkExpanded||{};
+    listHtml=bills.map(b=>{ const doc=b.doc, docE=esc(String(doc||'')).replace(/'/g,"\\'");
+      const items=billItems_(doc), c=checkChk_(id,doc), pr=billItemProg_(id,doc), sdone=items.length>0&&pr.done===items.length;
+      const open=!!state._checkExpanded[doc];
+      const srch=esc((String(b.name||'')+' '+String(b.code||'')+' '+items.map(it=>(it.sku||'')+' '+(it.barcode||'')).join(' ')).toLowerCase());
+      const itemsHtml=open?(items.length?items.map((it,i)=>{ const on=!!c[i]; return `
+        <div class="pay-row" style="cursor:pointer;margin:0 0 6px${on?';border-color:rgba(34,197,94,.45);background:rgba(34,197,94,.07)':''}" onclick="event.stopPropagation();toggleCheckItem_('${jid}','${docE}',${i})">
+          <div class="flex-between" style="align-items:flex-start;gap:8px">
+            <div style="min-width:0;flex:1"><div class="txt-bold" style="white-space:normal">${on?'✅':'⬜'} ${esc(it.sku||it.barcode||'สินค้า')}</div><div class="txt-xs txt-muted">${it.barcode?esc(it.barcode):''}</div></div>
+            <div class="txt-right txt-sm txt-bold" style="white-space:nowrap">${checkQtyFmt_(it.qty)} ${esc(it.unit||'')}</div>
+          </div>
+        </div>`; }).join(''):'<div class="txt-xs txt-muted" style="padding:4px 2px">⏳ กำลังโหลดสินค้า...</div>'):'';
+      return `<div class="card" data-search="${srch}" style="padding:0;overflow:hidden;margin-bottom:8px${sdone?';border:1px solid rgba(34,197,94,.45)':''}">
+        <div class="flex-between" style="gap:8px;padding:10px 12px;cursor:pointer${sdone?';background:rgba(34,197,94,.06)':''}" onclick="toggleStore_('${docE}')">
+          <div style="min-width:0;flex:1"><div class="txt-bold" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sdone?'✅':'🏪'} ${esc(b.name||b.code||doc)} <span class="txt-xs txt-muted">${open?'▴':'▾'}</span></div><div class="txt-xs txt-muted">${esc(doc)} · ${pr.done}/${pr.total} สินค้า</div></div>
+          <button class="btn btn-outline btn-sm" style="white-space:nowrap" onclick="event.stopPropagation();checkAllInStore_('${jid}','${docE}',${sdone?'false':'true'})">${sdone?'↺ ล้าง':'✅ ทั้งร้าน'}</button>
+        </div>
+        ${open?`<div style="padding:4px 10px 10px;background:var(--row-alt)">${itemsHtml}</div>`:''}
+      </div>`;
+    }).join('');
+  }
+  body.innerHTML=header+listHtml;
+  if(state._checkSearch) applyCheckSearch_();
 }
 
 function renderDriverHome(){
@@ -4647,6 +4729,7 @@ function matchScan(code){
 function checkManualScan(){
   const el=$('scanManual'); if(!el) return;
   const v=el.value.trim(); if(!v) return;
+  if(_scanMode==='checkload'){ checkloadScanHit_(v); el.value=''; el.focus(); return; }   // v3.145
   if(_scanMode==='product'){ productScanHit_(v); el.value=''; el.focus(); return; }   // v3.48
   matchScan(v); el.value=''; el.focus();
 }
@@ -4715,6 +4798,7 @@ function onScanBarcode(raw){
   const now=Date.now();
   if(code===_lastScan&&now-_lastScanAt<1500) return;   // กันยิงซ้ำถี่
   _lastScan=code; _lastScanAt=now;
+  if(_scanMode==='checkload'){ checkloadScanHit_(code); return; }   // v3.145
   if(_scanMode==='product'){ productScanHit_(code); return; }   // v3.48
   matchScan(code);
 }
