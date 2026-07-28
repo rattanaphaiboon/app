@@ -455,6 +455,7 @@ async function loadUsers(){
 function switchTab(t){
   if(t!=='co' && coCamOn) coStopCam();       // สลับแท็บ = ปิดกล้องที่ค้าง (กินแบต/ล็อกกล้อง)
   if(t!=='scan' && mtfCamOn) mtfStopCam();
+  if(t!=='scan' && reqCamOn) reqStopCam();
   if(t!=='tf' && tfCamOn) tfStopCam();
   document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active', p.id==='panel-'+t));
   document.querySelectorAll('.bottomnav .bn').forEach(b=>b.classList.toggle('active', b.dataset.bn===t));
@@ -943,8 +944,8 @@ function coOnCode(txt){ const now=Date.now(); const code=String(txt||'').trim();
 /* ================= 🔁 โอนย้าย (mtf — free-form · ชุดเดียวกับ Picker v3.28) · ไม่มี Export (ไปกดที่ Picker) ================= */
 let scanTabMode='mtf';
 let mtfFrom='C4', mtfTo='W4', mtfItems=[], mtfCur=null, mtfCam=null, mtfCamOn=false, mtfLast={code:'',t:0}, mtfSaved=true;
-/* 📋 ใบโอนย้าย (req) — อ่านจาก DM sheet · เลือก วันที่ + เลขเอกสาร */
-let reqDate='', reqRef='';
+/* 📋 ใบโอนย้าย (req) — อ่านจาก DM sheet · เลือก วันที่ + เลขเอกสาร + ยิงเช็คของ */
+let reqDate='', reqRef='', reqPicked={}, reqCur=null, reqQ='', reqCam=null, reqCamOn=false, reqLast={code:'',t:0};
 function renderScan(){
   const p=document.getElementById('panel-scan'); if(!p) return;
   if(!document.getElementById('scanShell')){
@@ -1000,6 +1001,60 @@ function reqDocs(date){
   return Object.values(m).sort((a,b)=>String(a.ref).localeCompare(b.ref));
 }
 function reqItems(){ return (DATA.dm||[]).filter(x=>x.date===reqDate && x.ref===reqRef); }
+function reqLsKey(){ return 'mp_req'; }
+function reqSaveLS(){ try{ localStorage.setItem(reqLsKey(), JSON.stringify({picked:reqPicked, date:reqDate, ref:reqRef})); }catch(e){} }
+function reqRestoreLS(){ try{ const o=JSON.parse(localStorage.getItem(reqLsKey())||'null'); if(o){ reqPicked=o.picked||{}; if(o.date) reqDate=o.date; if(o.ref) reqRef=o.ref; } }catch(e){ reqPicked={}; } }
+function reqScannedEa(bc){ const arr=reqPicked[reqRef]||[]; const p=arr.find(pp=>pp.barcode===bc); return p?pickedEa(p):null; }
+function reqDemand(){
+  return reqItems().map(x=>{
+    const prod=(DATA.prodIdx||{})[String(x.barcode||'').trim()]||null;
+    const ePer=eaPerOf(prod, x.level, x.eaPer);
+    return {...x, prod, eaPer:ePer, needEa:Math.round(x.qty*ePer), scannedEa:reqScannedEa(x.barcode)};
+  }).sort((a,b)=>String(a.product).localeCompare(String(b.product),'th'));
+}
+function reqScan(raw){
+  const code=String(raw||'').trim(); if(!code) return;
+  const now=Date.now(); if(code===reqLast.code && now-reqLast.t<1200) return; reqLast={code,t:now};
+  const u=unitOfBarcode(code);
+  if(!u){ beep(true); vibrate([200]); toast('❌ ไม่พบสินค้า: '+code); const i=document.getElementById('reqInput'); if(i){ i.value=''; i.focus(); } sbX('req'); return; }
+  /* หาบรรทัดในใบโอนที่ตรงกับสินค้านี้ (เทียบผ่าน prod object จาก PDDT — บาร์ CS/PA/EA เดียวกันชี้ prod ตัวเดียวกัน) */
+  const items=reqItems();
+  const match=items.find(x=>{ const p=(DATA.prodIdx||{})[String(x.barcode||'').trim()]; return p && p===u.prod; });
+  if(!match){ beep(true); vibrate([200]); toast('❌ บาร์โค้ดนี้ไม่อยู่ในใบโอน '+reqRef); const i=document.getElementById('reqInput'); if(i){ i.value=''; i.focus(); } sbX('req'); return; }
+  reqPicked[reqRef]=reqPicked[reqRef]||[];
+  let p=reqPicked[reqRef].find(pp=>pp.barcode===match.barcode);
+  if(!p){ p={barcode:match.barcode, product:match.product, unit:match.unit, level:match.level, eaPer:match.eaPer, units:{}, ts:nowStamp()}; reqPicked[reqRef].push(p); }
+  p.units[u.level] = (+p.units[u.level]||0) + 1;
+  p.ts = nowStamp();
+  beep(); vibrate();
+  reqSaveLS(); reqRender();
+  const i=document.getElementById('reqInput'); if(i){ i.value=''; i.focus(); } sbX('req');
+}
+function reqDel(bc){
+  if(!reqPicked[reqRef]) return;
+  const i=reqPicked[reqRef].findIndex(p=>p.barcode===bc);
+  if(i>=0){ reqPicked[reqRef].splice(i,1); reqSaveLS(); reqRender(); }
+}
+function reqEdit(bc){
+  const arr=reqPicked[reqRef]||[]; const p=arr.find(pp=>pp.barcode===bc); if(!p) return;
+  const it=reqItems().find(x=>x.barcode===bc); if(!it) return;
+  reqCur={barcode:bc, product:p.product||it.product, unit:it.unit, level:it.level, eaPer:it.eaPer, prod:(DATA.prodIdx||{})[bc]||null, need:it.qty, needEa:Math.round(it.qty*it.eaPer), units:{...p.units}};
+  reqRender();
+}
+function reqCurCancel(){ reqCur=null; reqRender(); }
+function reqCurSave(){
+  if(!reqCur) return;
+  reqPicked[reqRef]=reqPicked[reqRef]||[];
+  let p=reqPicked[reqRef].find(pp=>pp.barcode===reqCur.barcode);
+  const empty=Object.keys(reqCur.units).every(k=>!+reqCur.units[k]);
+  if(empty){ if(p) reqPicked[reqRef]=reqPicked[reqRef].filter(pp=>pp.barcode!==reqCur.barcode); }
+  else{
+    if(!p){ p={barcode:reqCur.barcode, product:reqCur.product, unit:reqCur.unit, level:reqCur.level, eaPer:reqCur.eaPer, units:{}, ts:nowStamp()}; reqPicked[reqRef].push(p); }
+    p.units={...reqCur.units}; p.ts=nowStamp();
+  }
+  reqCur=null; reqSaveLS(); reqRender();
+}
+function reqCurSetUnit(lv, val){ if(!reqCur) return; const n=Math.max(0, parseInt(val)||0); reqCur.units[lv]=n; reqRender(); }
 async function reqRender(){
   const rq=document.getElementById('mtfReqWrap'); if(!rq) return;
   if(!DATA.dm){
@@ -1007,20 +1062,41 @@ async function reqRender(){
     try{ await loadDm(); }
     catch(e){ rq.innerHTML='<div class="empty" style="color:var(--red)">❌ โหลด DM ไม่ได้ — '+esc(e.message||'')+'</div>'; return; }
   }
+  reqRestoreLS();
   const dates=reqDates(); if(!reqDate || !dates.includes(reqDate)) reqDate=dates[dates.length-1]||'';
   const docs=reqDocs(reqDate); if(!reqRef || !docs.find(d=>d.ref===reqRef)) reqRef=docs[0]?docs[0].ref:'';
   const items=reqItems();
-  const totalQty=items.reduce((s,x)=>s+x.qty,0);
   const cur=docs.find(d=>d.ref===reqRef);
-  const rows=items.map(x=>`<tr>
-    <td style="font-size:11px">${esc(x.barcode)}</td>
-    <td style="text-align:left">${esc(x.product)} <span class="muted" style="font-size:10px">${esc(x.unit)}</span></td>
-    <td class="num"><b>${x.qty}</b></td></tr>`).join('');
+  const dem=reqDemand();
+  const total=dem.length, done=dem.filter(d=>d.scannedEa!=null && d.scannedEa>=d.needEa).length;
+  const pct=total?Math.round(done/total*100):0;
+  const q=(reqQ||'').trim().toLowerCase();
+  const rows=dem.filter(d=>!q||(d.product+' '+d.barcode).toLowerCase().includes(q)).map(d=>{
+    const sc=d.scannedEa, scanned=(sc!=null), short=Math.max(0,d.needEa-(sc||0)), over=scanned&&sc>d.needEa;
+    const bg=!scanned?'':(over?'background:#fef2f2':(short>0?'background:#fffbeb':'background:#ecfdf5'));
+    const st=!scanned?'':(over?' <span style="font-size:9px;background:#fee2e2;color:#b91c1c;border-radius:4px;padding:1px 5px;font-weight:700">🔴 เกิน +'+esc(fmtEaUnits(sc-d.needEa,d.prod,d.level,d.eaPer))+'</span>':(short>0?' <span style="font-size:9px;background:#fef9c3;color:#854d0e;border-radius:4px;padding:1px 5px;font-weight:700">🟡 ยิงแล้ว</span>':' <span style="font-size:9px;background:#dcfce7;color:#166534;border-radius:4px;padding:1px 5px;font-weight:700">✅ ครบ</span>'));
+    const myp=(reqPicked[reqRef]||[]).find(p=>p.barcode===d.barcode);
+    const mixBadge=(myp&&myp.units&&Object.keys(myp.units).filter(u=>+myp.units[u]>0).length>1)?' <span style="font-size:9px;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 5px;font-weight:700">🧩 หลายหน่วย</span>':'';
+    const scCell=scanned?`<b style="color:${over?'#b91c1c':'#166534'}">${esc(fmtEaUnits(sc,d.prod,d.level,d.eaPer))}</b>`:'<span class="muted">-</span>';
+    return `<tr style="${bg}"><td style="font-size:11px">${esc(d.barcode)}</td><td style="text-align:left">${esc(d.product)} <span class="muted" style="font-size:10px">${esc(d.unit)}</span>${st}${mixBadge}</td><td class="num"><b>${d.qty}</b></td><td class="num">${scCell}</td><td class="num">${short>0?'<b style="color:var(--red)">'+esc(fmtEaUnits(short,d.prod,d.level,d.eaPer))+'</b>':(scanned?'<span style="color:#166534">✓</span>':'<span class="muted">-</span>')}</td><td style="white-space:nowrap">${scanned?`<button class="ico-btn" onclick="reqEdit('${esc(d.barcode)}')">✎</button> <button class="ico-btn" onclick="reqDel('${esc(d.barcode)}')">✕</button>`:''}</td></tr>`;
+  }).join('');
+  /* Manual edit card สำหรับปรับหน่วยรายบรรทัด (ยิงหลายหน่วยได้) */
+  const editCard=reqCur?`<div class="scan-card">
+    <div class="pname">${esc(reqCur.product)}</div>
+    <div class="pbar">บาร์โค้ด: ${esc(reqCur.barcode)} · หน่วยบิล <b>${esc(reqCur.unit)}</b> · ต้องออก <b>${reqCur.need} = ${esc(fmtEaUnits(reqCur.needEa,reqCur.prod,reqCur.level,reqCur.eaPer))}</b></div>
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:8px">
+      ${['CS','BP','PA','EA'].map(lv=>{ const per=eaPerOf(reqCur.prod,lv,(lv===reqCur.level?reqCur.eaPer:0)); if(lv!=='EA' && !(per>1)) return ''; const val=+reqCur.units[lv]||0;
+        return `<label style="display:flex;flex-direction:column;gap:3px"><span style="font-size:11px;color:var(--muted);font-weight:700">${UNIT_TH[lv]||lv}${per>1?' (×'+per+')':''}</span><input type="number" inputmode="numeric" min="0" value="${val}" oninput="reqCurSetUnit('${lv}', this.value)" style="padding:9px;border:1.5px solid var(--border);border-radius:9px;font-size:16px;font-weight:800;text-align:center;color:var(--navy)"></label>`; }).join('')}
+    </div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="scan-btn gold" style="flex:1" onclick="reqCurSave()">✓ บันทึก</button>
+      <button class="scan-btn gray" onclick="reqCurCancel()">ยกเลิก</button>
+    </div></div>`:'';
   rq.innerHTML=`
     <div style="background:var(--navy);color:#fff;border-radius:12px;padding:11px 13px;margin-bottom:10px">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <b style="font-size:17px">📋 ใบโอนย้าย (DM)</b>
-        <span style="font-size:11px;opacity:.75">เลือกวันที่ + เลขเอกสาร → ดูรายการโอน</span>
+        <span style="font-size:11px;opacity:.75">ยิงบาร์โค้ดเพื่อเช็คของออกจากใบ</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px 10px;flex-wrap:wrap;margin-top:9px">
         <span style="font-size:12px;opacity:.85">วันที่</span>
@@ -1029,16 +1105,42 @@ async function reqRender(){
         <select onchange="reqSetRef(this.value)" style="padding:8px 10px;border-radius:8px;border:none;font-family:inherit;font-size:14px;font-weight:800;color:var(--navy);max-width:320px">${docs.length?docs.map(d=>`<option value="${esc(d.ref)}"${d.ref===reqRef?' selected':''}>${esc(d.ref)} · ${esc(d.whFrom||'-')}→${esc(d.whTo||'-')} · ${d.lines} รายการ</option>`).join(''):'<option>—</option>'}</select>
         <button onclick="reqRefresh()" style="padding:8px 11px;border-radius:8px;border:1px solid rgba(255,255,255,.4);background:transparent;color:#fff;cursor:pointer;font-size:13px;font-weight:700">🔄</button>
       </div>
+      ${cur?`<div style="display:flex;align-items:center;gap:10px;margin-top:9px;flex-wrap:wrap">
+        <span style="font-size:12.5px;font-weight:800;background:rgba(255,255,255,.15);border-radius:6px;padding:2px 9px">${esc(cur.ref)} · ${esc(cur.whFrom||'-')}→${esc(cur.whTo||'-')}</span>
+        <span style="font-size:12.5px;font-weight:800">✅ ${done}/${total} รายการ (${pct}%)</span>
+        <div style="flex:1;min-width:100px;height:6px;background:rgba(255,255,255,.2);border-radius:3px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--gold);transition:width .3s"></div></div>
+      </div>`:''}
     </div>
-    ${cur?`<div class="row-sel" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-      <div><b style="color:var(--navy)">${esc(cur.ref)}</b> <span class="muted" style="font-size:12px">· ${esc(cur.whFrom||'-')}→${esc(cur.whTo||'-')} · ${items.length} รายการ · รวม ${totalQty}</span></div>
-    </div>`:''}
-    ${items.length?`<div class="tbl-wrap" style="max-height:56vh"><table><thead><tr><th>บาร์โค้ด</th><th>สินค้า</th><th class="num">จำนวน</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="empty">ไม่มีรายการ (เลือกวันที่/เอกสารอื่นหรือกด 🔄)</div>'}
+    <div class="scanbar">
+      <span class="sb-ico">🔍</span>
+      <input id="reqInput" placeholder="ยิง / พิมพ์บาร์โค้ด แล้วกด Enter" inputmode="numeric" autocomplete="off" oninput="sbX('req')" ${items.length?'':'disabled'}>
+      <button type="button" class="sb-x" id="reqX" onclick="sbClear('req')" title="ล้าง">✕</button>
+      <button type="button" class="sb-find" onclick="reqScan(document.getElementById('reqInput').value)">ค้นหา</button>
+      <button type="button" class="sb-cam" id="reqCamBtn" onclick="reqToggleCam()">📷 กล้อง</button>
+    </div>
+    <div id="req-qr-reader"></div>
+    ${editCard}
+    ${items.length?`<div class="tbl-wrap" style="max-height:52vh"><table><thead><tr><th>บาร์โค้ด</th><th>สินค้า</th><th class="num">ต้องออก</th><th class="num">ยิงแล้ว</th><th class="num">ขาด</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="empty">ไม่มีรายการ (เลือกวันที่/เอกสารอื่นหรือกด 🔄)</div>'}
   `;
+  const inp=document.getElementById('reqInput');
+  if(inp){ inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); reqScan(inp.value); } }); if(items.length && !reqCur) setTimeout(()=>inp.focus(),60); }
 }
-function reqSetDate(d){ reqDate=d; reqRef=''; reqRender(); }
-function reqSetRef(r){ reqRef=r; reqRender(); }
+function reqSetDate(d){ reqDate=d; reqRef=''; reqCur=null; reqSaveLS(); reqRender(); }
+function reqSetRef(r){ reqRef=r; reqCur=null; reqSaveLS(); reqRender(); }
 async function reqRefresh(){ try{ loading(true,'กำลังโหลด DM…'); await loadDm(true); await reqRender(); toast('✅ รีเฟรชใบโอนย้ายแล้ว ('+(DATA.dm||[]).length.toLocaleString()+' บรรทัด)'); }catch(e){ toast('❌ '+(e.message||'รีเฟรชไม่ได้')); } finally{ loading(false); } }
+/* กล้องยิงบาร์โค้ด (req) — เหมือน mtf */
+function reqToggleCam(){ reqCamOn?reqStopCam():reqStartCam(); }
+async function reqStartCam(){
+  if(!window.Html5Qrcode){ toast('กล้องยังโหลดไม่เสร็จ ลองใหม่'); return; }
+  try{
+    reqCam=new Html5Qrcode('req-qr-reader',{verbose:false,experimentalFeatures:{useBarCodeDetectorIfSupported:true}});
+    const F=Html5QrcodeSupportedFormats;
+    const config={fps:25,qrbox:{width:320,height:180},aspectRatio:1.7777,videoConstraints:{facingMode:{ideal:'environment'},width:{ideal:1920,min:1280},height:{ideal:1080,min:720},advanced:[{focusMode:'continuous'},{zoom:1.5}]},formatsToSupport:[F.EAN_13,F.EAN_8,F.UPC_A,F.UPC_E,F.CODE_128,F.CODE_39,F.CODE_93,F.ITF,F.QR_CODE]};
+    await reqCam.start({facingMode:'environment'},config,(txt)=>{ reqScan(String(txt||'').trim()); },()=>{});
+    reqCamOn=true; const b=document.getElementById('reqCamBtn'); if(b){ b.textContent='⏹ ปิดกล้อง'; b.classList.add('on'); }
+  }catch(e){ toast('เปิดกล้องไม่ได้: '+(e.message||e)); }
+}
+async function reqStopCam(){ try{ if(reqCam){ await reqCam.stop(); await reqCam.clear(); } }catch(e){} reqCam=null; reqCamOn=false; const b=document.getElementById('reqCamBtn'); if(b){ b.textContent='📷 กล้อง'; b.classList.remove('on'); } }
 function mtfLsKey(){ return 'mp_mtf'; }
 function mtfSaveLS(){ try{ localStorage.setItem(mtfLsKey(),JSON.stringify({from:mtfFrom,to:mtfTo,items:mtfItems,saved:mtfSaved})); }catch(e){} }
 function mtfRestoreLS(){ try{ const o=JSON.parse(localStorage.getItem(mtfLsKey())||'null'); if(o){ if(o.from)mtfFrom=o.from; if(o.to)mtfTo=o.to; if(Array.isArray(o.items))mtfItems=o.items; mtfSaved=(o.saved!==false); } }catch(e){} }
