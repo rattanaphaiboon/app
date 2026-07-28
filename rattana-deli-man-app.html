@@ -875,7 +875,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.150';
+const APP_VERSION='3.151';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -3938,45 +3938,70 @@ function loadReqStatusBadge_(x){ if(loadReqApproved_(x)) return '<span class="ba
 function loadReqTime_(x){ const d=x&&x.date?new Date(x.date):null; return d&&!isNaN(d.getTime())?d.getTime():0; }
 /* ----- คนขับ: ฟอร์มขอสินค้าเพิ่ม (modal) ----- */
 let _loadReqDraft=[];
+let _loadReqSel=null;   // {name,barcode,unit,unitKey,product} — สินค้าที่กำลังจะเพิ่ม
 function openLoadReq_(){
   if(!state._checkChosenJob){ showToast('เลือกใบคุมก่อน','warning'); return; }
-  _loadReqDraft=[]; renderLoadReqModal_(); openModal('modalLoadReq');
+  _loadReqDraft=[]; _loadReqSel=null;
+  if(!state.products.length){ try{ loadProducts().then(()=>{ if($('loadReqBody')) renderLoadReqModal_(); }); }catch(e){} }   // v3.151: โหลดแคตตาล็อกสินค้า
+  renderLoadReqModal_(); openModal('modalLoadReq');
 }
+function loadReqUnitOpts_(prod){ const out=[]; ['EA','PA','BP','CS'].forEach(k=>{ const l=prod.units[k]; if(l) out.push({key:k,value:l}); }); return out; }
 function renderLoadReqModal_(){
   const body=$('loadReqBody'); if(!body) return;
-  const agg=state._checkAgg||[];
-  const opts=[{v:'__new',l:'➕ สินค้าอื่น (พิมพ์เอง)'}].concat(agg.map((p,i)=>({v:String(i),l:`${p.sku} (ในใบคุม ${checkQtyFmt_(p.qty)} ${p.unit||''})`})));
+  const sel=_loadReqSel;
+  const unitPills=(sel&&sel.product)?loadReqUnitOpts_(sel.product).map(u=>`<button type="button" class="pill ${u.key===sel.unitKey?'active gold':''}" onclick="pickLoadReqUnit_('${u.key}')">${esc(u.value)}</button>`).join(''):'';
   body.innerHTML=`
-    <div class="field"><label>เลือกสินค้า</label>${buildDD('ddLoadReqProd',opts,'-- เลือกสินค้า --')}</div>
-    <div id="loadReqNewWrap" class="hidden">
-      <div class="field"><label>ชื่อสินค้า</label><input class="input" id="loadReqName" placeholder="ชื่อสินค้า"></div>
-      <div class="field"><label>บาร์โค้ด (ถ้ามี)</label><input class="input" id="loadReqBarcode" inputmode="numeric" placeholder="บาร์โค้ด"></div>
+    <div class="field"><label>ค้นหาสินค้า <span class="txt-xs txt-muted">(⭐ ในใบคุม · แคตตาล็อก ${state.products.length?fmtInt(state.products.length):'…'} รายการ)</span></label>
+      <div class="product-picker">
+        <input class="input" id="loadReqSearch" value="${esc(sel?sel.name:'')}" placeholder="พิมพ์ชื่อสินค้า / บาร์โค้ด" oninput="onLoadReqSearch_(this.value)" onfocus="onLoadReqSearch_(this.value)" autocomplete="off">
+        <ul class="product-results" id="loadReqProdRes" style="display:none"></ul>
+      </div>
     </div>
+    ${sel?`<div class="pay-row" style="background:rgba(212,160,23,.08);border-color:var(--gold)"><div class="txt-bold" style="white-space:normal">✔ ${esc(sel.name)}</div><div class="txt-xs txt-muted">${sel.barcode?esc(sel.barcode):'(ไม่มีบาร์โค้ด)'}</div></div>`:''}
+    ${unitPills?`<div class="field"><label>หน่วย</label><div class="pills">${unitPills}</div></div>`:''}
     <div class="row gap-8">
       <div class="field" style="flex:1"><label>จำนวนที่ขอ</label><input class="input input-num" id="loadReqQty" type="number" inputmode="decimal" min="0" placeholder="0"></div>
-      <div class="field" style="flex:1"><label>หน่วย</label><input class="input" id="loadReqUnit" placeholder="ลัง/กล่อง"></div>
+      <div class="field" style="flex:1"><label>หน่วย</label><input class="input" id="loadReqUnit" value="${esc(sel?sel.unit:'')}" placeholder="ลัง/กล่อง"></div>
     </div>
     <div class="field"><label>สาเหตุ</label><input class="input" id="loadReqReason" placeholder="เช่น ได้ไม่ครบ / ต้องการเพิ่ม"></div>
     <button class="btn btn-outline btn-block" onclick="addLoadReqDraft_()">➕ เพิ่มเข้ารายการ</button>
     <div id="loadReqDraftList" style="margin-top:10px"></div>
     <button class="btn btn-gold btn-lg btn-block" style="margin-top:10px" onclick="submitLoadReq_()">📤 ส่งขออนุมัติ (${_loadReqDraft.length})</button>`;
-  const panel=$('ddLoadReqProd_panel');
-  if(panel) panel.querySelectorAll('li[data-v]').forEach(li=>{ const o=li.onclick; li.onclick=e=>{ if(o)o.call(li,e); onLoadReqProdPick_(li.dataset.v); }; });
   paintLoadReqDraft_();
 }
-function onLoadReqProdPick_(v){
-  const w=$('loadReqNewWrap'); if(w) w.classList.toggle('hidden',v!=='__new');
-  if(v!=='__new'){ const p=(state._checkAgg||[])[parseInt(v,10)]; if(p){ const u=$('loadReqUnit'); if(u&&!u.value) u.value=p.unit||''; } }
+function onLoadReqSearch_(q){
+  const ul=$('loadReqProdRes'); if(!ul) return;
+  q=String(q||'').trim(); const ql=q.toLowerCase();
+  const billRows=(state._checkAgg||[]).filter(p=>!ql||(String(p.sku)+' '+String(p.barcode||'')).toLowerCase().indexOf(ql)>=0).slice(0,8)
+    .map(p=>({type:'bill',name:p.sku,barcode:p.barcode||'',unit:p.unit||'',product:findProductByName(p.sku)}));
+  let cat=[];
+  if(ql&&state.products.length) cat=state.products.filter(p=>String(p.name).toLowerCase().indexOf(ql)>=0||['EA','PA','BP','CS'].some(k=>p.codes[k]&&barcodeMatch(p.codes[k],q))).slice(0,25).map(p=>({type:'cat',name:p.name,product:p}));
+  const rows=billRows.concat(cat);
+  ul._rows=rows;
+  ul.innerHTML=rows.length?rows.map((r,i)=>`<li onclick="pickLoadReqProd_(${i})">${r.type==='bill'?'⭐ ':''}${esc(r.name)}${r.barcode?` <span class="txt-xs txt-muted">${esc(r.barcode)}</span>`:''}</li>`).join(''):`<li class="muted">${ql?'ไม่พบสินค้า':'พิมพ์เพื่อค้นหา'}</li>`;
+  ul.style.display='block';
+}
+function pickLoadReqProd_(i){
+  const ul=$('loadReqProdRes'), rows=ul&&ul._rows; if(!rows||!rows[i]) return;
+  const r=rows[i];
+  if(r.type==='bill'){ _loadReqSel={name:r.name,barcode:r.barcode||'',unit:r.unit||'',unitKey:unitKeyOf_(r.unit),product:r.product||null}; }
+  else { const prod=r.product, opts=loadReqUnitOpts_(prod), def=opts.find(o=>o.key==='CS')||opts[0]||{key:'',value:''}; _loadReqSel={name:prod.name,barcode:def.key?prod.codes[def.key]:'',unit:def.value,unitKey:def.key,product:prod}; }
+  ul.style.display='none';
+  renderLoadReqModal_();
+}
+function pickLoadReqUnit_(key){
+  if(!_loadReqSel||!_loadReqSel.product) return;
+  const prod=_loadReqSel.product;
+  _loadReqSel.unitKey=key; _loadReqSel.unit=prod.units[key]||_loadReqSel.unit; _loadReqSel.barcode=prod.codes[key]||_loadReqSel.barcode;
+  renderLoadReqModal_();
 }
 function addLoadReqDraft_(){
-  const v=ddValue('ddLoadReqProd'); if(!v){ showToast('เลือกสินค้าก่อน','warning'); return; }
+  if(!_loadReqSel){ showToast('ค้นหาแล้วเลือกสินค้าก่อน','warning'); return; }
   const qty=parseFloat(($('loadReqQty')||{}).value)||0; if(qty<=0){ showToast('ใส่จำนวนที่ขอ','warning'); return; }
-  let name='',barcode='',unit=(($('loadReqUnit')||{}).value||'').trim();
-  if(v==='__new'){ name=(($('loadReqName')||{}).value||'').trim(); barcode=(($('loadReqBarcode')||{}).value||'').trim(); if(!name){ showToast('ใส่ชื่อสินค้า','warning'); return; } }
-  else { const p=(state._checkAgg||[])[parseInt(v,10)]; if(p){ name=p.sku; barcode=p.barcode; unit=unit||p.unit; } }
+  const unit=(($('loadReqUnit')||{}).value||_loadReqSel.unit||'').trim();
   const reason=(($('loadReqReason')||{}).value||'').trim();
-  _loadReqDraft.push({name,barcode,unit,qty,reason,doc:'',storeName:''});
-  renderLoadReqModal_();
+  _loadReqDraft.push({name:_loadReqSel.name,barcode:_loadReqSel.barcode,unit,qty,reason,doc:'',storeName:''});
+  _loadReqSel=null; renderLoadReqModal_();
 }
 function removeLoadReqDraft_(i){ _loadReqDraft.splice(i,1); renderLoadReqModal_(); }
 function paintLoadReqDraft_(){
