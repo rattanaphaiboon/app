@@ -219,6 +219,8 @@ const CONFIG = {
   bkbvId: '1YZB25pg43yZ-meRG8raX7MRdQ6HpA-51',   // ไฟล์ BK_BV (ใช้เฉพาะแท็บ 📦 โอน Non-CS)
   dsdcId: '1S_HTxQ71AWHym1X_-CBwe-tzfCEPqY4T',   // ไฟล์ "Check Out.xlsx" — ใช้ในหน้าเช็คออก
   dsdcTab: 'DSDC',
+  dmId: '1S_HTxQ71AWHym1X_-CBwe-tzfCEPqY4T',     // ไฟล์เดียวกัน — ใช้ในหน้าเช็คโอนย้าย (แท็บ DM)
+  dmTab: 'DM',
   bkbvSheet: 'BK_BV',
   w4MasterId: '1VWu4rit8wGCyUX1qrdtx6_6fFJGc8M7B',
   bqUrl: 'https://script.google.com/macros/s/AKfycbx4TcMrs8Vi5-3WVOkhXcCJYCilRN-xRXo22ba7sQwKzd4JsM6MGAra6oAgGCMyZxx8pw/exec',
@@ -492,6 +494,29 @@ async function loadDsdc(force){
       sold:num(pick(r,'TRD_QTY','QTY'))||0, free:num(pick(r,'TRD_Q_FREE','FREE_QTY','FREE'))||0, price:num(pick(r,'TRD_U_PRC','PRICE'))||0 };
   }).filter(x=>x.barcode && x.ref && (x.sold>0||x.free>0) && x.date>=cutoff);
   dsdcLoadedAt=nowStamp(); return DATA.dsdc;
+}
+/* โหลดใบขอโอนย้าย (DM) — ใช้ในแท็บ 🔁 โอนย้าย → 📋 ใบขอโอนย้าย · ย้อนหลัง 3 วัน */
+async function loadDm(force){
+  if(DATA.dm && !force) return DATA.dm;
+  const rows=asObjects(await gvizFetch(CONFIG.dmId,{sheet:CONFIG.dmTab, bust:force}));
+  const pick=(r,...names)=>{ for(const n of names){ const v=r[n]; if(v!=null && String(v).trim()!=='') return v; } return ''; };
+  const cutoff=daysAgoBKK(2);
+  DATA.dm=rows.map((r,i)=>{
+    const unit=String(pick(r,'TRD_UTQNAME','TRD_UTQNA','UNIT_NAME','UNIT')).trim();
+    const pu=parseUnit(unit);
+    return { seq:i, date:String(pick(r,'DI_DATE','DATE')).trim().replace(/\//g,'-'),
+      ref:String(pick(r,'DI_REF')).trim(),
+      whFrom:String(pick(r,'WL_FROM','WL_FRC','WL_CODE')).trim().toUpperCase(),
+      whTo:String(pick(r,'WL_TC','WL_TO')).trim().toUpperCase(),
+      storeCode:String(pick(r,'AP_CODE','AP_COI','AR_CODE')).trim(),
+      store:String(pick(r,'AP_NAME','AR_NAME')).trim(),
+      barcode:String(pick(r,'GOODS_CODE','GOODS_COI','TRD_SH_CODE','BARCODE')).trim(),
+      product:String(pick(r,'SKU_NAME','PRODUCT_NAME','PRODUCT')).trim(),
+      unit, level:pu.level, eaPer:pu.eaPer||1,
+      qty:num(pick(r,'TRD_QTY','TRD_Q','QTY'))||0,
+      order:String(pick(r,'DI_ORDER')).trim() };
+  }).filter(x=>x.barcode && x.ref && x.qty>0 && x.date>=cutoff);
+  return DATA.dm;
 }
 function coDatesFor(){ return [...new Set(coSrcArr().map(x=>x.date))].filter(Boolean).sort(); }
 function coLines(){ return coSrcArr().filter(x=> !coDate || x.date===coDate ); }
@@ -918,6 +943,8 @@ function coOnCode(txt){ const now=Date.now(); const code=String(txt||'').trim();
 /* ================= 🔁 โอนย้าย (mtf — free-form · ชุดเดียวกับ Picker v3.28) · ไม่มี Export (ไปกดที่ Picker) ================= */
 let scanTabMode='mtf';
 let mtfFrom='C4', mtfTo='W4', mtfItems=[], mtfCur=null, mtfCam=null, mtfCamOn=false, mtfLast={code:'',t:0}, mtfSaved=true;
+/* 📋 ใบขอโอนย้าย (req) — อ่านจาก DM sheet · เลือก วันที่ + เลขเอกสาร */
+let reqDate='', reqRef='';
 function renderScan(){
   const p=document.getElementById('panel-scan'); if(!p) return;
   if(!document.getElementById('scanShell')){
@@ -962,8 +989,56 @@ function renderScan(){
   const rq=document.getElementById('mtfReqWrap'), mw=document.getElementById('mtfWrap');
   if(rq) rq.style.display=scanTabMode==='req'?'':'none';
   if(mw) mw.style.display=scanTabMode==='req'?'none':'';
-  if(scanTabMode!=='req'){ mtfRenderResult(); mtfRenderList(); }
+  if(scanTabMode==='req'){ reqRender(); }
+  else{ mtfRenderResult(); mtfRenderList(); }
 }
+/* ================= 📋 ใบขอโอนย้าย (req) — จาก DM sheet ================= */
+function reqDates(){ return [...new Set((DATA.dm||[]).map(x=>x.date))].filter(Boolean).sort(); }
+function reqDocs(date){
+  const list=(DATA.dm||[]).filter(x=>!date||x.date===date);
+  const m={}; list.forEach(x=>{ if(!m[x.ref]) m[x.ref]={ref:x.ref, whFrom:x.whFrom, whTo:x.whTo, lines:0, qty:0}; m[x.ref].lines++; m[x.ref].qty+=x.qty; });
+  return Object.values(m).sort((a,b)=>String(a.ref).localeCompare(b.ref));
+}
+function reqItems(){ return (DATA.dm||[]).filter(x=>x.date===reqDate && x.ref===reqRef); }
+async function reqRender(){
+  const rq=document.getElementById('mtfReqWrap'); if(!rq) return;
+  if(!DATA.dm){
+    rq.innerHTML='<div class="empty">⏳ กำลังโหลดใบขอโอนย้าย (DM)…</div>';
+    try{ await loadDm(); }
+    catch(e){ rq.innerHTML='<div class="empty" style="color:var(--red)">❌ โหลด DM ไม่ได้ — '+esc(e.message||'')+'</div>'; return; }
+  }
+  const dates=reqDates(); if(!reqDate || !dates.includes(reqDate)) reqDate=dates[dates.length-1]||'';
+  const docs=reqDocs(reqDate); if(!reqRef || !docs.find(d=>d.ref===reqRef)) reqRef=docs[0]?docs[0].ref:'';
+  const items=reqItems();
+  const totalQty=items.reduce((s,x)=>s+x.qty,0);
+  const cur=docs.find(d=>d.ref===reqRef);
+  const rows=items.map(x=>`<tr>
+    <td style="font-size:11px">${esc(x.barcode)}</td>
+    <td style="text-align:left">${esc(x.product)} <span class="muted" style="font-size:10px">${esc(x.unit)}</span></td>
+    <td class="num"><b>${x.qty}</b></td></tr>`).join('');
+  rq.innerHTML=`
+    <div style="background:var(--navy);color:#fff;border-radius:12px;padding:11px 13px;margin-bottom:10px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <b style="font-size:17px">📋 ใบขอโอนย้าย (DM)</b>
+        <span style="font-size:11px;opacity:.75">เลือกวันที่ + เลขเอกสาร → ดูรายการโอน</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px 10px;flex-wrap:wrap;margin-top:9px">
+        <span style="font-size:12px;opacity:.85">วันที่</span>
+        <select onchange="reqSetDate(this.value)" style="padding:8px 10px;border-radius:8px;border:none;font-family:inherit;font-size:14px;font-weight:800;color:var(--navy)">${dates.length?dates.map(d=>`<option value="${d}"${d===reqDate?' selected':''}>${d}</option>`).join(''):'<option>—</option>'}</select>
+        <span style="font-size:12px;opacity:.85">เลขเอกสาร</span>
+        <select onchange="reqSetRef(this.value)" style="padding:8px 10px;border-radius:8px;border:none;font-family:inherit;font-size:14px;font-weight:800;color:var(--navy);max-width:320px">${docs.length?docs.map(d=>`<option value="${esc(d.ref)}"${d.ref===reqRef?' selected':''}>${esc(d.ref)} · ${esc(d.whFrom||'-')}→${esc(d.whTo||'-')} · ${d.lines} รายการ</option>`).join(''):'<option>—</option>'}</select>
+        <button onclick="reqRefresh()" style="padding:8px 11px;border-radius:8px;border:1px solid rgba(255,255,255,.4);background:transparent;color:#fff;cursor:pointer;font-size:13px;font-weight:700">🔄</button>
+      </div>
+    </div>
+    ${cur?`<div class="row-sel" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <div><b style="color:var(--navy)">${esc(cur.ref)}</b> <span class="muted" style="font-size:12px">· ${esc(cur.whFrom||'-')}→${esc(cur.whTo||'-')} · ${items.length} รายการ · รวม ${totalQty}</span></div>
+    </div>`:''}
+    ${items.length?`<div class="tbl-wrap" style="max-height:56vh"><table><thead><tr><th>บาร์โค้ด</th><th>สินค้า</th><th class="num">จำนวน</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="empty">ไม่มีรายการ (เลือกวันที่/เอกสารอื่นหรือกด 🔄)</div>'}
+  `;
+}
+function reqSetDate(d){ reqDate=d; reqRef=''; reqRender(); }
+function reqSetRef(r){ reqRef=r; reqRender(); }
+async function reqRefresh(){ try{ loading(true,'กำลังโหลด DM…'); await loadDm(true); await reqRender(); toast('✅ รีเฟรชใบขอโอนย้ายแล้ว ('+(DATA.dm||[]).length.toLocaleString()+' บรรทัด)'); }catch(e){ toast('❌ '+(e.message||'รีเฟรชไม่ได้')); } finally{ loading(false); } }
 function mtfLsKey(){ return 'mp_mtf'; }
 function mtfSaveLS(){ try{ localStorage.setItem(mtfLsKey(),JSON.stringify({from:mtfFrom,to:mtfTo,items:mtfItems,saved:mtfSaved})); }catch(e){} }
 function mtfRestoreLS(){ try{ const o=JSON.parse(localStorage.getItem(mtfLsKey())||'null'); if(o){ if(o.from)mtfFrom=o.from; if(o.to)mtfTo=o.to; if(Array.isArray(o.items))mtfItems=o.items; mtfSaved=(o.saved!==false); } }catch(e){} }
