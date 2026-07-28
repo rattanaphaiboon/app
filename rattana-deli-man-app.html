@@ -875,7 +875,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.156';
+const APP_VERSION='3.157';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -5267,13 +5267,14 @@ function applyCNCredit(idx){
    → โชว์ในหน้าเก็บเงินให้คนขับ "เลือก" เพื่อหักยอด (creditNote) โดยไม่ต้องทำ CN ในแอป ===== */
 const IS_SHEET='IS';
 const _issuedCNDone={};
-async function fetchIssuedCN_(doc){
-  doc=String(doc||'').trim(); if(!doc) return;
+async function fetchIssuedCN_(code){
+  // v3.157: จับใบลดหนี้ IS ด้วย "รหัสร้าน" (AR_CODE = คอลัมน์ C) แทน TRD_REFER_REF(P) → โชว์ CN ทุกใบของร้านนี้
+  code=String(code||'').trim(); if(!code) return;
   if(!state.issuedCN) state.issuedCN={};
-  if(state.issuedCN[doc]) return;                     // ดึงแล้ว
-  if(_issuedCNDone[doc]) return; _issuedCNDone[doc]=1;
+  if(state.issuedCN[code]) return;                     // ดึงแล้ว (key = รหัสร้าน)
+  if(_issuedCNDone[code]) return; _issuedCNDone[code]=1;
   try{
-    const tq="select B,I,K,M,N,O where P = '"+_dsdcEsc(doc)+"'";   // DI_REF, SKU_NAME, TRD_QTY, TRD_U_PRC, TRD_G_AMT, DI_REMARK
+    const tq="select B,I,K,M,N,O where C = '"+_dsdcEsc(code)+"'";   // DI_REF, SKU_NAME, TRD_QTY, TRD_U_PRC, TRD_G_AMT, DI_REMARK · where AR_CODE
     const url='https://docs.google.com/spreadsheets/d/'+DSDC_SRC_ID+'/gviz/tq?tqx=out:csv&sheet='+encodeURIComponent(IS_SHEET)+'&tq='+encodeURIComponent(tq)+'&_cb='+Date.now();
     const ctrl=('AbortController' in window)?new AbortController():null;
     const to=setTimeout(()=>{ if(ctrl) ctrl.abort(); },45000);
@@ -5290,8 +5291,27 @@ async function fetchIssuedCN_(doc){
       byCn[cnDoc].items.push({sku:cleanCell(r['SKU_NAME']),qty:parseFloat(cleanCell(r['TRD_QTY']||'0').replace(/,/g,''))||0,price:parseFloat(cleanCell(r['TRD_U_PRC']||'0').replace(/,/g,''))||0,amount:amt});
       if(!byCn[cnDoc].reason){ const rm=cleanCell(r['DI_REMARK']||''); if(rm) byCn[cnDoc].reason=rm; }
     });
-    state.issuedCN[doc]=Object.values(byCn);
-  }catch(e){ console.warn('IS CN fetch failed:',e); state.issuedCN[doc]=state.issuedCN[doc]||[]; }
+    state.issuedCN[code]=Object.values(byCn);
+  }catch(e){ console.warn('IS CN fetch failed:',e); state.issuedCN[code]=state.issuedCN[code]||[]; }
+}
+/* v3.157: CN (IS) ใบนี้ "ถูกใช้ในบิลอื่น" แล้วหรือยัง — อ่านจากชีทบันทึกบิลและการชำระ (state.usedCN)
+   + เผื่อบิลอื่นในเซสชันนี้ที่เพิ่งเลือก/บันทึก (state.jobs) — ยกเว้นบิลปัจจุบันเอง (curDoc) */
+function cnUsedElsewhere_(cnDoc,curDoc){
+  const key=String(cnDoc||'').trim().toUpperCase(); if(!key) return false;
+  const cd=String(curDoc||'').trim().toUpperCase();
+  const u=(state.usedCN||{})[key];
+  if(u&&String(u.doc||'').trim().toUpperCase()!==cd) return true;   // ใช้ในบิลอื่น (บันทึกลงชีทแล้ว)
+  const jobs=state.jobs||[];
+  for(let ji=0;ji<jobs.length;ji++){ const bl=jobs[ji].bills||[];
+    for(let bi=0;bi<bl.length;bi++){ const bb=bl[bi];
+      if(String(bb.doc||'').trim().toUpperCase()===cd) continue;
+      const p=bb.payment||{};
+      if(p._cnPicked&&p._cnPicked[cnDoc]) return true;
+      const ref=String(p.creditNoteRef||'').toUpperCase();
+      if(ref&&ref.split(',').some(x=>x.trim()===key)) return true;
+    }
+  }
+  return false;
 }
 function applyIssuedCN_(idx){
   const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
@@ -5300,20 +5320,22 @@ function applyIssuedCN_(idx){
   const render=()=>{
     if(_billIdx!==idx) return;
     const el=$('issuedCnBox'); if(!el) return;
-    const list=(state.issuedCN||{})[b.doc];
+    const list=(state.issuedCN||{})[b.code];   // v3.157: key = รหัสร้าน
     if(!Array.isArray(list)){ el.innerHTML='<div class="txt-xs txt-muted" style="margin-top:4px">⏳ ตรวจใบลดหนี้ที่ออกแล้ว…</div>'; return; }
-    if(!list.length){ el.innerHTML=''; return; }
     // v3.92: โหลดจากชีท (มีเลข CN ในหมายเหตุ แต่ยังไม่มี _cnPicked) → ติ๊กให้ตามเลข CN เดิม (ไม่แตะยอดรวม)
     if((!b.payment._cnPicked||!Object.keys(b.payment._cnPicked).length) && b.payment.creditNoteRef){
       const pk={}; String(b.payment.creditNoteRef).split(',').forEach(x=>{ x=x.trim(); if(x) pk[x]=true; });
       b.payment._cnPicked=pk;
     }
     const picked=b.payment._cnPicked||{};
-    const isSum=list.filter(c=>picked[c.cnDoc]).reduce((s,c)=>s+(parseFloat(c.amount)||0),0);        // ยอดมีเอกสาร (IS)
+    // v3.157: ซ่อนใบที่ "ใช้ไปแล้ว" ในบิลอื่น (กันเลือกซ้ำ) — แต่คงใบที่บิลนี้เลือกไว้เองเสมอ
+    const vis=list.filter(c=>picked[c.cnDoc]||!cnUsedElsewhere_(c.cnDoc,b.doc));
+    if(!vis.length){ el.innerHTML=''; return; }
+    const isSum=vis.filter(c=>picked[c.cnDoc]).reduce((s,c)=>s+(parseFloat(c.amount)||0),0);         // ยอดมีเอกสาร (IS)
     const manual=Math.max(0,(parseFloat(b.payment.creditNote)||0)-isSum);                            // ยอดไม่มีเอกสาร (พิมพ์เอง)
     el.innerHTML=`<div style="padding:10px 12px;border-radius:10px;border:1px solid var(--gold);background:var(--gold-soft)">
-      <div class="txt-sm txt-bold mb-8">📄 พบใบลดหนี้ที่ออกแล้วในระบบ${ro?'':' — แตะเลือกเพื่อหักยอด (รวมกับที่พิมพ์เอง)'}</div>
-      ${list.map(c=>`<label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--border);cursor:${ro?'default':'pointer'}">
+      <div class="txt-sm txt-bold mb-8">📄 ใบลดหนี้ที่ออกแล้วของร้านนี้${ro?'':' — แตะเลือกเพื่อหักยอด (รวมกับที่พิมพ์เอง)'}</div>
+      ${vis.map(c=>`<label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--border);cursor:${ro?'default':'pointer'}">
         <input type="checkbox" ${picked[c.cnDoc]?'checked':''} ${ro?'disabled':''} onchange="toggleIssuedCN_(${idx},'${esc(c.cnDoc).replace(/'/g,"\\'")}',this.checked)" style="width:20px;height:20px;margin-top:2px;flex:none">
         <div style="flex:1;min-width:0">
           <div class="txt-sm"><b>${esc(c.cnDoc)}</b> · <span class="txt-gold txt-bold">${fmt(c.amount)} ฿</span></div>
@@ -5322,14 +5344,14 @@ function applyIssuedCN_(idx){
       ${(isSum>0&&manual>0.005)?`<div class="txt-xs" style="border-top:1px solid var(--border);padding-top:7px;margin-top:2px">รวมใบลดหนี้ <b class="txt-gold">${fmt(b.payment.creditNote)} ฿</b> = มีเอกสาร ${fmt(isSum)} + ไม่มีเอกสาร ${fmt(manual)}</div>`:''}
     </div>`;
   };
-  if((state.issuedCN||{})[b.doc]) render();
-  else { render(); fetchIssuedCN_(b.doc).then(render).catch(render); }
+  if((state.issuedCN||{})[b.code]) render();
+  else { render(); fetchIssuedCN_(b.code).then(render).catch(render); }
 }
 function toggleIssuedCN_(idx,cnDoc,checked){
   const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
   const b=j.bills[idx]; if(!b) return;
   if(j.status==='approved') return;
-  const list=(state.issuedCN||{})[b.doc]||[];
+  const list=(state.issuedCN||{})[b.code]||[];   // v3.157: key = รหัสร้าน
   if(!b.payment._cnPicked) b.payment._cnPicked={};
   // v3.92: รวมยอด 2 แบบ — คงส่วน "ไม่มีเอกสาร" (พิมพ์เอง) ไว้ แล้วบวก/ลบเฉพาะส่วน "มีเอกสาร" (IS) ที่ติ๊ก
   const oldIS=list.filter(c=>b.payment._cnPicked[c.cnDoc]).reduce((s,c)=>s+(parseFloat(c.amount)||0),0);   // ยอด IS ก่อนเปลี่ยน
@@ -5757,8 +5779,8 @@ async function _saveBillInner_(idx,saveBtn){
   if(cnAmt>0.005){
     if(!Array.isArray(state.cnHistory)){ try{ await loadCNHistory(); }catch(e){} }          // CN ในแอป
     const refs=String(p.creditNoteRef||'').split(',').map(s=>s.trim()).filter(Boolean);
-    if(refs.length&&!((state.issuedCN||{})[b.doc])){ try{ await fetchIssuedCN_(b.doc); }catch(e){} }   // CN จากระบบ IS ที่เลือก
-    const isList=(state.issuedCN||{})[b.doc]||[];
+    if(refs.length&&!((state.issuedCN||{})[b.code])){ try{ await fetchIssuedCN_(b.code); }catch(e){} }   // v3.157: CN จากระบบ IS (key=รหัสร้าน)
+    const isList=(state.issuedCN||{})[b.code]||[];
     const isBacked=refs.length?isList.filter(c=>refs.includes(c.cnDoc)).reduce((s,c)=>s+(parseFloat(c.amount)||0),0):0;
     const doc=String(b.doc||'').trim().toUpperCase();
     const cnBacked=(state.cnHistory||[]).filter(c=>String(c.docNo||'').trim().toUpperCase()===doc&&c.returnType!=='คืนเต็มทั้งบิล').reduce((s,c)=>s+(parseFloat(c.total)||0),0);
@@ -7380,6 +7402,16 @@ async function loadJobsFromSheet(){
     ]);
     if(!fetchOK) return null;          // โหลดชีทไม่สำเร็จ — อย่าลบงานใน local
     if(!cinRows.length&&!inputRows.length) return [];
+
+    // v3.157: รวมเลข CN (IS) ที่ "ใช้ไปแล้ว" จากทุกแถวในชีทบันทึกบิลและการชำระ (แท็ก [CN: ...] ในหมายเหตุ) → กันเลือกซ้ำ
+    const usedCN={};
+    cinRows.forEach(r=>{
+      const m=cleanCell(r['หมายเหตุ']||'').match(/\[CN:\s*([^\]]*)\]/);
+      if(!m) return;
+      const doc=cleanCell(r['Doc_No']||'').trim().toUpperCase();
+      m[1].split(',').forEach(x=>{ x=x.trim().toUpperCase(); if(x&&!usedCN[x]) usedCN[x]={doc}; });
+    });
+    state.usedCN=usedCN;
 
     // index INPUT (1 แถวต่อ 1 รหัสใบคุม)
     const inputByJob={};
