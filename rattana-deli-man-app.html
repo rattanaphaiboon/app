@@ -847,7 +847,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.141';
+const APP_VERSION='3.143';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -3700,13 +3700,36 @@ function driverWarehouse_(name){
   const wh=cleanCell(drv['W']);
   return /^W[1-4]$/.test(wh)?wh:'';
 }
-/* ========== v3.141: เช็คของขึ้นรถ — เช็คลิสต์บิลในใบคุม (แยกอิสระ ไม่ผูกการรับงาน · เก็บ local) ========== */
+/* ========== v3.141/v3.142: เช็คของขึ้นรถ — 2 ชั้น: ใบคุม → รายการบิล → แตะบิล → รายการสินค้าในบิล (ติ๊กรายชิ้น) ========== */
+/* แยกอิสระ ไม่ผูกการรับงาน · เก็บ local · โครง state.checkLoad = {jobId:{doc:{itemIndex:true, __all:true}}} */
 function checkLoadPool_(){
   const avail=state.jobs.filter(j=>j.status==='available'&&!j.team);   // ใบคุมว่าง (ยังไม่มีใครรับ)
   const mine=state.jobs.filter(j=>isMyOwnJob(j)&&(j.status==='in_progress'||j.status==='pending_approval'||j.status==='rejected'));   // งานตัวเองที่รับแล้ว
   const seen=new Set(), pool=[];
   [...avail,...mine].forEach(j=>{ const k=String(j.id); if(seen.has(k))return; seen.add(k); pool.push(j); });
   return pool.sort((a,b)=>String(a.id).localeCompare(String(b.id),'th'));
+}
+function billItems_(doc){ return state.billDetails[doc]||[]; }
+/* v3.143: รวมสินค้าทุกบิลในใบคุม → สินค้าเดียวกัน (barcode|unit หรือ sku|unit) บวกจำนวนกัน */
+function checkAggItems_(job){
+  const map=new Map();
+  (job.bills||[]).forEach(b=>{ billItems_(b.doc).forEach(it=>{
+    const bc=String(it.barcode||'').trim(), sku=String(it.sku||'').trim(), unit=String(it.unit||'').trim();
+    const key=(bc||sku||'?')+'|'+unit;
+    const g=map.get(key)||{key,sku:sku||bc||'สินค้า',barcode:bc,unit,qty:0};
+    g.qty+=parseFloat(it.qty)||0; map.set(key,g);
+  }); });
+  return [...map.values()].sort((a,b)=>String(a.sku).localeCompare(String(b.sku),'th'));
+}
+function checkQtyFmt_(n){ n=Math.round((parseFloat(n)||0)*100)/100; return n.toLocaleString('en-US'); }
+/* v3.142: ดึงรายการสินค้าหลายบิลทีเดียว (B='d1' or B='d2' ...) → 1 query */
+async function ensureBillDetailsForDocs_(docs){
+  const need=[...new Set((docs||[]).map(d=>String(d||'').trim()).filter(Boolean))].filter(d=>!(state.billDetails[d]||[]).length && !_dsdcDone['B|'+d]);
+  if(!need.length) return 0;
+  need.forEach(d=>_dsdcDone['B|'+d]=1);
+  const where=need.map(d=>"B = '"+_dsdcEsc(d)+"'").join(' or ');
+  try{ const n=mergeDsDc_(await fetchDsDc_(where)); afterBillDetailsLoaded_(); return n; }
+  catch(e){ need.forEach(d=>delete _dsdcDone['B|'+d]); console.warn('DS_DC batch failed',e); return 0; }
 }
 function renderCheckLoad(){
   const sel=$('checkloadSel'); if(!sel) return;
@@ -3715,57 +3738,56 @@ function renderCheckLoad(){
   const items=pool.map(j=>({v:String(j.id),l:`${j.id} — ${(j.bills||[]).length} ร้าน · ${fmt((j.bills||[]).reduce((s,b)=>s+(parseFloat(b.amount)||0),0))} ฿`}));
   sel.innerHTML=buildDD('ddCheckJob',items,items.length?'-- เลือกใบคุม --':'(ไม่มีใบคุมวันนี้)');
   const panel=$('ddCheckJob_panel');
-  if(panel) panel.querySelectorAll('li[data-v]').forEach(li=>{ const o=li.onclick; li.onclick=e=>{ if(o)o.call(li,e); state._checkChosenJob=li.dataset.v; paintCheckList_(); }; });
-  if(state._checkChosenJob){ const it=items.find(x=>x.v===state._checkChosenJob); if(it) ddPick('ddCheckJob',it.v,it.l); else state._checkChosenJob=''; }
+  if(panel) panel.querySelectorAll('li[data-v]').forEach(li=>{ const o=li.onclick; li.onclick=e=>{ if(o)o.call(li,e); pickCheckJob_(li.dataset.v); }; });
+  if(state._checkChosenJob){ const it=items.find(x=>x.v===state._checkChosenJob); if(it){ ddPick('ddCheckJob',it.v,it.l); prefetchCheckDocs_(state._checkChosenJob); } else { state._checkChosenJob=''; state._checkBill=null; } }
   paintCheckList_();
 }
+function prefetchCheckDocs_(id){
+  const j=state.jobs.find(x=>String(x.id)===String(id)); if(!j) return;
+  ensureBillDetailsForDocs_((j.bills||[]).map(b=>b.doc)).then(n=>{ if(n&&state.currentTab==='sec-checkload'&&String(state._checkChosenJob)===String(id)) paintCheckList_(); });
+}
+function pickCheckJob_(id){ state._checkChosenJob=id; paintCheckList_(); prefetchCheckDocs_(id); }
+function toggleCheckProd_(jobId,idx){ const p=(state._checkAgg||[])[idx]; if(!p) return; state.checkLoad=state.checkLoad||{}; const m=(state.checkLoad[jobId]&&typeof state.checkLoad[jobId]==='object')?state.checkLoad[jobId]:(state.checkLoad[jobId]={}); if(m[p.key]) delete m[p.key]; else m[p.key]=true; saveCheckLoad_(); paintCheckList_(); }
+function checkAllProd_(jobId,on){ state.checkLoad=state.checkLoad||{}; if(on){ const m={}; (state._checkAgg||[]).forEach(p=>m[p.key]=true); state.checkLoad[jobId]=m; } else delete state.checkLoad[jobId]; saveCheckLoad_(); paintCheckList_(); }
+function saveCheckLoad_(){ try{ localStorage.setItem('dman_checkload',JSON.stringify(state.checkLoad||{})); }catch(e){} }
 function paintCheckList_(){
   const body=$('checkloadBody'); if(!body) return;
   const id=state._checkChosenJob;
   const j=id?state.jobs.find(x=>String(x.id)===String(id)):null;
   if(!j){ body.innerHTML='<div class="txt-center txt-muted" style="padding:24px 12px">👆 เลือกใบคุมด้านบน เพื่อเริ่มเช็คของขึ้นรถ</div>'; return; }
   const bills=(j.bills||[]);
-  const ticks=(state.checkLoad&&state.checkLoad[id])||{};
-  const done=bills.filter(b=>ticks[b.doc]).length;
-  const all=bills.length>0&&done===bills.length;
-  const pct=bills.length?Math.round(done/bills.length*100):0;
   const jid=esc(String(j.id)).replace(/'/g,"\\'");
+  // v3.143: รวมสินค้าทุกบิลในใบคุม → ลิสต์เดียว (ไม่แยกร้าน) ติ๊กทีละสินค้า
+  const agg=checkAggItems_(j); state._checkAgg=agg;
+  const chk=(state.checkLoad&&state.checkLoad[id]&&typeof state.checkLoad[id]==='object')?state.checkLoad[id]:{};
+  const done=agg.filter(p=>!!chk[p.key]).length;
+  const all=agg.length>0&&done===agg.length;
+  const pct=agg.length?Math.round(done/agg.length*100):0;
+  const totalQty=agg.reduce((s,p)=>s+p.qty,0), doneQty=agg.reduce((s,p)=>s+(chk[p.key]?p.qty:0),0);
+  const triedAll=bills.length>0&&bills.every(b=>!!_dsdcDone['B|'+String(b.doc||'').trim()]);
   body.innerHTML=`
     <div class="card"><div class="card-body">
-      <div class="flex-between"><span class="txt-bold">📦 ${esc(j.id)}</span><span class="txt-bold ${all?'txt-success':'txt-gold'}">ขึ้นครบ ${done}/${bills.length}</span></div>
+      <div class="flex-between"><span class="txt-bold">📦 ${esc(j.id)}</span><span class="txt-bold ${all?'txt-success':'txt-gold'}">${done}/${agg.length} รายการ</span></div>
       <div style="height:9px;background:var(--row-alt);border-radius:6px;overflow:hidden;margin:9px 0"><div style="height:100%;width:${pct}%;background:${all?'var(--success)':'var(--gold)'};transition:width .2s"></div></div>
-      ${all?'<div class="txt-success txt-bold txt-center" style="padding:4px">✅ ของขึ้นรถครบทุกบิลแล้ว พร้อมออกรถ</div>':'<div class="txt-xs txt-muted txt-center">แตะบิลเพื่อติ๊กว่าของขึ้นรถแล้ว</div>'}
+      <div class="txt-xs txt-muted txt-center">รวมจาก ${bills.length} บิล · ${agg.length} รายการ · ${checkQtyFmt_(doneQty)}/${checkQtyFmt_(totalQty)} หน่วย</div>
+      ${all&&agg.length?'<div class="txt-success txt-bold txt-center" style="margin-top:4px">✅ ของขึ้นรถครบทุกรายการ พร้อมออกรถ</div>':''}
     </div></div>
-    ${bills.length?bills.map(b=>{ const on=!!ticks[b.doc]; const doc=esc(String(b.doc||'')).replace(/'/g,"\\'"); return `
-      <div class="pay-row" style="cursor:pointer${on?';border-color:rgba(34,197,94,.45);background:rgba(34,197,94,.07)':''}" onclick="toggleCheckBill_('${jid}','${doc}')">
+    ${agg.length?agg.map((p,i)=>{ const on=!!chk[p.key]; return `
+      <div class="pay-row" style="cursor:pointer${on?';border-color:rgba(34,197,94,.45);background:rgba(34,197,94,.07)':''}" onclick="toggleCheckProd_('${jid}',${i})">
         <div class="flex-between" style="align-items:flex-start;gap:8px">
           <div style="min-width:0;flex:1">
-            <div class="txt-bold" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${on?'✅':'⬜'} ${esc(b.name||b.code||b.doc)}</div>
-            <div class="txt-xs txt-muted">${esc(b.doc||'')}${b.code?' · '+esc(b.code):''}</div>
+            <div class="txt-bold" style="white-space:normal">${on?'✅':'⬜'} ${esc(p.sku)}</div>
+            <div class="txt-xs txt-muted">${p.barcode?esc(p.barcode):''}</div>
           </div>
-          <div class="txt-right txt-sm txt-bold" style="white-space:nowrap">${fmt(b.amount)} ฿</div>
+          <div class="txt-right txt-bold" style="white-space:nowrap">${checkQtyFmt_(p.qty)} ${esc(p.unit||'')}</div>
         </div>
-      </div>`; }).join(''):'<div class="txt-center txt-muted p-16">ใบคุมนี้ไม่มีบิล</div>'}
-    ${bills.length?`<div class="row" style="gap:8px;margin-top:10px">
-      <button class="btn btn-outline btn-block" onclick="checkAllBills_('${jid}',true)">✅ ติ๊กทั้งหมด</button>
-      <button class="btn btn-outline btn-block" onclick="checkAllBills_('${jid}',false)">↺ ล้างทั้งหมด</button>
+      </div>`; }).join(''):`<div class="card"><div class="card-body txt-center txt-muted">${triedAll?'ไม่พบรายการสินค้าของใบคุมนี้ในระบบ':'⏳ กำลังโหลดรายการสินค้า...'}</div></div>`}
+    ${agg.length?`<div class="row" style="gap:8px;margin-top:10px">
+      <button class="btn btn-outline btn-block" onclick="checkAllProd_('${jid}',true)">✅ ติ๊กทั้งหมด</button>
+      <button class="btn btn-outline btn-block" onclick="checkAllProd_('${jid}',false)">↺ ล้างทั้งหมด</button>
     </div>`:''}
   `;
 }
-function toggleCheckBill_(jobId,doc){
-  state.checkLoad=state.checkLoad||{};
-  const m=state.checkLoad[jobId]=state.checkLoad[jobId]||{};
-  if(m[doc]) delete m[doc]; else m[doc]=true;
-  saveCheckLoad_(); paintCheckList_();
-}
-function checkAllBills_(jobId,on){
-  const j=state.jobs.find(x=>String(x.id)===String(jobId)); if(!j) return;
-  state.checkLoad=state.checkLoad||{};
-  if(on){ const m={}; (j.bills||[]).forEach(b=>{ if(b.doc) m[b.doc]=true; }); state.checkLoad[jobId]=m; }
-  else delete state.checkLoad[jobId];
-  saveCheckLoad_(); paintCheckList_();
-}
-function saveCheckLoad_(){ try{ localStorage.setItem('dman_checkload',JSON.stringify(state.checkLoad||{})); }catch(e){} }
 
 function renderDriverHome(){
   const wh=state.user.warehouse||'W1';
