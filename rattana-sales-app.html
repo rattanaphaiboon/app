@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.467</title>
+<title>Rattana Sales — v8.468</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5539,7 +5539,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.467 · 2026-07-28</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.468 · 2026-07-28</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5550,7 +5550,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.467</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.468</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -11311,7 +11311,8 @@ function matchesGroup(product, cfg) {
 // v6.5.175: appendNoSale removed — visit row carries เหตุผลที่ไม่ซื้อ
 // v8.359: + appendCustomer/appendProposal — เดิมไม่อยู่ในลิสต์ = ยิงไม่ผ่านแล้ว throw ทิ้งเลย ไม่มีคิว ไม่มี auto-resend
 // v8.426: ยกออกมาเป็นฟังก์ชัน — ใช้ทั้งตอนเช็ค ok:false และตอนตัดสินใจเข้าคิว
-const _QUEUEABLE_ACTIONS = ['appendOrder','appendOrderBatch','appendVisit','appendCN','appendCustomer','appendProposal'];
+// v8.468: + appendCNBatch (CN ทั้งใบ · กันซ้ำด้วย cnLineId รายบรรทัดเหมือนเดิม) · attachCNPhoto (idempotent — มีรูปแล้วไม่อัปซ้ำ)
+const _QUEUEABLE_ACTIONS = ['appendOrder','appendOrderBatch','appendVisit','appendCN','appendCNBatch','attachCNPhoto','appendCustomer','appendProposal'];
 function queueableAction(a) { return _QUEUEABLE_ACTIONS.indexOf(String(a || '')) >= 0; }
 
 async function postToAppsScript(payload, _retries = 3) {
@@ -11777,6 +11778,9 @@ async function submitNewCustomer(row)   { return postToAppsScript({ action:'appe
 // v7.38: update an existing customer row by รหัส บีพลัส — used by จัดการร้าน screen + check-in gate
 async function submitUpdateCustomer(rowId, updates) { return postToAppsScript({ action:'updateCustomer', rowId, updates }); }
 async function submitCNRow(row)         { return postToAppsScript({ action:'appendCN', row });              }
+// v8.468: CN ทั้งใบก้อนเดียว — ไม่มีใบครึ่งๆ + หลังบ้านเติม ลำดับ/รวมรายการ/ยอดรวมทั้งใบ ให้แท็บขนส่งได้
+async function submitCNBatch(cnId, rows) { return postToAppsScript({ action:'appendCNBatch', cnId, rows }); }
+async function attachCNPhoto(p)          { return postToAppsScript({ action:'attachCNPhoto', ...p });       }
 
 // v6.5.127: kick off writeQueue auto-flusher — runs on boot + every 30s
 let _wqFlushTimer = null;
@@ -40760,6 +40764,41 @@ function _removeCNItem(idx) {
 }
 window._removeCNItem = _removeCNItem;
 
+// v8.468: ประกอบ payload 1 บรรทัด — แยกออกมาเพื่อให้ "ทางใหม่ (ทั้งใบ)" กับ "ทางเดิม (ทีละบรรทัด)" ใช้ field ชุดเดียวกันเป๊ะ
+//   ❌ ห้ามใส่ photoBase64 ที่นี่ — ทางใหม่ส่งรูปแยก · ทางเดิมค่อยยัดเพิ่มตอนเรียก
+function _cnRowPayload(it, i, cnId, now, shop) {
+  return {
+    'cnLineId':      cnId + '-' + String(i + 1).padStart(3, '0'),   // v8.426: คีย์กันซ้ำรายบรรทัด (Code.gs v8.139)
+    'วัน':           formatDateISO(now),
+    'เวลา':          formatTimeThai(now),
+    'email':        (currentUser && currentUser.email) || SALESMAN.email || '',
+    'ชื่อ-สกุล':     (currentUser && currentUser.name) || SALESMAN.name || '',
+    'รหัสเซลล์':     _resolveSalesmanCodeFromUsers(),  // v6.5.232: live from Users sheet
+    'คลัง':          SALESMAN.warehouseId || '',
+    'คลังส่ง':       _shipWhForShop(currentShopId) || SALESMAN.warehouseId || '',   // v8.442: CN ตามคลังที่ออกของจริงของร้านนี้
+    'คลังส่ง-ที่มา':  _shipWhSrcForShop(currentShopId),   // v8.443: ไม่ส่งธง = Code.gs backstop ทับกลับเป็นคลังบ้าน → ใบลดหนี้คืนของผิดคลัง
+    'รหัสร้าน':      String(shop?.bplusCode || shop?.id || ''),
+    'ชื่อร้าน':      shop?.name || '',
+    'Barcode':      String(it.barcode || ''),
+    'ชื่อสินค้า':    it.name,
+    'จำนวน':         it.qty,
+    'หน่วย':         it.unitLabel,
+    'ราคา':          it.price,
+    'ยอดเงินรวม':    it.qty * it.price,
+    'เหตุผล':        it.reason,
+    'วันหมดอายุ':    String(it.expiryDate || ''),   // v8.243: เหตุผลอื่นที่ไม่ใช่หมดอายุ → ใส่วันหมดอายุ
+    'ใกล้หมดอายุ':   String(it.nearExpiry || ''),   // v8.243: 'ใช่' = < 3 เดือน → หัวหน้าเห็นเตือน
+    'orderIdเดิม':   it.origOrderId,
+    'cnId':          cnId,
+    'สถานะอนุมัติ':  'รออนุมัติ',   // v8.83: ทุก CN รอหัวหน้าอนุมัติ (server ก็บังคับซ้ำ)
+  };
+}
+// ═══ v8.468 (Surat 28/7): ส่ง CN "ทั้งใบก้อนเดียว" ═══
+//   ทำไม: เดิมยิงทีละบรรทัด → บรรทัด 3 พลาด = ใบครึ่งๆ (Backend มี 5 แต่แท็บขนส่งมี 3) เป็นเงินลูกค้าจริง
+//         และไม่รู้ 'ลำดับ'/'รวมรายการ'/'ยอดรวมทั้งใบ' ตั้งแต่บรรทัดแรก → เติมให้แท็บขนส่งไม่ได้
+//   รูปส่งแยกทีหลัง (attachCNPhoto) — ยัดรวมมาทำให้ก้อนโต เซลสัญญาณอ่อน timeout ทั้งใบ
+//         แลกกัน: รูปพลาด = ใบยังอยู่ครบ (ยอมได้) · ใบพลาดเพราะรูป = ยอมไม่ได้
+//   ⚠️ หลังบ้าน < v8.156 → ตกลงทางเดิมทีละบรรทัดอัตโนมัติ (ห้ามตัดทิ้ง จนกว่า live จะ ≥v8.156 ทุกเครื่อง)
 async function _submitCN() {
   if (_cnDraft.items.length === 0) return;
   const shop = SHOPS.find(s => s.id === currentShopId);
@@ -40768,58 +40807,61 @@ async function _submitCN() {
   if (!_cnDraft.cnId) _cnDraft.cnId = 'CN' + Date.now().toString().slice(-7) + Math.floor(Math.random() * 900 + 100);
   const cnId = _cnDraft.cnId;
   const now = new Date();
+  const items = _cnDraft.items.slice();
+  const rows = items.map((it, i) => _cnRowPayload(it, i, cnId, now, shop));
+  const photoOk = window._cnPhotoBackendOk === true;
+  const batchOk = window._cnBatchBackendOk === true;
   closeModal();
   showToast('กำลังส่งใบลดหนี้...', 'info');
-  // v8.426: ห้าม loop ขาดกลางคัน — เดิมรายการที่ 3 พลาด = 4-5 ไม่ถูกส่งและไม่เข้าคิวเลย
-  //   เก็บผลรายบรรทัด แล้วค่อยสรุปทีเดียว · ล้างตะกร้าเฉพาะตอนสำเร็จครบทุกบรรทัด
-  let _sent = 0; const _failed = [];
-  for (let _i = 0; _i < _cnDraft.items.length; _i++) {
-    const it = _cnDraft.items[_i];
+
+  let sent = 0; const failed = [];
+  if (batchOk) {
     try {
-      const _res = await submitCNRow({
-        'cnLineId':      cnId + '-' + String(_i + 1).padStart(3, '0'),   // v8.426: คีย์กันซ้ำรายบรรทัด (Code.gs v8.139)
-        'วัน':           formatDateISO(now),
-        'เวลา':          formatTimeThai(now),
-        'email':        (currentUser && currentUser.email) || SALESMAN.email || '',
-        'ชื่อ-สกุล':     (currentUser && currentUser.name) || SALESMAN.name || '',
-        'รหัสเซลล์':     _resolveSalesmanCodeFromUsers(),  // v6.5.232: live from Users sheet
-        'คลัง':          SALESMAN.warehouseId || '',
-        'คลังส่ง':       _shipWhForShop(currentShopId) || SALESMAN.warehouseId || '',   // v8.442: CN ตามคลังที่ออกของจริงของร้านนี้
-        'คลังส่ง-ที่มา':  _shipWhSrcForShop(currentShopId),   // v8.443: ไม่ส่งธง = Code.gs backstop ทับกลับเป็นคลังบ้าน → ใบลดหนี้คืนของผิดคลัง
-        'รหัสร้าน':      String(shop?.bplusCode || shop?.id || ''),
-        'ชื่อร้าน':      shop?.name || '',
-        'Barcode':      String(it.barcode || ''),
-        'ชื่อสินค้า':    it.name,
-        'จำนวน':         it.qty,
-        'หน่วย':         it.unitLabel,
-        'ราคา':          it.price,
-        'ยอดเงินรวม':    it.qty * it.price,
-        'เหตุผล':        it.reason,
-        'วันหมดอายุ':    String(it.expiryDate || ''),   // v8.243: เหตุผลอื่นที่ไม่ใช่หมดอายุ → ใส่วันหมดอายุ
-        'ใกล้หมดอายุ':   String(it.nearExpiry || ''),   // v8.243: 'ใช่' = < 3 เดือน → หัวหน้าเห็นเตือน
-        'orderIdเดิม':   it.origOrderId,
-        'cnId':          cnId,
-        'สถานะอนุมัติ':  'รออนุมัติ',   // v8.83: ทุก CN รอหัวหน้าอนุมัติ (server ก็บังคับซ้ำ)
-        'photoBase64':   (window._cnPhotoBackendOk === true) ? String(it.photo || '') : '',   // v8.346: ส่งรูปเฉพาะเมื่อหลังบ้าน ≥v8.125 (cnPhoto flag) — Code.gs เก่าจะยัด base64 ลงเซลล์ เกิน 50k ตัวอักษร CN พังทั้งใบ
-      });
-      // v8.426: หลังบ้านตอบ HTTP 200 พร้อม ok:false ได้ (lock timeout / แท็บหาย) — เดิมไม่เช็ค = นับเป็นสำเร็จ
-      if (_res && _res.ok === false) throw new Error(String((_res && _res.error) || 'หลังบ้านตอบ ok:false'));
-      _sent++;
+      const res = await submitCNBatch(cnId, rows);
+      if (res && res.ok === false) throw new Error(String(res.error || 'หลังบ้านตอบ ok:false'));
+      sent = rows.length;
+      if (res && res.mirror && res.mirror.ok === false) console.warn('[CN] mirror แท็บขนส่งพลาด — cron reconcileCN จะตามเก็บ:', res.mirror.error);
     } catch (e) {
-      _failed.push({ name: it.name, err: String((e && e.message) || 'ส่งไม่ได้'), queued: !!(e && e._queued) });
-      console.error('CN submit failed:', it.name, e);
+      failed.push({ name: 'ทั้งใบ ' + rows.length + ' รายการ', err: String((e && e.message) || 'ส่งไม่ได้'), queued: !!(e && e._queued) });
+      console.error('CN batch submit failed:', e);
+    }
+  } else {
+    // ── ทางเดิม: ทีละบรรทัด (หลังบ้านยังไม่ ≥v8.156) ──
+    for (let i = 0; i < rows.length; i++) {
+      try {
+        const row = Object.assign({}, rows[i], { 'photoBase64': photoOk ? String(items[i].photo || '') : '' });
+        const res = await submitCNRow(row);
+        if (res && res.ok === false) throw new Error(String((res && res.error) || 'หลังบ้านตอบ ok:false'));
+        sent++;
+      } catch (e) {
+        failed.push({ name: items[i].name, err: String((e && e.message) || 'ส่งไม่ได้'), queued: !!(e && e._queued) });
+        console.error('CN submit failed:', items[i].name, e);
+      }
     }
   }
-  const _queuedN = _failed.filter(function (f) { return f.queued; }).length;
-  const _lostN   = _failed.length - _queuedN;
-  if (!_failed.length) {
-    showToast(`✅ ส่งใบลดหนี้ — รอหัวหน้าอนุมัติ ${_sent} รายการ`, 'success');
+
+  // ── แนบรูปหลังใบลงชีทแล้ว — พลาดตรงนี้ "ไม่นับว่าใบพลาด" (ใบครบแล้ว รูปตามทีหลังได้) ──
+  let photoMiss = 0;
+  if (batchOk && photoOk && !failed.length) {
+    for (let i = 0; i < items.length; i++) {
+      if (!items[i].photo) continue;
+      try {
+        const pr = await attachCNPhoto({ cnId, cnLineId: rows[i]['cnLineId'], barcode: String(items[i].barcode || ''), photoBase64: String(items[i].photo) });
+        if (pr && pr.ok === false) { photoMiss++; console.warn('[CN photo]', rows[i]['cnLineId'], pr.error); }
+      } catch (e) { photoMiss++; console.warn('[CN photo]', rows[i]['cnLineId'], e && e.message); }
+    }
+  }
+
+  const queuedN = failed.filter(f => f.queued).length;
+  const lostN   = failed.length - queuedN;
+  if (!failed.length) {
+    showToast(`✅ ส่งใบลดหนี้ — รอหัวหน้าอนุมัติ ${sent} รายการ` + (photoMiss ? ` · รูป ${photoMiss} ใบยังไม่ขึ้น` : ''), 'success');
     _cnDraft = { items: [] };   // ล้างตะกร้าเฉพาะตอนขึ้นชีทครบทุกบรรทัดจริง
-  } else if (_lostN === 0) {
-    showToast(`⏳ ขึ้นชีทแล้ว ${_sent} · อีก ${_queuedN} รายการยังไม่ถึงชีท บันทึกไว้ในเครื่องแล้ว จะส่งใหม่ให้เอง`, 'warning');
+  } else if (lostN === 0) {
+    showToast(`⏳ ยังไม่ถึงชีท บันทึกไว้ในเครื่องแล้ว จะส่งใหม่ให้เอง`, 'warning');
     // คงตะกร้าไว้ — กดส่งซ้ำได้ไม่เกิดใบซ้ำ เพราะ cnId/cnLineId เดิมถูกล็อกไว้แล้ว
   } else {
-    showToast(`❌ ส่งไม่สำเร็จ ${_lostN} รายการ — ของยังอยู่ในตะกร้า กดส่งใหม่อีกครั้ง`, 'error');
+    showToast(`❌ ส่งไม่สำเร็จ — ของยังอยู่ในตะกร้า กดส่งใหม่อีกครั้ง`, 'error');
   }
   if (typeof _renderStuckQueue === 'function') _renderStuckQueue();
 }
@@ -41046,9 +41088,13 @@ window._cnPhotoB64 = window._cnPhotoB64 || '';
 function _cnPingPhotoCap() {
   if (window._cnPhotoBackendOk !== undefined) return;
   window._cnPhotoBackendOk = false;
+  window._cnBatchBackendOk = false;   // v8.468: หลังบ้าน ≥v8.156 รับ appendCNBatch ได้ไหม — ไม่ได้ = ใช้ทางเดิมทีละบรรทัด
   try {
     fetch(CONFIG.appsScriptUrl + '?action=ping').then(function (r) { return r.json(); })
-      .then(function (d) { window._cnPhotoBackendOk = !!(d && d.cnPhoto); })
+      .then(function (d) {
+        window._cnPhotoBackendOk = !!(d && d.cnPhoto);
+        window._cnBatchBackendOk = !!(d && d.cnBatch && d.cnPhotoAttach);
+      })
       .catch(function () {});
   } catch (e) {}
 }
