@@ -875,7 +875,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.159';
+const APP_VERSION='3.160';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -7655,7 +7655,7 @@ async function syncJobsFromSheet(opts){
   return sheetJobs.length;
 }
 
-const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.159 (เมนู Sync CN-Sale-dman → CNSaleapp + trigger 5 นาที | คอลัมน์ "วันเครดิต" ชีท Cin จาก b.creditDays, ไม่มีวัน=0 | ขอสินค้าเพิ่มขึ้นรถ: request_load + approve/reject/delete_load_req + ชีท "ขอสินค้าเพิ่ม" + Discord | v3.130 CN คืนเต็มบิล → คอลัมน์ "ใบลดหนี้" ชีท Cin | v3.124 cancel_job เก็บ CN คนอื่น | v3.122 fixCinSalesmanColumn | v3.120 SLMN | v3.90 แท็ก [CN: ...]) */
+const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.160 (เมนู Sync CN-Sale-dman → CNSaleapp + trigger 5 นาที + มาร์ก CN ซ้ำ เนื้อหาทั้งใบ | คอลัมน์ "วันเครดิต" ชีท Cin จาก b.creditDays, ไม่มีวัน=0 | ขอสินค้าเพิ่มขึ้นรถ: request_load + approve/reject/delete_load_req + ชีท "ขอสินค้าเพิ่ม" + Discord | v3.130 CN คืนเต็มบิล → คอลัมน์ "ใบลดหนี้" ชีท Cin | v3.124 cancel_job เก็บ CN คนอื่น | v3.122 fixCinSalesmanColumn | v3.120 SLMN | v3.90 แท็ก [CN: ...]) */
 const SHEET_INPUT='บันทึกเที่ยวส่ง';
 const SHEET_CIN='บันทึกบิลและการชำระ';
 const SHEET_CN='CN';
@@ -7707,7 +7707,7 @@ const HEADERS_CIN=['เลขใบคุม','Doc_Date','Doc_No','Customer_Code
 function doGet(e){
   let drive='unknown';
   try{ DriveApp.getRootFolder().getName(); drive='OK'; }catch(err){ drive='NOT_AUTHORIZED'; }
-  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.159',drive:drive}))
+  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.160',drive:drive}))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -7769,7 +7769,7 @@ function doPost(e){
         fmtColsOpen_(sh,['รหัสร้าน','เลขใบคุม','Doc_No'],'@');   // v3.35: เปิดปลาย คลุมแถวใหม่
         fmtColsOpen_(sh,['Lat','Lng'],'0.000000');
         fmtColsOpen_(sh,['วันเวลา'],'yyyy-mm-dd hh:mm:ss');
-        return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.159'})).setMimeType(ContentService.MimeType.JSON);
+        return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.160'})).setMimeType(ContentService.MimeType.JSON);
       }finally{ lock.releaseLock(); }
     }
 
@@ -8270,7 +8270,7 @@ function doPost(e){
       fmtColsOpen_(cinSh,['วัน+เวลา ที่ส่งสินค้า','U_ADD','วันที่โอนครั้งที่1','วันที่โอนครั้งที่2','แก้ไขเมื่อ','วันที่','วันเวลาอนุมัติ'],'yyyy-mm-dd hh:mm:ss');
     }
 
-    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.159'}))
+    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.160'}))
       .setMimeType(ContentService.MimeType.JSON);
   }catch(err){
     return ContentService.createTextOutput(JSON.stringify({ok:false,error:String(err)}))
@@ -8793,12 +8793,56 @@ function syncCNSaleApp_(){
   const dstSS=SpreadsheetApp.openById(CN_SALE_DST_ID);
   var dst=dstSS.getSheetByName(CN_SALE_DST_SHEET); if(!dst) dst=dstSS.insertSheet(CN_SALE_DST_SHEET);
   const data=src.getDataRange().getValues();
+  const dup=cnDupFlags_(data);   // v3.160: ตรวจซ้ำ (เนื้อหาทั้งใบ) → มาร์ก ไม่ลบ
   dst.clearContents();
-  if(data.length&&data[0].length) dst.getRange(1,1,data.length,data[0].length).setValues(data);
-  return Math.max(0,data.length-1);   // จำนวนแถวข้อมูล (ไม่รวมหัว)
+  var rows=0;
+  if(data.length&&data[0].length){
+    dst.getRange(1,1,data.length,data[0].length).setValues(data);
+    dst.getRange(1,data[0].length+1,data.length,1).setValues(dup.flags.map(function(f){ return [f]; }));   // คอลัมน์ "ตรวจซ้ำ" ต่อท้าย
+    rows=Math.max(0,data.length-1);
+  }
+  return {rows:rows, dupDocs:dup.dupDocs, dupGroups:dup.dupGroups};
+}
+/* v3.160: มาร์ก CN ซ้ำแบบ "เนื้อหาทั้งใบ" — group ตาม cnId, สร้างลายเซ็น (รหัสร้าน+รายการ บาร์โค้ด:จำนวน เรียง+ยอดรวมทั้งใบ)
+   ลายเซ็นเดียวกันแต่ cnId ต่าง = กดซ้ำ → เก็บใบเวลาเร็วสุดเป็นต้นฉบับ ที่เหลือมาร์ก "⚠️ ซ้ำกับ ...". ไม่ลบข้อมูล (เทียบเนื้อหาล้วน ไม่ดูวันที่) */
+function cnDupFlags_(data){
+  var flags=[]; for(var i=0;i<data.length;i++) flags.push('');
+  if(data.length<2){ flags[0]='ตรวจซ้ำ'; return {flags:flags,dupDocs:0,dupGroups:0}; }
+  var hdr=data[0].map(function(x){ return String(x).trim(); });
+  var ci=function(n){ return hdr.indexOf(n); };
+  var cId=ci('cnId'), cStore=ci('รหัสร้าน'), cBar=ci('บาร์โค้ด'), cQty=ci('จำนวน'), cTime=ci('วัน เวลา'), cTotal=ci('ยอดรวมทั้งใบ');
+  flags[0]='ตรวจซ้ำ';
+  if(cId<0){ return {flags:flags,dupDocs:0,dupGroups:0}; }
+  var groups={};
+  for(var r=1;r<data.length;r++){
+    var id=String(data[r][cId]||'').trim(); if(!id) continue;
+    if(!groups[id]) groups[id]={rows:[],lines:[],time:'',store:'',total:''};
+    var g=groups[id]; g.rows.push(r);
+    g.lines.push((cBar>=0?String(data[r][cBar]||'').trim():'')+':'+(cQty>=0?String(data[r][cQty]||'').trim():''));
+    if(cStore>=0) g.store=String(data[r][cStore]||'').trim();
+    if(cTotal>=0) g.total=String(data[r][cTotal]||'').trim();
+    var t=cTime>=0?String(data[r][cTime]||'').trim():'';
+    if(t&&(!g.time||t<g.time)) g.time=t;
+  }
+  var bySig={};
+  Object.keys(groups).forEach(function(id){ var g=groups[id];
+    var sig=(g.store||'')+'||'+g.lines.slice().sort().join(',')+'||'+(g.total||'');
+    (bySig[sig]=bySig[sig]||[]).push(id);
+  });
+  var dupDocs=0, dupGroups=0;
+  Object.keys(bySig).forEach(function(sig){ var ids=bySig[sig]; if(ids.length<2) return;
+    dupGroups++;
+    ids.sort(function(a,b){ return String(groups[a].time||'').localeCompare(String(groups[b].time||'')); });
+    var orig=ids[0];
+    groups[orig].rows.forEach(function(r){ flags[r]='ต้นฉบับ (มีซ้ำ '+(ids.length-1)+' ใบ)'; });
+    for(var k=1;k<ids.length;k++){ dupDocs++;
+      groups[ids[k]].rows.forEach(function(r){ flags[r]='⚠️ ซ้ำกับ '+orig; });
+    }
+  });
+  return {flags:flags, dupDocs:dupDocs, dupGroups:dupGroups};
 }
 function syncCNSaleAppUI(){
-  try{ var n=syncCNSaleApp_(); SpreadsheetApp.getUi().alert('✓ Sync CN-Sale-dman → CNSaleapp เรียบร้อย\\n- ข้อมูล '+n+' แถว (ไม่รวมหัว)\\n('+new Date().toLocaleString('th-TH')+')'); }
+  try{ var r=syncCNSaleApp_(); SpreadsheetApp.getUi().alert('✓ Sync CN-Sale-dman → CNSaleapp เรียบร้อย\\n- ข้อมูล '+r.rows+' แถว\\n- ⚠️ CN ซ้ำ '+r.dupDocs+' ใบ ('+r.dupGroups+' กลุ่ม) — ดูคอลัมน์ "ตรวจซ้ำ"\\n('+new Date().toLocaleString('th-TH')+')'); }
   catch(e){ SpreadsheetApp.getUi().alert('✗ Sync CN ไม่สำเร็จ:\\n'+e.message); }
 }
 function setupCNSaleTrigger(){
