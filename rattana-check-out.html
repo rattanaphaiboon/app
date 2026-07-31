@@ -1069,12 +1069,13 @@ function reqScan(raw){
   p.ts = nowStamp();
   beep(); vibrate();
   reqSaveLS(); reqRender();
+  if(CONFIG.supaUrl) reqSave(true);
   const i=document.getElementById('reqInput'); if(i){ i.value=''; i.focus(); } sbX('req');
 }
 function reqDel(bc){
   if(!reqPicked[reqRef]) return;
   const i=reqPicked[reqRef].findIndex(p=>p.barcode===bc);
-  if(i>=0){ reqPicked[reqRef].splice(i,1); reqSaveLS(); reqRender(); }
+  if(i>=0){ reqPicked[reqRef].splice(i,1); reqSaveLS(); reqRender(); if(CONFIG.supaUrl) reqSave(true); }
 }
 function reqEdit(bc){
   const arr=reqPicked[reqRef]||[]; const p=arr.find(pp=>pp.barcode===bc); if(!p) return;
@@ -1094,8 +1095,39 @@ function reqCurSave(){
     p.units={...reqCur.units}; p.ts=nowStamp();
   }
   reqCur=null; reqSaveLS(); reqRender();
+  if(CONFIG.supaUrl) reqSave(true);
 }
 function reqCurSetUnit(lv, val){ if(!reqCur) return; const n=Math.max(0, parseInt(val)||0); reqCur.units[lv]=n; reqRender(); }
+/* บันทึกลง Supabase table: transfer_scan (scope: date + doc_ref + by_name) */
+async function reqSave(silent){
+  if(!CONFIG.supaUrl || !reqDate || !reqRef) return;
+  if(!silent) loading(true,'กำลังบันทึกลง Supabase…');
+  try{
+    const by=coMyName(), dev=tfDevId();
+    const doc=reqDocs(reqDate).find(d=>d.ref===reqRef)||{};
+    const arr=reqPicked[reqRef]||[];
+    const rows=arr.map(p=>{ const it=reqItems().find(x=>x.barcode===p.barcode)||{}; const need=+it.qty||0;
+      const scannedEa=pickedEa(p), scanQty=Math.floor((scannedEa+0.001)/Math.max(1,p.eaPer||1));
+      const short=Math.max(0, need-scanQty);
+      const mix=p.units?Object.keys(p.units).filter(u=>+p.units[u]>0).map(u=>(+p.units[u])+' '+(UNIT_TH[u]||u)).join(' + '):'';
+      return { scan_date:reqDate, doc_ref:reqRef, wh_from:doc.whFrom||'', wh_to:doc.whTo||'',
+        barcode:p.barcode, product:p.product, unit:p.unit,
+        need_qty:need, scanned_qty:scanQty, short_qty:short, scanned_ea:scannedEa, units_mix:mix,
+        by_name:by, scanned_at:new Date().toISOString(), device:dev };
+    });
+    const q=`scan_date=eq.${encodeURIComponent(reqDate)}&doc_ref=eq.${encodeURIComponent(reqRef)}&by_name=eq.${encodeURIComponent(by)}`;
+    const dr=await supaFetch('/transfer_scan?'+q,{method:'DELETE',headers:{'Prefer':'return=minimal'}});
+    if(!dr.ok){ const t=await dr.text(); throw new Error('DELETE: '+(t||('HTTP '+dr.status))); }
+    let saved=0;
+    if(rows.length){
+      const ir=await supaFetch('/transfer_scan',{method:'POST',body:JSON.stringify(rows),headers:{'Prefer':'return=minimal'}});
+      if(!ir.ok){ const t=await ir.text(); throw new Error('INSERT: '+(t||('HTTP '+ir.status))); }
+      saved=rows.length;
+    }
+    if(!silent) toast(`✅ บันทึก ${saved} รายการลง Supabase (transfer_scan)`);
+  }catch(e){ if(!silent){ console.error(e); toast('❌ '+(e.message||'บันทึกไม่สำเร็จ')); } }
+  finally{ if(!silent) loading(false); }
+}
 async function reqRender(){
   const rq=document.getElementById('mtfReqWrap'); if(!rq) return;
   if(!DATA.dm){
