@@ -1062,15 +1062,37 @@ function reqScan(raw){
   const items=reqItems();
   const match=items.find(x=>{ const p=(DATA.prodIdx||{})[String(x.barcode||'').trim()]; return p && p===u.prod; });
   if(!match){ beep(true); vibrate([200]); toast('❌ บาร์โค้ดนี้ไม่อยู่ในใบโอน '+reqRef); const i=document.getElementById('reqInput'); if(i){ i.value=''; i.focus(); } sbX('req'); return; }
-  reqPicked[reqRef]=reqPicked[reqRef]||[];
-  let p=reqPicked[reqRef].find(pp=>pp.barcode===match.barcode);
-  if(!p){ p={barcode:match.barcode, product:match.product, unit:match.unit, level:match.level, eaPer:match.eaPer, units:{}, ts:nowStamp()}; reqPicked[reqRef].push(p); }
-  p.units[u.level] = (+p.units[u.level]||0) + 1;
-  p.ts = nowStamp();
+  /* เปิดการ์ดใส่จำนวน (เหมือน check-out) — default qty = ที่เคยยิงหน่วยนี้ไว้ · ถ้ายังไม่มี = 1 */
+  const arr=reqPicked[reqRef]||[]; const existing=arr.find(pp=>pp.barcode===match.barcode);
+  const units=existing?{...existing.units}:{};
+  reqCur={ barcode:match.barcode, product:match.product, unit:match.unit,
+    level:match.level, eaPer:match.eaPer, prod:u.prod,
+    need:match.qty, needEa:Math.round(match.qty*match.eaPer),
+    scanLevel:u.level, scanEaPer:u.eaPer,
+    units, qty:(+units[u.level]||0) || 1 };
   beep(); vibrate();
-  reqSaveLS(); reqRender();
+  const i=document.getElementById('reqInput'); if(i){ i.value=''; } sbX('req');
+  reqRender();
+  setTimeout(()=>{ const q=document.getElementById('reqQty'); if(q){ q.focus(); q.select(); } }, 50);
+}
+function reqQtyInput(el){ if(!reqCur) return; reqCur.qty=Math.max(0, parseInt(el.value)||0); }
+function reqStep(d){ if(!reqCur) return; reqCur.qty=Math.max(0,(parseInt(reqCur.qty)||0)+d); reqRender(); setTimeout(()=>{ const q=document.getElementById('reqQty'); if(q){ q.focus(); q.select(); } }, 30); }
+function reqConfirm(){
+  if(!reqCur || !reqCur.scanLevel) return;
+  const qty=Math.max(0, parseInt(reqCur.qty)||0);
+  reqPicked[reqRef]=reqPicked[reqRef]||[];
+  let p=reqPicked[reqRef].find(pp=>pp.barcode===reqCur.barcode);
+  const units=p?{...p.units}:{...(reqCur.units||{})};
+  if(qty>0) units[reqCur.scanLevel]=qty; else delete units[reqCur.scanLevel];
+  const empty=Object.keys(units).every(k=>!+units[k]);
+  if(empty){ if(p) reqPicked[reqRef]=reqPicked[reqRef].filter(pp=>pp.barcode!==reqCur.barcode); }
+  else{
+    if(!p){ p={barcode:reqCur.barcode, product:reqCur.product, unit:reqCur.unit, level:reqCur.level, eaPer:reqCur.eaPer, units:{}, ts:nowStamp()}; reqPicked[reqRef].push(p); }
+    p.units=units; p.ts=nowStamp();
+  }
+  reqCur=null; reqSaveLS(); reqRender();
   if(CONFIG.supaUrl) reqSave(true);
-  const i=document.getElementById('reqInput'); if(i){ i.value=''; i.focus(); } sbX('req');
+  const i=document.getElementById('reqInput'); if(i) i.focus();
 }
 function reqDel(bc){
   if(!reqPicked[reqRef]) return;
@@ -1153,18 +1175,50 @@ async function reqRender(){
     const scCell=scanned?`<b style="color:${over?'#b91c1c':'#166534'}">${esc(fmtEaUnits(sc,d.prod,d.level,d.eaPer))}</b>`:'<span class="muted">-</span>';
     return `<tr style="${bg}"><td style="font-size:11px">${esc(d.barcode)}</td><td style="text-align:left">${esc(d.product)} <span class="muted" style="font-size:10px">${esc(d.unit)}</span>${st}${mixBadge}</td><td class="num"><b>${d.qty}</b></td><td class="num">${scCell}</td><td class="num">${short>0?'<b style="color:var(--red)">'+esc(fmtEaUnits(short,d.prod,d.level,d.eaPer))+'</b>':(scanned?'<span style="color:#166534">✓</span>':'<span class="muted">-</span>')}</td><td style="white-space:nowrap">${scanned?`<button class="ico-btn" onclick="reqEdit('${esc(d.barcode)}')">✎</button> <button class="ico-btn" onclick="reqDel('${esc(d.barcode)}')">✕</button>`:''}</td></tr>`;
   }).join('');
-  /* Manual edit card สำหรับปรับหน่วยรายบรรทัด (ยิงหลายหน่วยได้) */
-  const editCard=reqCur?`<div class="scan-card">
-    <div class="pname">${esc(reqCur.product)}</div>
-    <div class="pbar">บาร์โค้ด: ${esc(reqCur.barcode)} · หน่วยบิล <b>${esc(reqCur.unit)}</b> · ต้องออก <b>${reqCur.need} = ${esc(fmtEaUnits(reqCur.needEa,reqCur.prod,reqCur.level,reqCur.eaPer))}</b></div>
-    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:8px">
-      ${['CS','BP','PA','EA'].map(lv=>{ const per=eaPerOf(reqCur.prod,lv,(lv===reqCur.level?reqCur.eaPer:0)); if(lv!=='EA' && !(per>1)) return ''; const val=+reqCur.units[lv]||0;
-        return `<label style="display:flex;flex-direction:column;gap:3px"><span style="font-size:11px;color:var(--muted);font-weight:700">${UNIT_TH[lv]||lv}${per>1?' (×'+per+')':''}</span><input type="number" inputmode="numeric" min="0" value="${val}" oninput="reqCurSetUnit('${lv}', this.value)" style="padding:9px;border:1.5px solid var(--border);border-radius:9px;font-size:16px;font-weight:800;text-align:center;color:var(--navy)"></label>`; }).join('')}
-    </div>
-    <div style="display:flex;gap:8px;margin-top:10px">
-      <button class="scan-btn gold" style="flex:1" onclick="reqCurSave()">✓ บันทึก</button>
-      <button class="scan-btn gray" onclick="reqCurCancel()">ยกเลิก</button>
-    </div></div>`:'';
+  /* การ์ดหลังยิง — โหมด "scan" (จากปุ่ม/กล้อง · ช่องเดียว) หรือ "edit" (จากปุ่ม ✎ · หลายหน่วย) */
+  let editCard='';
+  if(reqCur && reqCur.scanLevel){
+    /* ── โหมด scan: ช่องกรอกจำนวนช่องเดียว (หน่วยที่เพิ่งยิง) ── */
+    const c=reqCur, prod=(DATA.prodIdx||{})[c.barcode]||null, thumb=prod?driveThumb(prod.img):'';
+    const scannedNow=Math.round(Object.keys(c.units||{}).reduce((s,u)=>{ if(u===c.scanLevel) return s; return s+(+c.units[u]||0)*eaPerOf(c.prod,u,(u===c.level?c.eaPer:1)); },0)+(+c.qty||0)*c.scanEaPer);
+    const roomEa=Math.max(0, c.needEa - Math.round(Object.keys(c.units||{}).reduce((s,u)=>{ if(u===c.scanLevel) return s; return s+(+c.units[u]||0)*eaPerOf(c.prod,u,(u===c.level?c.eaPer:1)); },0)));
+    const maxQ=Math.floor((roomEa+0.001)/Math.max(1,c.scanEaPer));
+    const over=scannedNow>c.needEa;
+    editCard=`<div class="scan-card">
+      <div style="display:flex;gap:11px;align-items:flex-start">
+        ${thumb?`<img src="${esc(thumb)}" alt="" onerror="this.style.display='none'" style="width:64px;height:64px;object-fit:contain;border:1px solid var(--border);border-radius:9px;background:#fff;flex:none">`:''}
+        <div style="flex:1;min-width:0">
+          <div class="pname">${esc(c.product)}</div>
+          <div class="pbar">บาร์โค้ด: ${esc(c.barcode)}</div>
+          <div class="ord" style="margin-top:5px">📤 ต้องออก <b>${c.need}</b> ${esc(UNIT_TH[c.level]||c.unit)} <span class="muted">(= ${esc(fmtEaUnits(c.needEa,c.prod,c.level,c.eaPer))})</span></div>
+        </div>
+      </div>
+      <label style="font-size:13px;color:var(--muted);font-weight:700;margin-top:8px;display:block">จำนวนที่ยิง — กรอกเป็น <b style="color:var(--navy);font-size:15px">${esc(UNIT_TH[c.scanLevel]||c.scanLevel)}</b> <span class="muted">(หน่วยที่เพิ่งยิง${maxQ>0?' · เต็ม '+maxQ:''})</span></label>
+      <div class="recv-box">
+        <button class="stp" onclick="reqStep(-1)">−</button>
+        <input id="reqQty" type="number" inputmode="numeric" value="${c.qty}" oninput="reqQtyInput(this)" min="0" onkeydown="if(event.key==='Enter'){event.preventDefault();reqConfirm();}">
+        <button class="stp" onclick="reqStep(1)">+</button>
+      </div>
+      <div style="font-size:12.5px;font-weight:700;margin-top:5px;color:${over?'#b91c1c':'#166534'}">รวมที่ยิง (ทุกหน่วย) = ${esc(fmtEaUnits(scannedNow,c.prod,c.level,c.eaPer))} / ต้องออก ${esc(fmtEaUnits(c.needEa,c.prod,c.level,c.eaPer))}${over?' · 🔴 เกิน':(scannedNow>=c.needEa?' · ✅ ครบ':'')}</div>
+      ${maxQ>0?`<div style="display:flex;gap:6px;margin:8px 0"><button class="chip" onclick="reqCur.qty=${maxQ};reqRender();setTimeout(()=>{const q=document.getElementById('reqQty');if(q){q.focus();q.select();}},30)">ครบ (${maxQ} ${esc(UNIT_TH[c.scanLevel]||c.scanLevel)})</button><button class="chip" onclick="reqCur.qty=0;reqRender();setTimeout(()=>{const q=document.getElementById('reqQty');if(q){q.focus();q.select();}},30)">ล้าง</button></div>`:''}
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <button class="scan-btn gold" style="flex:1" onclick="reqConfirm()">✓ ยืนยัน</button>
+        <button class="scan-btn gray" onclick="reqCurCancel()">ยกเลิก</button>
+      </div></div>`;
+  } else if(reqCur){
+    /* ── โหมด edit (จาก ✎): แยกหน่วย CS/BP/PA/EA ── */
+    editCard=`<div class="scan-card">
+      <div class="pname">${esc(reqCur.product)}</div>
+      <div class="pbar">บาร์โค้ด: ${esc(reqCur.barcode)} · หน่วยบิล <b>${esc(reqCur.unit)}</b> · ต้องออก <b>${reqCur.need} = ${esc(fmtEaUnits(reqCur.needEa,reqCur.prod,reqCur.level,reqCur.eaPer))}</b></div>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:8px">
+        ${['CS','BP','PA','EA'].map(lv=>{ const per=eaPerOf(reqCur.prod,lv,(lv===reqCur.level?reqCur.eaPer:0)); if(lv!=='EA' && !(per>1)) return ''; const val=+reqCur.units[lv]||0;
+          return `<label style="display:flex;flex-direction:column;gap:3px"><span style="font-size:11px;color:var(--muted);font-weight:700">${UNIT_TH[lv]||lv}${per>1?' (×'+per+')':''}</span><input type="number" inputmode="numeric" min="0" value="${val}" oninput="reqCurSetUnit('${lv}', this.value)" style="padding:9px;border:1.5px solid var(--border);border-radius:9px;font-size:16px;font-weight:800;text-align:center;color:var(--navy)"></label>`; }).join('')}
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="scan-btn gold" style="flex:1" onclick="reqCurSave()">✓ บันทึก</button>
+        <button class="scan-btn gray" onclick="reqCurCancel()">ยกเลิก</button>
+      </div></div>`;
+  }
   rq.innerHTML=`
     <div style="background:var(--navy);color:#fff;border-radius:12px;padding:11px 13px;margin-bottom:10px">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
