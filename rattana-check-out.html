@@ -635,12 +635,30 @@ const CO_SYNC_TAB='ยิงเช็คออก';
 function coSyncTab(){ return CO_SYNC_TAB; }
 function coSrcArr(){ return DATA.dsdc || []; }
 function coSrcLabel(){ return 'ใบขาย'; }
-/* บิลที่ยืนยันเช็คเสร็จแล้ว (โชว์ "✓ เช็คแล้ว") — เก็บ ref ต่อ วัน+คลัง (localStorage · ต่อเครื่อง) */
-let coConfirmed={};
-try{ coConfirmed=JSON.parse(localStorage.getItem('mp_co_confirmed')||'{}')||{}; }catch(e){ coConfirmed={}; }
-function coConfKey(){ return (coDate||'x')+'_'+(coWh||'x'); }
-function coConfSet(){ return new Set(coConfirmed[coConfKey()]||[]); }
-function coMarkConfirmed(refs){ const k=coConfKey(); const s=new Set(coConfirmed[k]||[]); (refs||[]).forEach(r=>s.add(r)); coConfirmed[k]=[...s]; try{ localStorage.setItem('mp_co_confirmed',JSON.stringify(coConfirmed)); }catch(e){} }
+/* บิลที่ยืนยันเช็คเสร็จแล้ว (โชว์ "✓ เช็คแล้ว") — เก็บเป็น marker row ในตารางเดิม checkout_scan (barcode=__CONFIRMED__ · product=เลขบิล) แชร์ทุกเครื่อง · ไม่ต้องมีตารางใหม่ */
+const CONF_BC='__CONFIRMED__';
+let coConfRefs=new Set();
+function coConfSet(){ return coConfRefs; }
+async function coLoadConfirmed(){
+  coConfRefs=new Set();
+  if(!CONFIG.supaUrl || !coDate || !coWh) return;
+  try{
+    const q=`scan_date=eq.${encodeURIComponent(coDate)}&wh=eq.${encodeURIComponent(coWh)}&barcode=eq.${encodeURIComponent(CONF_BC)}&select=product`;
+    const res=await supaFetch('/checkout_scan?'+q); if(!res.ok) return;
+    const rows=await res.json(); coConfRefs=new Set((rows||[]).map(r=>String(r.product)));
+  }catch(e){}
+}
+async function coMarkConfirmed(refs){
+  if(!CONFIG.supaUrl || !coDate || !coWh) return;
+  /* insert marker เฉพาะบิลที่ยังไม่เคยมาร์ค (กันซ้ำสะสม · อ่านด้วย Set อยู่แล้ว) */
+  const fresh=(refs||[]).map(String).filter(r=>!coConfRefs.has(r));
+  if(!fresh.length){ (refs||[]).forEach(r=>coConfRefs.add(String(r))); return; }
+  const rows=fresh.map(r=>({scan_date:coDate, wh:coWh, barcode:CONF_BC, product:r, by_name:coMyName(), scanned_ea:0, scanned_at:new Date().toISOString(), device:tfDevId()}));
+  try{
+    await supaFetch('/checkout_scan',{method:'POST',headers:{'Prefer':'return=minimal'},body:JSON.stringify(rows)});
+    fresh.forEach(r=>coConfRefs.add(r));
+  }catch(e){ console.warn('mark confirmed:',e); }
+}
 let coTeam={}, coExcl=new Set(), coSheetRows=[], coPplOpen=false, coSyncTimer=null, coSyncAt='', _coVisBound=false, coDirty=false;
 let coSubPending=null, coSubQ='';   // v2.3: จับคู่สินค้าทดแทน — coSubPending={code,name} = บาร์ที่ยิงแล้วไม่อยู่ในบิล รอเลือกว่าทดแทนตัวไหน
 const CO_SYNC_HEADER=['วันที่','คลัง','บาร์โค้ด','สินค้า','หน่วย','ต้องออก','ยิงแล้ว','ขาด','-','ทดแทน','ชื่อผู้ยิง','วันที่ยิง','เวลายิง','เครื่อง','ยิงแล้ว(EA)','ยิงแยกหน่วย'];   // col9 = โน้ตทดแทน (readTransfer คืน col9 เป็น .alloc → Picker อ่านได้) · col14 = EA รวมทุกหน่วย (v2.7 · gas-v17 คืนเป็น .ea) · col15 = อ่านในชีทเฉยๆ
@@ -753,11 +771,12 @@ async function enterCoTab(){
   coRestoreLS();
   if(!CO_MODES.some(x=>x.v===coMethod)) coMethod='sm';   /* โหมดเก่า (bill) ที่ค้าง → เซล */
   coRender();
+  coLoadConfirmed().then(coRender);   /* ดึงสถานะ "เช็คแล้ว" (แชร์ทุกเครื่อง) */
 }
 function coSetWh(w){ coWh=w; try{ localStorage.setItem('mp_co_wh',w); }catch(e){} coSel=new Set(); coCur=null; coSheetRows=[]; coTeam={};
   const ds=coDatesFor(); if(!coDate || !ds.includes(coDate)) coDate=ds[ds.length-1]||'';   /* ปรับวันที่ให้อยู่ในชุดของคลังใหม่ */
-  coRestoreLS(); coRender(); coSyncPull(); }
-function coSetDate(d){ coDate=d; coSel=new Set(); coCur=null; coQ2=''; coSheetRows=[]; coTeam={}; coRestoreLS(); coRender(); coSyncPull(); }
+  coRestoreLS(); coRender(); coSyncPull(); coLoadConfirmed().then(coRender); }
+function coSetDate(d){ coDate=d; coSel=new Set(); coCur=null; coQ2=''; coSheetRows=[]; coTeam={}; coRestoreLS(); coRender(); coSyncPull(); coLoadConfirmed().then(coRender); }
 function coSetMethod(m){ coMethod=m; try{ localStorage.setItem('mp_co_mode',m); }catch(e){} coRender(); }
 function coToggleSel(k){ if(coSel.has(k)) coSel.delete(k); else coSel.add(k); coSaveLS(); coRender(); }
 function coSelAll(){ coBillsF().forEach(b=>coSel.add(b.ref)); coSaveLS(); coRender(); }
@@ -773,7 +792,7 @@ async function coBack(){
   }
   if(coCamOn) coStopCam(); coStep='pick'; coCur=null; coSaveLS(); coRender();
 }
-async function coRefresh(){ try{ await loadDsdc(true); coCur=null; coRender(); toast('✅ รีเฟรชใบขายแล้ว ('+coSrcArr().length.toLocaleString()+' บรรทัด)'); }catch(e){ toast('❌ รีเฟรชไม่ได้ — '+(e.message||'')); } }
+async function coRefresh(){ try{ await loadDsdc(true); await coLoadConfirmed(); coCur=null; coRender(); toast('✅ รีเฟรชใบขายแล้ว ('+coSrcArr().length.toLocaleString()+' บรรทัด)'); }catch(e){ toast('❌ รีเฟรชไม่ได้ — '+(e.message||'')); } }
 function coRender(){
   const p=document.getElementById('panel-co'); if(!p) return;
   if(coStep==='scan') coTeam=coTeamCalc();
@@ -934,7 +953,7 @@ async function coConfirmDone(){
     const dmc=DM[coMethod]||DM.unit;
     const embed={ title:dmc.t+(shortList.length?' ⚠️ ของขาด':''), color:dmc.c, description:desc };
     const ok=await notifyDiscord(embed, 'CheckOut'+(coWh?' '+coWh:''), coWh);
-    if(ok){ coMarkConfirmed([...coSel]); }   /* ยืนยันแล้ว → มาร์คบิลว่า "เช็คแล้ว" */
+    if(ok){ await coMarkConfirmed([...coSel]); coRender(); }   /* ยืนยันแล้ว → มาร์คบิลว่า "เช็คแล้ว" (แชร์ทุกเครื่อง) */
     toast(ok?'✅ แจ้งเตือน Discord แล้ว · มาร์คว่าเช็คแล้ว':'❌ ส่ง Discord ไม่สำเร็จ');
   }catch(e){ toast('❌ '+(e.message||'ส่งไม่สำเร็จ')); }
   finally{ loading(false); }
@@ -979,7 +998,7 @@ async function coDelPerson(nm){
   if(!await confirmSafe(`ลบข้อมูลยิงของ "${nm}" (${coDate} · ${g.items||0} รายการ · ทุกเครื่องของเขา)?${g.mine?'\n\n⚠️ นี่คือของเราเอง — ลบแล้วเริ่มใหม่':''}`)) return;
   loading(true,'กำลังลบของ '+nm+'…');
   try{
-    const q=`scan_date=eq.${encodeURIComponent(coDate)}&wh=eq.${encodeURIComponent(coWh)}&by_name=eq.${encodeURIComponent(nm)}`;
+    const q=`scan_date=eq.${encodeURIComponent(coDate)}&wh=eq.${encodeURIComponent(coWh)}&by_name=eq.${encodeURIComponent(nm)}&barcode=neq.${encodeURIComponent(CONF_BC)}`;   /* ไม่แตะ marker "เช็คแล้ว" */
     const res=await supaFetch('/checkout_scan?'+q,{method:'DELETE',headers:{'Prefer':'return=representation'}});
     if(!res.ok){ const t=await res.text(); throw new Error(t||('HTTP '+res.status)); }
     const removed=(await res.json())||[];
@@ -1140,7 +1159,7 @@ async function coSave(silent){
         sub_barcode:subBc, scanned_ea:ea, units_mix:mix,
         by_name:by, scanned_at:new Date().toISOString(), device:dev };
     });
-    const q=`scan_date=eq.${encodeURIComponent(coDate)}&wh=eq.${encodeURIComponent(coWh)}&by_name=eq.${encodeURIComponent(by)}`;
+    const q=`scan_date=eq.${encodeURIComponent(coDate)}&wh=eq.${encodeURIComponent(coWh)}&by_name=eq.${encodeURIComponent(by)}&barcode=neq.${encodeURIComponent(CONF_BC)}`;   /* กัน marker "เช็คแล้ว" โดนลบตอน re-save */
     const dr=await supaFetch('/checkout_scan?'+q,{method:'DELETE',headers:{'Prefer':'return=minimal'}});
     if(!dr.ok){ const t=await dr.text(); throw new Error('DELETE: '+(t||('HTTP '+dr.status))); }
     let saved=0;
@@ -1163,7 +1182,9 @@ async function coSyncPull(force){
     const res=await supaFetch('/checkout_scan?'+q);
     if(!res.ok) return;
     const rows=await res.json(); if(!Array.isArray(rows)) return;
-    coSheetRows=rows.map(r=>({ barcode:r.barcode, product:r.product, unit:r.unit,
+    /* แยก marker "เช็คแล้ว" (barcode=__CONFIRMED__) ออกจากแถวสแกนจริง */
+    coConfRefs=new Set(rows.filter(r=>String(r.barcode)===CONF_BC).map(r=>String(r.product)));
+    coSheetRows=rows.filter(r=>String(r.barcode)!==CONF_BC).map(r=>({ barcode:r.barcode, product:r.product, unit:r.unit,
       qty:r.scanned_qty, ea:r.scanned_ea, by:r.by_name, ts:r.scanned_at||'', device:r.device,
       alloc:r.sub_barcode||'' }));
     const t=coTeamCalc(), changed=JSON.stringify(t)!==JSON.stringify(coTeam);
@@ -1208,6 +1229,24 @@ let scanTabMode='mtf';
 let mtfFrom='C4', mtfTo='W4', mtfItems=[], mtfCur=null, mtfCam=null, mtfCamOn=false, mtfLast={code:'',t:0}, mtfSaved=true;
 /* 📋 ใบโอนย้าย (req) — อ่านจาก DM sheet · เลือก วันที่ + เลขเอกสาร + ยิงเช็คของ */
 let reqDate='', reqRef='', reqPicked={}, reqCur=null, reqQ='', reqCam=null, reqCamOn=false, reqLast={code:'',t:0};
+/* เอกสารโอนที่ยืนยันเช็คเสร็จแล้ว — marker row ในตารางเดิม transfer_scan (barcode=__CONFIRMED__ · doc_ref=เลขเอกสาร) แชร์ทุกเครื่อง · ไม่ต้องมีตารางใหม่ */
+let reqConfRefs=new Set(), _reqConfDate='';
+async function reqLoadConfirmed(){
+  if(!CONFIG.supaUrl || !reqDate){ reqConfRefs=new Set(); return; }
+  try{
+    const q=`scan_date=eq.${encodeURIComponent(reqDate)}&barcode=eq.${encodeURIComponent(CONF_BC)}&select=doc_ref`;
+    const res=await supaFetch('/transfer_scan?'+q); if(!res.ok) return;
+    const rows=await res.json(); reqConfRefs=new Set((rows||[]).map(r=>String(r.doc_ref))); _reqConfDate=reqDate;
+  }catch(e){}
+}
+async function reqMarkConfirmed(ref){
+  if(!CONFIG.supaUrl || !reqDate || !ref) return;
+  if(reqConfRefs.has(String(ref))) return;   /* มาร์คแล้ว ไม่ต้องซ้ำ */
+  try{
+    await supaFetch('/transfer_scan',{method:'POST',headers:{'Prefer':'return=minimal'},body:JSON.stringify([{scan_date:reqDate, doc_ref:String(ref), barcode:CONF_BC, product:'', by_name:coMyName(), scanned_ea:0, scanned_at:new Date().toISOString(), device:tfDevId()}])});
+    reqConfRefs.add(String(ref));
+  }catch(e){ console.warn('req mark:',e); }
+}
 function renderScan(){
   const p=document.getElementById('panel-scan'); if(!p) return;
   if(!document.getElementById('scanShell')){
@@ -1358,7 +1397,7 @@ async function reqSave(silent){
         need_qty:need, scanned_qty:scanQty, short_qty:short, scanned_ea:scannedEa, units_mix:mix,
         by_name:by, scanned_at:new Date().toISOString(), device:dev };
     });
-    const q=`scan_date=eq.${encodeURIComponent(reqDate)}&doc_ref=eq.${encodeURIComponent(reqRef)}&by_name=eq.${encodeURIComponent(by)}`;
+    const q=`scan_date=eq.${encodeURIComponent(reqDate)}&doc_ref=eq.${encodeURIComponent(reqRef)}&by_name=eq.${encodeURIComponent(by)}&barcode=neq.${encodeURIComponent(CONF_BC)}`;   /* กัน marker "เช็คแล้ว" โดนลบตอน re-save */
     const dr=await supaFetch('/transfer_scan?'+q,{method:'DELETE',headers:{'Prefer':'return=minimal'}});
     if(!dr.ok){ const t=await dr.text(); throw new Error('DELETE: '+(t||('HTTP '+dr.status))); }
     let saved=0;
@@ -1380,6 +1419,7 @@ async function reqRender(){
   }
   reqRestoreLS();
   const dates=reqDates(); if(!reqDate || !dates.includes(reqDate)) reqDate=dates[dates.length-1]||'';
+  if(_reqConfDate!==reqDate){ reqLoadConfirmed().then(()=>reqRender()); }   /* โหลดสถานะเช็คแล้ว (แชร์ทุกเครื่อง) เมื่อเปลี่ยนวัน */
   const docs=reqDocs(reqDate); if(!reqRef || !docs.find(d=>d.ref===reqRef)) reqRef=docs[0]?docs[0].ref:'';
   const items=reqItems();
   const cur=docs.find(d=>d.ref===reqRef);
@@ -1445,11 +1485,12 @@ async function reqRender(){
       <div style="display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap">
         <b style="font-size:14px;white-space:nowrap">📋 ใบโอนย้าย</b>
         <select onchange="reqSetDate(this.value)" style="padding:6px 8px;border-radius:7px;border:none;font-family:inherit;font-size:13px;font-weight:700;color:var(--navy)">${dates.length?dates.map(d=>`<option value="${d}"${d===reqDate?' selected':''}>${d}</option>`).join(''):'<option>—</option>'}</select>
-        <select onchange="reqSetRef(this.value)" style="flex:1;min-width:130px;max-width:100%;padding:6px 8px;border-radius:7px;border:none;font-family:inherit;font-size:13px;font-weight:700;color:var(--navy)">${docs.length?docs.map(d=>`<option value="${esc(d.ref)}"${d.ref===reqRef?' selected':''}>${esc(d.ref)} · ${esc(d.whFrom||'-')}→${esc(d.whTo||'-')} · ${d.lines} รายการ</option>`).join(''):'<option>—</option>'}</select>
+        <select onchange="reqSetRef(this.value)" style="flex:1;min-width:130px;max-width:100%;padding:6px 8px;border-radius:7px;border:none;font-family:inherit;font-size:13px;font-weight:700;color:var(--navy)">${docs.length?docs.map(d=>`<option value="${esc(d.ref)}"${d.ref===reqRef?' selected':''}>${reqConfRefs.has(d.ref)?'✓ ':''}${esc(d.ref)} · ${esc(d.whFrom||'-')}→${esc(d.whTo||'-')} · ${d.lines} รายการ</option>`).join(''):'<option>—</option>'}</select>
         <button onclick="reqRefresh()" style="padding:6px 9px;border-radius:7px;border:1px solid rgba(255,255,255,.4);background:transparent;color:#fff;cursor:pointer;font-size:12px;font-weight:700">🔄</button>
       </div>
       ${cur?`<div style="display:flex;align-items:center;gap:8px;margin-top:6px">
         <span style="font-size:11.5px;font-weight:800;white-space:nowrap">✅ ${done}/${total} (${pct}%)</span>
+        ${reqConfRefs.has(reqRef)?'<span style="font-size:10px;background:#dcfce7;color:#166534;border-radius:5px;padding:1px 7px;font-weight:800;white-space:nowrap">✓ เช็คแล้ว</span>':''}
         <div style="flex:1;height:5px;background:rgba(255,255,255,.2);border-radius:3px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--gold);transition:width .3s"></div></div>
       </div>`:''}
     </div>
@@ -1485,13 +1526,14 @@ async function reqConfirmDone(){
     const desc=`เอกสาร : ${reqRef}\nคลัง : ${doc.whFrom||'-'} → ${doc.whTo||'-'}\nผู้เช็ค : ${coMyName()}\nวันที่ : ${dmy(reqDate)}\n${shortLines}`;
     const embed={ title:'เช็คโอนย้าย', color:shortList.length?0xf59e0b:0x22c55e, description:desc };
     const ok=await notifyDiscord(embed, 'CheckOut'+(currentUser&&currentUser.wh?' '+currentUser.wh:''));
-    toast(ok?'✅ แจ้งเตือน Discord แล้ว':'❌ ส่ง Discord ไม่สำเร็จ');
+    if(ok){ await reqMarkConfirmed(reqRef); reqRender(); }   /* ยืนยันแล้ว → มาร์คเอกสารว่า "เช็คแล้ว" (แชร์ทุกเครื่อง) */
+    toast(ok?'✅ แจ้งเตือน Discord แล้ว · มาร์คว่าเช็คแล้ว':'❌ ส่ง Discord ไม่สำเร็จ');
   }catch(e){ toast('❌ '+(e.message||'ส่งไม่สำเร็จ')); }
   finally{ loading(false); }
 }
 function reqSetDate(d){ reqDate=d; reqRef=''; reqCur=null; reqSaveLS(); reqRender(); }
 function reqSetRef(r){ reqRef=r; reqCur=null; reqSaveLS(); reqRender(); }
-async function reqRefresh(){ try{ loading(true,'กำลังโหลด DM…'); await loadDm(true); await reqRender(); toast('✅ รีเฟรชใบโอนย้ายแล้ว ('+(DATA.dm||[]).length.toLocaleString()+' บรรทัด)'); }catch(e){ toast('❌ '+(e.message||'รีเฟรชไม่ได้')); } finally{ loading(false); } }
+async function reqRefresh(){ try{ loading(true,'กำลังโหลด DM…'); await loadDm(true); _reqConfDate=''; await reqLoadConfirmed(); await reqRender(); toast('✅ รีเฟรชใบโอนย้ายแล้ว ('+(DATA.dm||[]).length.toLocaleString()+' บรรทัด)'); }catch(e){ toast('❌ '+(e.message||'รีเฟรชไม่ได้')); } finally{ loading(false); } }
 /* กล้องยิงบาร์โค้ด (req) — เหมือน mtf */
 function reqToggleCam(){ reqCamOn?reqStopCam():reqStartCam(); }
 async function reqStartCam(){
