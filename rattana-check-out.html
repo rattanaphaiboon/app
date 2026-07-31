@@ -196,6 +196,7 @@
     <span class="ver">v2.7</span>
     <div class="spacer"></div>
     <div class="who" id="whoBox"></div>
+    <button class="icon-btn" id="unitAdminBtn" onclick="dumOpen()" title="จัดการหน่วยส่ง (Base)" style="display:none">⚙️</button>
     <a class="hub-btn" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">← Hub</a>
   </header>
   <nav class="bottomnav">
@@ -212,6 +213,25 @@
 
 <div id="toast"></div>
 <div id="loadOverlay"><div class="box" id="loadMsg">กำลังโหลด…</div></div>
+
+<!-- ⚙️ จัดการ Base หน่วยส่ง (เฉพาะแผนกพัฒนาธุรกิจ) -->
+<div id="unitAdmin" style="display:none;position:fixed;inset:0;background:rgba(20,83,45,.5);z-index:3000;padding:0">
+  <div style="background:var(--bg);max-width:760px;margin:0 auto;height:100%;display:flex;flex-direction:column">
+    <div style="background:var(--navy);color:#fff;padding:12px 14px;display:flex;align-items:center;gap:10px;flex-shrink:0">
+      <b style="font-size:16px">⚙️ จัดการหน่วยส่ง (Base)</b>
+      <span style="font-size:11px;opacity:.7">Supabase · delivery_unit_map</span>
+      <div style="flex:1"></div>
+      <button onclick="dumClose()" style="background:transparent;border:1px solid rgba(255,255,255,.4);color:#fff;border-radius:8px;padding:6px 12px;font-family:inherit;font-weight:700;cursor:pointer">✕ ปิด</button>
+    </div>
+    <div style="padding:10px 12px;flex:1;overflow:auto" id="dumBody"></div>
+    <div style="padding:10px 12px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0;background:var(--card-bg)">
+      <button class="btn btn-outline btn-sm" onclick="dumImport()">📥 นำเข้าจากชีทเดิม</button>
+      <div style="flex:1"></div>
+      <button class="btn btn-outline" onclick="dumAddRow()">➕ เพิ่มแถว</button>
+      <button class="btn btn-gold" onclick="dumSave()">💾 บันทึกลง Base</button>
+    </div>
+  </div>
+</div>
 
 <script>
 /* ================= CONFIG — หลังบ้านชุดเดียวกับ Pre-order Picker ================= */
@@ -236,7 +256,8 @@ const CONFIG = {
   supaUrl: 'https://uytzsuwapwkqkougorvb.supabase.co',
   supaKey: 'sb_publishable_2iDqojkyM2pqJxQJfvnxyg_Y6WMQ6Q8',
   minRole: 3,
-  adminDepts: ['ธุรการขาย'],
+  adminDepts: ['ธุรการขาย','พัฒนาธุรกิจ'],
+  bizDevDept: 'พัฒนาธุรกิจ',   // แผนกที่แก้ไข Base หน่วยส่งได้
 };
 /* คลัง — โหลดจริงจาก PDDT (คอลัมน์ "STOCK *") ใน loadProducts() · WH_COLOR ให้สีตัวที่รู้จัก · whColor() มี fallback สำหรับคลังใหม่ */
 const WH_COLOR = {
@@ -413,6 +434,7 @@ function enterApp(){
   const uwh=String(currentUser.wh||'').trim().toUpperCase();
   WH_LOCK = (currentUser.role<6 && uwh) ? uwh : null;   /* ล็อกตามคลังผู้ใช้ (คลังอะไรก็ได้ที่มีใน PDDT) */
   document.getElementById('whoBox').innerHTML = `${esc(currentUser.name)} · <span onclick="logout()" style="cursor:pointer;text-decoration:underline">ออก</span><br><span class="muted">Role ${currentUser.role}${currentUser.wh?' · '+esc(currentUser.wh):''}</span>`;
+  const gb=document.getElementById('unitAdminBtn'); if(gb) gb.style.display=isBizDev()?'flex':'none';   /* ⚙️ แก้ Base เฉพาะพัฒนาธุรกิจ */
   reload();
 }
 async function reload(){
@@ -427,21 +449,93 @@ async function reload(){
   }catch(e){ console.error(e); toast('❌ '+(e.message||'โหลดข้อมูลไม่สำเร็จ')); }
   finally{ loading(false); }
 }
-/* ================= หน่วยส่ง (config sheet) — เลือกรหัสหน่วยส่ง → กรอง DS_DC ที่ DI_REF ขึ้นต้นด้วยรหัสบิลของหน่วยนั้น ================= */
+/* ================= หน่วยส่ง (Base ใน Supabase: delivery_unit_map) — เลือกรหัสหน่วยส่ง → กรอง DS_DC ที่ DI_REF ขึ้นต้นด้วยรหัสบิลของหน่วยนั้น ================= */
 let UNIT_TO_PREFIX={}, UNIT_ROUTE={}, UNIT_LIST=[];
-async function loadUnitMap(){
-  if(!CONFIG.unitMapId) return;
-  const rows=asObjects(await gvizFetch(CONFIG.unitMapId,{}));   // แท็บแรก · A=รหัสบิล · B=สายส่ง · C=รหัสหน่วยส่ง
+let DUM_ROWS=[];   // แถวดิบจาก Supabase (ใช้ในหน้าแก้ไข) — {id, bill_code, route, unit_code}
+function buildUnitMap(rows){
   UNIT_TO_PREFIX={}; UNIT_ROUTE={};
-  rows.forEach(r=>{
-    const bill=String(r['รหัสบิล']||'').trim();
-    const route=String(r['สายส่ง']||'').trim();
-    const unit=String(r['รหัสหน่วยส่ง']||'').trim();
+  (rows||[]).forEach(r=>{
+    const bill=String(r.bill_code||'').trim(), route=String(r.route||'').trim(), unit=String(r.unit_code||'').trim();
     if(!unit || !bill) return;
     (UNIT_TO_PREFIX[unit]=UNIT_TO_PREFIX[unit]||[]).push(bill);
     if(route && !UNIT_ROUTE[unit]) UNIT_ROUTE[unit]=route;
   });
   UNIT_LIST=Object.keys(UNIT_TO_PREFIX).sort();
+}
+async function loadUnitMap(){
+  if(!CONFIG.supaUrl) return;
+  const res=await supaFetch('/delivery_unit_map?select=*&order=unit_code.asc,bill_code.asc');
+  if(!res.ok){ const t=await res.text(); throw new Error(t||('HTTP '+res.status)); }
+  DUM_ROWS=(await res.json())||[];
+  buildUnitMap(DUM_ROWS);
+}
+/* นำเข้าครั้งเดียวจากชีท config เดิม (A=รหัสบิล · B=สายส่ง · C=รหัสหน่วยส่ง) → คืน array ให้หน้าแก้ไข review ก่อนบันทึก */
+async function importUnitMapFromSheet(){
+  if(!CONFIG.unitMapId) throw new Error('ไม่ได้ตั้ง unitMapId');
+  const rows=asObjects(await gvizFetch(CONFIG.unitMapId,{}));
+  return rows.map(r=>({ bill_code:String(r['รหัสบิล']||'').trim(), route:String(r['สายส่ง']||'').trim(), unit_code:String(r['รหัสหน่วยส่ง']||'').trim() }))
+    .filter(x=>x.bill_code && x.unit_code);
+}
+function isBizDev(){ const d=String((currentUser&&currentUser.dept)||'').trim(); return !!(CONFIG.bizDevDept && d.indexOf(CONFIG.bizDevDept)>=0); }
+/* ===== หน้าแก้ไข Base หน่วยส่ง (เฉพาะพัฒนาธุรกิจ) ===== */
+let dumRows=[];   // สำเนา editable [{bill_code, route, unit_code}]
+function dumOpen(){
+  if(!isBizDev()){ toast('⛔ เฉพาะแผนกพัฒนาธุรกิจ'); return; }
+  dumRows=(DUM_ROWS||[]).map(r=>({bill_code:String(r.bill_code||''), route:String(r.route||''), unit_code:String(r.unit_code||'')}));
+  document.getElementById('unitAdmin').style.display='block';
+  dumRender();
+}
+function dumClose(){ document.getElementById('unitAdmin').style.display='none'; }
+function dumAddRow(){ dumRows.push({bill_code:'', route:'', unit_code:''}); dumRender(); setTimeout(()=>{ const rows=document.querySelectorAll('#dumBody input[data-f="bill_code"]'); const last=rows[rows.length-1]; if(last) last.focus(); },30); }
+function dumDelRow(i){ dumRows.splice(i,1); dumRender(); }
+function dumSetField(i,f,v){ if(dumRows[i]) dumRows[i][f]=v; }
+function dumRender(){
+  const b=document.getElementById('dumBody'); if(!b) return;
+  const rowHtml=(r,i)=>`<tr>
+    <td style="padding:3px"><input value="${esc(r.bill_code)}" data-f="bill_code" oninput="dumSetField(${i},'bill_code',this.value)" placeholder="DC01" style="width:100%;padding:7px 8px;border:1.5px solid var(--border);border-radius:7px;font-family:inherit;font-size:14px;font-weight:700;color:var(--navy)"></td>
+    <td style="padding:3px"><input value="${esc(r.route)}" data-f="route" oninput="dumSetField(${i},'route',this.value)" placeholder="สายส่ง (ไม่บังคับ)" style="width:100%;padding:7px 8px;border:1.5px solid var(--border);border-radius:7px;font-family:inherit;font-size:14px"></td>
+    <td style="padding:3px"><input value="${esc(r.unit_code)}" data-f="unit_code" oninput="dumSetField(${i},'unit_code',this.value)" placeholder="P101" style="width:100%;padding:7px 8px;border:1.5px solid var(--border);border-radius:7px;font-family:inherit;font-size:14px;font-weight:700;color:var(--navy)"></td>
+    <td style="padding:3px;white-space:nowrap"><button class="ico-btn" onclick="dumDelRow(${i})" title="ลบแถว">✕</button></td></tr>`;
+  b.innerHTML=`
+    <div class="muted" style="font-size:12px;margin-bottom:8px">รหัสบิล = ต้นเลขเอกสาร (DI_REF ขึ้นต้นด้วยค่านี้) · 1 หน่วยส่งมีหลายรหัสบิลได้ (เพิ่มหลายแถว) · ${dumRows.length} แถว</div>
+    <div class="tbl-wrap" style="max-height:none;border:none;background:transparent">
+      <table><thead><tr>
+        <th style="text-align:left;padding:6px 8px">รหัสบิล (prefix)</th>
+        <th style="text-align:left;padding:6px 8px">สายส่ง</th>
+        <th style="text-align:left;padding:6px 8px">รหัสหน่วยส่ง</th>
+        <th style="width:40px"></th>
+      </tr></thead><tbody>${dumRows.map(rowHtml).join('')||'<tr><td colspan="4" class="muted" style="text-align:center;padding:18px">ยังไม่มีข้อมูล — กด ➕ เพิ่มแถว หรือ 📥 นำเข้าจากชีทเดิม</td></tr>'}</tbody></table>
+    </div>`;
+}
+async function dumImport(){
+  if(!confirmSafe('นำเข้าข้อมูลจากชีท config เดิม? (จะแทนที่รายการในหน้านี้ · ยังไม่บันทึกจนกว่าจะกด 💾)')) return;
+  loading(true,'กำลังนำเข้าจากชีท…');
+  try{ const rows=await importUnitMapFromSheet(); dumRows=rows; dumRender(); toast('📥 นำเข้า '+rows.length+' แถว — ตรวจแล้วกด 💾 บันทึก'); }
+  catch(e){ toast('❌ '+(e.message||'นำเข้าไม่ได้')); }
+  finally{ loading(false); }
+}
+async function dumSave(){
+  if(!isBizDev()){ toast('⛔ เฉพาะแผนกพัฒนาธุรกิจ'); return; }
+  const clean=dumRows.map(r=>({bill_code:String(r.bill_code||'').trim(), route:String(r.route||'').trim(), unit_code:String(r.unit_code||'').trim()}))
+    .filter(r=>r.bill_code && r.unit_code);
+  if(clean.length!==dumRows.filter(r=>String(r.bill_code||'').trim()||String(r.unit_code||'').trim()).length){
+    if(!confirmSafe('มีบางแถวที่รหัสบิลหรือรหัสหน่วยส่งว่าง — แถวเหล่านั้นจะถูกข้าม บันทึกต่อ?')) return;
+  }
+  loading(true,'กำลังบันทึกลง Base…');
+  try{
+    /* replace-all: ลบทั้ง table แล้ว insert ใหม่ (config เล็ก · เรียบง่าย ไม่ต้อง track id) */
+    const dr=await supaFetch('/delivery_unit_map?id=gte.0',{method:'DELETE',headers:{'Prefer':'return=minimal'}});
+    if(!dr.ok){ const t=await dr.text(); throw new Error('DELETE: '+(t||('HTTP '+dr.status))); }
+    if(clean.length){
+      const ir=await supaFetch('/delivery_unit_map',{method:'POST',body:JSON.stringify(clean),headers:{'Prefer':'return=minimal'}});
+      if(!ir.ok){ const t=await ir.text(); throw new Error('INSERT: '+(t||('HTTP '+ir.status))); }
+    }
+    await loadUnitMap();   // reload Base → rebuild UNIT_LIST
+    toast('✅ บันทึก '+clean.length+' แถวลง Base แล้ว');
+    dumClose();
+    if(coStep==='pick') coRender();   // อัปเดต dropdown หน่วยส่งในหน้าเช็คออก
+  }catch(e){ console.error(e); toast('❌ '+(e.message||'บันทึกไม่สำเร็จ')); }
+  finally{ loading(false); }
 }
 async function loadProducts(){
   const {cols,matrix} = await gvizFetch(CONFIG.productId,{sheet:CONFIG.productTab});
