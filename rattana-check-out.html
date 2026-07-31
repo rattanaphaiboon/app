@@ -607,11 +607,8 @@ function switchTab(t){
  * เลือกบิลใบขาย (DS_DC) → ยิงของเรา (clamp กันเกิน) → auto-save รายคน+เครื่อง ชีท "ยิงเช็คออก" → ทุกเครื่อง/ทุกแอป เห็นกัน */
 /* ไม่แยกคลังในหน้าเช็คออก — โชว์ทุกใบขายรวมกัน (coWh='ALL' คงที่ · ใช้เป็น scope key ตอน sync) */
 const coWh='ALL';
-let coDate='', coUnit='', coMethod='bill', coSel=new Set(), coStep='pick', coPicked=[], coCur=null, coQ='', coQ2='', coCam=null, coCamOn=false, coLast={code:'',t:0}, dsdcLoadedAt='';
-try{ coUnit=localStorage.getItem('mp_co_unit')||''; }catch(e){}
-/* prefix รหัสบิลของหน่วยส่งที่เลือก (null = ไม่กรอง · [] = หน่วยนี้ไม่มี prefix) */
-function coUnitPrefixes(){ if(!coUnit) return null; return UNIT_TO_PREFIX[coUnit]||[]; }
-function coRefMatchUnit(ref){ const pfx=coUnitPrefixes(); if(!pfx) return true; const s=String(ref||''); return pfx.some(p=>p && s.startsWith(p)); }
+let coDate='', coMethod='sm', coSel=new Set(), coStep='pick', coPicked=[], coCur=null, coQ='', coQ2='', coCam=null, coCamOn=false, coLast={code:'',t:0}, dsdcLoadedAt='';
+try{ const _m=localStorage.getItem('mp_co_mode'); if(_m) coMethod=_m; }catch(e){}
 const CO_SYNC_TAB='ยิงเช็คออก';
 function coSyncTab(){ return CO_SYNC_TAB; }
 function coSrcArr(){ return DATA.dsdc || []; }
@@ -662,9 +659,13 @@ async function loadDm(force){
   }).filter(x=>x.barcode && x.ref && x.qty>0 && x.date>=cutoff);
   return DATA.dm;
 }
-function coDatesFor(){ return [...new Set(coSrcArr().filter(coRefMatchUnit_x).map(x=>x.date))].filter(Boolean).sort(); }
-function coRefMatchUnit_x(x){ return coRefMatchUnit(x.ref); }
-function coLines(){ return coSrcArr().filter(x=> (!coDate || x.date===coDate) && coRefMatchUnit(x.ref) ); }
+function coDatesFor(){ return [...new Set(coSrcArr().map(x=>x.date))].filter(Boolean).sort(); }
+function coLines(){ return coSrcArr().filter(x=> !coDate || x.date===coDate ); }
+/* reverse lookup — บิล ref อยู่หน่วยส่งไหน (DI_REF ขึ้นต้นด้วย prefix ของหน่วยนั้น) */
+function unitForRef(ref){ const s=String(ref||''); for(const u of Object.keys(UNIT_TO_PREFIX)){ if((UNIT_TO_PREFIX[u]||[]).some(p=>p && s.startsWith(p))) return u; } return ''; }
+/* รถทะเบียน — รอไฟล์/mapping (CAR_TO_REF) · ตอนนี้ยังไม่มีข้อมูล → คืน '' */
+let CAR_TO_PREFIX={}, CAR_LIST=[];
+function carForRef(ref){ const s=String(ref||''); for(const c of Object.keys(CAR_TO_PREFIX)){ if((CAR_TO_PREFIX[c]||[]).some(p=>p && s.startsWith(p))) return c; } return ''; }
 function coBills(){
   const m={};
   coLines().forEach(x=>{ if(!m[x.ref]) m[x.ref]={ref:x.ref, store:x.store, storeCode:x.storeCode, salesman:x.salesman, salesmanName:x.salesmanName, wh:x.wh, cs:0, free:0, lines:0};
@@ -673,15 +674,23 @@ function coBills(){
 }
 function coQ2Match(b){ const q=(coQ2||'').trim().toLowerCase(); if(!q) return true; return (b.ref+' '+b.store+' '+b.storeCode+' '+b.salesman+' '+(b.salesmanName||'')).toLowerCase().includes(q); }
 function coBillsF(){ return coBills().filter(coQ2Match); }
-function coSms(){
+/* จัดกลุ่มบิลตามโหมด: sm=เซล · store=ร้าน · unit=หน่วยส่ง · car=ทะเบียน */
+const CO_MODES=[{v:'sm',lab:'รายเซล'},{v:'store',lab:'รายร้าน'},{v:'unit',lab:'หน่วยส่ง'},{v:'car',lab:'รถทะเบียน'}];
+function coGroupOf(b){
+  if(coMethod==='store'){ const k=b.storeCode||b.store||'(ไม่ระบุร้าน)'; return {key:k, label:(b.store||b.storeCode||'ไม่ระบุร้าน'), sub:b.storeCode||''}; }
+  if(coMethod==='unit'){ const u=unitForRef(b.ref); return {key:u||'(ไม่ระบุหน่วยส่ง)', label:u?u:'ไม่ระบุหน่วยส่ง', sub:u&&UNIT_ROUTE[u]?UNIT_ROUTE[u]:''}; }
+  if(coMethod==='car'){ const c=carForRef(b.ref); return {key:c||'(ไม่ระบุทะเบียน)', label:c||'ยังไม่มีข้อมูลทะเบียน', sub:''}; }
+  const k=b.salesman||'(ไม่ระบุ)'; return {key:k, label:`${b.salesman} ${smShort(b.salesman,b.salesmanName)}`, sub:''};   // sm
+}
+function coGroups(){
   const m={};
-  coBillsF().forEach(b=>{ const k=b.salesman||'(ไม่ระบุ)';
-    if(!m[k]) m[k]={salesman:k, salesmanName:b.salesmanName, bills:0, _st:new Set(), cs:0, free:0, refs:[], list:[]};
+  coBillsF().forEach(b=>{ const g=coGroupOf(b), k=g.key;
+    if(!m[k]) m[k]={key:k, label:g.label, sub:g.sub, salesman:b.salesman, salesmanName:b.salesmanName, bills:0, _st:new Set(), cs:0, free:0, refs:[], list:[]};
     const s=m[k]; s.bills++; s._st.add(b.storeCode||b.store); s.cs+=b.cs; s.free+=b.free; s.refs.push(b.ref); s.list.push(b); });
-  return Object.values(m).map(s=>({...s, stores:s._st.size, selN:s.refs.filter(r=>coSel.has(r)).length})).sort((a,b)=>String(a.salesman).localeCompare(b.salesman));
+  return Object.values(m).map(s=>({...s, stores:s._st.size, selN:s.refs.filter(r=>coSel.has(r)).length})).sort((a,b)=>String(a.label).localeCompare(String(b.label),'th'));
 }
 function coSelRefs(){ return new Set([...coSel]); }
-function coToggleSm(sm){ const s=coSms().find(x=>x.salesman===sm); if(!s) return; const all=s.refs.every(r=>coSel.has(r)); s.refs.forEach(r=>{ if(all) coSel.delete(r); else coSel.add(r); }); coSaveLS(); coRender(); }
+function coToggleGroup(key){ const s=coGroups().find(x=>x.key===key); if(!s) return; const all=s.refs.every(r=>coSel.has(r)); s.refs.forEach(r=>{ if(all) coSel.delete(r); else coSel.add(r); }); coSaveLS(); coRender(); }
 function coSetQ2(v){ coQ2=v; coRender(); const i=document.getElementById('coPickQ'); if(i){ i.focus(); const n=i.value.length; try{ i.setSelectionRange(n,n); }catch(e){} } }
 function coMyName(){ return ((currentUser&&currentUser.name)||'').trim()||'(ไม่ระบุชื่อ)'; }
 /* v2.7: ทุกยอด "ที่ยิง" นับเป็น EA — ยิงหน่วยไหนก็บวกเข้ากองเดียวกัน */
@@ -708,17 +717,13 @@ async function enterCoTab(){
   if(!DATA.dsdc){ p.innerHTML='<div class="empty">⏳ กำลังโหลดใบขาย…</div>';
     try{ await loadDsdc(); }
     catch(e){ p.innerHTML='<div class="empty" style="color:var(--red)">❌ โหลดใบขายไม่ได้ — '+esc(e.message||'')+'</div>'; return; } }
-  if(coUnit && UNIT_LIST.length && !UNIT_LIST.includes(coUnit)) coUnit='';   /* หน่วยส่งเก่าที่ค้างไว้ไม่มีในลิสต์ → ล้าง */
   const ds=coDatesFor(); if(!coDate || !ds.includes(coDate)) coDate=ds[ds.length-1]||'';
   coRestoreLS();
+  if(!CO_MODES.some(x=>x.v===coMethod)) coMethod='sm';   /* โหมดเก่า (bill) ที่ค้าง → เซล */
   coRender();
 }
 function coSetDate(d){ coDate=d; coSel=new Set(); coCur=null; coQ2=''; coSheetRows=[]; coTeam={}; coRestoreLS(); coRender(); coSyncPull(); }
-function coSetUnit(u){ coUnit=u; try{ localStorage.setItem('mp_co_unit',u); }catch(e){}
-  coSel=new Set(); coCur=null; coQ2='';   /* เปลี่ยนหน่วยส่ง = ล้างที่เลือก · ปรับวันที่ให้อยู่ในชุดที่กรองแล้ว */
-  const ds=coDatesFor(); if(!coDate || !ds.includes(coDate)) coDate=ds[ds.length-1]||'';
-  coRestoreLS(); coRender(); coSyncPull(); }
-function coSetMethod(m){ coMethod=m; coSaveLS(); coRender(); }
+function coSetMethod(m){ coMethod=m; try{ localStorage.setItem('mp_co_mode',m); }catch(e){} coRender(); }
 function coToggleSel(k){ if(coSel.has(k)) coSel.delete(k); else coSel.add(k); coSaveLS(); coRender(); }
 function coSelAll(){ coBillsF().forEach(b=>coSel.add(b.ref)); coSaveLS(); coRender(); }
 function coSelNone(){ coBillsF().forEach(b=>coSel.delete(b.ref)); coSaveLS(); coRender(); }
@@ -783,36 +788,33 @@ function wireDragSelect(root, cfg){
 function coPickHtml(){
   const dates=coDatesFor();
   const chip=(fn,lab)=>`<button onclick="${fn}" style="padding:8px 15px;border-radius:9px;border:1.5px solid var(--border);background:#fff;color:var(--navy);font-weight:800;cursor:pointer;font-size:13.5px">${lab}</button>`;
-  const bills=coBillsF(), sms=coSms();
-  const nShow=(coMethod==='sm')?sms.length:bills.length, selShown=bills.filter(b=>coSel.has(b.ref)).length;
-  const billRow=(b,pad)=>{ const on=coSel.has(b.ref);
-    return `<tr data-ref="${encodeURIComponent(b.ref)}" style="${on?'background:#eef2ff':''}"><td style="${pad||''}"><input type="checkbox" ${on?'checked':''} style="width:20px;height:20px"></td><td style="white-space:nowrap"><b style="color:#0369a1">${esc(b.ref)}</b></td><td style="text-align:left">${esc(b.store)} <span class="muted" style="font-size:10px">${esc(b.storeCode)}</span></td>${coMethod==='sm'?'':`<td style="white-space:nowrap">${esc(b.salesman)} ${esc(smShort(b.salesman,b.salesmanName))}</td>`}<td class="num"><b>${b.cs}</b></td><td class="num">${b.free?'<b style="color:#166534">'+b.free+'</b>':'-'}</td></tr>`; };
+  const groups=coGroups(), bills=coBillsF();
+  const nShow=groups.length, selShown=bills.filter(b=>coSel.has(b.ref)).length;
+  const modeLab=(CO_MODES.find(x=>x.v===coMethod)||{}).lab||'กลุ่ม';
+  const billRow=(b)=>{ const on=coSel.has(b.ref);
+    return `<tr data-ref="${encodeURIComponent(b.ref)}" style="${on?'background:#eaf7ef':''}"><td><input type="checkbox" ${on?'checked':''} style="width:20px;height:20px"></td><td style="white-space:nowrap"><b style="color:var(--gold-ink)">${esc(b.ref)}</b></td><td style="text-align:left">${esc(b.store)} <span class="muted" style="font-size:10px">${esc(b.storeCode)}</span></td><td style="white-space:nowrap">${esc(b.salesman)} ${esc(smShort(b.salesman,b.salesmanName))}</td><td class="num"><b>${b.cs}</b></td><td class="num">${b.free?'<b style="color:#166534">'+b.free+'</b>':'-'}</td></tr>`; };
   let body;
   if(!nShow){ body=`<div class="empty">${(coQ2||'').trim()?'ไม่พบบิลที่ค้นหา':'ไม่มีใบขาย ('+esc(coDate||'-')+')'}</div>`; }
-  else if(coMethod==='sm'){
-    body=sms.map(s=>{ const all=s.selN===s.bills && s.bills>0, part=s.selN>0 && !all;
-      return `<details style="border:1.5px solid ${s.selN?'#c7d2fe':'var(--border)'};background:${s.selN?'#f5f7ff':'#fff'};border-radius:10px;margin-bottom:7px" ${part||all?'open':''}>
+  else{
+    body=groups.map(s=>{ const all=s.selN===s.bills && s.bills>0, part=s.selN>0 && !all;
+      return `<details style="border:1.5px solid ${s.selN?'#a7e3be':'var(--border)'};background:${s.selN?'#f0faf3':'#fff'};border-radius:10px;margin-bottom:7px" ${part||all?'open':''}>
         <summary style="cursor:pointer;padding:11px 11px;display:flex;align-items:center;gap:9px;flex-wrap:wrap;list-style:none">
-          <input type="checkbox" ${all?'checked':''} data-ind="${part?'1':'0'}" onclick="event.stopPropagation()" onchange="coToggleSm('${esc(s.salesman)}')" style="width:21px;height:21px;flex:none">
-          <b style="font-size:14px;color:var(--navy)">${esc(s.salesman)} ${esc(smShort(s.salesman,s.salesmanName))}</b>
+          <input type="checkbox" ${all?'checked':''} data-ind="${part?'1':'0'}" onclick="event.stopPropagation()" onchange="coToggleGroup('${esc(s.key)}')" style="width:21px;height:21px;flex:none">
+          <b style="font-size:14px;color:var(--navy)">${esc(s.label)}</b>${s.sub?`<span class="muted" style="font-size:11px">${esc(s.sub)}</span>`:''}
           <span class="muted" style="font-size:11.5px">${s.bills} บิล · ${s.stores} ร้าน · ลัง <b style="color:var(--navy)">${s.cs}</b>${s.free?' · แถม <b style="color:#166534">'+s.free+'</b>':''}</span>
           <span style="flex:1;min-width:6px"></span>
-          <span style="font-size:11.5px;font-weight:800;color:${s.selN?'#0369a1':'#94a3b8'}">เลือก ${s.selN}/${s.bills} ▾</span>
+          <span style="font-size:11.5px;font-weight:800;color:${s.selN?'var(--gold-ink)':'#94a3b8'}">เลือก ${s.selN}/${s.bills} ▾</span>
         </summary>
-        <div class="tbl-wrap" style="max-height:260px;margin:0 8px 8px"><table style="font-size:12.5px"><thead><tr><th style="width:38px"></th><th>เลขบิล</th><th>ร้าน</th><th class="num">ลัง</th><th class="num">แถม</th></tr></thead><tbody>${s.list.map(b=>billRow(b)).join('')}</tbody></table></div>
+        <div class="tbl-wrap" style="max-height:260px;margin:0 8px 8px"><table style="font-size:12.5px"><thead><tr><th style="width:38px"></th><th>เลขบิล</th><th>ร้าน</th><th>เซล</th><th class="num">ลัง</th><th class="num">แถม</th></tr></thead><tbody>${s.list.map(b=>billRow(b)).join('')}</tbody></table></div>
       </details>`; }).join('');
-  } else {
-    body=`<div class="tbl-wrap" style="max-height:56vh"><table><thead><tr><th style="width:38px"></th><th>เลขบิล</th><th>ร้าน</th><th>เซล</th><th class="num">ลัง</th><th class="num">แถม</th></tr></thead><tbody>${bills.map(b=>billRow(b)).join('')}</tbody></table></div>`;
   }
-  const unitOpts=`<option value=""${coUnit?'':' selected'}>ทุกหน่วยส่ง</option>`+UNIT_LIST.map(u=>`<option value="${esc(u)}"${u===coUnit?' selected':''}>${esc(u)}${UNIT_ROUTE[u]?' · '+esc(UNIT_ROUTE[u]):''}</option>`).join('');
+  const modeOpts=CO_MODES.map(x=>`<option value="${x.v}"${x.v===coMethod?' selected':''}>${x.lab}</option>`).join('');
   return `<div style="background:var(--navy);color:#fff;border-radius:12px;padding:11px 13px;margin-bottom:10px">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:17px">📤 เช็คสินค้าออก</b>
         <span style="font-size:11px;opacity:.75">เช็คตามใบขาย (DS_DC)</span></div>
       <div style="display:flex;align-items:center;gap:8px 10px;flex-wrap:wrap;margin-top:9px">
-        ${UNIT_LIST.length?`<span style="font-size:12px;opacity:.85">หน่วยส่ง</span>
-        <select onchange="coSetUnit(this.value)" style="padding:8px 10px;border-radius:8px;border:none;font-family:inherit;font-size:14px;font-weight:800;color:var(--navy);max-width:230px">${unitOpts}</select>`:''}
-        <select onchange="coSetMethod(this.value)" style="padding:8px 10px;border-radius:8px;border:none;font-family:inherit;font-size:14px;font-weight:800;color:var(--navy)">
-          <option value="bill"${coMethod==='bill'?' selected':''}>รายบิล</option><option value="sm"${coMethod==='sm'?' selected':''}>รายเซล</option></select>
+        <span style="font-size:12px;opacity:.85">จัดกลุ่มตาม</span>
+        <select onchange="coSetMethod(this.value)" style="padding:8px 10px;border-radius:8px;border:none;font-family:inherit;font-size:14px;font-weight:800;color:var(--navy)">${modeOpts}</select>
         <select onchange="coSetDate(this.value)" style="padding:8px 10px;border-radius:8px;border:none;font-family:inherit;font-size:14px;font-weight:800;color:var(--navy)">${dates.length?dates.map(d=>`<option value="${d}"${d===coDate?' selected':''}>${d}</option>`).join(''):'<option>—</option>'}</select>
         <button onclick="coRefresh()" style="padding:8px 11px;border-radius:8px;border:1px solid rgba(255,255,255,.4);background:transparent;color:#fff;cursor:pointer;font-size:13px;font-weight:700">🔄</button>
       </div></div>
@@ -822,7 +824,7 @@ function coPickHtml(){
       ${(coQ2||'').trim()?`<button type="button" class="sb-x on" onclick="coSetQ2('')" title="ล้าง">✕</button>`:''}
     </div>
     <div class="row-sel" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-      <div><b style="color:var(--navy)">เลือก ${coSel.size} บิล</b> <span class="muted" style="font-size:11.5px">· แสดง ${nShow} ${coMethod==='sm'?'เซล':'บิล'}${(coQ2||'').trim()?` (เลือกในนี้ ${selShown})`:''}</span></div>
+      <div><b style="color:var(--navy)">เลือก ${coSel.size} บิล</b> <span class="muted" style="font-size:11.5px">· ${nShow} ${esc(modeLab)}${(coQ2||'').trim()?` (เลือกในนี้ ${selShown})`:''}</span></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${chip('coSelAll()','ทั้งหมด')}${chip('coSelNone()','ล้าง')}
         <button class="scan-btn gold" onclick="coGoScan()" ${coSel.size?'':'disabled'}>▶ เริ่มสแกน (${coSel.size})</button></div></div>
     ${body}`;
@@ -878,11 +880,15 @@ async function coConfirmDone(){
   if(!shortList.length && !confirmSafe(`เช็คครบทุกรายการ ${done}/${total} ✅\n\nส่งแจ้งเตือนเข้า Discord?`)) return;
   loading(true,'กำลังส่งแจ้งเตือน…');
   try{
-    const unitTxt=coUnit?(coUnit+(UNIT_ROUTE[coUnit]?' · '+UNIT_ROUTE[coUnit]:'')):'ทุกหน่วยส่ง';
+    /* บริบทหัวข้อ = ค่า group ของบิลที่เลือก ตามโหมดจัดกลุ่มปัจจุบัน */
+    const selBills=coBills().filter(b=>coSel.has(b.ref));
+    const grpVals=[...new Set(selBills.map(b=>coGroupOf(b).label).filter(Boolean))];
+    const grpLab={sm:'เซล', store:'ร้าน', unit:'หน่วย', car:'ทะเบียน'}[coMethod]||'กลุ่ม';
+    const ctxTxt=grpVals.length?(grpVals.length<=3?grpVals.join(', '):grpVals.slice(0,3).join(', ')+` …(+${grpVals.length-3})`):'-';
     const shortLines=shortList.length
       ? shortList.slice(0,25).map(d=>`${d.product} ขาด ${fmtEaUnits(Math.max(0,d.needEa-(d.scannedEa||0)),d.prod,d.level,d.eaPer)}`).join('\n')+(shortList.length>25?`\n…และอีก ${shortList.length-25} รายการ`:'')
       : 'สินค้าครบ';
-    const desc=`หน่วย : ${unitTxt}\nผู้เช็ค : ${coMyName()}\nวันที่ : ${dmy(coDate)}\n${shortLines}`;
+    const desc=`${grpLab} : ${ctxTxt}\nผู้เช็ค : ${coMyName()}\nวันที่ : ${dmy(coDate)}\n${shortLines}`;
     const embed={ title:'เช็คออก', color:shortList.length?0xf59e0b:0x22c55e, description:desc };
     const ok=await notifyDiscord(embed, 'CheckOut'+(currentUser&&currentUser.wh?' '+currentUser.wh:''));
     toast(ok?'✅ แจ้งเตือน Discord แล้ว':'❌ ส่ง Discord ไม่สำเร็จ');
