@@ -227,6 +227,7 @@ const CONFIG = {
   dsdcTab: 'DSDC',
   dmId: '1S_HTxQ71AWHym1X_-CBwe-tzfCEPqY4T',     // ไฟล์เดียวกัน — ใช้ในหน้าเช็คโอนย้าย (แท็บ DM)
   dmTab: 'DM',
+  unitMapId: '1388gw0zp8qNDXiX55SusNl8Gc3tW9IZjEzUOUvG4c4U',   // config: หน่วยส่ง — A=รหัสบิล(prefix) · B=สายส่ง · C=รหัสหน่วยส่ง
   bkbvSheet: 'BK_BV',
   w4MasterId: '1VWu4rit8wGCyUX1qrdtx6_6fFJGc8M7B',
   bqUrl: 'https://script.google.com/macros/s/AKfycbx4TcMrs8Vi5-3WVOkhXcCJYCilRN-xRXo22ba7sQwKzd4JsM6MGAra6oAgGCMyZxx8pw/exec',
@@ -420,9 +421,27 @@ async function reload(){
     DATA.prodIdx = await loadProducts();
     loading(true,'กำลังโหลด Users…');
     DATA.usersByCode = await loadUsers();
+    loading(true,'กำลังโหลดหน่วยส่ง…');
+    try{ await loadUnitMap(); }catch(e){ console.warn('unitMap:', e); }   /* ไม่มี/โหลดไม่ได้ → ทำงานต่อได้ (ไม่กรอง) */
     switchTab('co');
   }catch(e){ console.error(e); toast('❌ '+(e.message||'โหลดข้อมูลไม่สำเร็จ')); }
   finally{ loading(false); }
+}
+/* ================= หน่วยส่ง (config sheet) — เลือกรหัสหน่วยส่ง → กรอง DS_DC ที่ DI_REF ขึ้นต้นด้วยรหัสบิลของหน่วยนั้น ================= */
+let UNIT_TO_PREFIX={}, UNIT_ROUTE={}, UNIT_LIST=[];
+async function loadUnitMap(){
+  if(!CONFIG.unitMapId) return;
+  const rows=asObjects(await gvizFetch(CONFIG.unitMapId,{}));   // แท็บแรก · A=รหัสบิล · B=สายส่ง · C=รหัสหน่วยส่ง
+  UNIT_TO_PREFIX={}; UNIT_ROUTE={};
+  rows.forEach(r=>{
+    const bill=String(r['รหัสบิล']||'').trim();
+    const route=String(r['สายส่ง']||'').trim();
+    const unit=String(r['รหัสหน่วยส่ง']||'').trim();
+    if(!unit || !bill) return;
+    (UNIT_TO_PREFIX[unit]=UNIT_TO_PREFIX[unit]||[]).push(bill);
+    if(route && !UNIT_ROUTE[unit]) UNIT_ROUTE[unit]=route;
+  });
+  UNIT_LIST=Object.keys(UNIT_TO_PREFIX).sort();
 }
 async function loadProducts(){
   const {cols,matrix} = await gvizFetch(CONFIG.productId,{sheet:CONFIG.productTab});
@@ -477,7 +496,11 @@ function switchTab(t){
  * เลือกบิลใบขาย (DS_DC) → ยิงของเรา (clamp กันเกิน) → auto-save รายคน+เครื่อง ชีท "ยิงเช็คออก" → ทุกเครื่อง/ทุกแอป เห็นกัน */
 /* ไม่แยกคลังในหน้าเช็คออก — โชว์ทุกใบขายรวมกัน (coWh='ALL' คงที่ · ใช้เป็น scope key ตอน sync) */
 const coWh='ALL';
-let coDate='', coMethod='bill', coSel=new Set(), coStep='pick', coPicked=[], coCur=null, coQ='', coQ2='', coCam=null, coCamOn=false, coLast={code:'',t:0}, dsdcLoadedAt='';
+let coDate='', coUnit='', coMethod='bill', coSel=new Set(), coStep='pick', coPicked=[], coCur=null, coQ='', coQ2='', coCam=null, coCamOn=false, coLast={code:'',t:0}, dsdcLoadedAt='';
+try{ coUnit=localStorage.getItem('mp_co_unit')||''; }catch(e){}
+/* prefix รหัสบิลของหน่วยส่งที่เลือก (null = ไม่กรอง · [] = หน่วยนี้ไม่มี prefix) */
+function coUnitPrefixes(){ if(!coUnit) return null; return UNIT_TO_PREFIX[coUnit]||[]; }
+function coRefMatchUnit(ref){ const pfx=coUnitPrefixes(); if(!pfx) return true; const s=String(ref||''); return pfx.some(p=>p && s.startsWith(p)); }
 const CO_SYNC_TAB='ยิงเช็คออก';
 function coSyncTab(){ return CO_SYNC_TAB; }
 function coSrcArr(){ return DATA.dsdc || []; }
@@ -528,8 +551,9 @@ async function loadDm(force){
   }).filter(x=>x.barcode && x.ref && x.qty>0 && x.date>=cutoff);
   return DATA.dm;
 }
-function coDatesFor(){ return [...new Set(coSrcArr().map(x=>x.date))].filter(Boolean).sort(); }
-function coLines(){ return coSrcArr().filter(x=> !coDate || x.date===coDate ); }
+function coDatesFor(){ return [...new Set(coSrcArr().filter(coRefMatchUnit_x).map(x=>x.date))].filter(Boolean).sort(); }
+function coRefMatchUnit_x(x){ return coRefMatchUnit(x.ref); }
+function coLines(){ return coSrcArr().filter(x=> (!coDate || x.date===coDate) && coRefMatchUnit(x.ref) ); }
 function coBills(){
   const m={};
   coLines().forEach(x=>{ if(!m[x.ref]) m[x.ref]={ref:x.ref, store:x.store, storeCode:x.storeCode, salesman:x.salesman, salesmanName:x.salesmanName, wh:x.wh, cs:0, free:0, lines:0};
@@ -573,11 +597,16 @@ async function enterCoTab(){
   if(!DATA.dsdc){ p.innerHTML='<div class="empty">⏳ กำลังโหลดใบขาย…</div>';
     try{ await loadDsdc(); }
     catch(e){ p.innerHTML='<div class="empty" style="color:var(--red)">❌ โหลดใบขายไม่ได้ — '+esc(e.message||'')+'</div>'; return; } }
+  if(coUnit && UNIT_LIST.length && !UNIT_LIST.includes(coUnit)) coUnit='';   /* หน่วยส่งเก่าที่ค้างไว้ไม่มีในลิสต์ → ล้าง */
   const ds=coDatesFor(); if(!coDate || !ds.includes(coDate)) coDate=ds[ds.length-1]||'';
   coRestoreLS();
   coRender();
 }
 function coSetDate(d){ coDate=d; coSel=new Set(); coCur=null; coQ2=''; coSheetRows=[]; coTeam={}; coRestoreLS(); coRender(); coSyncPull(); }
+function coSetUnit(u){ coUnit=u; try{ localStorage.setItem('mp_co_unit',u); }catch(e){}
+  coSel=new Set(); coCur=null; coQ2='';   /* เปลี่ยนหน่วยส่ง = ล้างที่เลือก · ปรับวันที่ให้อยู่ในชุดที่กรองแล้ว */
+  const ds=coDatesFor(); if(!coDate || !ds.includes(coDate)) coDate=ds[ds.length-1]||'';
+  coRestoreLS(); coRender(); coSyncPull(); }
 function coSetMethod(m){ coMethod=m; coSaveLS(); coRender(); }
 function coToggleSel(k){ if(coSel.has(k)) coSel.delete(k); else coSel.add(k); coSaveLS(); coRender(); }
 function coSelAll(){ coBillsF().forEach(b=>coSel.add(b.ref)); coSaveLS(); coRender(); }
@@ -664,10 +693,13 @@ function coPickHtml(){
   } else {
     body=`<div class="tbl-wrap" style="max-height:56vh"><table><thead><tr><th style="width:38px"></th><th>เลขบิล</th><th>ร้าน</th><th>เซล</th><th class="num">ลัง</th><th class="num">แถม</th></tr></thead><tbody>${bills.map(b=>billRow(b)).join('')}</tbody></table></div>`;
   }
+  const unitOpts=`<option value=""${coUnit?'':' selected'}>ทุกหน่วยส่ง</option>`+UNIT_LIST.map(u=>`<option value="${esc(u)}"${u===coUnit?' selected':''}>${esc(u)}${UNIT_ROUTE[u]?' · '+esc(UNIT_ROUTE[u]):''}</option>`).join('');
   return `<div style="background:var(--navy);color:#fff;border-radius:12px;padding:11px 13px;margin-bottom:10px">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:17px">📤 เช็คสินค้าออก</b>
         <span style="font-size:11px;opacity:.75">เช็คตามใบขาย (DS_DC)</span></div>
       <div style="display:flex;align-items:center;gap:8px 10px;flex-wrap:wrap;margin-top:9px">
+        ${UNIT_LIST.length?`<span style="font-size:12px;opacity:.85">หน่วยส่ง</span>
+        <select onchange="coSetUnit(this.value)" style="padding:8px 10px;border-radius:8px;border:none;font-family:inherit;font-size:14px;font-weight:800;color:var(--navy);max-width:230px">${unitOpts}</select>`:''}
         <select onchange="coSetMethod(this.value)" style="padding:8px 10px;border-radius:8px;border:none;font-family:inherit;font-size:14px;font-weight:800;color:var(--navy)">
           <option value="bill"${coMethod==='bill'?' selected':''}>รายบิล</option><option value="sm"${coMethod==='sm'?' selected':''}>รายเซล</option></select>
         <select onchange="coSetDate(this.value)" style="padding:8px 10px;border-radius:8px;border:none;font-family:inherit;font-size:14px;font-weight:800;color:var(--navy)">${dates.length?dates.map(d=>`<option value="${d}"${d===coDate?' selected':''}>${d}</option>`).join(''):'<option>—</option>'}</select>
