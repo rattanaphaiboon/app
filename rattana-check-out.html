@@ -260,6 +260,8 @@ const CONFIG = {
   dmId: '1S_HTxQ71AWHym1X_-CBwe-tzfCEPqY4T',     // ไฟล์เดียวกัน — ใช้ในหน้าเช็คโอนย้าย (แท็บ DM)
   dmTab: 'DM',
   unitMapId: '1388gw0zp8qNDXiX55SusNl8Gc3tW9IZjEzUOUvG4c4U',   // config: หน่วยส่ง — A=รหัสบิล(prefix) · B=สายส่ง · C=รหัสหน่วยส่ง
+  promoId: '1CqHARklgveAeJ6rTkNeyUSku__puTiNE7-c6ebn93W8',   // ชีท Promotion — ตรวจ ซื้อครบแต่ไม่แถม / แถมแต่ไม่มีตัวซื้อ
+  promoTab: 'Promotion',
   bkbvSheet: 'BK_BV',
   w4MasterId: '1VWu4rit8wGCyUX1qrdtx6_6fFJGc8M7B',
   bqUrl: 'https://script.google.com/macros/s/AKfycbx4TcMrs8Vi5-3WVOkhXcCJYCilRN-xRXo22ba7sQwKzd4JsM6MGAra6oAgGCMyZxx8pw/exec',
@@ -471,6 +473,8 @@ async function reload(){
     DATA.usersByCode = await loadUsers();
     loading(true,'กำลังโหลดหน่วยส่ง…');
     try{ await loadUnitMap(); }catch(e){ console.warn('unitMap:', e); }   /* ไม่มี/โหลดไม่ได้ → ทำงานต่อได้ (ไม่กรอง) */
+    loading(true,'กำลังโหลดโปรโมชั่น…');
+    try{ await loadPromos(); }catch(e){ console.warn('promos:', e); }   /* ไม่มี → ข้ามการตรวจโปร */
     switchTab('co');
   }catch(e){ console.error(e); toast('❌ '+(e.message||'โหลดข้อมูลไม่สำเร็จ')); }
   finally{ loading(false); }
@@ -581,6 +585,7 @@ async function loadProducts(){
   const C = {name:ci('PRODUCT NAME'),short:ci('SHORT NAME'),
     cEA:ci('CODE EA'),cPA:ci('CODE PA'),cBP:ci('CODE BP'),cCS:ci('CODE CS'),
     qEA:ci('QTY EA'),qPA:ci('QTY PA'),qBP:ci('QTY BP'),qCS:ci('QTY CS'),
+    catSize:ci('CAT SIZE'),catBrand:ci('CAT BRAND'),
     img:ci('SKU_USAGE')};
   /* ดึงคลังทั้งหมดจากหัวคอลัมน์ "STOCK *" (ตามที่ตั้งไว้ใน PDDT) — คลังใหม่/เก่าเปลี่ยนที่ชีทได้เลย */
   const stockCols = cols.map((h,i)=>({h:String(h||'').trim(), i})).filter(x=>/^STOCK\s+\S+/i.test(x.h))
@@ -595,6 +600,7 @@ async function loadProducts(){
       name:r[C.name]||'', short:r[C.short]||r[C.name]||'',
       codeCS:String(r[C.cCS]||''), codeBP:String(r[C.cBP]||''), codePA:String(r[C.cPA]||''), codeEA:String(r[C.cEA]||''),
       qtyEA:num(r[C.qEA])||1, qtyPA:num(r[C.qPA]), qtyBP:num(r[C.qBP]), qtyCS:num(r[C.qCS]),
+      catSize:String((C.catSize>=0?r[C.catSize]:'')||'').trim(), catBrand:String((C.catBrand>=0?r[C.catBrand]:'')||'').trim(),
       stockRaw,
       img:String((C.img>=0?r[C.img]:'')||'').trim()
     };
@@ -665,6 +671,72 @@ async function coMarkConfirmed(refs, shortSet){
     await supaFetch('/checkout_scan',{method:'POST',headers:{'Prefer':'return=minimal'},body:JSON.stringify(rows)});
     refs.forEach(r=>{ const rs=String(r); coConfRefs.add(rs); if(shortSet&&shortSet.has(rs)) coConfShort.add(rs); else coConfShort.delete(rs); });
   }catch(e){ console.warn('mark confirmed:',e); }
+}
+/* ================= 🎁 ตรวจโปรโมชั่น (ต่อบิล) — ซื้อครบแต่ไม่ได้แถม / แถมแต่ไม่มีตัวซื้อ ================= */
+let PROMOS=[];
+function pnorm(s){ return String(s||'').replace(/\s+/g,'').toLowerCase(); }
+async function loadPromos(){
+  if(!CONFIG.promoId){ PROMOS=[]; return; }
+  const rows=asObjects(await gvizFetch(CONFIG.promoId,{sheet:CONFIG.promoTab}));
+  PROMOS=rows.map(r=>({
+    name:String(r['ชื่อโปร']||'').trim(),
+    method:String(r['วิธีวัด']||'').trim().toUpperCase(),   // PRODUCT NAME | CAT SIZE | CAT BRAND
+    match:String(r['ชื่อ']||'').trim(),
+    qty:num(r['จำนวน'])||0,
+    unit:String(r['รูปแบบขาย']||'').trim().toUpperCase(),   // PA/CS/BP/EA
+    freeName:String(r['แถมสินค้า']||'').trim(),
+    freeBc:String(r['Barcode สินค้าแถมEA']||'').trim(),
+    freeEa:num(r['จำนวนแถมEA'])||0,
+    start:String(r['เริ่มโปร']||'').trim().replace(/\//g,'-'),
+    end:String(r['จบโปร']||'').trim().replace(/\//g,'-'),
+    whs:String(r['Warehouses']||'').split(',').map(s=>s.trim().toUpperCase()).filter(Boolean),
+  })).filter(p=>p.match && p.freeBc && p.qty>0);
+  return PROMOS;
+}
+/* โปรที่ active สำหรับ วัน+คลัง ปัจจุบัน */
+function coPromosActive(){
+  return PROMOS.filter(p=> (!p.whs.length || p.whs.includes(coWh)) && (!p.start||coDate>=p.start) && (!p.end||coDate<=p.end) );
+}
+/* บิลไลน์ตรงกับตัวซื้อของโปรไหม (เทียบผ่าน PDDT ของบาร์โค้ดในบิล) */
+function coLineMatchPromo(x, p){
+  const prod=(DATA.prodIdx||{})[String(x.barcode||'').trim()]; if(!prod) return false;
+  if(p.method==='CAT SIZE') return String(prod.catSize||'').trim()===p.match;
+  if(p.method==='CAT BRAND') return String(prod.catBrand||'').trim()===p.match;
+  /* PRODUCT NAME (default) — ชื่อสินค้าตรง/มีคำโปร */
+  const a=pnorm(prod.name), b=pnorm(p.match); return a===b || (b && a.includes(b));
+}
+/* index บิลไลน์ตาม ref (cache กัน O(bills×lines)) */
+let _colbrKey='', _colbr={};
+function coLinesByRef(){ const k=(coDate||'')+'|'+(coWh||'')+'|'+coSrcArr().length; if(k!==_colbrKey){ _colbr={}; coLines().forEach(x=>{ (_colbr[x.ref]=_colbr[x.ref]||[]).push(x); }); _colbrKey=k; } return _colbr; }
+/* ตรวจโปรของบิล ref → คืน [{promo, kind:'no-free'|'no-buy', boughtSets, freeGivenEa, expectEa, need}] */
+function coPromoCheck(ref){
+  if(!PROMOS.length) return [];
+  const lines=coLinesByRef()[ref]||[];
+  if(!lines.length) return [];
+  const out=[], pidx=(DATA.prodIdx||{});
+  coPromosActive().forEach(p=>{
+    const freeProd=pidx[p.freeBc]||null;   // จับตัวแถมด้วย "ตัวสินค้า" (บิลอาจใช้บาร์ CS/PA คนละอันกับบาร์ EA ในโปร)
+    const isFree=(x)=>{ const pr=pidx[String(x.barcode||'').trim()]; return (freeProd && pr===freeProd) || String(x.barcode||'').trim()===p.freeBc; };
+    let boughtEa=0, matchProd=null;
+    lines.forEach(x=>{ if(isFree(x)) return;   // ตัวแถมไม่นับเป็นตัวซื้อ
+      if(coLineMatchPromo(x,p)){ boughtEa += (x.sold||0)*Math.max(1,x.eaPer||1); if(!matchProd) matchProd=pidx[String(x.barcode||'').trim()]; } });
+    const neededEa = p.qty * eaPerOf(matchProd, p.unit, 1);   // E หน่วย F → EA
+    let freeEa=0; lines.forEach(x=>{ if(isFree(x)) freeEa += (x.free||0)*Math.max(1,x.eaPer||1); });
+    const sets = neededEa>0 ? Math.floor((boughtEa+0.001)/neededEa) : 0;
+    const expectEa = sets*p.freeEa;
+    const qualifies = boughtEa>0 && neededEa>0 && boughtEa>=neededEa;
+    if(qualifies && freeEa < expectEa-0.001){ out.push({promo:p, kind:'no-free', sets, freeEa, expectEa}); }
+    else if(freeEa>0 && (!qualifies)){ out.push({promo:p, kind:'no-buy', freeEa, neededEa, boughtEa}); }
+  });
+  return out;
+}
+/* มีปัญหาโปรไหม (เร็ว) */
+function coHasPromoIssue(ref){ return coPromoCheck(ref).length>0; }
+function coPromoIssueLines(ref){
+  return coPromoCheck(ref).map(it=>{ const p=it.promo;
+    if(it.kind==='no-free') return `ซื้อครบโปร "${p.name}" แต่ยังไม่ได้แถม ${p.freeName} (ควรแถม ${Math.round(it.expectEa)} ชิ้น)`;
+    return `แถม ${p.freeName} แต่ซื้อไม่ครบโปร "${p.name}" (ต้องซื้อ ${p.qty} ${p.unit})`;
+  });
 }
 let coTeam={}, coExcl=new Set(), coSheetRows=[], coPplOpen=false, coSyncTimer=null, coSyncAt='', _coVisBound=false, coDirty=false;
 let coSubPending=null, coSubQ='';   // v2.3: จับคู่สินค้าทดแทน — coSubPending={code,name} = บาร์ที่ยิงแล้วไม่อยู่ในบิล รอเลือกว่าทดแทนตัวไหน
@@ -863,8 +935,10 @@ function coPickHtml(){
   const billComplete=(ref)=>{ const s=refBcs[ref]; return s && [...s].every(bcOk); };
   const billShort=(ref)=>confSet.has(ref) && !billComplete(ref);   /* เช็คแล้วแต่ของยังไม่ครบ */
   const billRow=(b)=>{ const on=coSel.has(b.ref), ck=confSet.has(b.ref), sh=billShort(b.ref);
-    const bg=sh?'background:#fffbeb':(ck?'background:#f0fdf4':(on?'background:#eaf7ef':''));
-    return `<tr data-ref="${encodeURIComponent(b.ref)}" style="${bg}"><td><input type="checkbox" ${on?'checked':''} style="width:20px;height:20px"></td><td style="white-space:nowrap"><b style="color:var(--gold-ink)">${esc(b.ref)}</b>${ck?(sh?' <span style="color:#b45309">⚠️</span>':' ✓'):''}</td><td style="text-align:left">${esc(b.store)} <span class="muted" style="font-size:10px">${esc(b.storeCode)}</span></td><td style="white-space:nowrap">${esc(b.salesman)} ${esc(smShort(b.salesman,b.salesmanName))}</td><td class="num"><b>${b.cs}</b></td><td class="num">${b.free?'<b style="color:#166534">'+b.free+'</b>':'-'}</td></tr>`; };
+    const promo=coPromoIssueLines(b.ref);
+    const bg=promo.length?'background:#fff7ed':(sh?'background:#fffbeb':(ck?'background:#f0fdf4':(on?'background:#eaf7ef':'')));
+    const promoBadge=promo.length?` <span title="${esc(promo.join(' · '))}" style="cursor:help">🎁⚠️</span>`:'';
+    return `<tr data-ref="${encodeURIComponent(b.ref)}" style="${bg}"><td><input type="checkbox" ${on?'checked':''} style="width:20px;height:20px"></td><td style="white-space:nowrap"><b style="color:var(--gold-ink)">${esc(b.ref)}</b>${ck?(sh?' <span style="color:#b45309">⚠️</span>':' ✓'):''}${promoBadge}</td><td style="text-align:left">${esc(b.store)} <span class="muted" style="font-size:10px">${esc(b.storeCode)}</span></td><td style="white-space:nowrap">${esc(b.salesman)} ${esc(smShort(b.salesman,b.salesmanName))}</td><td class="num"><b>${b.cs}</b></td><td class="num">${b.free?'<b style="color:#166534">'+b.free+'</b>':'-'}</td></tr>`; };
   let body;
   if(!nShow){ body=`<div class="empty">${(coQ2||'').trim()?'ไม่พบบิลที่ค้นหา':'ไม่มีใบขาย ('+esc(coDate||'-')+')'}</div>`; }
   else{
@@ -876,6 +950,7 @@ function coPickHtml(){
           <input type="checkbox" ${all?'checked':''} data-ind="${part?'1':'0'}" onclick="event.stopPropagation()" onchange="coToggleGroup('${esc(s.key)}')" style="width:21px;height:21px;flex:none">
           <b style="font-size:14px;color:var(--navy)">${esc(s.label)}</b>${s.sub?`<span class="muted" style="font-size:11px">${esc(s.sub)}</span>`:''}
           ${hasShort?shortBadge:(allChk?chkBadge:(confN>0?`<span style="font-size:9.5px;background:#dcfce7;color:#166534;border-radius:5px;padding:1px 6px;font-weight:800">✓ ${confN}/${s.bills}</span>`:''))}
+          ${(()=>{ const pn=s.refs.filter(coHasPromoIssue).length; return pn?`<span style="font-size:9.5px;background:#ffedd5;color:#c2410c;border-radius:5px;padding:1px 6px;font-weight:800">🎁 ${pn}</span>`:''; })()}
           <span class="muted" style="font-size:11.5px">${s.bills} บิล · ${s.stores} ร้าน · ลัง <b style="color:var(--navy)">${s.cs}</b>${s.free?' · แถม <b style="color:#166534">'+s.free+'</b>':''}</span>
           <span style="flex:1;min-width:6px"></span>
           <span style="font-size:11.5px;font-weight:800;color:${s.selN?'var(--gold-ink)':'#94a3b8'}">เลือก ${s.selN}/${s.bills} ▾</span>
@@ -904,7 +979,22 @@ function coPickHtml(){
       <div><b style="color:var(--navy)">เลือก ${coSel.size} บิล</b> <span class="muted" style="font-size:11.5px">· ${nShow} ${esc(modeLab)}${(coQ2||'').trim()?` (เลือกในนี้ ${selShown})`:''}</span></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${chip('coSelAll()','ทั้งหมด')}${chip('coSelNone()','ล้าง')}
         <button class="scan-btn gold" onclick="coGoScan()" ${coSel.size?'':'disabled'}>▶ เริ่มสแกน (${coSel.size})</button></div></div>
+    ${coPromoCardHtml(bills)}
     ${body}`;
+}
+/* การ์ดเตือนโปร — บิลที่ ซื้อครบแต่ไม่แถม / แถมแต่ไม่มีตัวซื้อ (ในชุดที่แสดง) */
+function coPromoCardHtml(bills){
+  if(!PROMOS.length) return '';
+  const rows=[]; (bills||[]).forEach(b=>{ const iss=coPromoCheck(b.ref); iss.forEach(it=>rows.push({b, it})); });
+  if(!rows.length) return '';
+  const li=rows.slice(0,60).map(({b,it})=>{ const p=it.promo, txt=it.kind==='no-free'
+      ? `ซื้อครบโปรแต่<b>ไม่ได้แถม ${esc(p.freeName)}</b> (ควรแถม ${Math.round(it.expectEa)} ชิ้น)`
+      : `<b>แถม ${esc(p.freeName)}</b> แต่ซื้อไม่ครบโปร (ต้องซื้อ ${p.qty} ${esc(p.unit)})`;
+    return `<tr><td style="text-align:left;white-space:nowrap"><b style="color:#0369a1">${esc(b.ref)}</b><br><span class="muted" style="font-size:10px">${esc(b.store)}</span></td><td style="text-align:left">${esc(p.name)}</td><td style="text-align:left;color:#b45309">${txt}</td></tr>`; }).join('');
+  return `<details style="margin:0 0 9px;border:1.5px solid #fdba74;border-radius:10px;background:#fff7ed;padding:8px 11px" open>
+    <summary style="cursor:pointer;font-size:13.5px;font-weight:800;color:#c2410c">🎁 ตรวจโปร — พบ ${rows.length} รายการที่ต้องเช็ค (กดดู)</summary>
+    <div class="tbl-wrap" style="max-height:300px;margin-top:7px;border-color:#fed7aa"><table style="font-size:12px"><thead><tr style="background:#fff"><th style="text-align:left">บิล/ร้าน</th><th style="text-align:left">โปร</th><th style="text-align:left">ปัญหา</th></tr></thead><tbody>${li}</tbody></table></div>
+  </details>`;
 }
 /* ยอดที่แสดง "ยิงแล้ว" = ยอดรวมทีม (แชร์จาก Supabase · รวมของเราด้วย) — เปิดบิลที่คนอื่นเช็คแล้วก็เห็นยอด */
 function coShownEa(d){ const t=coTeamEa(d.barcode); return (t!=null)?t:d.scannedEa; }
