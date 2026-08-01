@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Vehicle Repair v7.4</title>
+<title>Rattana Vehicle Repair v7.5</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
@@ -514,7 +514,7 @@ body.dark .ai-ocr-text strong{color:var(--gold)}
 <div class="login-screen" id="loginScreen">
   <div class="login-card">
     <div class="login-logo">RATTANA<span> · </span>REPAIR</div>
-    <div class="login-title">ระบบแจ้งซ่อมรถบริษัท · v7.4</div>
+    <div class="login-title">ระบบแจ้งซ่อมรถบริษัท · v7.5</div>
     <div id="g_id_onload"
          data-client_id="615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com"
          data-callback="handleGoogleLogin"
@@ -1119,6 +1119,8 @@ const CHECK_WARNING_DAYS  = 25;   // ใกล้ครบถ้า >= 25 วั
 let selectedVehicle = null;
 let selectedVendor  = null; // {name, phone} | null
 const MAX_BILL_PHOTOS = 4;  // จำนวนรูปใบเสนอราคาสูงสุด (แก้ที่เดียว มีผลทุกจุด)
+const IMG_MAX_DIM = 1568;   // ด้านยาวสุดหลังย่อ (px) — เท่ากับขนาดที่ AI ใช้จริง ใหญ่กว่านี้เสียเวลาเปล่า
+const IMG_QUALITY = 0.85;   // คุณภาพ JPEG หลังย่อ — 0.85 ยังอ่านตัวหนังสือในบิลออกชัด
 let billPhotoData = null; // {base64, mime} — รูปแรก (backward compat + OCR)
 let billPhotosData = []; // [{base64, mime, dataUrl, name}] — รูปบิลทั้งหมด
 let damagePhotosData = []; // [{base64, mime, dataUrl}]
@@ -2096,35 +2098,64 @@ function selectVendor(idx) {
 // ═════════════════════════════════════════════════════════════════════
 // BILL UPLOAD
 // ═════════════════════════════════════════════════════════════════════
-function handleBillUpload(ev) {
+// ย่อรูปก่อนส่ง — รูปจากมือถือมักใหญ่ 5-10 MB ทำให้อัปโหลดช้าและ AI อ่านช้าตาม
+// ย่อเหลือด้านยาว 1568px มักลดขนาดไฟล์ได้ ~90% โดยยังอ่านตัวหนังสือในบิลออกชัด
+// คืน {mime, base64, dataUrl, name} รูปแบบเดียวกับที่ FileReader เดิมให้ (ถ้าย่อไม่ได้ ใช้ไฟล์เดิม)
+function compressImage(file, maxDim, quality) {
+  maxDim = maxDim || IMG_MAX_DIM;
+  quality = quality || IMG_QUALITY;
+  return new Promise(resolve => {
+    const fallback = () => {
+      const reader = new FileReader();
+      reader.onload = e => {
+        const m = /^data:([^;]+);base64,(.+)$/.exec(e.target.result);
+        resolve(m ? { mime: m[1], base64: m[2], dataUrl: e.target.result, name: file.name } : null);
+      };
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(file);
+    };
+    try {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+          // ถ้ารูปเล็กกว่าเป้าอยู่แล้ว ไม่ต้องย่อ (กันขยายจนเบลอ) แต่ยัง re-encode เพื่อลดขนาดไฟล์
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#fff';          // กันพื้นโปร่งใสของ PNG กลายเป็นดำตอนแปลงเป็น JPEG
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL('image/jpeg', quality);
+          URL.revokeObjectURL(url);
+          const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
+          if (!m) { fallback(); return; }
+          resolve({ mime: m[1], base64: m[2], dataUrl, name: file.name });
+        } catch (e) { URL.revokeObjectURL(url); fallback(); }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); fallback(); };
+      img.src = url;
+    } catch (e) { fallback(); }
+  });
+}
+
+async function handleBillUpload(ev) {
   const files = [...(ev.target.files || [])];
   if (!files.length) return;
   const remaining = MAX_BILL_PHOTOS - billPhotosData.length;
   if (remaining <= 0) { showToast('แนบรูปบิลได้สูงสุด ' + MAX_BILL_PHOTOS + ' รูป', 'warning'); ev.target.value=''; return; }
   const accept = files.slice(0, remaining);
-  let processed = 0;
-  accept.forEach(file => {
-    if (file.size > 8 * 1024 * 1024) {
-      showToast('ข้าม "' + file.name + '" (เกิน 8 MB)', 'warning');
-      processed++;
-      if (processed === accept.length) renderBillThumbs();
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = e => {
-      const dataUrl = e.target.result;
-      const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
-      if (m) {
-        billPhotosData.push({ mime: m[1], base64: m[2], dataUrl, name: file.name });
-        // รูปแรก = billPhotoData (ใช้ backward compat)
-        if (!billPhotoData) billPhotoData = { mime: m[1], base64: m[2] };
-      }
-      processed++;
-      if (processed === accept.length) renderBillThumbs();
-    };
-    reader.readAsDataURL(file);
-  });
   ev.target.value = '';
+  // ย่อรูปแบบขนานทุกใบ (ไม่มีลิมิต 8 MB แล้ว เพราะย่อก่อนส่งอยู่แล้ว)
+  const photos = (await Promise.all(accept.map(f => compressImage(f)))).filter(Boolean);
+  photos.forEach(p => {
+    billPhotosData.push(p);
+    if (!billPhotoData) billPhotoData = { mime: p.mime, base64: p.base64 };  // รูปแรก (backward compat)
+  });
+  renderBillThumbs();
   if (files.length > remaining) showToast('แนบได้สูงสุด ' + MAX_BILL_PHOTOS + ' รูป — ใช้เฉพาะ ' + remaining + ' รูปแรก', 'warning');
 }
 
@@ -2154,7 +2185,7 @@ function removeBillPhoto(idx) {
 }
 
 // ─── DAMAGE PHOTOS (multiple, optional) ───
-function handleDamageUpload(ev) {
+async function handleDamageUpload(ev) {
   const files = [...(ev.target.files || [])];
   if (!files.length) return;
   const remaining = 5 - damagePhotosData.length;
@@ -2163,25 +2194,10 @@ function handleDamageUpload(ev) {
     ev.target.value = ''; return;
   }
   const accept = files.slice(0, remaining);
-  let processed = 0;
-  accept.forEach(file => {
-    if (file.size > 8 * 1024 * 1024) {
-      showToast('ข้าม "' + file.name + '" (เกิน 8 MB)', 'warning');
-      processed++;
-      if (processed === accept.length) renderDamageThumbs();
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = e => {
-      const dataUrl = e.target.result;
-      const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
-      if (m) damagePhotosData.push({ mime: m[1], base64: m[2], dataUrl: dataUrl, name: file.name });
-      processed++;
-      if (processed === accept.length) renderDamageThumbs();
-    };
-    reader.readAsDataURL(file);
-  });
   ev.target.value = '';
+  const photos = (await Promise.all(accept.map(f => compressImage(f)))).filter(Boolean);
+  photos.forEach(p => damagePhotosData.push(p));
+  renderDamageThumbs();
   if (files.length > remaining) showToast('แนบได้สูงสุด 5 รูป — ใช้เฉพาะ ' + remaining + ' รูปแรก', 'warning');
 }
 
@@ -2216,11 +2232,6 @@ async function handleOcrUpload(ev) {
   if (!files.length) return;
   ev.target.value = '';
 
-  const tooBig = files.filter(f => f.size > 8 * 1024 * 1024);
-  let okFiles = files.filter(f => f.size <= 8 * 1024 * 1024);
-  if (tooBig.length) showToast('ข้ามไฟล์เกิน 8 MB: ' + tooBig.map(f => f.name).join(', '), 'warning');
-  if (!okFiles.length) return;
-
   // ตัดให้เหลือตามโควตาตั้งแต่ต้น — ต้องอ่าน OCR เฉพาะรูปที่จะแนบจริง
   // ไม่งั้นยอดรวมจะมาจากบิลที่ไม่ได้แนบไปด้วย
   const slots = MAX_BILL_PHOTOS - billPhotosData.length;
@@ -2228,24 +2239,16 @@ async function handleOcrUpload(ev) {
     showToast('แนบรูปบิลครบ ' + MAX_BILL_PHOTOS + ' รูปแล้ว — ลบรูปเดิมออกก่อน', 'warning');
     return;
   }
+  let okFiles = files;
   if (okFiles.length > slots) {
     showToast('แนบได้อีก ' + slots + ' รูป — ใช้เฉพาะ ' + slots + ' รูปแรก', 'warning');
     okFiles = okFiles.slice(0, slots);
   }
 
-  // อ่านทุกไฟล์เป็น base64
-  const photos = [];
-  for (const file of okFiles) {
-    const dataUrl = await new Promise((res, rej) => {
-      const reader = new FileReader();
-      reader.onload = e => res(e.target.result);
-      reader.onerror = rej;
-      reader.readAsDataURL(file);
-    });
-    const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
-    if (m) photos.push({ mime: m[1], base64: m[2], dataUrl, name: file.name });
-  }
-  if (!photos.length) { showToast('อ่านรูปไม่ได้', 'error'); return; }
+  // ย่อรูปก่อน แล้วค่อยส่ง — ขั้นนี้กินเวลาไม่ถึงวินาที แต่ตัดเวลาอัปโหลด/อ่านได้มาก
+  showSpinner('กำลังเตรียมรูป...');
+  const photos = (await Promise.all(okFiles.map(f => compressImage(f)))).filter(Boolean);
+  if (!photos.length) { hideSpinner(); showToast('อ่านรูปไม่ได้', 'error'); return; }
 
   // Auto-fill รูปบิลด้วยเลย (ผู้ใช้ไม่ต้องอัปอีกรอบ) — จำนวนถูกตัดตามโควตาแล้วข้างบน
   photos.forEach(p => {
@@ -2257,7 +2260,7 @@ async function handleOcrUpload(ev) {
   // UI loading
   const card = document.querySelector('.ai-ocr-card');
   if (card) card.classList.add('loading');
-  showSpinner(photos.length > 1 ? `🤖 AI กำลังอ่านบิล ${photos.length} ใบ...` : '🤖 AI กำลังอ่านบิล...');
+  showSpinner(photos.length > 1 ? `🤖 AI กำลังอ่านบิล ${photos.length} ใบพร้อมกัน...` : '🤖 AI กำลังอ่านบิล...');
 
   try {
     const payload = {
