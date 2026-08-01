@@ -887,7 +887,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.30';
+const APP_VERSION = 'v4.31';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -1398,6 +1398,9 @@ function refreshAdjStock(wh) { loadAdjStock(wh, false); }
 // ── SPECIAL CATALOG + STOCK (v4.16) — Colgate/Chaindrite ฯลฯ ──────────────
 // ตัวคูณจากสตริงหน่วย เช่น "ลังx12(CS)" → 12
 function parseUnitFactor(s){ const m=String(s||'').match(/x\s*([\d,]+)/i); return m?parseFloat(m[1].replace(/,/g,'')):0; }
+// ชิ้นต่อลังจากคอลัมน์ "ชิ้น/แพ็ค x แพ็ค/ลัง" (OUTPUT Pack Size) เช่น "4X18" → 4×18=72
+// ใช้เฉพาะรูปแบบ int×int ล้วน (Colgate); Chaindrite เป็น "12X300ML" (มีหน่วย) จะคืน 0 → ไปใช้ parseUnitFactor(หน่วยCS)=12
+function packSizeFactor(s){ const m=String(s||'').trim().match(/^(\d+)\s*[xX]\s*(\d+)$/); return m ? parseFloat(m[1])*parseFloat(m[2]) : 0; }
 async function gvizRaw(id, sheet, minRows) {
   const url = `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheet)}`;
   for (let i=0;i<4;i++){
@@ -1409,7 +1412,7 @@ async function gvizRaw(id, sheet, minRows) {
   return [];
 }
 // โหลดชีต OUTPUT → สร้าง product แบบเดียวกับแคตตาล็อกหลัก แล้ว merge เข้า index (ทำครั้งเดียว)
-// คอลัมน์ OUTPUT: 0=รหัส 1=Barcode/CTN 2=Barcode/Pack 3=Barcode/Piece 4=ชื่อ 5=บรรจุ/หีบ 7=หน่วย(CS) 8=(BP) 9=(PA) 10=(EA)
+// คอลัมน์ OUTPUT: 0=รหัส 1=Barcode/CTN 2=Barcode/Pack 3=Barcode/Piece 4=ชื่อ 5=บรรจุ/หีบ 6=Pack Size(ชิ้น/แพ็ค x แพ็ค/ลัง) 7=หน่วย(CS) 8=(BP) 9=(PA) 10=(EA)
 let specialCatalogs = {}; // "id|sheet" → codeMap (โหลด+merge เข้า index ครั้งเดียว แม้หลายตัวเลือกใช้แคตตาล็อกเดียวกัน)
 async function loadSpecialCatalog(wh) {
   const cfg = SPECIAL_WH[wh]; if (!cfg || cfg._codeMap) return;
@@ -1421,14 +1424,18 @@ async function loadSpecialCatalog(wh) {
     const code = String(r[0]||'').trim(); if (!/^\d{3,}$/.test(code)) return;
     const name = String(r[4]||'').trim(); if (!name) return;
     const bc = i => { const c=String(r[i]||'').trim(); return (c && c!=='0' && c.length>3) ? c : ''; };
-    const fCS = parseUnitFactor(r[7]) || parseFloat(String(r[5]||'').replace(/,/g,'')) || 1;
+    // ชิ้นต่อลัง Colgate = ผลคูณ "ชิ้น/แพ็ค x แพ็ค/ลัง" (เช่น 4X18=72) — หน่วยCS ในชีต (ลังx18) เก็บแค่แพ็ค/ลัง ไม่ใช่ชิ้น/ลัง
+    const fCS = packSizeFactor(r[6]) || parseUnitFactor(r[7]) || parseFloat(String(r[5]||'').replace(/,/g,'')) || 1;
     const fBP = parseUnitFactor(r[8]) || 1;
     const fPA = parseUnitFactor(r[9]) || 1;
+    // label CS ให้ตรงตัวคูณจริง (ถ้า packSize แก้เป็น 72 label ต้องเป็น "ลังx72(CS)" ไม่ใช่ "ลังx18(CS)")
+    const rawUnitCS = String(r[7]||'');
+    const unitCS = (fCS>0 && /x\s*[\d,]+/i.test(rawUnitCS)) ? rawUnitCS.replace(/x\s*[\d,]+/i, 'x'+fCS) : rawUnitCS;
     const p = {
       'PRODUCT NAME': name, 'SHORT NAME': '',
       'CODE CS': bc(1), 'CODE BP': '', 'CODE PA': bc(2), 'CODE EA': bc(3),
       'QTY CS': fCS, 'QTY BP': fBP, 'QTY PA': fPA, 'QTY EA': 1,
-      'UNIT CS': String(r[7]||''), 'UNIT BP': String(r[8]||''), 'UNIT PA': String(r[9]||''), 'UNIT EA': String(r[10]||''),
+      'UNIT CS': unitCS, 'UNIT BP': String(r[8]||''), 'UNIT PA': String(r[9]||''), 'UNIT EA': String(r[10]||''),
       _special: wh, _code: code,
     };
     codeMap[code] = p;
