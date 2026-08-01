@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Vehicle Repair v7.6</title>
+<title>Rattana Vehicle Repair v7.7</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
@@ -514,7 +514,7 @@ body.dark .ai-ocr-text strong{color:var(--gold)}
 <div class="login-screen" id="loginScreen">
   <div class="login-card">
     <div class="login-logo">RATTANA<span> · </span>REPAIR</div>
-    <div class="login-title">ระบบแจ้งซ่อมรถบริษัท · v7.6</div>
+    <div class="login-title">ระบบแจ้งซ่อมรถบริษัท · v7.7</div>
     <div id="g_id_onload"
          data-client_id="615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com"
          data-callback="handleGoogleLogin"
@@ -2229,7 +2229,11 @@ function removeDamagePhoto(idx) {
 // ═════════════════════════════════════════════════════════════════════
 
 // อ่านบิล 1 ใบ = 1 request — ใช้ field billPhotoBase64 แบบดั้งเดิม
-// (เล็กที่สุด และใช้ได้กับ backend ทุกเวอร์ชัน แม้ยังไม่ได้ deploy .gs ใหม่)
+// (payload เล็กสุด และใช้ได้กับ backend ทุกเวอร์ชัน แม้ยังไม่ได้ deploy .gs ใหม่)
+//
+// ⚠️ ต้องยิง "ทีละใบ" เท่านั้น ห้ามยิงพร้อมกัน — Apps Script รับ request ซ้อนจาก
+// user เดียวกันไม่ได้ จะตอบกลับมาเป็นหน้า HTML ของ Google แทน JSON (ทดสอบยืนยันแล้ว)
+//
 // มี timeout กัน request ค้าง + ลองซ้ำ 1 ครั้งถ้าเน็ตสะดุด
 async function ocrOneBill(photo, vendorList, repairItemList, attempt) {
   attempt = attempt || 1;
@@ -2247,7 +2251,14 @@ async function ocrOneBill(photo, vendorList, repairItemList, attempt) {
         repairItemList: repairItemList
       })
     });
-    const j = await resp.json();
+    const txt = await resp.text();
+    let j;
+    try {
+      j = JSON.parse(txt);
+    } catch (parseErr) {
+      // ได้ HTML แทน JSON = Apps Script ไม่ยอมรับ request (ซ้อนกัน / หมด session)
+      throw new Error('เซิร์ฟเวอร์ตอบกลับผิดรูปแบบ');
+    }
     if (!j.ok) throw new Error(j.error || 'OCR failed');
     return j.data;
   } catch (e) {
@@ -2294,24 +2305,30 @@ async function handleOcrUpload(ev) {
   // UI loading
   const card = document.querySelector('.ai-ocr-card');
   if (card) card.classList.add('loading');
-  showSpinner(photos.length > 1 ? `🤖 AI กำลังอ่านบิล ${photos.length} ใบพร้อมกัน...` : '🤖 AI กำลังอ่านบิล...');
+  showSpinner('🤖 AI กำลังอ่านบิล...');   // ข้อความจะอัปเดตเป็น "ใบที่ x/y" ระหว่างวนอ่าน
 
   try {
     const vendorList = vendors.map(v => v.name);
     const repairItemList = REPAIR_CATEGORIES.flatMap(c => c.items);
 
-    // ยิงทีละใบพร้อมกัน — ถ้ารวมหลายใบใน request เดียว payload จะใหญ่หลาย MB
-    // แล้วเน็ตมือถือมักหลุดกลางทาง (ขึ้น "Load failed") + ใบไหนพลาดใบอื่นยังรอด
-    const settled = await Promise.allSettled(
-      photos.map(p => ocrOneBill(p, vendorList, repairItemList))
-    );
-    const okResults = settled.filter(s => s.status === 'fulfilled').map(s => s.value);
-    const failed = settled.length - okResults.length;
-
-    if (!okResults.length) {
-      const why = settled[0] && settled[0].reason ? settled[0].reason.message : '';
-      throw new Error(why);
+    // ส่งทีละใบตามลำดับ — ไม่รวมเป็นก้อนเดียว (payload ใหญ่เกิน เน็ตมือถือหลุด)
+    // และไม่ยิงพร้อมกัน (Apps Script รับ request ซ้อนไม่ได้ ตอบ HTML กลับมา)
+    const okResults = [];
+    let firstError = '';
+    for (let i = 0; i < photos.length; i++) {
+      showSpinner(photos.length > 1
+        ? `🤖 AI กำลังอ่านบิลใบที่ ${i + 1}/${photos.length}...`
+        : '🤖 AI กำลังอ่านบิล...');
+      try {
+        okResults.push(await ocrOneBill(photos[i], vendorList, repairItemList));
+      } catch (err) {
+        console.error('[OCR] ใบที่ ' + (i + 1) + ' ไม่สำเร็จ:', err);
+        if (!firstError) firstError = err.message || '';
+      }
     }
+    const failed = photos.length - okResults.length;
+
+    if (!okResults.length) throw new Error(firstError);
 
     // รวมผลฝั่งเครื่อง: ยอดบวกกันทุกใบ, รายการต่อกัน, ศูนย์ซ่อมเอาใบแรกที่อ่านได้
     applyOcrResult({
@@ -2321,14 +2338,15 @@ async function handleOcrUpload(ev) {
       items:       okResults.flatMap(r => Array.isArray(r.items) ? r.items : []),
       billCount:   okResults.length
     });
-    if (failed) showToast(`อ่านได้ ${okResults.length}/${settled.length} ใบ — ใบที่เหลือลองใหม่อีกครั้ง`, 'warning');
+    if (failed) showToast(`อ่านได้ ${okResults.length}/${photos.length} ใบ — ใบที่เหลือลองใหม่อีกครั้ง`, 'warning');
   } catch (e) {
     console.error('[OCR] error:', e);
     // "Load failed" / "Failed to fetch" = เน็ตหลุดระหว่างส่ง ไม่ใช่ AI อ่านไม่ออก — บอกให้ผู้ใช้เข้าใจ
-    const net = /load failed|failed to fetch|networkerror|aborted|timeout/i.test(e.message || '');
+    const msg = e.message || '';
+    const net = /load failed|failed to fetch|networkerror|aborted|timeout|ผิดรูปแบบ/i.test(msg);
     showToast(net
       ? 'ส่งรูปไม่สำเร็จ — สัญญาณเน็ตหลุด ลองใหม่อีกครั้ง หรือถ่ายทีละใบ'
-      : 'AI อ่านบิลไม่สำเร็จ: ' + e.message, 'error');
+      : 'AI อ่านบิลไม่สำเร็จ: ' + msg, 'error');
   } finally {
     if (card) card.classList.remove('loading');
     hideSpinner();
