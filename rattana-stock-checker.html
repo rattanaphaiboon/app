@@ -887,7 +887,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.24';
+const APP_VERSION = 'v4.33';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -1398,6 +1398,9 @@ function refreshAdjStock(wh) { loadAdjStock(wh, false); }
 // ── SPECIAL CATALOG + STOCK (v4.16) — Colgate/Chaindrite ฯลฯ ──────────────
 // ตัวคูณจากสตริงหน่วย เช่น "ลังx12(CS)" → 12
 function parseUnitFactor(s){ const m=String(s||'').match(/x\s*([\d,]+)/i); return m?parseFloat(m[1].replace(/,/g,'')):0; }
+// ชิ้นต่อลังจากคอลัมน์ "ชิ้น/แพ็ค x แพ็ค/ลัง" (OUTPUT Pack Size) เช่น "4X18" → 4×18=72
+// ใช้เฉพาะรูปแบบ int×int ล้วน (Colgate); Chaindrite เป็น "12X300ML" (มีหน่วย) จะคืน 0 → ไปใช้ parseUnitFactor(หน่วยCS)=12
+function packSizeFactor(s){ const m=String(s||'').trim().match(/^(\d+)\s*[xX]\s*(\d+)$/); return m ? parseFloat(m[1])*parseFloat(m[2]) : 0; }
 async function gvizRaw(id, sheet, minRows) {
   const url = `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheet)}`;
   for (let i=0;i<4;i++){
@@ -1409,27 +1412,38 @@ async function gvizRaw(id, sheet, minRows) {
   return [];
 }
 // โหลดชีต OUTPUT → สร้าง product แบบเดียวกับแคตตาล็อกหลัก แล้ว merge เข้า index (ทำครั้งเดียว)
-// คอลัมน์ OUTPUT: 0=รหัส 1=Barcode/CTN 2=Barcode/Pack 3=Barcode/Piece 4=ชื่อ 5=บรรจุ/หีบ 7=หน่วย(CS) 8=(BP) 9=(PA) 10=(EA)
+// คอลัมน์ OUTPUT: 0=รหัส 1=Barcode/CTN 2=Barcode/Pack 3=Barcode/Piece 4=ชื่อ 5=บรรจุ/หีบ 6=Pack Size(ชิ้น/แพ็ค x แพ็ค/ลัง) 7=หน่วย(CS) 8=(BP) 9=(PA) 10=(EA)
 let specialCatalogs = {}; // "id|sheet" → codeMap (โหลด+merge เข้า index ครั้งเดียว แม้หลายตัวเลือกใช้แคตตาล็อกเดียวกัน)
 async function loadSpecialCatalog(wh) {
   const cfg = SPECIAL_WH[wh]; if (!cfg || cfg._codeMap) return;
   const ck = cfg.catalog.id + '|' + cfg.catalog.sheet;
   if (specialCatalogs[ck]) { cfg._codeMap = specialCatalogs[ck]; return; }  // ใช้แคตตาล็อกที่โหลด+merge แล้วร่วมกัน
   const rows = await gvizRaw(cfg.catalog.id, cfg.catalog.sheet, 2);
+  // ชีท COMPARE: 0=รหัสสินค้า ... 8=ชื่อในระบบ(SKU) — map รหัส→ชื่อ SKU ไว้โชว์ในวงเล็บ
+  const skuByCode = {};
+  const cmpRows = await gvizRaw(cfg.catalog.id, 'COMPARE', 2);
+  cmpRows.slice(1).forEach(r => {
+    const c = String(r[0]||'').trim(); const sku = String(r[8]||'').trim();
+    if (c && sku && sku !== '-') skuByCode[c] = sku;
+  });
   const codeMap = {};
   rows.slice(1).forEach(r => {
     const code = String(r[0]||'').trim(); if (!/^\d{3,}$/.test(code)) return;
     const name = String(r[4]||'').trim(); if (!name) return;
     const bc = i => { const c=String(r[i]||'').trim(); return (c && c!=='0' && c.length>3) ? c : ''; };
-    const fCS = parseUnitFactor(r[7]) || parseFloat(String(r[5]||'').replace(/,/g,'')) || 1;
+    // ชิ้นต่อลัง Colgate = ผลคูณ "ชิ้น/แพ็ค x แพ็ค/ลัง" (เช่น 4X18=72) — หน่วยCS ในชีต (ลังx18) เก็บแค่แพ็ค/ลัง ไม่ใช่ชิ้น/ลัง
+    const fCS = packSizeFactor(r[6]) || parseUnitFactor(r[7]) || parseFloat(String(r[5]||'').replace(/,/g,'')) || 1;
     const fBP = parseUnitFactor(r[8]) || 1;
     const fPA = parseUnitFactor(r[9]) || 1;
+    // label CS ให้ตรงตัวคูณจริง (ถ้า packSize แก้เป็น 72 label ต้องเป็น "ลังx72(CS)" ไม่ใช่ "ลังx18(CS)")
+    const rawUnitCS = String(r[7]||'');
+    const unitCS = (fCS>0 && /x\s*[\d,]+/i.test(rawUnitCS)) ? rawUnitCS.replace(/x\s*[\d,]+/i, 'x'+fCS) : rawUnitCS;
     const p = {
       'PRODUCT NAME': name, 'SHORT NAME': '',
       'CODE CS': bc(1), 'CODE BP': '', 'CODE PA': bc(2), 'CODE EA': bc(3),
       'QTY CS': fCS, 'QTY BP': fBP, 'QTY PA': fPA, 'QTY EA': 1,
-      'UNIT CS': String(r[7]||''), 'UNIT BP': String(r[8]||''), 'UNIT PA': String(r[9]||''), 'UNIT EA': String(r[10]||''),
-      _special: wh, _code: code,
+      'UNIT CS': unitCS, 'UNIT BP': String(r[8]||''), 'UNIT PA': String(r[9]||''), 'UNIT EA': String(r[10]||''),
+      _special: wh, _code: code, _sku: skuByCode[code] || '',
     };
     codeMap[code] = p;
     productByKey[productKey(p)] = p;   // คีย์ = รหัสสินค้า → แต่ละรหัสเป็น product แยกกัน
@@ -1438,7 +1452,8 @@ async function loadSpecialCatalog(wh) {
       const c = String(p['CODE '+u]||'').trim();
       if (c && c.length>3 && c!=='0') {
         if (!barcodeIndex[c]) barcodeIndex[c] = { product:p, unit:u };
-        (specialBarcodeMap[c] = specialBarcodeMap[c] || []).push({ product:p, unit:u });
+        const arr = (specialBarcodeMap[c] = specialBarcodeMap[c] || []);
+        if (!arr.some(e => String(e.product._code) === String(p._code))) arr.push({ product:p, unit:u });
       }
     });
   });
@@ -1481,11 +1496,17 @@ async function loadSpecialStock(wh) {
       }
     });
   }
-  // จับคู่ด้วย barcode key ที่แม่นตรง (ไม่ใช้ nameIndex เพื่อกันชื่อซ้ำทำสต็อกเพี้ยน)
+  // index ด้วยทั้ง "รหัส" (productKey) และ "บาร์โค้ด" ทุกหน่วย
+  // → รายการเก่าที่คีย์ด้วยบาร์โค้ด (สแกนก่อนแก้บั๊กชนแคตตาล็อกหลัก) ก็ยังดึงสต็อก Colgate เจอ
   const index = {};
   Object.keys(codeStock).forEach(code => {
     const p = cfg._codeMap[code]; if (!p) return;
-    index[productKey(p)] = codeStock[code];
+    const ea = codeStock[code];
+    index[productKey(p)] = ea;
+    ['CS','BP','PA','EA'].forEach(u => {
+      const c = String(p['CODE '+u]||'').trim();
+      if (c && c.length>3 && c!=='0' && index[c] === undefined) index[c] = ea;
+    });
   });
   adjStockCache[wh] = { index, nameIndex: {}, reportDate: null };
   return Object.keys(index).length;
@@ -1638,7 +1659,8 @@ function remergeSpecialCatalogs() {
         const c = String(p['CODE '+u]||'').trim();
         if (c && c.length>3 && c!=='0') {
           if (!barcodeIndex[c]) barcodeIndex[c] = { product:p, unit:u };
-          (specialBarcodeMap[c] = specialBarcodeMap[c] || []).push({ product:p, unit:u });
+          const arr = (specialBarcodeMap[c] = specialBarcodeMap[c] || []);
+          if (!arr.some(e => String(e.product._code) === String(p._code))) arr.push({ product:p, unit:u });
         }
       });
     });
@@ -1653,6 +1675,28 @@ function productKey(p) {
     if (c && c.length > 3 && c !== '0' && c !== '-') return c;
   }
   return p['PRODUCT NAME'] || '?';
+}
+// รหัสสินค้าของสินค้าพิเศษ (Colgate/Chaindrite) — เก็บบน item หรือหาจาก productByKey
+function itemCodeOf(it) {
+  if (!it) return '';
+  if (it._code) return String(it._code);
+  const p = productByKey[it.key];
+  return (p && p._code) ? String(p._code) : '';
+}
+// ต่อท้ายชื่อสินค้าด้วยรหัส (ตัวเล็กสีเทา) — โชว์เฉพาะสินค้าพิเศษที่มีรหัส
+function codeSuffix(code) {
+  return code ? ` <small style="color:var(--muted);font-weight:600;white-space:nowrap">· ${code}</small>` : '';
+}
+// ชื่อในระบบ (SKU) จากชีท COMPARE ของสินค้าพิเศษ (Colgate/Chaindrite)
+function itemSkuOf(it) {
+  if (!it) return '';
+  if (it._sku) return String(it._sku);
+  const p = productByKey[it.key];
+  return (p && p._sku) ? String(p._sku) : '';
+}
+// ต่อท้ายด้วยชื่อในระบบ (SKU) ในวงเล็บ — ตัวเล็กสีเทา
+function skuSuffix(sku) {
+  return sku ? ` <small style="color:var(--muted);font-weight:600">(${sku})</small>` : '';
 }
 // EA-per-unit conversion factor (EA always 1; others from QTY column)
 function unitFactor(p, u) {
@@ -2338,7 +2382,10 @@ function liveSearch(q) {
   const drop = document.getElementById('searchDrop');
   if (!drop) return;
   const ql = q.toLowerCase();
+  // คลังพิเศษ (Colgate/Chaindrite) → ค้นเฉพาะสินค้าพิเศษ · คลังปกติ → เฉพาะสินค้าหลัก (กันสินค้าซ้ำ 2 แคตตาล็อก)
+  const onSpecial = !!SPECIAL_WH[countSession && countSession.warehouse];
   const matched = Object.values(productByKey).filter(p => {
+    if (onSpecial ? !p._code : !!p._code) return false;
     return (p['PRODUCT NAME']||'').toLowerCase().includes(ql)
       || (p['SHORT NAME']||'').toLowerCase().includes(ql)
       || (p['KEY']||'').toLowerCase().includes(ql);
@@ -2355,7 +2402,7 @@ function liveSearch(q) {
     ).join('');
     const codeTag = p._code ? ` <small style="color:var(--muted);font-weight:600">· ${p._code}</small>` : '';
     return `<div class="search-opt" onclick="pickSearchProduct(event,'${productKey(p)}','${units[0]||'EA'}')">
-      <span class="search-opt-name">${p['PRODUCT NAME']||'-'}${codeTag}</span>
+      <span class="search-opt-name">${p['PRODUCT NAME']||'-'}${codeTag}${skuSuffix(p._sku||'')}</span>
       <span class="search-opt-units">${unitBtns}</span>
     </div>`;
   }).join('');
@@ -2377,18 +2424,21 @@ function countScan(code) {
   const bc  = (code || inp.value).trim();
   closeSearchDrop();
   if (!bc) { inp.focus(); return; }
-  const found = barcodeIndex[bc];
+  const wh = countSession && countSession.warehouse;
+  // คลังพิเศษ (Colgate/Chaindrite): ใช้ "เฉพาะ" แคตตาล็อกพิเศษ จับคู่ด้วยรหัสของแบรนด์นั้น
+  // ไม่ fallback ไปแคตตาล็อกหลัก (บาร์โค้ดซ้ำกับหลักได้ ทำให้ดึงสต็อกผิดแบรนด์/เป็น 0)
+  const isSpecial = !!SPECIAL_WH[wh];
+  const special = (isSpecial && specialBarcodeMap[bc]) ? specialBarcodeMap[bc] : null;
+  const found = isSpecial ? (special ? special[0] : null) : barcodeIndex[bc];
   if (!found) {
-    showToast(`ไม่พบบาร์โค้ด: ${bc}`, 'error');
+    showToast(isSpecial ? `${bc} ไม่อยู่ในแคตตาล็อก ${SPECIAL_WH[wh].label}` : `ไม่พบบาร์โค้ด: ${bc}`, 'error');
     inp.select();
     return;
   }
   inp.value = '';
   document.getElementById('bcClear').style.display = 'none';
-  // สินค้าพิเศษ: บาร์โค้ดเดียวมีหลายรหัสสินค้า → ให้เลือกรหัสก่อน
-  const wh = countSession && countSession.warehouse;
-  const multi = (SPECIAL_WH[wh] && specialBarcodeMap[bc]) ? specialBarcodeMap[bc] : null;
-  if (multi && multi.length > 1) { renderCodeChooser(bc, multi); return; }
+  // บาร์โค้ดเดียวมีหลายรหัสสินค้า → ให้เลือกรหัสก่อน
+  if (special && special.length > 1) { renderCodeChooser(bc, special); return; }
   pendingScan = { product: found.product, unit: found.unit, code: bc };
   renderPending();
   if (navigator.vibrate) navigator.vibrate(60);
@@ -2405,7 +2455,7 @@ function renderCodeChooser(bc, entries) {
     const stockTxt = (totalEA !== undefined) ? piecesToCSEA(totalEA, unitFactor(p,'CS')) : 'ไม่มีสต็อก';
     return `<button type="button" class="code-opt" onclick="pickCode('${bc}','${code}')">
       <div class="code-opt-main">
-        <div class="code-opt-name">${p['PRODUCT NAME']||'-'}</div>
+        <div class="code-opt-name">${p['PRODUCT NAME']||'-'}${skuSuffix(p._sku||'')}</div>
         <div class="code-opt-sub">รหัส ${code} · สต็อก ${stockTxt}</div>
       </div>
       <span class="code-opt-go">→</span>
@@ -2456,8 +2506,8 @@ function renderPending() {
       <div class="pb-top">
         ${thumbHtml(name, pendingScan.product, false)}
         <div class="pb-info">
-          <div class="pb-name">${name}</div>
-          <div class="pb-sub">${pendingScan.code}</div>
+          <div class="pb-name">${name}${skuSuffix(p._sku||'')}</div>
+          <div class="pb-sub">${p._code ? 'รหัส '+p._code+' · ' : ''}${pendingScan.code}</div>
         </div>
         <button class="pb-x" onclick="cancelPending()" title="ยกเลิก">✕</button>
       </div>
@@ -2582,15 +2632,17 @@ function confirmCount() {
   const key = productKey(p);
   if (!countSession.items[key]) {
     countSession.items[key] = {
-      key, name: p['PRODUCT NAME']||'-', short: p['SHORT NAME']||'',
+      key, name: p['PRODUCT NAME']||'-', short: p['SHORT NAME']||'', _code: p._code || '', _sku: p._sku || '',
       factors: { EA:unitFactor(p,'EA'), PA:unitFactor(p,'PA'), BP:unitFactor(p,'BP'), CS:unitFactor(p,'CS') },
       counts: { EA:0, PA:0, BP:0, CS:0 },
     };
   }
   const item = countSession.items[key];
-  // Convert legacy single-counts to lots on first use
+  // แปลง counts เดิม → lots. ถ้าเป็นสินค้าใหม่ (ยังไม่มีจำนวน) เริ่มด้วย [] ไม่สร้างล็อตว่าง
+  // (ไม่งั้นล็อตว่าง Lot 1 จะค้าง แล้วจำนวนที่สแกนไปสร้าง Lot 2 → กลายเป็น 2 กรอบทั้งที่ควรมีกรอบเดียว)
   if (!item.lots) {
-    item.lots = [{ counts: { ...item.counts }, expiryDate: item.expiryDate || '' }];
+    const hasCount = ['EA','PA','BP','CS'].some(u => (item.counts[u]||0) > 0);
+    item.lots = hasCount ? [{ counts: { ...item.counts }, expiryDate: item.expiryDate || '' }] : [];
   }
   const locVal = document.getElementById('scanLocInput')?.value?.trim() || '';
   // Find existing lot with same expiry + location, or create new lot
@@ -2749,8 +2801,12 @@ function systemPiecesFor(item) {
       base = totalEA; raw = `${cs}.${ea}`; isAdj = true;
     }
   }
+  if (base === undefined && SPECIAL_WH[wh]) {
+    // คลังพิเศษ (Colgate/Chaindrite): ใช้เฉพาะสต็อกจากชีตวางฯ — ไม่ fallback Stocksync เด็ดขาด
+    cs = 0; ea = 0; base = 0; raw = '0'; isAdj = true;
+  }
   if (base === undefined) {
-    // Stocksync (real-time)
+    // Stocksync (real-time) — เฉพาะคลังปกติ
     raw = p ? (p[`STOCK ${wh}`] || '0') : '0';
     ({ cs, ea } = parseStock(raw));
     base = cs * (item.factors.CS||1) + ea;
@@ -2771,7 +2827,26 @@ function piecesToCSEA(pieces, factorCS) {
 // each unit's count. Structure mirrors Direction B from the design bundle.
 const liveOpen = new Set();   // one key at a time
 
+// ตัวคูณของรายการที่นับไว้เป็น snapshot ตอนสแกน — ถ้าแคตตาล็อกอัปเดตตัวคูณ (เช่น Colgate ชิ้น/ลัง 18→72)
+// ให้ดึงค่าล่าสุดจาก product ปัจจุบัน (productByKey[key]) มาทับ โดยคงจำนวนที่นับไว้เดิม
+// → ฝั่งนับ (countedPieces) / ฝั่งระบบ (systemPiecesFor split) / Diff ใช้ตัวคูณเดียวกัน จะตรงกัน
+function syncItemFactors() {
+  if (!countSession || !countSession.items) return false;
+  let changed = false;
+  Object.values(countSession.items).forEach(it => {
+    const p = productByKey[it.key];
+    if (!p) return;
+    it.factors = it.factors || {};
+    ['EA','PA','BP','CS'].forEach(u => {
+      const f = unitFactor(p, u);
+      if (f > 0 && it.factors[u] !== f) { it.factors[u] = f; changed = true; }
+    });
+  });
+  if (changed) saveCountSession();
+  return changed;
+}
 function renderCountList() {
+  syncItemFactors();
   const card = document.getElementById('countListCard');
   const list = document.getElementById('countList');
   const items = countSession ? Object.values(countSession.items) : [];
@@ -2816,7 +2891,7 @@ function renderCountList() {
     <div class="lrow ${open?'open':''}">
       <div class="lrow-main" onclick="toggleLiveRow('${key}')">
         <div class="lrow-info">
-          <div class="lrow-name">${it.name}</div>
+          <div class="lrow-name">${it.name}${codeSuffix(itemCodeOf(it))}${skuSuffix(itemSkuOf(it))}</div>
           <div class="lrow-sub">${breakdownText(it)} = <b>${d.counted.toLocaleString()}</b> ชิ้น · ระบบ ${d.system.toLocaleString()}${d.putawayPallets ? ` <span style="color:var(--navy-mid);font-weight:600">· 📍 ${d.putawayPallets} พาเลท</span>` : ''}</div>
         </div>
         ${pill}
@@ -2926,6 +3001,10 @@ function productStock(p) {
       cs = Math.floor(totalEA / factorCS); ea = totalEA - cs * factorCS;
       base = totalEA; isAdj = true;
     }
+  }
+  if (base === undefined && SPECIAL_WH[wh]) {
+    // คลังพิเศษ (Colgate/Chaindrite): ใช้เฉพาะสต็อกจากชีตวางฯ — ไม่ fallback Stocksync
+    cs = 0; ea = 0; base = 0; isAdj = true;
   }
   if (base === undefined) {
     ({ cs, ea } = parseStock(p ? (p[`STOCK ${wh}`] || '0') : '0'));
@@ -3121,7 +3200,7 @@ function openEditItem(encKey) {
   if (!it.lots) it.lots = [{ counts: { ...it.counts }, expiryDate: it.expiryDate||'' }];
   window._editItem = it;
   document.getElementById('editBody').innerHTML = `
-    <div style="font-size:14px;font-weight:700;margin-bottom:10px">${it.name}</div>
+    <div style="font-size:14px;font-weight:700;margin-bottom:10px">${it.name}${codeSuffix(itemCodeOf(it))}${skuSuffix(itemSkuOf(it))}</div>
     <div class="lot-info-note">💡 Lot จะถูกแยกอัตโนมัติเมื่อ <b>วันหมดอายุ</b> หรือ <b>ที่ตั้ง</b> ต่างกัน</div>
     <div id="lotList"></div>
     <button type="button" onclick="addLotRow()" class="btn btn-outline btn-sm btn-block" style="margin-top:8px">
@@ -3246,8 +3325,8 @@ function renderSummary() {
       : `<span class="srp srp-${r.status==='short'?'short':'over'}">${word} ${csea}</span>`;
     return `<div class="sum-row sr-${r.status==='ok'?'ok':(r.status==='short'?'short':'over')}">
       <div class="sr-main">
-        <div class="sr-name">${r.name}</div>
-        <div class="sr-sub">นับ <b>${r.counted.toLocaleString()}</b> · ระบบ ${r.system.toLocaleString()} ชิ้น</div>
+        <div class="sr-name">${r.name}${skuSuffix(itemSkuOf(r.item))}</div>
+        <div class="sr-sub">${(() => { const c = itemCodeOf(r.item); return c ? 'รหัส '+c+' · ' : ''; })()}นับ <b>${r.counted.toLocaleString()}</b> · ระบบ ${r.system.toLocaleString()} ชิ้น</div>
       </div>
       ${srp}
     </div>`;
@@ -4287,8 +4366,8 @@ function openHistDetail(idx) {
     <div class="hd-prod-row${hasDrill?' hd-has-lots':''}" onclick="this.classList.toggle('open')">
       <div class="hd-prod-main">
         <div class="hd-prod-info">
-          <div style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
-          <div style="font-size:12px;color:var(--muted);margin-top:1px">นับ <b>${piecesToCSEA(p.counted,p.factorCS)}</b> · ระบบ ${piecesToCSEA(p.system,p.factorCS)}${multiScan?` · <b>${scans.length} ครั้ง</b>`:''}
+          <div style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}${skuSuffix(itemSkuOf(p))}</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:1px">${(() => { const c = productByKey[p.key] && productByKey[p.key]._code; return c ? 'รหัส '+c+' · ' : ''; })()}นับ <b>${piecesToCSEA(p.counted,p.factorCS)}</b> · ระบบ ${piecesToCSEA(p.system,p.factorCS)}${multiScan?` · <b>${scans.length} ครั้ง</b>`:''}
           </div>
         </div>
         <div class="hd-prod-right">
