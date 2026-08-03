@@ -896,11 +896,31 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.38';
+const APP_VERSION = 'v4.39';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
-// GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
+// GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
 const COUNT_SAVE_URL = 'https://script.google.com/macros/s/AKfycbyMAQLR0MCCBq8-f6cQzmlg1cjHIySuFzZQgvaMxt68zN76OvfWecES_RTXI-sklzrlAg/exec';
+
+// Supabase — เก็บ "draft" รายการนับ เพื่อ sync ข้ามเครื่องให้ตรงกันแน่นอน (โปรเจกต์เดียวกับแอปเช็คเอาต์)
+// ตาราง stock_draft (PK: wh + counter_key) เก็บ items(jsonb) · publishable key ใช้ในเว็บได้ (RLS เปิด policy allow anon)
+// กดส่งจริง → ลงชีท (GAS) แล้วลบ draft แถวนี้ทิ้ง
+const SUPA_URL = 'https://uytzsuwapwkqkougorvb.supabase.co';
+const SUPA_KEY = 'sb_publishable_2iDqojkyM2pqJxQJfvnxyg_Y6WMQ6Q8';
+function supaFetch(path, opts) {
+  opts = opts || {};
+  const url = SUPA_URL.replace(/\/$/,'') + '/rest/v1' + path;
+  const headers = Object.assign({ 'apikey':SUPA_KEY, 'Authorization':'Bearer '+SUPA_KEY, 'Content-Type':'application/json' }, opts.headers || {});
+  return fetch(url, Object.assign({}, opts, { headers }));
+}
+// device id คงที่ต่อเครื่อง (localStorage) — ใช้แยกว่า draft มาจากเครื่องไหน
+function deviceId() {
+  try {
+    let d = localStorage.getItem('sc_device_id');
+    if (!d) { d = 'd' + Math.random().toString(36).slice(2,10) + Date.now().toString(36); localStorage.setItem('sc_device_id', d); }
+    return d;
+  } catch { return 'd0'; }
+}
 
 const WH_LIST  = ['W1','W2','W3','W4','C4'];
 const WH_NAMES = { W1:'สมุทรสงคราม', W2:'สุพรรณบุรี', W3:'ราชบุรี', W4:'นครปฐม', C4:'รัตนมาร์ท' };
@@ -2248,7 +2268,7 @@ function saveCountSession() {
   }
 }
 
-// ── Cross-device draft sync via Google Sheet ──
+// ── Cross-device draft sync via Supabase (ตาราง stock_draft) ──
 // userKey for cross-device draft sync — keyed by the PICKED counter so
 // each person's in-progress count syncs only with their own devices.
 const userKey = () => {
@@ -2261,50 +2281,59 @@ const userKey = () => {
 };
 let draftSyncTimer = null;
 function queueDraftSync() {
-  if (!COUNT_SAVE_URL || !currentUser || !countSession) return;
+  if (!SUPA_URL || !currentUser || !countSession || !userKey()) return;
   clearTimeout(draftSyncTimer);
   draftSyncTimer = setTimeout(syncDraftNow, 400); // debounce 0.4s — feels instant
 }
+// upsert draft ลง Supabase (1 แถวต่อ wh+counter_key) — REST ยืนยันผลได้ (ไม่ใช่ no-cors)
 async function syncDraftNow() {
-  if (!COUNT_SAVE_URL || !currentUser || !countSession) return;
+  const key = userKey();
+  if (!SUPA_URL || !currentUser || !countSession || !key) return;
   try {
-    await fetch(COUNT_SAVE_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{ 'Content-Type':'text/plain;charset=utf-8' },
-      body: JSON.stringify({
-        action:'saveDraft',
-        userKey: userKey(),
-        email: currentUser.email,
-        empId: counterDisplayEmpId(),
-        warehouse: countSession.warehouse,
-        sessionStart: countSession.startedAt,
-        items: countSession.items,
-      }),
+    const row = {
+      wh: countSession.warehouse,
+      counter_key: key,
+      items: countSession.items || {},
+      session_start: countSession.startedAt || null,
+      device: deviceId(),
+      updated_at: new Date().toISOString(),
+    };
+    const res = await supaFetch('/stock_draft', {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },   // upsert บน PK (wh,counter_key)
+      body: JSON.stringify(row),
     });
-    // Mark this local snapshot as mirrored on the Sheet
-    if (countSession) {
-      countSession.syncedAt = new Date().toISOString();
-      try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
+    if (res.ok) {
+      if (countSession) {
+        countSession.syncedAt = row.updated_at;
+        try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
+      }
+    } else {
+      console.warn('draft sync failed', res.status, await res.text().catch(()=>''));
     }
-  } catch {}
+  } catch (e) { console.warn('draft sync error', e); }
 }
+// อ่าน draft ล่าสุดจาก Supabase → { items, updatedAt, sessionStart, device } หรือ null
 async function fetchRemoteDraft(wh) {
-  if (!COUNT_SAVE_URL || !currentUser) return null;
+  const key = userKey();
+  if (!SUPA_URL || !currentUser || !key) return null;
   try {
-    const url = `${COUNT_SAVE_URL}?action=draft&userKey=${encodeURIComponent(userKey())}&warehouse=${encodeURIComponent(wh)}`;
-    const res = await fetch(url, { cache:'no-store' });
-    const json = await res.json();
-    return json && json.ok && json.draft ? json.draft : null;
+    const q = `/stock_draft?wh=eq.${encodeURIComponent(wh)}&counter_key=eq.${encodeURIComponent(key)}&select=items,updated_at,session_start,device&limit=1`;
+    const res = await supaFetch(q, { cache:'no-store' });
+    if (!res.ok) return null;
+    const arr = await res.json();
+    const r = Array.isArray(arr) && arr.length ? arr[0] : null;
+    if (!r) return null;
+    return { items: r.items || {}, updatedAt: r.updated_at, sessionStart: r.session_start, device: r.device };
   } catch { return null; }
 }
+// ลบ draft แถวนี้ (ตอนกดส่งจริงลงชีทแล้ว)
 async function clearRemoteDraft(wh) {
-  if (!COUNT_SAVE_URL || !currentUser) return;
+  const key = userKey();
+  if (!SUPA_URL || !currentUser || !key) return;
   try {
-    await fetch(COUNT_SAVE_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{ 'Content-Type':'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action:'clearDraft', userKey: userKey(), warehouse: wh }),
-    });
+    await supaFetch(`/stock_draft?wh=eq.${encodeURIComponent(wh)}&counter_key=eq.${encodeURIComponent(key)}`,
+      { method:'DELETE', headers:{ 'Prefer':'return=minimal' } });
   } catch {}
 }
 // Manual override — bypass the 30s guard, fetch the remote draft and adopt it
@@ -2358,7 +2387,7 @@ function draftSig(items) {
 function updateSyncStatus(wh, remote) {
   const el = document.getElementById('syncStatus');
   if (!el) return;
-  if (!COUNT_SAVE_URL || !currentUser) { el.style.display = 'none'; return; }
+  if (!SUPA_URL || !currentUser) { el.style.display = 'none'; return; }
   const key = userKey();
   const items = remote && remote.items ? remote.items : null;
   const n = items ? Object.keys(items).length : 0;
