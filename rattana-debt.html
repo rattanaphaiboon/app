@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v5.16</title>
+<title>Rattana ยอดหนี้คงค้าง v5.17</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -613,6 +613,10 @@ body.dark .cr-chip.ok{color:#6fe3a3}
 .cr-extra{margin-top:8px;display:none;flex-direction:column;gap:6px}
 .cr-extra.on{display:flex}
 .cr-extra input{width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px}
+.cr-ord{padding:3px 0}
+.cr-ord+.cr-ord{border-top:1px dashed var(--border);margin-top:4px;padding-top:6px}
+.cr-sku{padding-left:12px;opacity:.85}
+.cr-sku .cr-item-n{font-size:11px}
 .cr-locked{margin-top:9px;font-size:11px;color:var(--muted);background:var(--row-alt);border-radius:7px;padding:7px 9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .match-img-thumb{width:48px;height:48px;object-fit:cover;border-radius:6px;border:1px solid var(--border);cursor:pointer;flex-shrink:0}
 
@@ -770,7 +774,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v5.16</span>
+      <span class="app-ver">v5.17</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -3106,34 +3110,33 @@ function switchTab(tab){
 }
 
 /* ==========================================================
-   ขายเชื่อ — บัญชีตรวจบิลที่ซุปอนุมัติไปแล้ว (v5.13)
-   โมเดล: ซุปอนุมัติ → เซลคีย์บิลได้ทันที ไม่รอบัญชี → บิลมาโผล่ที่นี่
-          บัญชี "ไม่กด" = ผ่านโดยปริยาย · กด = เขียน สถานะอนุมัติ ในชีท Order + Supabase
-   ข้อมูล/การเขียนทั้งหมดไปที่หลังบ้าน Sales App (เจ้าของชีท Order + SB) — ที่นี่ไม่ทำ logic ซ้ำ
+   ขายเชื่อ — บัญชีตรวจใบที่ซุปอนุมัติแล้ว (v5.17)
+   ใช้แค่ 2 แท็บของ Sales App: DebtApproval (ตัวตั้ง) + Order (ออเดอร์ที่ reqId ตรงกัน)
+   1 ใบอนุมัติ (reqId) = 1 การ์ด รวมทุกออเดอร์ของใบนั้น · บัญชีกด = เขียน สถานะอนุมัติ
+   ทุกแถวใน Order ที่ ขายเชื่อ-reqId ตรงกัน + mirror Supabase
    ========================================================== */
-let creditBills   = [];
+let creditRows    = [];
 let creditLoaded  = false;
 let creditLoading = false;
 let crQuery       = '';
-const crExpanded  = new Set();   // orderId ที่กด "ดูทั้งหมด" แล้ว
+const crExpanded  = new Set();   // reqId ที่กดดูรายการสินค้าแล้ว
 
 const CR_DECIDED = { 'บัญชีไม่อนุมัติ': 'bad', 'เปิดภายในวงเงิน': 'warn' };
-// ค่าจากชีทเป็น TEXT เสมอ (HARD RULE) — อาจมาเป็น "12,345.67" → Number() จะได้ NaN ถ้าไม่ล้าง comma ก่อน
+// ค่าจากชีทเป็น TEXT เสมอ (HARD RULE) — อาจมาเป็น "12,345.67" → Number() ได้ NaN ถ้าไม่ล้าง comma
 const crNum = v => Number(String(v == null ? '' : v).replace(/[^\d.-]/g, '')) || 0;
 
-// ค้นได้ทุก field ของบิล (รวมชื่อสินค้า + บาร์โค้ดทุกบรรทัด) — ทำครั้งเดียวตอนโหลด
-function crSearchable(b){
-  return [b.shopName, b.shopCode, b.smName, b.smCode, b.wh, b.orderId, b.billId, b.reqId,
-          b.apprBy, b.status, b.finBy, b.note, b.seen, b.reason, b.day, (b.noBill ? 'ยังไม่มีบิล' : ''),
-          ...(b.items||[]).map(it => it.name), ...(b.items||[]).map(it => it.barcode)]
-         .join(' ').toLowerCase();
+// ค้นได้ทุก field รวมชื่อสินค้าทุกบรรทัดของทุกออเดอร์ — ทำครั้งเดียวตอนโหลด
+function crSearchable(a){
+  const names = (a.orders || []).flatMap(o => [o.orderId, ...(o.items || []).map(it => it.name)]);
+  return [a.shopName, a.shopCode, a.smName, a.smCode, a.wh, a.reqId, a.apprBy, a.status, a.reason,
+          a.orderCount ? '' : 'ยังไม่มีออเดอร์', ...names].join(' ').toLowerCase();
 }
 
 async function loadCreditBills(force){
   if (creditLoading) return;
   if (creditLoaded && !force) { renderCreditList(); return; }
   creditLoading = true;
-  $('crCount').textContent = 'กำลังโหลด...';
+  if ($('crCount')) $('crCount').textContent = 'กำลังโหลด...';
   try {
     const res = await fetch(CONFIG.salesScriptUrl, {
       method: 'POST',
@@ -3143,10 +3146,10 @@ async function loadCreditBills(force){
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (!data || data.ok === false) throw new Error(data && data.error ? data.error : 'หลังบ้านตอบไม่สำเร็จ');
-    creditBills = (data.bills || []).map(b => ({ ...b, _s: crSearchable(b) }));
+    creditRows = (data.rows || []).map(a => ({ ...a, _s: crSearchable(a) }));
     creditLoaded = true;
   } catch(e){
-    creditBills = [];
+    creditRows = [];
     $('crList').innerHTML = `<div class="match-empty">โหลดไม่สำเร็จ: ${escapeHtml(e.message)}</div>`;
     $('crCount').textContent = 'โหลดไม่สำเร็จ';
     creditLoading = false;
@@ -3157,12 +3160,11 @@ async function loadCreditBills(force){
   updateCreditBadge();
 }
 
-// v5.14: "ยังไม่ได้ดู" = ยังไม่มีใครกดอะไรกับใบนี้เลย (ทั้งดูแล้ว-ปล่อยผ่าน และ ไม่อนุมัติ/วงเงิน)
-//   เลขแดงบนแท็บนับเฉพาะพวกนี้ — ไม่งั้น "ไม่กด" จะแปลได้ 2 อย่าง แยกไม่ออกว่าเหลืออะไรต้องดู
-const crUnseen = b => !b.noBill && !b.seen && !CR_DECIDED[b.status];
+// เลขแดง = ใบที่มีออเดอร์เข้ามาแล้วแต่บัญชียังไม่ได้สั่งอะไร (ใบที่ยังไม่มีออเดอร์ ไม่มีอะไรให้ตัดสิน)
+const crPending = a => a.orderCount > 0 && !CR_DECIDED[a.status];
 
 function updateCreditBadge(){
-  const n = creditBills.filter(crUnseen).length;
+  const n = creditRows.filter(crPending).length;
   const el = $('creditBadge');
   if (!el) return;
   el.textContent = n;
@@ -3184,133 +3186,110 @@ function crClearSearch(){
 
 function renderCreditList(){
   const terms = crQuery ? crQuery.split(/\s+/).filter(Boolean) : [];
-  const rows = creditBills.filter(b => terms.every(t => b._s.includes(t)));   // หลายคำ = AND ทุกคำ
+  const rows = creditRows.filter(a => terms.every(t => a._s.includes(t)));   // หลายคำ = AND ทุกคำ
+  const withOrder = rows.filter(a => a.orderCount > 0).length;
   $('crCount').textContent = rows.length
-    ? `${rows.filter(x => !x.noBill).length} บิล · ยังไม่ได้ดู ${rows.filter(crUnseen).length} · รอเปิดบิล ${rows.filter(x => x.noBill).length}`
+    ? `${withOrder} ใบมีออเดอร์ · รอบัญชี ${rows.filter(crPending).length} · รอเซลคีย์ ${rows.length - withOrder}`
     : '';
   if (!rows.length){
-    $('crList').innerHTML = `<div class="match-empty">${crQuery ? 'ไม่พบบิลที่ตรงกับคำค้น' : 'ไม่มีใบอนุมัติขายเชื่อในช่วง ' + CONFIG.creditDays + ' วันล่าสุด'}</div>`;
+    $('crList').innerHTML = `<div class="match-empty">${crQuery ? 'ไม่พบรายการที่ตรงกับคำค้น' : 'ไม่มีใบอนุมัติขายเชื่อในช่วง ' + CONFIG.creditDays + ' วันล่าสุด'}</div>`;
     return;
   }
   $('crList').innerHTML = rows.map(crCardHtml).join('');
 }
 
-function crCardHtml(b){
-  const oid  = b.orderId || b.reqId;   // ใบที่ยังไม่มีบิลไม่มี orderId ใช้ reqId เป็นคีย์การ์ดแทน
-  const open = crExpanded.has(oid);
-  const items = b.items || [];
-  const shown = open ? items : items.slice(0, 4);
-  const decided = CR_DECIDED[b.status];
+function crCardHtml(a){
+  const rq      = a.reqId;
+  const open    = crExpanded.has(rq);
+  const decided = CR_DECIDED[a.status];
+  const hasOrd  = a.orderCount > 0;
 
   const chips = [];
-  if (crNum(b.debtAmount))   chips.push(`<span class="cr-chip bad">ค้าง ฿${fmtBaht(crNum(b.debtAmount))}</span>`);
-  if (crNum(b.overdueDays))  chips.push(`<span class="cr-chip bad">เกิน ${fmtInt(crNum(b.overdueDays))} วัน</span>`);
-  if (crNum(b.overdueBills)) chips.push(`<span class="cr-chip warn">${fmtInt(crNum(b.overdueBills))} บิลเกิน</span>`);
-  if (b.apprBy)              chips.push(`<span class="cr-chip ok">ซุป: ${escapeHtml(b.apprBy)}</span>`);
-  if (b.picked)              chips.push(`<span class="cr-chip">จัดแล้ว</span>`);
-  if (decided)               chips.push(`<span class="cr-chip ${decided}">${escapeHtml(b.status)}${b.finBy ? ' · ' + escapeHtml(b.finBy) : ''}</span>`);
-  else if (b.noBill)         chips.push(`<span class="cr-chip">ยังไม่มีบิล</span>`);
-  else if (b.seen)           chips.push(`<span class="cr-chip ok" title="${escapeHtml(b.seen)}">ดูแล้ว ปล่อยผ่าน</span>`);
-  else                       chips.push(`<span class="cr-chip warn">ยังไม่ได้ดู</span>`);
-  // ป้าย [บัญชี: ...] ที่แปะไว้หน้าหมายเหตุ — วงเงิน/เหตุผลอยู่ในนี้ ให้เห็นเต็มๆ บรรทัดเดียว
-  const finTag = (b.note || '').match(/^\[บัญชี:[^\]]*\]/);
+  if (crNum(a.debtAmount))   chips.push(`<span class="cr-chip bad">ค้าง ฿${fmtBaht(crNum(a.debtAmount))}</span>`);
+  if (crNum(a.overdueDays))  chips.push(`<span class="cr-chip bad">เกิน ${fmtInt(crNum(a.overdueDays))} วัน</span>`);
+  if (crNum(a.overdueBills)) chips.push(`<span class="cr-chip warn">${fmtInt(crNum(a.overdueBills))} บิลเกิน</span>`);
+  if (a.apprBy)              chips.push(`<span class="cr-chip ok">ซุป: ${escapeHtml(a.apprBy)}</span>`);
+  if (decided)               chips.push(`<span class="cr-chip ${decided}">${escapeHtml(a.status)}</span>`);
+  else if (!hasOrd)          chips.push(`<span class="cr-chip">ยังไม่มีออเดอร์</span>`);
 
-  const itemHtml = shown.map(it => `
-      <div class="cr-item">
-        <span class="cr-item-n" title="${escapeHtml(it.name)}">${escapeHtml(it.name || '-')}${it.kind === 'แถม' ? ' (แถม)' : ''}</span>
-        <span class="cr-item-q">${escapeHtml(it.qty)} ${escapeHtml(it.unit)}</span>
-        <span class="cr-item-a">฿${fmtBaht(it.amount)}</span>
+  // ออเดอร์ทั้งหมดของใบอนุมัตินี้ — ย่อไว้ 1 บรรทัด/ออเดอร์ กดแล้วค่อยกางรายการสินค้า
+  const ordHtml = (a.orders || []).map(o => `
+      <div class="cr-ord">
+        <div class="cr-item">
+          <span class="cr-item-n" title="${escapeHtml(o.orderId)}">${escapeHtml(o.orderId)} · ${escapeHtml(o.day)} ${escapeHtml(o.time)}</span>
+          <span class="cr-item-q">${o.items.length} รายการ</span>
+          <span class="cr-item-a">฿${fmtBaht(o.total)}</span>
+        </div>
+        ${open ? o.items.map(it => `
+          <div class="cr-item cr-sku">
+            <span class="cr-item-n" title="${escapeHtml(it.name)}">${escapeHtml(it.name || '-')}${it.kind === 'แถม' ? ' (แถม)' : ''}</span>
+            <span class="cr-item-q">${escapeHtml(it.qty)} ${escapeHtml(it.unit)}</span>
+            <span class="cr-item-a">฿${fmtBaht(it.amount)}</span>
+          </div>`).join('') : ''}
       </div>`).join('');
-  const moreHtml = items.length > 4
-    ? `<button class="cr-more" onclick="crToggleItems('${escapeHtml(oid)}')">${open ? 'ย่อรายการ' : 'ดูทั้งหมด ' + items.length + ' รายการ'}</button>`
-    : '';
 
-  const actHtml = b.noBill
-    ? `<div class="cr-locked" title="ซุปอนุมัติให้เปิดบิลได้แล้ว แต่ยังไม่มีบิลที่ผูกกับใบนี้ในชีท Order — เซลยังไม่คีย์ หรือคีย์ก่อนระบบนี้เริ่มใช้">ซุปอนุมัติแล้ว · ยังไม่มีบิลเข้ามา</div>`
-    : b.picked
-    ? `<div class="cr-locked" title="คลังจัดของและทำบิลไปแล้ว ยับยั้งไม่ได้ ต้องตั้งเรื่องใบลดหนี้ (CN) แทน">จัดของแล้ว — ยับยั้งไม่ได้ ต้องทำ CN แทน</div>
-       ${b.seen || decided ? '' : `<div class="cr-act">
-         <select id="crSel-${escapeHtml(oid)}" onchange="crOnDecision('${escapeHtml(oid)}')">
-           <option value="">— เลือก —</option>
-           <option value="seen">รับทราบ — ดูแล้ว</option>
-         </select>
-         <button id="crBtn-${escapeHtml(oid)}" onclick="crSubmit('${escapeHtml(oid)}')" disabled>ยืนยัน</button>
-       </div>
-       <div class="cr-extra" id="crExtra-${escapeHtml(oid)}"></div>`}`
+  const actHtml = !hasOrd
+    ? `<div class="cr-locked" title="ซุปอนุมัติแล้ว แต่เซลยังไม่ได้คีย์ออเดอร์เข้าชีท Order">ซุปอนุมัติแล้ว · รอเซลคีย์ออเดอร์</div>`
     : `<div class="cr-act">
-         <select id="crSel-${escapeHtml(oid)}" onchange="crOnDecision('${escapeHtml(oid)}')">
-           <option value="">— เลือก —</option>
-           ${decided ? '' : '<option value="seen">ดูแล้ว ปล่อยผ่าน</option>'}
+         <select id="crSel-${escapeHtml(rq)}" onchange="crOnDecision('${escapeHtml(rq)}')">
+           <option value="">${decided ? 'เปลี่ยนคำสั่ง...' : '— เลือก —'}</option>
            <option value="reject">ไม่อนุมัติ</option>
            <option value="limit">เปิดภายในวงเงิน</option>
-           ${decided ? '<option value="clear">ถอนคำตัดสิน — ปล่อยบิลผ่าน</option>' : ''}
+           ${decided ? '<option value="clear">ถอนคำสั่ง — กลับเป็นอนุมัติราคา</option>' : ''}
          </select>
-         <button id="crBtn-${escapeHtml(oid)}" onclick="crSubmit('${escapeHtml(oid)}')" disabled>ยืนยัน</button>
-       </div>
-       <div class="cr-extra" id="crExtra-${escapeHtml(oid)}">
-         <input id="crLimit-${escapeHtml(oid)}" type="number" inputmode="decimal" placeholder="วงเงินที่ให้เปิดได้ (บาท)">
-         <input id="crNote-${escapeHtml(oid)}" type="text" placeholder="หมายเหตุถึงแอดมิน (ไม่ใส่ก็ได้)">
+         <button id="crBtn-${escapeHtml(rq)}" onclick="crSubmit('${escapeHtml(rq)}')" disabled>ยืนยัน</button>
        </div>`;
 
   return `
-    <div class="cr-card" id="crCard-${escapeHtml(oid)}">
+    <div class="cr-card" id="crCard-${escapeHtml(rq)}">
       <div class="cr-top">
         <div class="cr-top-l">
-          <div class="cr-shop" title="${escapeHtml(b.shopName)}">${escapeHtml(b.shopName || '-')}</div>
-          <div class="cr-sub" title="${escapeHtml(b.smName)}">${escapeHtml(b.shopCode)} · ${escapeHtml(b.smName)} · ${escapeHtml(b.wh)}</div>
+          <div class="cr-shop" title="${escapeHtml(a.shopName)}">${escapeHtml(a.shopName || '-')}</div>
+          <div class="cr-sub" title="${escapeHtml(a.smName)}">${escapeHtml(a.shopCode)} · ${escapeHtml(a.smName)} · ${escapeHtml(a.wh)}</div>
         </div>
         <div class="cr-top-r">
-          <div class="cr-amt">${b.noBill ? '<span style="font-size:12px;color:var(--muted);font-weight:600">รออนุมัติเปิดบิล</span>' : '฿' + fmtBaht(b.total)}</div>
-          <div class="cr-when">${escapeHtml(b.day)} ${escapeHtml(b.time)}</div>
+          <div class="cr-amt">${hasOrd ? '฿' + fmtBaht(a.total) : '<span style="font-size:12px;color:var(--muted);font-weight:600">รอออเดอร์</span>'}</div>
+          <div class="cr-when">${hasOrd ? escapeHtml(a.orderCount + ' ออเดอร์') : escapeHtml(a.apprTs)}</div>
         </div>
       </div>
       ${chips.length ? `<div class="cr-chips">${chips.join('')}</div>` : ''}
-      ${finTag ? `<div class="cr-sub" style="margin-top:6px;color:var(--danger)" title="${escapeHtml(b.note)}">${escapeHtml(b.note)}</div>` : ''}
-      ${b.reason ? `<div class="cr-sub" style="margin-top:6px" title="${escapeHtml(b.reason)}">เหตุผลที่เซลขอ: ${escapeHtml(b.reason)}</div>` : ''}
-      ${items.length ? `<div class="cr-items">${itemHtml}${moreHtml}</div>` : ''}
+      ${a.reason ? `<div class="cr-sub" style="margin-top:6px" title="${escapeHtml(a.reason)}">เหตุผลที่เซลขอ: ${escapeHtml(a.reason)}</div>` : ''}
+      ${hasOrd ? `<div class="cr-items">${ordHtml}
+        <button class="cr-more" onclick="crToggleItems('${escapeHtml(rq)}')">${open ? 'ย่อรายการสินค้า' : 'ดูรายการสินค้า'}</button>
+      </div>` : ''}
       ${actHtml}
     </div>`;
 }
 
-function crToggleItems(oid){
-  if (crExpanded.has(oid)) crExpanded.delete(oid); else crExpanded.add(oid);
-  crRepaintCard(oid);   // วาดเฉพาะการ์ดใบนั้น — ห้ามเด้ง scroll กลับบนสุด
+function crToggleItems(rq){
+  if (crExpanded.has(rq)) crExpanded.delete(rq); else crExpanded.add(rq);
+  crRepaintCard(rq);   // วาดเฉพาะการ์ดใบนั้น — ห้ามเด้ง scroll กลับบนสุด
 }
 
-// วาดใหม่เฉพาะการ์ดเดียว (renderCreditList ทั้งลิสต์จะทำให้ตำแหน่ง scroll กระโดด)
-function crRepaintCard(oid){
-  const b = creditBills.find(x => x.orderId === oid);
-  const el = $('crCard-' + oid);
-  if (!b || !el) return;
-  el.outerHTML = crCardHtml(b);
+function crRepaintCard(rq){
+  const a  = creditRows.find(x => x.reqId === rq);
+  const el = $('crCard-' + rq);
+  if (!a || !el) return;
+  el.outerHTML = crCardHtml(a);
 }
 
-function crOnDecision(oid){
-  const v = $('crSel-' + oid).value;
-  $('crExtra-' + oid).classList.toggle('on', v === 'limit');
-  $('crBtn-' + oid).disabled = !v;
+function crOnDecision(rq){
+  const v = $('crSel-' + rq).value;
+  $('crBtn-' + rq).disabled = !v;
 }
 
-async function crSubmit(oid){
-  const sel = $('crSel-' + oid);
-  const btn = $('crBtn-' + oid);
+async function crSubmit(rq){
+  const sel = $('crSel-' + rq);
+  const btn = $('crBtn-' + rq);
   const decision = sel.value;
   if (!decision) return;
-  const limitEl = $('crLimit-' + oid);
-  const limitAmount = decision === 'limit' ? String(limitEl && limitEl.value || '').trim() : '';
-  const noteEl = $('crNote-' + oid);
-  const note = String(noteEl && noteEl.value || '').trim();
-  const LBL = { reject:'ไม่อนุมัติ', limit:'เปิดภายในวงเงิน', clear:'ถอนคำตัดสิน', seen:'ดูแล้ว ปล่อยผ่าน' };
+  const a = creditRows.find(x => x.reqId === rq);
+  const LBL = { reject: 'ไม่อนุมัติ', limit: 'เปิดภายในวงเงิน', clear: 'ถอนคำสั่ง' };
   const label = LBL[decision] || decision;
-  const b = creditBills.find(x => x.orderId === oid);
-  // 'seen' ไม่แตะบิล ไม่ต้องถามยืนยัน — ถามทุกคลิกจะกลายเป็นภาระตอนไล่เคลียร์ทีละใบ
-  if (decision !== 'seen'){
-    const warn = decision === 'clear'
-      ? 'บิลจะกลับไปสถานะเดิม คลังจัดของได้ตามปกติ'
-      : 'จะเขียนทับช่อง สถานะอนุมัติ ในชีท Order และ Supabase ทันที — คลังจะจัดบิลนี้ไม่ได้';
-    if (!confirm(`ยืนยัน "${label}" บิล ${b ? b.shopName : oid} ฿${fmtBaht(b ? b.total : 0)}?\n\n${warn}`)) return;
-    if (decision === 'limit' && !crNum(limitAmount) && !confirm('ยังไม่ได้ใส่ตัวเลขวงเงิน — แอดมินหลังบ้านจะไม่รู้ว่าให้เปิดได้เท่าไร\n\nยืนยันโดยไม่ใส่วงเงิน?')) return;
-  }
+  const warn = decision === 'clear'
+    ? 'สถานะอนุมัติ จะกลับเป็น "อนุมัติราคา" ทุกออเดอร์ของใบนี้'
+    : `จะเขียน "${label}" ลงช่อง สถานะอนุมัติ ทุกออเดอร์ของใบนี้ ในชีท Order และ Supabase`;
+  if (!confirm(`${a ? a.shopName : rq}\n${a ? a.orderCount : '?'} ออเดอร์ · ฿${fmtBaht(a ? a.total : 0)}\n\n${warn}`)) return;
 
   btn.disabled = true; btn.textContent = 'กำลังบันทึก...';
   try {
@@ -3318,8 +3297,7 @@ async function crSubmit(oid){
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({
-        action: 'financeDebtDecision',
-        orderId: oid, decision, limitAmount, note,
+        action: 'financeDebtDecision', reqId: rq, decision,
         byName:  currentUser ? (currentUser.name  || '') : '',
         byEmail: currentUser ? (currentUser.email || '') : '',
       }),
@@ -3327,17 +3305,10 @@ async function crSubmit(oid){
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (!data || data.ok === false) throw new Error(data && data.error ? data.error : 'บันทึกไม่สำเร็จ');
-    const me = currentUser ? (currentUser.name || '') : '';
-    if (b){
-      b.status   = data.status || '';
-      b.seen     = me + ' · ' + new Date().toLocaleString('th-TH');   // ทุก decision = บัญชีดูใบนี้แล้ว
-      b.finBy    = (decision === 'clear' || decision === 'seen') ? '' : me;
-      b.note     = data.note != null ? data.note : (b.note || '');
-      b._s = crSearchable(b);
-    }
-    crRepaintCard(oid);
+    if (a) { a.status = data.status || ''; a._s = crSearchable(a); }
+    crRepaintCard(rq);
     updateCreditBadge();
-    showToast(`บันทึกแล้ว — ${label} (${data.changed} รายการ)`, 'success');
+    showToast(`บันทึกแล้ว — ${label} (${data.changed} แถว)`, 'success');
   } catch(e){
     btn.disabled = false; btn.textContent = 'ยืนยัน';
     showToast('บันทึกไม่สำเร็จ: ' + e.message, 'error');
