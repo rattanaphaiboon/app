@@ -896,7 +896,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.40';
+const APP_VERSION = 'v4.41';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -2285,10 +2285,14 @@ function queueDraftSync() {
   clearTimeout(draftSyncTimer);
   draftSyncTimer = setTimeout(syncDraftNow, 400); // debounce 0.4s — feels instant
 }
+// สถานะการเขียนขึ้น Supabase — โชว์ในแถบซิงค์ให้เห็นบนเครื่องจริง
+let syncWriteState = '';   // '' | 'pending' | 'ok' | 'fail'
+let syncWriteErr = '';
 // upsert draft ลง Supabase (1 แถวต่อ wh+counter_key) — REST ยืนยันผลได้ (ไม่ใช่ no-cors)
 async function syncDraftNow() {
   const key = userKey();
   if (!SUPA_URL || !currentUser || !countSession || !key) return;
+  syncWriteState = 'pending';
   try {
     const row = {
       wh: countSession.warehouse,
@@ -2304,14 +2308,20 @@ async function syncDraftNow() {
       body: JSON.stringify(row),
     });
     if (res.ok) {
+      syncWriteState = 'ok'; syncWriteErr = '';
       if (countSession) {
         countSession.syncedAt = row.updated_at;
         try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
       }
     } else {
+      syncWriteState = 'fail'; syncWriteErr = 'HTTP ' + res.status;
       console.warn('draft sync failed', res.status, await res.text().catch(()=>''));
     }
-  } catch (e) { console.warn('draft sync error', e); }
+  } catch (e) {
+    syncWriteState = 'fail'; syncWriteErr = String(e && e.message || e).slice(0,40);
+    console.warn('draft sync error', e);
+  }
+  updateSyncStatus(countSession && countSession.warehouse, null, true);   // อัปเดตชิปสถานะเขียนทันที
 }
 // อ่าน draft ล่าสุดจาก Supabase → { items, updatedAt, sessionStart, device } หรือ null
 async function fetchRemoteDraft(wh) {
@@ -2383,11 +2393,13 @@ function draftSig(items) {
     return k + ':' + (c.CS||0) + '.' + (c.BP||0) + '.' + (c.PA||0) + '.' + (c.EA||0) + '@' + (it.countedAt||'');
   }).join('|');
 }
-// แถบสถานะซิงค์ข้ามเครื่อง — โชว์ว่าในระบบ (cloud) มีรายการของ "ชื่อผู้นับนี้" กี่รายการ + ปุ่มดึงให้ตรง
-function updateSyncStatus(wh, remote) {
+// แถบสถานะซิงค์ข้ามเครื่อง — โชว์ว่าในระบบ (cloud) มีรายการของ "ชื่อผู้นับนี้" กี่รายการ + สถานะเขียน + ปุ่มดึงให้ตรง
+let lastRemoteDraft = null;   // remote ล่าสุดที่อ่านได้ (ใช้ตอน syncDraftNow อัปเดตชิปเขียนโดยไม่ต้องอ่านใหม่)
+function updateSyncStatus(wh, remote, writeOnly) {
   const el = document.getElementById('syncStatus');
   if (!el) return;
   if (!SUPA_URL || !currentUser) { el.style.display = 'none'; return; }
+  if (writeOnly) remote = lastRemoteDraft; else lastRemoteDraft = remote;
   const key = userKey();
   const items = remote && remote.items ? remote.items : null;
   const n = items ? Object.keys(items).length : 0;
@@ -2403,7 +2415,13 @@ function updateSyncStatus(wh, remote) {
     main = `☁️ ในระบบมี <b>${n}</b> รายการ${t ? ' · ' + t : ''} · เครื่องนี้ ${localN}`;
     pull = `<button class="sync-pull" onclick="forcePullDraft()" type="button">↻ ดึงให้ตรง</button>`;
   }
-  el.innerHTML = `<span>${main}</span>${pull}<span class="sync-key">🔑 ชื่อซิงค์: ${key || '— (ยังไม่เลือกชื่อผู้นับ)'}</span>`;
+  // ชิปสถานะการเขียนขึ้นระบบ (เห็นชัดว่าเครื่องนี้ส่งขึ้นได้ไหม)
+  const wchip = syncWriteState === 'fail'
+      ? ` · <span style="color:var(--danger);font-weight:700">⚠️ ส่งขึ้นระบบไม่สำเร็จ${syncWriteErr ? ' (' + syncWriteErr + ')' : ''}</span>`
+    : syncWriteState === 'ok'
+      ? ` · <span style="color:var(--success);font-weight:700">ส่งขึ้นระบบ ✓</span>`
+      : '';
+  el.innerHTML = `<span>${main}${wchip}</span>${pull}<span class="sync-key">🔑 ชื่อซิงค์: ${key || '— (ยังไม่เลือกชื่อผู้นับ)'}</span>`;
   el.style.display = 'flex';
 }
 // นโยบาย: "เครื่องที่แก้ล่าสุดเป็นหลัก" — เครื่องที่กำลังนับ (แก้ใน 8 วิ) เก็บของตัวเอง,
