@@ -888,7 +888,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.36';
+const APP_VERSION = 'v4.37';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
@@ -2230,9 +2230,11 @@ function loadCountSession(wh) {
   if (SPECIAL_WH[wh] && !adjStockCache[wh]) loadSpecial(wh, true);
 }
 
+let lastLocalEditMs = 0;   // เวลา(client) ที่เครื่องนี้แก้รายการนับล่าสุด — ใช้ตัดสิน "กำลังนับ(เก็บของตัวเอง)" vs "ว่าง(มิเรอร์อีกเครื่อง)"
 function saveCountSession() {
   if (countSession) {
     countSession.lastEdit = new Date().toISOString();
+    lastLocalEditMs = Date.now();
     try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
     queueDraftSync();
   }
@@ -2335,26 +2337,33 @@ async function forcePullDraft() {
 // so a fresh save+clear is never overwritten by a stale remote read that
 // races with the no-cors POST clearDraft.
 const recentlySavedAt = {};   // { wh: epochMs } — block re-adoption after a save
+const DRAFT_ACTIVE_MS = 8000; // แก้ภายใน 8 วิ = "กำลังนับ" → เครื่องนี้เป็นตัวหลัก ไม่ให้ remote ทับ
+// ลายเซ็นรายการนับ (key + จำนวนต่อหน่วย + เวลาที่เช็ค) — ใช้เทียบว่า remote ต่างจากที่แสดงอยู่ไหม
+function draftSig(items) {
+  if (!items) return '';
+  return Object.keys(items).sort().map(k => {
+    const it = items[k] || {}, c = it.counts || {};
+    return k + ':' + (c.CS||0) + '.' + (c.BP||0) + '.' + (c.PA||0) + '.' + (c.EA||0) + '@' + (it.countedAt||'');
+  }).join('|');
+}
+// นโยบาย: "เครื่องที่แก้ล่าสุดเป็นหลัก" — เครื่องที่กำลังนับ (แก้ใน 8 วิ) เก็บของตัวเอง,
+// เครื่องที่ว่าง (โหมดดู/สำรอง) มิเรอร์รายการจากอีกเครื่องอัตโนมัติ (poll ทุก 5 วิ)
 async function maybeAdoptRemoteDraft(wh) {
-  // Guard against the post-save race: if we just saved this warehouse,
-  // ignore any remote draft for the next 30s — Apps Script may not have
-  // finished clearing the row yet, and the user already pushed the data.
+  // เพิ่งบันทึกลงชีท → เว้น 30 วิ กัน draft เก่าย้อนกลับมา (clearDraft แบบ no-cors อาจยังไม่ทันเคลียร์)
   if (recentlySavedAt[wh] && Date.now() - recentlySavedAt[wh] < 30000) return;
   const remote = await fetchRemoteDraft(wh);
   const hasRemote = remote && remote.items && Object.keys(remote.items).length;
-  // Remote empty → leave local alone. (No-cors POST means syncedAt isn't a
-  // reliable signal that the server actually has our items, so the old
-  // auto-clear path was triggering false positives. The user can clear
-  // explicitly via "ล้างทั้งหมด" or the ↻ pull-draft button.)
-  if (!hasRemote) return;
-  const localTime  = countSession && countSession.lastEdit ? new Date(countSession.lastEdit).getTime() : 0;
-  const remoteTime = new Date(remote.updatedAt || 0).getTime();
-  if (remoteTime <= localTime + 1000) return;   // local is same or newer → keep
+  if (!hasRemote) return;   // remote ว่าง → ไม่แตะ local (no-cors ไม่ยืนยันการเคลียร์ ป้องกันลบผิด)
+  const remoteSig = draftSig(remote.items);
+  if (remoteSig === draftSig(countSession && countSession.items)) return;   // ตรงกับที่แสดงอยู่แล้ว → ข้าม (กัน re-render/toast ทุก 5 วิ)
+  if (Date.now() - lastLocalEditMs < DRAFT_ACTIVE_MS) return;               // เครื่องนี้กำลังนับ → เก็บของตัวเองไว้ (last edit wins)
+  // เครื่องนี้ว่าง & remote ต่างจาก local → มิเรอร์ตามอีกเครื่อง
   countSession = { warehouse: wh, startedAt: remote.sessionStart || new Date().toISOString(),
                    items: remote.items, lastEdit: remote.updatedAt, syncedAt: remote.updatedAt };
   try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
+  countListPage = 1;
   renderCountList();
-  showToast(`โหลดรายการที่เช็คค้าง ${Object.keys(remote.items).length} รายการ`, 'info');
+  showToast(`ซิงค์รายการจากอีกเครื่อง (${Object.keys(remote.items).length} รายการ)`, 'info');
 }
 
 function clearScanInput() {
