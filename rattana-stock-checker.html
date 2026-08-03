@@ -896,7 +896,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.39';
+const APP_VERSION = 'v4.40';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -1024,7 +1024,7 @@ function stopDraftPoll() { if (draftPollTimer) { clearInterval(draftPollTimer); 
 function refreshEverything() {
   if (!currentUser) return;
   if (currentMode === 'history') { historyLoaded = false; loadHistory(true); }
-  if (currentMode === 'count')   { fetchAndUpdate(); if (countSession) maybeAdoptRemoteDraft(countSession.warehouse); }
+  if (currentMode === 'count')   { fetchAndUpdate(); if (countSession) enterDraftSync(countSession.warehouse); }
   if (currentMode === 'summary') { fetchAndUpdate(); renderSummary(); }
 }
 
@@ -1207,7 +1207,7 @@ function counterPickSel(el) {
       loadCountSession(countSession.warehouse);
       renderCountList();
       renderPending();
-      maybeAdoptRemoteDraft(countSession.warehouse);
+      enterDraftSync(countSession.warehouse);   // เลือกชื่อผู้นับ → กู้ของเก่า + ซิงค์ Supabase ตามชื่อนี้
     }
   } catch (e) { console.warn('reload draft after counter pick failed', e); }
   showToast(`ผู้นับ: ${nickname || name}`, 'success');
@@ -2232,7 +2232,7 @@ function initCountMode() {
   }
   if (!countSession) loadCountSession(sel.value || visibleWh[0]);
   renderCountList();
-  maybeAdoptRemoteDraft(countSession.warehouse);
+  enterDraftSync(countSession.warehouse);
   // โหลด putaway summary เพื่อหักออกจากสต็อกระบบ
   loadPutawaySummary().then(() => { renderCountList(); renderPending(); renderSummary(); });
 }
@@ -2243,7 +2243,7 @@ function onCountWhChange() {
   document.getElementById('countPending').innerHTML = '';
   loadCountSession(wh);   // also refreshes stock-source bar + auto-loads ERP
   renderCountList();
-  maybeAdoptRemoteDraft(wh);
+  enterDraftSync(wh);
 }
 
 function loadCountSession(wh) {
@@ -2425,6 +2425,36 @@ async function maybeAdoptRemoteDraft(wh) {
   countListPage = 1;
   renderCountList();
   showToast(`ซิงค์รายการจากอีกเครื่อง (${Object.keys(remote.items).length} รายการ)`, 'info');
+}
+// กู้ draft เก่าจากระบบเดิม (GAS CacheService) → Supabase — ครั้งเดียวต่อ (คลัง+ชื่อ) ถ้า Supabase ยังว่าง
+const _migratedDraft = {};
+async function migrateOldDraft(wh) {
+  const key = userKey();
+  if (!SUPA_URL || !COUNT_SAVE_URL || !currentUser || !key) return;
+  const mk = wh + '|' + key;
+  if (_migratedDraft[mk]) return;
+  try {
+    const supa = await fetchRemoteDraft(wh);
+    if (supa && supa.items && Object.keys(supa.items).length) { _migratedDraft[mk] = 1; return; }  // Supabase มีแล้ว ไม่ต้องกู้
+    // ดึง draft เก่าจาก GAS (action=draft ยังทำงานอยู่)
+    const url = `${COUNT_SAVE_URL}?action=draft&userKey=${encodeURIComponent(key)}&warehouse=${encodeURIComponent(wh)}`;
+    const json = await fetch(url, { cache:'no-store' }).then(r=>r.json()).catch(()=>null);
+    _migratedDraft[mk] = 1;
+    const old = json && json.ok && json.draft ? json.draft : null;
+    if (!old || !old.items || !Object.keys(old.items).length) return;   // ระบบเก่าไม่มี (หมดอายุ/คนละ key)
+    const r = await supaFetch('/stock_draft', {
+      method:'POST', headers:{ 'Prefer':'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ wh, counter_key:key, items:old.items,
+        session_start: old.sessionStart || null, device: deviceId(),
+        updated_at: old.updatedAt || new Date().toISOString() }),
+    });
+    if (r.ok) showToast(`กู้รายการนับเดิม ${Object.keys(old.items).length} รายการจากระบบเก่าแล้ว ✓`, 'success');
+  } catch (e) { _migratedDraft[mk] = 1; console.warn('migrateOldDraft', e); }
+}
+// จุดเข้าโหมดนับ: กู้ของเก่า(ครั้งเดียว) แล้วซิงค์ Supabase
+async function enterDraftSync(wh) {
+  await migrateOldDraft(wh);
+  await maybeAdoptRemoteDraft(wh);
 }
 
 function clearScanInput() {
