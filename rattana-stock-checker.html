@@ -896,7 +896,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.41';
+const APP_VERSION = 'v4.42';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -2288,53 +2288,77 @@ function queueDraftSync() {
 // สถานะการเขียนขึ้น Supabase — โชว์ในแถบซิงค์ให้เห็นบนเครื่องจริง
 let syncWriteState = '';   // '' | 'pending' | 'ok' | 'fail'
 let syncWriteErr = '';
-// upsert draft ลง Supabase (1 แถวต่อ wh+counter_key) — REST ยืนยันผลได้ (ไม่ใช่ no-cors)
+// แปลง items (object) → แถวราย SKU สำหรับตาราง stock_draft
+function draftItemsToRows(wh, key, items, now, dev) {
+  return Object.keys(items || {}).map(k => {
+    const it = items[k] || {}, c = it.counts || {}, f = it.factors || {};
+    return {
+      wh, counter_key: key, item_key: String(k),
+      code: it._code || '', name: it.name || '', sku: it._sku || '',
+      cs: +c.CS||0, bp: +c.BP||0, pa: +c.PA||0, ea: +c.EA||0,
+      factor_cs: +f.CS||1, factor_pa: +f.PA||1, factor_bp: +f.BP||1,
+      lots: it.lots || null, counted_at: it.countedAt || now,
+      device: dev, updated_at: now,
+    };
+  });
+}
+// upsert draft ลง Supabase แบบ "1 แถวต่อ SKU" — REST ยืนยันผลได้ (ไม่ใช่ no-cors)
 async function syncDraftNow() {
   const key = userKey();
   if (!SUPA_URL || !currentUser || !countSession || !key) return;
   syncWriteState = 'pending';
   try {
-    const row = {
-      wh: countSession.warehouse,
-      counter_key: key,
-      items: countSession.items || {},
-      session_start: countSession.startedAt || null,
-      device: deviceId(),
-      updated_at: new Date().toISOString(),
-    };
-    const res = await supaFetch('/stock_draft', {
-      method: 'POST',
-      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },   // upsert บน PK (wh,counter_key)
-      body: JSON.stringify(row),
-    });
-    if (res.ok) {
-      syncWriteState = 'ok'; syncWriteErr = '';
-      if (countSession) {
-        countSession.syncedAt = row.updated_at;
-        try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
-      }
+    const wh = countSession.warehouse, items = countSession.items || {};
+    const keys = Object.keys(items), now = new Date().toISOString(), dev = deviceId();
+    const base = `/stock_draft?wh=eq.${encodeURIComponent(wh)}&counter_key=eq.${encodeURIComponent(key)}`;
+    if (!keys.length) {
+      // ไม่มีรายการ → ลบ draft ของ (คลัง+ชื่อ) นี้ทั้งหมด
+      const dr = await supaFetch(base, { method:'DELETE', headers:{'Prefer':'return=minimal'} });
+      if (!dr.ok) throw new Error('HTTP ' + dr.status);
     } else {
-      syncWriteState = 'fail'; syncWriteErr = 'HTTP ' + res.status;
-      console.warn('draft sync failed', res.status, await res.text().catch(()=>''));
+      // 1) upsert ทุกรายการ (PK = wh+counter_key+item_key)
+      const rows = draftItemsToRows(wh, key, items, now, dev);
+      const res = await supaFetch('/stock_draft', {
+        method:'POST', headers:{'Prefer':'resolution=merge-duplicates,return=minimal'}, body: JSON.stringify(rows),
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text().catch(()=>'')).slice(0,60));
+      // 2) ลบรายการที่ถูกเอาออก (ไม่อยู่ในชุดปัจจุบัน)
+      const inList = keys.map(k => encodeURIComponent('"' + String(k).replace(/"/g,'') + '"')).join(',');
+      await supaFetch(`${base}&item_key=not.in.(${inList})`, { method:'DELETE', headers:{'Prefer':'return=minimal'} });
+    }
+    syncWriteState = 'ok'; syncWriteErr = '';
+    if (countSession) {
+      countSession.syncedAt = now;
+      try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
     }
   } catch (e) {
-    syncWriteState = 'fail'; syncWriteErr = String(e && e.message || e).slice(0,40);
+    syncWriteState = 'fail'; syncWriteErr = String(e && e.message || e).slice(0,50);
     console.warn('draft sync error', e);
   }
   updateSyncStatus(countSession && countSession.warehouse, null, true);   // อัปเดตชิปสถานะเขียนทันที
 }
-// อ่าน draft ล่าสุดจาก Supabase → { items, updatedAt, sessionStart, device } หรือ null
+// อ่าน draft จาก Supabase (แถวราย SKU) → ประกอบกลับเป็น { items, updatedAt, device } หรือ null
 async function fetchRemoteDraft(wh) {
   const key = userKey();
   if (!SUPA_URL || !currentUser || !key) return null;
   try {
-    const q = `/stock_draft?wh=eq.${encodeURIComponent(wh)}&counter_key=eq.${encodeURIComponent(key)}&select=items,updated_at,session_start,device&limit=1`;
+    const q = `/stock_draft?wh=eq.${encodeURIComponent(wh)}&counter_key=eq.${encodeURIComponent(key)}&select=*`;
     const res = await supaFetch(q, { cache:'no-store' });
     if (!res.ok) return null;
-    const arr = await res.json();
-    const r = Array.isArray(arr) && arr.length ? arr[0] : null;
-    if (!r) return null;
-    return { items: r.items || {}, updatedAt: r.updated_at, sessionStart: r.session_start, device: r.device };
+    const rows = await res.json();
+    if (!Array.isArray(rows) || !rows.length) return null;
+    const items = {}; let maxT = '', dev = '';
+    rows.forEach(r => {
+      items[r.item_key] = {
+        key: r.item_key, name: r.name || '', _code: r.code || '', _sku: r.sku || '',
+        factors: { EA:1, PA: r.factor_pa||1, BP: r.factor_bp||1, CS: r.factor_cs||1 },
+        counts:  { EA: r.ea||0, PA: r.pa||0, BP: r.bp||0, CS: r.cs||0 },
+        lots: r.lots || undefined,
+        countedAt: r.counted_at || '',
+      };
+      if ((r.updated_at||'') > maxT) { maxT = r.updated_at || ''; dev = r.device || ''; }
+    });
+    return { items, updatedAt: maxT, sessionStart: null, device: dev };
   } catch { return null; }
 }
 // ลบ draft แถวนี้ (ตอนกดส่งจริงลงชีทแล้ว)
@@ -2460,13 +2484,12 @@ async function migrateOldDraft(wh) {
     _migratedDraft[mk] = 1;
     const old = json && json.ok && json.draft ? json.draft : null;
     if (!old || !old.items || !Object.keys(old.items).length) return;   // ระบบเก่าไม่มี (หมดอายุ/คนละ key)
+    const rows = draftItemsToRows(wh, key, old.items, old.updatedAt || new Date().toISOString(), deviceId());
     const r = await supaFetch('/stock_draft', {
       method:'POST', headers:{ 'Prefer':'resolution=merge-duplicates,return=minimal' },
-      body: JSON.stringify({ wh, counter_key:key, items:old.items,
-        session_start: old.sessionStart || null, device: deviceId(),
-        updated_at: old.updatedAt || new Date().toISOString() }),
+      body: JSON.stringify(rows),   // เขียนแบบราย SKU
     });
-    if (r.ok) showToast(`กู้รายการนับเดิม ${Object.keys(old.items).length} รายการจากระบบเก่าแล้ว ✓`, 'success');
+    if (r.ok) showToast(`กู้รายการนับเดิม ${rows.length} รายการจากระบบเก่าแล้ว ✓`, 'success');
   } catch (e) { _migratedDraft[mk] = 1; console.warn('migrateOldDraft', e); }
 }
 // จุดเข้าโหมดนับ: กู้ของเก่า(ครั้งเดียว) แล้วซิงค์ Supabase
