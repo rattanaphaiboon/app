@@ -404,7 +404,7 @@
     .tab-btn{flex:1;background:rgba(13,27,62,.06);border:none;color:var(--navy);padding:13px 8px;font-family:inherit;font-size:14px;font-weight:700;border-radius:16px;cursor:pointer;transition:all .15s;min-height:48px}
     .tab-btn.active{background:var(--gold);color:#fff;box-shadow:var(--shadow-gold)}
     body.dark .tab-btn{background:rgba(255,255,255,.06);color:var(--mint)}
-    body.dark .tab-btn.active{background:var(--gold);color:var(--navy)}
+    body.dark .tab-btn.active{background:var(--gold);color:#fff}
     /* Count list — big cards with product thumbnail */
     /* Live list rows — Direction B (from prototype.html) */
     .lrow{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-md);margin-bottom:7px;box-shadow:var(--shadow-sm);overflow:hidden}
@@ -493,6 +493,11 @@
     /* Live-list section header (replaces card-head) */
     .livebar{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-md);padding:14px;box-shadow:var(--shadow-sm)}
     .livebar-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+    .sync-bar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:12.5px;color:var(--muted);background:var(--row-alt);border:1px solid var(--border);border-radius:10px;padding:8px 11px}
+    .sync-bar b{color:var(--text);font-weight:700}
+    .sync-bar .sync-key{flex-basis:100%;font-size:11px;opacity:.9}
+    .sync-bar .sync-pull{margin-left:auto;background:var(--navy-mid);color:#fff;border:none;border-radius:8px;padding:5px 12px;font-size:12.5px;font-weight:700;cursor:pointer;-webkit-tap-highlight-color:transparent}
+    .sync-bar .sync-pull:active{opacity:.85}
     .lnk-clear{display:flex;align-items:center;gap:6px;color:var(--danger);font-size:13px;font-weight:700;padding:6px 10px;border-radius:9px;background:transparent;border:none;cursor:pointer}
     .lnk-clear:hover{background:var(--danger-bg)}
     .dsk-n{background:var(--navy-mid);color:#fff;font-size:13px;font-weight:800;padding:1px 10px;border-radius:11px;margin-left:4px}
@@ -738,6 +743,9 @@
       <button class="btn-pull" onclick="clearCounterPick()" title="ล้างชื่อผู้นับ" type="button">×</button>
     </div>
 
+    <!-- Cross-device sync status — โชว์ว่าในระบบมีรายการของ "ชื่อนี้" กี่รายการ + ปุ่มดึงให้ตรง -->
+    <div id="syncStatus" class="sync-bar mt-8" style="display:none"></div>
+
     <!-- Camera (collapsed by default — opens above the list) -->
     <div id="countCameraSection" style="display:none;margin-top:10px">
       <div id="countReader"><video id="countVideo" playsinline muted autoplay></video></div>
@@ -756,8 +764,9 @@
         <div style="font-size:14px;font-weight:700">รายการที่นับ <span class="dsk-n" id="countN">0</span></div>
         <button class="lnk-clear" onclick="clearCount()" type="button">🗑 ล้างทั้งหมด</button>
       </div>
+      <input type="text" id="countSearch" class="input input-compact" placeholder="🔍 ค้นหาชื่อสินค้า / รหัส" oninput="onCountSearch(this.value)" autocomplete="off" style="margin-bottom:10px">
       <div id="countList"></div>
-      <button class="btn btn-primary btn-block btn-lg" style="margin-top:12px" onclick="openSummaryModal()" type="button">📊 ตรวจสอบและสรุปผล</button>
+      <div id="countPager"></div>
     </div>
 
   </div><!-- /modeCount -->
@@ -887,11 +896,31 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.31';
+const APP_VERSION = 'v4.41';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
-// GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS
+// GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
 const COUNT_SAVE_URL = 'https://script.google.com/macros/s/AKfycbyMAQLR0MCCBq8-f6cQzmlg1cjHIySuFzZQgvaMxt68zN76OvfWecES_RTXI-sklzrlAg/exec';
+
+// Supabase — เก็บ "draft" รายการนับ เพื่อ sync ข้ามเครื่องให้ตรงกันแน่นอน (โปรเจกต์เดียวกับแอปเช็คเอาต์)
+// ตาราง stock_draft (PK: wh + counter_key) เก็บ items(jsonb) · publishable key ใช้ในเว็บได้ (RLS เปิด policy allow anon)
+// กดส่งจริง → ลงชีท (GAS) แล้วลบ draft แถวนี้ทิ้ง
+const SUPA_URL = 'https://uytzsuwapwkqkougorvb.supabase.co';
+const SUPA_KEY = 'sb_publishable_2iDqojkyM2pqJxQJfvnxyg_Y6WMQ6Q8';
+function supaFetch(path, opts) {
+  opts = opts || {};
+  const url = SUPA_URL.replace(/\/$/,'') + '/rest/v1' + path;
+  const headers = Object.assign({ 'apikey':SUPA_KEY, 'Authorization':'Bearer '+SUPA_KEY, 'Content-Type':'application/json' }, opts.headers || {});
+  return fetch(url, Object.assign({}, opts, { headers }));
+}
+// device id คงที่ต่อเครื่อง (localStorage) — ใช้แยกว่า draft มาจากเครื่องไหน
+function deviceId() {
+  try {
+    let d = localStorage.getItem('sc_device_id');
+    if (!d) { d = 'd' + Math.random().toString(36).slice(2,10) + Date.now().toString(36); localStorage.setItem('sc_device_id', d); }
+    return d;
+  } catch { return 'd0'; }
+}
 
 const WH_LIST  = ['W1','W2','W3','W4','C4'];
 const WH_NAMES = { W1:'สมุทรสงคราม', W2:'สุพรรณบุรี', W3:'ราชบุรี', W4:'นครปฐม', C4:'รัตนมาร์ท' };
@@ -995,7 +1024,7 @@ function stopDraftPoll() { if (draftPollTimer) { clearInterval(draftPollTimer); 
 function refreshEverything() {
   if (!currentUser) return;
   if (currentMode === 'history') { historyLoaded = false; loadHistory(true); }
-  if (currentMode === 'count')   { fetchAndUpdate(); if (countSession) maybeAdoptRemoteDraft(countSession.warehouse); }
+  if (currentMode === 'count')   { fetchAndUpdate(); if (countSession) enterDraftSync(countSession.warehouse); }
   if (currentMode === 'summary') { fetchAndUpdate(); renderSummary(); }
 }
 
@@ -1178,7 +1207,7 @@ function counterPickSel(el) {
       loadCountSession(countSession.warehouse);
       renderCountList();
       renderPending();
-      maybeAdoptRemoteDraft(countSession.warehouse);
+      enterDraftSync(countSession.warehouse);   // เลือกชื่อผู้นับ → กู้ของเก่า + ซิงค์ Supabase ตามชื่อนี้
     }
   } catch (e) { console.warn('reload draft after counter pick failed', e); }
   showToast(`ผู้นับ: ${nickname || name}`, 'success');
@@ -1419,6 +1448,13 @@ async function loadSpecialCatalog(wh) {
   const ck = cfg.catalog.id + '|' + cfg.catalog.sheet;
   if (specialCatalogs[ck]) { cfg._codeMap = specialCatalogs[ck]; return; }  // ใช้แคตตาล็อกที่โหลด+merge แล้วร่วมกัน
   const rows = await gvizRaw(cfg.catalog.id, cfg.catalog.sheet, 2);
+  // ชีท COMPARE: 0=รหัสสินค้า ... 8=ชื่อในระบบ(SKU) — map รหัส→ชื่อ SKU ไว้โชว์ในวงเล็บ
+  const skuByCode = {};
+  const cmpRows = await gvizRaw(cfg.catalog.id, 'COMPARE', 2);
+  cmpRows.slice(1).forEach(r => {
+    const c = String(r[0]||'').trim(); const sku = String(r[8]||'').trim();
+    if (c && sku && sku !== '-') skuByCode[c] = sku;
+  });
   const codeMap = {};
   rows.slice(1).forEach(r => {
     const code = String(r[0]||'').trim(); if (!/^\d{3,}$/.test(code)) return;
@@ -1436,7 +1472,7 @@ async function loadSpecialCatalog(wh) {
       'CODE CS': bc(1), 'CODE BP': '', 'CODE PA': bc(2), 'CODE EA': bc(3),
       'QTY CS': fCS, 'QTY BP': fBP, 'QTY PA': fPA, 'QTY EA': 1,
       'UNIT CS': unitCS, 'UNIT BP': String(r[8]||''), 'UNIT PA': String(r[9]||''), 'UNIT EA': String(r[10]||''),
-      _special: wh, _code: code,
+      _special: wh, _code: code, _sku: skuByCode[code] || '',
     };
     codeMap[code] = p;
     productByKey[productKey(p)] = p;   // คีย์ = รหัสสินค้า → แต่ละรหัสเป็น product แยกกัน
@@ -1679,6 +1715,17 @@ function itemCodeOf(it) {
 // ต่อท้ายชื่อสินค้าด้วยรหัส (ตัวเล็กสีเทา) — โชว์เฉพาะสินค้าพิเศษที่มีรหัส
 function codeSuffix(code) {
   return code ? ` <small style="color:var(--muted);font-weight:600;white-space:nowrap">· ${code}</small>` : '';
+}
+// ชื่อในระบบ (SKU) จากชีท COMPARE ของสินค้าพิเศษ (Colgate/Chaindrite)
+function itemSkuOf(it) {
+  if (!it) return '';
+  if (it._sku) return String(it._sku);
+  const p = productByKey[it.key];
+  return (p && p._sku) ? String(p._sku) : '';
+}
+// ต่อท้ายด้วยชื่อในระบบ (SKU) ในวงเล็บ — ตัวเล็กสีเทา
+function skuSuffix(sku) {
+  return sku ? ` <small style="color:var(--muted);font-weight:600">(${sku})</small>` : '';
 }
 // EA-per-unit conversion factor (EA always 1; others from QTY column)
 function unitFactor(p, u) {
@@ -2185,7 +2232,7 @@ function initCountMode() {
   }
   if (!countSession) loadCountSession(sel.value || visibleWh[0]);
   renderCountList();
-  maybeAdoptRemoteDraft(countSession.warehouse);
+  enterDraftSync(countSession.warehouse);
   // โหลด putaway summary เพื่อหักออกจากสต็อกระบบ
   loadPutawaySummary().then(() => { renderCountList(); renderPending(); renderSummary(); });
 }
@@ -2196,7 +2243,7 @@ function onCountWhChange() {
   document.getElementById('countPending').innerHTML = '';
   loadCountSession(wh);   // also refreshes stock-source bar + auto-loads ERP
   renderCountList();
-  maybeAdoptRemoteDraft(wh);
+  enterDraftSync(wh);
 }
 
 function loadCountSession(wh) {
@@ -2211,15 +2258,17 @@ function loadCountSession(wh) {
   if (SPECIAL_WH[wh] && !adjStockCache[wh]) loadSpecial(wh, true);
 }
 
+let lastLocalEditMs = 0;   // เวลา(client) ที่เครื่องนี้แก้รายการนับล่าสุด — ใช้ตัดสิน "กำลังนับ(เก็บของตัวเอง)" vs "ว่าง(มิเรอร์อีกเครื่อง)"
 function saveCountSession() {
   if (countSession) {
     countSession.lastEdit = new Date().toISOString();
+    lastLocalEditMs = Date.now();
     try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
     queueDraftSync();
   }
 }
 
-// ── Cross-device draft sync via Google Sheet ──
+// ── Cross-device draft sync via Supabase (ตาราง stock_draft) ──
 // userKey for cross-device draft sync — keyed by the PICKED counter so
 // each person's in-progress count syncs only with their own devices.
 const userKey = () => {
@@ -2232,50 +2281,69 @@ const userKey = () => {
 };
 let draftSyncTimer = null;
 function queueDraftSync() {
-  if (!COUNT_SAVE_URL || !currentUser || !countSession) return;
+  if (!SUPA_URL || !currentUser || !countSession || !userKey()) return;
   clearTimeout(draftSyncTimer);
   draftSyncTimer = setTimeout(syncDraftNow, 400); // debounce 0.4s — feels instant
 }
+// สถานะการเขียนขึ้น Supabase — โชว์ในแถบซิงค์ให้เห็นบนเครื่องจริง
+let syncWriteState = '';   // '' | 'pending' | 'ok' | 'fail'
+let syncWriteErr = '';
+// upsert draft ลง Supabase (1 แถวต่อ wh+counter_key) — REST ยืนยันผลได้ (ไม่ใช่ no-cors)
 async function syncDraftNow() {
-  if (!COUNT_SAVE_URL || !currentUser || !countSession) return;
+  const key = userKey();
+  if (!SUPA_URL || !currentUser || !countSession || !key) return;
+  syncWriteState = 'pending';
   try {
-    await fetch(COUNT_SAVE_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{ 'Content-Type':'text/plain;charset=utf-8' },
-      body: JSON.stringify({
-        action:'saveDraft',
-        userKey: userKey(),
-        email: currentUser.email,
-        empId: counterDisplayEmpId(),
-        warehouse: countSession.warehouse,
-        sessionStart: countSession.startedAt,
-        items: countSession.items,
-      }),
+    const row = {
+      wh: countSession.warehouse,
+      counter_key: key,
+      items: countSession.items || {},
+      session_start: countSession.startedAt || null,
+      device: deviceId(),
+      updated_at: new Date().toISOString(),
+    };
+    const res = await supaFetch('/stock_draft', {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },   // upsert บน PK (wh,counter_key)
+      body: JSON.stringify(row),
     });
-    // Mark this local snapshot as mirrored on the Sheet
-    if (countSession) {
-      countSession.syncedAt = new Date().toISOString();
-      try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
+    if (res.ok) {
+      syncWriteState = 'ok'; syncWriteErr = '';
+      if (countSession) {
+        countSession.syncedAt = row.updated_at;
+        try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
+      }
+    } else {
+      syncWriteState = 'fail'; syncWriteErr = 'HTTP ' + res.status;
+      console.warn('draft sync failed', res.status, await res.text().catch(()=>''));
     }
-  } catch {}
+  } catch (e) {
+    syncWriteState = 'fail'; syncWriteErr = String(e && e.message || e).slice(0,40);
+    console.warn('draft sync error', e);
+  }
+  updateSyncStatus(countSession && countSession.warehouse, null, true);   // อัปเดตชิปสถานะเขียนทันที
 }
+// อ่าน draft ล่าสุดจาก Supabase → { items, updatedAt, sessionStart, device } หรือ null
 async function fetchRemoteDraft(wh) {
-  if (!COUNT_SAVE_URL || !currentUser) return null;
+  const key = userKey();
+  if (!SUPA_URL || !currentUser || !key) return null;
   try {
-    const url = `${COUNT_SAVE_URL}?action=draft&userKey=${encodeURIComponent(userKey())}&warehouse=${encodeURIComponent(wh)}`;
-    const res = await fetch(url, { cache:'no-store' });
-    const json = await res.json();
-    return json && json.ok && json.draft ? json.draft : null;
+    const q = `/stock_draft?wh=eq.${encodeURIComponent(wh)}&counter_key=eq.${encodeURIComponent(key)}&select=items,updated_at,session_start,device&limit=1`;
+    const res = await supaFetch(q, { cache:'no-store' });
+    if (!res.ok) return null;
+    const arr = await res.json();
+    const r = Array.isArray(arr) && arr.length ? arr[0] : null;
+    if (!r) return null;
+    return { items: r.items || {}, updatedAt: r.updated_at, sessionStart: r.session_start, device: r.device };
   } catch { return null; }
 }
+// ลบ draft แถวนี้ (ตอนกดส่งจริงลงชีทแล้ว)
 async function clearRemoteDraft(wh) {
-  if (!COUNT_SAVE_URL || !currentUser) return;
+  const key = userKey();
+  if (!SUPA_URL || !currentUser || !key) return;
   try {
-    await fetch(COUNT_SAVE_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{ 'Content-Type':'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action:'clearDraft', userKey: userKey(), warehouse: wh }),
-    });
+    await supaFetch(`/stock_draft?wh=eq.${encodeURIComponent(wh)}&counter_key=eq.${encodeURIComponent(key)}`,
+      { method:'DELETE', headers:{ 'Prefer':'return=minimal' } });
   } catch {}
 }
 // Manual override — bypass the 30s guard, fetch the remote draft and adopt it
@@ -2316,26 +2384,95 @@ async function forcePullDraft() {
 // so a fresh save+clear is never overwritten by a stale remote read that
 // races with the no-cors POST clearDraft.
 const recentlySavedAt = {};   // { wh: epochMs } — block re-adoption after a save
+const DRAFT_ACTIVE_MS = 8000; // แก้ภายใน 8 วิ = "กำลังนับ" → เครื่องนี้เป็นตัวหลัก ไม่ให้ remote ทับ
+// ลายเซ็นรายการนับ (key + จำนวนต่อหน่วย + เวลาที่เช็ค) — ใช้เทียบว่า remote ต่างจากที่แสดงอยู่ไหม
+function draftSig(items) {
+  if (!items) return '';
+  return Object.keys(items).sort().map(k => {
+    const it = items[k] || {}, c = it.counts || {};
+    return k + ':' + (c.CS||0) + '.' + (c.BP||0) + '.' + (c.PA||0) + '.' + (c.EA||0) + '@' + (it.countedAt||'');
+  }).join('|');
+}
+// แถบสถานะซิงค์ข้ามเครื่อง — โชว์ว่าในระบบ (cloud) มีรายการของ "ชื่อผู้นับนี้" กี่รายการ + สถานะเขียน + ปุ่มดึงให้ตรง
+let lastRemoteDraft = null;   // remote ล่าสุดที่อ่านได้ (ใช้ตอน syncDraftNow อัปเดตชิปเขียนโดยไม่ต้องอ่านใหม่)
+function updateSyncStatus(wh, remote, writeOnly) {
+  const el = document.getElementById('syncStatus');
+  if (!el) return;
+  if (!SUPA_URL || !currentUser) { el.style.display = 'none'; return; }
+  if (writeOnly) remote = lastRemoteDraft; else lastRemoteDraft = remote;
+  const key = userKey();
+  const items = remote && remote.items ? remote.items : null;
+  const n = items ? Object.keys(items).length : 0;
+  const localN = countSession ? Object.keys(countSession.items || {}).length : 0;
+  const t = (remote && remote.updatedAt) ? formatThaiTime(remote.updatedAt) : '';
+  const same = n > 0 && draftSig(items) === draftSig(countSession && countSession.items);
+  let main, pull = '';
+  if (n === 0) {
+    main = '☁️ ยังไม่มีรายการในระบบสำหรับชื่อนี้';
+  } else if (same) {
+    main = `☁️ ตรงกับระบบแล้ว · <b>${n}</b> รายการ${t ? ' · ' + t : ''} ✓`;
+  } else {
+    main = `☁️ ในระบบมี <b>${n}</b> รายการ${t ? ' · ' + t : ''} · เครื่องนี้ ${localN}`;
+    pull = `<button class="sync-pull" onclick="forcePullDraft()" type="button">↻ ดึงให้ตรง</button>`;
+  }
+  // ชิปสถานะการเขียนขึ้นระบบ (เห็นชัดว่าเครื่องนี้ส่งขึ้นได้ไหม)
+  const wchip = syncWriteState === 'fail'
+      ? ` · <span style="color:var(--danger);font-weight:700">⚠️ ส่งขึ้นระบบไม่สำเร็จ${syncWriteErr ? ' (' + syncWriteErr + ')' : ''}</span>`
+    : syncWriteState === 'ok'
+      ? ` · <span style="color:var(--success);font-weight:700">ส่งขึ้นระบบ ✓</span>`
+      : '';
+  el.innerHTML = `<span>${main}${wchip}</span>${pull}<span class="sync-key">🔑 ชื่อซิงค์: ${key || '— (ยังไม่เลือกชื่อผู้นับ)'}</span>`;
+  el.style.display = 'flex';
+}
+// นโยบาย: "เครื่องที่แก้ล่าสุดเป็นหลัก" — เครื่องที่กำลังนับ (แก้ใน 8 วิ) เก็บของตัวเอง,
+// เครื่องที่ว่าง (โหมดดู/สำรอง) มิเรอร์รายการจากอีกเครื่องอัตโนมัติ (poll ทุก 5 วิ)
 async function maybeAdoptRemoteDraft(wh) {
-  // Guard against the post-save race: if we just saved this warehouse,
-  // ignore any remote draft for the next 30s — Apps Script may not have
-  // finished clearing the row yet, and the user already pushed the data.
+  // เพิ่งบันทึกลงชีท → เว้น 30 วิ กัน draft เก่าย้อนกลับมา (clearDraft แบบ no-cors อาจยังไม่ทันเคลียร์)
   if (recentlySavedAt[wh] && Date.now() - recentlySavedAt[wh] < 30000) return;
   const remote = await fetchRemoteDraft(wh);
+  updateSyncStatus(wh, remote);   // อัปเดตแถบสถานะทุกครั้งที่ดึง (ทุก 5 วิ) — เห็นได้ว่า 2 เครื่องตรงกันไหม
   const hasRemote = remote && remote.items && Object.keys(remote.items).length;
-  // Remote empty → leave local alone. (No-cors POST means syncedAt isn't a
-  // reliable signal that the server actually has our items, so the old
-  // auto-clear path was triggering false positives. The user can clear
-  // explicitly via "ล้างทั้งหมด" or the ↻ pull-draft button.)
-  if (!hasRemote) return;
-  const localTime  = countSession && countSession.lastEdit ? new Date(countSession.lastEdit).getTime() : 0;
-  const remoteTime = new Date(remote.updatedAt || 0).getTime();
-  if (remoteTime <= localTime + 1000) return;   // local is same or newer → keep
+  if (!hasRemote) return;   // remote ว่าง → ไม่แตะ local (no-cors ไม่ยืนยันการเคลียร์ ป้องกันลบผิด)
+  const remoteSig = draftSig(remote.items);
+  if (remoteSig === draftSig(countSession && countSession.items)) return;   // ตรงกับที่แสดงอยู่แล้ว → ข้าม (กัน re-render/toast ทุก 5 วิ)
+  if (Date.now() - lastLocalEditMs < DRAFT_ACTIVE_MS) return;               // เครื่องนี้กำลังนับ → เก็บของตัวเองไว้ (last edit wins)
+  // เครื่องนี้ว่าง & remote ต่างจาก local → มิเรอร์ตามอีกเครื่อง
   countSession = { warehouse: wh, startedAt: remote.sessionStart || new Date().toISOString(),
                    items: remote.items, lastEdit: remote.updatedAt, syncedAt: remote.updatedAt };
   try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
+  countListPage = 1;
   renderCountList();
-  showToast(`โหลดรายการที่เช็คค้าง ${Object.keys(remote.items).length} รายการ`, 'info');
+  showToast(`ซิงค์รายการจากอีกเครื่อง (${Object.keys(remote.items).length} รายการ)`, 'info');
+}
+// กู้ draft เก่าจากระบบเดิม (GAS CacheService) → Supabase — ครั้งเดียวต่อ (คลัง+ชื่อ) ถ้า Supabase ยังว่าง
+const _migratedDraft = {};
+async function migrateOldDraft(wh) {
+  const key = userKey();
+  if (!SUPA_URL || !COUNT_SAVE_URL || !currentUser || !key) return;
+  const mk = wh + '|' + key;
+  if (_migratedDraft[mk]) return;
+  try {
+    const supa = await fetchRemoteDraft(wh);
+    if (supa && supa.items && Object.keys(supa.items).length) { _migratedDraft[mk] = 1; return; }  // Supabase มีแล้ว ไม่ต้องกู้
+    // ดึง draft เก่าจาก GAS (action=draft ยังทำงานอยู่)
+    const url = `${COUNT_SAVE_URL}?action=draft&userKey=${encodeURIComponent(key)}&warehouse=${encodeURIComponent(wh)}`;
+    const json = await fetch(url, { cache:'no-store' }).then(r=>r.json()).catch(()=>null);
+    _migratedDraft[mk] = 1;
+    const old = json && json.ok && json.draft ? json.draft : null;
+    if (!old || !old.items || !Object.keys(old.items).length) return;   // ระบบเก่าไม่มี (หมดอายุ/คนละ key)
+    const r = await supaFetch('/stock_draft', {
+      method:'POST', headers:{ 'Prefer':'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ wh, counter_key:key, items:old.items,
+        session_start: old.sessionStart || null, device: deviceId(),
+        updated_at: old.updatedAt || new Date().toISOString() }),
+    });
+    if (r.ok) showToast(`กู้รายการนับเดิม ${Object.keys(old.items).length} รายการจากระบบเก่าแล้ว ✓`, 'success');
+  } catch (e) { _migratedDraft[mk] = 1; console.warn('migrateOldDraft', e); }
+}
+// จุดเข้าโหมดนับ: กู้ของเก่า(ครั้งเดียว) แล้วซิงค์ Supabase
+async function enterDraftSync(wh) {
+  await migrateOldDraft(wh);
+  await maybeAdoptRemoteDraft(wh);
 }
 
 function clearScanInput() {
@@ -2384,7 +2521,7 @@ function liveSearch(q) {
     ).join('');
     const codeTag = p._code ? ` <small style="color:var(--muted);font-weight:600">· ${p._code}</small>` : '';
     return `<div class="search-opt" onclick="pickSearchProduct(event,'${productKey(p)}','${units[0]||'EA'}')">
-      <span class="search-opt-name">${p['PRODUCT NAME']||'-'}${codeTag}</span>
+      <span class="search-opt-name">${p['PRODUCT NAME']||'-'}${codeTag}${skuSuffix(p._sku||'')}</span>
       <span class="search-opt-units">${unitBtns}</span>
     </div>`;
   }).join('');
@@ -2437,7 +2574,7 @@ function renderCodeChooser(bc, entries) {
     const stockTxt = (totalEA !== undefined) ? piecesToCSEA(totalEA, unitFactor(p,'CS')) : 'ไม่มีสต็อก';
     return `<button type="button" class="code-opt" onclick="pickCode('${bc}','${code}')">
       <div class="code-opt-main">
-        <div class="code-opt-name">${p['PRODUCT NAME']||'-'}</div>
+        <div class="code-opt-name">${p['PRODUCT NAME']||'-'}${skuSuffix(p._sku||'')}</div>
         <div class="code-opt-sub">รหัส ${code} · สต็อก ${stockTxt}</div>
       </div>
       <span class="code-opt-go">→</span>
@@ -2488,7 +2625,7 @@ function renderPending() {
       <div class="pb-top">
         ${thumbHtml(name, pendingScan.product, false)}
         <div class="pb-info">
-          <div class="pb-name">${name}</div>
+          <div class="pb-name">${name}${skuSuffix(p._sku||'')}</div>
           <div class="pb-sub">${p._code ? 'รหัส '+p._code+' · ' : ''}${pendingScan.code}</div>
         </div>
         <button class="pb-x" onclick="cancelPending()" title="ยกเลิก">✕</button>
@@ -2544,7 +2681,7 @@ function renderPending() {
                placeholder="เช่น C4.15.04.04" autocomplete="off" autocorrect="off">
       </div>`;
       })()}
-      ${palletCS ? `<button class="btn btn-block" style="margin:10px 0 2px;background:var(--gold);color:var(--navy);font-weight:700;font-size:14px" onclick="fillPallet()" type="button">📦 เต็มพาเลท (${palletCS} CS/พาเลท) — กดเพิ่มได้</button>` : ''}
+      ${palletCS ? `<button class="btn btn-block" style="margin:10px 0 2px;background:var(--gold);color:#fff;font-weight:700;font-size:14px" onclick="fillPallet()" type="button">📦 เต็มพาเลท (${palletCS} CS/พาเลท) — กดเพิ่มได้</button>` : ''}
       <div class="pb-row">
         <button class="step-btn" onclick="bumpQty(-1)" type="button">−</button>
         <input id="qtyInput" class="pb-qty" type="text" inputmode="numeric" value="${window._prefillQty || 1}"
@@ -2595,6 +2732,8 @@ function cancelPending() {
   document.getElementById('countInput').focus();
 }
 
+// ประทับเวลาเช็คล่าสุดของรายการ (ISO เต็มความละเอียดถึงมิลลิวินาที) เพื่อเรียงรายการตามเวลาจริง
+function stampItem(it) { if (it) it.countedAt = new Date().toISOString(); }
 function confirmCount() {
   if (!pendingScan) return;
   const qty = parseInt(document.getElementById('qtyInput').value) || 0;
@@ -2614,7 +2753,7 @@ function confirmCount() {
   const key = productKey(p);
   if (!countSession.items[key]) {
     countSession.items[key] = {
-      key, name: p['PRODUCT NAME']||'-', short: p['SHORT NAME']||'', _code: p._code || '',
+      key, name: p['PRODUCT NAME']||'-', short: p['SHORT NAME']||'', _code: p._code || '', _sku: p._sku || '',
       factors: { EA:unitFactor(p,'EA'), PA:unitFactor(p,'PA'), BP:unitFactor(p,'BP'), CS:unitFactor(p,'CS') },
       counts: { EA:0, PA:0, BP:0, CS:0 },
     };
@@ -2639,9 +2778,11 @@ function confirmCount() {
   // Keep legacy counts in sync (sum of lots) for any code that still reads it
   item.counts = lotsToTotalCounts(item.lots);
   item.expiryDate = item.lots[0].expiryDate || '';
+  stampItem(item);   // เวลาที่เช็คล่าสุด (ISO ระดับมิลลิวินาที) → ใช้เรียงรายการใหม่→เก่า
   saveCountSession();
   pendingScan = null;
   document.getElementById('countPending').innerHTML = '';
+  countListPage = 1;   // สแกนใหม่ → กลับหน้าแรก เห็นรายการที่เพิ่งนับบนสุด
   renderCountList();
   showToast(`+${qty} ${u} · ${countSession.items[key].name}`, 'success');
   document.getElementById('countInput').focus();
@@ -2809,15 +2950,71 @@ function piecesToCSEA(pieces, factorCS) {
 // each unit's count. Structure mirrors Direction B from the design bundle.
 const liveOpen = new Set();   // one key at a time
 
+// ตัวคูณของรายการที่นับไว้เป็น snapshot ตอนสแกน — ถ้าแคตตาล็อกอัปเดตตัวคูณ (เช่น Colgate ชิ้น/ลัง 18→72)
+// ให้ดึงค่าล่าสุดจาก product ปัจจุบัน (productByKey[key]) มาทับ โดยคงจำนวนที่นับไว้เดิม
+// → ฝั่งนับ (countedPieces) / ฝั่งระบบ (systemPiecesFor split) / Diff ใช้ตัวคูณเดียวกัน จะตรงกัน
+function syncItemFactors() {
+  if (!countSession || !countSession.items) return false;
+  let changed = false;
+  Object.values(countSession.items).forEach(it => {
+    const p = productByKey[it.key];
+    if (!p) return;
+    it.factors = it.factors || {};
+    ['EA','PA','BP','CS'].forEach(u => {
+      const f = unitFactor(p, u);
+      if (f > 0 && it.factors[u] !== f) { it.factors[u] = f; changed = true; }
+    });
+  });
+  if (changed) saveCountSession();
+  return changed;
+}
+// ── ค้นหา + แบ่งหน้ารายการที่นับ (10 รายการ/หน้า) ──
+let countListSearch = '';
+let countListPage = 1;
+const COUNT_PAGE_SIZE = 10;
+function onCountSearch(v) { countListSearch = v; countListPage = 1; renderCountList(); }
+function countPage(delta) {
+  countListPage += delta;
+  renderCountList();
+  document.getElementById('countList')?.scrollIntoView({ block:'start', behavior:'smooth' });
+}
+function itemMatchesQuery(it, q) {
+  if ((it.name||'').toLowerCase().includes(q)) return true;
+  const code = itemCodeOf(it); if (code && String(code).toLowerCase().includes(q)) return true;
+  const sku = itemSkuOf(it);   if (sku  && String(sku).toLowerCase().includes(q))  return true;
+  return false;
+}
 function renderCountList() {
+  syncItemFactors();
   const card = document.getElementById('countListCard');
   const list = document.getElementById('countList');
-  const items = countSession ? Object.values(countSession.items) : [];
+  // เรียงตามเวลาที่เช็คล่าสุด ใหม่→เก่า (ISO เต็มความละเอียด) — รายการเก่าที่ไม่มี countedAt ไปท้ายสุด คงลำดับเดิม
+  const items = countSession
+    ? Object.values(countSession.items).sort((a,b) => (b.countedAt||'').localeCompare(a.countedAt||''))
+    : [];
   document.getElementById('countN').textContent = items.length;
   updateSumFab();
-  if (!items.length) { card.style.display = 'none'; return; }
+  const pager = document.getElementById('countPager');
+  if (!items.length) { card.style.display = 'none'; if (pager) pager.innerHTML = ''; return; }
   card.style.display = 'block';
-  list.innerHTML = items.map(it => {
+
+  // กรองตามคำค้น (ชื่อ / รหัส / SKU)
+  const q = countListSearch.trim().toLowerCase();
+  const filtered = q ? items.filter(it => itemMatchesQuery(it, q)) : items;
+  if (!filtered.length) {
+    list.innerHTML = `<div class="txt-center txt-muted" style="padding:20px 8px;font-size:13px">ไม่พบรายการที่ตรงกับ “${q}”</div>`;
+    if (pager) pager.innerHTML = '';
+    return;
+  }
+
+  // แบ่งหน้า 10 รายการ/หน้า
+  const totalPages = Math.max(1, Math.ceil(filtered.length / COUNT_PAGE_SIZE));
+  if (countListPage > totalPages) countListPage = totalPages;
+  if (countListPage < 1) countListPage = 1;
+  const startIdx = (countListPage - 1) * COUNT_PAGE_SIZE;
+  const pageItems = filtered.slice(startIdx, startIdx + COUNT_PAGE_SIZE);
+
+  list.innerHTML = pageItems.map(it => {
     const d   = itemDiff(it);
     const key = encodeURIComponent(it.key);
     const open = liveOpen.has(it.key);
@@ -2854,7 +3051,7 @@ function renderCountList() {
     <div class="lrow ${open?'open':''}">
       <div class="lrow-main" onclick="toggleLiveRow('${key}')">
         <div class="lrow-info">
-          <div class="lrow-name">${it.name}${codeSuffix(itemCodeOf(it))}</div>
+          <div class="lrow-name">${it.name}${codeSuffix(itemCodeOf(it))}${skuSuffix(itemSkuOf(it))}</div>
           <div class="lrow-sub">${breakdownText(it)} = <b>${d.counted.toLocaleString()}</b> ชิ้น · ระบบ ${d.system.toLocaleString()}${d.putawayPallets ? ` <span style="color:var(--navy-mid);font-weight:600">· 📍 ${d.putawayPallets} พาเลท</span>` : ''}</div>
         </div>
         ${pill}
@@ -2870,6 +3067,16 @@ function renderCountList() {
       </div>` : ''}
     </div>`;
   }).join('');
+
+  // ตัวแบ่งหน้า — โชว์เมื่อมีเกิน 10 รายการ (หลังกรอง)
+  if (pager) {
+    pager.innerHTML = (filtered.length > COUNT_PAGE_SIZE) ? `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px">
+        <button class="btn btn-outline btn-sm" ${countListPage<=1?'disabled':''} onclick="countPage(-1)" type="button">‹ ก่อนหน้า</button>
+        <span style="font-size:12.5px;color:var(--muted);font-weight:700">หน้า ${countListPage}/${totalPages} · ${filtered.length} รายการ</span>
+        <button class="btn btn-outline btn-sm" ${countListPage>=totalPages?'disabled':''} onclick="countPage(1)" type="button">ถัดไป ›</button>
+      </div>` : '';
+  }
 }
 
 function toggleLiveRow(encKey) {
@@ -2921,6 +3128,7 @@ function liveBump(encKey, unit, delta) {
     it.counts[unit] = Math.max(0, (it.counts[unit]||0) + delta);
     _liveSync(it, k);
   }
+  if (countSession.items[k]) stampItem(countSession.items[k]);
   saveCountSession();
   renderCountList();
 }
@@ -2934,6 +3142,7 @@ function liveSet(encKey, unit, val) {
     it.counts[unit] = Math.max(0, parseInt(val)||0);
     _liveSync(it, k);
   }
+  if (countSession.items[k]) stampItem(countSession.items[k]);
   saveCountSession();
   renderCountList();
 }
@@ -3163,7 +3372,7 @@ function openEditItem(encKey) {
   if (!it.lots) it.lots = [{ counts: { ...it.counts }, expiryDate: it.expiryDate||'' }];
   window._editItem = it;
   document.getElementById('editBody').innerHTML = `
-    <div style="font-size:14px;font-weight:700;margin-bottom:10px">${it.name}${codeSuffix(itemCodeOf(it))}</div>
+    <div style="font-size:14px;font-weight:700;margin-bottom:10px">${it.name}${codeSuffix(itemCodeOf(it))}${skuSuffix(itemSkuOf(it))}</div>
     <div class="lot-info-note">💡 Lot จะถูกแยกอัตโนมัติเมื่อ <b>วันหมดอายุ</b> หรือ <b>ที่ตั้ง</b> ต่างกัน</div>
     <div id="lotList"></div>
     <button type="button" onclick="addLotRow()" class="btn btn-outline btn-sm btn-block" style="margin-top:8px">
@@ -3210,6 +3419,7 @@ function saveEditItem() {
   it.expiryDate = validLots[0].expiryDate || '';
   if (!countSession.items[editKey]) countSession.items[editKey] = it;
   else Object.assign(countSession.items[editKey], it);
+  stampItem(countSession.items[editKey]);
   saveCountSession();
   closeEditItem();
   renderCountList();
@@ -3288,7 +3498,7 @@ function renderSummary() {
       : `<span class="srp srp-${r.status==='short'?'short':'over'}">${word} ${csea}</span>`;
     return `<div class="sum-row sr-${r.status==='ok'?'ok':(r.status==='short'?'short':'over')}">
       <div class="sr-main">
-        <div class="sr-name">${r.name}</div>
+        <div class="sr-name">${r.name}${skuSuffix(itemSkuOf(r.item))}</div>
         <div class="sr-sub">${(() => { const c = itemCodeOf(r.item); return c ? 'รหัส '+c+' · ' : ''; })()}นับ <b>${r.counted.toLocaleString()}</b> · ระบบ ${r.system.toLocaleString()} ชิ้น</div>
       </div>
       ${srp}
@@ -3430,6 +3640,7 @@ async function saveCountToSheet() {
           diffCSEA: li===0 ? diffCSEA : '',
           status: status,   // v4.11: ใส่สถานะรวมของสินค้าทุกแถว (รวมล็อตรอง) — สต็อก/ขาดเกิน ยังโชว์แถวแรกแถวเดียว
           expiryDate: lot.expiryDate || '',
+          countedAt: r.item.countedAt || '',   // v4.35: เวลาที่เช็คจริง (เรียงประวัติใหม่→เก่า)
         };
       });
     }),
@@ -4253,13 +4464,14 @@ function openHistDetail(idx) {
       }
       prodMap.set(k, { name:it.name, key:it.key, factorCS, counted:0,
                        system:it.systemPieces||0, diff:it.diffPieces||0, status:it.status,
-                       scanMap: new Map() });
+                       countedAt: it.countedAt || '', scanMap: new Map() });
     }
     const g = prodMap.get(k);
     g.counted += it.countedPieces||0;
     if (it.systemPieces) g.system = it.systemPieces;
     if (it.diffPieces)   g.diff   = it.diffPieces;
     if (it.status)       g.status = it.status;
+    if (it.countedAt && it.countedAt > (g.countedAt||'')) g.countedAt = it.countedAt;  // เก็บเวลาเช็คล่าสุดของสินค้า
     // Group by savedAt (each unique save time = one scan)
     const tKey = it.savedAt || '__none__';
     if (!g.scanMap.has(tKey)) g.scanMap.set(tKey, { savedAt:it.savedAt, counted:0, system:0, lots:[] });
@@ -4269,7 +4481,8 @@ function openHistDetail(idx) {
     sc.lots.push(it);
   });
 
-  const prods = [...prodMap.values()];
+  // เรียงสินค้าในประวัติ ใหม่→เก่า ตามเวลาที่เช็คจริง (countedAt) — ไม่มี countedAt (ข้อมูลเก่า) คงลำดับเดิม
+  const prods = [...prodMap.values()].sort((a,b)=>(b.countedAt||'').localeCompare(a.countedAt||''));
   const nOk    = prods.filter(p=>p.status==='ตรง').length;
   const nShort = prods.filter(p=>p.status==='ขาด').length;
   const nOver  = prods.filter(p=>p.status==='เกิน').length;
@@ -4329,7 +4542,7 @@ function openHistDetail(idx) {
     <div class="hd-prod-row${hasDrill?' hd-has-lots':''}" onclick="this.classList.toggle('open')">
       <div class="hd-prod-main">
         <div class="hd-prod-info">
-          <div style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
+          <div style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}${skuSuffix(itemSkuOf(p))}</div>
           <div style="font-size:12px;color:var(--muted);margin-top:1px">${(() => { const c = productByKey[p.key] && productByKey[p.key]._code; return c ? 'รหัส '+c+' · ' : ''; })()}นับ <b>${piecesToCSEA(p.counted,p.factorCS)}</b> · ระบบ ${piecesToCSEA(p.system,p.factorCS)}${multiScan?` · <b>${scans.length} ครั้ง</b>`:''}
           </div>
         </div>

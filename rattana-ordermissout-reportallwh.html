@@ -297,7 +297,7 @@
 <header>
   <div class="header-row1">
     <button id="sidebarToggle" onclick="toggleSidebar()" title="ซ่อน/แสดง Sidebar">☰</button>
-    <div class="logo-text">Rattana <span>OM Report</span> <span class="ver-badge">v10.24.3 · 2026-07-27</span></div>
+    <div class="logo-text">Rattana <span>OM Report</span> <span class="ver-badge">v10.24.13 · 2026-08-03</span></div>
     <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรชข้อมูล">↻</button>
     <button class="icon-btn" id="btnDark" onclick="toggleDark()" title="Dark mode">🌙</button>
     <button class="icon-btn" onclick="exportExcel()" title="Export Excel">📥</button>
@@ -914,6 +914,7 @@
   <div id="productSearchBar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;position:fixed;left:0;right:0;top:87px;z-index:50;background:var(--bg);padding:10px 16px 8px;box-shadow:0 4px 8px -2px rgba(0,0,0,.1)">
     <input id="productSearchInput" class="input" style="height:40px;font-size:14px;flex:1;min-width:200px;max-width:400px" placeholder="🔍 ค้นหาสินค้า..." oninput="filterProductList()">
     <select id="productCardSort" class="input" style="height:40px;font-size:13px;width:auto;min-width:180px" onchange="filterProductList()">
+      <option value="delta_asc">เรียงผลต่างติดลบมากสุด ↑</option>
       <option value="avg_desc">เรียง AVG 3 M. ↓</option>
       <option value="store_desc">เรียงจำนวนร้าน ↓</option>
       <option value="name_asc">เรียงชื่อสินค้า A→Z</option>
@@ -1088,6 +1089,8 @@ let currentSheet = '';
 let selBU = '';
 let selRoute = '';
 let selStoreType = '';
+let currentUserRole = 0;
+let currentUserWH   = '';
 
 // ── BU colour palette ─────────────────────────────
 const BU_COLORS = [
@@ -1167,9 +1170,29 @@ function initApp() {
 function buildSaleDD() {
   const ul = document.getElementById('ddSaleList');
   ul.innerHTML = '';
-  SALESPEOPLE.forEach(name => {
+
+  // role=3,4,5 + WH เป็น W1/W2/W3/W4 → กรองเฉพาะคนที่อยู่ใน WH นั้น (จาก Users sheet)
+  let salesList = SALESPEOPLE;
+  if ([3,4,5].includes(currentUserRole) && /^W\d+$/.test(currentUserWH) && window._salesFilter && window._salesFilter.size) {
+    salesList = SALESPEOPLE.filter(name => window._salesFilter.has(name));
+  }
+
+  // หา W ของแต่ละเซลล์จาก Customer sheet
+  const custRows = window._custAllRows || [];
+  const saleWhMap = {};
+  custRows.forEach(r => {
+    const sn = normSale(r['เซลล์ผู้ดูแล'] || '');
+    const wh = String(r['WH'] || '').trim();
+    if (!sn || !wh) return;
+    if (!saleWhMap[sn]) saleWhMap[sn] = new Set();
+    saleWhMap[sn].add(wh);
+  });
+
+  salesList.forEach(name => {
     const li = document.createElement('li');
-    li.textContent = name;
+    const whs = saleWhMap[normSale(name)];
+    const whLabel = whs ? [...whs].sort().join(', ') : '';
+    li.innerHTML = escHtml(name) + (whLabel ? ` <span style="color:var(--gold);font-size:10px;font-weight:700">[${escHtml(whLabel)}]</span>` : '');
     li.className = name === currentSheet ? 'selected' : '';
     li.onclick = () => {
       document.getElementById('ddSaleLabel').textContent = name;
@@ -1200,9 +1223,10 @@ async function loadSheet(sheetName) {
   try {
     fetchBudgetData();   // โหลด Budget ควบคู่
     fetchCustMaster().then(() => {
+      buildSaleDD();
       buildRouteDD();
       buildStoreTypeDD();
-      if (activeTab === 'summary') renderSummaryTab();
+      renderSummaryTab();
     });
     const cached = getCached(cacheKey);
     if (cached) {
@@ -2818,7 +2842,8 @@ function filterProductList() {
   const byProd = window._productIndex || {};
   let names = Object.keys(byProd);
   if (q) names = names.filter(n => n.toLowerCase().includes(q));
-  if (sortVal === 'avg_desc')   names.sort((a,b) => byProd[b].avgCS - byProd[a].avgCS);
+  if (sortVal === 'avg_desc')        names.sort((a,b) => byProd[b].avgCS - byProd[a].avgCS);
+  else if (sortVal === 'delta_asc')  names.sort((a,b) => (byProd[a].latestCS - byProd[a].avgCS/3) - (byProd[b].latestCS - byProd[b].avgCS/3));
   else if (sortVal === 'store_desc') names.sort((a,b) => byProd[b].stores.size - byProd[a].stores.size);
   else names.sort((a,b) => a.localeCompare(b,'th'));
   if (countEl) countEl.textContent = names.length + ' สินค้า';
@@ -3297,10 +3322,20 @@ function exportSummaryExcel() {
         showLoginError(`ไม่พบสิทธิ์: ${payload.email}`); return;
       }
       const userRole = parseInt(userRow[15]) || 0;
+      const userWH   = String(userRow[1] || '').trim();
       if (email !== normalizeEmail(EXEMPT_EMAIL) && userRole < 5) {
         localStorage.removeItem(SESSION_KEY);
         showLoginError(`สิทธิ์ไม่เพียงพอ: User Role ของคุณคือ ${userRole || '—'} (ต้องการ 5 ขึ้นไป)`); return;
       }
+      // หาชื่อพนักงานทั้งหมดที่อยู่ใน W เดียวกัน (column B = index 1, column E = index 4)
+      const whFilter = /^W\d+$/.test(userWH);
+      const salesFilter = (whFilter && [3,4,5].includes(userRole))
+        ? rows.filter(r => String(r[1]||'').trim() === userWH).map(r => String(r[4]||'').trim()).filter(Boolean)
+        : [];
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ email, name: payload.name, role: userRole, wh: userWH, salesFilter, exp: Date.now() + SESSION_DAYS * 86400000 }));
+      currentUserRole = userRole;
+      currentUserWH   = userWH;
+      window._salesFilter = salesFilter.length ? new Set(salesFilter) : null;
       document.getElementById('loginScreen').style.display = 'none';
       document.getElementById('btnLogout').style.display = '';
       initApp();
@@ -3316,6 +3351,9 @@ function exportSummaryExcel() {
       try {
         const s = JSON.parse(raw);
         if (s.exp > Date.now()) {
+          currentUserRole = s.role || 0;
+          currentUserWH   = s.wh   || '';
+          window._salesFilter = (s.salesFilter && s.salesFilter.length) ? new Set(s.salesFilter) : null;
           document.getElementById('loginScreen').style.display = 'none';
           document.getElementById('btnLogout').style.display = '';
           initApp(); return;

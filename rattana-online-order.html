@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v3.70</title>
+<title>Rattana Online Order v3.73</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -547,7 +547,7 @@ body.dark .seg-tab.on{background:var(--gold);color:var(--navy);border-color:var(
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.70</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.73</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -2451,10 +2451,11 @@ async function loadSummary(){
   if(!currentCustomer){ box.innerHTML='<div class="sum-empty">🔒 กรุณาเข้าสู่ระบบก่อนดูสรุปออเดอร์</div>'; return; }
   box.innerHTML='<div class="sum-load">⏳ กำลังโหลดสรุปออเดอร์…</div>';
   try{
-    const r=await jsonpGet({ action:'getOrders', shop:clean(currentCustomer.name||''), uid:clean(currentCustomer.uid||''), code:clean(currentCustomer.shopCode||'') }, 15000);
+    const r=await jsonpGet({ action:'getOrders', shop:clean(currentCustomer.name||''), uid:clean(currentCustomer.uid||''), code:clean(currentCustomer.shopCode||'') }, 20000);
+    if(r===null){ box.innerHTML='<div class="sum-empty">⚠️ โหลดช้าหรือไม่สำเร็จ<br><button class="btn btn-outline btn-sm" style="margin-top:10px" onclick="loadSummary()">🔄 ลองใหม่</button></div>'; return; }
     _sumData=(r&&r.ok&&Array.isArray(r.days))?r.days:[];
     renderSummary();
-  }catch(e){ box.innerHTML='<div class="sum-empty">โหลดไม่สำเร็จ · ลองใหม่อีกครั้ง</div>'; }
+  }catch(e){ box.innerHTML='<div class="sum-empty">โหลดไม่สำเร็จ<br><button class="btn btn-outline btn-sm" style="margin-top:10px" onclick="loadSummary()">🔄 ลองใหม่</button></div>'; }
 }
 function sumDateLabel(ds){
   const m=String(ds||'').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if(!m) return ds||'';
@@ -2827,35 +2828,55 @@ function jsonpGet(params, timeoutMs){
 }
 async function orderStatusRaw(orderId){ return await jsonpGet({action:'getOrderStatus',orderId}, 5000); }
 function statusSupported(r){ return !!(r && Object.prototype.hasOwnProperty.call(r,'approved')); }   // backend รองรับ getOrderStatus ไหม
-/* ยิงออเดอร์ + ยืนยันว่าเขียน "อนุมัติ" ลงหลังบ้านจริง — เช็คก่อนกันส่งซ้ำ, ตรวจซ้ำ 3 รอบ
-   • backend ใหม่ + เน็ตดี → ยืนยันจริง  • backend เก่า (ยังไม่ deploy) → โหมดเดิม  • เน็ตอ่านผลไม่ได้ → ถือว่ายังไม่ยืนยัน (เก็บตะกร้าไว้) */
+/* ยิงออเดอร์ + ยืนยันว่าเขียนหลังบ้านจริง — กันส่งซ้ำ + กันหมุนค้าง (v3.73)
+   คืน true เมื่อ (ก) ชีทขึ้น "อนุมัติ" [ไวสุด ~6 วิ กับ backend v1.22]  หรือ  (ข) postGAS จบ = เซิร์ฟเวอร์เขียนเสร็จ+ตอบกลับ [เผื่อ backend เก่าเขียนช้า หรือ JSONP อ่านสถานะไม่ได้]
+   ⚠️ ไม่ retry (retry ทับซ้อน = ต้นเหตุออเดอร์เบิ้ล) · timeout ยาว 3 นาที (บิลใหญ่บน backend เก่าเขียน 60-90 วิ) · fetch ล้มจริง → คืน false เก็บตะกร้าไว้ให้กดใหม่ */
 async function sendAndConfirm(payload, orderId){
   const pre=await orderStatusRaw(orderId);
-  if(statusSupported(pre) && pre.approved) return true;   // ส่งไปแล้วก่อนหน้า (เน็ตเด้ง) → ไม่ส่งซ้ำ
-  await postGAS(payload,{retries:3,timeoutMs:20000});     // เน็ตสะดุด → ยิงซ้ำเองในคลิกเดียว (backend กันแถวซ้ำแล้ว)
-  for(let i=0;i<4;i++){
-    await sleep(1500);
+  if(statusSupported(pre) && pre.approved) return true;                 // กดซ้ำหลังส่งสำเร็จ → ไม่ส่งซ้ำ
+  let done=false, postOk=false;
+  const posting=postGAS(payload,{retries:1,timeoutMs:180000})           // ยิงครั้งเดียว · no-cors resolve = เซิร์ฟเวอร์เขียน+ตอบกลับเสร็จจริง
+    .then(v=>{ postOk=!!v; done=true; return v; }).catch(()=>{ postOk=false; done=true; });
+  for(let i=0;i<90;i++){                                                // poll — คืนไวสุดเมื่อชีทขึ้น "อนุมัติ" (ไม่ต้องรอ LINE/Supabase)
+    await sleep(2000);
     const st=await orderStatusRaw(orderId);
-    if(st===null) continue;                  // เน็ตล่ม อ่านผลไม่ได้ → รอรอบต่อไป
-    if(!statusSupported(st)) return true;     // backend ยังไม่มี getOrderStatus → โหมดเดิม (postGAS ไม่ throw=สำเร็จ)
-    if(st.approved) return true;              // ยืนยันแล้ว ✓ (อ่านจากชีทจริง ไม่เชื่อ HTTP)
+    if(st && statusSupported(st) && st.approved) return true;           // ✓ ชีทขึ้น "อนุมัติ"
+    if(done){                                                           // เซิร์ฟเวอร์ตอบกลับแล้ว = เขียนชีทเสร็จ
+      if(st && statusSupported(st) && st.approved) return true;
+      if(postOk){
+        for(let j=0;j<3;j++){ await sleep(1500); const f=await orderStatusRaw(orderId); if(f && statusSupported(f) && f.approved) return true; if(f && !statusSupported(f)) return true; }
+        const last=await orderStatusRaw(orderId);                       // ยิงสำเร็จแต่อ่านสถานะไม่ได้ (JSONP โดนบล็อก/backend เก่า) → ถือว่าสำเร็จ ไม่ปล่อยให้หมุนค้าง
+        return statusSupported(last) ? !!last.approved : true;
+      }
+      return false;                                                     // ยิงไม่สำเร็จ (fetch ล้ม) → ยังไม่ยืนยัน เก็บตะกร้าไว้
+    }
   }
   return false;
 }
-/* ร้านส่ง: verify จากชีท "Order ร้านส่ง" (getOrderStatus&special=1)
-   backward-safe: .gs เก่าตอบไม่มี checkedSpecial → กลับโหมดเดิม (ถือว่าสำเร็จหลัง retry) ไม่พัง ; .gs ใหม่ → ยืนยันจากชีทจริง เก็บตะกร้าถ้าไม่ยืนยัน */
+/* ร้านส่ง: verify จากชีท "Order ร้านส่ง" (getOrderStatus&special=1) — โครงเดียวกับด้านบน
+   backward-safe: .gs เก่าตอบไม่มี checkedSpecial → postGAS จบ = ถือว่าสำเร็จ (ไม่พัง) ; .gs ใหม่ → ยืนยันจากชีทจริง */
 async function sendAndConfirmSpecial(payload, orderId){
-  const pre=await jsonpGet({action:'getOrderStatus',orderId,special:1},5000);
-  if(pre && pre.checkedSpecial && pre.approved) return true;   // ยืนยันไปแล้ว (เน็ตเด้ง) → ไม่ส่งซ้ำ
-  await postGAS(payload,{retries:3,timeoutMs:20000});          // เน็ตสะดุด → ยิงซ้ำเอง (backend กันแถวซ้ำ)
-  for(let i=0;i<4;i++){
-    await sleep(1500);
-    const st=await jsonpGet({action:'getOrderStatus',orderId,special:1},5000);
-    if(st===null) continue;                  // เน็ตอ่านไม่ได้ → รอรอบต่อไป
-    if(!st.checkedSpecial) return true;       // .gs เก่ายังไม่รองรับ verify ร้านส่ง → โหมดเดิม (postGAS ไม่ throw=สำเร็จ)
-    if(st.approved) return true;              // ยืนยันจากชีท "Order ร้านส่ง" จริง ✓
+  const q={action:'getOrderStatus',orderId,special:1};
+  const pre=await jsonpGet(q,5000);
+  if(pre && pre.checkedSpecial && pre.approved) return true;
+  let done=false, postOk=false;
+  const posting=postGAS(payload,{retries:1,timeoutMs:180000})
+    .then(v=>{ postOk=!!v; done=true; return v; }).catch(()=>{ postOk=false; done=true; });
+  for(let i=0;i<90;i++){
+    await sleep(2000);
+    const st=await jsonpGet(q,5000);
+    if(st && st.checkedSpecial && st.approved) return true;
+    if(done){
+      if(st && st.checkedSpecial && st.approved) return true;
+      if(postOk){
+        for(let j=0;j<3;j++){ await sleep(1500); const f=await jsonpGet(q,5000); if(f && f.checkedSpecial && f.approved) return true; if(f && !f.checkedSpecial) return true; }
+        const last=await jsonpGet(q,5000);
+        return (last && last.checkedSpecial) ? !!last.approved : true;
+      }
+      return false;
+    }
   }
-  return false;                              // .gs ใหม่ แต่ยังไม่ approved 4 รอบ → เก็บตะกร้าไว้ (ไม่หาย)
+  return false;
 }
 
 /* opts.retries: ยิงซ้ำเมื่อ fetch พัง (เน็ตสะดุด) — ใช้กับ action 'order' ที่ backend กันซ้ำไว้แล้ว (orderSignature + update-in-place) → ส่งซ้ำไม่ได้แถวเบิ้ล
