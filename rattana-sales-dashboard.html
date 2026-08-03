@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v11.3</title>
+<title>Rattana Sales Dashboard v11.4</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -345,7 +345,7 @@ body.dark .ptbl-td{border-color:var(--border)}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v11.3</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v11.4</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -3269,60 +3269,97 @@ function renderSummaryTab() {
   );
 
   const norm = s => tgtNormalizeText(String(s||'')).replace(/\s+/g,'').toLowerCase();
-
-  const kpiAgg = (valueNorm) => {
-    const rows = scopeRows.filter(r => r.dim.toUpperCase() === 'KPI' && norm(r.value) === norm(valueNorm));
-    const target = rows.reduce((s,r)=>s+(r.target||0),0);
-    const actual = rows.reduce((s,r)=>s+(r.actual||0),0);
-    return { target, actual, pct: target>0 ? actual/target*100 : null };
-  };
-
-  const bplus  = kpiAgg('รวมbplus');
-  const outlet = kpiAgg('Active Outlet');
-  const allSku = kpiAgg('All SKU');
-  const newSku = kpiAgg('SKUใหม่ต่อร้านค้า');
-  const eo     = kpiAgg('Effective Outlet');
-  const budget = kpiAgg('Budget');
-  const cn     = kpiAgg('CN');
-
   const dataMonth = (tgtState.rows.find(r=>r.month)||{}).month || '';
 
-  // Person leaderboard
+  // ── Actual sales directly from bpRaw (EXVat+CN*2) ──
+  const scopeNames = new Set(scopeRows.map(r => tgtNormalizeName(r.name)));
+  const bpByPerson = new Map(); // normName → total EXVat+CN*2
+  const bpByMonth  = new Map(); // 'mm/yyyy' → total EXVat+CN*2
+  const catMap     = new Map(); // Cat_BU → total
+
+  (tgtState.bpRaw || []).forEach(r => {
+    const normName = tgtNormalizeName(r['Sale NO ROO'] || '');
+    if (!normName || !scopeNames.has(normName)) return;
+    const val = r._exvatcn2 != null ? r._exvatcn2 : parseNum(r['EXVat+CN*2']);
+    bpByPerson.set(normName, (bpByPerson.get(normName) || 0) + val);
+    const my = tgtBpMonthYear(r['Doc_Date']);
+    if (my) {
+      const mk = my.mm + '/' + my.yyyy;
+      bpByMonth.set(mk, (bpByMonth.get(mk) || 0) + val);
+    }
+    const cat = tgtNormalizeText(String(r['Cat_BU'] || 'อื่นๆ')).trim() || 'อื่นๆ';
+    catMap.set(cat, (catMap.get(cat) || 0) + val);
+  });
+
+  const bpTotalActual = [...bpByPerson.values()].reduce((s,v)=>s+v, 0);
+
+  // ── Targets from KPI rows ──
+  const kpiTgt = (valueNorm) => {
+    const rows = scopeRows.filter(r => r.dim.toUpperCase()==='KPI' && norm(r.value)===norm(valueNorm));
+    return rows.reduce((s,r)=>s+(r.target||0), 0);
+  };
+  const kpiActual = (valueNorm) => {
+    const rows = scopeRows.filter(r => r.dim.toUpperCase()==='KPI' && norm(r.value)===norm(valueNorm));
+    return rows.reduce((s,r)=>s+(r.actual||0), 0);
+  };
+  const kpiCard2 = (icon, label, actual, target, unit) => {
+    const pct = target > 0 ? actual/target*100 : null;
+    return kpiCard(icon, label, actual, target, pct, unit);
+  };
+
+  const bplusTgt   = kpiTgt('รวมbplus');
+  const outletTgt  = kpiTgt('Active Outlet');
+  const outletAct  = kpiActual('Active Outlet');
+  const allSkuTgt  = kpiTgt('All SKU');
+  const allSkuAct  = kpiActual('All SKU');
+  const newSkuTgt  = kpiTgt('SKUใหม่ต่อร้านค้า');
+  const newSkuAct  = kpiActual('SKUใหม่ต่อร้านค้า');
+  const eoTgt      = kpiTgt('Effective Outlet');
+  const eoAct      = kpiActual('Effective Outlet');
+  const cnTgt      = kpiTgt('CN');
+  const cnAct      = kpiActual('CN');
+  const budgetTgt  = kpiTgt('Budget');
+  const budgetAct  = kpiActual('Budget');
+
+  const overallPct = bplusTgt > 0 ? bpTotalActual / bplusTgt * 100 : null;
+
+  // ── Target by month (from KPI rows, BE year → CE) ──
+  const tgtByMonth = new Map();
+  scopeRows.filter(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value)===norm('รวมbplus')&&r.month).forEach(r=>{
+    const p = tgtParseThaiMonthYear(r.month);
+    if (!p) return;
+    const mk = p.mm + '/' + p.yyyy;
+    tgtByMonth.set(mk, (tgtByMonth.get(mk)||0) + (r.target||0));
+  });
+
+  // Sort months (mm/yyyy CE)
+  const sortedMonths = [...new Set([...bpByMonth.keys(), ...tgtByMonth.keys()])].sort((a,b)=>{
+    const [am,ay]=a.split('/'), [bm,by]=b.split('/');
+    return (+ay*100 + +am) - (+by*100 + +bm);
+  });
+  const thShort = {1:'ม.ค.',2:'ก.พ.',3:'มี.ค.',4:'เม.ย.',5:'พ.ค.',6:'มิ.ย.',7:'ก.ค.',8:'ส.ค.',9:'ก.ย.',10:'ต.ค.',11:'พ.ย.',12:'ธ.ค.'};
+
+  // ── Person leaderboard ──
   const people = Array.from(new Set(scopeRows.map(r=>r.name))).filter(Boolean);
   const personList = people.map(name => {
     const myRows = scopeRows.filter(r=>r.name===name);
-    const wh = (myRows[0]||{}).wh||'';
+    const wh      = (myRows[0]||{}).wh||'';
     const empCode = (myRows[0]||{}).empCode||'';
-    const mainRow = myRows.find(r=>r.dim.toUpperCase()==='KPI' && norm(r.value)===norm('รวมbplus'));
-    const eoRow   = myRows.find(r=>r.dim.toUpperCase()==='KPI' && norm(r.value).includes('effective'));
-    const skuRow  = myRows.find(r=>r.dim.toUpperCase()==='KPI' && norm(r.value).includes('allsku'));
-    const cnRow   = myRows.find(r=>r.dim.toUpperCase()==='KPI' && norm(r.value)===norm('CN'));
-    return { name, wh, empCode, mainRow, eoRow, skuRow, cnRow };
-  }).sort((a,b)=>(b.mainRow?.pct??-Infinity)-(a.mainRow?.pct??-Infinity));
+    const normName= tgtNormalizeName(name);
+    const bpActual= bpByPerson.get(normName) || 0;
+    const tgtRow  = myRows.find(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value)===norm('รวมbplus'));
+    const bpTarget= tgtRow?.target || 0;
+    const bpPct   = bpTarget > 0 ? bpActual/bpTarget*100 : null;
+    const eoRow   = myRows.find(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value).includes('effective'));
+    const skuRow  = myRows.find(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value).includes('allsku'));
+    const cnRow   = myRows.find(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value)===norm('CN'));
+    return { name, wh, empCode, bpActual, bpTarget, bpPct, eoRow, skuRow, cnRow };
+  }).sort((a,b)=>(b.bpPct??-Infinity)-(a.bpPct??-Infinity));
 
-  const above100 = personList.filter(p=>p.mainRow?.pct!=null&&p.mainRow.pct>=100).length;
+  const above100 = personList.filter(p=>p.bpPct!=null&&p.bpPct>=100).length;
 
-  // Monthly aggregation from tgtState.rows
-  const monthMap = new Map();
-  scopeRows.filter(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value)===norm('รวมbplus')&&r.month).forEach(r=>{
-    if(!monthMap.has(r.month)) monthMap.set(r.month,{target:0,actual:0});
-    const e=monthMap.get(r.month); e.target+=r.target||0; e.actual+=r.actual||0;
-  });
-  const thOrder={'มกราคม':1,'กุมภาพันธ์':2,'มีนาคม':3,'เมษายน':4,'พฤษภาคม':5,'มิถุนายน':6,'กรกฎาคม':7,'สิงหาคม':8,'กันยายน':9,'ตุลาคม':10,'พฤศจิกายน':11,'ธันวาคม':12};
-  const sortedMonths = [...monthMap.keys()].sort((a,b)=>{
-    const [am,ay]=a.split(' '), [bm,by]=b.split(' ');
-    return ((+ay||0)*100+(thOrder[am]||0))-((+by||0)*100+(thOrder[bm]||0));
-  });
-
-  // Category donut from bpRaw
-  const catMap = new Map();
-  const scopeNames = new Set(scopeRows.map(r=>tgtNormalizeName(r.name)));
-  (tgtState.bpRaw||[]).forEach(r=>{
-    if(role===5){ const n=tgtNormalizeName(r['Sale NO ROO']||''); if(!scopeNames.has(n)) return; }
-    const cat = tgtNormalizeText(String(r['Cat_BU']||'อื่นๆ')).trim()||'อื่นๆ';
-    catMap.set(cat,(catMap.get(cat)||0)+(r._exvatcn2||parseNum(r['EXVat+CN*2'])));
-  });
-  const catTotal = [...catMap.values()].reduce((s,v)=>s+v,0);
+  // Category donut
+  const catTotal = [...catMap.values()].reduce((s,v)=>s+v, 0);
   const topCats  = [...catMap.entries()].filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]).slice(0,5);
   const catColors= ['#3b82f6','#22c55e','#f59e0b','#8b5cf6','#94a3b8'];
 
@@ -3344,12 +3381,12 @@ function renderSummaryTab() {
       </div>
     </div>`;
 
-  // ── SVG bar+line chart ──
+  // ── SVG bar+line chart (actual from bpByMonth, target from tgtByMonth) ──
   const buildChart = () => {
     if (!sortedMonths.length) return '<div style="text-align:center;padding:40px;color:var(--muted)">ไม่มีข้อมูลรายเดือน</div>';
     const W=460, H=200, pad={t:20,r:16,b:40,l:60};
     const cW=W-pad.l-pad.r, cH=H-pad.t-pad.b;
-    const maxVal = Math.max(...sortedMonths.map(m=>{const e=monthMap.get(m);return Math.max(e.target,e.actual);}),1);
+    const maxVal = Math.max(...sortedMonths.map(m=>Math.max(bpByMonth.get(m)||0, tgtByMonth.get(m)||0)), 1);
     const barW = Math.max(8, cW/sortedMonths.length*0.55);
     const xOf = (i) => pad.l + (i+0.5)*(cW/sortedMonths.length);
     const yOf = (v) => pad.t + cH*(1-v/maxVal);
@@ -3361,25 +3398,25 @@ function renderSummaryTab() {
       yLabels+=`<text x="${pad.l-6}" y="${y+4}" text-anchor="end" font-size="9" fill="var(--muted)">${fmt(v)}</text>`;
     }
     const bars = sortedMonths.map((m,i)=>{
-      const e=monthMap.get(m);
-      const x=xOf(i); const h=cH*(e.actual/maxVal); const y=pad.t+cH-h;
-      const col=e.actual>=e.target?'#3b82f6':'#f59e0b';
+      const act=bpByMonth.get(m)||0, tgt=tgtByMonth.get(m)||0;
+      const x=xOf(i); const h=Math.max(cH*(act/maxVal),1); const y=pad.t+cH-h;
+      const col=act>=tgt&&tgt>0?'#3b82f6':'#f59e0b';
       return `<rect x="${x-barW/2}" y="${y}" width="${barW}" height="${h}" rx="3" fill="${col}" opacity=".85"/>`;
     }).join('');
-    const linePoints = sortedMonths.map((m,i)=>`${xOf(i)},${yOf(monthMap.get(m).target)}`).join(' ');
-    const dots = sortedMonths.map((m,i)=>`<circle cx="${xOf(i)}" cy="${yOf(monthMap.get(m).target)}" r="3" fill="#22c55e"/>`).join('');
+    const tgtPts = sortedMonths.filter(m=>tgtByMonth.has(m)).map((m,i)=>`${xOf(sortedMonths.indexOf(m))},${yOf(tgtByMonth.get(m))}`).join(' ');
+    const dots = sortedMonths.filter(m=>tgtByMonth.has(m)).map(m=>`<circle cx="${xOf(sortedMonths.indexOf(m))}" cy="${yOf(tgtByMonth.get(m))}" r="3" fill="#22c55e"/>`).join('');
     const xLabels = sortedMonths.map((m,i)=>{
-      const short=m.split(' ')[0].slice(0,3);
-      return `<text x="${xOf(i)}" y="${H-8}" text-anchor="middle" font-size="9" fill="var(--muted)">${short}</text>`;
+      const [mm] = m.split('/');
+      return `<text x="${xOf(i)}" y="${H-8}" text-anchor="middle" font-size="9" fill="var(--muted)">${thShort[+mm]||mm}</text>`;
     }).join('');
     return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;overflow:visible">
       ${gridLines}${yLabels}${bars}
-      <polyline points="${linePoints}" fill="none" stroke="#22c55e" stroke-width="2" stroke-dasharray="5,3"/>
+      ${tgtPts?`<polyline points="${tgtPts}" fill="none" stroke="#22c55e" stroke-width="2" stroke-dasharray="5,3"/>`:''}
       ${dots}${xLabels}
       <rect x="${pad.l}" y="${H-28}" width="10" height="10" rx="2" fill="#3b82f6" opacity=".85"/>
-      <text x="${pad.l+13}" y="${H-20}" font-size="9" fill="var(--muted)">ยอดขาย</text>
-      <line x1="${pad.l+60}" y1="${H-23}" x2="${pad.l+75}" y2="${H-23}" stroke="#22c55e" stroke-width="2" stroke-dasharray="4,2"/>
-      <text x="${pad.l+78}" y="${H-20}" font-size="9" fill="var(--muted)">เป้าหมาย</text>
+      <text x="${pad.l+13}" y="${H-20}" font-size="9" fill="var(--muted)">ยอดขาย (Exvat)</text>
+      <line x1="${pad.l+80}" y1="${H-23}" x2="${pad.l+95}" y2="${H-23}" stroke="#22c55e" stroke-width="2" stroke-dasharray="4,2"/>
+      <text x="${pad.l+98}" y="${H-20}" font-size="9" fill="var(--muted)">เป้าหมาย</text>
     </svg>`;
   };
 
@@ -3417,9 +3454,9 @@ function renderSummaryTab() {
   const avatarColor = (i) => ['#3b82f6','#22c55e','#f59e0b','#8b5cf6','#94a3b8'][i];
   const initials = name => name.split(/\s+/).map(w=>w[0]||'').join('').slice(0,2).toUpperCase();
   const top5Html = top5.map((p,i)=>{
-    const pct=p.mainRow?.pct;
-    const act=p.mainRow?.actual;
-    const tgt=p.mainRow?.target;
+    const pct=p.bpPct;
+    const act=p.bpActual;
+    const tgt=p.bpTarget;
     return `<div class="card" style="flex:0 0 200px;padding:16px;text-align:center">
       <div style="position:relative;width:56px;height:56px;border-radius:50%;background:${avatarColor(i)};display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:18px;color:#fff">
         ${initials(p.name)}
@@ -3451,15 +3488,15 @@ function renderSummaryTab() {
 
   // ── Leaderboard table ──
   const lbRows = personList.map((p,i)=>{
-    const pct=p.mainRow?.pct;
+    const pct=p.bpPct;
     const barW=Math.min(pct||0,150)/1.5;
     const bg=pctColor(pct);
     return `<tr>
       <td style="text-align:center;font-size:${i<3?'16px':'13px'}">${medals[i]||i+1}</td>
       <td><div style="font-weight:600;font-size:13px">${p.name}</div><div class="txt-sm txt-muted">${p.empCode}</div></td>
       <td style="text-align:center"><span class="badge badge-info">${p.wh}</span></td>
-      <td class="num">${p.mainRow?.actual!=null?fmtFull(p.mainRow.actual):'-'}</td>
-      <td class="num" style="color:var(--muted)">${p.mainRow?.target?fmtFull(p.mainRow.target):'-'}</td>
+      <td class="num">${fmtFull(p.bpActual)}</td>
+      <td class="num" style="color:var(--muted)">${p.bpTarget?fmtFull(p.bpTarget):'-'}</td>
       <td style="min-width:110px">
         <div style="display:flex;align-items:center;gap:5px">
           <div style="flex:1;background:var(--border);border-radius:4px;height:14px;overflow:hidden">
@@ -3486,14 +3523,14 @@ function renderSummaryTab() {
 
   <!-- KPI CARDS -->
   <div style="display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;margin-bottom:16px;scrollbar-width:none">
-    ${kpiCard('💰','ยอดขายรวม (Bplus)',bplus.actual,bplus.target,bplus.pct,'บาท')}
-    ${kpiCard('🎯','% Achieve',bplus.pct??0,100,bplus.pct,'%')}
-    ${kpiCard('🏪','Active Outlet',outlet.actual,outlet.target,outlet.pct,'ร้าน')}
-    ${kpiCard('📦','All SKU',allSku.actual,allSku.target,allSku.pct,'ร้าน')}
-    ${kpiCard('✨','New SKU',newSku.actual,newSku.target,newSku.pct,'ร้าน')}
-    ${kpiCard('🔵','Effective Outlet',eo.actual,eo.target,eo.pct,'ร้าน')}
-    ${kpiCard('📋','CN (บิลรับคืน)',cn.actual,cn.target,cn.pct,'บิล')}
-    ${kpiCard('💼','Budget',budget.actual,budget.target,budget.pct,'บาท')}
+    ${kpiCard('💰','ยอดขายรวม (Exvat)',bpTotalActual,bplusTgt,overallPct,'บาท')}
+    ${kpiCard('🎯','% Achieve',overallPct??0,100,overallPct,'%')}
+    ${kpiCard('🏪','Active Outlet',outletAct,outletTgt,outletTgt>0?outletAct/outletTgt*100:null,'ร้าน')}
+    ${kpiCard('📦','All SKU',allSkuAct,allSkuTgt,allSkuTgt>0?allSkuAct/allSkuTgt*100:null,'ร้าน')}
+    ${kpiCard('✨','New SKU',newSkuAct,newSkuTgt,newSkuTgt>0?newSkuAct/newSkuTgt*100:null,'ร้าน')}
+    ${kpiCard('🔵','Effective Outlet',eoAct,eoTgt,eoTgt>0?eoAct/eoTgt*100:null,'ร้าน')}
+    ${kpiCard('📋','CN (บิลรับคืน)',cnAct,cnTgt,cnTgt>0?cnAct/cnTgt*100:null,'บิล')}
+    ${kpiCard('💼','Budget',budgetAct,budgetTgt,budgetTgt>0?budgetAct/budgetTgt*100:null,'บาท')}
   </div>
 
   <!-- MIDDLE 3-COL -->
