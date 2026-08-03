@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v11.9</title>
+<title>Rattana Sales Dashboard v12.0</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -345,7 +345,7 @@ body.dark .ptbl-td{border-color:var(--border)}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v11.9</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v12.0</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -3277,6 +3277,7 @@ function renderSummaryTab() {
   const bpByMonth  = new Map(); // 'mm/yyyy' → total EXVat+CN*2
   const catMap     = new Map(); // Cat_BU → total
 
+  const bpCustSalesIdx = new Map(); // normName → Map(Customer_Code → sum EXVat+CN*2)
   (tgtState.bpRaw || []).forEach(r => {
     const normName = tgtNormalizeName(r['Sale NO ROO'] || '');
     if (!normName || !scopeNames.has(normName)) return;
@@ -3289,7 +3290,29 @@ function renderSummaryTab() {
     }
     const cat = tgtNormalizeText(String(r['Cat_BU'] || 'อื่นๆ')).trim() || 'อื่นๆ';
     catMap.set(cat, (catMap.get(cat) || 0) + val);
+    // accumulate EXVat+CN*2 per customer for EO calculation
+    const cust = r['Customer_Code'];
+    if (cust) {
+      if (!bpCustSalesIdx.has(normName)) bpCustSalesIdx.set(normName, new Map());
+      const cm = bpCustSalesIdx.get(normName);
+      cm.set(cust, (cm.get(cust) || 0) + parseNum(r['EXVat+CN*2']));
+    }
   });
+
+  // emp code index from EO sheet (for threshold lookup)
+  const summaryEoCodeIdx = new Map();
+  (tgtState.eoRaw || []).forEach(r => {
+    const nm = tgtNormalizeName(r['ชื่อพนักงานขาย']);
+    const code = String(r['รหัส'] || '').trim();
+    if (nm && code) summaryEoCodeIdx.set(nm, code);
+  });
+  const computeEoActual = (normName, fallbackCode) => {
+    const custMap = bpCustSalesIdx.get(normName);
+    if (!custMap) return 0;
+    const code = summaryEoCodeIdx.get(normName) || fallbackCode || '';
+    const thresh = tgtDebtorThreshold(code) ?? 2500;
+    return [...custMap.values()].filter(v => v >= thresh).length;
+  };
 
   const bpTotalActual = [...bpByPerson.values()].reduce((s,v)=>s+v, 0);
 
@@ -3315,7 +3338,7 @@ function renderSummaryTab() {
   const newSkuTgt  = kpiTgt('SKUใหม่ต่อร้านค้า');
   const newSkuAct  = kpiActual('SKUใหม่ต่อร้านค้า');
   const eoTgt      = kpiTgt('Effective Outlet');
-  const eoAct      = kpiActual('Effective Outlet');
+  let   eoAct      = 0; // will be computed after personList
   const cnTgt      = kpiTgt('CN');
   const cnAct      = kpiActual('CN');
   const budgetTgt  = kpiTgt('Budget');
@@ -3353,8 +3376,11 @@ function renderSummaryTab() {
     const eoRow   = myRows.find(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value).includes('effective'));
     const skuRow  = myRows.find(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value).includes('allsku'));
     const cnRow   = myRows.find(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value)===norm('CN'));
-    return { name, wh, empCode, bpActual, bpTarget, bpPct, eoRow, skuRow, cnRow };
+    const eoActual= computeEoActual(normName, empCode);
+    return { name, wh, empCode, bpActual, bpTarget, bpPct, eoRow, skuRow, cnRow, eoActual };
   }).sort((a,b)=>b.bpActual-a.bpActual);
+
+  eoAct = personList.reduce((s,p)=>s+p.eoActual, 0);
 
   const above100 = personList.filter(p=>p.bpPct!=null&&p.bpPct>=100).length;
 
@@ -3473,7 +3499,7 @@ function renderSummaryTab() {
         <div style="font-weight:700;font-size:15px;color:${pctColor(pct)};margin-top:4px">${pct!=null?pct.toFixed(1)+'%':'-'}</div>
       </div>
       <div style="display:flex;justify-content:space-around;margin-top:8px;font-size:11px;color:var(--muted)">
-        <div><div style="font-weight:600;color:var(--text)">${p.eoRow?.actual!=null?Math.round(p.eoRow.actual):'-'}</div>EO</div>
+        <div><div style="font-weight:600;color:var(--text)">${p.eoActual!=null?p.eoActual:'-'}</div>EO</div>
         <div><div style="font-weight:600;color:var(--text)">${p.skuRow?.actual!=null?Math.round(p.skuRow.actual):'-'}</div>All SKU</div>
         <div><div style="font-weight:600;color:var(--text)">${p.cnRow?.actual!=null?Math.round(p.cnRow.actual):'-'}</div>CN</div>
       </div>
