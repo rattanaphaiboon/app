@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v3.71</title>
+<title>Rattana Online Order v3.72</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -547,7 +547,7 @@ body.dark .seg-tab.on{background:var(--gold);color:var(--navy);border-color:var(
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.71</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.72</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -2833,30 +2833,32 @@ function statusSupported(r){ return !!(r && Object.prototype.hasOwnProperty.call
 async function sendAndConfirm(payload, orderId){
   const pre=await orderStatusRaw(orderId);
   if(statusSupported(pre) && pre.approved) return true;   // ส่งไปแล้วก่อนหน้า (เน็ตเด้ง) → ไม่ส่งซ้ำ
-  await postGAS(payload,{retries:3,timeoutMs:20000});     // เน็ตสะดุด → ยิงซ้ำเองในคลิกเดียว (backend กันแถวซ้ำแล้ว)
-  for(let i=0;i<4;i++){
-    await sleep(1500);
+  const posting=postGAS(payload,{retries:2,timeoutMs:30000}).catch(()=>{});   // ยิง (ไม่บล็อก verify) — บิลใหญ่เขียนลงชีทก่อน LINE/Supabase → verify จับได้เร็ว
+  for(let i=0;i<12;i++){                      // poll ~24 วิ — คืนทันทีที่ชีทขึ้น "อนุมัติ" (ไม่ต้องรอ push/mirror จบ)
+    await sleep(2000);
     const st=await orderStatusRaw(orderId);
-    if(st===null) continue;                  // เน็ตล่ม อ่านผลไม่ได้ → รอรอบต่อไป
-    if(!statusSupported(st)) return true;     // backend ยังไม่มี getOrderStatus → โหมดเดิม (postGAS ไม่ throw=สำเร็จ)
-    if(st.approved) return true;              // ยืนยันแล้ว ✓ (อ่านจากชีทจริง ไม่เชื่อ HTTP)
+    if(st && statusSupported(st) && st.approved) return true;   // ยืนยันจากชีทจริง ✓
   }
-  return false;
+  await posting;                             // ยังไม่ approved → รอ postGAS จบแล้วเช็คปิดท้าย
+  const fin=await orderStatusRaw(orderId);
+  if(fin && !statusSupported(fin)) return true;   // backend เก่า (ไม่มี getOrderStatus) → postGAS จบ = สำเร็จ
+  return !!(fin && fin.approved);
 }
 /* ร้านส่ง: verify จากชีท "Order ร้านส่ง" (getOrderStatus&special=1)
    backward-safe: .gs เก่าตอบไม่มี checkedSpecial → กลับโหมดเดิม (ถือว่าสำเร็จหลัง retry) ไม่พัง ; .gs ใหม่ → ยืนยันจากชีทจริง เก็บตะกร้าถ้าไม่ยืนยัน */
 async function sendAndConfirmSpecial(payload, orderId){
   const pre=await jsonpGet({action:'getOrderStatus',orderId,special:1},5000);
   if(pre && pre.checkedSpecial && pre.approved) return true;   // ยืนยันไปแล้ว (เน็ตเด้ง) → ไม่ส่งซ้ำ
-  await postGAS(payload,{retries:3,timeoutMs:20000});          // เน็ตสะดุด → ยิงซ้ำเอง (backend กันแถวซ้ำ)
-  for(let i=0;i<4;i++){
-    await sleep(1500);
+  const posting=postGAS(payload,{retries:2,timeoutMs:30000}).catch(()=>{});   // ยิง (ไม่บล็อก verify)
+  for(let i=0;i<12;i++){                      // poll ~24 วิ — คืนทันทีที่ชีท "Order ร้านส่ง" ขึ้น "อนุมัติ"
+    await sleep(2000);
     const st=await jsonpGet({action:'getOrderStatus',orderId,special:1},5000);
-    if(st===null) continue;                  // เน็ตอ่านไม่ได้ → รอรอบต่อไป
-    if(!st.checkedSpecial) return true;       // .gs เก่ายังไม่รองรับ verify ร้านส่ง → โหมดเดิม (postGAS ไม่ throw=สำเร็จ)
-    if(st.approved) return true;              // ยืนยันจากชีท "Order ร้านส่ง" จริง ✓
+    if(st && st.checkedSpecial && st.approved) return true;    // ยืนยันจากชีทจริง ✓
   }
-  return false;                              // .gs ใหม่ แต่ยังไม่ approved 4 รอบ → เก็บตะกร้าไว้ (ไม่หาย)
+  await posting;                             // ยังไม่ approved → รอ postGAS จบแล้วเช็คปิดท้าย
+  const fin=await jsonpGet({action:'getOrderStatus',orderId,special:1},5000);
+  if(fin && !fin.checkedSpecial) return true;   // .gs เก่าไม่รองรับ verify ร้านส่ง → postGAS จบ = สำเร็จ
+  return !!(fin && fin.approved);
 }
 
 /* opts.retries: ยิงซ้ำเมื่อ fetch พัง (เน็ตสะดุด) — ใช้กับ action 'order' ที่ backend กันซ้ำไว้แล้ว (orderSignature + update-in-place) → ส่งซ้ำไม่ได้แถวเบิ้ล
