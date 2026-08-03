@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v11.1</title>
+<title>Rattana Sales Dashboard v11.7</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -345,7 +345,7 @@ body.dark .ptbl-td{border-color:var(--border)}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v11.1</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v11.7</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -354,6 +354,7 @@ body.dark .ptbl-td{border-color:var(--border)}
   </header>
 
   <nav class="tab-nav">
+    <button class="tab-btn" id="tabBtnSummary" style="display:none" onclick="switchTab('summary',this)">&#x1F4CA; สรุปภาพรวม</button>
     <button class="tab-btn" onclick="switchTab('target',this)">&#x1F3AF; เทียบเป้าหมาย</button>
     <button class="tab-btn active" onclick="switchTab('home',this)">🏠 ภาพรวม</button>
     <button class="tab-btn" onclick="switchTab('sku',this)">📦 SKU ยังไม่ขาย</button>
@@ -579,6 +580,15 @@ body.dark .ptbl-td{border-color:var(--border)}
   <div id="tgt-tab-roo" style="display:none">
     <div id="tgtRooContent"></div>
     <div id="tgtRooSummaryContent" style="margin-top:24px"></div>
+  </div>
+</div>
+
+<!-- SUMMARY TAB -->
+<div class="tab-panel" id="tab-summary">
+  <div id="summaryContent" style="padding-bottom:24px">
+    <div style="text-align:center;padding:60px;color:var(--muted)">
+      <div class="spinner-ring" style="margin:0 auto 12px"></div>กำลังโหลดข้อมูล…
+    </div>
   </div>
 </div>
   </div><!-- /content -->
@@ -838,6 +848,9 @@ function startApp() {
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('appScreen').style.display = 'block';
   document.getElementById('userChip').textContent = (currentUser.nickname || currentUser.name || 'User') + ' ออกจากระบบ';
+  if ((currentUser.role || 0) >= 5 || TGT_SUPER_ADMINS.includes(String(currentUser.email||'').toLowerCase())) {
+    document.getElementById('tabBtnSummary').style.display = '';
+  }
   bindHeaderSort();
   loadData();
 }
@@ -1473,6 +1486,7 @@ function switchTab(id, btn) {
   if (id === 'sku' && !skuLoaded) loadSkuData();
   if (id === 'lowstore') renderLowStore();
   if (id === 'target' && !tgtLoaded) initTargetTab();
+  if (id === 'summary') { if (!tgtLoaded) initTargetTab(); setTimeout(renderSummaryTab, tgtLoaded ? 0 : 3000); }
 }
 
 // ── SKU TAB ───────────────────────────────────────────────────────────────
@@ -2559,7 +2573,7 @@ function exportTgtDetailExcel() {
   XLSX.writeFile(wb, 'rattana-sales-target-' + Date.now() + '.xlsx');
 }
 
-function renderTgtAll() { renderTgtPivot(); renderTgtOutlets(); renderTgtOnTop(); renderTgtROO(); renderTgtROOSummary(); }
+function renderTgtAll() { renderTgtPivot(); renderTgtOutlets(); renderTgtOnTop(); renderTgtROO(); renderTgtROOSummary(); renderSummaryTab(); }
 
 /* ================= OUTLETS TAB ================= */
 function tgtGetChannelGroup(empCode) {
@@ -3234,6 +3248,341 @@ function switchTargetTab(tab) {
 }
 
 /* scroll handler removed */
+
+/* ================= SUMMARY / LEADERBOARD TAB ================= */
+let summaryWhFilter = 'ALL';
+
+function renderSummaryTab() {
+  const el = document.getElementById('summaryContent');
+  if (!el) return;
+  if (!tgtState.rows || !tgtState.rows.length) {
+    el.innerHTML = '<div style="text-align:center;padding:60px;color:var(--muted)"><div class="spinner-ring" style="margin:0 auto 12px"></div>กำลังโหลดข้อมูล…</div>';
+    return;
+  }
+
+  const role = tgtGetUserRole();
+  const userWh = String(currentUser?.warehouse || '').trim();
+  if (role === 5) summaryWhFilter = userWh;
+
+  const scopeRows = tgtState.rows.filter(r =>
+    summaryWhFilter === 'ALL' || r.wh === summaryWhFilter
+  );
+
+  const norm = s => tgtNormalizeText(String(s||'')).replace(/\s+/g,'').toLowerCase();
+  const dataMonth = (tgtState.rows.find(r=>r.month)||{}).month || '';
+
+  // ── Actual sales directly from bpRaw (EXVat+CN*2) ──
+  const scopeNames = new Set(scopeRows.map(r => tgtNormalizeName(r.name)));
+  const bpByPerson = new Map(); // normName → total EXVat+CN*2
+  const bpByMonth  = new Map(); // 'mm/yyyy' → total EXVat+CN*2
+  const catMap     = new Map(); // Cat_BU → total
+
+  (tgtState.bpRaw || []).forEach(r => {
+    const normName = tgtNormalizeName(r['Sale NO ROO'] || '');
+    if (!normName || !scopeNames.has(normName)) return;
+    const val = parseNum(r['EXVat']);
+    bpByPerson.set(normName, (bpByPerson.get(normName) || 0) + val);
+    const my = tgtBpMonthYear(r['Doc_Date']);
+    if (my) {
+      const mk = my.mm + '/' + my.yyyy;
+      bpByMonth.set(mk, (bpByMonth.get(mk) || 0) + val);
+    }
+    const cat = tgtNormalizeText(String(r['Cat_BU'] || 'อื่นๆ')).trim() || 'อื่นๆ';
+    catMap.set(cat, (catMap.get(cat) || 0) + val);
+  });
+
+  const bpTotalActual = [...bpByPerson.values()].reduce((s,v)=>s+v, 0);
+
+  // ── Targets from KPI rows ──
+  const kpiTgt = (valueNorm) => {
+    const rows = scopeRows.filter(r => r.dim.toUpperCase()==='KPI' && norm(r.value)===norm(valueNorm));
+    return rows.reduce((s,r)=>s+(r.target||0), 0);
+  };
+  const kpiActual = (valueNorm) => {
+    const rows = scopeRows.filter(r => r.dim.toUpperCase()==='KPI' && norm(r.value)===norm(valueNorm));
+    return rows.reduce((s,r)=>s+(r.actual||0), 0);
+  };
+  const kpiCard2 = (icon, label, actual, target, unit) => {
+    const pct = target > 0 ? actual/target*100 : null;
+    return kpiCard(icon, label, actual, target, pct, unit);
+  };
+
+  const bplusTgt   = kpiTgt('รวมbplus');
+  const outletTgt  = kpiTgt('Active Outlet');
+  const outletAct  = kpiActual('Active Outlet');
+  const allSkuTgt  = kpiTgt('All SKU');
+  const allSkuAct  = kpiActual('All SKU');
+  const newSkuTgt  = kpiTgt('SKUใหม่ต่อร้านค้า');
+  const newSkuAct  = kpiActual('SKUใหม่ต่อร้านค้า');
+  const eoTgt      = kpiTgt('Effective Outlet');
+  const eoAct      = kpiActual('Effective Outlet');
+  const cnTgt      = kpiTgt('CN');
+  const cnAct      = kpiActual('CN');
+  const budgetTgt  = kpiTgt('Budget');
+  const budgetAct  = kpiActual('Budget');
+
+  const overallPct = bplusTgt > 0 ? bpTotalActual / bplusTgt * 100 : null;
+
+  // ── Target by month (from KPI rows, BE year → CE) ──
+  const tgtByMonth = new Map();
+  scopeRows.filter(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value)===norm('รวมbplus')&&r.month).forEach(r=>{
+    const p = tgtParseThaiMonthYear(r.month);
+    if (!p) return;
+    const mk = p.mm + '/' + p.yyyy;
+    tgtByMonth.set(mk, (tgtByMonth.get(mk)||0) + (r.target||0));
+  });
+
+  // Sort months (mm/yyyy CE)
+  const sortedMonths = [...new Set([...bpByMonth.keys(), ...tgtByMonth.keys()])].sort((a,b)=>{
+    const [am,ay]=a.split('/'), [bm,by]=b.split('/');
+    return (+ay*100 + +am) - (+by*100 + +bm);
+  });
+  const thShort = {1:'ม.ค.',2:'ก.พ.',3:'มี.ค.',4:'เม.ย.',5:'พ.ค.',6:'มิ.ย.',7:'ก.ค.',8:'ส.ค.',9:'ก.ย.',10:'ต.ค.',11:'พ.ย.',12:'ธ.ค.'};
+
+  // ── Person leaderboard ──
+  const people = Array.from(new Set(scopeRows.map(r=>r.name))).filter(Boolean);
+  const personList = people.map(name => {
+    const myRows = scopeRows.filter(r=>r.name===name);
+    const wh      = (myRows[0]||{}).wh||'';
+    const empCode = (myRows[0]||{}).empCode||'';
+    const normName= tgtNormalizeName(name);
+    const bpActual= bpByPerson.get(normName) || 0;
+    const tgtRow  = myRows.find(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value)===norm('รวมbplus'));
+    const bpTarget= tgtRow?.target || 0;
+    const bpPct   = bpTarget > 0 ? bpActual/bpTarget*100 : null;
+    const eoRow   = myRows.find(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value).includes('effective'));
+    const skuRow  = myRows.find(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value).includes('allsku'));
+    const cnRow   = myRows.find(r=>r.dim.toUpperCase()==='KPI'&&norm(r.value)===norm('CN'));
+    return { name, wh, empCode, bpActual, bpTarget, bpPct, eoRow, skuRow, cnRow };
+  }).sort((a,b)=>b.bpActual-a.bpActual);
+
+  const above100 = personList.filter(p=>p.bpPct!=null&&p.bpPct>=100).length;
+
+  // Category donut
+  const catTotal = [...catMap.values()].reduce((s,v)=>s+v, 0);
+  const topCats  = [...catMap.entries()].filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  const catColors= ['#3b82f6','#22c55e','#f59e0b','#8b5cf6','#94a3b8'];
+
+  // ── helpers ──
+  const fmt = n => n>=1e6 ? (n/1e6).toFixed(1)+'M' : n>=1e3 ? (n/1e3).toFixed(0)+'K' : (n||0).toLocaleString();
+  const fmtFull = n => Math.round(n||0).toLocaleString();
+  const pctColor = p => p==null?'var(--muted)':p>=100?'var(--success)':p>=80?'var(--warning)':'var(--danger)';
+  const pctArrow = p => p==null?'':p>=100?'<span style="color:var(--success)">▲</span>':p>=80?'<span style="color:var(--warning)">▬</span>':'<span style="color:var(--danger)">▼</span>';
+  const kpiCard = (icon,label,actual,target,pct,unit='บาท',extraCls='') => `
+    <div class="card" style="padding:14px 16px;min-width:160px;flex:1;border-top:3px solid ${pctColor(pct)}">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="font-size:22px">${icon}</span>
+        <span class="txt-sm txt-muted" style="font-weight:600;line-height:1.2">${label}</span>
+      </div>
+      <div style="font-size:22px;font-weight:700;line-height:1">${fmt(actual)} <span style="font-size:11px;color:var(--muted)">${unit}</span></div>
+      <div style="margin-top:6px;display:flex;align-items:center;justify-content:space-between">
+        <span class="txt-sm txt-muted">เป้า ${fmt(target)}</span>
+        <span style="font-weight:700;color:${pctColor(pct)}">${pct!=null?pct.toFixed(1)+'%':'-'} ${pctArrow(pct)}</span>
+      </div>
+    </div>`;
+
+  // ── SVG bar+line chart (actual from bpByMonth, target from tgtByMonth) ──
+  const buildChart = () => {
+    if (!sortedMonths.length) return '<div style="text-align:center;padding:40px;color:var(--muted)">ไม่มีข้อมูลรายเดือน</div>';
+    const W=460, H=200, pad={t:20,r:16,b:40,l:60};
+    const cW=W-pad.l-pad.r, cH=H-pad.t-pad.b;
+    const maxVal = Math.max(...sortedMonths.map(m=>Math.max(bpByMonth.get(m)||0, tgtByMonth.get(m)||0)), 1);
+    const barW = Math.max(8, cW/sortedMonths.length*0.55);
+    const xOf = (i) => pad.l + (i+0.5)*(cW/sortedMonths.length);
+    const yOf = (v) => pad.t + cH*(1-v/maxVal);
+    const yTicks = 4;
+    let gridLines='', yLabels='';
+    for(let i=0;i<=yTicks;i++){
+      const v=maxVal*i/yTicks; const y=yOf(v);
+      gridLines+=`<line x1="${pad.l}" y1="${y}" x2="${W-pad.r}" y2="${y}" stroke="var(--border)" stroke-width="1"/>`;
+      yLabels+=`<text x="${pad.l-6}" y="${y+4}" text-anchor="end" font-size="9" fill="var(--muted)">${fmt(v)}</text>`;
+    }
+    const bars = sortedMonths.map((m,i)=>{
+      const act=bpByMonth.get(m)||0, tgt=tgtByMonth.get(m)||0;
+      const x=xOf(i); const h=Math.max(cH*(act/maxVal),1); const y=pad.t+cH-h;
+      const col=act>=tgt&&tgt>0?'#3b82f6':'#f59e0b';
+      return `<rect x="${x-barW/2}" y="${y}" width="${barW}" height="${h}" rx="3" fill="${col}" opacity=".85"/>`;
+    }).join('');
+    const tgtPts = sortedMonths.filter(m=>tgtByMonth.has(m)).map((m,i)=>`${xOf(sortedMonths.indexOf(m))},${yOf(tgtByMonth.get(m))}`).join(' ');
+    const dots = sortedMonths.filter(m=>tgtByMonth.has(m)).map(m=>`<circle cx="${xOf(sortedMonths.indexOf(m))}" cy="${yOf(tgtByMonth.get(m))}" r="3" fill="#22c55e"/>`).join('');
+    const xLabels = sortedMonths.map((m,i)=>{
+      const [mm] = m.split('/');
+      return `<text x="${xOf(i)}" y="${H-8}" text-anchor="middle" font-size="9" fill="var(--muted)">${thShort[+mm]||mm}</text>`;
+    }).join('');
+    return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;overflow:visible">
+      ${gridLines}${yLabels}${bars}
+      ${tgtPts?`<polyline points="${tgtPts}" fill="none" stroke="#22c55e" stroke-width="2" stroke-dasharray="5,3"/>`:''}
+      ${dots}${xLabels}
+      <rect x="${pad.l}" y="${H-28}" width="10" height="10" rx="2" fill="#3b82f6" opacity=".85"/>
+      <text x="${pad.l+13}" y="${H-20}" font-size="9" fill="var(--muted)">ยอดขาย (Exvat)</text>
+      <line x1="${pad.l+80}" y1="${H-23}" x2="${pad.l+95}" y2="${H-23}" stroke="#22c55e" stroke-width="2" stroke-dasharray="4,2"/>
+      <text x="${pad.l+98}" y="${H-20}" font-size="9" fill="var(--muted)">เป้าหมาย</text>
+    </svg>`;
+  };
+
+  // ── CSS conic donut ──
+  const buildDonut = () => {
+    if (!topCats.length) return '<div style="text-align:center;padding:40px;color:var(--muted)">ไม่มีข้อมูลสินค้า</div>';
+    let cum=0;
+    const stops=topCats.map(([,v],i)=>{
+      const pct=catTotal>0?v/catTotal*100:0;
+      const s=`${catColors[i]} ${cum.toFixed(1)}% ${(cum+pct).toFixed(1)}%`;
+      cum+=pct; return s;
+    });
+    if(cum<100) stops.push(`var(--border) ${cum.toFixed(1)}% 100%`);
+    const gradient=`conic-gradient(${stops.join(', ')})`;
+    const legend=topCats.map(([k,v],i)=>`
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:5px">
+        <div style="width:10px;height:10px;border-radius:2px;background:${catColors[i]};flex-shrink:0"></div>
+        <span class="txt-sm" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${k}</span>
+        <span class="txt-sm txt-bold">${catTotal>0?(v/catTotal*100).toFixed(1):'0'}%</span>
+      </div>`).join('');
+    return `<div style="display:flex;flex-direction:column;align-items:center;gap:12px">
+      <div style="position:relative;width:150px;height:150px;border-radius:50%;background:${gradient};flex-shrink:0">
+        <div style="position:absolute;inset:32px;border-radius:50%;background:var(--card-bg);display:flex;align-items:center;justify-content:center;text-align:center;flex-direction:column">
+          <div style="font-size:13px;font-weight:700">${fmt(catTotal)}</div>
+          <div style="font-size:10px;color:var(--muted)">บาท</div>
+        </div>
+      </div>
+      <div style="width:100%">${legend}</div>
+    </div>`;
+  };
+
+  // ── Top 5 performer cards ──
+  const top5 = personList.slice(0,5);
+  const medals=['🥇','🥈','🥉','4️⃣','5️⃣'];
+  const avatarColor = (i) => ['#3b82f6','#22c55e','#f59e0b','#8b5cf6','#94a3b8'][i];
+  const initials = name => name.split(/\s+/).map(w=>w[0]||'').join('').slice(0,2).toUpperCase();
+  const top5Html = top5.map((p,i)=>{
+    const pct=p.bpPct;
+    const act=p.bpActual;
+    const tgt=p.bpTarget;
+    return `<div class="card" style="flex:0 0 200px;padding:16px;text-align:center">
+      <div style="position:relative;width:56px;height:56px;border-radius:50%;background:${avatarColor(i)};display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:18px;color:#fff">
+        ${initials(p.name)}
+        <div style="position:absolute;bottom:-2px;right:-2px;background:var(--card-bg);border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:13px">${medals[i]}</div>
+      </div>
+      <div style="font-weight:700;font-size:13px;line-height:1.3">${p.name}</div>
+      <div class="txt-sm txt-muted" style="margin-bottom:8px">${p.empCode} · ${p.wh}</div>
+      <div style="font-size:20px;font-weight:700;color:${pctColor(pct)}">${act!=null?fmtFull(act):'-'}</div>
+      <div class="txt-sm txt-muted">เป้า ${tgt?fmtFull(tgt):'-'}</div>
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+        <div style="background:var(--border);border-radius:6px;height:6px;overflow:hidden">
+          <div style="width:${Math.min(pct||0,100)}%;height:100%;background:${pctColor(pct)};border-radius:6px;transition:width .4s"></div>
+        </div>
+        <div style="font-weight:700;font-size:15px;color:${pctColor(pct)};margin-top:4px">${pct!=null?pct.toFixed(1)+'%':'-'}</div>
+      </div>
+      <div style="display:flex;justify-content:space-around;margin-top:8px;font-size:11px;color:var(--muted)">
+        <div><div style="font-weight:600;color:var(--text)">${p.eoRow?.actual!=null?Math.round(p.eoRow.actual):'-'}</div>EO</div>
+        <div><div style="font-weight:600;color:var(--text)">${p.skuRow?.actual!=null?Math.round(p.skuRow.actual):'-'}</div>All SKU</div>
+        <div><div style="font-weight:600;color:var(--text)">${p.cnRow?.actual!=null?Math.round(p.cnRow.actual):'-'}</div>CN</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // ── WH filter chips (for role ≥6 only) ──
+  const allWhs = Array.from(new Set(tgtState.rows.map(r=>r.wh))).filter(Boolean).sort();
+  const whChipsHtml = role>=6 ? `<div class="chip-group">
+    ${['ALL',...allWhs].map(w=>`<button class="chip ${summaryWhFilter===w?'active':''}" onclick="setSummaryWh('${w}')">${w==='ALL'?'ทั้งหมด':w}</button>`).join('')}
+  </div>` : `<span class="badge badge-info">${userWh||'ทั้งหมด'}</span>`;
+
+  // ── Leaderboard table ──
+  const lbRows = personList.map((p,i)=>{
+    const pct=p.bpPct;
+    const barW=Math.min(pct||0,150)/1.5;
+    const bg=pctColor(pct);
+    return `<tr>
+      <td style="text-align:center;font-size:${i<3?'16px':'13px'}">${medals[i]||i+1}</td>
+      <td><div style="font-weight:600;font-size:13px">${p.name}</div><div class="txt-sm txt-muted">${p.empCode}</div></td>
+      <td style="text-align:center"><span class="badge badge-info">${p.wh}</span></td>
+      <td class="num" style="color:var(--muted)">${p.bpTarget?fmtFull(p.bpTarget):'-'}</td>
+      <td class="num">${fmtFull(p.bpActual)}</td>
+      <td style="min-width:110px">
+        <div style="display:flex;align-items:center;gap:5px">
+          <div style="flex:1;background:var(--border);border-radius:4px;height:14px;overflow:hidden">
+            <div style="width:${barW}%;height:100%;background:${bg}"></div>
+          </div>
+          <span style="font-size:12px;font-weight:700;color:${bg};min-width:40px">${pct!=null?pct.toFixed(1)+'%':'-'}</span>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  // ── Assemble ──
+  el.innerHTML = `
+  <div style="padding:12px 0 14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+    <div>
+      <div style="font-size:17px;font-weight:700">📊 Sales Team Overview</div>
+      <div class="txt-sm txt-muted">ภาพรวมผลงานทีมขาย${dataMonth?' · '+dataMonth:''}</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      ${whChipsHtml}
+      <button class="btn btn-outline btn-sm" onclick="exportSummaryExcel()">⬇ Excel</button>
+    </div>
+  </div>
+
+  <!-- KPI CARDS -->
+  <div style="display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;margin-bottom:16px;scrollbar-width:none">
+    ${kpiCard('💰','ยอดขายรวม (Exvat)',bpTotalActual,bplusTgt,overallPct,'บาท')}
+    ${kpiCard('🎯','% Achieve',overallPct??0,100,overallPct,'%')}
+    ${kpiCard('🏪','Active Outlet',outletAct,outletTgt,outletTgt>0?outletAct/outletTgt*100:null,'ร้าน')}
+    ${kpiCard('📦','All SKU',allSkuAct,allSkuTgt,allSkuTgt>0?allSkuAct/allSkuTgt*100:null,'ร้าน')}
+    ${kpiCard('✨','New SKU',newSkuAct,newSkuTgt,newSkuTgt>0?newSkuAct/newSkuTgt*100:null,'ร้าน')}
+    ${kpiCard('🔵','Effective Outlet',eoAct,eoTgt,eoTgt>0?eoAct/eoTgt*100:null,'ร้าน')}
+    ${kpiCard('📋','CN (บิลรับคืน)',cnAct,cnTgt,cnTgt>0?cnAct/cnTgt*100:null,'บิล')}
+    ${kpiCard('💼','Budget',budgetAct,budgetTgt,budgetTgt>0?budgetAct/budgetTgt*100:null,'บาท')}
+  </div>
+
+  <!-- MIDDLE 3-COL -->
+  <div style="display:grid;grid-template-columns:1fr 1fr 240px;gap:12px;margin-bottom:16px;align-items:start">
+    <!-- Leaderboard table -->
+    <div class="card" style="overflow:hidden">
+      <div class="card-head"><span style="font-weight:700">🏆 ยอดขายแยกตามเซลล์</span><span class="txt-sm txt-muted">${dataMonth}</span></div>
+      <div class="tbl-wrap" style="max-height:300px;overflow-y:auto">
+        <table class="tbl" id="summaryLbTable">
+          <thead><tr>
+            <th style="width:36px;text-align:center">#</th>
+            <th>ชื่อ-สกุล</th>
+            <th style="text-align:center">คลัง</th>
+            <th style="text-align:right">เป้า</th>
+            <th style="text-align:right">ทำได้</th>
+            <th>%</th>
+          </tr></thead>
+          <tbody>${lbRows||'<tr class="empty-row"><td colspan="6">ไม่มีข้อมูล</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+    <!-- Monthly chart -->
+    <div class="card" style="padding:16px">
+      <div style="font-weight:700;margin-bottom:12px">📈 ยอดขายเทียบเป้าหมายรายเดือน</div>
+      ${buildChart()}
+    </div>
+    <!-- Category donut -->
+    <div class="card" style="padding:16px">
+      <div style="font-weight:700;margin-bottom:12px">🍩 สัดส่วนตาม Cat BU</div>
+      ${buildDonut()}
+    </div>
+  </div>
+
+  <!-- TOP 5 CARDS -->
+  <div class="card-head" style="margin-bottom:10px;padding:0">
+    <span style="font-weight:700;font-size:14px">⭐ Performance ของเซลล์ (Top ${top5.length})</span>
+  </div>
+  <div style="display:flex;gap:10px;overflow-x:auto;padding-bottom:8px;scrollbar-width:none">
+    ${top5Html||'<div style="color:var(--muted);padding:24px">ไม่มีข้อมูล</div>'}
+  </div>`;
+}
+
+function setSummaryWh(w) { summaryWhFilter = w; renderSummaryTab(); }
+
+function exportSummaryExcel() {
+  const tbl = document.getElementById('summaryLbTable');
+  if (!tbl) return showToast('ยังไม่มีข้อมูล', 'warning');
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.table_to_sheet(tbl);
+  XLSX.utils.book_append_sheet(wb, ws, 'Leaderboard');
+  XLSX.writeFile(wb, 'summary-leaderboard.xlsx');
+}
 
 </script>
 </body>
