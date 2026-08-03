@@ -3378,7 +3378,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '8.3';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '8.4';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -8976,6 +8976,29 @@ const APPROVE_SHEET_LABEL = {
   'เอกสารApp':'ขอเอกสาร', 'สั่งข้าว':'สั่งข้าว',
 };
 
+/* v8.4 — ทีมของฉัน = ลูกทีมในชีท Users (ระบุเราเป็นหัวหน้า) + พนักงาน PTT สาขา/คลังเดียวกัน
+   ใช้ร่วมกันทั้งหน้าอนุมัติ + ปรับผ่านงาน (HR = เห็นทุกคน) */
+async function resolveMyTeam() {
+  const myName = (currentUser.name || '').trim();
+  const isHR   = currentUser.role === 'hr';
+  const ids = new Set(), names = new Set();
+  const add = u => {
+    if (u && u.empId) ids.add(String(u.empId).trim());
+    if (u && u.name)  names.add(String(u.name).trim());
+  };
+  (allUsers || []).forEach(u => {
+    if ((u.supervisorName || '').trim() === myName && String(u.status || '').toLowerCase() === 'active') add(u);
+  });
+  try {
+    const ptt = await callAppsScript('getPTTStaff', { khlang: currentUser.khlang || '', empId: currentUser.empId });
+    (ptt.staff || []).forEach(add);
+  } catch (_) {}
+  return { ids, names, isHR };
+}
+function inMyTeam(team, empId, name){
+  return team.ids.has(String(empId || '').trim()) || team.names.has(String(name || '').trim());
+}
+
 async function loadApprovals() {
   const el = document.getElementById('approvalsList');
   const kpi = document.getElementById('approvalsKpi');
@@ -8985,27 +9008,10 @@ async function loadApprovals() {
     const res = await callAppsScript('getPendingAll', { supervisorId: currentUser.empId });
     const all = res.items || [];
 
-    // ── ทีมของฉัน = ลูกทีมในชีท Users + พนักงาน PTT สาขา/คลังเดียวกัน (HR เห็นทั้งหมด) ──
-    const myName = (currentUser.name || '').trim();
-    const isHR   = currentUser.role === 'hr';
-    const teamIds = new Set(), teamNames = new Set();
-    const addMember = u => {
-      if (u && u.empId) teamIds.add(String(u.empId).trim());
-      if (u && u.name)  teamNames.add(String(u.name).trim());
-    };
-    // 1) ชีท Users — คนที่ระบุเราเป็น "ชื่อหัวหน้างาน"
-    (allUsers || []).forEach(u => {
-      if ((u.supervisorName || '').trim() === myName && String(u.status || '').toLowerCase() === 'active') addMember(u);
-    });
-    // 2) ชีทพนักงาน PTT — สาขา + คลังเดียวกับเรา
-    try {
-      const ptt = await callAppsScript('getPTTStaff', { khlang: currentUser.khlang || '', empId: currentUser.empId });
-      (ptt.staff || []).forEach(addMember);
-    } catch (_) {}
-
-    // v7.8: เฉพาะ HR เห็นทั้งหมด — หัวหน้ากรองเป็นทีมตัวเองเสมอ (เดิม fail-open เห็นทั้งบริษัทตอน roster ยังไม่โหลด)
-    const items = isHR ? all : all.filter(it =>
-      teamIds.has(String(it.empId || '').trim()) || teamNames.has((it.name || '').trim()));
+    // เฉพาะ HR เห็นทั้งหมด — หัวหน้ากรองเป็นทีมตัวเองเสมอ
+    const team = await resolveMyTeam();
+    const isHR = team.isHR;
+    const items = isHR ? all : all.filter(it => inMyTeam(team, it.empId, it.name));
     _approvalItems = items;
 
     if (kpi) {
@@ -10415,11 +10421,17 @@ async function renderProbationPage() {
   const e = document.getElementById('pbEmp');     if (e) e.value = '';
   const c = document.getElementById('pbComment'); if (c) c.value = '';
   document.querySelectorAll('.pb-item').forEach(cb => cb.checked = false);
-  // รายชื่อพนักงานคลังส่งเดียวกัน
+  // รายชื่อพนักงาน — v8.4: หัวหน้าเห็นเฉพาะลูกทีมตัวเอง (HR เห็นทั้งหมด)
   _pbColleagues = [];
   try {
     const res = await callAppsScript('getOfficeRefData', { empId: currentUser.empId });
     _pbColleagues = (res.colleagues || []).filter(x => x.name);
+  } catch(_) {}
+  try {
+    const team = await resolveMyTeam();
+    if (!team.isHR && (team.ids.size || team.names.size)) {
+      _pbColleagues = _pbColleagues.filter(u => inMyTeam(team, u.empId, u.name));
+    }
   } catch(_) {}
   const dl = document.getElementById('pbEmpList');
   if (dl) dl.innerHTML = _pbColleagues.map(u =>
