@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v18.3</title>
+<title>Rattana Sales Dashboard v18.4</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -345,7 +345,7 @@ body.dark .ptbl-td{border-color:var(--border)}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v18.3</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v18.4</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -2635,7 +2635,7 @@ function tgtComputeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw) {
 async function loadTargetData(showSpin) {
   if (showSpin) showSpinner('กำลังโหลดข้อมูลยอดขาย...');
   try {
-    const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, outletRaw, eoRaw, customerRaw, onTopRaw, rooRaw, onlineRaw] = await Promise.all([
+    const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, outletRaw, eoRaw, customerRaw, onTopRaw, rooRaw, onlineRaw, allSalesRaw] = await Promise.all([
       fetchSheet(CUSTOMER_SHEET_ID, TGT_TARGET_SHEET_NAME),
       fetchSheet(SALES_SHEET_ID, SALES_SHEET),
       fetchSheet(TGT_CN_SHEET_ID, TGT_CN_SHEET_NAME),
@@ -2647,9 +2647,11 @@ async function loadTargetData(showSpin) {
       fetchSheet(TGT_OUTLET_SHEET_ID, TGT_ON_TOP_SHEET_NAME),
       fetchSheet(TGT_OUTLET_SHEET_ID, TGT_ROO_SHEET_NAME),
       fetchSheet(TGT_OUTLET_SHEET_ID, TGT_ONLINE_SHEET_NAME),
+      fetchSheet(ALL_SALES_SHEET_ID, ALL_SALES_SHEET_NAME).catch(()=>[]),
     ]);
     tgtState.targetRaw = targetRaw;
     tgtState.bpRaw = bpRaw;
+    tgtState.allSalesRaw = allSalesRaw;
     tgtState.cnRaw = cnRaw;
     tgtState.budgetRaw = budgetRaw;
     tgtState.newSkuRaw = newSkuRaw;
@@ -3704,6 +3706,7 @@ function renderSummaryTab() {
 
   const bpCustSalesIdx = new Map();   // normName → Map(Customer_Code → sum EXVat+CN*2)
   const bpNameSalesIdx = new Map();   // normName → Map(Customer_Name → sum EXVat+CN*2)
+  const bpNameToCodeIdx = new Map();  // normName → Map(Customer_Name → Customer_Code)
   const bpActiveOutletIdx = new Map(); // normName → Set(Customer_Name)
   (tgtState.bpRaw || []).forEach(r => {
     const normName = tgtNormalizeName(r['Sale NO ROO'] || '');
@@ -3729,6 +3732,7 @@ function renderSummaryTab() {
     catMap.set(cat, (catMap.get(cat) || 0) + val);
     // Active Outlet: count distinct Customer_Name per salesperson
     const custName = String(r['Customer_Name'] || '').trim();
+    const custCode = String(r['Customer_Code'] || '').trim();
     if (custName) {
       if (!bpActiveOutletIdx.has(normName)) bpActiveOutletIdx.set(normName, new Set());
       bpActiveOutletIdx.get(normName).add(custName);
@@ -3736,6 +3740,11 @@ function renderSummaryTab() {
       if (!bpNameSalesIdx.has(normName)) bpNameSalesIdx.set(normName, new Map());
       const nm2 = bpNameSalesIdx.get(normName);
       nm2.set(custName, (nm2.get(custName) || 0) + valCN2);
+      // bridge: Customer_Name → Customer_Code (for avg lookup)
+      if (custCode) {
+        if (!bpNameToCodeIdx.has(normName)) bpNameToCodeIdx.set(normName, new Map());
+        bpNameToCodeIdx.get(normName).set(custName, custCode);
+      }
     }
     // accumulate EXVat+CN*2 per customer for EO calculation
     const cust = r['Customer_Code'];
@@ -3745,6 +3754,27 @@ function renderSummaryTab() {
       cm.set(cust, (cm.get(cust) || 0) + parseNum(r['EXVat+CN*2']));
     }
   });
+
+  // AVG 3 months per store name (from All Sales sheet)
+  const bpAvgByNameIdx = new Map(); // normName → Map(Customer_Name → avg Exvat/3)
+  {
+    const sumIdx = new Map(); // normName§Customer_Code → sum Exvat
+    (tgtState.allSalesRaw || []).forEach(r => {
+      const seller = tgtNormalizeName(String(r['Sale_No_ROO'] || r['Sale NO ROO'] || ''));
+      const code   = String(r['Customer_Code'] || '').trim();
+      if (!seller || !code) return;
+      const key = seller + '§' + code;
+      const v = parseFloat(String(r['Exvat'] || r['EXVat'] || '0').replace(/,/g,'')) || 0;
+      sumIdx.set(key, (sumIdx.get(key) || 0) + v);
+    });
+    bpNameToCodeIdx.forEach((nameCodeMap, normName) => {
+      nameCodeMap.forEach((code, custName) => {
+        const avg = (sumIdx.get(normName + '§' + code) || 0) / 3;
+        if (!bpAvgByNameIdx.has(normName)) bpAvgByNameIdx.set(normName, new Map());
+        bpAvgByNameIdx.get(normName).set(custName, avg);
+      });
+    });
+  }
 
   // emp code index from EO sheet (for threshold lookup)
   const summaryEoCodeIdx = new Map();
@@ -3764,11 +3794,11 @@ function renderSummaryTab() {
     const code = summaryEoCodeIdx.get(normName) || fallbackCode || '';
     const thresh = tgtDebtorThreshold(code) ?? 2500;
     const todayStoreSet = summaryInRouthTodayIdx.get(normName); // Set(ชื่อร้านค้า) รูทวันนี้
-    const nameMap = bpNameSalesIdx.get(normName);               // Map(Customer_Name → EXVat+CN*2)
+    const avgMap = bpAvgByNameIdx.get(normName);                // Map(Customer_Name → avg Exvat/3)
     if (!todayStoreSet || todayStoreSet.size === 0) return { count: 0, gap: 0 };
     let count = 0, gap = 0;
     todayStoreSet.forEach(storeName => {
-      const v = (nameMap && nameMap.get(storeName)) || 0;
+      const v = (avgMap && avgMap.get(storeName)) || 0;
       if (v < thresh) { count++; gap += thresh - v; }
     });
     return { count, gap };
