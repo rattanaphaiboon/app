@@ -239,7 +239,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page hidden" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v2.9</small>
+      <small>ยอดขายเทียบเป้าหมาย v3.0</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -1757,9 +1757,6 @@ function renderSup() {
   const supRaw = state.supRaw || [];
   const bpRaw  = state.bpRaw  || [];
   if (!supRaw.length) { el.innerHTML = '<p class="txt-muted" style="padding:16px">ไม่มีข้อมูล Sup</p>'; return; }
-  // DEBUG: show columns
-  el.innerHTML = '<pre style="padding:16px;font-size:11px">columns: ' + Object.keys(supRaw[0]||{}).join(' | ') + '\nrow0: ' + JSON.stringify(supRaw[0]) + '</pre>';
-  return;
 
   const lbp = state.latestBpMonth;
   const thaiMonths = ['','มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
@@ -1787,39 +1784,47 @@ function renderSup() {
     tdNote: `background:#e8e8e8;color:#555;text-align:center;font-style:italic;font-size:12px;padding:6px;border:1px solid #ccc`,
   };
 
-  // build BP index: wh||ch||bu -> {sales, custs}
+  // build BP index: wh||ch||bu and ST||ch||bu (Ship to across all WH)
   const bpIdx = new Map();
   bpRaw.forEach(r => {
     if (!lbp) return;
     const d = bpMonthYear(r['Doc_Date']);
     if (!d || d.mm !== lbp.mm || d.yyyy !== lbp.yyyy) return;
-    const wh  = normalizeText(String(r['WH']||r['คลัง']||'')).toUpperCase();
+    const wh  = String(r['WH']||r['คลัง']||'').trim().toUpperCase();
     const ch  = String(r['Channal']||r['Channel']||'').trim();
     const bu  = String(r['Cat_BU']||'').trim();
-    const key = wh + '||' + ch + '||' + bu;
-    if (!bpIdx.has(key)) bpIdx.set(key, {sales:0, custs:new Set()});
-    const e = bpIdx.get(key);
-    e.sales += (r._exvatcn2||0);
-    if (r['Customer_Code']) e.custs.add(r['Customer_Code']);
+    if (!wh || !ch || !bu) return;
+    const addTo = key => {
+      if (!bpIdx.has(key)) bpIdx.set(key, {sales:0, custs:new Set()});
+      const e = bpIdx.get(key);
+      e.sales += (r._exvatcn2||0);
+      if (r['Customer_Code']) e.custs.add(r['Customer_Code']);
+    };
+    addTo(wh + '||' + ch + '||' + bu);
+    if (ch.toLowerCase().includes('ship')) addTo('ST||' + ch + '||' + bu);
   });
 
-  // group sup rows by WH (preserve order)
+  // parse sup rows: r[''] = section code, forward-fill Main CH and CH
   const whMap = new Map();
+  let lastMainCh = '', lastCh = '';
   supRaw.forEach(r => {
-    const wh     = String(r['WH']||r['คลัง']||'').trim();
-    const mainCh = String(r['Main CH']||r['Main_CH']||'').trim();
-    const ch     = String(r['CH']||r['Channel']||'').trim();
-    const bu     = String(r['BU']||r['Cat_BU']||'').trim();
-    const target = parseNum(r['Target']||r['เป้าหมาย']||0);
-    if (!wh || !bu) return;
-    if (!whMap.has(wh)) whMap.set(wh, []);
-    whMap.get(wh).push({mainCh, ch, bu, target});
+    const sec    = String(r['']||'').trim();                   // "ST","W1","W3","W4"
+    const mainCh = String(r['Main CH']||'').trim() || lastMainCh;
+    const ch     = String(r['CH']||'').trim() || lastCh;
+    const bu     = String(r['BU']||'').trim();
+    const target = parseNum(r['Target']||0);
+    if (mainCh) lastMainCh = mainCh;
+    if (ch)     lastCh     = ch;
+    if (!sec || !bu) return;
+    if (!whMap.has(sec)) whMap.set(sec, []);
+    whMap.get(sec).push({mainCh, ch, bu, target});
   });
 
   let html = '';
-  whMap.forEach((rows, wh) => {
+  whMap.forEach((rows, sec) => {
+    const wh = sec === 'ST' ? 'Ship to' : sec;
     const enriched = rows.map(r => {
-      const key   = wh + '||' + r.ch + '||' + r.bu;
+      const key = sec + '||' + r.ch + '||' + r.bu;
       const bp    = bpIdx.get(key) || {sales:0, custs:new Set()};
       const actual = bp.sales;
       const custs  = bp.custs.size;
