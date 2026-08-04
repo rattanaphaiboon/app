@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v5.21</title>
+<title>Rattana ยอดหนี้คงค้าง v5.22</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -578,7 +578,12 @@ body.dark .pagination button:hover:not(:disabled){background:var(--navy-light)}
 .match-empty{padding:40px 20px;text-align:center;color:var(--muted);font-size:13px}
 
 /* ── แท็บขายเชื่อ (v5.18: พับเหลือ 2 บรรทัด/ใบ กดกางดูรายละเอียด) ── */
-.dcr-bar{position:sticky;top:calc(54px + 38px);z-index:55;background:var(--card-bg);border-bottom:1px solid var(--border);padding:10px 12px;display:flex;gap:8px;align-items:center}
+.dcr-bar{position:sticky;top:calc(54px + 38px);z-index:55;background:var(--card-bg);border-bottom:1px solid var(--border);padding:10px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.dcr-chips{width:100%;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.dcr-chiplbl{font-size:11px;color:var(--muted);white-space:nowrap}
+.dcr-chip{padding:4px 10px;border-radius:14px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;font-weight:600;white-space:nowrap;cursor:pointer;font-family:inherit}
+.dcr-chip.on{background:var(--gold);border-color:var(--gold);color:var(--navy)}
+.dcr-chip .n{opacity:.65;font-weight:500;margin-left:3px}
 .dcr-search{flex:1;min-width:0;position:relative;display:flex;align-items:center}
 .dcr-search input{width:100%;min-width:0;padding:9px 34px 9px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px}
 .dcr-search .dcr-x{position:absolute;right:6px;width:24px;height:24px;border-radius:50%;border:none;background:var(--border);color:var(--text);font-size:13px;line-height:1;display:none;align-items:center;justify-content:center}
@@ -771,7 +776,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v5.21</span>
+      <span class="app-ver">v5.22</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -1066,6 +1071,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
         <button class="dcr-x" id="crClear" onclick="crClearSearch()" title="ล้างการค้นหา">&#x2715;</button>
       </div>
       <button class="dcr-reload" onclick="loadCreditBills(true)">รีเฟรช</button>
+      <div class="dcr-chips" id="crChips"></div>
     </div>
     <div class="match-header">
       <h3>บิลขายเชื่อที่ซุปอนุมัติแล้ว</h3>
@@ -2082,6 +2088,8 @@ function processData(raw){
     }
   }
   _diag.rowsAfterRoleFilter = allRows.length;
+  // v5.22: การ์ดขายเชื่อ join ยอดหนี้จาก allRows — ถ้าโหลดเสร็จทีหลัง ต้องวาดใหม่ให้ตัวเลขสด
+  if (typeof creditLoaded !== 'undefined' && creditLoaded) { try { renderCreditList(); } catch(e){} }
 
   // Build lookups for dropdowns
   // Group by empId first, then by normalized name (merges ROO rows)
@@ -3124,6 +3132,35 @@ let crQuery       = '';
 const crExpanded  = new Set();   // reqId ที่กดดูรายการสินค้าแล้ว
 
 const CR_DECIDED = { 'บัญชีไม่อนุมัติ': 'bad', 'เปิดภายในวงเงิน': 'warn' };
+let crOnlyKeyed = false;   // ชิป: โชว์เฉพาะใบที่เซลคีย์ออเดอร์แล้ว
+let crDay       = '';      // ชิป: วันที่ที่คีย์ออเดอร์ ('' = ทุกวัน)
+
+// ยอดหนี้ปัจจุบันรายร้าน — รวมจาก SQL Data ที่แท็บยอดหนี้โหลดไว้แล้ว (1 แถว = 1 ใบค้าง)
+//   ไม่ได้ไปดึงชีทเพิ่ม แค่ join ด้วยรหัสร้านในเครื่อง
+let _crDebtMap = null, _crDebtLen = -1;
+function crDebtMap(){
+  if (_crDebtMap && _crDebtLen === allRows.length) return _crDebtMap;
+  const m = {};
+  (allRows || []).forEach(r => {
+    if (!r.custCode) return;
+    const g = m[r.custCode] || (m[r.custCode] = { amount:0, bills:0, aging:0, credit:null, limit:0, flag:'', note:'' });
+    g.amount += r.amount || 0;
+    g.bills++;
+    if ((r.aging || 0) > g.aging) g.aging = r.aging || 0;
+    if (r.credit != null && g.credit == null) g.credit = r.credit;
+    if (r.limit)  g.limit = r.limit;
+    if (r.flag && !g.flag) g.flag = r.flag;
+    if (r.note && !g.note) g.note = r.note;
+  });
+  _crDebtLen = (allRows || []).length; _crDebtMap = m;
+  return m;
+}
+// ข้อมูลหนี้ของใบนี้ — ใช้ของสดจาก SQL Data ก่อน ถ้าไม่เจอค่อยใช้สแนปช็อตตอนซุปอนุมัติ
+function crDebtInfo(a){
+  const d = crDebtMap()[a.shopCode];
+  if (d) return { live:true, amount:d.amount, bills:d.bills, aging:d.aging, credit:d.credit, limit:d.limit, flag:d.flag };
+  return { live:false, amount:crNum(a.debtAmount), bills:crNum(a.overdueBills), aging:crNum(a.overdueDays), credit:null, limit:0, flag:'' };
+}
 // ค่าจากชีทเป็น TEXT เสมอ (HARD RULE) — อาจมาเป็น "12,345.67" → Number() ได้ NaN ถ้าไม่ล้าง comma
 const crNum = v => Number(String(v == null ? '' : v).replace(/[^\d.-]/g, '')) || 0;
 // 'yyyy/MM/dd HH:mm:ss' → 'dd/MM HH:mm' (ย่อให้พอดี 1 บรรทัดบนหัวการ์ด)
@@ -3162,6 +3199,7 @@ async function loadCreditBills(force){
     return;
   }
   creditLoading = false;
+  renderCreditChips();
   renderCreditList();
   updateCreditBadge();
 }
@@ -3177,6 +3215,20 @@ function updateCreditBadge(){
   el.style.display = n > 0 ? '' : 'none';
 }
 
+function renderCreditChips(){
+  const el = $('crChips'); if (!el) return;
+  const days = [...new Set(creditRows.flatMap(a => (a.orders || []).map(o => o.day)))].sort().reverse();
+  const cnt = d => creditRows.filter(a => (a.orders || []).some(o => o.day === d)).length;
+  const keyed = creditRows.filter(a => a.orderCount > 0).length;
+  el.innerHTML =
+    `<button class="dcr-chip ${crOnlyKeyed ? 'on' : ''}" onclick="crToggleKeyed()">คีย์ออเดอร์แล้ว<span class="n">${keyed}</span></button>`
+    + (days.length ? `<span class="dcr-chiplbl">วันที่คีย์</span>
+       <button class="dcr-chip ${crDay ? '' : 'on'}" onclick="crSetDay('')">ทุกวัน</button>`
+       + days.map(d => `<button class="dcr-chip ${crDay === d ? 'on' : ''}" onclick="crSetDay('${d}')">${escapeHtml(crShortTs(d))}<span class="n">${cnt(d)}</span></button>`).join('') : '');
+}
+function crToggleKeyed(){ crOnlyKeyed = !crOnlyKeyed; if (crOnlyKeyed === false) crDay = ''; renderCreditChips(); renderCreditList(); }
+function crSetDay(d){ crDay = d; if (d) crOnlyKeyed = true; renderCreditChips(); renderCreditList(); }
+
 function crOnSearch(){
   crQuery = ($('crSearch').value || '').trim().toLowerCase();
   $('crClear').classList.toggle('on', !!crQuery);
@@ -3185,14 +3237,18 @@ function crOnSearch(){
 function crClearSearch(){
   $('crSearch').value = '';
   crQuery = '';
+  crOnlyKeyed = false; crDay = '';        // ล้างชิปด้วย — คลิกเดียวเห็นข้อมูลครบ
   $('crClear').classList.remove('on');
+  renderCreditChips();
   renderCreditList();
   $('crSearch').focus();
 }
 
 function renderCreditList(){
   const terms = crQuery ? crQuery.split(/\s+/).filter(Boolean) : [];
-  const rows = creditRows.filter(a => terms.every(t => a._s.includes(t)));   // หลายคำ = AND ทุกคำ
+  let rows = creditRows.filter(a => terms.every(t => a._s.includes(t)));   // หลายคำ = AND ทุกคำ
+  if (crOnlyKeyed) rows = rows.filter(a => a.orderCount > 0);
+  if (crDay)       rows = rows.filter(a => (a.orders || []).some(o => o.day === crDay));
   const withOrder = rows.filter(a => a.orderCount > 0).length;
   $('crCount').textContent = rows.length
     ? `${withOrder} ใบมีออเดอร์ · รอบัญชี ${rows.filter(crPending).length} · รอเซลคีย์ ${rows.length - withOrder}`
@@ -3211,16 +3267,33 @@ function crCardHtml(a){
   const hasOrd  = a.orderCount > 0;
 
   // บรรทัดที่ 2 = สรุปทุกอย่างที่บัญชีต้องเห็นตอนยังไม่กาง (ค้างเท่าไร · เกินกี่วัน · ใครขาย)
+  // บรรทัด 2 = เรื่องเครดิตล้วนๆ (ค้างเท่าไร กี่บิล กี่วัน · วงเงิน · วันเครดิต · ติดเพราะอะไร · ธง)
+  const D = crDebtInfo(a);
+  const overLimit = D.limit > 0 && D.amount > D.limit;
+  const overTerm  = D.credit != null && D.aging > D.credit;
   const bits = [];
-  if (decided)               bits.push(`<span class="dcr-tag ${decided}">${escapeHtml(a.status)}</span>`);
-  if (crNum(a.debtAmount))   bits.push(`<span class="dcr-hot">ค้าง ฿${fmtInt(crNum(a.debtAmount))}</span>`);
-  if (crNum(a.overdueDays))  bits.push(`<span class="dcr-hot">เกิน ${fmtInt(crNum(a.overdueDays))} วัน</span>`);
-  if (crNum(a.overdueBills)) bits.push(`${fmtInt(crNum(a.overdueBills))} บิลเกิน`);
-  if (a.reason)              bits.push(`<span class="dcr-why">${escapeHtml(a.reason)}</span>`);   // เหตุผลที่ลูกค้ายังไม่จ่าย — ต้องเห็นโดยไม่ต้องกาง
-  if (a.smName)              bits.push(escapeHtml(a.smName));
-  if (a.wh)                  bits.push(escapeHtml(a.wh));
+  if (decided)          bits.push(`<span class="dcr-tag ${decided}">${escapeHtml(a.status)}</span>`);
+  if (D.amount)         bits.push(`<span class="dcr-hot">ค้าง ฿${fmtInt(Math.round(D.amount))}</span>`);
+  if (D.bills)          bits.push(`${fmtInt(D.bills)} บิล`);
+  if (D.aging)          bits.push(`<span class="dcr-hot">ค้างนานสุด ${fmtInt(D.aging)} วัน</span>`);
+  if (D.limit)          bits.push(`วงเงิน ฿${fmtInt(Math.round(D.limit))}`);
+  if (D.credit != null) bits.push(`เครดิต ${fmtInt(D.credit)} วัน`);
+  const why = [];
+  if (overLimit) why.push('เกินวงเงิน');
+  if (overTerm)  why.push('เกินวันเครดิต');
+  if (why.length) bits.push(`<span class="dcr-tag bad">ติด${why.join(' + ')}</span>`);
+  if (D.flag)    bits.push(`<span class="dcr-tag warn">ธง ${escapeHtml(D.flag)}</span>`);
+  if (!D.live)   bits.push(`<span class="dcr-q">(ตัวเลข ณ วันที่ซุปอนุมัติ)</span>`);
   const subTxt = bits.join(' · ');
   const subPlain = subTxt.replace(/<[^>]+>/g, '');
+
+  // บรรทัด 3 = เหตุผลที่ลูกค้ายังไม่จ่าย + ใครขาย
+  const bits2 = [];
+  if (a.reason) bits2.push(`<span class="dcr-why">${escapeHtml(a.reason)}</span>`);
+  if (a.smName) bits2.push(escapeHtml(a.smName));
+  if (a.wh)     bits2.push(escapeHtml(a.wh));
+  const sub2Txt = bits2.join(' · ');
+  const sub2Plain = sub2Txt.replace(/<[^>]+>/g, '');
 
   const actHtml = !hasOrd
     ? `<div class="dcr-locked" title="ซุปอนุมัติแล้ว แต่เซลยังไม่ได้คีย์ออเดอร์เข้าชีท Order">รอเซลคีย์ออเดอร์</div>`
@@ -3239,7 +3312,7 @@ function crCardHtml(a){
   //   ออเดอร์ 23 รายการเคยกิน 23 บรรทัด ตอนนี้เหลือ 2-3 บรรทัด
   const bodyHtml = !open ? '' : `
       <div class="dcr-body">
-        ${a.apprBy ? `<div class="dcr-flow dcr-dim">ซุปอนุมัติ: ${escapeHtml(a.apprBy)} · ${escapeHtml(a.apprTs)}</div>` : ''}
+        ${a.apprBy ? `<div class="dcr-flow dcr-dim">ซุปอนุมัติ: ${escapeHtml(a.apprBy)} · ${escapeHtml(a.apprTs)}${a.expiry ? ' · ใช้ได้ถึง ' + escapeHtml(a.expiry) : ''}</div>` : ''}
         ${(a.orders || []).map(o => `
           <div class="dcr-ord">
             <div class="dcr-flow dcr-ordhead">${escapeHtml(o.orderId)} · ${escapeHtml(crWhen(o))} · ${o.items.length} รายการ · ฿${fmtBaht(o.total)}</div>
@@ -3255,6 +3328,7 @@ function crCardHtml(a){
         <div class="dcr-l">
           <div class="dcr-shop" title="${escapeHtml(a.shopName)} · ${escapeHtml(a.shopCode)}"><span class="dcr-caret">${open ? '&#x25BE;' : '&#x25B8;'}</span>${escapeHtml(a.shopName || '-')}</div>
           <div class="dcr-sub" title="${escapeHtml(subPlain)}">${subTxt}</div>
+          ${sub2Txt ? `<div class="dcr-sub" title="${escapeHtml(sub2Plain)}">${sub2Txt}</div>` : ''}
         </div>
         <div class="dcr-r">
           <div class="dcr-amt">${hasOrd ? '฿' + fmtInt(Math.round(a.total)) : '<span style="font-size:12px;color:var(--muted)">รอออเดอร์</span>'}</div>
