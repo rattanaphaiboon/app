@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v18.6</title>
+<title>Rattana Sales Dashboard v18.7</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -393,7 +393,7 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v18.6</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v18.7</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -4079,6 +4079,7 @@ function renderSummaryTab() {
 
   // AVG 3 months per store name (from All Sales sheet)
   const bpAvgByNameIdx = new Map(); // normName → Map(Customer_Name → avg Exvat/3)
+  const sellerCodeAvgIdx = new Map(); // normSeller§Customer_Code → avg(Exvat)/3 from All Sales
   {
     const sumIdx = new Map(); // normName§Customer_Code → sum Exvat
     (tgtState.allSalesRaw || []).forEach(r => {
@@ -4089,6 +4090,7 @@ function renderSummaryTab() {
       const v = parseFloat(String(r['Exvat'] || r['EXVat'] || '0').replace(/,/g,'')) || 0;
       sumIdx.set(key, (sumIdx.get(key) || 0) + v);
     });
+    sumIdx.forEach((sum, key) => sellerCodeAvgIdx.set(key, sum / 3));
     bpNameToCodeIdx.forEach((nameCodeMap, normName) => {
       nameCodeMap.forEach((code, custName) => {
         const avg = (sumIdx.get(normName + '§' + code) || 0) / 3;
@@ -4164,6 +4166,43 @@ function renderSummaryTab() {
           summaryInRouthTodayBpIdx.get(nm).add(bp);
         }
       }
+    });
+  }
+
+  // EO-check index: normSeller → Map(Customer_Code → EXVat) from current month BP
+  const bpEoCheckIdx = new Map();
+  (tgtState.bpRaw || []).forEach(r => {
+    const nm   = tgtNormalizeName(String(r['Sale NO ROO'] || r['Sale_No_ROO'] || ''));
+    const code = String(r['Customer_Code'] || '').trim();
+    if (!nm || !code) return;
+    if (!bpEoCheckIdx.has(nm)) bpEoCheckIdx.set(nm, new Map());
+    const m = bpEoCheckIdx.get(nm);
+    m.set(code, (m.get(code) || 0) + parseNum(r['EXVat']));
+  });
+  // EO summary for today's route — same logic as EO summary table (count + totalAvg per seller)
+  const eoSummaryTodayCache = new Map(); // normSellerName → {count, totalAvg}
+  if ((tgtState.customerRaw || []).length > 0) {
+    const _sk = Object.keys(tgtState.customerRaw[0]);
+    const _fC = t => _sk.find(k => t.some(x => k.replace(/[\s_]/g,'').toUpperCase().includes(x.toUpperCase())));
+    const _rK = _fC(['ชื่อรูท','รูท']) || 'ชื่อรูท';
+    const _cK = _fC(['รหัสบีพลัส','บีพลัส']) || 'รหัสบีพลัส';
+    const _sK = _fC(['เซลล์ผู้ดูแล','เซลล์']) || 'เซลล์ผู้ดูแล';
+    (tgtState.customerRaw).forEach(r => {
+      const route = String(r[_rK]||'').trim();
+      if ((route.startsWith('พฤหัส') ? 'พฤหัสบดี' : route) !== todayDayName) return;
+      const code   = String(r[_cK]||'').trim();
+      const rawSel = String(r[_sK]||'').trim();
+      if (!code || !rawSel) return;
+      const normSel = tgtNormalizeName(rawSel);
+      const empCode = summaryEoCodeIdx.get(normSel) || '';
+      const thresh  = tgtDebtorThreshold(empCode) ?? 2500;
+      const monthSales = (bpEoCheckIdx.get(normSel) || new Map()).get(code) || 0;
+      if (monthSales >= thresh) return;
+      const avgVal  = sellerCodeAvgIdx.get(normSel + '§' + code) || 0;
+      if (!eoSummaryTodayCache.has(normSel)) eoSummaryTodayCache.set(normSel, {count: 0, totalAvg: 0});
+      const s = eoSummaryTodayCache.get(normSel);
+      s.count++;
+      s.totalAvg += avgVal;
     });
   }
 
@@ -4372,7 +4411,7 @@ function renderSummaryTab() {
   const personCardsHtml = personList.map((p,i)=>{
     const pct=p.bpPct, col=avatarColors[i%avatarColors.length];
     const normN=tgtNormalizeName(p.name);
-    const eoBelow=computeEoBelowStats(normN, p.empCode);
+    const eoBelow=eoSummaryTodayCache.get(normN) || {count:0, totalAvg:0};
     const onclickAttr=`showSalesDailyChart(${JSON.stringify(normN).replace(/"/g,'&quot;')},${JSON.stringify(p.name).replace(/"/g,'&quot;')})`;
     const aoAct   = p.aoActual;
     const aoTgt   = p.aoRow?.target!=null ? Math.round(p.aoRow.target) : null;
@@ -4386,7 +4425,7 @@ function renderSummaryTab() {
     const vaAct   = p.visitActRow?.actual!=null ? Math.round(p.visitActRow.actual) : '-';
     const vPct    = (typeof vpAct==='number'&&typeof vaAct==='number'&&vpAct>0) ? (vaAct/vpAct*100).toFixed(0)+'%' : '-';
     const silent  = p.silentRow?.actual!=null ? Math.round(p.silentRow.actual) : '-';
-    const eoGapFmt = eoBelow.gap > 0 ? fmtFull(Math.round(eoBelow.gap)) + ' บาท' : '-';
+    const eoGapFmt = eoBelow.totalAvg > 0 ? fmtFull(Math.round(eoBelow.totalAvg)) + ' บาท' : '-';
     const issueItem = (icon, bg, label, val, sub) =>
       `<div style="background:${bg};border-radius:8px;padding:7px 8px;display:flex;align-items:center;gap:8px;min-width:0">
         <span style="font-size:20px;flex-shrink:0">${icon}</span>
