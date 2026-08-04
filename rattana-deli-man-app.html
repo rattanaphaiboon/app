@@ -890,7 +890,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.187';
+const APP_VERSION='3.188';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -7735,53 +7735,93 @@ async function syncJobsFromSheet(opts){
    อ่าน CNSaleapp (เซลล์สั่งคืน อนุมัติแล้ว + ยังไม่เก็บ) → ขนส่งกดเก็บ+จำนวนจริง+รูป
    → POST save_cn_collect → GAS เขียนกลับชีทต้นทาง CN-Sale-dman → sync มิเรอร์ลง CNSaleapp เอง
    ======================================================================== */
-let _cncGroups=[];         // [{shopCode,shopName,wh,lines:[{cnLineId,cnId,name,barcode,qty,unit,reason,price,seller}]}]
+let _cncGroups=[];         // รอเก็บ: [{shopCode,shopName,wh,lines:[{cnLineId,cnId,name,barcode,qty,unit,reason,price,seller}]}]
+let _cncDone=[];           // v3.188: เก็บแล้ว: [{shopCode,shopName,wh,lines:[{cnLineId,name,unit,qty,qtyCollect,status,note,driver,time,cnId}]}]
+let _cncView='pending';    // v3.188: 'pending'=รอเก็บ / 'done'=เก็บแล้ว(ยกเลิกได้)
 let _cncSelCode='';        // v3.184: รหัสร้านที่เลือกอยู่ (เลือกร้านก่อนแล้วค่อยโชว์รายการ)
 const _cncPhoto={};        // shopCode -> base64 (รูปของที่เก็บมา 1 รูป/ร้าน)
-function _cncDoneSet(){ try{ return new Set(JSON.parse(localStorage.getItem('dman_cnc_done')||'[]')); }catch(e){ return new Set(); } }
-function _cncMarkDone(ids){ try{ const s=_cncDoneSet(); (ids||[]).forEach(x=>s.add(x)); localStorage.setItem('dman_cnc_done',JSON.stringify([...s])); }catch(e){} }
 function cncApproved_(v){ v=String(v||''); return v.indexOf('อนุมัติ')>=0 && v.indexOf('รอ')<0 && v.indexOf('ไม่')<0 && v.indexOf('ปฏิเสธ')<0; }
 async function renderCNCollect(){
   const body=$('cncollectBody'); if(!body) return;
   if((parseInt((state.user||{}).userRole)||0)<3){ body.innerHTML='<div class="txt-muted txt-center" style="padding:24px">อยู่ระหว่างทดสอบ — ยังไม่เปิดใช้งาน</div>'; return; }   // v3.187: เทส—เฉพาะ Role≥3 (กันเข้าถึงตรง)
   body.innerHTML='<div class="txt-muted txt-center" style="padding:24px">⏳ กำลังโหลดรายการสั่งคืน…</div>';
   let rows=[];
-  try{ rows=await fetchSheet(CFG.jobsSheetId,'CNSaleapp',{fresh:true}); }
+  // v3.188: อ่านจากชีทต้นทาง CN-Sale-dman ตรงๆ (เรียลไทม์ ไม่ต้องรอมิเรอร์ 5 นาที) — customerSheetId = ไฟล์เดียวกับต้นทาง
+  try{ rows=await fetchSheet(CFG.customerSheetId,'CN-Sale-dman',{fresh:true}); }
   catch(e){ body.innerHTML='<div class="txt-danger txt-center" style="padding:24px">โหลดข้อมูลไม่สำเร็จ — ลองรีเฟรชใหม่</div>'; return; }
-  const done=_cncDoneSet();
-  const grpMap={}, order=[];
+  const pMap={},pOrd=[],dMap={},dOrd=[];
   (rows||[]).forEach(r=>{
     const line=String(r['cnLineId']||'').trim(); if(!line) return;
-    if(!cncApproved_(r['อนุมัติคืน'])) return;                 // เอาเฉพาะอนุมัติแล้ว
-    if(String(r['สถานะเก็บ']||'').trim()) return;              // เก็บแล้ว → ข้าม
-    if(done.has(line)) return;                                 // เพิ่งกดเก็บในเครื่อง (กันมิเรอร์ยังไม่ทัน 5 นาที)
     if(!whPass_(r['คลัง'])) return;                            // เฉพาะคลังของคนขับ
     const code=String(r['รหัสร้าน']||'').trim()||'-';
-    if(!grpMap[code]){ grpMap[code]={shopCode:code,shopName:String(r['ชื่อร้าน']||'').trim(),wh:String(r['คลัง']||'').trim(),lines:[]}; order.push(code); }
-    grpMap[code].lines.push({
-      cnLineId:line, cnId:String(r['cnId']||'').trim(),
-      name:String(r['ชื่อสินค้า']||'').trim(), barcode:String(r['บาร์โค้ด']||'').trim(),
-      qty:parseFloat(r['จำนวน'])||0, unit:String(r['หน่วย']||'').trim(),
-      reason:String(r['สาเหตุรับคืน']||'').trim(), price:parseFloat(r['ราคา'])||0,
-      seller:String(r['ชื่อเซลล์']||'').trim()
-    });
+    const shopName=String(r['ชื่อร้าน']||'').trim(), wh=String(r['คลัง']||'').trim();
+    const collected=String(r['สถานะเก็บ']||'').trim();
+    if(collected){   // v3.188: เก็บแล้ว (ยกเลิกได้)
+      if(!dMap[code]){ dMap[code]={shopCode:code,shopName:shopName,wh:wh,lines:[]}; dOrd.push(code); }
+      dMap[code].lines.push({ cnLineId:line, name:String(r['ชื่อสินค้า']||'').trim(), unit:String(r['หน่วย']||'').trim(),
+        qty:parseFloat(r['จำนวน'])||0, qtyCollect:cleanCell(r['จำนวนเก็บจริง']), status:collected,
+        note:cleanCell(r['หมายเหตุขนส่ง']), driver:cleanCell(r['ผู้ขับ']), time:cleanCell(r['เวลาเก็บ']), cnId:String(r['cnId']||'').trim() });
+    } else {          // รอเก็บ — เฉพาะที่อนุมัติแล้ว
+      if(!cncApproved_(r['อนุมัติคืน'])) return;
+      if(!pMap[code]){ pMap[code]={shopCode:code,shopName:shopName,wh:wh,lines:[]}; pOrd.push(code); }
+      pMap[code].lines.push({ cnLineId:line, cnId:String(r['cnId']||'').trim(),
+        name:String(r['ชื่อสินค้า']||'').trim(), barcode:String(r['บาร์โค้ด']||'').trim(),
+        qty:parseFloat(r['จำนวน'])||0, unit:String(r['หน่วย']||'').trim(),
+        reason:String(r['สาเหตุรับคืน']||'').trim(), price:parseFloat(r['ราคา'])||0,
+        seller:String(r['ชื่อเซลล์']||'').trim() });
+    }
   });
-  _cncGroups=order.map(k=>grpMap[k]);
+  _cncGroups=pOrd.map(k=>pMap[k]);
+  _cncDone=dOrd.map(k=>dMap[k]);
+  if(_cncSelCode && !_cncGroups.some(g=>g.shopCode===_cncSelCode)) _cncSelCode='';   // ร้านที่เลือกไม่เหลือ → รีเซ็ต
   paintCNCollect_();
 }
 function paintCNCollect_(){
   const body=$('cncollectBody'); if(!body) return;
-  if(!_cncGroups.length){ body.innerHTML='<div class="txt-muted txt-center" style="padding:24px">🎉 ไม่มีรายการรอเก็บ (อนุมัติแล้ว · ยังไม่ได้เก็บ)</div>'; _cncSelCode=''; return; }
-  // v3.184: เลือกร้านก่อน แล้วค่อยโชว์รายการ (ไม่ขึ้นทุกร้านพร้อมกัน)
-  const opts=['<option value="">— เลือกร้าน —</option>'].concat(_cncGroups.map(g=>`<option value="${esc(g.shopCode)}">${esc(g.shopName||g.shopCode)} · ${g.lines.length} รายการ</option>`)).join('');
-  const selCard=`<div class="card card-gold" style="margin-bottom:12px"><div class="card-body"><div class="field" style="margin:0">
-      <label>เลือกร้านที่จะเก็บของ <span class="txt-xs txt-muted">(${_cncGroups.length} ร้านรอเก็บ)</span></label>
-      <select class="input" id="cncShopSel" onchange="cncSelectShop_(this.value)">${opts}</select>
-    </div></div></div>`;
-  const gi=_cncGroups.findIndex(g=>g.shopCode===_cncSelCode);
-  const shopHtml=(gi>=0)?cncShopCardHtml_(gi):'<div class="txt-muted txt-center" style="padding:20px">👆 เลือกร้านด้านบน เพื่อดูรายการที่ต้องเก็บ</div>';
-  body.innerHTML=selCard+`<div id="cncShopArea">${shopHtml}</div>`;
+  // v3.188: แท็บ รอเก็บ / เก็บแล้ว(ยกเลิกได้)
+  const nP=_cncGroups.reduce((s,g)=>s+g.lines.length,0), nD=_cncDone.reduce((s,g)=>s+g.lines.length,0);
+  const tab=(v,l,n)=>`<button class="btn btn-sm ${_cncView===v?'btn-gold':'btn-outline'}" style="flex:1" onclick="cncSetView_('${v}')">${l} (${n})</button>`;
+  const toggle=`<div class="row gap-8" style="margin-bottom:12px">${tab('pending','🔵 รอเก็บ',nP)}${tab('done','✅ เก็บแล้ว',nD)}</div>`;
+  let inner;
+  if(_cncView==='done'){
+    inner=cncDoneHtml_();
+  } else if(!_cncGroups.length){
+    inner='<div class="txt-muted txt-center" style="padding:24px">🎉 ไม่มีรายการรอเก็บ (อนุมัติแล้ว · ยังไม่ได้เก็บ)</div>'; _cncSelCode='';
+  } else {
+    const opts=['<option value="">— เลือกร้าน —</option>'].concat(_cncGroups.map(g=>`<option value="${esc(g.shopCode)}">${esc(g.shopName||g.shopCode)} · ${g.lines.length} รายการ</option>`)).join('');
+    const selCard=`<div class="card card-gold" style="margin-bottom:12px"><div class="card-body"><div class="field" style="margin:0">
+        <label>เลือกร้านที่จะเก็บของ <span class="txt-xs txt-muted">(${_cncGroups.length} ร้านรอเก็บ)</span></label>
+        <select class="input" id="cncShopSel" onchange="cncSelectShop_(this.value)">${opts}</select>
+      </div></div></div>`;
+    const gi=_cncGroups.findIndex(g=>g.shopCode===_cncSelCode);
+    const shopHtml=(gi>=0)?cncShopCardHtml_(gi):'<div class="txt-muted txt-center" style="padding:20px">👆 เลือกร้านด้านบน เพื่อดูรายการที่ต้องเก็บ</div>';
+    inner=selCard+`<div id="cncShopArea">${shopHtml}</div>`;
+  }
+  body.innerHTML=toggle+inner;
   const s=$('cncShopSel'); if(s) s.value=_cncSelCode;
+}
+function cncSetView_(v){ _cncView=v; paintCNCollect_(); }
+function cncDoneHtml_(){
+  if(!_cncDone.length) return '<div class="txt-muted txt-center" style="padding:24px">— ยังไม่มีรายการที่เก็บแล้ว —</div>';
+  return _cncDone.map(g=>{
+    const items=g.lines.map(ln=>`<div class="bill-row" style="align-items:center;gap:8px">
+        <span style="flex:1;min-width:0">
+          <div class="txt-sm txt-bold" style="word-break:break-word">${esc(ln.name||ln.cnId||'-')}</div>
+          <div class="txt-xs txt-muted">${esc(ln.status)} · เก็บ ${esc(String(ln.qtyCollect))}/${fmtQty_(ln.qty)} ${esc(ln.unit)}${ln.time?' · '+esc(ln.time):''}${ln.driver?' · '+esc(ln.driver):''}</div>
+        </span>
+        <button class="btn btn-outline btn-sm txt-danger" style="flex:none" onclick="undoCNCollect_('${esc(ln.cnLineId)}')">↩ ยกเลิก</button>
+      </div>`).join('');
+    return `<div class="card" style="margin-bottom:12px"><div class="card-head"><h3 style="font-size:15px">🏪 ${esc(g.shopName||g.shopCode)} <span class="txt-xs txt-muted">(${esc(g.shopCode)})</span></h3><span class="badge badge-ok">${g.lines.length} เก็บแล้ว</span></div><div class="card-body">${items}</div></div>`;
+  }).join('');
+}
+async function undoCNCollect_(cnLineId){
+  const ok=await showConfirm('ยกเลิกการเก็บรายการนี้? (ล้างเฉพาะข้อมูลการเก็บ — ไม่ลบข้อมูลใบสั่งคืนเดิม)',{okLabel:'ยกเลิกการเก็บ'});
+  if(!ok) return;
+  showSpinner('กำลังยกเลิก…');
+  const r=await postSyncGAS_({action:'undo_cn_collect',lines:[{cnLineId:cnLineId}]},30000);
+  hideSpinner();
+  if(r&&r.ok&&r.cleared>0){ showToast('ยกเลิกการเก็บแล้ว ✓','success'); renderCNCollect(); }
+  else showToast('ยกเลิกไม่สำเร็จ: '+((r&&r.error)||'ไม่พบรายการ'),'error');
 }
 function cncSelectShop_(code){ _cncSelCode=String(code||''); paintCNCollect_(); }
 function cncCheckAll_(gi,on){ const g=_cncGroups[gi]; if(!g) return; g.lines.forEach((ln,li)=>{ const c=$('cncchk_'+gi+'_'+li); if(c) c.checked=!!on; }); }   // v3.185: เลือก/ล้าง ทั้งหมด
@@ -7853,18 +7893,16 @@ async function saveCNCollect_(gi){
   const r=await postSyncGAS_({action:'save_cn_collect',shopCode:g.shopCode,shopName:g.shopName,warehouse:g.wh,driver:driver,note:note,photo:_cncPhoto[g.shopCode]||'',lines:lines},30000);
   hideSpinner();
   if(r&&r.ok){
-    _cncMarkDone(doneIds);
     delete _cncPhoto[g.shopCode];
-    _cncGroups.splice(gi,1);
     _cncSelCode='';   // v3.184: เก็บร้านนี้เสร็จ → กลับไปหน้าเลือกร้าน
-    paintCNCollect_();
     showToast('บันทึกเก็บของแล้ว ✓ ('+(r.updated||lines.length)+' รายการ)','success');
+    renderCNCollect();   // v3.188: โหลดใหม่จากต้นทาง (เรียลไทม์) → รายการย้ายไปแท็บ "เก็บแล้ว"
   } else {
     showToast('บันทึกไม่สำเร็จ: '+((r&&r.error)||'ลองใหม่อีกครั้ง'),'error');
   }
 }
 
-const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.183 (v3.183 action save_cn_collect: ขนส่งเก็บของคืน CN → เขียนกลับ CN-Sale-dman ตาม cnLineId + คอลัมน์ ภาพเก็บขนส่ง/เวลาเก็บ | v3.182 Status บิล: ขาดโดยไม่มีเงินจริง (มีแต่ CN/ลดหนี้หัก) → "ยังไม่ชำระ" | v3.181 Status จ่าย: ไม่มีเงินจริงแม้มี CN/ลดหนี้หัก → "ไม่ชำระ" ไม่ปล่อยว่าง | CN: คอลัมน์ cnId + ชื่อเซลล์=เซลล์สั่งคืน จาก cnRef | รวมช่องหักยอด: creditNote รวม CN+นอกCN, ลดหนี้=ส่วนนอกCN subset ไม่บวกซ้ำ + เหตุผลลดหนี้ ชีท Cin | เมนู Sync CN-Sale-dman → CNSaleapp + trigger 5 นาที + มาร์ก CN ซ้ำ เนื้อหาทั้งใบ | คอลัมน์ "วันเครดิต" ชีท Cin จาก b.creditDays, ไม่มีวัน=0 | ขอสินค้าเพิ่มขึ้นรถ: request_load + approve/reject/delete_load_req + ชีท "ขอสินค้าเพิ่ม" + Discord | v3.130 CN คืนเต็มบิล → คอลัมน์ "ใบลดหนี้" ชีท Cin | v3.124 cancel_job เก็บ CN คนอื่น | v3.122 fixCinSalesmanColumn | v3.120 SLMN | v3.90 แท็ก [CN: ...]) */
+const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.188 (v3.188 action undo_cn_collect: ยกเลิกการเก็บ—เคลียร์เฉพาะคอลัมน์ระบบตาม cnLineId ไม่ลบแถว/ไม่แตะข้อมูลเดิม | v3.183 action save_cn_collect: ขนส่งเก็บของคืน CN → เขียนกลับ CN-Sale-dman ตาม cnLineId + คอลัมน์ ภาพเก็บขนส่ง/เวลาเก็บ | v3.182 Status บิล: ขาดโดยไม่มีเงินจริง (มีแต่ CN/ลดหนี้หัก) → "ยังไม่ชำระ" | v3.181 Status จ่าย: ไม่มีเงินจริงแม้มี CN/ลดหนี้หัก → "ไม่ชำระ" ไม่ปล่อยว่าง | CN: คอลัมน์ cnId + ชื่อเซลล์=เซลล์สั่งคืน จาก cnRef | รวมช่องหักยอด: creditNote รวม CN+นอกCN, ลดหนี้=ส่วนนอกCN subset ไม่บวกซ้ำ + เหตุผลลดหนี้ ชีท Cin | เมนู Sync CN-Sale-dman → CNSaleapp + trigger 5 นาที + มาร์ก CN ซ้ำ เนื้อหาทั้งใบ | คอลัมน์ "วันเครดิต" ชีท Cin จาก b.creditDays, ไม่มีวัน=0 | ขอสินค้าเพิ่มขึ้นรถ: request_load + approve/reject/delete_load_req + ชีท "ขอสินค้าเพิ่ม" + Discord | v3.130 CN คืนเต็มบิล → คอลัมน์ "ใบลดหนี้" ชีท Cin | v3.124 cancel_job เก็บ CN คนอื่น | v3.122 fixCinSalesmanColumn | v3.120 SLMN | v3.90 แท็ก [CN: ...]) */
 const SHEET_INPUT='บันทึกเที่ยวส่ง';
 const SHEET_CIN='บันทึกบิลและการชำระ';
 const SHEET_CN='CN';
@@ -7916,7 +7954,7 @@ const HEADERS_CIN=['เลขใบคุม','Doc_Date','Doc_No','Customer_Code
 function doGet(e){
   let drive='unknown';
   try{ DriveApp.getRootFolder().getName(); drive='OK'; }catch(err){ drive='NOT_AUTHORIZED'; }
-  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.183',drive:drive}))
+  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.188',drive:drive}))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -7991,6 +8029,30 @@ function doPost(e){
       } finally { lock.releaseLock(); }
     }
 
+    // ===== v3.188: ยกเลิกการเก็บ (CN) → เคลียร์เฉพาะคอลัมน์ที่ระบบเขียน ตาม cnLineId · ★ ไม่ลบแถว ★ ไม่แตะข้อมูลเดิมของ Sales App =====
+    if(data.action==='undo_cn_collect'){
+      const lock=LockService.getScriptLock(); lock.waitLock(30000);
+      try{
+        const sh=SpreadsheetApp.openById(CN_SALE_SRC_ID).getSheetByName(CN_SALE_SRC_SHEET);
+        if(!sh) return ContentService.createTextOutput(JSON.stringify({ok:false,error:'ไม่พบชีทต้นทาง CN-Sale-dman'})).setMimeType(ContentService.MimeType.JSON);
+        const hmap=headerMap_(sh);
+        const cLine=hmap['cnLineId']?hmap['cnLineId'][0]:-1;
+        if(cLine<0) return ContentService.createTextOutput(JSON.stringify({ok:false,error:'ไม่พบคอลัมน์ cnLineId'})).setMimeType(ContentService.MimeType.JSON);
+        // เคลียร์เฉพาะคอลัมน์ที่ระบบเราเขียนเท่านั้น (ห้ามแตะคอลัมน์อื่นของ Sales App)
+        const clearCols=['สถานะเก็บ','จำนวนเก็บจริง','หมายเหตุขนส่ง','ผู้ขับ','ภาพเก็บขนส่ง','เวลาเก็บ']
+          .map(function(n){ return hmap[n]?hmap[n][0]:-1; }).filter(function(c){ return c>=0; });
+        const keys={}; (Array.isArray(data.lines)?data.lines:[]).forEach(function(x){ var k=String((x&&x.cnLineId)||x||'').trim(); if(k) keys[k]=1; });
+        const values=sh.getDataRange().getValues();
+        var cleared=0;
+        for(var i=1;i<values.length;i++){
+          var k=String(values[i][cLine]||'').trim(); if(!k||!keys[k]) continue;
+          clearCols.forEach(function(c){ sh.getRange(i+1,c+1).setValue(''); });   // ล้างเป็นค่าว่าง (ไม่ลบแถว)
+          cleared++;
+        }
+        return ContentService.createTextOutput(JSON.stringify({ok:true,cleared:cleared})).setMimeType(ContentService.MimeType.JSON);
+      } finally { lock.releaseLock(); }
+    }
+
     // ===== v3.80: แนบรูปสลิป/เช็คให้บิลเดิม (หน้า "แนบสลิปที่ขาด") → อัปขึ้น Drive + เขียนลิงก์ลง Cin =====
     if(data.action==='set_bill_photo'){
       const lock=LockService.getScriptLock(); lock.waitLock(30000);
@@ -8019,7 +8081,7 @@ function doPost(e){
         fmtColsOpen_(sh,['รหัสร้าน','เลขใบคุม','Doc_No'],'@');   // v3.35: เปิดปลาย คลุมแถวใหม่
         fmtColsOpen_(sh,['Lat','Lng'],'0.000000');
         fmtColsOpen_(sh,['วันเวลา'],'yyyy-mm-dd hh:mm:ss');
-        return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.183'})).setMimeType(ContentService.MimeType.JSON);
+        return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.188'})).setMimeType(ContentService.MimeType.JSON);
       }finally{ lock.releaseLock(); }
     }
 
@@ -8524,7 +8586,7 @@ function doPost(e){
       fmtColsOpen_(cinSh,['วัน+เวลา ที่ส่งสินค้า','U_ADD','วันที่โอนครั้งที่1','วันที่โอนครั้งที่2','แก้ไขเมื่อ','วันที่','วันเวลาอนุมัติ'],'yyyy-mm-dd hh:mm:ss');
     }
 
-    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.183'}))
+    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.188'}))
       .setMimeType(ContentService.MimeType.JSON);
   }catch(err){
     return ContentService.createTextOutput(JSON.stringify({ok:false,error:String(err)}))
