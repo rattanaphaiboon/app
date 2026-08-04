@@ -907,7 +907,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.54';
+const APP_VERSION = 'v4.55';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -2274,6 +2274,7 @@ function saveCountSession() {
   if (countSession) {
     countSession.lastEdit = new Date().toISOString();
     lastLocalEditMs = Date.now();
+    countSession.mirrored = false;   // มีการแก้/บันทึกบนเครื่องนี้เอง → เป็นเจ้าของ draft (owned) ดันขึ้น Supabase ได้
     try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
     queueDraftSync();
   }
@@ -2403,7 +2404,8 @@ async function forcePullDraft() {
     if (Object.keys(countSession.items || {}).length &&
         !confirm(`พบ ${Object.keys(remote.items).length} รายการในระบบ — แทนที่รายการในเครื่องตอนนี้?`)) return;
     countSession = { warehouse: wh, startedAt: remote.sessionStart || new Date().toISOString(),
-                     items: remote.items, lastEdit: remote.updatedAt, syncedAt: remote.updatedAt };
+                     items: remote.items, lastEdit: remote.updatedAt, syncedAt: remote.updatedAt,
+                     mirrored: true };   // ดึงจากอีกเครื่องมาดู → mirrored (ถ้าแก้เองภายหลัง saveCountSession จะปลดเป็น owned)
     try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
     renderCountList();
     showToast(`โหลด ${Object.keys(remote.items).length} รายการแล้ว ✓`, 'success');
@@ -2469,13 +2471,27 @@ async function maybeAdoptRemoteDraft(wh) {
   const remote = await fetchRemoteDraft(wh);
   updateSyncStatus(wh, remote);   // อัปเดตแถบสถานะทุกครั้งที่ดึง (ทุก 5 วิ) — เห็นได้ว่า 2 เครื่องตรงกันไหม
   const hasRemote = remote && remote.items && Object.keys(remote.items).length;
-  if (!hasRemote) return;   // remote ว่าง → ไม่แตะ local (no-cors ไม่ยืนยันการเคลียร์ ป้องกันลบผิด)
+  if (!hasRemote) {
+    // remote ว่าง: ถ้า local เป็นของที่ "มิเรอร์" มาจากอีกเครื่อง (mirrored) แปลว่าอีกเครื่องกด "ล้างทั้งหมด" ไปแล้ว
+    // → ล้าง local ตามให้ตรง (Supabase REST ยืนยันการลบได้จริง ไม่ใช่ no-cors)
+    // แต่ถ้าเป็นของที่ "นับเองบนเครื่องนี้" (owned) → ไม่แตะ ปล่อย push-on-empty ดันขึ้น (เคสนับ offline/ก่อนอัปเวอร์ชัน)
+    if (countSession && Object.keys(countSession.items || {}).length && countSession.mirrored) {
+      countSession.items = {};
+      try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
+      countListPage = 1;
+      renderCountList();
+      updateSyncStatus(wh, remote);
+      showToast('อีกเครื่องล้างรายการแล้ว — ล้างตามให้ตรง', 'info');
+    }
+    return;
+  }
   const remoteSig = draftSig(remote.items);
   if (remoteSig === draftSig(countSession && countSession.items)) return;   // ตรงกับที่แสดงอยู่แล้ว → ข้าม (กัน re-render/toast ทุก 5 วิ)
   if (Date.now() - lastLocalEditMs < DRAFT_ACTIVE_MS) return;               // เครื่องนี้กำลังนับ → เก็บของตัวเองไว้ (last edit wins)
   // เครื่องนี้ว่าง & remote ต่างจาก local → มิเรอร์ตามอีกเครื่อง
   countSession = { warehouse: wh, startedAt: remote.sessionStart || new Date().toISOString(),
-                   items: remote.items, lastEdit: remote.updatedAt, syncedAt: remote.updatedAt };
+                   items: remote.items, lastEdit: remote.updatedAt, syncedAt: remote.updatedAt,
+                   mirrored: true };   // มิเรอร์มาจากอีกเครื่อง → ห้ามดันกลับขึ้น + ให้ล้างตามได้เมื่ออีกเครื่องล้าง
   try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
   countListPage = 1;
   renderCountList();
@@ -2512,7 +2528,9 @@ async function enterDraftSync(wh) {
   // ดันรายการที่ค้างใน local ขึ้น Supabase ถ้าระบบยังว่าง (เช่น นับไว้ก่อนเปลี่ยนมาใช้ Supabase / ก่อนอัปเวอร์ชัน)
   const justSaved = recentlySavedAt[wh] && Date.now() - recentlySavedAt[wh] < 30000;
   const localHas = countSession && Object.keys(countSession.items || {}).length;
-  if (localHas && !justSaved) {
+  // push-on-empty เฉพาะ draft ที่ "นับเองบนเครื่องนี้" (owned) — ห้ามให้เครื่องสำรองที่มิเรอร์มา
+  // ดันข้อมูลที่อีกเครื่องกดล้างไปแล้วกลับขึ้น Supabase (ต้นเหตุ "ล้างแล้วไม่ลบ")
+  if (localHas && !justSaved && !(countSession && countSession.mirrored)) {
     const remote = await fetchRemoteDraft(wh);
     if (!remote || !Object.keys(remote.items || {}).length) await syncDraftNow();
   }
