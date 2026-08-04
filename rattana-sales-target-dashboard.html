@@ -239,7 +239,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page hidden" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v2.7</small>
+      <small>ยอดขายเทียบเป้าหมาย v2.8</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -253,6 +253,7 @@ body.dark .ptbl-td{border-color:var(--border)}
     <button class="tab-btn" data-tab="outlets" onclick="switchTab('outlets')">Outlets</button>
     <button class="tab-btn" data-tab="ontop" onclick="switchTab('ontop')">On Top</button>
     <button class="tab-btn" data-tab="roo" onclick="switchTab('roo')">ROO</button>
+    <button class="tab-btn" data-tab="sup" onclick="switchTab('sup')">Sup</button>
   </div>
 
   <div class="content">
@@ -299,6 +300,9 @@ body.dark .ptbl-td{border-color:var(--border)}
       <div id="rooContent"></div>
       <div id="rooSummaryContent" style="margin-top:24px"></div>
     </div>
+    <div id="tab-sup" class="hidden">
+      <div id="supContent"></div>
+    </div>
   </div>
 </div>
 
@@ -325,6 +329,7 @@ const EO_SHEET_NAME = 'Effective Outlet';
 const ON_TOP_SHEET_NAME = 'On Top';
 const ROO_SHEET_NAME = 'Roo';
 const ONLINE_SHEET_NAME = 'Online';
+const SUP_SHEET_NAME = 'Sup';
 
 const AUTH_CONFIG = {
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
@@ -773,7 +778,7 @@ async function loadData(showSpin) {
   if (showSpin) showSpinner('กำลังโหลดข้อมูลยอดขาย...');
   setLoading(true);
   try {
-    const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, outletRaw, eoRaw, customerRaw, onTopRaw, rooRaw, onlineRaw] = await Promise.all([
+    const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, outletRaw, eoRaw, customerRaw, onTopRaw, rooRaw, onlineRaw, supRaw] = await Promise.all([
       loadFromSheets(TARGET_SHEET_ID, TARGET_SHEET_NAME),
       loadFromSheets(BP_SHEET_ID, BP_SHEET_NAME),
       loadFromSheets(CN_SHEET_ID, CN_SHEET_NAME),
@@ -785,6 +790,7 @@ async function loadData(showSpin) {
       loadFromSheets(OUTLET_SHEET_ID, ON_TOP_SHEET_NAME),
       loadFromSheets(OUTLET_SHEET_ID, ROO_SHEET_NAME),
       loadFromSheets(OUTLET_SHEET_ID, ONLINE_SHEET_NAME),
+      loadFromSheets(OUTLET_SHEET_ID, SUP_SHEET_NAME),
     ]);
     state.targetRaw = targetRaw;
     state.bpRaw = bpRaw;
@@ -797,6 +803,7 @@ async function loadData(showSpin) {
     state.onTopRaw = onTopRaw;
     state.rooRaw = rooRaw;
     state.onlineRaw = onlineRaw;
+    state.supRaw = supRaw;
     state.latestBpMonth = getLatestBpMonth(bpRaw);
     setCache('targetCache', targetRaw);
     state.rows = computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw);
@@ -1078,7 +1085,7 @@ function exportDetailExcel() {
   XLSX.writeFile(wb, 'rattana-sales-target-' + Date.now() + '.xlsx');
 }
 
-function renderAll() { renderPivot(); renderOutlets(); renderOnTop(); renderROO(); renderROOSummary(); requestAnimationFrame(updateStickyOffsets); }
+function renderAll() { renderPivot(); renderOutlets(); renderOnTop(); renderROO(); renderROOSummary(); renderSup(); requestAnimationFrame(updateStickyOffsets); }
 
 /* ================= OUTLETS TAB ================= */
 function getChannelGroup(empCode) {
@@ -1743,6 +1750,137 @@ function renderROOSummary() {
 </table></div>`;
 }
 
+/* ================= SUP TAB ================= */
+function renderSup() {
+  const el = document.getElementById('supContent');
+  if (!el) return;
+  const supRaw = state.supRaw || [];
+  const bpRaw  = state.bpRaw  || [];
+  if (!supRaw.length) { el.innerHTML = '<p class="txt-muted" style="padding:16px">ไม่มีข้อมูล Sup</p>'; return; }
+
+  const lbp = state.latestBpMonth;
+  const dataMonth = lbp ? ((['','มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'][lbp.mm]||'')+' '+(lbp.yyyy+543)) : '';
+  const wd = getWorkingDaysInfo(dataMonth);
+
+  // build BP index: wh||ch||bu -> {sales, custs}
+  const bpIdx = new Map();
+  bpRaw.forEach(r => {
+    if (!lbp) return;
+    const d = bpMonthYear(r['Doc_Date']);
+    if (!d || d.mm !== lbp.mm || d.yyyy !== lbp.yyyy) return;
+    const wh  = normalizeText(String(r['WH']||r['คลัง']||'')).toUpperCase();
+    const ch  = String(r['Channal']||r['Channel']||'').trim();
+    const bu  = String(r['Cat_BU']||'').trim();
+    const key = wh + '||' + ch + '||' + bu;
+    if (!bpIdx.has(key)) bpIdx.set(key, {sales:0, custs:new Set()});
+    const e = bpIdx.get(key);
+    e.sales += (r._exvatcn2||0);
+    if (r['Customer_Code']) e.custs.add(r['Customer_Code']);
+  });
+
+  // group sup rows by WH
+  const whMap = new Map();
+  supRaw.forEach(r => {
+    const wh      = String(r['WH']||r['คลัง']||'').trim();
+    const mainCh  = String(r['Main CH']||r['Main_CH']||'').trim();
+    const ch      = String(r['CH']||r['Channel']||'').trim();
+    const bu      = String(r['BU']||r['Cat_BU']||'').trim();
+    const target  = parseNum(r['Target']||r['เป้าหมาย']||0);
+    if (!wh || !bu) return;
+    if (!whMap.has(wh)) whMap.set(wh, []);
+    whMap.get(wh).push({mainCh, ch, bu, target});
+  });
+
+  let html = '';
+  whMap.forEach((rows, wh) => {
+    // compute actual per row
+    const enriched = rows.map(r => {
+      const key = wh + '||' + r.ch + '||' + r.bu;
+      const bp  = bpIdx.get(key) || {sales:0, custs:new Set()};
+      const actual = bp.sales;
+      const custs  = bp.custs.size;
+      const pct    = r.target > 0 ? actual/r.target*100 : null;
+      return {...r, actual, custs, pct};
+    });
+
+    const totalTarget = enriched.reduce((s,r)=>s+r.target,0);
+    const totalActual = enriched.reduce((s,r)=>s+r.actual,0);
+    const totalPct    = totalTarget>0 ? totalActual/totalTarget*100 : null;
+    const totalCusts  = enriched.reduce((s,r)=>s+r.custs,0);
+
+    // group by mainCh then ch
+    const mainChMap = new Map();
+    enriched.forEach(r => {
+      if (!mainChMap.has(r.mainCh)) mainChMap.set(r.mainCh, new Map());
+      const chMap = mainChMap.get(r.mainCh);
+      if (!chMap.has(r.ch)) chMap.set(r.ch, []);
+      chMap.get(r.ch).push(r);
+    });
+
+    let bodyHtml = '';
+    mainChMap.forEach((chMap, mainCh) => {
+      let mainChRowCount = 0;
+      chMap.forEach(rows => mainChRowCount += rows.length);
+      let firstMainCh = true;
+      chMap.forEach((buRows, ch) => {
+        let firstCh = true;
+        buRows.forEach(r => {
+          const pctCl = r.pct === null ? '' : r.pct >= 100 ? 'color:var(--success);font-weight:700' : r.pct >= wd.pct ? 'color:var(--warning);font-weight:600' : 'color:var(--danger);font-weight:600';
+          bodyHtml += `<tr>
+            ${firstMainCh ? `<td rowspan="${mainChRowCount}" style="text-align:center;font-weight:700;background:rgba(13,27,62,.04);border-right:2px solid var(--border)">${mainCh}</td>` : ''}
+            ${firstCh ? `<td rowspan="${buRows.length}" style="text-align:center;border-right:1px solid var(--border)">${ch}</td>` : ''}
+            <td>${r.bu}</td>
+            <td class="ptbl-td" style="text-align:right">${fmtNum(r.target)}</td>
+            <td class="ptbl-td" style="text-align:right">${fmtNum(Math.round(r.actual))}</td>
+            <td class="ptbl-td" style="text-align:right;${pctCl}">${r.pct!==null?fmtNum(r.pct,2)+'%':'-'}</td>
+            <td class="ptbl-td" style="text-align:right">${r.custs||0}</td>
+          </tr>`;
+          firstMainCh = false;
+          firstCh = false;
+        });
+      });
+    });
+
+    const totPctCl = totalPct===null?'':totalPct>=100?'color:var(--success)':totalPct>=wd.pct?'color:var(--warning)':'color:var(--danger)';
+    html += `
+    <div style="margin-bottom:24px;overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:600px">
+        <thead>
+          <tr style="background:var(--navy);color:#fff">
+            <th colspan="7" style="padding:10px 14px;text-align:left;font-size:15px;border-bottom:3px solid var(--gold)">
+              RSP ${wh}
+              <span style="float:right;font-size:11px;opacity:.7">
+                TIME USED ${fmtNum(wd.pct,0)}% &nbsp;|&nbsp; Week ${wd.week} &nbsp;|&nbsp; ${wd.dateStr} &nbsp;|&nbsp; วันทำงาน ${wd.total} &nbsp;|&nbsp; เหลือ ${wd.remaining}
+              </span>
+            </th>
+          </tr>
+          <tr style="background:var(--navy-mid);color:rgba(255,255,255,.85)">
+            <th style="padding:8px 10px;border-bottom:2px solid var(--gold)">Main CH</th>
+            <th style="padding:8px 10px;border-bottom:2px solid var(--gold)">CH</th>
+            <th style="padding:8px 10px;border-bottom:2px solid var(--gold)">BU</th>
+            <th style="padding:8px 10px;text-align:right;border-bottom:2px solid var(--gold)">Target</th>
+            <th style="padding:8px 10px;text-align:right;border-bottom:2px solid var(--gold)">Actual</th>
+            <th style="padding:8px 10px;text-align:right;border-bottom:2px solid var(--gold)">%</th>
+            <th style="padding:8px 10px;text-align:right;border-bottom:2px solid var(--gold)">ร้านค้า</th>
+          </tr>
+        </thead>
+        <tbody style="color:var(--text)">
+          ${bodyHtml}
+          <tr style="background:var(--navy);color:#fff;font-weight:700">
+            <td colspan="3" style="padding:9px 10px;text-align:center">รวม</td>
+            <td style="padding:9px 10px;text-align:right">${fmtNum(totalTarget)}</td>
+            <td style="padding:9px 10px;text-align:right">${fmtNum(Math.round(totalActual))}</td>
+            <td style="padding:9px 10px;text-align:right;${totPctCl}">${totalPct!==null?fmtNum(totalPct,2)+'%':'-'}</td>
+            <td style="padding:9px 10px;text-align:right">${totalCusts}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>`;
+  });
+
+  el.innerHTML = html || '<p class="txt-muted" style="padding:16px">ไม่มีข้อมูล</p>';
+}
+
 /* ================= TABS / UI ================= */
 function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===tab));
@@ -1750,6 +1888,7 @@ function switchTab(tab) {
   document.getElementById('tab-outlets').classList.toggle('hidden', tab!=='outlets');
   document.getElementById('tab-ontop').classList.toggle('hidden', tab!=='ontop');
   document.getElementById('tab-roo').classList.toggle('hidden', tab!=='roo');
+  document.getElementById('tab-sup').classList.toggle('hidden', tab!=='sup');
   document.querySelector('.filter-bar').style.display = (tab === 'detail') ? '' : 'none';
   requestAnimationFrame(updateStickyOffsets);
 }
