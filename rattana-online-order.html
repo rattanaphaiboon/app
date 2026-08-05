@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v3.76</title>
+<title>Rattana Online Order v3.77</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -547,7 +547,7 @@ body.dark .seg-tab.on{background:var(--gold);color:var(--navy);border-color:var(
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.76</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.77</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -1155,7 +1155,7 @@ async function lineLogin(){
     const p=await liff.getProfile(); window._lineProfile=p; const uid=clean(p.userId); window._lineUid=uid;
     const hit=custByUid(uid);
     hideSpinner(); closeModal('loginModal');
-    if(hit){ currentCustomer=hit; saveSession(hit); renderAll(); goShop(); pullCart(true); startCartSync(); showToast('ยินดีต้อนรับ '+(hit.name||''),'success'); }
+    if(hit){ currentCustomer=hit; saveSession(hit); renderAll(); goShop(); pullCart(true); startCartSync(); preloadCartData(); showToast('ยินดีต้อนรับ '+(hit.name||''),'success'); }
     else { openModal('loginModal'); showToast('ยังไม่พบบัญชี LINE นี้ — ถ้าเคยลงทะเบียนแล้ว กรอกเบอร์เพื่อเชื่อมบัญชี หรือกดลงทะเบียนใหม่','info'); }
   }catch(e){ hideSpinner(); console.warn('LINE login error:',e); showToast('LINE: '+(e&&e.message?e.message:'เชื่อมต่อไม่สำเร็จ'),'error'); }
 }
@@ -2254,11 +2254,22 @@ async function fetchHistory(){
   }
   return [];   // backend ยังไม่เปิด getHistory / query พัง → ไม่โชว์ส่วนนี้ (ไม่พังแอป)
 }
+/* ⚡ v3.77: แคชผลลง localStorage ต่อ (ร้าน+งวด) — เปิดแอปรอบหลังได้ทันทีโดยไม่ยิงเซิร์ฟเวอร์เลย
+   ประวัติซื้อ/บาร์โค้ดที่เคยซื้อ เปลี่ยนเดือนละครั้ง (backend เปลี่ยนงวดทุกวันที่ 5) → เก็บ 12 ชม. พอ
+   ผลพลอยได้: ลดจำนวน execution ของ Apps Script (เดิมทุกคนที่เปิดตะกร้า = ยิง 2 ครั้ง) */
+function _pcGet(k){ try{ const r=JSON.parse(localStorage.getItem(k)||'null'); if(r&&r.exp>Date.now()) return r.v; }catch(e){} return null; }
+function _pcSet(k,v){ try{ lsSet(k, JSON.stringify({v, exp:Date.now()+12*3600e3})); }catch(e){} }
+let _histInflight=null, _boughtInflight=null, _drecoInflight=null;
 async function loadHistory(){
   const code=clean(currentCustomer&&currentCustomer.shopCode);
   if(!currentCustomer||!code){ _history=[]; _historyShop=''; return; }
   if(_historyShop===code && _history!==null) return;          // โหลดแล้ว
-  _historyShop=code; _history=null; _history=await fetchHistory();
+  if(_histInflight && _historyShop===code) return _histInflight;   // กำลังโหลดอยู่ → รออันเดิม (กันยิงซ้ำตอน preload ชนกับกดเข้าตะกร้า)
+  const ck='rop_hist_'+code, hit=_pcGet(ck);
+  if(hit){ _historyShop=code; _history=hit; return; }         // มีในเครื่อง → ทันที ไม่ต้องรอเน็ต
+  _historyShop=code; _history=null;
+  _histInflight=(async()=>{ try{ const v=await fetchHistory(); _history=v; if(v&&v.length) _pcSet(ck,v); } finally { _histInflight=null; } })();
+  return _histInflight;
 }
 /* บาร์โค้ดที่ร้านเคยซื้อ "ทั้งหมด" (BQ ไม่จำกัด top 60) → Set : ใช้ตัดออกจาก reco อำเภอ ให้ครบ
    backward-safe: backend เก่าไม่มี action getBoughtCodes → เซ็ตว่าง = ตัดด้วย _history (top 60) อย่างเดียวเหมือนเดิม */
@@ -2266,9 +2277,19 @@ async function loadBought(){
   const code=clean(currentCustomer&&currentCustomer.shopCode);
   if(!currentCustomer||!code){ _bought=new Set(); _boughtShop=''; return; }
   if(_boughtShop===code && _bought!==null) return;
+  if(_boughtInflight && _boughtShop===code) return _boughtInflight;
+  const ck='rop_bought_'+code, hit=_pcGet(ck);
+  if(hit){ _boughtShop=code; _bought=new Set(hit); return; }   // v3.77: มีในเครื่อง → ทันที
   _boughtShop=code; _bought=null;
-  const r=await jsonpGet({action:'getBoughtCodes',code},15000);
-  _bought=(r&&r.ok&&Array.isArray(r.codes)) ? new Set(r.codes.map(c=>clean(c))) : new Set();
+  _boughtInflight=(async()=>{
+    try{
+      const r=await jsonpGet({action:'getBoughtCodes',code},15000);
+      const arr=(r&&r.ok&&Array.isArray(r.codes)) ? r.codes.map(c=>clean(c)) : [];
+      _bought=new Set(arr);
+      if(arr.length) _pcSet(ck,arr);
+    } finally { _boughtInflight=null; }
+  })();
+  return _boughtInflight;
 }
 function inCartByName(name){ name=clean(name); return Object.values(cart).some(i=>clean(i.name)===name); }
 function renderCartHistory(){
@@ -2336,7 +2357,21 @@ async function loadDistrictReco(){
   const amphoe=_drecoNorm(custDistrict(currentCustomer));
   if(!currentCustomer||!amphoe){ _dreco=[]; _drecoAmphoe=''; return; }
   if(_drecoAmphoe===amphoe && _dreco!==null) return;   // โหลดแล้วต่ออำเภอนี้ (memo ต่อ session)
-  _drecoAmphoe=amphoe; _dreco=null; _dreco=await fetchDrecoWhere("A = '"+amphoe.replace(/'/g,'')+"'");
+  if(_drecoInflight && _drecoAmphoe===amphoe) return _drecoInflight;   // v3.77: กำลังโหลดอยู่ → รออันเดิม
+  _drecoAmphoe=amphoe; _dreco=null;
+  _drecoInflight=(async()=>{ try{ _dreco=await fetchDrecoWhere("A = '"+amphoe.replace(/'/g,'')+"'"); } finally { _drecoInflight=null; } })();
+  return _drecoInflight;
+}
+/* ⚡ v3.77: โหลด "เคยซื้อ + ขายดีในอำเภอ" ไว้ล่วงหน้าตั้งแต่เข้าแอป/ล็อกอิน
+   เดิมเริ่มโหลดตอนกดเข้าตะกร้า (goCart) → ลูกค้าต้องนั่งรอหน้า "⏳ กำลังโหลด..."
+   ตอนนี้ยิงเบื้องหลังทันทีที่รู้ว่าเป็นร้านไหน → กดเข้าตะกร้าแล้วเห็นเลย
+   ยิงแบบไม่บล็อกหน้าจอ · ถ้าเผอิญอยู่หน้าตะกร้าอยู่แล้วก็วาดใหม่ให้เอง */
+function preloadCartData(){
+  if(!currentCustomer) return;
+  const paint=()=>{ try{ const v=document.getElementById('viewCart'); if(v&&v.classList.contains('active')){ renderCartHistory(); renderDistrictReco(); } }catch(e){} };
+  try{ loadHistory().then(paint,()=>{}); }catch(e){}
+  try{ loadBought().then(paint,()=>{}); }catch(e){}
+  try{ loadDistrictReco().then(paint,()=>{}); }catch(e){}
 }
 /* เสริม: ขายดี "ทั้งจังหวัด" (รวมทุกอำเภอในจังหวัด → รวมยอดต่อสินค้า) — โหลด lazy เฉพาะเมื่ออำเภอเหลือ <5 */
 async function loadDistrictProv(){
@@ -2363,7 +2398,11 @@ function renderDistrictReco(){
   if(!currentCustomer){ box.innerHTML=''; return; }
   const amphoe=_drecoNorm(custDistrict(currentCustomer));
   if(!amphoe){ box.innerHTML=''; return; }                                     // ร้านไม่มีอำเภอ → เงียบ
-  if(_dreco===null || _history===null || _bought===null){ box.innerHTML='<div class="hist-load">⏳ กำลังโหลดสินค้าแนะนำจากอำเภอ...</div>'; return; }
+  /* v3.77: รอแค่ 2 อย่างที่จำเป็น (ขายดีในอำเภอ + เคยซื้อ) — ไม่รอ _bought แล้ว
+     _bought (บาร์โค้ดเคยซื้อทั้งหมด) ใช้แค่ "กรองให้ละเอียดขึ้น" และบรรทัดล่างกัน null ไว้แล้ว
+     เดิมรอครบทั้ง 3 → ถ้า getBoughtCodes ช้า/ว่าง ลูกค้าค้างหน้า "กำลังโหลด" ทั้งที่ข้อมูลพร้อมแล้ว
+     พอ _bought มาถึงทีหลัง preload จะสั่งวาดใหม่ให้เอง (รายการจะกรองละเอียดขึ้น) */
+  if(_dreco===null || _history===null){ box.innerHTML='<div class="hist-load">⏳ กำลังโหลดสินค้าแนะนำจากอำเภอ...</div>'; return; }
   const visSet=new Set(visibleProducts());
   const exclP=new Set();                                                       // ตัดของที่ร้านเคยซื้อ "ทั้งหมด" (BQ ไม่จำกัด top 60) + ในตะกร้า → ไม่ซ้ำ "เคยซื้อ"
   (_history||[]).forEach(x=>{ const p=findProduct(clean(x.product_name))||((barcodeEntry(clean(x.barcode))||{}).p); if(p) exclP.add(p); });
@@ -2623,7 +2662,7 @@ async function loginByPhone(){
     currentCustomer=makeSpecialCustomer(sp, ph);
     if(window._lineUid) linkSpecialUidToServer(ph, window._lineUid);   // เข้าผ่าน LINE → เก็บ User ID ลงชีทร้านพิเศษ + ผู้ติดตาม
     saveSession(currentCustomer); closeModal('loginModal');
-    renderAll(); goShop(); pullCart(true); startCartSync();   // sync ตะกร้าร่วม (draft "รออนุมัติ" ในชีท Order ร้านส่ง) กันออเดอร์หาย
+    renderAll(); goShop(); pullCart(true); startCartSync(); preloadCartData();   // sync ตะกร้าร่วม (draft "รออนุมัติ" ในชีท Order ร้านส่ง) กันออเดอร์หาย
     showToast('ยินดีต้อนรับ (ร้านส่ง) '+currentCustomer.name,'success');
     return;
   }
@@ -2632,7 +2671,7 @@ async function loginByPhone(){
   // เครื่องนี้เพิ่งเข้าผ่านไลน์แต่ยังไม่ได้จับ uid → ลองดึงจาก LIFF ก่อน เพื่อผูกไลน์เครื่องที่ 2,3.. (เก็บช่อง "User ID เพิ่ม")
   if(!window._lineUid){ try{ const u=await tryLiff(); if(u) window._lineUid=u; }catch(e){} }
   currentCustomer=hit; ensureUidLinked(hit); saveSession(hit); closeModal('loginModal');
-  renderAll(); goShop(); pullCart(true); startCartSync(); showToast('ยินดีต้อนรับ '+(hit.name||''),'success');
+  renderAll(); goShop(); pullCart(true); startCartSync(); preloadCartData(); showToast('ยินดีต้อนรับ '+(hit.name||''),'success');
 }
 async function linkUidToServer(phone,uid){
   if(!phone||!uid) return;
@@ -3070,7 +3109,7 @@ async function loadAll(silent){
     await resolveLogin();
     ensureUidLinked(currentCustomer);   // เผื่อมี LINE uid ใหม่ที่ยังไม่ผูกกับร้าน
     renderAll();
-    pullCart(true); startCartSync();    // ซิงค์ตะกร้าร่วมของร้าน
+    pullCart(true); startCartSync(); preloadCartData();    // ซิงค์ตะกร้าร่วมของร้าน
   }catch(e){ console.error(e); if(!haveCache) showToast('โหลดข้อมูลไม่สำเร็จ ตรวจสอบอินเทอร์เน็ต','error'); }
   finally{ if(!silent) hideSpinner(); }
 }
