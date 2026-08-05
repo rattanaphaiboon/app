@@ -3378,7 +3378,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '8.6';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '8.7';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -4247,7 +4247,26 @@ async function apiCheckin(logData) {
     retroactive: !!logData.retroactive,
     reason: logData.retroactive?.reason || '',
     photo: logData.photo || '',
+    clientId: String(logData.id || ''),   // v8.7: กันบันทึกซ้ำตอน re-sync (backend dedupe)
+    clientTs: logData.ts || '',           // v8.7: เวลาสแกนจริง (backend ใช้แทน now ตอน re-sync)
   });
+}
+
+/* v8.7 — ดัน log ที่ sync ไม่สำเร็จ ขึ้น Sheet ซ้ำตอนเปิดแอป (idempotent ด้วย clientId) */
+async function resyncPendingLogs() {
+  if (!config.appsScriptUrl) return;
+  const cutoff = Date.now() - 3 * 24 * 3600 * 1000;   // ย้อนหลังไม่เกิน 3 วัน
+  const pending = logs.filter(l =>
+    !l.remote && l.empId && l.type && l.ts &&
+    new Date(l.ts).getTime() > cutoff
+  ).slice(0, 20);
+  if (!pending.length) return;
+  let ok = 0;
+  for (const l of pending) {
+    try { await apiCheckin(l); l.remote = true; ok++; }
+    catch (_) { /* ยังส่งไม่ได้ — ไว้รอบหน้า */ }
+  }
+  if (ok) { saveLogs(); console.log('[resync] ดันขึ้น Sheet ' + ok + '/' + pending.length + ' รายการ'); }
 }
 
 /* Read FaceData via Apps Script — ใส่ idToken ใน query string */
@@ -4654,25 +4673,37 @@ function saveSharedSession(userData) {
 /* ============================================================
    FACE-API
    ============================================================ */
-async function loadFaceModels() {
+async function loadFaceModels(silent) {
   if (faceapiReady) return true;
-  if (typeof faceapi === 'undefined') { setFaceModelStatus('❌ face-api ไม่พร้อม', 'err'); return false; }
+  if (typeof faceapi === 'undefined') { if(!silent) setFaceModelStatus('❌ face-api ไม่พร้อม', 'err'); return false; }
   try {
-    setFaceModelStatus('⏳ โหลดโมเดล...', 'pending');
-    showSpinner('กำลังโหลดโมเดลสแกนใบหน้า...', true);
-    setProgress(10);
-    await faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODELS_URL); setProgress(40);
-    await faceapi.nets.faceLandmark68Net.loadFromUri(FACE_MODELS_URL); setProgress(70);
-    await faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODELS_URL); setProgress(100);
+    if(!silent){ setFaceModelStatus('⏳ โหลดโมเดล...', 'pending'); showSpinner('กำลังโหลดโมเดลสแกนใบหน้า...', true); setProgress(10); }
+    await faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODELS_URL); if(!silent) setProgress(40);
+    await faceapi.nets.faceLandmark68Net.loadFromUri(FACE_MODELS_URL); if(!silent) setProgress(70);
+    await faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODELS_URL); if(!silent) setProgress(100);
     faceapiReady = true;
     setFaceModelStatus('✓ พร้อม', 'ok');
     return true;
   } catch (e) {
     console.error(e);
-    setFaceModelStatus('⚠ โหลดโมเดลไม่ได้', 'warn');
-    toast('โหลดโมเดลไม่ได้ — ใช้แค่ถ่ายรูป', 'warning');
+    if(!silent){ setFaceModelStatus('⚠ โหลดโมเดลไม่ได้', 'warn'); toast('โหลดโมเดลไม่ได้ — บันทึกได้แต่ไม่มีใบหน้า', 'warning'); }
     return false;
-  } finally { hideSpinner(); }
+  } finally { if(!silent) hideSpinner(); }
+}
+
+/* v8.7 — โมเดลโหลดไม่สำเร็จ → retry เงียบๆ ทุก 6 วิ ระหว่างจอสแกนเปิดอยู่ */
+let _faceLoading = false, _faceRetryTimer = null;
+function retryFaceModels() {
+  if (faceapiReady || _faceLoading || _faceRetryTimer) return;
+  _faceRetryTimer = setTimeout(async () => {
+    _faceRetryTimer = null;
+    if (faceapiReady || !empStream) return;
+    _faceLoading = true;
+    const ok = await loadFaceModels(true);   // silent
+    _faceLoading = false;
+    if (ok && empStream) { startEmpMatching(); }
+    evaluateAction();
+  }, 6000);
 }
 function setFaceModelStatus(text, kind) {
   const el = document.getElementById('faceModelStatus'); if (!el) return;
@@ -5207,13 +5238,25 @@ function evaluateAction() {
   document.getElementById('chkTime').textContent = new Date().toLocaleTimeString('th-TH');
   if (lineTime) { lineTime.classList.remove('pending'); lineTime.classList.add('ok'); }
 
+  // v8.7: โมเดลใบหน้าโหลดไม่ได้ → เตือนชัด (ยังบันทึกได้ แต่บอกว่าไม่มีใบหน้า) + retry เงียบๆ
+  const faceDown = !faceapiReady;
+  if (faceDown) {
+    const chkFace = document.getElementById('chkFace');
+    const lineFace = document.getElementById('lineFace');
+    if (chkFace) chkFace.textContent = '⚠ ระบบใบหน้าไม่พร้อม';
+    if (lineFace) { lineFace.classList.remove('ok','pending','err'); lineFace.classList.add('warn'); }
+    retryFaceModels();
+  }
+
   const faceOk = !faceapiReady || !registeredDescriptor || lastFaceMatch?.ok;
   const ready = reasons.length === 0;
 
   // ปุ่มหลัก
   txt.textContent = next==='in' ? 'บันทึกเข้างาน' : 'บันทึกออกงาน';
   btn.disabled = !ready;
-  sub.textContent = ready ? '✓ พร้อมบันทึก · กดเพื่อยืนยัน' : reasons[0];
+  sub.textContent = !ready ? reasons[0]
+    : faceDown ? '⚠ บันทึกแบบไม่มีใบหน้า (ระบบใบหน้าไม่พร้อม) · กดเพื่อยืนยัน'
+    : '✓ พร้อมบันทึก · กดเพื่อยืนยัน';
 
   // ปุ่ม Off-site check-out (เฉพาะ check-out นอกพื้นที่ + ใบหน้าผ่าน)
   const offSiteBtn = document.getElementById('btnOffSite');
@@ -5271,6 +5314,7 @@ async function doSelfCheckIn() {
 
   // 1) Save local first (offline backup)
   saveLog(logData);
+  const saved = logs[0] || logData;   // v8.7: อ้างถึง log ที่บันทึก (มี id+ts) เพื่อ mark remote + re-sync
 
   // v7.4: สแกนเสร็จ → ปิดจอสแกน กลับหน้าแรกทันที (ไม่ต้องรอเน็ต) แล้วค่อย sync เบื้องหลัง
   const timeStr = new Date().toLocaleTimeString('th-TH', { hour:'2-digit', minute:'2-digit' });
@@ -5283,7 +5327,7 @@ async function doSelfCheckIn() {
   let syncError = '';
   if (config.appsScriptUrl) {
     try {
-      await apiCheckin(logData);
+      await apiCheckin(saved);
       synced = true;
     } catch (e) {
       syncError = e.message || String(e);
@@ -5291,7 +5335,7 @@ async function doSelfCheckIn() {
       // v2.2: retry 1 ครั้งหลัง 2 วิ (กรณี network blip)
       try {
         await new Promise(r => setTimeout(r, 2000));
-        await apiCheckin(logData);
+        await apiCheckin(saved);
         synced = true;
         syncError = '';
       } catch (e2) {
@@ -5300,6 +5344,7 @@ async function doSelfCheckIn() {
       }
     }
   }
+  if (synced) { saved.remote = true; saveLogs(); }   // v8.7: mark synced กัน re-sync ซ้ำ
 
   // Toast แสดง error จริง ไม่ใช่ generic message
   const baseMsg = (type === 'out' ? '✓ บันทึกออกงาน' : '✓ บันทึกเข้างาน') + ' ' + timeStr + ' น.';
@@ -7444,6 +7489,8 @@ function initApp() {
   // Background: load all sheets (FaceData, Settings, Locations, etc.)
   setTimeout(async () => {
     await loadAllSheets();
+    // v8.7: ดัน log ที่ค้าง (sync ไม่สำเร็จรอบก่อน) ขึ้น Sheet ก่อน sync กลับ
+    try { await resyncPendingLogs(); } catch(_) {}
     // v1.4: Sync local logs กับ Sheet เพื่อให้ next-action ถูก (Sheet = source of truth)
     await syncLogsFromSheet();
     // Re-build team with fresh face data
