@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.521</title>
+<title>Rattana Sales — v8.522</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5599,7 +5599,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.521 · 2026-08-05</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.522 · 2026-08-05</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5610,7 +5610,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.521</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.522</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -7981,6 +7981,15 @@ function hydrateShopsFromSheet() {
   if (typeof _ensureSkuSwap === 'function') {
     try {
       _ensureSkuSwap().then(function () {
+        try { if (typeof renderProductList === 'function' && document.getElementById('productList')) renderProductList(_productSearchQuery || ''); } catch (e) {}
+      }).catch(function () {});
+    } catch (e) {}
+  }
+  // v8.522: preload "ปิดสินค้า" — ต้องมาก่อนเซลเริ่มค้น ไม่งั้นสินค้าที่สั่งปิดยังโผล่ให้กดคีย์
+  if (typeof _ensureSkuClosed === 'function') {
+    try {
+      _ensureSkuClosed().then(function (idx) {
+        if (!idx || !idx.size) return;
         try { if (typeof renderProductList === 'function' && document.getElementById('productList')) renderProductList(_productSearchQuery || ''); } catch (e) {}
       }).catch(function () {});
     } catch (e) {}
@@ -10713,6 +10722,61 @@ function _skuSwapAliasBadgeHtml(p) {
     + '<div style="font-weight:600;opacity:.85;margin-top:2px">เช็คหน่วยกับราคาก่อนคีย์ — อาจคนละหน่วยกับตัวเดิม</div></div>';
 }
 window._skuSwapAliasBadgeHtml = _skuSwapAliasBadgeHtml;
+
+/* ═══ v8.522 (Surat 5/8): ปิดสินค้า — จัดซื้อสั่งไม่ให้ขาย/ไม่ให้ค้นเจอ ═══
+   ชีท: Purchase Actions tab "ปิดสินค้า" · คอลัมน์: รหัสสินค้า | ชื่อสินค้า | Warehouses
+   - รหัสสินค้า = บาร์โค้ดหน่วยไหนก็ได้ (EA/PA/BP/CS) → ปิดสินค้าตัวนั้นทั้งตัว ทุกหน่วย
+   - Warehouses ว่าง = ปิดทุกคลัง · "W1,W4" = ปิดเฉพาะเซลคลัง W1/W4 (คลังอื่นขายได้ปกติ)
+   - ปิดแค่ทางที่จะ "ขายใหม่": ลิสต์ · ค้นหา · สแกน · เปิดการ์ดคีย์ — ❌ ไม่แตะ CN/ประวัติ/ออเดอร์เดิม (ร้านมีของค้างต้องคืนได้)
+   ⚠️ ไม่มีแท็บ/โหลดไม่ได้ = ไม่ปิดอะไรเลย (ขายได้ปกติ) แต่ถ้าเจอแถวแล้วไม่รู้คลังของเซล = ปิดไว้ก่อน */
+window._skuClosedIdx = null;
+function _clCode(v) {
+  let s = String(v == null ? '' : v).trim();
+  if (!s) return '';
+  s = s.replace(/[,\s]/g, '');
+  if (/e\+?\d+$/i.test(s)) { const n = Number(s); if (isFinite(n)) s = n.toFixed(0); }   // ชีทเก็บรหัสเป็นตัวเลข → gviz อาจคืน 1.88e+13
+  return s.replace(/\.0+$/, '');
+}
+async function _ensureSkuClosed() {
+  if (window._skuClosedIdx) return window._skuClosedIdx;
+  const idx = new Map();
+  try {
+    const rows = await fetchWithCache('skuClosed', function () { return fetchSheet(CONFIG.purchaseSheetId, 'ปิดสินค้า'); }, 30 * 60 * 1000);
+    (rows || []).forEach(function (r) {
+      const code = _clCode(r['รหัสสินค้า']);
+      if (!code) return;
+      const wh = String(r['Warehouses'] || '').trim();
+      const whs = (!wh || wh === '*' || wh.toUpperCase() === 'ALL') ? null
+        : wh.split(/[,|/]/).map(function (x) { return x.trim().toUpperCase(); }).filter(Boolean);
+      const prev = idx.get(code);
+      if (!prev) { idx.set(code, { whs: whs, name: String(r['ชื่อสินค้า'] || '').trim() }); return; }
+      if (!prev.whs || !whs) { prev.whs = null; return; }                                  // แถวไหนสั่งปิดทุกคลัง = ชนะ
+      whs.forEach(function (w) { if (prev.whs.indexOf(w) < 0) prev.whs.push(w); });        // หลายแถวรหัสเดียวกัน = รวมคลัง
+    });
+  } catch (e) { console.warn('skuClosed:', e && e.message); }
+  window._skuClosedIdx = idx;
+  return idx;
+}
+window._ensureSkuClosed = _ensureSkuClosed;
+// สินค้านี้ถูกปิดสำหรับคลังของเซลคนนี้ไหม — ใส่บาร์โค้ดหน่วยไหนในชีทก็เจอ (เทียบครบ 4 หน่วย + เผื่อ 0 นำหน้า)
+function _isSkuClosed(p) {
+  const idx = window._skuClosedIdx;
+  if (!idx || !idx.size || !p) return false;
+  const sheet = (p && p._sheet) ? p._sheet : p;
+  const cols = ['CODE EA', 'CODE PA', 'CODE BP', 'CODE CS'];
+  let hit = null;
+  for (let i = 0; i < cols.length && !hit; i++) {
+    const k = _clCode(sheet[cols[i]]);
+    if (!k) continue;
+    hit = idx.get(k) || idx.get(k.replace(/^0+/, '')) || null;
+  }
+  if (!hit) return false;
+  if (!hit.whs || !hit.whs.length) return true;                        // ไม่ระบุคลัง = ปิดทุกคลัง
+  const myWh = String((currentUser && currentUser.warehouse) || SALESMAN.warehouseId || '').trim().toUpperCase();
+  if (!myWh) return true;                                              // ไม่รู้คลัง = ปิดไว้ก่อน (คำสั่งปิดขายต้อง fail-safe)
+  return hit.whs.indexOf(myWh) >= 0;
+}
+window._isSkuClosed = _isSkuClosed;
 
 function productSearchText(p) {
   if (p._searchText) return p._searchText;  // memoized
@@ -32786,6 +32850,11 @@ function renderProductList(filterText = '') {
     products = products.filter(function (p) { try { return !_skuSwapHidden(p); } catch (e) { return true; } });
   }
 
+  // v8.522: ปิดสินค้า (แท็บ "ปิดสินค้า" ใน Purchase Actions) — หายจากลิสต์ทุกชิป + ค้นหาไม่เจอ
+  if (window._skuClosedIdx && window._skuClosedIdx.size) {
+    products = products.filter(function (p) { try { return !_isSkuClosed(p); } catch (e) { return true; } });
+  }
+
   // v8.370: ปุ่ม "📍 มีของ <คลัง>" — กรองชั้นสุดท้าย AND ทับชิปที่เลือกอยู่ทุกตัวโดยอัตโนมัติ
   //   ยกเว้น nonMoving: branch นั้นใช้ _productWhSel ไปแล้ว และ "ไม่เคลื่อนไหว" อาจสต็อก 0 ได้ → กรองซ้ำจะเหลือ 0
   if (_productWhSel && _productActiveFilter !== 'nonMoving') {
@@ -33615,6 +33684,14 @@ function openProductCardInModal(productId, fromParentId) {
     String(x['PRODUCT NAME']||'').trim() === id
   );
   if (!p) { showToast('ไม่พบสินค้า', 'warning'); return; }
+  /* v8.522: ตาข่ายชั้นสุดท้ายของ "ปิดสินค้า" — ทุกทางที่จะเปิดการ์ดคีย์ (ลิสต์ · แนะนำ · ประวัติซื้อ · BQ · เสนอราคา) ผ่านตรงนี้
+     ยกเว้นตัวที่อยู่ในตะกร้าแล้ว (ใส่ไว้ก่อนจัดซื้อสั่งปิด) — ต้องเปิดได้ ไม่งั้นเซลแก้/ลบออกจากตะกร้าไม่ได้ = ติดกับ */
+  if (typeof _isSkuClosed === 'function' && _isSkuClosed(p)) {
+    const _inCart = (typeof cart !== 'undefined' && Array.isArray(cart)) && cart.some(function (c) {
+      return c && String(c.productId || '').trim() === id && (!currentShopId || c.shopId === currentShopId);
+    });
+    if (!_inCart) { showToast('สินค้านี้ปิดการขายแล้ว — คีย์ไม่ได้', 'warning'); return; }
+  }
   // v8.293: nav-stack — เปิดจาก "สินค้าใกล้เคียง" (fromParentId) = drill-in → จำ parent ไว้ · ยืนยัน/ปิด แล้วเด้งกลับ popup เดิม ไม่ออกหน้ารวม · เปิดสดจากกริด/ค้นหา (ไม่มี parent · ไม่ใช่ back) = ล้าง stack
   window._modalNavStack = window._modalNavStack || [];
   if (fromParentId) {
@@ -39646,7 +39723,11 @@ function applyPriceFilter(products) {
 function renderPriceList() { renderProductList(_productSearchQuery); }
 
 function getDefaultProductList() {
-  const all = SHEET_DATA.products || [];
+  // v8.522: ตัดสินค้าที่จัดซื้อสั่งปิดออกก่อนจัดอันดับ — ไม่งั้น Top 200 โดนตัวที่ขายไม่ได้กินที่
+  const _allRaw = SHEET_DATA.products || [];
+  const all = (window._skuClosedIdx && window._skuClosedIdx.size)
+    ? _allRaw.filter(function (p) { try { return !_isSkuClosed(p); } catch (e) { return true; } })
+    : _allRaw;
   if (all.length === 0) return [];
 
   const wh = SALESMAN.warehouseId || 'W1';
@@ -42312,6 +42393,12 @@ function onBarcodeFound(code) {
     const _sw = _skuSwapEntry(product);
     const _nw = _sw && (SHEET_DATA.products || []).find(p => String(p['CODE EA'] || '').trim() === _sw.newCode);
     if (_nw) { showToast('🔄 รหัส ' + trimmed + ' เปลี่ยนเป็น "' + (_sw.newName || _sw.newCode) + '" แล้ว — พาไปตัวใหม่ให้', 'info'); product = _nw; }
+  }
+
+  // v8.522: สแกนเจอสินค้าที่จัดซื้อสั่งปิด → บอกตรงๆ ไม่ต้องพาไปค้นหา (การ์ดโดนกรองออกอยู่แล้ว = จอเงียบ เซลงง)
+  if (typeof _isSkuClosed === 'function' && _isSkuClosed(product)) {
+    showToast('ปิดการขายแล้ว: ' + String(product['PRODUCT NAME'] || trimmed) + ' — จัดซื้อสั่งปิดสินค้านี้', 'warning');
+    return;
   }
   const productName = String(product['PRODUCT NAME'] || '').trim();
   console.log('[scan] matched:', productName);
