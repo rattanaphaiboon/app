@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v5.24</title>
+<title>Rattana ยอดหนี้คงค้าง v5.25</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -776,7 +776,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v5.24</span>
+      <span class="app-ver">v5.25</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -1406,7 +1406,7 @@ async function loadFromSheets(sheetId, sheetName, captureD = false){
 
   // Fetch with retry: gviz endpoint sometimes returns 503 / HTML redirect on cold first hit.
   // Retry once with a small delay before failing.
-  const FETCH_TIMEOUT = 12000;
+  const FETCH_TIMEOUT = 30000;   // v5.25: SQL Data 6,300+ แถว เดิม 12 วิ ไม่พอ พอ timeout = allRows ว่าง = การ์ดขายเชื่อไม่มีวงเงิน/เครดิต/ธง
   const MAX_ATTEMPTS = 2;
   let res, lastErr, text;
 
@@ -1855,6 +1855,7 @@ async function loadPaymentLog(){
     });
     console.log('Payment Log loaded:', pendingDocNos.size, 'pending,', partialDocNos.size, 'partial');
     if (viewRows.length > 0) renderTable();
+    if (creditLoaded) renderCreditList();   // v5.25: สลิปมาถึงทีหลัง → การ์ดขายเชื่อต้องคิดยอดสุทธิใหม่
   } catch(e){
     console.error('Payment Log load failed:', e.message, e);
   }
@@ -3174,6 +3175,9 @@ function crDebtMap(){
 }
 // ข้อมูลหนี้ของใบนี้ — ใช้ของสดจาก SQL Data ก่อน ถ้าไม่เจอค่อยใช้สแนปช็อตตอนซุปอนุมัติ
 function crDebtInfo(a){
+  if (!(allRows || []).length) return { loading:true, live:false, amount:crNum(a.debtAmount), net:crNum(a.debtAmount),
+                                        paid:0, bills:crNum(a.overdueBills), paidBills:0, aging:crNum(a.overdueDays),
+                                        credit:null, limit:0, flag:'' };
   const d = crDebtMap()[a.shopCode];
   if (d) return { live:true, amount:d.amount, net:d.net, paid:d.paid, bills:d.bills, paidBills:d.paidBills,
                   aging:d.aging, credit:d.credit, limit:d.limit, flag:d.flag };
@@ -3194,11 +3198,27 @@ function crSearchable(a){
           a.orderCount ? '' : 'ยังไม่มีออเดอร์', ...names].join(' ').toLowerCase();
 }
 
+const CR_CACHE_KEY = 'rattanaCreditBills';
+const CR_CACHE_TTL = 5 * 60 * 1000;
+
 async function loadCreditBills(force){
   if (creditLoading) return;
   if (creditLoaded && !force) { renderCreditList(); return; }
+  // v5.25: หลังบ้าน GAS ใช้เวลา ~10 วิ (redirect + cold start) แก้ที่ฝั่งนี้ไม่ได้
+  //   → โชว์ของที่ cache ไว้ก่อนทันที แล้วค่อยดึงของสดมาทับเงียบๆ จอจะไม่ค้างว่าง
+  if (!creditLoaded && !force){
+    try {
+      const c = JSON.parse(localStorage.getItem(CR_CACHE_KEY) || 'null');
+      if (c && Array.isArray(c.rows) && (Date.now() - c.ts) < CR_CACHE_TTL){
+        creditRows = c.rows.map(a => ({ ...a, _s: crSearchable(a) }));
+        creditLoaded = true;
+        crApplyDefaultDay();
+        renderCreditChips(); renderCreditList(); updateCreditBadge();
+      }
+    } catch(e){}
+  }
   creditLoading = true;
-  if ($('crCount')) $('crCount').textContent = 'กำลังโหลด...';
+  if ($('crCount') && !creditRows.length) $('crCount').textContent = 'กำลังโหลด...';
   try {
     const res = await fetch(CONFIG.salesScriptUrl, {
       method: 'POST',
@@ -3210,17 +3230,17 @@ async function loadCreditBills(force){
     if (!data || data.ok === false) throw new Error(data && data.error ? data.error : 'หลังบ้านตอบไม่สำเร็จ');
     creditRows = (data.rows || []).map(a => ({ ...a, _s: crSearchable(a) }));
     creditLoaded = true;
-    if (!crDayInit){                       // เปิดมาครั้งแรก = โฟกัสของวันนี้ก่อน
-      crDayInit = true;
-      const today = new Date().toLocaleDateString('sv-SE').replace(/-/g, '/');   // yyyy/MM/dd ตามเครื่อง (Asia/Bangkok)
-      const days = new Set(creditRows.flatMap(a => (a.orders || []).map(o => o.day)));
-      crDay = days.has(today) ? today : '';
-    }
+    try { localStorage.setItem(CR_CACHE_KEY, JSON.stringify({ ts: Date.now(), rows: data.rows || [] })); } catch(e){}
+    crApplyDefaultDay();
   } catch(e){
-    creditRows = [];
-    $('crList').innerHTML = `<div class="match-empty">โหลดไม่สำเร็จ: ${escapeHtml(e.message)}</div>`;
-    $('crCount').textContent = 'โหลดไม่สำเร็จ';
     creditLoading = false;
+    if (!creditRows.length){          // ไม่มีของเก่าให้ดู ค่อยแจ้ง error เต็มจอ
+      $('crList').innerHTML = `<div class="match-empty">โหลดไม่สำเร็จ: ${escapeHtml(e.message)}</div>`;
+      $('crCount').textContent = 'โหลดไม่สำเร็จ';
+    } else {
+      showToast('ดึงข้อมูลขายเชื่อล่าสุดไม่สำเร็จ — แสดงของที่โหลดไว้ก่อนหน้า', 'warning');
+      renderCreditList();
+    }
     return;
   }
   creditLoading = false;
@@ -3256,6 +3276,15 @@ function renderCreditChips(){
        + days.map(d => `<button class="dcr-chip ${crDay === d ? 'on' : ''}" onclick="crSetDay('${d}')">${d === _today ? 'วันนี้ ' : ''}${escapeHtml(crShortTs(d))}<span class="n">${cnt(d)}</span></button>`).join('') : '');
 }
 // ชิป 2 ตัวเป็นอิสระต่อกัน — กดตัวหนึ่งห้ามไปรีเซ็ตอีกตัว (บั๊คเดิม: กดคีย์ออเดอร์แล้ว วันที่เด้งกลับเป็นทุกวัน)
+// เปิดมาครั้งแรก = โฟกัสของวันนี้ก่อน (ถ้าวันนี้ยังไม่มีออเดอร์ ตกเป็นทุกวัน จะได้ไม่เจอจอว่าง)
+function crApplyDefaultDay(){
+  if (crDayInit) return;
+  crDayInit = true;
+  const today = new Date().toLocaleDateString('sv-SE').replace(/-/g, '/');   // yyyy/MM/dd ตามเครื่อง
+  const days = new Set(creditRows.flatMap(a => (a.orders || []).map(o => o.day)));
+  crDay = days.has(today) ? today : '';
+}
+
 function crToggleKeyed(){ crOnlyKeyed = !crOnlyKeyed; renderCreditChips(); renderCreditList(); }
 function crSetDay(d){ crDay = d; renderCreditChips(); renderCreditList(); }
 function crSetSt(k){ crSt = (crSt === k) ? '' : k; renderCreditChips(); renderCreditList(); }   // กดซ้ำ = ยกเลิก
@@ -3318,7 +3347,8 @@ function crCardHtml(a){
   if (overTerm)  why.push('เกินวันเครดิต');
   if (why.length) bits.push(`<span class="dcr-tag bad">ติด${why.join(' + ')}</span>`);
   if (D.flag)    bits.push(`<span class="dcr-tag warn">ธง ${escapeHtml(D.flag)}</span>`);
-  if (!D.live)   bits.push(`<span class="dcr-q">(ตัวเลข ณ วันที่ซุปอนุมัติ)</span>`);
+  if (D.loading) bits.push(`<span class="dcr-q">กำลังโหลดวงเงิน/เครดิต...</span>`);
+  else if (!D.live) bits.push(`<span class="dcr-q">(ไม่พบยอดค้างในระบบแล้ว — ตัวเลข ณ วันที่ซุปอนุมัติ)</span>`);
   const subTxt = bits.join(' · ');
   const subPlain = subTxt.replace(/<[^>]+>/g, '');
 
