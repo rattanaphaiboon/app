@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.522</title>
+<title>Rattana Sales — v8.523</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5599,7 +5599,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.522 · 2026-08-05</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.523 · 2026-08-05</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5610,7 +5610,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.522</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.523</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -9111,7 +9111,11 @@ async function refreshAll() {
   }, 90000);  // 90s for full reload (Order tab can be large)
   try {
     await cacheClear();
+    // v8.523: ตารางคุมการขาย (ปิดสินค้า · skuแทน) เก็บไว้ใน memory ด้วย — cacheClear ไม่ล้างให้ ต้องรีเซ็ตเอง ไม่งั้นค่าเก่าค้างจนกว่าจะปิดแอป
+    window._skuClosedIdx = null; window._skuSwapMap = null; window._skuSwapAlias = null;
     await loadAllSheetData();
+    try { if (typeof _ensureSkuClosed === 'function') await _ensureSkuClosed(true); } catch (e) {}
+    try { if (typeof _ensureSkuSwap === 'function') await _ensureSkuSwap(); } catch (e) {}
     if (typeof renderHomeDashboard === 'function') renderHomeDashboard();
     if (window._updateAppBadge) _updateAppBadge();   // v8.100: อัปเดตเลขบน icon หลังรีเฟรช
     showToast('✓ โหลดข้อมูลใหม่แล้ว', 'success');
@@ -10737,11 +10741,14 @@ function _clCode(v) {
   if (/e\+?\d+$/i.test(s)) { const n = Number(s); if (isFinite(n)) s = n.toFixed(0); }   // ชีทเก็บรหัสเป็นตัวเลข → gviz อาจคืน 1.88e+13
   return s.replace(/\.0+$/, '');
 }
-async function _ensureSkuClosed() {
-  if (window._skuClosedIdx) return window._skuClosedIdx;
+async function _ensureSkuClosed(force) {
+  if (window._skuClosedIdx && !force) return window._skuClosedIdx;
   const idx = new Map();
   try {
-    const rows = await fetchWithCache('skuClosed', function () { return fetchSheet(CONFIG.purchaseSheetId, 'ปิดสินค้า'); }, 30 * 60 * 1000);
+    // v8.523: cache 5 นาที (เดิม 30) — ตาราง 2-3 แถว โหลดถูกมาก · จัดซื้อแก้ชีทแล้วต้องเห็นผลเร็ว ไม่ใช่รอครึ่งชั่วโมง
+    const rows = force
+      ? await fetchSheet(CONFIG.purchaseSheetId, 'ปิดสินค้า')
+      : await fetchWithCache('skuClosed', function () { return fetchSheet(CONFIG.purchaseSheetId, 'ปิดสินค้า'); }, 5 * 60 * 1000);
     (rows || []).forEach(function (r) {
       const code = _clCode(r['รหัสสินค้า']);
       if (!code) return;
@@ -10755,9 +10762,24 @@ async function _ensureSkuClosed() {
     });
   } catch (e) { console.warn('skuClosed:', e && e.message); }
   window._skuClosedIdx = idx;
+  console.log('[skuClosed] ปิดสินค้า', idx.size, 'รายการ');
   return idx;
 }
 window._ensureSkuClosed = _ensureSkuClosed;
+/* v8.523: คลังที่ต้องเอาไปเทียบกับ "Warehouses" ในชีท — เช็คหลายชั้น ตรงชั้นไหนก็ถือว่าโดนปิด
+   เดิมดูแค่ `W` (คลังบ้าน) → คน HQ ที่ขายจริงด้วยคลังส่ง W1 (เช่นผู้บริหาร/หัวหน้า) ไม่โดนกฎ W1 เลย = ยังเห็นสินค้าที่สั่งปิด */
+function _clWhSet() {
+  const out = [];
+  const push = function (v) {
+    const s = String(v || '').trim().toUpperCase();
+    if (s && out.indexOf(s) < 0) out.push(s);
+  };
+  try { if (typeof _shipWhForShop === 'function' && typeof currentShopId !== 'undefined' && currentShopId) push(_shipWhForShop(currentShopId)); } catch (e) {}
+  try { push(currentUser && currentUser.shipFromWh); } catch (e) {}
+  try { push(currentUser && currentUser.warehouse); } catch (e) {}
+  try { push(typeof SALESMAN !== 'undefined' && SALESMAN.warehouseId); } catch (e) {}
+  return out;
+}
 // สินค้านี้ถูกปิดสำหรับคลังของเซลคนนี้ไหม — ใส่บาร์โค้ดหน่วยไหนในชีทก็เจอ (เทียบครบ 4 หน่วย + เผื่อ 0 นำหน้า)
 function _isSkuClosed(p) {
   const idx = window._skuClosedIdx;
@@ -10772,9 +10794,9 @@ function _isSkuClosed(p) {
   }
   if (!hit) return false;
   if (!hit.whs || !hit.whs.length) return true;                        // ไม่ระบุคลัง = ปิดทุกคลัง
-  const myWh = String((currentUser && currentUser.warehouse) || SALESMAN.warehouseId || '').trim().toUpperCase();
-  if (!myWh) return true;                                              // ไม่รู้คลัง = ปิดไว้ก่อน (คำสั่งปิดขายต้อง fail-safe)
-  return hit.whs.indexOf(myWh) >= 0;
+  const mine = _clWhSet();
+  if (!mine.length) return true;                                       // ไม่รู้คลังเลย = ปิดไว้ก่อน (คำสั่งปิดขายต้อง fail-safe)
+  return mine.some(function (w) { return hit.whs.indexOf(w) >= 0; });
 }
 window._isSkuClosed = _isSkuClosed;
 
