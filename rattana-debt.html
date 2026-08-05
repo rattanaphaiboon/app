@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v5.23</title>
+<title>Rattana ยอดหนี้คงค้าง v5.24</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -776,7 +776,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v5.23</span>
+      <span class="app-ver">v5.24</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -3132,35 +3132,53 @@ let crQuery       = '';
 const crExpanded  = new Set();   // reqId ที่กดดูรายการสินค้าแล้ว
 
 const CR_DECIDED = { 'บัญชีไม่อนุมัติ': 'bad', 'เปิดภายในวงเงิน': 'warn' };
+// สถานะของใบ → ป้าย/ชิป · 'รอบัญชีอนุมัติ' คือค่าที่แอปขายเขียนมาให้บัญชีตรวจ
+const CR_ST = [
+  { key:'รอบัญชีอนุมัติ', label:'รอบัญชี',        cls:'warn' },
+  { key:'อนุมัติราคา',    label:'อนุมัติ',         cls:'ok'   },
+  { key:'บัญชีไม่อนุมัติ', label:'ไม่อนุมัติ',      cls:'bad'  },
+  { key:'เปิดภายในวงเงิน', label:'เปิดภายในวงเงิน', cls:'warn' },
+];
+let crSt = '';   // ชิปสถานะที่เลือกอยู่ ('' = ทุกสถานะ)
 let crOnlyKeyed = false;   // ชิป: โชว์เฉพาะใบที่เซลคีย์ออเดอร์แล้ว
 let crDay       = '';      // ชิป: วันที่ที่คีย์ออเดอร์ ('' = ทุกวัน)
 let crDayInit   = false;   // ตั้ง default ครั้งเดียวตอนโหลดรอบแรก ห้ามไปทับที่ผู้ใช้เลือกเอง
 
 // ยอดหนี้ปัจจุบันรายร้าน — รวมจาก SQL Data ที่แท็บยอดหนี้โหลดไว้แล้ว (1 แถว = 1 ใบค้าง)
 //   ไม่ได้ไปดึงชีทเพิ่ม แค่ join ด้วยรหัสร้านในเครื่อง
-let _crDebtMap = null, _crDebtLen = -1;
+let _crDebtMap = null, _crDebtLen = '';
 function crDebtMap(){
-  if (_crDebtMap && _crDebtLen === allRows.length) return _crDebtMap;
+  const sig = (allRows || []).length + '/' + pendingDocNos.size + '/' + partialDocNos.size;
+  if (_crDebtMap && _crDebtLen === sig) return _crDebtMap;
   const m = {};
   (allRows || []).forEach(r => {
     if (!r.custCode) return;
-    const g = m[r.custCode] || (m[r.custCode] = { amount:0, bills:0, aging:0, credit:null, limit:0, flag:'', note:'' });
+    const g = m[r.custCode] || (m[r.custCode] = { amount:0, net:0, paid:0, bills:0, paidBills:0, aging:0, credit:null, limit:0, flag:'', note:'' });
+    // แนบสลิปเต็มยอดแล้ว = ถือว่าจ่ายแล้ว รอบัญชีตัดยอดใน ERP เท่านั้น
+    //   'ไม่เต็ม' (partialDocNos) ยังนับเป็นค้างอยู่ เพราะสลิปไม่ครบยอด
+    const cleared = pendingDocNos.has(r.docNo) && !partialDocNos.has(r.docNo);
     g.amount += r.amount || 0;
     g.bills++;
-    if ((r.aging || 0) > g.aging) g.aging = r.aging || 0;
+    if (cleared){ g.paid += r.amount || 0; g.paidBills++; }
+    else {
+      g.net += r.amount || 0;
+      if ((r.aging || 0) > g.aging) g.aging = r.aging || 0;   // อายุหนี้นับเฉพาะใบที่ยังไม่ได้จ่าย
+    }
     if (r.credit != null && g.credit == null) g.credit = r.credit;
     if (r.limit)  g.limit = r.limit;
     if (r.flag && !g.flag) g.flag = r.flag;
     if (r.note && !g.note) g.note = r.note;
   });
-  _crDebtLen = (allRows || []).length; _crDebtMap = m;
+  _crDebtLen = sig; _crDebtMap = m;
   return m;
 }
 // ข้อมูลหนี้ของใบนี้ — ใช้ของสดจาก SQL Data ก่อน ถ้าไม่เจอค่อยใช้สแนปช็อตตอนซุปอนุมัติ
 function crDebtInfo(a){
   const d = crDebtMap()[a.shopCode];
-  if (d) return { live:true, amount:d.amount, bills:d.bills, aging:d.aging, credit:d.credit, limit:d.limit, flag:d.flag };
-  return { live:false, amount:crNum(a.debtAmount), bills:crNum(a.overdueBills), aging:crNum(a.overdueDays), credit:null, limit:0, flag:'' };
+  if (d) return { live:true, amount:d.amount, net:d.net, paid:d.paid, bills:d.bills, paidBills:d.paidBills,
+                  aging:d.aging, credit:d.credit, limit:d.limit, flag:d.flag };
+  return { live:false, amount:crNum(a.debtAmount), net:crNum(a.debtAmount), paid:0,
+           bills:crNum(a.overdueBills), paidBills:0, aging:crNum(a.overdueDays), credit:null, limit:0, flag:'' };
 }
 // ค่าจากชีทเป็น TEXT เสมอ (HARD RULE) — อาจมาเป็น "12,345.67" → Number() ได้ NaN ถ้าไม่ล้าง comma
 const crNum = v => Number(String(v == null ? '' : v).replace(/[^\d.-]/g, '')) || 0;
@@ -3228,8 +3246,11 @@ function renderCreditChips(){
   const _today = new Date().toLocaleDateString('sv-SE').replace(/-/g, '/');
   const cnt = d => creditRows.filter(a => (a.orders || []).some(o => o.day === d)).length;
   const keyed = creditRows.filter(a => a.orderCount > 0).length;
+  const stCnt = k => creditRows.filter(a => a.orderCount > 0 && a.status === k).length;
   el.innerHTML =
     `<button class="dcr-chip ${crOnlyKeyed ? 'on' : ''}" onclick="crToggleKeyed()">คีย์ออเดอร์แล้ว<span class="n">${keyed}</span></button>`
+    + CR_ST.filter(x => stCnt(x.key) > 0).map(x =>
+        `<button class="dcr-chip ${crSt === x.key ? 'on' : ''}" onclick="crSetSt('${x.key}')">${x.label}<span class="n">${stCnt(x.key)}</span></button>`).join('')
     + (days.length ? `<span class="dcr-chiplbl">วันที่คีย์</span>
        <button class="dcr-chip ${crDay ? '' : 'on'}" onclick="crSetDay('')">ทุกวัน</button>`
        + days.map(d => `<button class="dcr-chip ${crDay === d ? 'on' : ''}" onclick="crSetDay('${d}')">${d === _today ? 'วันนี้ ' : ''}${escapeHtml(crShortTs(d))}<span class="n">${cnt(d)}</span></button>`).join('') : '');
@@ -3237,6 +3258,7 @@ function renderCreditChips(){
 // ชิป 2 ตัวเป็นอิสระต่อกัน — กดตัวหนึ่งห้ามไปรีเซ็ตอีกตัว (บั๊คเดิม: กดคีย์ออเดอร์แล้ว วันที่เด้งกลับเป็นทุกวัน)
 function crToggleKeyed(){ crOnlyKeyed = !crOnlyKeyed; renderCreditChips(); renderCreditList(); }
 function crSetDay(d){ crDay = d; renderCreditChips(); renderCreditList(); }
+function crSetSt(k){ crSt = (crSt === k) ? '' : k; renderCreditChips(); renderCreditList(); }   // กดซ้ำ = ยกเลิก
 
 function crOnSearch(){
   crQuery = ($('crSearch').value || '').trim().toLowerCase();
@@ -3246,7 +3268,7 @@ function crOnSearch(){
 function crClearSearch(){
   $('crSearch').value = '';
   crQuery = '';
-  crOnlyKeyed = false; crDay = '';        // ล้างชิปด้วย — คลิกเดียวเห็นข้อมูลครบทุกวัน
+  crOnlyKeyed = false; crDay = ''; crSt = '';   // ล้างชิปทุกตัว — คลิกเดียวเห็นข้อมูลครบทุกวัน
   $('crClear').classList.remove('on');
   renderCreditChips();
   renderCreditList();
@@ -3258,6 +3280,7 @@ function renderCreditList(){
   let rows = creditRows.filter(a => terms.every(t => a._s.includes(t)));   // หลายคำ = AND ทุกคำ
   if (crOnlyKeyed) rows = rows.filter(a => a.orderCount > 0);
   if (crDay)       rows = rows.filter(a => (a.orders || []).some(o => o.day === crDay));
+  if (crSt)        rows = rows.filter(a => a.status === crSt);
   const withOrder = rows.filter(a => a.orderCount > 0).length;
   $('crCount').textContent = rows.length
     ? `${withOrder} ใบมีออเดอร์ · รอบัญชี ${rows.filter(crPending).length} · รอเซลคีย์ ${rows.length - withOrder}`
@@ -3278,13 +3301,16 @@ function crCardHtml(a){
   // บรรทัดที่ 2 = สรุปทุกอย่างที่บัญชีต้องเห็นตอนยังไม่กาง (ค้างเท่าไร · เกินกี่วัน · ใครขาย)
   // บรรทัด 2 = เรื่องเครดิตล้วนๆ (ค้างเท่าไร กี่บิล กี่วัน · วงเงิน · วันเครดิต · ติดเพราะอะไร · ธง)
   const D = crDebtInfo(a);
-  const overLimit = D.limit > 0 && D.amount > D.limit;
-  const overTerm  = D.credit != null && D.aging > D.credit;
+  // ตัดสิน "ติด" ด้วยยอดสุทธิ (หักใบที่แนบสลิปเต็มยอดแล้ว) — ไม่งั้นร้านที่จ่ายแล้วยังขึ้นติดค้าง
+  const overLimit = D.limit > 0 && D.net > D.limit;
+  const overTerm  = D.credit != null && D.net > 0 && D.aging > D.credit;
   const bits = [];
-  if (decided)          bits.push(`<span class="dcr-tag ${decided}">${escapeHtml(a.status)}</span>`);
+  const stDef = CR_ST.find(x => x.key === a.status);
+  if (stDef && a.status !== 'อนุมัติราคา') bits.push(`<span class="dcr-tag ${stDef.cls}">${stDef.label}</span>`);
   if (D.amount)         bits.push(`<span class="dcr-hot">ค้าง ฿${fmtInt(Math.round(D.amount))}</span>`);
   if (D.bills)          bits.push(`${fmtInt(D.bills)} บิล`);
-  if (D.aging)          bits.push(`<span class="dcr-hot">ค้างนานสุด ${fmtInt(D.aging)} วัน</span>`);
+  if (D.paid > 0)       bits.push(`<span class="dcr-tag ok">แนบสลิปแล้ว ฿${fmtInt(Math.round(D.paid))} รอตัดยอด</span>`);
+  if (D.aging && D.net > 0) bits.push(`<span class="dcr-hot">ค้างนานสุด ${fmtInt(D.aging)} วัน</span>`);
   if (D.limit)          bits.push(`วงเงิน ฿${fmtInt(Math.round(D.limit))}`);
   if (D.credit != null) bits.push(`เครดิต ${fmtInt(D.credit)} วัน`);
   const why = [];
@@ -3309,9 +3335,9 @@ function crCardHtml(a){
     : `<div class="dcr-act" onclick="event.stopPropagation()">
          <select id="crSel-${escapeHtml(rq)}" onchange="crOnDecision('${escapeHtml(rq)}')">
            <option value="">${decided ? 'เปลี่ยนคำสั่ง...' : '— เลือก —'}</option>
+           <option value="approve">อนุมัติ</option>
            <option value="reject">ไม่อนุมัติ</option>
            <option value="limit">เปิดภายในวงเงิน</option>
-           ${decided ? '<option value="clear">ถอนคำสั่ง</option>' : ''}
          </select>
          <button id="crBtn-${escapeHtml(rq)}" onclick="crSubmit('${escapeHtml(rq)}')" disabled>ยืนยัน</button>
        </div>`;
@@ -3362,7 +3388,9 @@ function crRepaintCard(rq){
 
 function crOnDecision(rq){
   const v = $('crSel-' + rq).value;
-  $('crBtn-' + rq).disabled = !v;
+  const b = $('crBtn-' + rq);
+  b.disabled = !v;
+  b.style.background = (v === 'approve') ? 'var(--success)' : '';   // อนุมัติ = เขียว · บล็อก = แดง
 }
 
 async function crSubmit(rq){
@@ -3371,11 +3399,11 @@ async function crSubmit(rq){
   const decision = sel.value;
   if (!decision) return;
   const a = creditRows.find(x => x.reqId === rq);
-  const LBL = { reject: 'ไม่อนุมัติ', limit: 'เปิดภายในวงเงิน', clear: 'ถอนคำสั่ง' };
+  const LBL = { approve: 'อนุมัติ', reject: 'ไม่อนุมัติ', limit: 'เปิดภายในวงเงิน' };
   const label = LBL[decision] || decision;
-  const warn = decision === 'clear'
-    ? 'สถานะอนุมัติ จะกลับเป็น "อนุมัติราคา" ทุกออเดอร์ของใบนี้'
-    : `จะเขียน "${label}" ลงช่อง สถานะอนุมัติ ทุกออเดอร์ของใบนี้ ในชีท Order และ Supabase`;
+  const warn = decision === 'approve'
+    ? 'สถานะอนุมัติ จะเป็น "อนุมัติราคา" ทุกออเดอร์ของใบนี้ — คลังจัดของได้ตามปกติ'
+    : `จะเขียน "${label}" ลงช่อง สถานะอนุมัติ ทุกออเดอร์ของใบนี้ ในชีท Order และ Supabase — คลังจะจัดบิลนี้ไม่ได้`;
   if (!confirm(`${a ? a.shopName : rq}\n${a ? a.orderCount : '?'} ออเดอร์ · ฿${fmtBaht(a ? a.total : 0)}\n\n${warn}`)) return;
 
   btn.disabled = true; btn.textContent = 'กำลังบันทึก...';
