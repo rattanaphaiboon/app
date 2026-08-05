@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.514</title>
+<title>Rattana Sales — v8.515</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5570,7 +5570,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.514 · 2026-08-04</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.515 · 2026-08-04</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5581,7 +5581,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.514</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.515</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -7931,6 +7931,7 @@ function hydrateShopsFromSheet() {
     try {
       _quotaEnsure().then(function () {
         try { if (typeof renderProductList === 'function' && document.getElementById('productList')) renderProductList(_productSearchQuery || ''); } catch (e) {}
+        try { if (typeof _quotaWarmUsage === 'function') _quotaWarmUsage(); } catch (e) {}   // v8.515: ตามด้วยยอดที่ใช้ไปแล้ว (ไม่บล็อก · ได้ครบแล้ววาดใหม่)
       });
     } catch (e) {}
   }
@@ -29830,6 +29831,108 @@ function _quotaShopCap(rule) {
   const c = parseFloat(row['เพดานต่อเดือน(ลัง)']) || 1;
   return { cap: c, why: 'ร้านนี้เคยซื้อ ' + (row['ลัง 2 เดือน'] || 0) + ' ลัง ใน 2 เดือน' };
 }
+// บาร์โค้ดทุกหน่วยของสินค้าที่เข้าเงื่อนไขโควต้าข้อนี้ (จากข้อมูลสินค้าที่แอปโหลดไว้แล้ว — ไม่ยิงอะไรเพิ่ม)
+function _quotaCodesForRule(rule) {
+  if (rule._codes) return rule._codes;
+  const by = String(rule['MeasureBy'] || '').trim(), val = String(rule['MeasureValue'] || '').trim();
+  const nr = _qtNorm(val), out = [];
+  (SHEET_DATA.products || []).forEach(function (x) {
+    let hit = false;
+    if (by === 'BARCODE') hit = ['CODE EA', 'CODE PA', 'CODE BP', 'CODE CS'].some(function (c) { return String(x[c] || '').trim() === val; });
+    else { const np = _qtNorm(x[by]); if (np && nr) hit = (by === 'PRODUCT NAME') ? (np === nr) : (np.indexOf(nr) >= 0); }
+    if (!hit) return;
+    ['CODE EA', 'CODE PA', 'CODE BP', 'CODE CS'].forEach(function (c) {
+      const v = String(x[c] || '').trim();
+      if (v && out.indexOf(v) < 0) out.push(v);
+    });
+  });
+  rule._codes = out;
+  return out;
+}
+function _quotaPeriod(rule) {
+  const s = String(rule['Period'] || '').trim().replace(/-/g, '/');
+  const e = String(rule['Period สิ้นสุด'] || '').trim().replace(/-/g, '/');
+  const t = _qtToday();
+  return { from: (s && s.length >= 8) ? s : t.slice(0, 8) + '01', to: (e && e.length >= 8 && e < t) ? e : t };
+}
+/* ยอดที่ใช้ไปแล้วของโควต้าข้อนี้ — ยิง 2 คิวรี กรองบาร์โค้ด+ช่วงวันฝั่ง Google (payload เล็ก)
+   ⚠️ ใช้ max(ส่งแล้ว, คีย์แล้ว) ไม่ใช่บวกกัน:
+     - ออเดอร์ที่คีย์วันนี้ยังไม่ออกบิล → ฝั่ง Order นับให้ ไม่งั้นพรุ่งนี้ทะลุโควต้า
+     - ออเดอร์ที่ออกบิลแล้วจะอยู่ทั้ง 2 ฝั่ง ถ้าบวกกันคือนับซ้ำ
+     - ชีท Order ไม่มีช่องบอกว่าออกบิลหรือยัง (billId มีค่าทุกแถว = id ที่แอปสร้าง · สถานะจัด ว่างทั้งคอลัมน์)
+     - บิลที่ไม่ได้มาจากแอป (คลังขายตรง) ฝั่ง DS จะมากกว่าเอง → max ครอบให้ */
+async function _quotaUsage(rule) {
+  const st = _quotaState();
+  const ck = rule._key + '|' + String(rule['Warehouses'] || '');
+  const hit = st.usage[ck];
+  if (hit && (Date.now() - hit.t) < QUOTA_TTL) return hit.data;
+  if (hit && hit.loading) return null;
+  st.usage[ck] = { loading: true, t: 0, data: null };
+  const codes = _quotaCodesForRule(rule);
+  if (!codes.length) { st.usage[ck] = { t: Date.now(), data: null }; return null; }
+  const per = _quotaPeriod(rule);
+  const wh = String(rule['Warehouses'] || '').trim();
+  const whList = (!wh || wh === '*' || wh.toUpperCase() === 'ALL') ? null : wh.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+  const orIn = function (col) { return '(' + codes.map(function (c) { return col + ' = "' + c + '"'; }).join(' or ') + ')'; };
+  const dsTq  = 'select C,G,H,J,K where ' + orIn('H') + ' and A >= "' + per.from + '" and A <= "' + per.to + '"';
+  const ordTq = 'select H,J,M,N,S where ' + orIn('J') + ' and A >= "' + per.from + '" and A <= "' + per.to + '"';
+  const _csOf = function (bc, unit, qty) {
+    const n = numv(qty) || 0; if (!n) return 0;
+    const hitP = (typeof _tgResolve === 'function') ? _tgResolve(bc) : null;
+    return (typeof _tgRowCs === 'function') ? (_tgRowCs(hitP, unit, n) || 0) : 0;
+  };
+  try {
+    const res = await Promise.all([
+      fetchSheet(TG_SHEET_ID, 'DS_DC', null, dsTq).catch(function () { return []; }),
+      fetchSheet(CONFIG.backendSheetId, 'Order', null, ordTq).catch(function () { return []; })
+    ]);
+    const shipByShop = {}, keyByShop = {};
+    let shipped = 0, keyed = 0;
+    (res[0] || []).forEach(function (r) {
+      if (whList && whList.indexOf(String(r['WL_CODE'] || '').trim()) < 0) return;
+      const cs = _csOf(r['TRD_SH_CODE'], r['TRD_UTQNAME'], r['TRD_QTY']);
+      if (cs <= 0) return;
+      shipped += cs;
+      const cc = String(r['AR_CODE'] || '').trim();
+      if (cc) shipByShop[cc] = (shipByShop[cc] || 0) + cs;
+    });
+    (res[1] || []).forEach(function (r) {
+      if (String(r['ยกเลิก'] || '').trim()) return;                                    // แถวที่ยกเลิกไม่นับ
+      if (whList && whList.indexOf(String(r['คลังส่ง'] || '').trim()) < 0) return;
+      const u = String(r['หน่วย'] || '').trim();
+      const lv = /ลัง|CS/i.test(u) ? 'ลังx1(CS)' : (/แพ็|PA/i.test(u) ? 'แพ็คx1(PA)' : 'ชิ้นx1(EA)');   // หน่วยในชีท Order เป็นคำไทย → แปลงให้ตัวคิดลังอ่านออก
+      const cs = _csOf(r['Barcode'], lv, r['จำนวน']);
+      if (cs <= 0) return;
+      keyed += cs;
+      const cc = String(r['รหัสร้าน'] || '').trim();
+      if (cc) keyByShop[cc] = (keyByShop[cc] || 0) + cs;
+    });
+    const byShop = {};
+    Object.keys(shipByShop).concat(Object.keys(keyByShop)).forEach(function (cc) {
+      byShop[cc] = Math.max(shipByShop[cc] || 0, keyByShop[cc] || 0);
+    });
+    const data = { shipped: shipped, keyed: keyed, used: Math.max(shipped, keyed), byShop: byShop, from: per.from, to: per.to };
+    st.usage[ck] = { t: Date.now(), data: data };
+    return data;
+  } catch (e) {
+    console.warn('[quota] usage:', e && e.message);
+    st.usage[ck] = { t: Date.now(), data: null };
+    return null;
+  }
+}
+// โหลดยอดใช้ไปแล้วแบบไม่บล็อก แล้ววาดลิสต์ใหม่รอบเดียวเมื่อได้ครบ
+function _quotaWarmUsage() {
+  const st = _quotaState();
+  if (!st.rules || !st.rules.length || st._warming) return;
+  st._warming = true;
+  const jobs = st.rules.map(function (r) { r._key = r._key || (String(r['MeasureBy']) + '|' + String(r['MeasureValue'])); return _quotaUsage(r); });
+  Promise.all(jobs).then(function () {
+    st._warming = false;
+    try { if (typeof renderProductList === 'function' && document.getElementById('productList')) renderProductList(_productSearchQuery || ''); } catch (e) {}
+  }).catch(function () { st._warming = false; });
+}
+window._quotaWarmUsage = _quotaWarmUsage;
+
 function _quotaBadgeHtml(p) {
   const rule = _quotaRuleFor(p);
   if (!rule) return '';
@@ -29838,9 +29941,23 @@ function _quotaBadgeHtml(p) {
   const whTxt = (!wh || wh === '*' || wh.toUpperCase() === 'ALL') ? 'ทุกคลัง' : wh;
   const sc = _quotaShopCap(rule);
   const lock = String(rule['โหมด'] || '').trim() === 'ล็อก';
-  const main = sc ? ('ร้านนี้ได้ ' + sc.cap + ' ลัง/เดือน') : ('โควต้า ' + whTxt + ' ' + qty.toLocaleString() + ' ลัง');
+  // v8.515: หักยอดที่ใช้ไปแล้ว — ยังโหลดไม่เสร็จให้โชว์สิทธิ์เต็มไปก่อน แล้ววาดใหม่เมื่อได้ตัวเลข
+  const st = _quotaState();
+  const u = (st.usage[rule._key + '|' + String(rule['Warehouses'] || '')] || {}).data;
+  let main;
+  if (sc) {
+    const s = (SHOPS || []).find(function (x) { return x.id === currentShopId; });
+    const cc = String((s && s.bplusCode) || '').trim();
+    const usedShop = (u && u.byShop && cc) ? (u.byShop[cc] || 0) : 0;
+    const leftShop = Math.max(0, sc.cap - usedShop);
+    main = u ? ('ร้านนี้ได้อีก ' + (Math.round(leftShop * 10) / 10) + ' ลัง') : ('ร้านนี้ได้ ' + sc.cap + ' ลัง/เดือน');
+  } else {
+    const left = u ? Math.max(0, qty - u.used) : qty;
+    main = u ? (whTxt + ' เหลือ ' + Math.round(left).toLocaleString() + '/' + qty.toLocaleString() + ' ลัง')
+             : ('โควต้า ' + whTxt + ' ' + qty.toLocaleString() + ' ลัง');
+  }
   return '<span class="ocg-bdg quota' + (lock ? ' lock' : '') + '" onclick="event.stopPropagation();_quotaExplain(\'' + escapeAttr(rule._key) + '\')" title="แตะดูที่มาของตัวเลข">'
-       + (lock ? 'โควต้า' : 'โควต้า') + ' · ' + escapeHtml(main) + '</span>';
+       + 'โควต้า · ' + escapeHtml(main) + '</span>';
 }
 window._quotaBadgeHtml = _quotaBadgeHtml;
 function _quotaExplain(key) {
@@ -29859,6 +29976,19 @@ function _quotaExplain(key) {
     ['โหมด', String(rule['โหมด'] || 'เตือน') + (String(rule['โหมด']||'').trim() === 'ล็อก' ? ' (ขายเกินไม่ได้)' : ' (เกินได้ แต่คลังจัดตามที่เหลือจริง)')]
   ];
   if (sc) rows.push(['ร้านนี้ได้', sc.cap + ' ลัง/เดือน — ' + sc.why]);
+  // v8.515: โชว์ที่มาของ "ใช้ไปแล้ว" ให้ครบ เซลจะได้เห็นว่าตัวเลขมาจากไหน
+  const stx = _quotaState();
+  const ux = (stx.usage[rule._key + '|' + String(rule['Warehouses'] || '')] || {}).data;
+  if (ux) {
+    const qtyAll = parseFloat(rule['จำนวน(ลัง)']) || 0;
+    rows.push(['ส่งแล้ว (บิลจริง)', Math.round(ux.shipped * 10) / 10 + ' ลัง']);
+    rows.push(['คีย์ไว้ในระบบ', Math.round(ux.keyed * 10) / 10 + ' ลัง']);
+    rows.push(['นับเป็นใช้ไปแล้ว', Math.round(ux.used * 10) / 10 + ' ลัง (เอาตัวมากกว่า ไม่บวกกัน กันนับซ้ำ)']);
+    rows.push(['เหลือทั้งรอบ', Math.max(0, Math.round(qtyAll - ux.used)).toLocaleString() + ' ลัง']);
+    const sx = (SHOPS || []).find(function (x) { return x.id === currentShopId; });
+    const ccx = String((sx && sx.bplusCode) || '').trim();
+    if (sc && ccx) rows.push(['ร้านนี้รับไปแล้ว', (Math.round(((ux.byShop || {})[ccx] || 0) * 10) / 10) + ' ลัง ในรอบนี้']);
+  }
   const html = '<div style="padding:4px 2px">'
     + rows.map(function (r) { return '<div style="display:flex;gap:10px;font-size:12px;padding:5px 0;border-bottom:1px solid var(--border)"><span style="color:var(--muted);min-width:112px;flex-shrink:0">' + escapeHtml(r[0]) + '</span><b style="flex:1;min-width:0">' + escapeHtml(r[1]) + '</b></div>'; }).join('')
     + '<div style="font-size:11px;color:var(--muted);margin-top:9px;line-height:1.6">โควต้า = จำกัดไม่ให้ขายเกิน (คนละเรื่องกับเป้าที่ต้องขายให้ถึง)<br>ของในคลังอาจยังมี แต่กันไว้ให้ร้านอื่นที่ยังไม่ได้รับ</div></div>';
