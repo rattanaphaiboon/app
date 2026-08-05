@@ -9,6 +9,9 @@
   <meta name="apple-mobile-web-app-title" content="Check Stock">
   <meta name="format-detection" content="telephone=no">
   <meta name="theme-color" content="#0d1b3e">
+  <link rel="manifest" href="stock-manifest.json">
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 120'%3E%3Crect width='120' height='120' fill='%2313294d'/%3E%3Cpath d='M18 54 L60 30 L102 54 L102 96 L18 96 Z' fill='none' stroke='%23fff' stroke-width='6' stroke-linejoin='round'/%3E%3Crect x='36' y='66' width='16' height='28' fill='%23fff'/%3E%3Crect x='60' y='66' width='16' height='28' fill='%233b7ffb'/%3E%3Cpath d='M63 78 L68 83 L75 71' stroke='%23fff' stroke-width='4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('rattana-stock-checker-sw.js',{scope:'rattana-stock-checker.html'}).catch(function(){});});}</script>
   <title>Check Stock</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 120'%3E%3Crect width='120' height='120' rx='22' fill='%230d1b3e'/%3E%3Cpath d='M14 52 L60 24 L106 52 L106 100 L14 100 Z' fill='none' stroke='%23fff' stroke-width='6' stroke-linejoin='round'/%3E%3Crect x='34' y='66' width='18' height='30' fill='%23fff'/%3E%3Crect x='60' y='66' width='18' height='30' fill='%233b7ffb'/%3E%3Cpath d='M64 78 L69 83 L76 71' stroke='%23fff' stroke-width='4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -904,7 +907,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.52';
+const APP_VERSION = 'v4.56';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -2271,6 +2274,7 @@ function saveCountSession() {
   if (countSession) {
     countSession.lastEdit = new Date().toISOString();
     lastLocalEditMs = Date.now();
+    countSession.mirrored = false;   // มีการแก้/บันทึกบนเครื่องนี้เอง → เป็นเจ้าของ draft (owned) ดันขึ้น Supabase ได้
     try { localStorage.setItem(countStoreKey(countSession.warehouse), JSON.stringify(countSession)); } catch {}
     queueDraftSync();
   }
@@ -2370,14 +2374,20 @@ async function fetchRemoteDraft(wh) {
     return { items, updatedAt: maxT, sessionStart: null, device: dev };
   } catch { return null; }
 }
-// ลบ draft แถวนี้ (ตอนกดส่งจริงลงชีทแล้ว)
+// ลบ draft ของ (คลัง+ชื่อผู้นับ) นี้ใน Supabase — ยืนยันผล (res.ok) + retry กันเน็ตสะดุด → คืน true/false
+// ใช้ตอนกดส่งลงชีทแล้ว และตอนกดล้างทั้งหมด: ต้องลบให้ขาด ไม่งั้นเครื่องอื่นดึงมาซ้ำ
 async function clearRemoteDraft(wh) {
   const key = userKey();
-  if (!SUPA_URL || !currentUser || !key) return;
-  try {
-    await supaFetch(`/stock_draft?wh=eq.${encodeURIComponent(wh)}&counter_key=eq.${encodeURIComponent(key)}`,
-      { method:'DELETE', headers:{ 'Prefer':'return=minimal' } });
-  } catch {}
+  if (!SUPA_URL || !currentUser || !key) return false;
+  const path = `/stock_draft?wh=eq.${encodeURIComponent(wh)}&counter_key=eq.${encodeURIComponent(key)}`;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const res = await supaFetch(path, { method:'DELETE', headers:{ 'Prefer':'return=minimal' } });
+      if (res.ok) return true;
+    } catch {}
+    await new Promise(r => setTimeout(r, 700 * (i + 1)));
+  }
+  return false;
 }
 // Manual override — bypass the 30s guard, fetch the remote draft and adopt it
 // even if local has items. Used when the user knows another device has the
@@ -2400,7 +2410,8 @@ async function forcePullDraft() {
     if (Object.keys(countSession.items || {}).length &&
         !confirm(`พบ ${Object.keys(remote.items).length} รายการในระบบ — แทนที่รายการในเครื่องตอนนี้?`)) return;
     countSession = { warehouse: wh, startedAt: remote.sessionStart || new Date().toISOString(),
-                     items: remote.items, lastEdit: remote.updatedAt, syncedAt: remote.updatedAt };
+                     items: remote.items, lastEdit: remote.updatedAt, syncedAt: remote.updatedAt,
+                     mirrored: true };   // ดึงจากอีกเครื่องมาดู → mirrored (ถ้าแก้เองภายหลัง saveCountSession จะปลดเป็น owned)
     try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
     renderCountList();
     showToast(`โหลด ${Object.keys(remote.items).length} รายการแล้ว ✓`, 'success');
@@ -2466,13 +2477,27 @@ async function maybeAdoptRemoteDraft(wh) {
   const remote = await fetchRemoteDraft(wh);
   updateSyncStatus(wh, remote);   // อัปเดตแถบสถานะทุกครั้งที่ดึง (ทุก 5 วิ) — เห็นได้ว่า 2 เครื่องตรงกันไหม
   const hasRemote = remote && remote.items && Object.keys(remote.items).length;
-  if (!hasRemote) return;   // remote ว่าง → ไม่แตะ local (no-cors ไม่ยืนยันการเคลียร์ ป้องกันลบผิด)
+  if (!hasRemote) {
+    // remote ว่าง: ถ้า local เป็นของที่ "มิเรอร์" มาจากอีกเครื่อง (mirrored) แปลว่าอีกเครื่องกด "ล้างทั้งหมด" ไปแล้ว
+    // → ล้าง local ตามให้ตรง (Supabase REST ยืนยันการลบได้จริง ไม่ใช่ no-cors)
+    // แต่ถ้าเป็นของที่ "นับเองบนเครื่องนี้" (owned) → ไม่แตะ ปล่อย push-on-empty ดันขึ้น (เคสนับ offline/ก่อนอัปเวอร์ชัน)
+    if (countSession && Object.keys(countSession.items || {}).length && countSession.mirrored) {
+      countSession.items = {};
+      try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
+      countListPage = 1;
+      renderCountList();
+      updateSyncStatus(wh, remote);
+      showToast('อีกเครื่องล้างรายการแล้ว — ล้างตามให้ตรง', 'info');
+    }
+    return;
+  }
   const remoteSig = draftSig(remote.items);
   if (remoteSig === draftSig(countSession && countSession.items)) return;   // ตรงกับที่แสดงอยู่แล้ว → ข้าม (กัน re-render/toast ทุก 5 วิ)
   if (Date.now() - lastLocalEditMs < DRAFT_ACTIVE_MS) return;               // เครื่องนี้กำลังนับ → เก็บของตัวเองไว้ (last edit wins)
   // เครื่องนี้ว่าง & remote ต่างจาก local → มิเรอร์ตามอีกเครื่อง
   countSession = { warehouse: wh, startedAt: remote.sessionStart || new Date().toISOString(),
-                   items: remote.items, lastEdit: remote.updatedAt, syncedAt: remote.updatedAt };
+                   items: remote.items, lastEdit: remote.updatedAt, syncedAt: remote.updatedAt,
+                   mirrored: true };   // มิเรอร์มาจากอีกเครื่อง → ห้ามดันกลับขึ้น + ให้ล้างตามได้เมื่ออีกเครื่องล้าง
   try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
   countListPage = 1;
   renderCountList();
@@ -2509,7 +2534,9 @@ async function enterDraftSync(wh) {
   // ดันรายการที่ค้างใน local ขึ้น Supabase ถ้าระบบยังว่าง (เช่น นับไว้ก่อนเปลี่ยนมาใช้ Supabase / ก่อนอัปเวอร์ชัน)
   const justSaved = recentlySavedAt[wh] && Date.now() - recentlySavedAt[wh] < 30000;
   const localHas = countSession && Object.keys(countSession.items || {}).length;
-  if (localHas && !justSaved) {
+  // push-on-empty เฉพาะ draft ที่ "นับเองบนเครื่องนี้" (owned) — ห้ามให้เครื่องสำรองที่มิเรอร์มา
+  // ดันข้อมูลที่อีกเครื่องกดล้างไปแล้วกลับขึ้น Supabase (ต้นเหตุ "ล้างแล้วไม่ลบ")
+  if (localHas && !justSaved && !(countSession && countSession.mirrored)) {
     const remote = await fetchRemoteDraft(wh);
     if (!remote || !Object.keys(remote.items || {}).length) await syncDraftNow();
   }
@@ -3737,11 +3764,11 @@ async function saveCountToSheet() {
     // Cancel any pending draft sync so a stale items={} POST doesn't race the clear
     if (draftSyncTimer) { clearTimeout(draftSyncTimer); draftSyncTimer = null; }
     try { localStorage.removeItem(countStoreKey(wh)); } catch {}
-    clearRemoteDraft(wh);
-    // Belt + suspenders: try clearing again after 2s in case the first POST raced the save.
-    setTimeout(() => clearRemoteDraft(wh), 2000);
+    // ลบ draft ใน Supabase ให้ขาด (ยืนยันผล res.ok + retry) — กดส่งลงชีทแล้วต้องหายจาก Supabase เลย
+    const cleared = await clearRemoteDraft(wh);
+    if (!cleared) setTimeout(() => clearRemoteDraft(wh), 3000);   // เน็ตสะดุด → ลองอีกครั้งเบื้องหลัง
     const now = new Date().toISOString();
-    countSession = { warehouse: wh, startedAt: now, items: {}, lastEdit: now };
+    countSession = { warehouse: wh, startedAt: now, items: {}, lastEdit: now, mirrored: false };
     try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
     closeSummaryModal();   // ปิด modal สรุปหลังบันทึกสำเร็จ
     renderCountList();
