@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v3.77</title>
+<title>Rattana Online Order v3.78</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -547,7 +547,7 @@ body.dark .seg-tab.on{background:var(--gold);color:var(--navy);border-color:var(
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.77</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.78</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -2372,6 +2372,7 @@ function preloadCartData(){
   try{ loadHistory().then(paint,()=>{}); }catch(e){}
   try{ loadBought().then(paint,()=>{}); }catch(e){}
   try{ loadDistrictReco().then(paint,()=>{}); }catch(e){}
+  try{ loadSummary(); }catch(e){}   // v3.78: แท็บ 📋 สรุปออเดอร์ ก็โหลดล่วงหน้าด้วย (ไม่แตะหน้าจอถ้ายังไม่ได้เปิดแท็บนั้น)
 }
 /* เสริม: ขายดี "ทั้งจังหวัด" (รวมทุกอำเภอในจังหวัด → รวมยอดต่อสินค้า) — โหลด lazy เฉพาะเมื่ออำเภอเหลือ <5 */
 async function loadDistrictProv(){
@@ -2492,22 +2493,36 @@ function setNav(id){ ['navShop','navSpecial','navCart','navSummary','navProfile'
 function showView(v){ ['viewShop','viewCart','viewProfile','viewSummary'].forEach(x=>{const e=document.getElementById(x); if(e) e.classList.remove('active');}); document.getElementById(v).classList.add('active'); window.scrollTo(0,0); }
 function goShop(){ showView('viewShop'); setNav('navShop'); clearSpecial(); }
 function goSpecial(){ setNav('navSpecial'); showView('viewShop'); setSpecial('promo'); }   // แท็บรวม โปร&New (ปุ่มสลับด้านบน)
-function goSummary(){ setNav('navSummary'); showView('viewSummary'); loadSummary(); }        // หน้าสรุปออเดอร์
+function goSummary(){ setNav('navSummary'); showView('viewSummary'); if(_sumData) renderSummary(); loadSummary(); }   // v3.78: มีของเดิม = โชว์ทันที แล้วรีเฟรชเงียบๆ
 function goCart(){ _histShowAll=false; _histPage=0; showView('viewCart'); setNav('navCart'); renderCart(); renderCartHistory(); renderDistrictReco(); loadHistory().then(()=>{ renderCartHistory(); renderDistrictReco(); }); loadDistrictReco().then(renderDistrictReco); loadBought().then(renderDistrictReco); pullCart(false); }
 function goProfile(){ showView('viewProfile'); setNav('navProfile'); renderProfile(); }
 
 /* ===================== สรุปออเดอร์ (แท็บ 📋) — ออเดอร์ย้อนหลัง 14 วัน จัดกลุ่มตามวัน ===================== */
-let _sumData=null;
-async function loadSummary(){
+/* ⚡ v3.78: โหลดล่วงหน้า + จำผลไว้ (เดิมกดแท็บทีไรยิงใหม่ทุกครั้ง + ขึ้น "กำลังโหลด" ทุกครั้ง)
+   - preload ตั้งแต่เข้าแอป → กดแท็บ 📋 แล้วเห็นทันที
+   - มีของเดิมอยู่ = โชว์ของเดิมก่อน แล้วรีเฟรชเงียบๆ ข้างหลัง (ไม่กระพริบ)
+   - สดใหม่ภายใน 60 วิ ถือว่าใช้ได้เลย · สั่งออเดอร์เสร็จจะล้างให้ดึงใหม่ (ดู submitOrder) */
+let _sumData=null, _sumTs=0, _sumInflight=null, _sumShop='';
+function _sumActive(){ const v=document.getElementById('viewSummary'); return !!(v && v.classList.contains('active')); }
+async function loadSummary(opts){
+  opts=opts||{};
   const box=document.getElementById('summaryBody'); if(!box) return;
-  if(!currentCustomer){ box.innerHTML='<div class="sum-empty">🔒 กรุณาเข้าสู่ระบบก่อนดูสรุปออเดอร์</div>'; return; }
-  box.innerHTML='<div class="sum-load">⏳ กำลังโหลดสรุปออเดอร์…</div>';
-  try{
-    const r=await jsonpGet({ action:'getOrders', shop:clean(currentCustomer.name||''), uid:clean(currentCustomer.uid||''), code:clean(currentCustomer.shopCode||'') }, 20000);
-    if(r===null){ box.innerHTML='<div class="sum-empty">⚠️ โหลดช้าหรือไม่สำเร็จ<br><button class="btn btn-outline btn-sm" style="margin-top:10px" onclick="loadSummary()">🔄 ลองใหม่</button></div>'; return; }
-    _sumData=(r&&r.ok&&Array.isArray(r.days))?r.days:[];
-    renderSummary();
-  }catch(e){ box.innerHTML='<div class="sum-empty">โหลดไม่สำเร็จ<br><button class="btn btn-outline btn-sm" style="margin-top:10px" onclick="loadSummary()">🔄 ลองใหม่</button></div>'; }
+  if(!currentCustomer){ if(_sumActive()) box.innerHTML='<div class="sum-empty">🔒 กรุณาเข้าสู่ระบบก่อนดูสรุปออเดอร์</div>'; return; }
+  const key=clean(currentCustomer.name||'')+'|'+clean(currentCustomer.shopCode||'');
+  if(_sumShop!==key){ _sumData=null; _sumTs=0; _sumShop=key; }              // เปลี่ยนร้าน → ทิ้งของร้านเก่า
+  if(!opts.force && _sumData && Date.now()-_sumTs<60000){ if(_sumActive()) renderSummary(); return; }
+  if(_sumInflight) return _sumInflight;                                    // กำลังโหลดอยู่ → รออันเดิม (กันยิงซ้ำ)
+  if(_sumActive() && !_sumData) box.innerHTML='<div class="sum-load">⏳ กำลังโหลดสรุปออเดอร์…</div>';   // มีของเดิม = ไม่ต้องขึ้นสปินเนอร์
+  _sumInflight=(async()=>{
+    try{
+      const r=await jsonpGet({ action:'getOrders', shop:clean(currentCustomer.name||''), uid:clean(currentCustomer.uid||''), code:clean(currentCustomer.shopCode||'') }, 20000);
+      if(r===null){ if(_sumActive() && !_sumData) box.innerHTML='<div class="sum-empty">⚠️ โหลดช้าหรือไม่สำเร็จ<br><button class="btn btn-outline btn-sm" style="margin-top:10px" onclick="loadSummary({force:true})">🔄 ลองใหม่</button></div>'; return; }
+      _sumData=(r&&r.ok&&Array.isArray(r.days))?r.days:[]; _sumTs=Date.now();
+      if(_sumActive()) renderSummary();
+    }catch(e){ if(_sumActive() && !_sumData) box.innerHTML='<div class="sum-empty">โหลดไม่สำเร็จ<br><button class="btn btn-outline btn-sm" style="margin-top:10px" onclick="loadSummary({force:true})">🔄 ลองใหม่</button></div>'; }
+    finally{ _sumInflight=null; }
+  })();
+  return _sumInflight;
 }
 function sumDateLabel(ds){
   const m=String(ds||'').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if(!m) return ds||'';
@@ -2787,6 +2802,7 @@ async function submitOrder(force){
     if(!remain) resetDraft();                 // สั่งครบทั้งตะกร้า → เริ่ม draft ใหม่ ; ถ้ายังเหลือ = คง orderId เดิม (ชิ้นที่เหลือยัง "รออนุมัติ" อยู่ในบิลนั้น — .gs ไม่ block draft แล้ว v1.19)
     saveCart();
     if(noteEl) noteEl.value=''; setDeliver('ส่งถึงร้านลูกค้า'); renderCart(); renderProducts(); renderCartBadge();
+    _sumTs=0; setTimeout(()=>{ try{ loadSummary({force:true}); }catch(e){} }, 1200);   // v3.78: สั่งเสร็จ → ดึงสรุปออเดอร์ใหม่ไว้เลย กดแท็บ 📋 จะเห็นบิลนี้ทันที
     showToast('ส่งออเดอร์สำเร็จ! เลขที่ '+orderId+(remain?(' · เหลือในตะกร้า '+remain+' รายการ (รออนุมัติ)'):''),'success');
     goShop();
   } else {
