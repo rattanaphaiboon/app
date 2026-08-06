@@ -239,7 +239,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page hidden" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v5.8</small>
+      <small>ยอดขายเทียบเป้าหมาย v5.9</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -255,6 +255,7 @@ body.dark .ptbl-td{border-color:var(--border)}
     <button class="tab-btn" data-tab="roo" onclick="switchTab('roo')">ROO</button>
     <button class="tab-btn" data-tab="sup" onclick="switchTab('sup')">Sup</button>
     <button class="tab-btn" data-tab="rsp" onclick="switchTab('rsp')">RSP ส่ง</button>
+    <button class="tab-btn" data-tab="rsp-plik" onclick="switchTab('rsp-plik')">RSP ปลีก</button>
   </div>
 
   <div class="content">
@@ -304,6 +305,9 @@ body.dark .ptbl-td{border-color:var(--border)}
     <div id="tab-rsp" class="hidden">
       <div id="rspContent"></div>
     </div>
+    <div id="tab-rsp-plik" class="hidden">
+      <div id="rspPlikContent"></div>
+    </div>
     <div id="tab-sup" class="hidden">
       <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
         <div id="supContent" style="flex:0 0 auto"></div>
@@ -338,7 +342,8 @@ const ROO_SHEET_NAME = 'Roo';
 const ONLINE_SHEET_NAME = 'Online';
 const SUP_SHEET_NAME = 'Sup';
 const W1_SHEET_NAME  = 'W1';
-const RSP_SHEET_NAME = 'RSP ส่ง';
+const RSP_SHEET_NAME      = 'RSP ส่ง';
+const RSP_PLIK_SHEET_NAME = 'RSP ปลีก';
 
 const AUTH_CONFIG = {
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
@@ -802,7 +807,8 @@ async function loadData(showSpin) {
       loadFromSheets(OUTLET_SHEET_ID, SUP_SHEET_NAME),
       loadFromSheets(OUTLET_SHEET_ID, W1_SHEET_NAME),
     ]);
-    const rspRaw = await loadFromSheets(OUTLET_SHEET_ID, RSP_SHEET_NAME).catch(()=>[]);
+    const rspRaw     = await loadFromSheets(OUTLET_SHEET_ID, RSP_SHEET_NAME).catch(()=>[]);
+    const rspPlikRaw = await loadFromSheets(OUTLET_SHEET_ID, RSP_PLIK_SHEET_NAME).catch(()=>[]);
     state.targetRaw = targetRaw;
     state.bpRaw = bpRaw;
     state.cnRaw = cnRaw;
@@ -816,7 +822,8 @@ async function loadData(showSpin) {
     state.onlineRaw = onlineRaw;
     state.supRaw = supRaw;
     state.w1Raw  = w1Raw;
-    state.rspRaw = rspRaw;
+    state.rspRaw     = rspRaw;
+    state.rspPlikRaw = rspPlikRaw;
     state.latestBpMonth = getLatestBpMonth(bpRaw);
     setCache('targetCache', targetRaw);
     state.rows = computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw);
@@ -1106,7 +1113,7 @@ function exportDetailExcel() {
   XLSX.writeFile(wb, 'rattana-sales-target-' + Date.now() + '.xlsx');
 }
 
-function renderAll() { renderPivot(); renderOutlets(); renderOnTop(); renderROO(); renderROOSummary(); renderSup(); renderW1(); renderRSP(); requestAnimationFrame(updateStickyOffsets); }
+function renderAll() { renderPivot(); renderOutlets(); renderOnTop(); renderROO(); renderROOSummary(); renderSup(); renderW1(); renderRSP(); renderRSPPlik(); requestAnimationFrame(updateStickyOffsets); }
 
 /* ================= OUTLETS TAB ================= */
 function getChannelGroup(empCode) {
@@ -2223,6 +2230,125 @@ function renderSup() {
   </div>`;
 }
 
+/* ================= RSP ปลีก TABLE ================= */
+function renderRSPPlik() {
+  const el = document.getElementById('rspPlikContent');
+  if (!el) return;
+  const raw    = state.rspPlikRaw || [];
+  const bpRaw  = state.bpRaw || [];
+  if (!raw.length) { el.innerHTML = `<div style="padding:24px;color:#b00">ไม่พบข้อมูล sheet "${RSP_PLIK_SHEET_NAME}"</div>`; return; }
+  const dataRows0 = raw.filter(r => String(r['ชื่อ-นามสกุล']||'').trim());
+  if (!dataRows0.length) { el.innerHTML = `<div style="padding:24px;color:#b00">โหลดได้ ${raw.length} แถว แต่ไม่พบคอลัมน์ "ชื่อ-นามสกุล" — columns: ${Object.keys(raw[0]||{}).join(', ')}</div>`; return; }
+
+  const lbp = state.latestBpMonth;
+  const wd  = getWorkingDaysInfo(getWdMonth());
+  const SKU_SCORE = {A:1,B:5,C:10,D:20,E:30,F:30,New:50};
+
+  const bpIdx       = new Map();
+  const bpOutletIdx = new Map();
+
+  bpRaw.forEach(r => {
+    if (!lbp) return;
+    const d = bpMonthYear(r['Doc_Date']);
+    if (!d || d.mm !== lbp.mm || d.yyyy !== lbp.yyyy) return;
+    const saleNo   = normalizeText(String(r['Sale NO ROO']||'').trim()).toLowerCase();
+    const custName = String(r['Customer_Name']||'').trim();
+    const prod     = String(r['Product_Name']||'').trim();
+    const date     = String(r['Doc_Date']||'').trim();
+    const exvat    = parseNum(r['EXVat+CN*2']);
+    const skuRank  = String(r['SKU Point']||'').trim();
+    if (saleNo) {
+      if (!bpIdx.has(saleNo)) bpIdx.set(saleNo, {exvat:0, dates:new Set()});
+      const e = bpIdx.get(saleNo);
+      e.exvat += exvat;
+      if (date) e.dates.add(date);
+    }
+    if (saleNo && exvat > 0) {
+      if (!bpOutletIdx.has(saleNo)) bpOutletIdx.set(saleNo, {custs:new Set(), custSkuMap:new Map(), prodRankMap:new Map()});
+      const oe = bpOutletIdx.get(saleNo);
+      if (custName) oe.custs.add(custName);
+      if (prod && skuRank && !oe.prodRankMap.has(prod)) oe.prodRankMap.set(prod, skuRank);
+      if (custName && prod) {
+        if (!oe.custSkuMap.has(custName)) oe.custSkuMap.set(custName, new Map());
+        const cm = oe.custSkuMap.get(custName);
+        if (!cm.has(prod) || (!cm.get(prod) && skuRank)) cm.set(prod, skuRank);
+      }
+    }
+  });
+
+  const dataRows = raw.filter(r => String(r['ชื่อ-นามสกุล']||'').trim());
+  const enriched = dataRows.map(r => {
+    const name   = String(r['ชื่อ-นามสกุล']||'').trim();
+    const norm   = normalizeText(name).toLowerCase();
+    const tgt    = parseNum(r['เป้าหมาย']);
+    const bp     = bpIdx.get(norm) || {exvat:0, dates:new Set()};
+    const oe     = bpOutletIdx.get(norm) || {custs:new Set(), custSkuMap:new Map(), prodRankMap:new Map()};
+    const actual = bp.exvat;
+    const outlet = oe.custs.size;
+    const allSku = oe.prodRankMap.size;
+    const uniqueDates   = bp.dates.size || 1;
+    const ranVan        = outlet > 0 ? outlet / uniqueDates : 0;
+    const sumSkuPerCust = Array.from(oe.custSkuMap.values()).reduce((s,m)=>s+m.size,0);
+    const skuPerStore   = outlet > 0 ? sumSkuPerCust / outlet : 0;
+    let skuPt = 0;
+    oe.custSkuMap.forEach(pm => { pm.forEach(rank => { skuPt += SKU_SCORE[rank]||0; }); });
+    const pct = tgt > 0 ? actual / tgt * 100 : 0;
+    return { ...r, _actual:actual, _outlet:outlet, _ranVan:ranVan, _skuPerStore:skuPerStore, _allSku:allSku, _skuPt:skuPt, _pct:pct, _tgt:tgt };
+  });
+
+  const sorted = [...enriched].sort((a,b) => b._pct - a._pct);
+  sorted.forEach((r,i) => r._rank = i+1);
+
+  const GOLD='#c9a84c', NAVY='#0d1b3e', TEAL='#1B9EB5', TEAL_DARK='#147a8c', COL_HDR='#b2e4ef', BORDER='#8ecfdd';
+  const pctColor = p => p>=100?'#1a7a3a':p>=wd.pct?'#7a5a00':'#b00000';
+  const pctBg    = p => p>=100?'#d4f4e1':p>=wd.pct?'#fff3cd':'#fde8e8';
+  const rankColor= r => r===1?'#c0392b':r===2?'#e67e22':r===3?'#27ae60':'#555';
+  const rankBg   = r => r===1?'#fde8e8':r===2?'#fef3d7':r===3?'#e8f7ee':'#f5f5f5';
+  const th    = (txt,extra='') => `<th style="background:${COL_HDR};color:${NAVY};font-weight:700;text-align:center;padding:7px 8px;border:1px solid ${BORDER};white-space:nowrap${extra}">${txt}</th>`;
+  const thHdr = (txt,extra='') => `<th style="background:${TEAL};color:#fff;font-weight:600;font-size:12px;text-align:center;padding:6px 8px;border:1px solid ${TEAL_DARK}${extra}">${txt}</th>`;
+  const tdVal = (txt,extra='') => `<td style="background:${TEAL};color:#fff;font-weight:700;font-size:13px;text-align:center;padding:6px 8px;border:1px solid ${TEAL_DARK}${extra}">${txt}</td>`;
+  const fmtN  = v => v ? Math.round(v).toLocaleString() : '-';
+
+  let bodyHtml = '';
+  enriched.forEach(r => {
+    const p = r._pct;
+    bodyHtml += `<tr style="border-bottom:1px solid #dde3f0">
+      <td style="text-align:center;padding:7px 8px;border:1px solid #dde3f0">${r['ลำดับ']||''}</td>
+      <td style="padding:7px 8px;border:1px solid #dde3f0">${r['Channal']||''}</td>
+      <td style="padding:7px 8px;border:1px solid #dde3f0">${r['ผู้ดูแล']||''}</td>
+      <td style="padding:7px 8px;border:1px solid #dde3f0">${r['ชื่อ-นามสกุล']||''}</td>
+      <td style="text-align:center;padding:7px 8px;border:1px solid #dde3f0;font-weight:700">${r['รหัสเซลล์']||''}</td>
+      <td style="text-align:center;padding:7px 8px;border:1px solid #dde3f0">${r['BU']||''}</td>
+      <td style="text-align:center;padding:7px 8px;border:1px solid #dde3f0">${r['คลัง']||''}</td>
+      <td style="text-align:right;padding:7px 8px;border:1px solid #dde3f0">${r._tgt?Math.round(r._tgt).toLocaleString():'-'}</td>
+      <td style="text-align:right;padding:7px 8px;border:1px solid #dde3f0">${r._actual?Math.round(r._actual).toLocaleString():'-'}</td>
+      <td style="text-align:center;padding:7px 8px;border:1px solid #dde3f0;font-weight:700;color:${pctColor(p)};background:${pctBg(p)}">${p?p.toFixed(2)+'%':'-'}</td>
+      <td style="text-align:center;padding:7px 8px;border:1px solid #dde3f0">${r._outlet||'-'}</td>
+      <td style="text-align:center;padding:7px 8px;border:1px solid #dde3f0">${r._ranVan?r._ranVan.toFixed(1):'-'}</td>
+      <td style="text-align:center;padding:7px 8px;border:1px solid #dde3f0">${r._skuPerStore?r._skuPerStore.toFixed(1):'-'}</td>
+      <td style="text-align:center;padding:7px 8px;border:1px solid #dde3f0">${r._allSku||'-'}</td>
+      <td style="text-align:center;padding:7px 8px;border:1px solid #dde3f0">${r._skuPt?Math.round(r._skuPt).toLocaleString():'-'}</td>
+      <td style="text-align:center;padding:7px 8px;border:1px solid #dde3f0;font-weight:700;color:${rankColor(r._rank)};background:${rankBg(r._rank)}">${r._rank||'-'}</td>
+    </tr>`;
+  });
+
+  el.innerHTML = `<div class="tbl-wrap"><table class="rtbl" style="width:100%">
+<thead>
+<tr>
+  <th colspan="11" rowspan="2" style="background:${GOLD};color:${NAVY};font-weight:700;font-size:15px;text-align:center;padding:10px 16px;border:1px solid #b8963c">SALES RSP (ร้านค้าปลีก)</th>
+  ${thHdr('Time Used')}${thHdr('Week')}${thHdr('วันที่')}${thHdr('วันทำงาน<br>ทั้งหมด')}${thHdr('วันทำงาน<br>เหลือ')}
+</tr>
+<tr>
+  ${tdVal(fmtN(wd.pct)+'%')}${tdVal(wd.weekOfMonth)}${tdVal(wd.dateStr||'')}${tdVal(wd.totalWork)}${tdVal(wd.remaining)}
+</tr>
+<tr>
+  ${th('ลำดับ')}${th('Channal')}${th('ผู้ดูแล')}${th('ชื่อ-นามสกุล','text-align:left')}${th('รหัสเซลล์')}${th('BU')}${th('คลัง')}${th('เป้าหมาย')}${th('ทำได้')}${th('%')}${th('Outlet')}${th('ร้าน/วัน')}${th('SKU/ร้าน')}${th('All SKU')}${th('SKU Point')}${th('RANK')}
+</tr>
+</thead>
+<tbody>${bodyHtml}</tbody>
+</table></div>`;
+}
+
 /* ================= TABS / UI ================= */
 function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===tab));
@@ -2232,6 +2358,7 @@ function switchTab(tab) {
   document.getElementById('tab-roo').classList.toggle('hidden', tab!=='roo');
   document.getElementById('tab-sup').classList.toggle('hidden', tab!=='sup');
   document.getElementById('tab-rsp').classList.toggle('hidden', tab!=='rsp');
+  document.getElementById('tab-rsp-plik').classList.toggle('hidden', tab!=='rsp-plik');
   document.querySelector('.filter-bar').style.display = (tab === 'detail') ? '' : 'none';
   requestAnimationFrame(updateStickyOffsets);
 }
