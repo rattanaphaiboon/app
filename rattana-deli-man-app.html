@@ -699,6 +699,11 @@ body.dark .banner-gold{color:var(--gold-light)}
         <div class="card-head"><h3>📦 CN รออนุมัติ</h3><span class="txt-sm txt-muted" id="cnPendingCount">0</span></div>
         <div class="card-body" id="cnPendingList"></div>
       </div>
+      <!-- v3.218: CN ที่ขนส่งเก็บมา รออนุมัติ (ย้ายมาจากแท็บในหน้าเก็บของคืน) -->
+      <div class="card card-gold" id="cncPendingCard" style="display:none">
+        <div class="card-head"><h3>🚚 CN ที่ขนส่งเก็บมา รออนุมัติ</h3><span class="txt-sm txt-muted" id="cncPendingCount">0</span></div>
+        <div class="card-body" id="cncPendingList"></div>
+      </div>
       <!-- ค่าพาเลทรออนุมัติ (ฝ่ายบัญชี) v3.68 -->
       <div class="card card-gold" id="palletPendingCard" style="display:none">
         <div class="card-head"><h3>🧺 ค่าพาเลทรออนุมัติ</h3><span class="txt-sm txt-muted" id="palletPendingCount">0</span></div>
@@ -911,7 +916,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.217';
+const APP_VERSION='3.218';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -3682,7 +3687,7 @@ async function confirmOwnReturn(){
         items:items,totalAmount:items.reduce((s,it)=>s+(it.qty*it.price),0),submittedAt:Date.now()}); }catch(e){}
       showToast('บันทึกแล้ว ✓ ส่งคลังอนุมัติ (ขนส่งเก็บเอง)','success');
       Object.assign(returnState,{photo:'',returnType:'',billType:'',customerCode:'',customerName:'',docNo:'',salesman:'',_cnSellers:[],_cnIds:[],reasonCategory:'',reasonSub:'',note:'',_ownMode:false,_draftChecked:false,items:[{productId:'',productName:'',unit:'ชิ้น(EA)',qty:'',price:''}]});
-      _cncView='approve'; switchTab('sec-cncollect');
+      _cncView='done'; switchTab('sec-cncollect');   // v3.218: ไม่มีแท็บรออนุมัติแล้ว → ไปแท็บ "เก็บแล้ว" ให้เห็นของที่เพิ่งบันทึก
     } else showToast('บันทึกไม่สำเร็จ: '+((r&&r.error)||'ลองใหม่'),'error');
   } catch(e){ hideSpinner(); showToast('บันทึกไม่สำเร็จ — ลองใหม่','error'); }
   finally { returnState._submitting=false; if(btn){ btn.disabled=false; btn.innerHTML=orig; } }
@@ -6648,6 +6653,7 @@ async function renderSupHome(){
   $('pendingList').innerHTML=_bar+(pending.length?pending.map(j=>renderSupJobRow(j)).join(''):
     `<div class="txt-center txt-muted p-16">ไม่มีงานรออนุมัติ${whLocked_()?' ของคลัง '+esc(state.user.warehouse||''):(state.whFilter?' คลัง '+esc(state.whFilter):'')}</div>`);
   renderCNPending();   // v2.9: CN ของคลังที่รออนุมัติ โผล่ในหน้านี้ด้วย (เฉพาะฝ่ายคลัง)
+  renderCNCollectPending();   // v3.218: CN ที่ขนส่งเก็บมา รออนุมัติ (ย้ายมาจากหน้าเก็บของคืน)
   renderPalletPending();   // v3.68: ค่าพาเลทรออนุมัติ (เฉพาะฝ่ายบัญชี)
 }
 /* ===== CN รออนุมัติ ในหน้ารออนุมัติ (เฉพาะฝ่ายคลัง) v2.9 ===== */
@@ -8063,14 +8069,13 @@ function cncGrandTotal_(){
   }));
   el.innerHTML=`เลือกเก็บ <b>${items}</b> รายการ · รวม <b class="num" style="color:var(--gold-ink);font-size:15px">${fmt(sum)} ฿</b>`;
 }
-async function renderCNCollect(){
-  const body=$('cncollectBody'); if(!body) return;
-  if((parseInt((state.user||{}).userRole)||0)<3){ body.innerHTML='<div class="txt-muted txt-center" style="padding:24px">อยู่ระหว่างทดสอบ — ยังไม่เปิดใช้งาน</div>'; return; }   // v3.187: เทส—เฉพาะ Role≥3 (กันเข้าถึงตรง)
-  body.innerHTML='<div class="txt-muted txt-center" style="padding:24px">⏳ กำลังโหลดรายการสั่งคืน…</div>';
+/* ★ v3.218: แยกตัวโหลด/จัดกลุ่มข้อมูล CN ออกมา — ใช้ร่วมกันระหว่างหน้า "เก็บของคืน" กับ "รออนุมัติ" (คลัง)
+   คืน true = สำเร็จ · เติมค่าให้ _cncGroups/_cncDone/_cncApprove */
+async function cncLoadData_(){
   let rows=[];
-  // v3.188: อ่านจากชีทต้นทาง CN-Sale-dman ตรงๆ (เรียลไทม์ ไม่ต้องรอมิเรอร์ 5 นาที) — customerSheetId = ไฟล์เดียวกับต้นทาง
+  // v3.188: อ่านจากชีทต้นทาง CN-Sale-dman ตรงๆ (เรียลไทม์) — customerSheetId = ไฟล์เดียวกับต้นทาง
   try{ rows=await fetchSheet(CFG.customerSheetId,'CN-Sale-dman',{fresh:true}); }
-  catch(e){ body.innerHTML='<div class="txt-danger txt-center" style="padding:24px">โหลดข้อมูลไม่สำเร็จ — ลองรีเฟรชใหม่</div>'; return; }
+  catch(e){ return false; }
   const pMap={},pOrd=[],dMap={},dOrd=[],aMap={},aOrd=[];
   (rows||[]).forEach(r=>{
     const line=String(r['cnLineId']||'').trim(); if(!line) return;
@@ -8112,8 +8117,30 @@ async function renderCNCollect(){
   _cncDone=dOrd.map(k=>dMap[k]);
   _cncApprove=aOrd.map(k=>aMap[k]);
   if(_cncSelCode && !_cncGroups.some(g=>g.shopCode===_cncSelCode)) _cncSelCode='';   // ร้านที่เลือกไม่เหลือ → รีเซ็ต
-  if(_cncView==='approve' && !((state.user||{}).canApproveCN)) _cncView='pending';   // ไม่มีสิทธิ์อนุมัติ → กลับแท็บรอเก็บ
+  if(_cncView==='approve') _cncView='pending';   // v3.218: ย้ายการอนุมัติไปหน้า "รออนุมัติ" แล้ว
+  return true;
+}
+async function renderCNCollect(){
+  const body=$('cncollectBody'); if(!body) return;
+  if((parseInt((state.user||{}).userRole)||0)<3){ body.innerHTML='<div class="txt-muted txt-center" style="padding:24px">อยู่ระหว่างทดสอบ — ยังไม่เปิดใช้งาน</div>'; return; }   // v3.187: เทส—เฉพาะ Role≥3
+  body.innerHTML='<div class="txt-muted txt-center" style="padding:24px">⏳ กำลังโหลดรายการสั่งคืน…</div>';
+  const ok=await cncLoadData_();
+  if(!ok){ body.innerHTML='<div class="txt-danger txt-center" style="padding:24px">โหลดข้อมูลไม่สำเร็จ — ลองรีเฟรชใหม่</div>'; return; }
   paintCNCollect_();
+}
+/* ★ v3.218: CN ที่ขนส่งเก็บมา รออนุมัติ → โผล่ในหน้า "รออนุมัติ" เดิม (ที่เดียวกับ CN/งาน/ค่าพาเลท) */
+async function renderCNCollectPending(){
+  const card=$('cncPendingCard'); if(!card) return;
+  const u=state.user||{};
+  if(!(u.canApproveCN||(isHQ_()&&u.canApprove))){ card.style.display='none'; return; }
+  card.style.display='';
+  const box=$('cncPendingList');
+  box.innerHTML='<div class="txt-muted txt-center" style="padding:20px">⏳ กำลังโหลด…</div>';
+  const ok=await cncLoadData_();
+  const cc=$('cncPendingCount');
+  if(!ok){ box.innerHTML='<div class="txt-muted txt-center" style="padding:20px">โหลดไม่สำเร็จ — ลองรีเฟรช</div>'; if(cc) cc.textContent=''; return; }
+  if(cc) cc.textContent=_cncApprove.reduce((s,g)=>s+g.lines.length,0);
+  box.innerHTML=cncApproveHtml_();
 }
 function paintCNCollect_(){
   const body=$('cncollectBody'); if(!body) return;
@@ -8123,7 +8150,8 @@ function paintCNCollect_(){
   const tab=(v,l,n)=>`<button class="btn btn-sm ${_cncView===v?'btn-gold':'btn-outline'}" style="flex:1;min-width:84px" onclick="cncSetView_('${v}')">${l}${n!==undefined?' ('+n+')':''}</button>`;
   let toggle='<div class="row gap-8" style="margin-bottom:12px;flex-wrap:wrap">'+tab('pending','🔵 รอเก็บ',nP)
     +'<button class="btn btn-sm btn-outline" style="flex:1;min-width:84px" onclick="openOwnReturn()">➕ เก็บเอง</button>';   // v3.197: เปิดฟอร์มรับคืนแบบเต็ม (โหมด own)
-  if(canApp) toggle+=tab('approve','📋 รออนุมัติ',nA);
+  // v3.218: แท็บ "รออนุมัติ" ย้ายไปหน้า "รออนุมัติ" เดิมแล้ว (คลังดูที่เดียวจบ) — ที่นี่เหลือ รอเก็บ/เก็บเอง/เก็บแล้ว
+  if(canApp&&nA) toggle+=`<span class="txt-xs txt-muted" style="flex:1;min-width:120px;align-self:center;text-align:center">📋 รออนุมัติ ${nA} รายการ<br>(ดูที่หน้า "รออนุมัติ")</span>`;
   toggle+=tab('done','✅ เก็บแล้ว',nD)+'</div>';
   let inner;
   if(_cncView==='own'){
@@ -8235,7 +8263,9 @@ async function approveCNBatch_(bi,approve){
   showSpinner(approve?'กำลังอนุมัติ…':'กำลังปฏิเสธ…');
   const r=await postSyncGAS_({action:'approve_cn_collect',decision:approve?'approve':'reject',approver:approver,reason:reason||'',cnDoc:approve?cnDoc:'',photo:approve?appPhoto:'',lines:b.lines.map(x=>({cnLineId:x.cnLineId}))},30000);
   hideSpinner();
-  if(r&&r.ok&&r.updated>0){ if(approve) delete _cncAppPhoto[bkey]; showToast(approve?'อนุมัติแล้ว ✓':'ปฏิเสธแล้ว','success'); renderCNCollect(); }
+  // v3.218: อนุมัติจากหน้า "รออนุมัติ" → รีเฟรชการ์ดในหน้านั้น · ถ้าอยู่หน้าเก็บของคืนก็รีเฟรชหน้านั้นแทน
+  if(r&&r.ok&&r.updated>0){ if(approve) delete _cncAppPhoto[bkey]; showToast(approve?'อนุมัติแล้ว ✓':'ปฏิเสธแล้ว','success');
+    if(state.currentTab==='sec-sup-home') renderCNCollectPending(); else renderCNCollect(); }
   else showToast('ไม่สำเร็จ: '+((r&&r.error)||'ไม่พบรายการ'),'error');
 }
 async function undoCNCollect_(cnLineId){
@@ -8397,7 +8427,7 @@ async function saveOwnCN_(){
   showSpinner('บันทึกเคลม…');
   const r=await postSyncGAS_({action:'create_cn_own',shopCode:_ownCN.shopCode,shopName:_ownCN.shopName,warehouse:wh,driver:driver,reason:_ownCN.reason,note:_ownCN.note,photo:_ownCN.photo,items:items.map(it=>({name:it.name,barcode:it.barcode,qty:parseFloat(it.qty)||0,unit:it.unit,price:parseFloat(it.price)||0}))},30000);
   hideSpinner();
-  if(r&&r.ok){ showToast('บันทึกแล้ว ✓ ส่งคลังอนุมัติ','success'); _ownCN={shopCode:'',shopName:'',reason:'',note:'',photo:'',items:[{name:'',barcode:'',qty:'',unit:'',price:''}]}; _cncView='approve'; renderCNCollect(); }
+  if(r&&r.ok){ showToast('บันทึกแล้ว ✓ ส่งคลังอนุมัติ','success'); _ownCN={shopCode:'',shopName:'',reason:'',note:'',photo:'',items:[{name:'',barcode:'',qty:'',unit:'',price:''}]}; _cncView='pending'; renderCNCollect(); }   // v3.218: ไม่มีแท็บ approve แล้ว
   else showToast('บันทึกไม่สำเร็จ: '+((r&&r.error)||'ลองใหม่'),'error');
 }
 
