@@ -885,12 +885,26 @@ body.dark .banner-gold{color:var(--gold-light)}
   </div>
 </div>
 
+<div class="modal-overlay" id="modalEditTeam">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>✏️ แก้ทีม (คนขับ / ผู้ช่วย / ทะเบียน)</h3>
+      <button class="modal-close" onclick="closeModal('modalEditTeam')">×</button>
+    </div>
+    <div class="modal-body" id="editTeamBody"></div>
+    <div class="modal-foot">
+      <button class="btn btn-outline" onclick="closeModal('modalEditTeam')">ยกเลิก</button>
+      <button class="btn btn-gold" onclick="saveEditTeam()">✓ บันทึกทีม</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.198';
+const APP_VERSION='3.199';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -4672,6 +4686,47 @@ function backToMyJobsList(){
   state.driverJobView='list';
   renderActiveJob();
 }
+/* v3.199: แก้ทีม (คนขับ/ผู้ช่วย/ทะเบียน/การส่ง) หลัง assign — บันทึกส่ง editTeam:true (GAS เขียนทีมทับได้เฉพาะตอนนี้) */
+function etPickPattern(btn){ btn.parentElement.querySelectorAll('.pill').forEach(p=>p.classList.remove('active','gold')); btn.classList.add('active','gold'); }
+function openEditTeam(){
+  const j=state.jobs.find(x=>x.id===state.activeJobId);
+  if(!j||!j.team){ showToast('ไม่พบข้อมูลงาน','warning'); return; }
+  const drvItems=state.drivers.map(h=>{ const nk=cleanCell(h['ชื่อเล่น']); const fn=cleanCell(h['ชื่อ - สกุล']||h['ชื่อ-สกุล']||''); const full=fn?`${fn} (${nk})`:nk; return {v:full,l:full}; }).sort((a,b)=>a.l.localeCompare(b.l,'th'));
+  const helperItems=drvItems.slice();
+  const veh=(state.vehicles||[]).slice();
+  const hl=(j.team.helperList&&j.team.helperList.length)?j.team.helperList:[j.team.helper1,j.team.helper2,j.team.helperExtra].filter(Boolean);
+  $('editTeamBody').innerHTML=`
+    <div class="banner-gold" style="margin-bottom:10px">แก้แล้วกด "บันทึกทีม" — จะอัปเดตชื่อในชีทบันทึกเที่ยว (ใบคุม ${esc(j.id)})</div>
+    <div class="field"><label>คนขับ<span class="req">*</span></label>${buildDD('etDriver',drvItems,'-- เลือกคนขับ --')}</div>
+    <div class="field"><label>ทะเบียน</label>${buildDD('etPlate',veh.map(v=>({v:v.plate,l:v.plate})),'-- เลือกทะเบียน --')}</div>
+    <div class="field"><label>การส่ง</label><div class="pills" id="etPattern">${PICKUP_PATTERNS.map(p=>`<button type="button" class="pill ${p===j.team.pattern?'active gold':''}" data-v="${esc(p)}" onclick="etPickPattern(this)">${esc(p)}</button>`).join('')}</div></div>
+    ${[1,2,3,4,5,6].map(n=>`<div class="field"><label>ผู้ช่วย ${n}</label>${buildDD('etHelper'+n,[{v:'',l:'— ไม่เลือก —'}].concat(helperItems),'-- (ถ้ามี) --')}</div>`).join('')}
+    <div class="field"><label>ผู้ช่วยที่ไม่มีในรายชื่อ</label><input class="input" id="etHelperExtra" value="${esc(j.team.newStaff||'')}" placeholder="พิมพ์ชื่อผู้ช่วยอื่น (ถ้ามี)"></div>`;
+  openModal('modalEditTeam');
+  if(j.team.driver) ddPick('etDriver',j.team.driver,j.team.driver);
+  if(j.team.plate) ddPick('etPlate',j.team.plate,j.team.plate);
+  hl.forEach((h,i)=>{ if(i<6&&h) ddPick('etHelper'+(i+1),h,h); });
+}
+async function saveEditTeam(){
+  const j=state.jobs.find(x=>x.id===state.activeJobId);
+  if(!j){ closeModal('modalEditTeam'); return; }
+  const driver=expandPersonName_(ddValue('etDriver'))||j.team.driver||'';
+  if(!driver){ showToast('เลือกคนขับ','warning'); return; }
+  const helpers=[]; [1,2,3,4,5,6].forEach(n=>{ const v=expandPersonName_(ddValue('etHelper'+n)); if(v&&helpers.indexOf(v)<0) helpers.push(v); });
+  const newStaff=expandPersonName_((($('etHelperExtra')||{}).value||'').trim());
+  const plate=ddValue('etPlate')||j.team.plate||'';
+  const ap=document.querySelector('#etPattern .pill.active');
+  const pattern=(ap&&ap.dataset.v)||j.team.pattern||PICKUP_PATTERNS[0];
+  j.team=Object.assign({},j.team,{driver,helper:helpers.concat(newStaff?[newStaff]:[]).join(', '),
+    helper1:helpers[0]||'',helper2:helpers[1]||'',helperExtra:helpers[2]||'',helperList:helpers,newStaff,plate,pattern});
+  j.driver=driver; j.helper=j.team.helper; j.plate=plate; j.pickup=pattern;
+  persistJobs();
+  queueSync({action:'save_job',jobId:j.id,status:j.status,team:j.team,helperList:helpers,
+    newStaff:newStaff||undefined,warehouse:j.warehouse||'W1',startedAt:j.startedAt,editTeam:true},'editteam|'+j.id);
+  closeModal('modalEditTeam');
+  showToast('บันทึกทีมแล้ว ✓','success');
+  renderActiveJob();
+}
 function renderActiveJob(){
   // v1.45: list view (3 กล่อง) เป็น default; detail เมื่อมี activeJobId
   if(state.driverJobView!=='detail'||!state.activeJobId){
@@ -4705,11 +4760,12 @@ function renderActiveJob(){
         <span class="badge badge-info">${esc(j.status==='in_progress'?'กำลังส่ง':j.status==='pending_approval'?'รออนุมัติ':j.status==='rejected'?'ตีกลับ':j.status==='approved'?'อนุมัติแล้ว':j.status)}</span>
       </div>
       <div class="card-body">
-        <div class="row mb-8">
+        <div class="row mb-8" style="flex-wrap:wrap;align-items:center;gap:5px">
           <span class="badge badge-gold">👤 ${esc(j.team.driver||'-')}</span>
           <span class="badge badge-info">🚗 ${esc(j.team.plate)}</span>
           <span class="badge badge-info">📦 ${esc(j.team.pattern||'-')}</span>
           ${j.team.helper?`<span class="badge" style="background:#eef2fa;color:var(--muted);border:1px solid var(--border)">👥 ${esc(j.team.helper)}</span>`:''}
+          ${!coHelp?`<button type="button" class="badge" style="background:#fff;border:1px solid var(--gold);color:var(--gold-ink);cursor:pointer;font-weight:600" onclick="openEditTeam()">✏️ แก้ทีม</button>`:''}
         </div>
         <div class="grid-2">
           <div><div class="txt-xs txt-muted">บิลทั้งหมด</div><div class="txt-lg num">${done}/${j.bills.length}</div></div>
