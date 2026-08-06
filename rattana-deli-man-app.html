@@ -909,7 +909,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.202';
+const APP_VERSION='3.203';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -2468,7 +2468,10 @@ function saveReturnDraft(){
   if(returnState._ownMode) return;   // v3.197: โหมด own ไม่เขียนทับ draft รับคืน (กันข้อมูลรับคืนที่ค้างไว้หาย)
   try{
     const {photo,returnType,billType,customerCode,customerName,docNo,driverName,salesman,reasonCategory,reasonSub,note,items}=returnState;
-    localStorage.setItem(RETURN_DRAFT_KEY,JSON.stringify({photo,returnType,billType,customerCode,customerName,docNo,driverName,salesman,reasonCategory,reasonSub,note,items,_ts:Date.now()}));
+    // ★ v3.203: ห้ามเก็บรูป base64 ลงเครื่อง (ใบละ ~300-500KB ทำพื้นที่เต็ม → ระบบล้างข้อมูลทิ้งทั้งก้อน)
+    //   เก็บเฉพาะ "ลิงก์ Drive" ที่อัปเสร็จแล้ว · ถ้ายังอัปไม่เสร็จ = ไม่เก็บรูปในร่าง (ข้อความที่กรอกยังกู้ได้ครบ)
+    const photoSafe=(typeof photo==='string'&&photo.indexOf('data:')===0)?'':photo;
+    localStorage.setItem(RETURN_DRAFT_KEY,JSON.stringify({photo:photoSafe,returnType,billType,customerCode,customerName,docNo,driverName,salesman,reasonCategory,reasonSub,note,items,_ts:Date.now()}));
   }catch(e){}
 }
 function clearReturnDraft(){ localStorage.removeItem(RETURN_DRAFT_KEY); }
@@ -3184,19 +3187,42 @@ function pickBillType(btn){
   renderReturn();
 }
 function renderReturnThumb(){ return `<div class="photo-thumb"><img src="${imgSrc(returnState.photo)}" onerror="this.style.opacity=.3"><button class="photo-del" onclick="returnState.photo='';$('returnPhotoPreview').innerHTML=''">×</button></div>`; }
+/* ★ v3.203: อัปรูปขึ้น Drive ทันทีที่แนบ แล้วเก็บแค่ "ลิงก์" — ไม่เก็บรูป base64 ไว้ในเครื่อง
+   (รูป 1 ใบ ~300-500KB · พื้นที่เว็บมีจำกัด ~5MB → เต็มแล้วระบบล้างข้อมูลทิ้งทั้งก้อน = งานหาย)
+   GAS uploadToDrive_ ส่งผ่านค่าที่เป็นลิงก์อยู่แล้ว → ส่งลิงก์ไปแทน base64 ได้เลย ไม่ต้องแก้ GAS */
+async function uploadPhotoNow_(dataUrl,name){
+  try{
+    if(!dataUrl||String(dataUrl).indexOf('data:')!==0) return dataUrl||'';
+    const url=getAppsUrl(); if(!url) return '';
+    const ctrl=('AbortController' in window)?new AbortController():null;
+    const to=setTimeout(()=>{ if(ctrl) ctrl.abort(); },30000);
+    const r=await fetch(url,{method:'POST',mode:'cors',headers:{'Content-Type':'text/plain'},
+      body:JSON.stringify({action:'upload_photo',dataUrl:dataUrl,name:name}),signal:ctrl?ctrl.signal:undefined});
+    clearTimeout(to);
+    const jr=await r.json().catch(()=>({}));
+    return (jr&&jr.ok&&jr.url&&String(jr.url).indexOf('http')===0)?jr.url:'';
+  }catch(e){ return ''; }
+}
 function handleReturnPhoto(ev){
   const f=ev.target.files[0]; if(!f) return;
   const reader=new FileReader();
   reader.onload=e=>{
     const img=new Image();
-    img.onload=()=>{
+    img.onload=async()=>{
       const max=1280; let w=img.width,h=img.height;
       if(w>max||h>max){ const r=Math.min(max/w,max/h); w*=r; h*=r; }
       const c=document.createElement('canvas'); c.width=w; c.height=h;
       c.getContext('2d').drawImage(img,0,0,w,h);
-      returnState.photo=c.toDataURL('image/jpeg',0.78);
+      const data=c.toDataURL('image/jpeg',0.78);
+      returnState.photo=data;
       $('returnPhotoPreview').innerHTML=renderReturnThumb();
-      saveReturnDraft();
+      saveReturnDraft();   // v3.203: ตอนนี้ยังเป็น base64 → saveReturnDraft ไม่เก็บรูปลงเครื่อง (เก็บเฉพาะลิงก์)
+      const link=await uploadPhotoNow_(data,'CNRET_'+Date.now()+'.jpg');   // อัปขึ้น Drive เบื้องหลัง
+      if(link&&returnState.photo===data){   // เปลี่ยน/ลบรูประหว่างอัป → ไม่ทับ
+        returnState.photo=link;
+        const el=$('returnPhotoPreview'); if(el) el.innerHTML=renderReturnThumb();
+        saveReturnDraft();   // คราวนี้เก็บลิงก์สั้นๆ ลงร่างได้ (กู้คืนได้เต็ม)
+      }
     };
     img.src=e.target.result;
   };
@@ -7398,13 +7424,51 @@ const OUTBOX_KEY='dman_outbox_v1';
 function loadOutbox(){ try{ return JSON.parse(localStorage.getItem(OUTBOX_KEY)||'[]'); }catch(e){ return []; } }
 function saveOutbox(arr){ try{ localStorage.setItem(OUTBOX_KEY,JSON.stringify(arr)); }catch(e){ console.warn('outbox persist',e); } }
 function outboxCount(){ return loadOutbox().length; }
+/* ★ v3.203: เตือนเมื่อข้อมูลค้างส่งนานเกินไป — ถ้าเครื่องโดนล้าง/พังตอนยังไม่เข้าชีท ข้อมูลหาย
+   → ป้ายแดงชัดๆ + สั่น + เตือนซ้ำทุก 5 นาที ให้คนขับรู้ตัวไปหาสัญญาณ */
+const OUTBOX_WARN_MS=5*60*1000;
+let _outboxWarnedAt=0;
+function outboxOldestAgeMs_(){
+  const box=loadOutbox(); if(!box.length) return 0;
+  let oldest=Infinity; box.forEach(x=>{ const t=+x.ts||0; if(t&&t<oldest) oldest=t; });
+  return (oldest===Infinity)?0:(Date.now()-oldest);
+}
 function updateOutboxBadge(){
   const el=$('outboxBadge'); if(!el) return;
   const n=outboxCount();
-  if(!n){ el.style.display='none'; return; }
+  if(!n){ el.style.display='none'; el.style.background=''; el.style.color=''; _outboxWarnedAt=0; return; }
   el.style.display='inline-block';
-  el.textContent=_flushing?('⏳ กำลังเข้าชีท '+n):('⏳ รอเข้าชีท '+n);
+  const age=outboxOldestAgeMs_();
+  if(age>=OUTBOX_WARN_MS){
+    const mins=Math.floor(age/60000);
+    el.style.background='#e74c3c'; el.style.color='#fff';
+    el.textContent=`⚠️ ยังไม่เข้าระบบ ${n} รายการ (ค้าง ${mins} นาที)`;
+    if(Date.now()-_outboxWarnedAt>OUTBOX_WARN_MS){
+      _outboxWarnedAt=Date.now();
+      try{ if(navigator.vibrate) navigator.vibrate([120,60,120]); }catch(e){}
+      showToast(`⚠️ มีข้อมูล ${n} รายการยังไม่เข้าระบบ (ค้าง ${mins} นาที) — หาสัญญาณแล้วกด ↻`,'error');
+      flushOutbox();   // ลองส่งใหม่ทันที
+    }
+  } else {
+    el.style.background=''; el.style.color='';
+    el.textContent=_flushing?('⏳ กำลังเข้าชีท '+n):('⏳ รอเข้าชีท '+n);
+  }
 }
+setInterval(()=>{ try{ if(!document.hidden) updateOutboxBadge(); }catch(e){} },30000);   // v3.203: เช็คคิวค้างทุก 30 วิ
+/* ★ v3.203: ขอสิทธิ์ "ห้ามลบข้อมูลนี้" จากเครื่อง — กันระบบล้างข้อมูลเว็บทิ้งตอนพื้นที่ใกล้เต็ม
+   (ได้ผลชัดบน Android/Chrome · iOS ช่วยได้เมื่อติดตั้งเป็นแอปบนหน้าจอโฮม) — ไม่รองรับก็ไม่พัง */
+(function requestPersistentStorage_(){
+  try{
+    if(!navigator.storage) return;
+    if(navigator.storage.persist) navigator.storage.persisted().then(p=>{ if(!p) navigator.storage.persist().catch(()=>{}); }).catch(()=>{});
+    // v3.203: พื้นที่ใกล้เต็ม → เตือนล่วงหน้า (เต็มเมื่อไหร่ระบบจะล้างข้อมูลแอปทิ้ง)
+    if(navigator.storage.estimate) navigator.storage.estimate().then(s=>{
+      if(!s||!s.quota) return;
+      const pct=s.usage/s.quota;
+      if(pct>0.8) setTimeout(()=>showToast('⚠️ พื้นที่เก็บข้อมูลของแอปใกล้เต็ม ('+Math.round(pct*100)+'%) — เคลียร์พื้นที่เครื่อง หรือส่งงานค้างให้เข้าระบบก่อน','warning'),4000);
+    }).catch(()=>{});
+  }catch(e){}
+})();
 function queueSync(payload,label){
   const box=loadOutbox();
   box.push({ky:label||(payload.jobId+'|'+((payload.bills&&payload.bills.map(b=>b.doc).join(','))||payload.action||'')),payload,tries:0,ts:Date.now()});
