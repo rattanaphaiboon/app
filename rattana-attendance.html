@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v4.78</title>
+<title>HR Rattana v4.82</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3245,6 +3245,20 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
     </div>
   </div>
 </div>
+<!-- ===== v9.2: กล้องลงทะเบียนใบหน้า — เห็นตัวเอง กดถ่ายเอง 2 ช็อต ===== -->
+<div id="faceRegOverlay" style="display:none;position:fixed;inset:0;z-index:1200;background:linear-gradient(160deg,#0d1b3e 0%,#1a2f5e 100%);flex-direction:column;align-items:center;justify-content:center;padding:20px;padding-top:max(20px,env(safe-area-inset-top))">
+  <div id="frStep" style="color:#fff;font-size:19px;font-weight:800;margin-bottom:6px">📷 ช็อต 1/2 — หน้าปกติ ไม่ยิ้ม</div>
+  <div id="frHint" style="color:rgba(255,255,255,.75);font-size:13.5px;margin-bottom:16px;text-align:center">จัดใบหน้าให้เต็มวงกลม แล้วกดปุ่มถ่าย</div>
+  <div id="frCamRing" style="position:relative;width:min(74vw,300px);aspect-ratio:1/1;border-radius:50%;overflow:hidden;border:4px solid var(--gold);box-shadow:0 0 44px rgba(201,168,76,.35);flex-shrink:0">
+    <video id="frVideo" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;transform:scaleX(-1)"></video>
+  </div>
+  <div id="frShots" style="display:flex;gap:12px;margin:16px 0 4px;min-height:60px;align-items:center"></div>
+  <button id="frCaptureBtn" onclick="faceRegCapture()" style="width:min(74vw,300px);background:var(--gold);color:var(--navy);border:0;padding:16px;border-radius:14px;font-weight:800;font-size:17px;cursor:pointer;font-family:inherit">📸 ถ่ายรูป</button>
+  <div style="display:flex;gap:10px;margin-top:12px">
+    <button onclick="faceRegRestart()" style="background:transparent;border:1px solid rgba(255,255,255,.35);color:#fff;padding:10px 18px;border-radius:10px;font-size:13.5px;cursor:pointer;font-family:inherit">↺ เริ่มใหม่</button>
+    <button onclick="closeFaceRegCamera()" style="background:transparent;border:1px solid rgba(255,255,255,.35);color:#fff;padding:10px 18px;border-radius:10px;font-size:13.5px;cursor:pointer;font-family:inherit">ยกเลิก</button>
+  </div>
+</div>
 <div id="kioskOverlay">
   <div class="kiosk-bar">
     <button class="icon-btn" onclick="exitKiosk()">✕</button>
@@ -3378,7 +3392,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '8.9';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '9.3';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -3446,7 +3460,29 @@ let personalLocations = [];        // PersonalLocations — empId-specific spots
 let selectedLoginUser = null;
 
 let faceapiReady = false;
-let registeredDescriptor = null;   // own face descriptor
+let registeredDescriptor = null;   // own face descriptor (ไม่ยิ้ม — เทมเพลตหลัก)
+let registeredDescriptor2 = null;  // v9.1: เทมเพลตที่ 2 (ยิ้ม) — optional
+
+/* v9.1: ระยะที่ใกล้สุดจากทุกเทมเพลตของคนคนนั้น (รองรับ 1 หรือ 2 เทมเพลต)
+   descList = array ของ Float32Array (ตัว null/undefined ถูกข้าม) */
+function bestFaceDist_(probe, descList) {
+  let best = Infinity;
+  for (const d of descList) {
+    if (!d) continue;
+    const dist = faceapi.euclideanDistance(probe, d);
+    if (dist < best) best = dist;
+  }
+  return best;
+}
+/* แตก descriptor ที่อ่านจากชีท: รองรับทั้ง [128 ตัวเลข] (เก่า) และ [[128],[128]] (ใหม่ 2 เทมเพลต) */
+function parseDescriptors_(raw) {
+  try {
+    const arr = JSON.parse(raw || 'null');
+    if (!Array.isArray(arr) || !arr.length) return [];
+    if (Array.isArray(arr[0])) return arr.map(a => new Float32Array(a));  // หลายเทมเพลต
+    return [new Float32Array(arr)];                                        // เทมเพลตเดียว (เก่า)
+  } catch (_) { return []; }
+}
 
 /* Employee mode state */
 let empStream = null, empMatchInterval = null;
@@ -3477,7 +3513,7 @@ function loadAll() {
   settings  = Object.assign({radius:30, faceThr:0.5, startTime:'08:30', liveness:'medium', lateGrace:5,
     endTime:'17:00', breakStart:'12:00', breakEnd:'13:00', workCapH:8, graceMin:14}, LS.get('settings', {}));
   logs      = LS.get('logs', []);
-  team      = (LS.get('team', []) || []).map(m => ({...m, descriptor: m.descriptor ? new Float32Array(m.descriptor) : null}));
+  team      = (LS.get('team', []) || []).map(m => ({...m, descriptor: m.descriptor ? new Float32Array(m.descriptor) : null, descriptor2: m.descriptor2 ? new Float32Array(m.descriptor2) : null}));
   // Priority: hardcoded > localStorage > empty
   const lsConfig = LS.get('config', {}) || {};
   config = {
@@ -3495,10 +3531,12 @@ function loadAll() {
   allUsers  = LS.get('allUsers', []);
   // Restore cached remote data
   const cachedFD = LS.get('remoteFaceData', []);
-  remoteFaceData = cachedFD.map(f => ({...f, descriptor: f.descriptor ? new Float32Array(f.descriptor) : null}));
+  remoteFaceData = cachedFD.map(f => ({...f, descriptor: f.descriptor ? new Float32Array(f.descriptor) : null, descriptor2: f.descriptor2 ? new Float32Array(f.descriptor2) : null}));
   personalLocations = LS.get('personalLocations', []);
   const desc = LS.get('faceDescriptor', null);
   registeredDescriptor = desc ? new Float32Array(desc) : null;
+  const desc2 = LS.get('faceDescriptor2', null);            // v9.1: เทมเพลตยิ้ม
+  registeredDescriptor2 = desc2 ? new Float32Array(desc2) : null;
 }
 function saveLocations(){ LS.set('locations', locations); }
 function saveLogs(){ LS.set('logs', logs); }
@@ -3561,7 +3599,7 @@ async function syncLogsFromSheet(opts = {}) {
   }
 }
 function saveTeam(){
-  LS.set('team', team.map(m => ({...m, descriptor: m.descriptor ? Array.from(m.descriptor) : null})));
+  LS.set('team', team.map(m => ({...m, descriptor: m.descriptor ? Array.from(m.descriptor) : null, descriptor2: m.descriptor2 ? Array.from(m.descriptor2) : null})));
 }
 function saveConfig(){ LS.set('config', config); }
 function saveAllUsers(){ LS.set('allUsers', allUsers); }
@@ -3797,6 +3835,8 @@ async function doSheetLogin() {
       role:        u.role || 'employee',
       userRoleInt: parseInt(u.userRole, 10) || 1,
       department:  u.department || '',
+      company:     u.company || '',      // v9.0: backend ใส่ให้เฉพาะ PTT (บายพาส/ลาดใหญ่)
+      slipSheet:   u.slipSheet || '',    // v9.0: 'Slip PTT' = พนักงาน PTT นำร่อง
       loginAt:     Date.now(),
       sheetLogin:  true,
     };
@@ -3900,14 +3940,16 @@ function buildTeamFromSheet(selectedSupervisorName) {
     const remote = remoteFaceMap[empKey_(u.empId)];
     const local = localMap[empKey_(u.empId)];
     // Priority: remote face > local face
-    let descriptor = null, photo = null, registeredAt = null, registeredBy = null;
+    let descriptor = null, descriptor2 = null, photo = null, registeredAt = null, registeredBy = null;
     if (remote?.descriptor) {
       descriptor = remote.descriptor;
+      descriptor2 = remote.descriptor2 || null;   // v9.1
       photo = remote.photo || local?.photo || null;
       registeredAt = remote.registeredAt;
       registeredBy = remote.registeredBy;
     } else if (local?.descriptor) {
       descriptor = local.descriptor instanceof Float32Array ? local.descriptor : new Float32Array(local.descriptor);
+      descriptor2 = local.descriptor2 ? (local.descriptor2 instanceof Float32Array ? local.descriptor2 : new Float32Array(local.descriptor2)) : null;  // v9.1
       photo = local.photo || null;
       registeredAt = local.registeredAt;
       registeredBy = local.registeredBy;
@@ -3920,7 +3962,7 @@ function buildTeamFromSheet(selectedSupervisorName) {
       branch: u.branch,
       department: u.department,
       supervisorName: u.supervisorName,
-      descriptor, photo, registeredAt, registeredBy,
+      descriptor, descriptor2, photo, registeredAt, registeredBy,
       synced: !!remote?.descriptor, // ✓ ถ้ามาจาก FaceData Sheet
     };
   });
@@ -4028,9 +4070,11 @@ function adoptMyFace_(tag) {
   const myFace = findMyFace_();
   if (!myFace) { console.log('[face] ' + tag + ': ไม่พบใบหน้าของ empId=' + empKey_(currentUser && currentUser.empId) + ' ใน FaceData (' + remoteFaceData.length + ' คน)'); return false; }
   registeredDescriptor = myFace.descriptor;
+  registeredDescriptor2 = myFace.descriptor2 || null;   // v9.1: เทมเพลตยิ้ม (ถ้ามี)
   if (myFace.photo) LS.set('facePhoto', myFace.photo);
   if (myFace.registeredAt) LS.set('faceRegisteredAt', new Date(myFace.registeredAt).getTime());
   LS.set('faceDescriptor', Array.from(myFace.descriptor));
+  if (myFace.descriptor2) LS.set('faceDescriptor2', Array.from(myFace.descriptor2)); else LS.del('faceDescriptor2');
   console.log('[face] ' + tag + ': โหลดใบหน้าตัวเองจาก FaceData แล้ว (' + empKey_(myFace.empId) + ')');
   try { renderFaceReg(); evaluateAction(); } catch (_) {}
   return true;
@@ -4043,20 +4087,18 @@ async function loadFaceDataSheet() {
   if (!rows) return false;
   // FaceData columns: empId, name, descriptor (JSON array), photo (base64 or URL), registeredAt, registeredBy
   remoteFaceData = rows.filter(r => r.empId).map(r => {
-    let descriptor = null;
-    try {
-      if (r.descriptor) descriptor = new Float32Array(JSON.parse(r.descriptor));
-    } catch(e) { console.warn('bad descriptor for', r.empId); }
+    const descs = parseDescriptors_(r.descriptor);   // v9.1: รองรับ 1 หรือ 2 เทมเพลต
     return {
       empId: empKey_(r.empId),
       name: r.name || '',
-      descriptor,
+      descriptor: descs[0] || null,
+      descriptor2: descs[1] || null,
       photo: r.photo || '',
       registeredAt: r.registeredAt || '',
       registeredBy: r.registeredBy || '',
     };
   });
-  LS.set('remoteFaceData', remoteFaceData.map(f => ({...f, descriptor: f.descriptor ? Array.from(f.descriptor) : null})));
+  LS.set('remoteFaceData', remoteFaceData.map(f => ({...f, descriptor: f.descriptor ? Array.from(f.descriptor) : null, descriptor2: f.descriptor2 ? Array.from(f.descriptor2) : null})));
   // ตรวจว่ามีใบหน้าตัวเองใน FaceData Sheet หรือไม่
   // ถ้ามี → ใช้แทน local (ใบหน้าจาก Sheet เป็น source of truth)
   adoptMyFace_('CSV');
@@ -4225,13 +4267,16 @@ async function testAppsScriptConnection() {
   }
 }
 
-/* Register face → POST to Apps Script (idToken ใส่อัตโนมัติใน callAppsScript) */
-async function apiRegisterFace({ empId, name, descriptor, photo, registeredBy }) {
-  const descArr = descriptor instanceof Float32Array ? Array.from(descriptor) : descriptor;
+/* Register face → POST to Apps Script (idToken ใส่อัตโนมัติใน callAppsScript)
+   v9.1: รองรับ 2 เทมเพลต — ถ้ามี descriptor2 จะส่งเป็น [[128],[128]] ใน field เดิม */
+async function apiRegisterFace({ empId, name, descriptor, descriptor2, photo, photo2, registeredBy }) {
+  const round = d => (d instanceof Float32Array ? Array.from(d) : d).map(n => +n.toFixed(5));
+  const payloadDesc = descriptor2 ? [round(descriptor), round(descriptor2)] : round(descriptor);
   return callAppsScript('registerFace', {
     empId, name,
-    descriptor: descArr.map(n => +n.toFixed(5)),
+    descriptor: payloadDesc,
     photo: photo || '',
+    photo2: photo2 || '',
     registeredBy: registeredBy || empId,
   });
 }
@@ -4362,20 +4407,18 @@ async function loadFaceDataViaApi() {
   const rows = await apiGetFaceData();
   if (!rows) return false;
   remoteFaceData = rows.filter(r => r.empId).map(r => {
-    let descriptor = null;
-    try {
-      if (r.descriptor) descriptor = new Float32Array(JSON.parse(r.descriptor));
-    } catch(e) {}
+    const descs = parseDescriptors_(typeof r.descriptor === 'string' ? r.descriptor : JSON.stringify(r.descriptor || null));  // v9.1
     return {
       empId: empKey_(r.empId),
       name: r.name || '',
-      descriptor,
+      descriptor: descs[0] || null,
+      descriptor2: descs[1] || null,
       photo: r.photo || '',
       registeredAt: r.registeredAt || '',
       registeredBy: r.registeredBy || '',
     };
   });
-  LS.set('remoteFaceData', remoteFaceData.map(f => ({...f, descriptor: f.descriptor ? Array.from(f.descriptor) : null})));
+  LS.set('remoteFaceData', remoteFaceData.map(f => ({...f, descriptor: f.descriptor ? Array.from(f.descriptor) : null, descriptor2: f.descriptor2 ? Array.from(f.descriptor2) : null})));
   adoptMyFace_('API');
   return true;
 }
@@ -4876,7 +4919,7 @@ async function empMatchTick() {
     evaluateAction();
     return;
   }
-  const dist = faceapi.euclideanDistance(det.descriptor, registeredDescriptor);
+  const dist = bestFaceDist_(det.descriptor, [registeredDescriptor, registeredDescriptor2]);  // v9.1: เทียบ 2 เทมเพลต (ยิ้ม/ไม่ยิ้ม) เอาใกล้สุด
   const ok = dist <= settings.faceThr;
   document.getElementById('empCamWrap').className = 'camera-wrap home-cam ' + (ok ? 'success' : 'matching');
   lastFaceMatch = { found:true, ok, distance:dist, descriptor:det.descriptor, time:Date.now() };
@@ -4931,50 +4974,153 @@ function updateFaceCheck(info) {
 /* ============================================================
    OWN FACE REGISTRATION (employee/supervisor's own face)
    ============================================================ */
-async function registerOwnFace() {
-  if (!empStream) await startEmpCamera();
-  if (!faceapiReady) { toast('โมเดลยังไม่พร้อม', 'warning'); return; }
-  toast('มองตรงกล้อง 3 วินาที...', 'info');
-  showSpinner('กำลังจับใบหน้า...');
-  try {
-    let descriptor = null, photoData = null;
-    for (let i = 0; i < 8 && !descriptor; i++) {
-      await sleep(400);
-      const v = document.getElementById('empVideo');
-      const det = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({inputSize:320,scoreThreshold:0.6}))
-        .withFaceLandmarks().withFaceDescriptor();
-      if (det) { descriptor = det.descriptor; photoData = capturePhoto(v); }
-    }
-    if (!descriptor) { toast('ไม่พบใบหน้า ลองใหม่', 'error'); return; }
-    registeredDescriptor = descriptor;
-    LS.set('faceDescriptor', Array.from(descriptor));
-    LS.set('facePhoto', photoData);
-    LS.set('faceRegisteredAt', Date.now());
-    renderFaceReg();
+/* v9.2: ลงทะเบียนใบหน้า — เปิดกล้องเต็มจอ เห็นตัวเอง กดถ่ายเอง 2 ช็อต (ไม่ยิ้ม → ยิ้ม) */
+let _frState = null;
 
-    // Sync to FaceData Sheet via Apps Script
-    if (config.appsScriptUrl && currentUser?.empId) {
-      try {
-        await apiRegisterFace({
-          empId: currentUser.empId,
-          name: currentUser.name,
-          descriptor,
-          photo: photoData,
-          registeredBy: currentUser.empId,
-        });
-        toast('ลงทะเบียนสำเร็จ ✓ · ☁️ Sheet', 'success');
-      } catch (e) {
-        toast('ลงทะเบียน ✓ · ⚠️ Sheet sync ล้มเหลว: ' + e.message, 'warning');
-      }
+async function registerOwnFace() {
+  if (!faceapiReady) { toast('โมเดลยังไม่พร้อม — รอสักครู่แล้วลองใหม่', 'warning'); return; }
+  const ov = document.getElementById('faceRegOverlay');
+  if (!ov) return;
+  _frState = { step: 1, shot1: null, shot2: null, stream: null, busy: false };
+  ov.style.display = 'flex';
+  frRender_();
+  try {
+    _frState.stream = await navigator.mediaDevices.getUserMedia({
+      audio: false, video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 640 } }
+    });
+    const v = document.getElementById('frVideo');
+    v.srcObject = _frState.stream;
+    v.play().catch(() => {});    // อย่า await — ค้างบน iOS (บทเรียน v7.2)
+  } catch (e) {
+    closeFaceRegCamera();
+    toast('เปิดกล้องไม่ได้ — อนุญาตการใช้กล้องในเบราว์เซอร์ก่อน', 'error');
+  }
+}
+
+function frRender_() {
+  const s = _frState; if (!s) return;
+  const stepEl = document.getElementById('frStep');
+  const hintEl = document.getElementById('frHint');
+  const btn = document.getElementById('frCaptureBtn');
+  if (s.step === 1) {
+    stepEl.textContent = '📷 ช็อต 1/2 — หน้าปกติ ไม่ยิ้ม';
+    hintEl.textContent = 'จัดใบหน้าให้เต็มวงกลม แล้วกดปุ่มถ่าย';
+    btn.textContent = '📸 ถ่ายรูป';
+  } else {
+    stepEl.textContent = '😄 ช็อต 2/2 — ยิ้มกว้างๆ';
+    hintEl.textContent = 'ยิ้มค้างไว้ แล้วกดปุ่มถ่าย';
+    btn.textContent = '📸 ถ่ายรูป (ยิ้ม)';
+  }
+  const th = (p, label) => `<div style="text-align:center"><img src="${p}" style="width:56px;height:56px;border-radius:50%;object-fit:cover;border:2.5px solid var(--gold)"><div style="color:rgba(255,255,255,.75);font-size:10.5px;margin-top:3px">${label}</div></div>`;
+  document.getElementById('frShots').innerHTML =
+    (s.shot1 ? th(s.shot1.photo, '✓ ปกติ') : '') + (s.shot2 ? th(s.shot2.photo, '✓ ยิ้ม') : '');
+}
+
+/* v9.3: จับภาพนิ่ง ณ วินาทีที่กดชัตเตอร์ — คืน {canvas (raw ไว้ตรวจใบหน้า), photo (200px ไว้โชว์/เก็บ)} */
+function frSnapshot_() {
+  const v = document.getElementById('frVideo');
+  if (!v || !v.videoWidth) return null;
+  const min = Math.min(v.videoWidth, v.videoHeight);
+  const c = document.createElement('canvas'); c.width = min; c.height = min;
+  const sx = (v.videoWidth - min) / 2, sy = (v.videoHeight - min) / 2;
+  c.getContext('2d').drawImage(v, sx, sy, min, min, 0, 0, min, min);   // raw ไม่ mirror — ให้ descriptor ตรงกับตอนสแกนจริง
+  const p = document.createElement('canvas'); p.width = 200; p.height = 200;
+  const pctx = p.getContext('2d');
+  pctx.translate(200, 0); pctx.scale(-1, 1);                            // รูปโชว์ mirror เหมือนที่เห็นในกล้อง
+  pctx.drawImage(c, 0, 0, min, min, 0, 0, 200, 200);
+  return { canvas: c, photo: p.toDataURL('image/jpeg', .7) };
+}
+
+async function faceRegCapture() {
+  const s = _frState; if (!s || s.busy) return;
+  s.busy = true;
+  const btn = document.getElementById('frCaptureBtn');
+  const ring = document.getElementById('frCamRing');
+  btn.disabled = true;
+  try {
+    // ── ชัตเตอร์: เก็บภาพทันทีที่กด ──
+    const snap = frSnapshot_();
+    if (!snap) { toast('กล้องยังไม่พร้อม — รอสักครู่', 'warning'); return; }
+    if (ring) { ring.style.borderColor = 'var(--success)'; setTimeout(() => { const r = document.getElementById('frCamRing'); if (r) r.style.borderColor = 'var(--gold)'; }, 300); }  // แฟลช = ถ่ายแล้ว
+    // ── ตรวจว่ารูปที่ถ่ายมีใบหน้าไหม ──
+    btn.textContent = '⏳ กำลังตรวจใบหน้า...';
+    const det = await faceapi.detectSingleFace(snap.canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }))
+      .withFaceLandmarks().withFaceDescriptor();
+    if (!_frState) return;                  // ผู้ใช้กดยกเลิกระหว่างตรวจ
+    if (!det) { toast('รูปนี้จับใบหน้าไม่ได้ — จัดหน้าให้เต็มวงกลมแล้วกดถ่ายใหม่', 'error'); return; }
+    const shot = { descriptor: det.descriptor, photo: snap.photo };
+    if (s.step === 1) {
+      s.shot1 = shot; s.step = 2;
+      toast('✓ ช็อต 1 เรียบร้อย — ต่อไปยิ้มกว้างๆ', 'success');
     } else {
-      toast('ลงทะเบียนสำเร็จ ✓ (เก็บในเครื่อง)', 'success');
+      // guard: สองช็อตต้องเป็นคนเดียวกัน — กันคนสลับหน้ากล้อง
+      const between = faceapi.euclideanDistance(s.shot1.descriptor, shot.descriptor);
+      if (between > 0.6) { toast('สองช็อตดูไม่ใช่คนเดียวกัน — ถ่ายช็อตยิ้มใหม่', 'error'); return; }
+      s.shot2 = shot;
+      frRender_();
+      await frSave_();
+      return;
     }
-  } finally { hideSpinner(); }
+    frRender_();
+  } finally {
+    if (_frState) { _frState.busy = false; }
+    if (btn) { btn.disabled = false; }
+    if (_frState) frRender_();   // อัปเดตข้อความปุ่มตาม step
+  }
+}
+
+function faceRegRestart() {
+  if (!_frState) return;
+  _frState.step = 1; _frState.shot1 = null; _frState.shot2 = null;
+  frRender_();
+}
+
+async function frSave_() {
+  const s = _frState; if (!s || !s.shot1) return;
+  registeredDescriptor = s.shot1.descriptor;
+  registeredDescriptor2 = s.shot2 ? s.shot2.descriptor : null;
+  LS.set('faceDescriptor', Array.from(s.shot1.descriptor));
+  if (s.shot2) LS.set('faceDescriptor2', Array.from(s.shot2.descriptor)); else LS.del('faceDescriptor2');
+  LS.set('facePhoto', s.shot1.photo);
+  LS.set('faceRegisteredAt', Date.now());
+  const photo1 = s.shot1.photo, photo2 = s.shot2 ? s.shot2.photo : '';
+  const d1 = s.shot1.descriptor, d2 = s.shot2 ? s.shot2.descriptor : null;
+  closeFaceRegCamera();
+  renderFaceReg();
+  // Sync to FaceData Sheet + Supabase via Apps Script
+  if (config.appsScriptUrl && currentUser?.empId) {
+    showSpinner('กำลังบันทึกขึ้นระบบ...');
+    try {
+      await apiRegisterFace({
+        empId: currentUser.empId,
+        name: currentUser.name,
+        descriptor: d1,
+        descriptor2: d2,
+        photo: photo1,
+        photo2: photo2,
+        registeredBy: currentUser.empId,
+      });
+      toast(`ลงทะเบียนสำเร็จ ✓ (${d2 ? '2 เทมเพลต ยิ้ม/ไม่ยิ้ม' : '1 เทมเพลต'}) · ☁️`, 'success');
+    } catch (e) {
+      toast('ลงทะเบียน ✓ · ⚠️ sync ล้มเหลว: ' + e.message, 'warning');
+    } finally { hideSpinner(); }
+  } else {
+    toast('ลงทะเบียนสำเร็จ ✓ (เก็บในเครื่อง)', 'success');
+  }
+}
+
+function closeFaceRegCamera() {
+  const s = _frState;
+  if (s && s.stream) { try { s.stream.getTracks().forEach(t => t.stop()); } catch (_) {} }
+  _frState = null;
+  const v = document.getElementById('frVideo'); if (v) v.srcObject = null;
+  const ov = document.getElementById('faceRegOverlay'); if (ov) ov.style.display = 'none';
 }
 function clearOwnFace() {
   if (!confirm('ลบใบหน้าที่ลงทะเบียน?')) return;
   registeredDescriptor = null;
-  LS.del('faceDescriptor'); LS.del('facePhoto'); LS.del('faceRegisteredAt');
+  registeredDescriptor2 = null;   // v9.1
+  LS.del('faceDescriptor'); LS.del('faceDescriptor2'); LS.del('facePhoto'); LS.del('faceRegisteredAt');
   renderFaceReg(); toast('ลบแล้ว', 'info');
 }
 function renderFaceReg() {
@@ -4988,7 +5134,8 @@ function renderFaceReg() {
     if (!statusEl || !previewEl) return;
     if (registeredDescriptor) {
       const at = LS.get('faceRegisteredAt', null);
-      statusEl.textContent = '✓ ลงทะเบียนแล้ว'; statusEl.style.color='var(--success)';
+      statusEl.textContent = registeredDescriptor2 ? '✓ ลงทะเบียนแล้ว (2 เทมเพลต ยิ้ม/ไม่ยิ้ม)' : '✓ ลงทะเบียนแล้ว (1 เทมเพลต)';
+      statusEl.style.color='var(--success)';
       const photo = LS.get('facePhoto', null);
       previewEl.innerHTML = `
         <div style="display:flex;gap:14px;align-items:center;padding:12px;background:var(--off-white);border-radius:10px;margin-bottom:12px">
@@ -5009,17 +5156,9 @@ function renderFaceReg() {
   renderInto(teamBadge, teamPreview);
 }
 
-/* เปิดกล้อง home → ลงทะเบียนใบหน้าตัวเอง (สำหรับ Supervisor/HR ที่ใช้ Team page) */
+/* ลงทะเบียนใบหน้าตัวเองจากหน้า Team — v9.2: overlay มีกล้องของตัวเอง เรียกตรงได้เลย */
 async function registerOwnFaceFromTeamPage() {
-  // ไปที่หน้าหลักก่อน เพื่อให้กล้องเปิดอยู่
-  showPage('home');
-  await sleep(300);
-  if (!empStream) await startEmpCamera();
-  await sleep(500);
   await registerOwnFace();
-  // กลับมาหน้า Team
-  await sleep(800);
-  showPage('team');
 }
 function capturePhoto(video) {
   const c = document.createElement('canvas'); c.width = 200; c.height = 200;
@@ -5572,7 +5711,7 @@ async function kioskDetectTick() {
     // Match against all team members, find best
     const results = team
       .filter(m => m.descriptor)
-      .map(m => ({ member:m, distance: faceapi.euclideanDistance(det.descriptor, m.descriptor) }))
+      .map(m => ({ member:m, distance: bestFaceDist_(det.descriptor, [m.descriptor, m.descriptor2]) }))  // v9.1: 2 เทมเพลต
       .sort((a,b) => a.distance - b.distance);
 
     if (results.length === 0) {
@@ -7605,7 +7744,7 @@ function dismissQuickStart() {
    CHECK-IN FLOW (start/cancel)
    ============================================================ */
 async function startCheckinFlow() {
-  if (CHECKIN_HR_ONLY && !isHROnly()) { toast('ยังไม่พร้อมใช้งานขณะนี้ค่ะ', 'info'); return; }
+  if (CHECKIN_HR_ONLY && !isHROnly() && !isPTTPilot()) { toast('ยังไม่พร้อมใช้งานขณะนี้ค่ะ', 'info'); return; }
   // v2.2: ไม่มี homeStartScreen แล้ว — เปิด overlay homeActiveScreen ตรงๆ
   const overlay = document.getElementById('homeActiveScreen');
   if (!overlay) return;
@@ -9988,6 +10127,15 @@ const CHECKIN_HR_ONLY = true;
 
 function isHROnly() {
   return !!(currentUser && (currentUser.role === 'hr' || isHRDept()));
+}
+/* v9.0: พนักงาน PTT นำร่อง (บายพาส/ลาดใหญ่) — เปิดให้เช็คอินได้ก่อนเปิดทั้งบริษัท
+   backend ใส่ slipSheet='Slip PTT'+company ให้ตอน login, applyPTTMenuVisibility ตั้ง isPTT */
+function isPTTPilot() {
+  if (!currentUser) return false;
+  if (currentUser.isPTT) return true;
+  if (currentUser.slipSheet === 'Slip PTT') return true;
+  const c = String(currentUser.company || '');
+  return c.indexOf('บายพาส') >= 0 || c.indexOf('ลาดใหญ่') >= 0;
 }
 /* ผ่านได้ถ้าไม่ได้ล็อก หรือเป็น HR */
 function canUseLeaveTime() {
