@@ -239,7 +239,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page hidden" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v4.5</small>
+      <small>ยอดขายเทียบเป้าหมาย v5.3</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -1793,28 +1793,46 @@ function renderW1() {
   const wd  = getWorkingDaysInfo(getWdMonth());
 
   // Build BP index by normalized Salesman_Name for current month
-  const bpIdx = new Map(); // normName → {exvat, custs, custSkuMap, prodSet, dates}
+  const bpIdx = new Map(); // normName → {exvat, custSkuMap, prodSet, dates}
+  // Build BP outlet+sku index by Sale NO ROO for current month
+  const bpOutletIdx = new Map(); // normName → {custs:Set, custSkuMap:Map}
   bpRaw.forEach(r => {
     if (!lbp) return;
     const d = bpMonthYear(r['Doc_Date']);
     if (!d || d.mm !== lbp.mm || d.yyyy !== lbp.yyyy) return;
     const sn   = String(r['Salesman_Name']||'').trim();
     const norm = normalizeText(sn).toLowerCase();
-    if (!norm) return;
-    if (!bpIdx.has(norm)) bpIdx.set(norm, {exvat:0, custs:new Set(), custSkuMap:new Map(), prodSet:new Set(), dates:new Set()});
-    const e    = bpIdx.get(norm);
+    const saleNo = normalizeText(String(r['Sale NO ROO']||'').trim()).toLowerCase();
     const cust = String(r['Customer_Code']||'').trim();
     const prod = String(r['Product_Name']||'').trim();
     const date = String(r['Doc_Date']||'').trim();
-    e.exvat += parseNum(r['EXVat+CN*2']);
-    if (cust) e.custs.add(cust);
-    if (prod) e.prodSet.add(prod);
-    if (date) e.dates.add(date);
-    if (cust && prod) {
-      if (!e.custSkuMap.has(cust)) e.custSkuMap.set(cust, new Set());
-      e.custSkuMap.get(cust).add(prod);
+    // index by Salesman_Name for actual/allSku/dates
+    if (norm) {
+      if (!bpIdx.has(norm)) bpIdx.set(norm, {exvat:0, prodSet:new Set(), dates:new Set()});
+      const e = bpIdx.get(norm);
+      e.exvat += parseNum(r['EXVat+CN*2']);
+      if (prod) e.prodSet.add(prod);
+      if (date) e.dates.add(date);
+    }
+    // index by Sale NO ROO for Outlet, SKU/ร้าน, SKU Point, All SKU (use Customer_Name)
+    const custName = String(r['Customer_Name']||'').trim();
+    if (saleNo) {
+      if (!bpOutletIdx.has(saleNo)) bpOutletIdx.set(saleNo, {custs:new Set(), custSkuMap:new Map(), prodRankMap:new Map()});
+      const oe = bpOutletIdx.get(saleNo);
+      const skuRank = String(r['SKU Point']||'').trim();
+      if (custName) oe.custs.add(custName);
+      // global unique product rank (first non-blank wins)
+      if (prod && skuRank && !oe.prodRankMap.has(prod)) oe.prodRankMap.set(prod, skuRank);
+      if (custName && prod) {
+        if (!oe.custSkuMap.has(custName)) oe.custSkuMap.set(custName, new Map());
+        const cm = oe.custSkuMap.get(custName);
+        // per-customer product rank: prefer non-blank
+        if (!cm.has(prod) || (!cm.get(prod) && skuRank)) cm.set(prod, skuRank);
+      }
     }
   });
+
+  const SKU_SCORE = {A:1,B:5,C:10,D:20,E:30,F:30,New:50};
 
   // Enrich W1 rows
   const dataRows = w1Raw.filter(r => String(r['ชื่อ-นามสกุล']||'').trim());
@@ -1822,15 +1840,21 @@ function renderW1() {
     const name   = String(r['ชื่อ-นามสกุล']||'').trim();
     const norm   = normalizeText(name).toLowerCase();
     const tgt    = parseNum(r['เป้าหมาย']);
-    const bp     = bpIdx.get(norm) || {exvat:0, custs:new Set(), custSkuMap:new Map(), prodSet:new Set(), dates:new Set()};
+    const bp     = bpIdx.get(norm) || {exvat:0, prodSet:new Set(), dates:new Set()};
     const actual = bp.exvat;
-    const outlet = bp.custs.size;
-    const allSku = bp.prodSet.size;
+    const oe     = bpOutletIdx.get(norm) || {custs:new Set(), custSkuMap:new Map(), prodRankMap:new Map()};
+    const outlet = oe.custs.size;
+    const allSku = oe.prodRankMap.size;
     const uniqueDates  = bp.dates.size || 1;
     const ranVan       = outlet > 0 ? outlet / uniqueDates : 0;
-    const sumSkuPerCust= Array.from(bp.custSkuMap.values()).reduce((s,st)=>s+st.size,0);
+    // SKU/ร้าน = Σ(unique prod per cust) / outlet
+    const sumSkuPerCust= Array.from(oe.custSkuMap.values()).reduce((s,m)=>s+m.size,0);
     const skuPerStore  = outlet > 0 ? sumSkuPerCust / outlet : 0;
-    const skuPt  = sumSkuPerCust;
+    // SKU Point = Σ score ของ unique (Customer+Product) (A=1,B=5,C=10,D=20,E=30,F=30,New=50)
+    let skuPt = 0;
+    oe.custSkuMap.forEach(prodMap => {
+      prodMap.forEach(rank => { skuPt += SKU_SCORE[rank] || 0; });
+    });
     const pct    = tgt > 0 ? actual / tgt * 100 : 0;
     return { ...r, _actual:actual, _outlet:outlet, _ranVan:ranVan, _skuPerStore:skuPerStore, _allSku:allSku, _skuPt:skuPt, _pct:pct, _tgt:tgt };
   });
