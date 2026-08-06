@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rattana ใบจองสินค้า SMR v1.2</title>
+<title>Rattana ใบจองสินค้า SMR v1.3</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 <style>
@@ -185,7 +185,7 @@ body.dark .spin-box{background:var(--card-bg);color:var(--text)}
 
 <header>
   <span class="logo-text">RATTANA <span>ใบจอง SMR</span></span>
-  <span class="ver">v1.2</span>
+  <span class="ver">v1.3</span>
   <span class="hd-spacer"></span>
   <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="โหลดข้อมูลใหม่">⟳</button>
   <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
@@ -325,11 +325,49 @@ const showSpin = m => { $('spinMsg').textContent=m||'กำลังโหลด
 const hideSpin = () => $('spin').classList.remove('show');
 function toast(msg,type){ const t=document.createElement('div'); t.className='toast toast-'+(type||'info');
   t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t.remove(),3600); }
-/* ⚠️ origin rattanaphaiboon.github.io แชร์ localStorage กับแอปอื่น 60+ ตัว → เต็มได้
-   ห้ามกลืน error เงียบ ไม่งั้นผู้ใช้กดยืนยันแล้วนึกว่าจำ แต่จริงๆ ไม่ได้บันทึก */
-function lsSet(k,v){
-  try{ localStorage.setItem(k,v); return true; }
-  catch(e){ toast('⚠️ บันทึกไม่ได้ — พื้นที่เบราว์เซอร์เต็ม ลองล้างข้อมูลเว็บเก่าแล้วกดใหม่','error'); return false; }
+function lsSet(k,v){ try{ localStorage.setItem(k,v); return true; }catch(e){ return false; } }
+
+/* ⚠️ origin rattanaphaiboon.github.io แชร์ localStorage กับแอปอื่น 60+ ตัว → เต็มจริง (เจอกับเครื่องผู้ใช้)
+   พอเต็ม setItem โยน QuotaExceededError = กดยืนยันแล้วไม่ถูกบันทึก กดกี่รอบก็เด้งกลับ
+   → ย้ายมาเก็บที่ IndexedDB (โควตาใหญ่กว่ามาก + แยกจาก localStorage) ไม่ต้องไปลบข้อมูลแอปอื่น
+     localStorage เขียนคู่ไว้เฉยๆ (เผื่ออ่านเร็ว) เขียนไม่ติดก็ไม่เป็นไร */
+const IDB_DB='smrbk', IDB_STORE='kv';
+function idbOpen(){
+  return new Promise((res,rej)=>{
+    const rq=indexedDB.open(IDB_DB,1);
+    rq.onupgradeneeded=()=>{ if(!rq.result.objectStoreNames.contains(IDB_STORE)) rq.result.createObjectStore(IDB_STORE); };
+    rq.onsuccess=()=>res(rq.result); rq.onerror=()=>rej(rq.error);
+  });
+}
+async function idbGet(k){
+  try{ const db=await idbOpen();
+    return await new Promise((res,rej)=>{ const q=db.transaction(IDB_STORE,'readonly').objectStore(IDB_STORE).get(k);
+      q.onsuccess=()=>res(q.result); q.onerror=()=>rej(q.error); });
+  }catch(e){ return undefined; }
+}
+async function idbSet(k,v){
+  try{ const db=await idbOpen();
+    return await new Promise((res,rej)=>{ const q=db.transaction(IDB_STORE,'readwrite').objectStore(IDB_STORE).put(v,k);
+      q.onsuccess=()=>res(true); q.onerror=()=>rej(q.error); });
+  }catch(e){ return false; }
+}
+/* เขียน override — IndexedDB เป็นหลัก · เตือนต่อเมื่อพังทั้งสองที่ */
+function persistOvr(){
+  const json=JSON.stringify(OVR);
+  const lsOk=lsSet(OVR_KEY,json);
+  idbSet(OVR_KEY,json).then(ok=>{
+    if(!ok && !lsOk) toast('⚠️ บันทึกไม่ได้ — เบราว์เซอร์ไม่ให้เก็บข้อมูล (เปิดโหมดไม่ระบุตัวตนอยู่หรือเปล่า?)','error');
+  });
+  return true;
+}
+/* อ่าน override — เชื่อ IndexedDB ก่อน · ถ้ายังไม่มี ย้ายของเก่าจาก localStorage มาให้ */
+async function loadOvr(){
+  let raw=await idbGet(OVR_KEY);
+  if(raw===undefined || raw===null){
+    let ls=null; try{ ls=localStorage.getItem(OVR_KEY); }catch(e){}
+    if(ls){ raw=ls; idbSet(OVR_KEY,ls); }
+  }
+  try{ OVR=raw?JSON.parse(raw):{}; }catch(e){ OVR={}; }
 }
 
 const THEME_KEY='rattana_theme';
@@ -460,7 +498,7 @@ async function loadAll(){
     if(!REQ.length) throw new Error('ไม่พบใบขอเบิก (แท็บพันท้าย/คลังกลาง) ในชีท');
     if(!BILL.length) toast('⚠️ ไม่พบข้อมูลในแท็บบิล — จะถือว่ายังไม่ได้ของทุกตัว','warning');
 
-    OVR = JSON.parse(localStorage.getItem(OVR_KEY)||'{}');
+    await loadOvr();
     matchAll(); buildDocs(); compute();
     $('introHint').style.display='none';
     $('docCard').style.display=''; $('stats').style.display=''; $('fbar').style.display='';
@@ -844,14 +882,14 @@ function closePick(){ $('pickModal').classList.remove('open'); pickTarget=null; 
 function saveOvr(val){
   const r=ROWS[pickTarget];
   for(const k of ovrKeysOf(r)){ if(val===null) delete OVR[k]; else OVR[k]=val; }
-  lsSet(OVR_KEY, JSON.stringify(OVR));
+  persistOvr();
   closePick(); matchAll(); compute();
 }
 /* ✓ ถูกแล้ว — ยืนยันตัวที่ระบบจับให้ ไม่ต้องเปิด modal ไปหาตัวเดิมกดซ้ำ */
 function confirmMatch(i){
   const r=ROWS[i]; if(!r||!r.p) return;
   for(const k of ovrKeysOf(r)) OVR[k] = r.p.name;
-  if(!lsSet(OVR_KEY, JSON.stringify(OVR))) return;
+  persistOvr();
   matchAll(); compute();
   toast('ยืนยันแล้ว — '+r.p.name,'success');
 }
@@ -865,7 +903,7 @@ function confirmAllShown(){
       +(list.length>8?'\n… และอีก '+(list.length-8)+' รายการ':'')
       +'\n\n(ถ้ามีตัวที่จับผิด กด ยกเลิก แล้วแก้ด้วยปุ่ม 🔎 เลือกเอง ก่อน)')) return;
   for(const r of list) for(const k of ovrKeysOf(r)) OVR[k] = r.p.name;
-  if(!lsSet(OVR_KEY, JSON.stringify(OVR))) return;
+  persistOvr();
   matchAll(); compute();
   toast('ยืนยัน '+list.length+' รายการแล้ว — จำไว้ ครั้งหน้าไม่ต้องกดอีก','success');
 }
