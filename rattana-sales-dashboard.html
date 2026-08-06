@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v18.52</title>
+<title>Rattana Sales Dashboard v18.53</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -393,7 +393,7 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v18.52</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v18.53</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -1155,13 +1155,18 @@ async function loadData(showSpin=true) {
     const prefixes = ['คุณ ','นาย ','นาง ','นางสาว ','ด.ช. ','ด.ญ. '];
     const stripPfx = s => { let v=String(s||'').trim(); for(const p of prefixes) if(v.startsWith(p)) return v.slice(p.length).trim(); return v; };
 
+    // โหลด 4 ชีตพร้อมกัน (parallel)
     const cacheKey = `salesData_${isAdmin ? 'admin' : currentUser.empId}`;
-    let fetchedAll = getCached(cacheKey);
-    if (!fetchedAll) {
-      fetchedAll = await fetchSheet(SALES_SHEET_ID, SALES_SHEET);
-      setCache(cacheKey, fetchedAll);
-    }
+    const cached = getCached(cacheKey);
+    const [fetchedAll, budgetRows, allCust, pddt] = await Promise.all([
+      cached ? Promise.resolve(cached) : fetchSheet(SALES_SHEET_ID, SALES_SHEET),
+      fetchSheet(BUDGET_SHEET_ID, BUDGET_SHEET).catch(e => { console.warn('[budget]', e.message); return []; }),
+      fetchSheet(CUSTOMER_SHEET_ID, CUSTOMER_SHEET_NAME).catch(e => { console.warn('[customer]', e.message); return []; }),
+      Object.keys(skuImageMap).length === 0 ? fetchSheet(PRODUCT_SHEET_ID, PRODUCT_SHEET_NAME).catch(e => { console.warn('[PDDT]', e.message); return []; }) : Promise.resolve([]),
+    ]);
+    if (!cached) setCache(cacheKey, fetchedAll);
 
+    // ── process Sales ──
     if (isAdmin) {
       allRawRows = fetchedAll;
       populateSaleFilter(fetchedAll);
@@ -1174,11 +1179,10 @@ async function loadData(showSpin=true) {
     console.log(`[loadData] active="${getActiveSellerName()}" matched=${allRows.length}/${fetchedAll.length}`);
     document.getElementById('lastUpdate').textContent = 'อัพเดท: ' + new Date().toLocaleTimeString('th-TH');
 
-    // โหลด Budget
-    try {
-      const budgetRows = await fetchSheet(BUDGET_SHEET_ID, BUDGET_SHEET);
+    // ── process Budget ──
+    if (budgetRows.length) {
       if (isAdmin) allBudgetRows = budgetRows;
-      const bKeys = budgetRows.length ? Object.keys(budgetRows[0]) : [];
+      const bKeys = Object.keys(budgetRows[0]);
       const bNameKey = bKeys.find(k => k.replace(/[\s_]/g,'').toUpperCase() === 'SALENOROO'
         || k.replace(/[\s_]/g,'').toUpperCase() === 'SALENOROО'
         || k.toLowerCase().includes('sale')) || bKeys[0];
@@ -1189,58 +1193,46 @@ async function loadData(showSpin=true) {
         for (const p of pList) if (v.startsWith(p)) { v = v.slice(p.length).trim(); break; }
         return v;
       };
-      const myName2 = getActiveSellerName();
-      const bRow = budgetRows.find(r => stripP(r[bNameKey]||'') === myName2);
+      const bRow = budgetRows.find(r => stripP(r[bNameKey]||'') === getActiveSellerName());
       userBudget = bRow ? parseNum(bRow[bValKey]) : 0;
-    } catch(e) {
-      console.warn('[budget] load failed:', e.message);
-      userBudget = 0;
-    }
+    } else { userBudget = 0; }
 
-    // โหลด Customer sheet สำหรับตารางรายร้าน
-    try {
-      const allCust = await fetchSheet(CUSTOMER_SHEET_ID, CUSTOMER_SHEET_NAME);
+    // ── process Customer ──
+    if (allCust.length) {
       if (isAdmin) allCustomerRows = allCust;
-      const cKeys = allCust.length ? Object.keys(allCust[0]) : [];
+      const cKeys = Object.keys(allCust[0]);
       const _sellerCol = cKeys.find(k => k.replace(/\s/g,'') === 'เซลล์ผู้ดูแล') || 'เซลล์ผู้ดูแล';
       const _nameCol   = cKeys.find(k => k.replace(/\s/g,'') === 'ชื่อร้านค้า')   || 'ชื่อร้านค้า';
       const _routeCol  = cKeys.find(k => k.replace(/\s/g,'') === 'ชื่อรูท')        || 'ชื่อรูท';
-      const myName = getActiveSellerName();
-      homeCustomerRows = allCust.filter(r => stripPfx(r[_sellerCol]||'') === myName);
+      homeCustomerRows = allCust.filter(r => stripPfx(r[_sellerCol]||'') === getActiveSellerName());
       homeCustomerRows._nameCol  = _nameCol;
       homeCustomerRows._routeCol = _routeCol;
-      // reuse for lowStore tab so it doesn't need to reload
       if (!lowStoreLoaded) {
         lowCustomerRows = homeCustomerRows;
         lowCustomerRows._codeCol  = cKeys.find(k => k.replace(/\s/g,'') === 'รหัสบีพลัส') || 'รหัสบีพลัส';
         lowCustomerRows._nameCol  = _nameCol;
         lowCustomerRows._routeCol = _routeCol;
       }
-    } catch(e) {
-      console.warn('[customer] load failed:', e.message);
     }
 
-    // โหลด PDDT image map ตั้งแต่ต้น (ไม่ต้องรอเปิดแท็บ SKU)
-    try {
-      if (Object.keys(skuImageMap).length === 0) {
-        const pddt = await fetchSheet(PRODUCT_SHEET_ID, PRODUCT_SHEET_NAME);
-        skuAllProductRows = pddt;
-        const pKeys = pddt.length ? Object.keys(pddt[0]) : [];
-        const nKey = pKeys.find(k=>k.replace(/[\s_]/g,'').toUpperCase()==='PRODUCTNAME')||'PRODUCT NAME';
-        const iKey = pKeys.find(k=>k.replace(/[\s_]/g,'').toUpperCase()==='SKUUSAGE')||'SKU_USAGE';
-        skuImageMap = {};
-        for (const r of pddt) {
-          const name = (r[nKey]||'').trim();
-          const raw  = (r[iKey]||'').trim();
-          if (!name||!raw||!raw.startsWith('http')) continue;
-          const m1=raw.match(/[?&]id=([^&]+)/), m2=raw.match(/\/d\/([a-zA-Z0-9_-]+)/);
-          const fid = m1?m1[1]:m2?m2[1]:null;
-          skuImageMap[name] = fid ? `https://drive.google.com/thumbnail?id=${fid}&sz=w80` : raw;
-        }
-        productImageMap = skuImageMap;
-        console.log(`[PDDT eager] images=${Object.keys(skuImageMap).length}`);
+    // ── process Product ──
+    if (pddt.length && Object.keys(skuImageMap).length === 0) {
+      skuAllProductRows = pddt;
+      const pKeys = Object.keys(pddt[0]);
+      const nKey = pKeys.find(k=>k.replace(/[\s_]/g,'').toUpperCase()==='PRODUCTNAME')||'PRODUCT NAME';
+      const iKey = pKeys.find(k=>k.replace(/[\s_]/g,'').toUpperCase()==='SKUUSAGE')||'SKU_USAGE';
+      skuImageMap = {};
+      for (const r of pddt) {
+        const name = (r[nKey]||'').trim();
+        const raw  = (r[iKey]||'').trim();
+        if (!name||!raw||!raw.startsWith('http')) continue;
+        const m1=raw.match(/[?&]id=([^&]+)/), m2=raw.match(/\/d\/([a-zA-Z0-9_-]+)/);
+        const fid = m1?m1[1]:m2?m2[1]:null;
+        skuImageMap[name] = fid ? `https://drive.google.com/thumbnail?id=${fid}&sz=w80` : raw;
       }
-    } catch(e) { console.warn('[PDDT eager] failed:', e.message); }
+      productImageMap = skuImageMap;
+      console.log(`[PDDT eager] images=${Object.keys(skuImageMap).length}`);
+    }
 
     applyFilters();
     populateBUFilter();
