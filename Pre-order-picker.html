@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rattana Pre-order Picker v3.99</title>
+<title>Rattana Pre-order Picker v4.00</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -399,7 +399,7 @@
     <button type="button" class="login-bypass" id="previewBypassBtn" onclick="bypassLogin()" style="display:none;margin-top:10px">🔓 เข้าโหมดพรีวิว (ทดสอบในเครื่อง — ไม่ผ่าน Google Login)</button>
     <div id="loginSpinner">⏳ กำลังเข้าสู่ระบบ…</div>
     <div id="loginError"></div>
-    <div class="login-ver">เวอร์ชัน v3.99</div>
+    <div class="login-ver">เวอร์ชัน v4.00</div>
   </div>
 </div>
 
@@ -416,7 +416,7 @@
         <button type="button" id="srcMenuSb" onclick="setOrderSrc('sb')"><span>🟣</span> ใบจอง จาก Supabase</button>
       </div>
     </div>
-    <div class="title">📦 Pre-order Picker <span class="ver">v3.99</span></div>
+    <div class="title">📦 Pre-order Picker <span class="ver">v4.00</span></div>
     <div class="spacer"></div>
     <div class="who" id="whoBox"></div>
     <a class="hub-btn" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">
@@ -1357,6 +1357,7 @@ async function _fetchSalesOrdersSb(from, to){
     price:num(g(r,'price')), total:num(g(r,'total_amount')),
     orderId:(String(g(r,'bill_id')).trim() || String(g(r,'order_id')).trim()),
     note:String(g(r,'note')).trim(), promo:String(g(r,'promo_used')).trim(),
+    lineId:String(g(r,'line_id')).trim(),   // v4.00: คีย์รายบรรทัด (ORD8343218-001 · verify แล้ว unique 14,911/14,911) → มาร์ค "จัดแล้ว" เฉพาะบรรทัดที่ export จริง
     done:/จัดแล้ว/.test(String(g(r,'picking_status'))),
     doneBy:String(g(r,'picking_admin')).trim(), doneDate:String(g(r,'picking_date')).trim(), doneTime:String(g(r,'picking_time')).trim(),
     dueDate:toISO(g(r,'delivery_due_date')), apprStatus:String(g(r,'approval_status')).trim()
@@ -1536,6 +1537,28 @@ async function markDoneRoo(orderIds){
   }
   return { ok:errs.length===0, n, errs };
 }
+/* ═══ v4.00 — มาร์ค "จัดแล้ว" รายบรรทัดสำหรับ sales_orders (ปิดรู "ของหาย") ═══
+ * บั๊ก: markDoneSb มาร์คด้วย bill_id = เหมาทั้งบิล → บรรทัดที่ยังไม่อนุมัติราคา (ไม่เข้าไฟล์ Export)
+ *       โดนตีตราว่าจัดแล้ว ทั้งที่ไม่มีใครหยิบของ → ไม่กลับมาขึ้นอีก → ลูกค้าไม่ได้ของ
+ *       (audit 2026-08-06: 107 บรรทัด / 10 บิล / 103,481 บาท · ยังเกิดวันนี้)
+ * แก้: ส่ง line_id ของ "บรรทัดที่ export จริง" ไปให้ .gs action ใหม่ `markDoneLines`
+ * ⚠️ ถ้า .gs ยังไม่ได้วาง patch → action ไม่รู้จัก → ถอยไปใช้ markDoneSb แบบเดิม + เตือนแอดมิน
+ *    (ไม่พังของเดิม · patch อยู่ที่ C:\Users\Lenovo\Downloads\PATCH-picker-gas-markDoneLines.gs) */
+let GAS_LINE_MARK = null;   // null=ยังไม่รู้ · true=.gs รองรับรายบรรทัด · false=ยังเป็นรายบิล
+async function markDoneSbLines(lines){
+  const ids=[...new Set((lines||[]).map(l=>l&&l.lineId).filter(Boolean))];
+  if(!CONFIG.gasUrl || !ids.length) return {ok:false, n:0, skipped:true};
+  const by=(currentUser&&currentUser.email)||(currentUser&&currentUser.name)||'';
+  try{
+    const res=await fetch(CONFIG.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify({action:'markDoneLines', lineIds:ids, by})});
+    const txt=(await res.text()).trim(); let j={}; try{ j=JSON.parse(txt); }catch(e){}
+    if(j.ok){ GAS_LINE_MARK=true; return {ok:true, n:(j.lines!=null?j.lines:ids.length)}; }
+    if(j.needSetup) return {ok:false, n:0, needSetup:true};
+    GAS_LINE_MARK=false;   // unknown action / error → .gs ยังไม่ได้วาง patch
+    return {ok:false, n:0, error:j.error||txt||'unknown action', noPatch:true};
+  }catch(e){ return {ok:false, n:0, error:String(e.message||e)}; }
+}
 /* ═══ v3.89 (Surat: "อันไหนที่กดออกไปต้องค้างอยู่หน้าเลือกบิล เพราะยังไม่เอาออกไปจัด") ═══
  * มาร์ค "จัดแล้ว" ราย "บรรทัด" สำหรับบิล ROO — PATCH ตรงจาก client ด้วย anon key แมตช์ `id` (PK รายแถว)
  * ทำได้โดย "ไม่ต้อง deploy .gs" เพราะ roo_sales/roo_special_sales อยู่โปรเจกต์ที่แอปมี anon key + GRANT UPDATE 4 คอลัมน์อยู่แล้ว
@@ -1588,9 +1611,11 @@ async function exportMarkDone(orderIds, expLines){
   const _expKeys = new Set(_lines.map(l=>lineKey(l)));
   orderIds.forEach(id=>{ if(!DONE[id]) DONE[id]={orderId:id, by, date, time}; selectedBills.delete(id); });   // ย้ายเข้า "นำเข้าแล้ว" + เอาออกจากตะกร้าทันที
   // v3.76: มาร์ค o.done บน DATA.orders ทันที (optimistic · ไม่รอ reload) → export รอบถัดไป "วันเดียวกัน" เลขเอกสารต่อเนื่องไม่ซ้ำ
+  const _gasLines= _lines.filter(l=>l && l._src!=='roo' && l.lineId);   // v4.00: บรรทัด sales_orders ที่ export จริง (มี line_id)
   for(const o of DATA.orders){
     if(!_idSet.has(o.orderId)) continue;
     if(_rooBills.has(o.orderId) && !_expKeys.has(lineKey(o))) continue;   // v3.89: บรรทัด ROO ที่ไม่ได้ export (ตัดออกรายตัว) → คงเป็น "ยังไม่จัด"
+    if(!_rooBills.has(o.orderId) && !_expKeys.has(lineKey(o))) continue;  // v4.00: บรรทัด sales_orders ที่ไม่ได้ export (เช่น รออนุมัติราคา) → ห้ามตีว่าจัดแล้ว (ของจะหาย)
     o.done=true; o.doneBy=by; o.doneDate=_today; o.doneTime=time;
   }
   _explogAdd(orderIds, storeMap);   // v3.83: จำว่า "export แล้ว" → reconcile ทุกครั้งที่โหลด (กันสถานะหายเงียบ)
@@ -1599,14 +1624,24 @@ async function exportMarkDone(orderIds, expLines){
   let sb={ok:true, n:0}, roo={ok:true, n:0};
   const _both=[];
   if(_rooLines.length) _both.push((async()=>{ for(let t=1;t<=3;t++){ roo=await markDoneRooLines(_rooLines); if(roo.ok) break; await new Promise(r=>setTimeout(r,800*t)); } })());
+  /* v4.00: sales_orders → ลองมาร์ค "รายบรรทัด" (line_id) ก่อน · ถ้า .gs ยังไม่ได้วาง patch ค่อยถอยไปรายบิลแบบเดิม */
+  let byLine=false;
   if(_gasBills.length && _gasBills.some(id=>!DONE_SB[id]))
-    _both.push((async()=>{ for(let t=1;t<=3;t++){ sb=await markDoneSupabase(_gasBills); if(sb.ok||sb.needSetup) break; await new Promise(r=>setTimeout(r,1200*t)); } })());
+    _both.push((async()=>{
+      if(_gasLines.length && GAS_LINE_MARK!==false){
+        for(let t=1;t<=3;t++){ sb=await markDoneSbLines(_gasLines); if(sb.ok||sb.needSetup||sb.noPatch) break; await new Promise(r=>setTimeout(r,900*t)); }
+        if(sb.ok){ byLine=true; _gasBills.forEach(id=>DONE_SB[id]=true); return; }
+      }
+      for(let t=1;t<=3;t++){ sb=await markDoneSupabase(_gasBills); if(sb.ok||sb.needSetup) break; await new Promise(r=>setTimeout(r,1200*t)); }
+    })());
   await Promise.all(_both);   // ยิงขนาน = ไม่ช้ากว่าเดิม
   let msg='';
-  if(sb.ok && roo.ok) msg=' · ✅ เขียน Supabase สำเร็จ'+(_rooLines.length?` (ROO รายบรรทัด ${roo.n})`:'');
+  if(sb.ok && roo.ok) msg=' · ✅ เขียน Supabase สำเร็จ'+(byLine?` (รายบรรทัด ${sb.n})`:'')+(_rooLines.length?` (ROO ${roo.n})`:'');
   else if(sb.needSetup) msg=' · ⏸ ยังไม่ตั้ง SB_URL/KEY ใน .gs';
   else msg=' · ❌ เขียน Supabase ไม่สำเร็จ — ดูแถบแดง กด "มาร์คซ้ำ"';
   toast(`📥 ย้ายไป "นำเข้าแล้ว" ${orderIds.length} บิล`+msg);
+  if(GAS_LINE_MARK===false && MODEL && (MODEL.apprHeld||[]).length)   // v4.00: ยังไม่ได้วาง patch .gs + รอบนี้มีบรรทัดที่ยังไม่อนุมัติ → เตือนว่าของอาจหาย
+    toast('⚠️ .gs ยังไม่รองรับมาร์ครายบรรทัด — บรรทัดที่ยังไม่อนุมัติราคาอาจโดนมาร์คจัดแล้ว (วาง PATCH-picker-gas-markDoneLines.gs ก่อน)');
   render();   // v3.83: renderMarkFailBanner จะโชว์แถบแดงถ้ายังไม่ลง Supabase
 }
 /* ═══ v3.83: กันพลาด "Export แล้วสถานะ 'จัดแล้ว' ไม่ลง Supabase" (mark ล้มเหลว หรือโดน sheet re-sync ทับ) ═══
