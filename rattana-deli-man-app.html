@@ -911,7 +911,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.212';
+const APP_VERSION='3.213';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -8007,8 +8007,8 @@ async function syncJobsFromSheet(opts){
 
 /* ========================================================================
    v3.183: เก็บของคืน (CN) — หน้าแยกใหม่ (ไม่ยุ่งกับ "รับคืน" เดิม)
-   อ่าน CNSaleapp (เซลล์สั่งคืน อนุมัติแล้ว + ยังไม่เก็บ) → ขนส่งกดเก็บ+จำนวนจริง+รูป
-   → POST save_cn_collect → GAS เขียนกลับชีทต้นทาง CN-Sale-dman → sync มิเรอร์ลง CNSaleapp เอง
+   อ่าน CN-Sale-dman (ไฟล์ Sale App) โดยตรง — เซลล์สั่งคืน อนุมัติแล้ว + ยังไม่เก็บ → ขนส่งกดเก็บ+จำนวนจริง+รูป
+   → POST save_cn_collect → GAS เขียนกลับชีทต้นทางเดียวกัน (v3.213: เลิกก๊อปลง CNSaleapp แล้ว ใช้ชีทเดียวร่วมกัน)
    ======================================================================== */
 let _cncGroups=[];         // รอเก็บ: [{shopCode,shopName,wh,lines:[{cnLineId,cnId,name,barcode,qty,unit,reason,price,seller}]}]
 let _cncDone=[];           // เก็บแล้ว (ทุกสถานะอนุมัติ): [{shopCode,shopName,wh,lines:[{...,appSt,rej,batch}]}]
@@ -8446,7 +8446,7 @@ const HEADERS_CIN=['เลขใบคุม','Doc_Date','Doc_No','Customer_Code
 function doGet(e){
   let drive='unknown';
   try{ DriveApp.getRootFolder().getName(); drive='OK'; }catch(err){ drive='NOT_AUTHORIZED'; }
-  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.198',drive:drive}))
+  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.213',drive:drive}))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -8674,7 +8674,7 @@ function doPost(e){
         fmtColsOpen_(sh,['รหัสร้าน','เลขใบคุม','Doc_No'],'@');   // v3.35: เปิดปลาย คลุมแถวใหม่
         fmtColsOpen_(sh,['Lat','Lng'],'0.000000');
         fmtColsOpen_(sh,['วันเวลา'],'yyyy-mm-dd hh:mm:ss');
-        return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.198'})).setMimeType(ContentService.MimeType.JSON);
+        return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.213'})).setMimeType(ContentService.MimeType.JSON);
       }finally{ lock.releaseLock(); }
     }
 
@@ -9183,7 +9183,7 @@ function doPost(e){
       fmtColsOpen_(cinSh,['วัน+เวลา ที่ส่งสินค้า','U_ADD','วันที่โอนครั้งที่1','วันที่โอนครั้งที่2','แก้ไขเมื่อ','วันที่','วันเวลาอนุมัติ'],'yyyy-mm-dd hh:mm:ss');
     }
 
-    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.198'}))
+    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.213'}))
       .setMimeType(ContentService.MimeType.JSON);
   }catch(err){
     return ContentService.createTextOutput(JSON.stringify({ok:false,error:String(err)}))
@@ -9806,8 +9806,39 @@ function cnDupFlags_(data){
   });
   return {flags:flags, dupDocs:dupDocs, dupGroups:dupGroups};
 }
+/* ★ v3.213: เลิกก๊อปชีทลงมา (CNSaleapp) — แอปอ่านชีทต้นทาง CN-Sale-dman ตรงๆ ตั้งแต่ v3.188 แล้ว
+   คงไว้แค่ "ตรวจซ้ำ" แต่ย้ายไปเขียนที่ชีทต้นทางเลย → ดูที่เดียวจบ ไม่ต้องมีชีทก๊อป ไม่ต้อง sync ทุก 5 นาที
+   ★ เขียนเฉพาะคอลัมน์ "ตรวจซ้ำ" (ต่อท้ายด้วย ensureHeaders_) — ไม่แตะคอลัมน์อื่นของ Sales App */
+function markCNDupOnSource_(){
+  const src=SpreadsheetApp.openById(CN_SALE_SRC_ID).getSheetByName(CN_SALE_SRC_SHEET);
+  if(!src) throw new Error('ไม่พบชีท '+CN_SALE_SRC_SHEET+' ในไฟล์ต้นทาง');
+  ensureHeaders_(src,['ตรวจซ้ำ']);
+  const data=src.getDataRange().getValues();
+  const dup=cnDupFlags_(data);
+  const hmap=headerMap_(src);
+  const c=hmap['ตรวจซ้ำ']?hmap['ตรวจซ้ำ'][0]:-1;
+  if(c<0) throw new Error('ไม่พบคอลัมน์ ตรวจซ้ำ');
+  const out=[]; for(var i=1;i<data.length;i++) out.push([dup.flags[i]||'']);
+  if(out.length) src.getRange(2,c+1,out.length,1).setValues(out);   // เขียนคอลัมน์เดียว แถวข้อมูลเท่านั้น
+  return {rows:Math.max(0,data.length-1), dupDocs:dup.dupDocs, dupGroups:dup.dupGroups};
+}
+function markCNDupUI(){
+  try{ var r=markCNDupOnSource_(); SpreadsheetApp.getUi().alert('✓ ตรวจ CN ซ้ำ (ชีทต้นทาง CN-Sale-dman) เรียบร้อย\\n- ข้อมูล '+r.rows+' แถว\\n- ⚠️ CN ซ้ำ '+r.dupDocs+' ใบ ('+r.dupGroups+' กลุ่ม)\\n- ดูคอลัมน์ "ตรวจซ้ำ" ท้ายชีท\\n('+new Date().toLocaleString('th-TH')+')'); }
+  catch(e){ SpreadsheetApp.getUi().alert('✗ ตรวจ CN ซ้ำ ไม่สำเร็จ:\\n'+e.message); }
+}
+function setupCNDupTrigger(){
+  ScriptApp.getProjectTriggers().forEach(function(t){ var f=t.getHandlerFunction(); if(f==='markCNDupOnSource_'||f==='syncCNSaleApp_') ScriptApp.deleteTrigger(t); });   // ลบตัวก๊อปเก่าด้วย
+  ScriptApp.newTrigger('markCNDupOnSource_').timeBased().everyMinutes(30).create();
+  try{ markCNDupOnSource_(); }catch(e){}
+  try{ SpreadsheetApp.getUi().alert('✓ ตั้งตรวจ CN ซ้ำอัตโนมัติทุก 30 นาที (เขียนที่ชีทต้นทาง)\\n+ หยุด Sync ก๊อปชีทเก่าให้แล้ว'); }catch(e){}
+}
+function stopCNDupTrigger(){
+  var n=0; ScriptApp.getProjectTriggers().forEach(function(t){ var f=t.getHandlerFunction(); if(f==='markCNDupOnSource_'||f==='syncCNSaleApp_'){ ScriptApp.deleteTrigger(t); n++; } });
+  try{ SpreadsheetApp.getUi().alert('■ หยุดตรวจ CN ซ้ำอัตโนมัติแล้ว ('+n+' trigger)'); }catch(e){}
+}
+/* v3.159 (เลิกใช้แล้ว v3.213 — เก็บฟังก์ชันไว้เผื่อต้องก๊อปชีทย้อนหลัง เรียกมือได้จากเมนู Apps Script) */
 function syncCNSaleAppUI(){
-  try{ var r=syncCNSaleApp_(); SpreadsheetApp.getUi().alert('✓ Sync CN-Sale-dman → CNSaleapp เรียบร้อย\\n- ข้อมูล '+r.rows+' แถว\\n- ⚠️ CN ซ้ำ '+r.dupDocs+' ใบ ('+r.dupGroups+' กลุ่ม) — ดูคอลัมน์ "ตรวจซ้ำ"\\n('+new Date().toLocaleString('th-TH')+')'); }
+  try{ var r=syncCNSaleApp_(); SpreadsheetApp.getUi().alert('✓ Sync CN-Sale-dman → CNSaleapp เรียบร้อย\\n- ข้อมูล '+r.rows+' แถว\\n('+new Date().toLocaleString('th-TH')+')'); }
   catch(e){ SpreadsheetApp.getUi().alert('✗ Sync CN ไม่สำเร็จ:\\n'+e.message); }
 }
 function setupCNSaleTrigger(){
@@ -10128,9 +10159,9 @@ function onOpen(){
       .addSeparator()
       .addItem('⏰ ตั้ง Trigger 9:00 · 15:00 · 21:00','setupJadRotTriggers')
       .addSeparator()
-      .addItem('🔄 Sync CN (CN-Sale-dman → CNSaleapp)','syncCNSaleAppUI')   // v3.159
-      .addItem('⏰ ตั้ง Sync CN อัตโนมัติ (ทุก 5 นาที)','setupCNSaleTrigger')
-      .addItem('⏹ หยุด Sync CN อัตโนมัติ','stopCNSaleTrigger')
+      .addItem('🔍 ตรวจ CN ซ้ำ (ตอนนี้)','markCNDupUI')                      // v3.213: เขียนคอลัมน์ "ตรวจซ้ำ" ที่ชีทต้นทาง CN-Sale-dman
+      .addItem('⏰ ตั้งตรวจ CN ซ้ำ อัตโนมัติ (ทุก 30 นาที)','setupCNDupTrigger')   // + หยุด sync ก๊อปชีทเก่าให้ด้วย
+      .addItem('⏹ หยุดตรวจ CN ซ้ำ อัตโนมัติ','stopCNDupTrigger')
       .addSeparator()
       .addItem('🩹 Backfill Status columns (Cin เก่า)','backfillStatusColumns')
       .addItem('🔧 แก้ทะเบียนแถวเก่าเป็น text','fixPlateColumnFormat')
