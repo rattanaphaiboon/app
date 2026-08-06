@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v4.79</title>
+<title>HR Rattana v4.80</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3378,7 +3378,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '9.0';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '9.1';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -3446,7 +3446,29 @@ let personalLocations = [];        // PersonalLocations — empId-specific spots
 let selectedLoginUser = null;
 
 let faceapiReady = false;
-let registeredDescriptor = null;   // own face descriptor
+let registeredDescriptor = null;   // own face descriptor (ไม่ยิ้ม — เทมเพลตหลัก)
+let registeredDescriptor2 = null;  // v9.1: เทมเพลตที่ 2 (ยิ้ม) — optional
+
+/* v9.1: ระยะที่ใกล้สุดจากทุกเทมเพลตของคนคนนั้น (รองรับ 1 หรือ 2 เทมเพลต)
+   descList = array ของ Float32Array (ตัว null/undefined ถูกข้าม) */
+function bestFaceDist_(probe, descList) {
+  let best = Infinity;
+  for (const d of descList) {
+    if (!d) continue;
+    const dist = faceapi.euclideanDistance(probe, d);
+    if (dist < best) best = dist;
+  }
+  return best;
+}
+/* แตก descriptor ที่อ่านจากชีท: รองรับทั้ง [128 ตัวเลข] (เก่า) และ [[128],[128]] (ใหม่ 2 เทมเพลต) */
+function parseDescriptors_(raw) {
+  try {
+    const arr = JSON.parse(raw || 'null');
+    if (!Array.isArray(arr) || !arr.length) return [];
+    if (Array.isArray(arr[0])) return arr.map(a => new Float32Array(a));  // หลายเทมเพลต
+    return [new Float32Array(arr)];                                        // เทมเพลตเดียว (เก่า)
+  } catch (_) { return []; }
+}
 
 /* Employee mode state */
 let empStream = null, empMatchInterval = null;
@@ -3477,7 +3499,7 @@ function loadAll() {
   settings  = Object.assign({radius:30, faceThr:0.5, startTime:'08:30', liveness:'medium', lateGrace:5,
     endTime:'17:00', breakStart:'12:00', breakEnd:'13:00', workCapH:8, graceMin:14}, LS.get('settings', {}));
   logs      = LS.get('logs', []);
-  team      = (LS.get('team', []) || []).map(m => ({...m, descriptor: m.descriptor ? new Float32Array(m.descriptor) : null}));
+  team      = (LS.get('team', []) || []).map(m => ({...m, descriptor: m.descriptor ? new Float32Array(m.descriptor) : null, descriptor2: m.descriptor2 ? new Float32Array(m.descriptor2) : null}));
   // Priority: hardcoded > localStorage > empty
   const lsConfig = LS.get('config', {}) || {};
   config = {
@@ -3495,10 +3517,12 @@ function loadAll() {
   allUsers  = LS.get('allUsers', []);
   // Restore cached remote data
   const cachedFD = LS.get('remoteFaceData', []);
-  remoteFaceData = cachedFD.map(f => ({...f, descriptor: f.descriptor ? new Float32Array(f.descriptor) : null}));
+  remoteFaceData = cachedFD.map(f => ({...f, descriptor: f.descriptor ? new Float32Array(f.descriptor) : null, descriptor2: f.descriptor2 ? new Float32Array(f.descriptor2) : null}));
   personalLocations = LS.get('personalLocations', []);
   const desc = LS.get('faceDescriptor', null);
   registeredDescriptor = desc ? new Float32Array(desc) : null;
+  const desc2 = LS.get('faceDescriptor2', null);            // v9.1: เทมเพลตยิ้ม
+  registeredDescriptor2 = desc2 ? new Float32Array(desc2) : null;
 }
 function saveLocations(){ LS.set('locations', locations); }
 function saveLogs(){ LS.set('logs', logs); }
@@ -3561,7 +3585,7 @@ async function syncLogsFromSheet(opts = {}) {
   }
 }
 function saveTeam(){
-  LS.set('team', team.map(m => ({...m, descriptor: m.descriptor ? Array.from(m.descriptor) : null})));
+  LS.set('team', team.map(m => ({...m, descriptor: m.descriptor ? Array.from(m.descriptor) : null, descriptor2: m.descriptor2 ? Array.from(m.descriptor2) : null})));
 }
 function saveConfig(){ LS.set('config', config); }
 function saveAllUsers(){ LS.set('allUsers', allUsers); }
@@ -3902,14 +3926,16 @@ function buildTeamFromSheet(selectedSupervisorName) {
     const remote = remoteFaceMap[empKey_(u.empId)];
     const local = localMap[empKey_(u.empId)];
     // Priority: remote face > local face
-    let descriptor = null, photo = null, registeredAt = null, registeredBy = null;
+    let descriptor = null, descriptor2 = null, photo = null, registeredAt = null, registeredBy = null;
     if (remote?.descriptor) {
       descriptor = remote.descriptor;
+      descriptor2 = remote.descriptor2 || null;   // v9.1
       photo = remote.photo || local?.photo || null;
       registeredAt = remote.registeredAt;
       registeredBy = remote.registeredBy;
     } else if (local?.descriptor) {
       descriptor = local.descriptor instanceof Float32Array ? local.descriptor : new Float32Array(local.descriptor);
+      descriptor2 = local.descriptor2 ? (local.descriptor2 instanceof Float32Array ? local.descriptor2 : new Float32Array(local.descriptor2)) : null;  // v9.1
       photo = local.photo || null;
       registeredAt = local.registeredAt;
       registeredBy = local.registeredBy;
@@ -3922,7 +3948,7 @@ function buildTeamFromSheet(selectedSupervisorName) {
       branch: u.branch,
       department: u.department,
       supervisorName: u.supervisorName,
-      descriptor, photo, registeredAt, registeredBy,
+      descriptor, descriptor2, photo, registeredAt, registeredBy,
       synced: !!remote?.descriptor, // ✓ ถ้ามาจาก FaceData Sheet
     };
   });
@@ -4030,9 +4056,11 @@ function adoptMyFace_(tag) {
   const myFace = findMyFace_();
   if (!myFace) { console.log('[face] ' + tag + ': ไม่พบใบหน้าของ empId=' + empKey_(currentUser && currentUser.empId) + ' ใน FaceData (' + remoteFaceData.length + ' คน)'); return false; }
   registeredDescriptor = myFace.descriptor;
+  registeredDescriptor2 = myFace.descriptor2 || null;   // v9.1: เทมเพลตยิ้ม (ถ้ามี)
   if (myFace.photo) LS.set('facePhoto', myFace.photo);
   if (myFace.registeredAt) LS.set('faceRegisteredAt', new Date(myFace.registeredAt).getTime());
   LS.set('faceDescriptor', Array.from(myFace.descriptor));
+  if (myFace.descriptor2) LS.set('faceDescriptor2', Array.from(myFace.descriptor2)); else LS.del('faceDescriptor2');
   console.log('[face] ' + tag + ': โหลดใบหน้าตัวเองจาก FaceData แล้ว (' + empKey_(myFace.empId) + ')');
   try { renderFaceReg(); evaluateAction(); } catch (_) {}
   return true;
@@ -4045,20 +4073,18 @@ async function loadFaceDataSheet() {
   if (!rows) return false;
   // FaceData columns: empId, name, descriptor (JSON array), photo (base64 or URL), registeredAt, registeredBy
   remoteFaceData = rows.filter(r => r.empId).map(r => {
-    let descriptor = null;
-    try {
-      if (r.descriptor) descriptor = new Float32Array(JSON.parse(r.descriptor));
-    } catch(e) { console.warn('bad descriptor for', r.empId); }
+    const descs = parseDescriptors_(r.descriptor);   // v9.1: รองรับ 1 หรือ 2 เทมเพลต
     return {
       empId: empKey_(r.empId),
       name: r.name || '',
-      descriptor,
+      descriptor: descs[0] || null,
+      descriptor2: descs[1] || null,
       photo: r.photo || '',
       registeredAt: r.registeredAt || '',
       registeredBy: r.registeredBy || '',
     };
   });
-  LS.set('remoteFaceData', remoteFaceData.map(f => ({...f, descriptor: f.descriptor ? Array.from(f.descriptor) : null})));
+  LS.set('remoteFaceData', remoteFaceData.map(f => ({...f, descriptor: f.descriptor ? Array.from(f.descriptor) : null, descriptor2: f.descriptor2 ? Array.from(f.descriptor2) : null})));
   // ตรวจว่ามีใบหน้าตัวเองใน FaceData Sheet หรือไม่
   // ถ้ามี → ใช้แทน local (ใบหน้าจาก Sheet เป็น source of truth)
   adoptMyFace_('CSV');
@@ -4227,13 +4253,16 @@ async function testAppsScriptConnection() {
   }
 }
 
-/* Register face → POST to Apps Script (idToken ใส่อัตโนมัติใน callAppsScript) */
-async function apiRegisterFace({ empId, name, descriptor, photo, registeredBy }) {
-  const descArr = descriptor instanceof Float32Array ? Array.from(descriptor) : descriptor;
+/* Register face → POST to Apps Script (idToken ใส่อัตโนมัติใน callAppsScript)
+   v9.1: รองรับ 2 เทมเพลต — ถ้ามี descriptor2 จะส่งเป็น [[128],[128]] ใน field เดิม */
+async function apiRegisterFace({ empId, name, descriptor, descriptor2, photo, photo2, registeredBy }) {
+  const round = d => (d instanceof Float32Array ? Array.from(d) : d).map(n => +n.toFixed(5));
+  const payloadDesc = descriptor2 ? [round(descriptor), round(descriptor2)] : round(descriptor);
   return callAppsScript('registerFace', {
     empId, name,
-    descriptor: descArr.map(n => +n.toFixed(5)),
+    descriptor: payloadDesc,
     photo: photo || '',
+    photo2: photo2 || '',
     registeredBy: registeredBy || empId,
   });
 }
@@ -4364,20 +4393,18 @@ async function loadFaceDataViaApi() {
   const rows = await apiGetFaceData();
   if (!rows) return false;
   remoteFaceData = rows.filter(r => r.empId).map(r => {
-    let descriptor = null;
-    try {
-      if (r.descriptor) descriptor = new Float32Array(JSON.parse(r.descriptor));
-    } catch(e) {}
+    const descs = parseDescriptors_(typeof r.descriptor === 'string' ? r.descriptor : JSON.stringify(r.descriptor || null));  // v9.1
     return {
       empId: empKey_(r.empId),
       name: r.name || '',
-      descriptor,
+      descriptor: descs[0] || null,
+      descriptor2: descs[1] || null,
       photo: r.photo || '',
       registeredAt: r.registeredAt || '',
       registeredBy: r.registeredBy || '',
     };
   });
-  LS.set('remoteFaceData', remoteFaceData.map(f => ({...f, descriptor: f.descriptor ? Array.from(f.descriptor) : null})));
+  LS.set('remoteFaceData', remoteFaceData.map(f => ({...f, descriptor: f.descriptor ? Array.from(f.descriptor) : null, descriptor2: f.descriptor2 ? Array.from(f.descriptor2) : null})));
   adoptMyFace_('API');
   return true;
 }
@@ -4878,7 +4905,7 @@ async function empMatchTick() {
     evaluateAction();
     return;
   }
-  const dist = faceapi.euclideanDistance(det.descriptor, registeredDescriptor);
+  const dist = bestFaceDist_(det.descriptor, [registeredDescriptor, registeredDescriptor2]);  // v9.1: เทียบ 2 เทมเพลต (ยิ้ม/ไม่ยิ้ม) เอาใกล้สุด
   const ok = dist <= settings.faceThr;
   document.getElementById('empCamWrap').className = 'camera-wrap home-cam ' + (ok ? 'success' : 'matching');
   lastFaceMatch = { found:true, ok, distance:dist, descriptor:det.descriptor, time:Date.now() };
@@ -4933,40 +4960,71 @@ function updateFaceCheck(info) {
 /* ============================================================
    OWN FACE REGISTRATION (employee/supervisor's own face)
    ============================================================ */
+/* v9.1: จับใบหน้า 1 ช็อต (วนรอสูงสุด ~3.2 วิ) — คืน {descriptor, photo} หรือ null */
+async function captureFaceShot_() {
+  for (let i = 0; i < 8; i++) {
+    await sleep(400);
+    const v = document.getElementById('empVideo');
+    if (!v || !v.videoWidth) continue;
+    const det = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({inputSize:320,scoreThreshold:0.6}))
+      .withFaceLandmarks().withFaceDescriptor();
+    if (det) return { descriptor: det.descriptor, photo: capturePhoto(v) };
+  }
+  return null;
+}
+
+/* v9.1: ลงทะเบียน 2 ช็อต — หน้าปกติ (เทมเพลตหลัก) + ยิ้ม (เทมเพลตเสริม) */
 async function registerOwnFace() {
   if (!empStream) await startEmpCamera();
   if (!faceapiReady) { toast('โมเดลยังไม่พร้อม', 'warning'); return; }
-  toast('มองตรงกล้อง 3 วินาที...', 'info');
-  showSpinner('กำลังจับใบหน้า...');
   try {
-    let descriptor = null, photoData = null;
-    for (let i = 0; i < 8 && !descriptor; i++) {
-      await sleep(400);
-      const v = document.getElementById('empVideo');
-      const det = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({inputSize:320,scoreThreshold:0.6}))
-        .withFaceLandmarks().withFaceDescriptor();
-      if (det) { descriptor = det.descriptor; photoData = capturePhoto(v); }
+    // ── ช็อต 1: หน้าปกติ ──
+    toast('📷 1/2 ทำหน้าปกติ ไม่ยิ้ม มองตรงกล้อง...', 'info');
+    showSpinner('ช็อต 1/2 — หน้าปกติ...');
+    const shot1 = await captureFaceShot_();
+    if (!shot1) { hideSpinner(); toast('ไม่พบใบหน้า ลองใหม่', 'error'); return; }
+    hideSpinner();
+
+    // ── ช็อต 2: ยิ้ม ──
+    toast('😄 2/2 ยิ้มกว้างๆ ...', 'info');
+    await sleep(1200);   // ให้เวลาเปลี่ยนสีหน้า
+    showSpinner('ช็อต 2/2 — ยิ้ม...');
+    const shot2 = await captureFaceShot_();
+    hideSpinner();
+
+    // guard: สองช็อตต้องเป็นคนเดียวกัน (ระยะไม่เกิน 0.6) — กันคนสลับหน้ากล้อง
+    let d2 = null, photo2 = '';
+    if (shot2) {
+      const between = faceapi.euclideanDistance(shot1.descriptor, shot2.descriptor);
+      if (between > 0.6) { toast('สองช็อตดูไม่ใช่คนเดียวกัน — ลงทะเบียนใหม่', 'error'); return; }
+      d2 = shot2.descriptor; photo2 = shot2.photo;
+    } else {
+      toast('ช็อตยิ้มไม่ติด — บันทึกเฉพาะหน้าปกติ (ลงใหม่ได้ทีหลัง)', 'warning');
     }
-    if (!descriptor) { toast('ไม่พบใบหน้า ลองใหม่', 'error'); return; }
-    registeredDescriptor = descriptor;
-    LS.set('faceDescriptor', Array.from(descriptor));
-    LS.set('facePhoto', photoData);
+
+    registeredDescriptor = shot1.descriptor;
+    registeredDescriptor2 = d2;
+    LS.set('faceDescriptor', Array.from(shot1.descriptor));
+    if (d2) LS.set('faceDescriptor2', Array.from(d2)); else LS.del('faceDescriptor2');
+    LS.set('facePhoto', shot1.photo);
     LS.set('faceRegisteredAt', Date.now());
     renderFaceReg();
 
-    // Sync to FaceData Sheet via Apps Script
+    // Sync to FaceData Sheet + Supabase via Apps Script
     if (config.appsScriptUrl && currentUser?.empId) {
       try {
         await apiRegisterFace({
           empId: currentUser.empId,
           name: currentUser.name,
-          descriptor,
-          photo: photoData,
+          descriptor: shot1.descriptor,
+          descriptor2: d2,
+          photo: shot1.photo,
+          photo2: photo2,
           registeredBy: currentUser.empId,
         });
-        toast('ลงทะเบียนสำเร็จ ✓ · ☁️ Sheet', 'success');
+        toast(`ลงทะเบียนสำเร็จ ✓ (${d2 ? '2 เทมเพลต' : '1 เทมเพลต'}) · ☁️`, 'success');
       } catch (e) {
-        toast('ลงทะเบียน ✓ · ⚠️ Sheet sync ล้มเหลว: ' + e.message, 'warning');
+        toast('ลงทะเบียน ✓ · ⚠️ sync ล้มเหลว: ' + e.message, 'warning');
       }
     } else {
       toast('ลงทะเบียนสำเร็จ ✓ (เก็บในเครื่อง)', 'success');
@@ -4976,7 +5034,8 @@ async function registerOwnFace() {
 function clearOwnFace() {
   if (!confirm('ลบใบหน้าที่ลงทะเบียน?')) return;
   registeredDescriptor = null;
-  LS.del('faceDescriptor'); LS.del('facePhoto'); LS.del('faceRegisteredAt');
+  registeredDescriptor2 = null;   // v9.1
+  LS.del('faceDescriptor'); LS.del('faceDescriptor2'); LS.del('facePhoto'); LS.del('faceRegisteredAt');
   renderFaceReg(); toast('ลบแล้ว', 'info');
 }
 function renderFaceReg() {
@@ -4990,7 +5049,8 @@ function renderFaceReg() {
     if (!statusEl || !previewEl) return;
     if (registeredDescriptor) {
       const at = LS.get('faceRegisteredAt', null);
-      statusEl.textContent = '✓ ลงทะเบียนแล้ว'; statusEl.style.color='var(--success)';
+      statusEl.textContent = registeredDescriptor2 ? '✓ ลงทะเบียนแล้ว (2 เทมเพลต ยิ้ม/ไม่ยิ้ม)' : '✓ ลงทะเบียนแล้ว (1 เทมเพลต)';
+      statusEl.style.color='var(--success)';
       const photo = LS.get('facePhoto', null);
       previewEl.innerHTML = `
         <div style="display:flex;gap:14px;align-items:center;padding:12px;background:var(--off-white);border-radius:10px;margin-bottom:12px">
@@ -5574,7 +5634,7 @@ async function kioskDetectTick() {
     // Match against all team members, find best
     const results = team
       .filter(m => m.descriptor)
-      .map(m => ({ member:m, distance: faceapi.euclideanDistance(det.descriptor, m.descriptor) }))
+      .map(m => ({ member:m, distance: bestFaceDist_(det.descriptor, [m.descriptor, m.descriptor2]) }))  // v9.1: 2 เทมเพลต
       .sort((a,b) => a.distance - b.distance);
 
     if (results.length === 0) {
