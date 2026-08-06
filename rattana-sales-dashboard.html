@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v18.41</title>
+<title>Rattana Sales Dashboard v18.42</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -393,7 +393,7 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v18.41</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v18.42</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -4756,6 +4756,39 @@ function renderSummaryTab() {
     });
   }
 
+  // ── Revenue drop stores per seller (stores buying less than 3M avg) ──
+  const dropStoreCache = new Map();
+  {
+    const normS2 = s => String(s||'').replace(/^คุณ\s*/,'').replace(/\s+/g,' ').trim();
+    const custHistIdx = new Map();
+    (tgtState.allSalesRaw||[]).forEach(r => {
+      const sel = normS2(String(r['Sale_No_ROO']||r['Sale NO ROO']||''));
+      const cust = String(r['Customer_Name']||r['Customer_Code']||'').trim();
+      const exvat = parseFloat(String(r['Exvat']||r['EXVat']||'0').replace(/,/g,''))||0;
+      if (!sel||!cust) return;
+      const k = sel+'§'+cust;
+      custHistIdx.set(k, (custHistIdx.get(k)||0) + exvat);
+    });
+    const custBpIdx = new Map();
+    (tgtState.bpRaw||[]).forEach(r => {
+      const sel = normS2(String(r['Sale_No_ROO']||r['Sale NO ROO']||''));
+      const cust = String(r['Customer_Name']||r['Customer_Code']||'').trim();
+      const exvat = parseFloat(String(r['Exvat']||r['EXVat']||'0').replace(/,/g,''))||0;
+      if (!sel||!cust) return;
+      const k = sel+'§'+cust;
+      custBpIdx.set(k, (custBpIdx.get(k)||0) + exvat);
+    });
+    custHistIdx.forEach((histSum, k) => {
+      const avgExvat = histSum / 3;
+      const bpExvat = custBpIdx.get(k) || 0;
+      if (bpExvat <= 0 || bpExvat >= avgExvat) return;
+      const sep = k.indexOf('§'), sel = k.slice(0, sep);
+      if (!dropStoreCache.has(sel)) dropStoreCache.set(sel, {count:0, lostExvat:0});
+      const e = dropStoreCache.get(sel);
+      e.count++; e.lostExvat += Math.round(avgExvat - bpExvat);
+    });
+  }
+
   const bpTotalActual = [...bpByPerson.values()].reduce((s,v)=>s+v, 0);
 
   // ── Targets from KPI rows ──
@@ -4976,12 +5009,13 @@ function renderSummaryTab() {
     const vPct    = (typeof vpAct==='number'&&typeof vaAct==='number'&&vpAct>0) ? (vaAct/vpAct*100).toFixed(0)+'%' : '-';
     const silent  = p.silentRow?.actual!=null ? Math.round(p.silentRow.actual) : '-';
     const eoGapFmt = eoBelow.totalAvg > 0 ? fmtFull(Math.round(eoBelow.totalAvg)) + ' บาท<br><span style="font-size:8px;opacity:.7">ยอดขายที่หายไปเทียบ AVG 3 M</span>' : '-';
-    const issueItem = (icon, bg, label, val, sub) =>
+    const issueItem = (icon, bg, label, val, sub, change, changeColor) =>
       `<div style="background:${bg};border-radius:8px;padding:7px 8px;display:flex;align-items:center;gap:8px;min-width:0">
         <span style="font-size:20px;flex-shrink:0">${icon}</span>
         <div style="min-width:0;overflow:hidden">
           <div style="font-size:9px;color:rgba(255,255,255,.6);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${label}</div>
           <div style="font-size:13px;font-weight:800;color:#fff;white-space:nowrap">${val}</div>
+          ${change ? `<div style="font-size:9px;font-weight:700;color:${changeColor||'rgba(255,255,255,.7)'};white-space:nowrap">${change}</div>` : ''}
           <div style="font-size:9px;color:rgba(255,255,255,.55);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sub}</div>
         </div>
       </div>`;
@@ -5014,8 +5048,23 @@ function renderSummaryTab() {
     <!-- ปัญหาเร่งแก้ไข -->
     <div style="flex:1;min-width:0;background:var(--navy);border-radius:10px;padding:8px;display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:minmax(62px,auto) minmax(62px,auto);gap:6px">
       ${issueItem('🏪','rgba(231,76,60,.35)','ร้านต่ำกว่า Effective Outlet',eoBelow.count+' ร้าน',eoGapFmt)}
-      ${issueItem('📉','rgba(231,76,60,.25)','ยอดขายตก','- ร้าน','มูลค่าหาย -')}
-      ${issueItem('📦','rgba(243,156,18,.25)','SKU หาย','- SKU','มูลค่าหาย -')}
+      ${(()=>{
+        const ds = dropStoreCache.get(normN);
+        const dsVal = ds ? ds.count+' ร้าน' : '- ร้าน';
+        const dsChange = ds ? '▼ ยอดหาย −'+ds.lostExvat.toLocaleString() : '';
+        const dsSub = ds ? 'ซื้อน้อยกว่า AVG 3M' : 'มูลค่าหาย -';
+        return issueItem('📉','rgba(231,76,60,.25)','ยอดขายตก',dsVal,dsSub,dsChange,'#ff8a7e');
+      })()}
+      ${(()=>{
+        const mpDx = mpMissingProductsCache.get(normN)||[];
+        const skuCount = mpDx.length;
+        const storeImpact = mpDx.reduce((s,d)=>s+d.diff,0);
+        const skuLoss = mpDx.reduce((s,d)=>s+d.exvatDiff,0);
+        const skuVal = skuCount > 0 ? skuCount+' SKU' : '- SKU';
+        const skuChange = skuCount > 0 ? '▼ กระทบ '+storeImpact+' ร้าน' : '';
+        const skuSub = skuCount > 0 ? 'ยอดหาย −'+Math.round(skuLoss).toLocaleString() : 'มูลค่าหาย -';
+        return issueItem('📦','rgba(243,156,18,.25)','SKU หาย',skuVal,skuSub,skuChange,'#ff8a7e');
+      })()}
       ${issueItem('🏷️','rgba(52,152,219,.25)','โปรไม่ครบ','- ร้าน','มูลค่าหาย -')}
       ${(()=>{
         const mpD=mpMissingProductsCache.get(normN)||[];
