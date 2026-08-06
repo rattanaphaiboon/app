@@ -905,7 +905,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.200';
+const APP_VERSION='3.201';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1128,24 +1128,30 @@ function setCachedSheet(key,data){
 }
 
 /* localStorage helpers */
+// ★ v3.201: cache store ในหน่วยความจำ — เดิมทุกครั้งที่บันทึก (persistJobs/saveStore) จะ JSON.parse ข้อมูลทั้งก้อนใหม่
+//   (งาน+บิล+รูป อาจหลาย MB) แล้ว stringify อีกรอบ = บล็อกจอทุกครั้งที่กดบันทึก → แอปค้าง
+let _storeCache=null;
 function loadStore(){
-  try{ return JSON.parse(localStorage.getItem(CFG.storageKey))||{}; }catch{ return {}; }
+  if(_storeCache) return _storeCache;
+  try{ _storeCache=JSON.parse(localStorage.getItem(CFG.storageKey))||{}; }catch{ _storeCache={}; }
+  return _storeCache;
 }
 function saveStore(patch){
   const cur=loadStore();
   const merged={...cur,...patch};
+  _storeCache=merged;   // อัปเดต cache ก่อนเขียนจริง (อ่านครั้งถัดไปไม่ต้อง parse ใหม่)
   // v2.60: กัน QuotaExceededError — ถ้าเกิน quota → strip base64 photos ในบิลออก (แทนที่ด้วย marker) แล้วลองใหม่
   try{ localStorage.setItem(CFG.storageKey,JSON.stringify(merged)); return; }
   catch(e){
     if(e&&e.name==='QuotaExceededError'){
       console.warn('[saveStore] quota exceeded — stripping base64 photos, retrying');
       const cleaned=stripBase64Photos_(merged);
-      try{ localStorage.setItem(CFG.storageKey,JSON.stringify(cleaned)); return; }
+      try{ localStorage.setItem(CFG.storageKey,JSON.stringify(cleaned)); _storeCache=cleaned; return; }   // v3.201: cache ตามที่เขียนจริง
       catch(e2){
         // ยังใหญ่ไป → เก็บเฉพาะงาน active (in_progress/pending_approval/rejected) ตัด approved ทิ้ง
         console.warn('[saveStore] still too big — dropping approved jobs');
         const trimmed=Object.assign({},cleaned,{jobs:(cleaned.jobs||[]).filter(j=>j&&j.status!=='approved')});
-        try{ localStorage.setItem(CFG.storageKey,JSON.stringify(trimmed)); return; }
+        try{ localStorage.setItem(CFG.storageKey,JSON.stringify(trimmed)); _storeCache=trimmed; return; }
         catch(e3){ console.error('[saveStore] cannot save — quota still exceeded',e3); /* ยอมแพ้ ไม่ throw */ }
       }
     } else { throw e; }
@@ -7582,8 +7588,10 @@ async function loadJobsFromSheet(){
     let fetchOK=true;
     // v2.45: fresh:true → cache-bust ผลอ่านชีทงาน กัน gviz โชว์สถานะเก่า (approve/reject ไม่ update ข้ามเครื่อง)
     // v3.186: อ่านเฉพาะ 60 วันล่าสุด (กันชีทโตขึ้นเรื่อยๆ ทำ Android ค้าง) — Cin กรอง U_ADD(คอลัมน์ K), INPUT กรอง วันเวลาที่รับงาน(คอลัมน์ AD) ซึ่ง GAS เขียนเป็น datetime จริงเสมอ · งานที่ยัง active มี U_ADD/รับงาน ใหม่กว่านี้แน่นอน (มี glitch-guard กันงานหายถ้าชีทคืน 0)
+    // ★ v3.201: 60 → 21 วัน — ตัดข้อมูลที่ต้องดาวน์โหลด+parse ลง ~3 เท่า (สาเหตุหลักที่มือถือค้าง)
+    //   งานที่ยัง active/รออนุมัติ อยู่ในช่วงไม่กี่วันเสมอ · งานเก่ากว่านี้ยังอยู่ครบใน local (sync แค่ merge ไม่ลบงาน) + ดูย้อนหลังได้ที่หน้าประวัติ
     const _p2=n=>String(n).padStart(2,'0');
-    const _cutD=new Date(Date.now()-60*86400000);
+    const _cutD=new Date(Date.now()-21*86400000);
     const _cutStr=`${_cutD.getFullYear()}-${_p2(_cutD.getMonth()+1)}-${_p2(_cutD.getDate())} 00:00:00`;
     const [cinRows,inputRows]=await Promise.all([
       fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',{fresh:true,tq:`select * where K >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];}),
@@ -7864,6 +7872,26 @@ const _cncPhoto={};        // shopCode -> base64 (รูปของที่เ
 const _cncAppPhoto={};     // v3.190: รูปอนุมัติ CN ต่อรอบเก็บ (base64) — batchKey -> base64
 function cncBKey_(b){ return String(b&&b.batch)||('L'+((b&&b.lines&&b.lines[0])?b.lines[0].cnLineId:'')); }
 function cncApproved_(v){ v=String(v||''); return v.indexOf('อนุมัติ')>=0 && v.indexOf('รอ')<0 && v.indexOf('ไม่')<0 && v.indexOf('ปฏิเสธ')<0; }
+/* v3.201: รหัสร้านทั้งหมดในใบคุมที่รับงานมา (ว่าง = ไม่มีงาน → ไม่กรอง) */
+function cncJobShopCodes_(){
+  const s=new Set();
+  try{ listMyJobs().forEach(j=>(j.bills||[]).forEach(b=>{ const c=String(b.code||'').trim().toUpperCase(); if(c) s.add(c); })); }catch(e){}
+  return s;
+}
+/* v3.201: ปุ่ม −/+ ช่องเก็บจริง (ไม่ต้องพิมพ์เลข) */
+function cncStep_(gi,li,d){
+  const el=$('cncq_'+gi+'_'+li); if(!el) return;
+  let v=parseFloat(el.value); if(isNaN(v)) v=0;
+  v=Math.max(0,v+d); el.value=(Math.round(v*100)/100);
+  const chk=$('cncchk_'+gi+'_'+li); if(chk) chk.checked=v>0;   // 0 = ไม่เจอของ → ติ๊กออกให้เอง
+  cncCount_(gi);
+}
+/* v3.201: นับที่ติ๊กไว้ → โชว์บนแถบบันทึก */
+function cncCount_(gi){
+  const g=_cncGroups[gi]; if(!g) return;
+  let n=0; g.lines.forEach((ln,li)=>{ const c=$('cncchk_'+gi+'_'+li); if(c&&c.checked) n++; });
+  const el=$('cnccount_'+gi); if(el) el.textContent=n+'/'+g.lines.length;
+}
 async function renderCNCollect(){
   const body=$('cncollectBody'); if(!body) return;
   if((parseInt((state.user||{}).userRole)||0)<3){ body.innerHTML='<div class="txt-muted txt-center" style="padding:24px">อยู่ระหว่างทดสอบ — ยังไม่เปิดใช้งาน</div>'; return; }   // v3.187: เทส—เฉพาะ Role≥3 (กันเข้าถึงตรง)
@@ -7905,7 +7933,9 @@ async function renderCNCollect(){
         seller:String(r['ชื่อเซลล์']||'').trim(), src:_src });
     }
   });
-  _cncGroups=pOrd.map(k=>pMap[k]);
+  // v3.201: โชว์เฉพาะร้านที่อยู่ในใบคุมที่รับงานมา (ตรงเส้นทางที่ไปส่งจริง) — ร้านนอกใบคุมไม่ขึ้น
+  const _myCodes=cncJobShopCodes_();
+  _cncGroups=pOrd.map(k=>pMap[k]).filter(g=>!_myCodes.size||_myCodes.has(String(g.shopCode||'').trim().toUpperCase()));
   _cncDone=dOrd.map(k=>dMap[k]);
   _cncApprove=aOrd.map(k=>aMap[k]);
   if(_cncSelCode && !_cncGroups.some(g=>g.shopCode===_cncSelCode)) _cncSelCode='';   // ร้านที่เลือกไม่เหลือ → รีเซ็ต
@@ -10083,11 +10113,17 @@ async function bootApp(){
 const AUTO_REFRESH_MS=180000;   // v3.186: 60→180 วิ ลดภาระ auto-refresh (Android ค้างบ่อย) · กด ↻ รีเฟรชเองได้ทุกเมื่อ
 let _autoRefreshTimer=null;
 let _autoRefreshing=false;
+let _lastSyncAt=0;   // v3.201: เวลาที่ sync ล่าสุด (ใช้ throttle ตอนสลับแอปกลับมา)
 
 async function autoRefreshTick(){
   if(_autoRefreshing) return;
   if(document.hidden) return; // หยุดเมื่อแท็บไม่ได้ใช้งาน
+  // ★ v3.201: กำลังกรอกข้อมูล/เปิดหน้าต่างอยู่ → ข้ามรอบนี้ (โหลด+parse ชีทกลาง main thread ทำแอปค้างคามือ)
+  if(document.querySelector('.modal-overlay.open')) return;
+  const _ae=document.activeElement;
+  if(_ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(_ae.tagName)) return;
   _autoRefreshing=true;
+  _lastSyncAt=Date.now();
   setLiveDot(true);
   try{
     // v3.28: ส่ง outbox ให้เข้าชีทก่อน — กัน sheet-sync ดึงสถานะเก่าทับบิลที่เพิ่ง save แต่ยังไม่เข้าชีท
@@ -10116,8 +10152,14 @@ function setLiveDot(active){
   el.style.background=active?'var(--gold)':'#2ecc71';
   el.style.boxShadow=active?'0 0 8px var(--gold)':'0 0 6px #2ecc71';
 }
-// Refresh ทันทีเมื่อ user กลับมาที่แท็บ + ส่ง outbox ที่ค้าง
-document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ flushOutbox(); autoRefreshTick(); } });
+// Refresh เมื่อ user กลับมาที่แท็บ + ส่ง outbox ที่ค้าง
+// ★ v3.201: throttle 60 วิ — เดิมสลับแอปกลับมาทีไร ยิงโหลดชีททั้งก้อน+parse ใหม่ทุกครั้ง (มือถือสลับแอปบ่อย = ค้างรัวๆ)
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden) return;
+  flushOutbox();
+  if(Date.now()-_lastSyncAt<60000) return;   // เพิ่ง sync ไปไม่ถึงนาที → ข้าม (กด ↻ เองได้ตลอด)
+  autoRefreshTick();
+});
 // ส่ง outbox เมื่อเน็ตกลับมา
 window.addEventListener('online',()=>{ flushOutbox(); });
 
