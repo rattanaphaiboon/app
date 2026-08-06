@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v4.80</title>
+<title>HR Rattana v4.81</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3245,6 +3245,20 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
     </div>
   </div>
 </div>
+<!-- ===== v9.2: กล้องลงทะเบียนใบหน้า — เห็นตัวเอง กดถ่ายเอง 2 ช็อต ===== -->
+<div id="faceRegOverlay" style="display:none;position:fixed;inset:0;z-index:1200;background:linear-gradient(160deg,#0d1b3e 0%,#1a2f5e 100%);flex-direction:column;align-items:center;justify-content:center;padding:20px;padding-top:max(20px,env(safe-area-inset-top))">
+  <div id="frStep" style="color:#fff;font-size:19px;font-weight:800;margin-bottom:6px">📷 ช็อต 1/2 — หน้าปกติ ไม่ยิ้ม</div>
+  <div id="frHint" style="color:rgba(255,255,255,.75);font-size:13.5px;margin-bottom:16px;text-align:center">จัดใบหน้าให้เต็มวงกลม แล้วกดปุ่มถ่าย</div>
+  <div id="frCamRing" style="position:relative;width:min(74vw,300px);aspect-ratio:1/1;border-radius:50%;overflow:hidden;border:4px solid var(--gold);box-shadow:0 0 44px rgba(201,168,76,.35);flex-shrink:0">
+    <video id="frVideo" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;transform:scaleX(-1)"></video>
+  </div>
+  <div id="frShots" style="display:flex;gap:12px;margin:16px 0 4px;min-height:60px;align-items:center"></div>
+  <button id="frCaptureBtn" onclick="faceRegCapture()" style="width:min(74vw,300px);background:var(--gold);color:var(--navy);border:0;padding:16px;border-radius:14px;font-weight:800;font-size:17px;cursor:pointer;font-family:inherit">📸 ถ่ายรูป</button>
+  <div style="display:flex;gap:10px;margin-top:12px">
+    <button onclick="faceRegRestart()" style="background:transparent;border:1px solid rgba(255,255,255,.35);color:#fff;padding:10px 18px;border-radius:10px;font-size:13.5px;cursor:pointer;font-family:inherit">↺ เริ่มใหม่</button>
+    <button onclick="closeFaceRegCamera()" style="background:transparent;border:1px solid rgba(255,255,255,.35);color:#fff;padding:10px 18px;border-radius:10px;font-size:13.5px;cursor:pointer;font-family:inherit">ยกเลิก</button>
+  </div>
+</div>
 <div id="kioskOverlay">
   <div class="kiosk-bar">
     <button class="icon-btn" onclick="exitKiosk()">✕</button>
@@ -3378,7 +3392,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '9.1';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '9.2';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -4960,76 +4974,133 @@ function updateFaceCheck(info) {
 /* ============================================================
    OWN FACE REGISTRATION (employee/supervisor's own face)
    ============================================================ */
-/* v9.1: จับใบหน้า 1 ช็อต (วนรอสูงสุด ~3.2 วิ) — คืน {descriptor, photo} หรือ null */
-async function captureFaceShot_() {
-  for (let i = 0; i < 8; i++) {
-    await sleep(400);
-    const v = document.getElementById('empVideo');
-    if (!v || !v.videoWidth) continue;
-    const det = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({inputSize:320,scoreThreshold:0.6}))
-      .withFaceLandmarks().withFaceDescriptor();
-    if (det) return { descriptor: det.descriptor, photo: capturePhoto(v) };
+/* v9.2: ลงทะเบียนใบหน้า — เปิดกล้องเต็มจอ เห็นตัวเอง กดถ่ายเอง 2 ช็อต (ไม่ยิ้ม → ยิ้ม) */
+let _frState = null;
+
+async function registerOwnFace() {
+  if (!faceapiReady) { toast('โมเดลยังไม่พร้อม — รอสักครู่แล้วลองใหม่', 'warning'); return; }
+  const ov = document.getElementById('faceRegOverlay');
+  if (!ov) return;
+  _frState = { step: 1, shot1: null, shot2: null, stream: null, busy: false };
+  ov.style.display = 'flex';
+  frRender_();
+  try {
+    _frState.stream = await navigator.mediaDevices.getUserMedia({
+      audio: false, video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 640 } }
+    });
+    const v = document.getElementById('frVideo');
+    v.srcObject = _frState.stream;
+    v.play().catch(() => {});    // อย่า await — ค้างบน iOS (บทเรียน v7.2)
+  } catch (e) {
+    closeFaceRegCamera();
+    toast('เปิดกล้องไม่ได้ — อนุญาตการใช้กล้องในเบราว์เซอร์ก่อน', 'error');
   }
-  return null;
 }
 
-/* v9.1: ลงทะเบียน 2 ช็อต — หน้าปกติ (เทมเพลตหลัก) + ยิ้ม (เทมเพลตเสริม) */
-async function registerOwnFace() {
-  if (!empStream) await startEmpCamera();
-  if (!faceapiReady) { toast('โมเดลยังไม่พร้อม', 'warning'); return; }
+function frRender_() {
+  const s = _frState; if (!s) return;
+  const stepEl = document.getElementById('frStep');
+  const hintEl = document.getElementById('frHint');
+  const btn = document.getElementById('frCaptureBtn');
+  if (s.step === 1) {
+    stepEl.textContent = '📷 ช็อต 1/2 — หน้าปกติ ไม่ยิ้ม';
+    hintEl.textContent = 'จัดใบหน้าให้เต็มวงกลม แล้วกดปุ่มถ่าย';
+    btn.textContent = '📸 ถ่ายรูป';
+  } else {
+    stepEl.textContent = '😄 ช็อต 2/2 — ยิ้มกว้างๆ';
+    hintEl.textContent = 'ยิ้มค้างไว้ แล้วกดปุ่มถ่าย';
+    btn.textContent = '📸 ถ่ายรูป (ยิ้ม)';
+  }
+  const th = (p, label) => `<div style="text-align:center"><img src="${p}" style="width:56px;height:56px;border-radius:50%;object-fit:cover;border:2.5px solid var(--gold)"><div style="color:rgba(255,255,255,.75);font-size:10.5px;margin-top:3px">${label}</div></div>`;
+  document.getElementById('frShots').innerHTML =
+    (s.shot1 ? th(s.shot1.photo, '✓ ปกติ') : '') + (s.shot2 ? th(s.shot2.photo, '✓ ยิ้ม') : '');
+}
+
+async function faceRegCapture() {
+  const s = _frState; if (!s || s.busy) return;
+  s.busy = true;
+  const btn = document.getElementById('frCaptureBtn');
+  const ring = document.getElementById('frCamRing');
+  btn.disabled = true; btn.textContent = '⏳ กำลังจับใบหน้า...';
   try {
-    // ── ช็อต 1: หน้าปกติ ──
-    toast('📷 1/2 ทำหน้าปกติ ไม่ยิ้ม มองตรงกล้อง...', 'info');
-    showSpinner('ช็อต 1/2 — หน้าปกติ...');
-    const shot1 = await captureFaceShot_();
-    if (!shot1) { hideSpinner(); toast('ไม่พบใบหน้า ลองใหม่', 'error'); return; }
-    hideSpinner();
-
-    // ── ช็อต 2: ยิ้ม ──
-    toast('😄 2/2 ยิ้มกว้างๆ ...', 'info');
-    await sleep(1200);   // ให้เวลาเปลี่ยนสีหน้า
-    showSpinner('ช็อต 2/2 — ยิ้ม...');
-    const shot2 = await captureFaceShot_();
-    hideSpinner();
-
-    // guard: สองช็อตต้องเป็นคนเดียวกัน (ระยะไม่เกิน 0.6) — กันคนสลับหน้ากล้อง
-    let d2 = null, photo2 = '';
-    if (shot2) {
-      const between = faceapi.euclideanDistance(shot1.descriptor, shot2.descriptor);
-      if (between > 0.6) { toast('สองช็อตดูไม่ใช่คนเดียวกัน — ลงทะเบียนใหม่', 'error'); return; }
-      d2 = shot2.descriptor; photo2 = shot2.photo;
-    } else {
-      toast('ช็อตยิ้มไม่ติด — บันทึกเฉพาะหน้าปกติ (ลงใหม่ได้ทีหลัง)', 'warning');
+    const v = document.getElementById('frVideo');
+    if (!v || !v.videoWidth) { toast('กล้องยังไม่พร้อม — รอสักครู่', 'warning'); return; }
+    let det = null;
+    for (let i = 0; i < 5 && !det; i++) {   // ลองจับ ~1.7 วิ ณ จังหวะที่กด
+      det = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.55 }))
+        .withFaceLandmarks().withFaceDescriptor();
+      if (!det) await sleep(350);
     }
-
-    registeredDescriptor = shot1.descriptor;
-    registeredDescriptor2 = d2;
-    LS.set('faceDescriptor', Array.from(shot1.descriptor));
-    if (d2) LS.set('faceDescriptor2', Array.from(d2)); else LS.del('faceDescriptor2');
-    LS.set('facePhoto', shot1.photo);
-    LS.set('faceRegisteredAt', Date.now());
-    renderFaceReg();
-
-    // Sync to FaceData Sheet + Supabase via Apps Script
-    if (config.appsScriptUrl && currentUser?.empId) {
-      try {
-        await apiRegisterFace({
-          empId: currentUser.empId,
-          name: currentUser.name,
-          descriptor: shot1.descriptor,
-          descriptor2: d2,
-          photo: shot1.photo,
-          photo2: photo2,
-          registeredBy: currentUser.empId,
-        });
-        toast(`ลงทะเบียนสำเร็จ ✓ (${d2 ? '2 เทมเพลต' : '1 เทมเพลต'}) · ☁️`, 'success');
-      } catch (e) {
-        toast('ลงทะเบียน ✓ · ⚠️ sync ล้มเหลว: ' + e.message, 'warning');
-      }
+    if (!_frState) return;                  // ผู้ใช้กดยกเลิกระหว่างจับ
+    if (!det) { toast('ไม่พบใบหน้า — จัดหน้าให้อยู่ในวงกลมแล้วถ่ายใหม่', 'error'); return; }
+    const shot = { descriptor: det.descriptor, photo: capturePhoto(v) };
+    if (ring) { ring.style.borderColor = 'var(--success)'; setTimeout(() => { if (ring) ring.style.borderColor = 'var(--gold)'; }, 350); }  // แฟลชเขียว = ถ่ายติด
+    if (s.step === 1) {
+      s.shot1 = shot; s.step = 2;
+      toast('✓ ช็อต 1 เรียบร้อย — ต่อไปยิ้มกว้างๆ', 'success');
     } else {
-      toast('ลงทะเบียนสำเร็จ ✓ (เก็บในเครื่อง)', 'success');
+      // guard: สองช็อตต้องเป็นคนเดียวกัน — กันคนสลับหน้ากล้อง
+      const between = faceapi.euclideanDistance(s.shot1.descriptor, shot.descriptor);
+      if (between > 0.6) { toast('สองช็อตดูไม่ใช่คนเดียวกัน — ถ่ายช็อตยิ้มใหม่', 'error'); return; }
+      s.shot2 = shot;
+      frRender_();
+      await frSave_();
+      return;
     }
-  } finally { hideSpinner(); }
+    frRender_();
+  } finally {
+    if (_frState) { _frState.busy = false; }
+    if (btn) { btn.disabled = false; }
+    if (_frState) frRender_();   // อัปเดตข้อความปุ่มตาม step
+  }
+}
+
+function faceRegRestart() {
+  if (!_frState) return;
+  _frState.step = 1; _frState.shot1 = null; _frState.shot2 = null;
+  frRender_();
+}
+
+async function frSave_() {
+  const s = _frState; if (!s || !s.shot1) return;
+  registeredDescriptor = s.shot1.descriptor;
+  registeredDescriptor2 = s.shot2 ? s.shot2.descriptor : null;
+  LS.set('faceDescriptor', Array.from(s.shot1.descriptor));
+  if (s.shot2) LS.set('faceDescriptor2', Array.from(s.shot2.descriptor)); else LS.del('faceDescriptor2');
+  LS.set('facePhoto', s.shot1.photo);
+  LS.set('faceRegisteredAt', Date.now());
+  const photo1 = s.shot1.photo, photo2 = s.shot2 ? s.shot2.photo : '';
+  const d1 = s.shot1.descriptor, d2 = s.shot2 ? s.shot2.descriptor : null;
+  closeFaceRegCamera();
+  renderFaceReg();
+  // Sync to FaceData Sheet + Supabase via Apps Script
+  if (config.appsScriptUrl && currentUser?.empId) {
+    showSpinner('กำลังบันทึกขึ้นระบบ...');
+    try {
+      await apiRegisterFace({
+        empId: currentUser.empId,
+        name: currentUser.name,
+        descriptor: d1,
+        descriptor2: d2,
+        photo: photo1,
+        photo2: photo2,
+        registeredBy: currentUser.empId,
+      });
+      toast(`ลงทะเบียนสำเร็จ ✓ (${d2 ? '2 เทมเพลต ยิ้ม/ไม่ยิ้ม' : '1 เทมเพลต'}) · ☁️`, 'success');
+    } catch (e) {
+      toast('ลงทะเบียน ✓ · ⚠️ sync ล้มเหลว: ' + e.message, 'warning');
+    } finally { hideSpinner(); }
+  } else {
+    toast('ลงทะเบียนสำเร็จ ✓ (เก็บในเครื่อง)', 'success');
+  }
+}
+
+function closeFaceRegCamera() {
+  const s = _frState;
+  if (s && s.stream) { try { s.stream.getTracks().forEach(t => t.stop()); } catch (_) {} }
+  _frState = null;
+  const v = document.getElementById('frVideo'); if (v) v.srcObject = null;
+  const ov = document.getElementById('faceRegOverlay'); if (ov) ov.style.display = 'none';
 }
 function clearOwnFace() {
   if (!confirm('ลบใบหน้าที่ลงทะเบียน?')) return;
@@ -5071,17 +5142,9 @@ function renderFaceReg() {
   renderInto(teamBadge, teamPreview);
 }
 
-/* เปิดกล้อง home → ลงทะเบียนใบหน้าตัวเอง (สำหรับ Supervisor/HR ที่ใช้ Team page) */
+/* ลงทะเบียนใบหน้าตัวเองจากหน้า Team — v9.2: overlay มีกล้องของตัวเอง เรียกตรงได้เลย */
 async function registerOwnFaceFromTeamPage() {
-  // ไปที่หน้าหลักก่อน เพื่อให้กล้องเปิดอยู่
-  showPage('home');
-  await sleep(300);
-  if (!empStream) await startEmpCamera();
-  await sleep(500);
   await registerOwnFace();
-  // กลับมาหน้า Team
-  await sleep(800);
-  showPage('team');
 }
 function capturePhoto(video) {
   const c = document.createElement('canvas'); c.width = 200; c.height = 200;
