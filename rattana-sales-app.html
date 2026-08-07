@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.528</title>
+<title>Rattana Sales — v8.530</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -5608,7 +5608,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.528 · 2026-08-06</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.530 · 2026-08-06</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -5619,7 +5619,7 @@ body.dark .qt-tier-chip{ color:var(--gold,#c9a84c) }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.528</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.530</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -8345,6 +8345,220 @@ function _debtBlockSell(shopId, openGate) {
   } catch (e) { return false; }
 }
 window._debtBlockSell = _debtBlockSell;
+
+/* ══════════ v8.529 (Surat 6/8): ขายเชื่อ — เลิกบล็อก "คน" เปลี่ยนเป็นพัก "บิล" ══════════
+   เดิม: ร้านติดเกณฑ์ → เซลขายไม่ได้เลยจนกว่าหัวหน้าจะกด (หัวหน้าไม่ว่าง = เซลยืนรอหน้าร้าน)
+   ใหม่: เตือนให้รับทราบ → คีย์+ส่งได้ตามปกติ → ระบบส่งคำขอให้เอง → บิลถูกพักรอหัวหน้า+บัญชี (กลไกเดิม v8.167-187)
+   ⚠️ เกณฑ์ 4 ข้อ · จอบัญชี · ตัวปล่อยบิล ไม่แตะเลยสักตัว */
+
+// สรุป "ติดเพราะอะไร" เป็นข้อความสั้น — ใช้ทั้งบนชิป · popup · body ของ push
+//   (บทเรียน 6/8: push เดิมบอก "ค้างเกิน 0 วัน" เพราะร้านติดเพราะธง หนี้ติดลบ → หัวหน้าอ่านแล้วไม่รู้เหตุผล)
+function _debtCriteriaText(s) {
+  try {
+    const out = [];
+    if (typeof _debtHasFlag === 'function' && _debtHasFlag(s)) out.push('ติดธง: ' + String(s.flag || '').trim());
+    const ov = (typeof _debtOverdueBills === 'function') ? _debtOverdueBills(s) : [];
+    if (ov.length) {
+      const mx = (typeof _debtMaxOver === 'function') ? _debtMaxOver(s) : 0;
+      const cash = ov.every(function (inv) { return Number(inv.terms || 0) === 0; });
+      out.push(cash ? ('ขายสด ค้างข้ามวัน ' + ov.length + ' ใบ') : ('เกินกำหนด ' + ov.length + ' ใบ (สูงสุด ' + mx + ' วัน)'));
+    }
+    if (typeof _debtOverLimit === 'function' && _debtOverLimit(s)) {
+      out.push('เกินวงเงิน ฿' + Math.round(Math.max(0, Number(s.debt || 0) - Number(s.creditLimit || 0))).toLocaleString());
+    }
+    if (typeof _debtManyUnpaid === 'function' && _debtManyUnpaid(s)) {
+      out.push('ค้าง ' + ((typeof _debtUnpaidCount === 'function') ? _debtUnpaidCount(s) : 0) + ' ใบ');
+    }
+    return out.join(' · ');
+  } catch (e) { return ''; }
+}
+window._debtCriteriaText = _debtCriteriaText;
+
+/* ด่าน "รับทราบ" — แทนด่านบล็อกเดิม
+   คืน true = กำลังโชว์จอรับทราบ (caller ต้อง return แล้วรอ onDone เรียกตัวเองซ้ำ · pattern เดียวกับ _canPickShipWh)
+   คืน false = ไม่ต้องเตือน เดินต่อได้เลย · เตือนครั้งเดียวต่อร้านต่อวัน (in-memory — ปิดแอปแล้วเตือนใหม่ ยอมรับได้) */
+function _debtAckGate(shopId, onDone) {
+  try {
+    if (window._DEBT_GATE_ON === false) return false;
+    if (typeof _debtRoleGated !== 'function' || !_debtRoleGated()) return false;
+    const s = (SHOPS || []).find(function (x) { return x.id === shopId; });
+    if (!s || typeof _debtIsOverCredit !== 'function' || !_debtIsOverCredit(s)) return false;
+    window._debtAckDone = window._debtAckDone || {};
+    if (window._debtAckDone[shopId] === _debtTodayISO()) return false;
+    if (typeof showDebtGateModal !== 'function') return false;
+    showDebtGateModal(shopId, { ack: true, onDone: onDone });
+    return true;
+  } catch (e) { return false; }
+}
+window._debtAckGate = _debtAckGate;
+// กดรับทราบแล้ว — จำไว้ว่าเตือนไปแล้ววันนี้ แล้วเดินงานต่อ
+window._debtAckConfirm = function (shopId) {
+  try {
+    window._debtAckDone = window._debtAckDone || {};
+    window._debtAckDone[shopId] = _debtTodayISO();
+    const cb = (window._debtAckCb || {})[shopId];
+    if (window._debtAckCb) delete window._debtAckCb[shopId];
+    if (typeof closeModal === 'function') closeModal();
+    if (typeof cb === 'function') setTimeout(cb, 30);
+  } catch (e) {}
+};
+
+/* ใบนี้ต้องส่งคำขออนุมัติไหม — เรียกตอนกดยืนยันออเดอร์ (หลังรู้ยอดตะกร้าแล้ว)
+   ⚠️ ยังต้องใช้ _debtCartOverLimit ต่อ ห้ามลบทิ้งตอนถอดด่าน — เกณฑ์ "ยอดใบนี้ทะลุวงเงิน" รู้ได้ตอนนี้เท่านั้น */
+function _debtNeedsRequest(shopId, cartTotal) {
+  try {
+    if (window._DEBT_GATE_ON === false) return false;
+    if (typeof _debtRoleGated !== 'function' || !_debtRoleGated()) return false;
+    const s = (SHOPS || []).find(function (x) { return x.id === shopId; });
+    if (!s) return false;
+    if (typeof _debtIsOverCredit === 'function' && _debtIsOverCredit(s)) return true;
+    if (typeof _debtCartOverLimit === 'function' && _debtCartOverLimit(s, cartTotal)) return true;
+    return false;
+  } catch (e) { return false; }
+}
+window._debtNeedsRequest = _debtNeedsRequest;
+
+/* ยิงคำขอหลังส่งออเดอร์สำเร็จ — ไม่บล็อกจอ ไม่ทำให้เซลรอ
+   ล้มเหลว/ออฟไลน์ → เข้าคิว localStorage แล้วลองซ้ำตอน boot / online / ก่อนส่งใบถัดไป
+   ⚠️ ห้ามยิงก่อน submit — เพิ่ม round-trip GAS บนเส้นทางที่เซลยืนรอหน้าร้าน */
+const _DEBT_RETRY_KEY = 'rsa_debtReqRetry';
+function _debtReqPayload(shopId, orderId, cartTotal) {
+  const s = (SHOPS || []).find(function (x) { return x.id === shopId; }) || {};
+  const _snap = function (k, live) { return (typeof _debtSnapMax === 'function') ? _debtSnapMax(shopId, k, live) : live; };
+  const hit = (typeof _debtCartOverLimit === 'function') ? _debtCartOverLimit(s, cartTotal) : null;
+  const crit = [_debtCriteriaText(s), hit ? ('ใบนี้ ฿' + Math.round(hit.add).toLocaleString() + ' ทำให้เกินวงเงิน ฿' + Math.round(hit.over).toLocaleString()) : '']
+    .filter(Boolean).join(' · ');
+  return {
+    action: 'appendDebtApproval', shopCode: s.id || shopId, shopName: s.name || '',
+    wh: String((typeof _resolveMyWarehouse === 'function' ? _resolveMyWarehouse() : '') || s.debtWarehouse || ''),
+    smCode: _myApprKeyId(), smName: String((typeof SALESMAN !== 'undefined' && SALESMAN.name) || (currentUser && currentUser.name) || ''),
+    email: String((currentUser && currentUser.email) || ''),
+    // v8.495: ค่าที่มากกว่าระหว่าง live กับ snapshot — SHOPS ถูกสร้างใหม่ระหว่างคีย์ได้ (heartbeat) = ค่าปัจจุบันกลายเป็น 0
+    debtAmount:   String(_snap('debt', Math.round(Number(s.debt || 0)))),
+    overdueDays:  String(_snap('maxOver', (typeof _debtMaxOver === 'function') ? _debtMaxOver(s) : 0)),
+    overdueBills: String(_snap('nTotal', (typeof _debtUnpaidCount === 'function') ? _debtUnpaidCount(s) : 0)),
+    criteria: crit,                                   // v8.529: เหตุผลจริง → ไปโผล่บน push หาหัวหน้า
+    reason: crit,                                     // ช่องเหตุผลในชีท (เซลไม่ต้องพิมพ์แล้ว)
+    billId: String(orderId || ''),                    // v8.529: ใบที่คำขอนี้ครอบ → หลังบ้านตามไปพักบิลใบนี้
+    orderTotal: String(Math.round(Number(cartTotal) || 0))
+  };
+}
+function _debtRetryLoad() { try { return JSON.parse(localStorage.getItem(_DEBT_RETRY_KEY) || '[]') || []; } catch (e) { return []; } }
+function _debtRetrySave(q) { try { localStorage.setItem(_DEBT_RETRY_KEY, JSON.stringify((q || []).slice(-30))); } catch (e) {} }
+// กันซ้ำด้วย ร้าน+เลขใบ — คำขอตอนเช็คอินไม่มีเลขใบ (คีย์เป็น "ร้าน|") จึงยังแยกจากคำขอตอนคีย์ใบได้
+function _debtReqKey(p) { return String((p && p.shopCode) || '') + '|' + String((p && p.billId) || ''); }
+function _debtRetryPush(payload) {
+  const q = _debtRetryLoad();
+  const k = _debtReqKey(payload);
+  if (q.some(function (x) { return _debtReqKey(x) === k; })) return;
+  q.push(payload); _debtRetrySave(q);
+}
+function _debtRetryDrop(payload) {
+  const k = _debtReqKey(payload);
+  _debtRetrySave(_debtRetryLoad().filter(function (x) { return _debtReqKey(x) !== k; }));
+}
+/* v8.530 (Surat 6/8): ยิงคำขอตั้งแต่ "เช็คอินเสร็จ" — ตอนนั้นรู้แล้วว่าร้านติดเกณฑ์ ไม่ต้องรอคีย์จบ
+   หัวหน้าจึงมีเวลาตัดสินระหว่างที่เซลยังคีย์อยู่ · เลขใบยิงตามไปทีหลัง (idempotent → ใบเดิม ต่อ billId + พักบิล)
+   ⚠️ fire-and-forget — ห้ามให้การเช็คอินรอผลคำขอ */
+function _debtRequestOnCheckin(shopId) {
+  try {
+    if (window._DEBT_GATE_ON === false) return;
+    if (typeof _debtRoleGated !== 'function' || !_debtRoleGated()) return;
+    const s = (SHOPS || []).find(function (x) { return x.id === shopId; });
+    if (!s || typeof _debtIsOverCredit !== 'function' || !_debtIsOverCredit(s)) return;
+    const st = (typeof _debtApprStatusFor === 'function') ? _debtApprStatusFor(shopId) : null;
+    if (st && (st.status === 'รอ' || st.status === 'อนุมัติ')) return;   // มีใบที่ยังใช้ได้อยู่แล้ว → ไม่ต้องขอซ้ำ
+    _debtAutoRequest(shopId, '', 0);                                     // billId ว่าง = ยังไม่มีใบ
+  } catch (e) { console.warn('[debtReq] checkin:', e && e.message); }
+}
+window._debtRequestOnCheckin = _debtRequestOnCheckin;
+async function _debtAutoRequest(shopId, orderId, cartTotal) {
+  const payload = _debtReqPayload(shopId, orderId, cartTotal);
+  /* ★ เข้าคิวก่อนยิงเสมอ แล้วค่อยเอาออกเมื่อสำเร็จ (pattern durability เดียวกับออเดอร์)
+     ถ้าเซลปิดแอป/แอปเด้งระหว่างยิง คำขอจะไม่หาย — boot ครั้งหน้าส่งให้เอง
+     ไม่งั้น: บิลลงชีทแล้วแต่ไม่มีคำขอ = ของออกโดยไม่ผ่านอนุมัติ และไม่มีใครรู้ */
+  _debtRetryPush(payload);
+  try {
+    const res = await postToAppsScript(payload);
+    if (res && res.ok) {
+      _debtRetryDrop(payload);
+      const key = _debtApprKey(shopId, _myApprKeyId());
+      (window._debtApprRows = window._debtApprRows || {})[key] = {
+        'reqId': res.reqId, 'สถานะ': res.status || 'รอ', 'เหตุผล': payload.reason,
+        'รหัสร้าน': shopId, 'รหัสเซลล์': _myApprKeyId(), 'วันหมดอายุ': _debtTodayISO(2), 'billId': payload.billId
+      };
+      try { if (typeof renderShopList === 'function') renderShopList(); } catch (e) {}
+      return res;
+    }
+    return null;
+  } catch (e) { return null; }
+}
+window._debtAutoRequest = _debtAutoRequest;
+// ลองส่งคิวที่ค้าง — เรียกตอน boot / กลับมาออนไลน์ / ก่อนส่งใบถัดไป
+/* ใบนั้นลงชีทจริงหรือยัง — คำขอต้องตามหลังบิลเสมอ ไม่งั้นได้คำขอที่ไม่มีบิลให้พัก
+   ไม่รู้จักใบแล้ว (ถูกล้างออกจาก submittedOrders) = ถือว่าลงแล้ว ยิงได้ (ดีกว่าค้างคิวตลอดกาล) */
+function _debtBillSynced(billId) {
+  try {
+    const bid = String(billId || '').trim();
+    if (!bid) return true;
+    const o = (typeof submittedOrders !== 'undefined' ? submittedOrders : []).find(function (x) { return x && String(x.id) === bid; });
+    if (!o) return true;
+    return !!o.synced;
+  } catch (e) { return true; }
+}
+async function _debtReqRetryFlush() {
+  if (window._debtFlushBusy) return;                       // กันวิ่งซ้อน (boot + online + confirm ยิงพร้อมกันได้)
+  const q = _debtRetryLoad();
+  if (!q.length || !navigator.onLine) return;
+  window._debtFlushBusy = true;
+  const left = [];
+  try {
+    for (let i = 0; i < q.length; i++) {
+      if (!_debtBillSynced(q[i] && q[i].billId)) { left.push(q[i]); continue; }   // บิลยังไม่ลงชีท → รอรอบหน้า
+      try {
+        const res = await postToAppsScript(q[i]);
+        if (!(res && res.ok)) left.push(q[i]);
+      } catch (e) { left.push(q[i]); }
+    }
+    // ★ อ่านคิวใหม่ก่อนเขียนทับ — ระหว่างที่ยิงอยู่อาจมีใบใหม่เข้าคิว (เซลกดส่งใบถัดไป) จะได้ไม่ลบทิ้ง
+    const fresh = _debtRetryLoad().filter(function (x) {
+      const k = _debtReqKey(x);
+      return !q.some(function (o) { return _debtReqKey(o) === k; });
+    });
+    _debtRetrySave(left.concat(fresh));
+    if (left.length) console.warn('[debtReq] ยังค้าง', left.length, 'ใบ');
+  } finally { window._debtFlushBusy = false; }
+}
+window._debtReqRetryFlush = _debtReqRetryFlush;
+try { window.addEventListener('online', function () { setTimeout(_debtReqRetryFlush, 1500); }); } catch (e) {}
+
+/* v8.529: จอแจ้งหลังส่งใบขายเชื่อ — จบพาทเซลตรงนี้
+   sent=false (คำขอยังไม่ถึงชีท) ต้องบอกตรง ๆ ว่าระบบจะส่งซ้ำให้ — ห้ามบอกว่าส่งแล้วทั้งที่ยังไม่ถึง
+   ⚠️ ห่อ .modal เองเสมอ (openCardModal ให้แค่พื้นหลังโปร่ง — บทเรียน v8.520) */
+function _debtPostSubmitModal(shopId, orderId, total, sent) {
+  const s = (SHOPS || []).find(function (x) { return x.id === shopId; }) || {};
+  const amt = Math.round(Number(total) || 0).toLocaleString();
+  const warn = sent
+    ? 'ร้านนี้ติดเกณฑ์เครดิต — <b>บิลถูกพักไว้</b> รอหัวหน้า + บัญชีอนุมัติ ของถึงจะออก<br>แจ้งหัวหน้าให้กดอนุมัติด้วย'
+    : 'ร้านนี้ติดเกณฑ์เครดิต — <b>บิลถูกพักไว้</b> รอหัวหน้า + บัญชีอนุมัติ<br>เลขใบยังส่งไม่ถึงคำขอ (เน็ตขัดข้อง) ระบบจะส่งซ้ำให้เอง — แจ้งหัวหน้าด้วยจะเร็วกว่า';
+  const html = '<div class="modal" style="max-width:360px">'
+    + '<button type="button" class="modal-close-x" onclick="closeCardModal()" aria-label="ปิด">&#10005;</button>'
+    + '<div style="padding:14px 52px 0 16px">'
+      + '<div style="font-size:15px;font-weight:900;color:#0f766e">✓ ' + escapeHtml(String(orderId || '')) + ' ส่งแล้ว</div>'
+      + '<div style="font-size:11.5px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(s.name || '') + ' · ฿' + amt + '</div>'
+    + '</div>'
+    + '<div style="padding:11px 16px 0">'
+      + '<div style="background:rgba(220,38,38,.07);border:1px solid rgba(220,38,38,.3);border-radius:10px;padding:10px 12px;font-size:12px;color:#b91c1c;line-height:1.65;font-weight:700">' + warn + '</div>'
+    + '</div>'
+    + '<div style="padding:12px 16px 14px;display:flex;flex-direction:column;gap:7px">'
+      + '<button class="btn btn-block" style="background:#06C755;color:#fff;border:none" onclick="closeCardModal();shareDebtToLine(\'' + escapeAttr(shopId) + '\')">ส่ง LINE แจ้งหัวหน้า</button>'
+      + '<button class="btn btn-outline btn-block" onclick="closeCardModal()">ตกลง</button>'
+    + '</div></div>';
+  if (typeof openCardModal === 'function') openCardModal(html);
+  else showToast('ส่งแล้ว — บิลถูกพักรอหัวหน้าอนุมัติ แจ้งหัวหน้าด้วย', 'warning');
+}
+window._debtPostSubmitModal = _debtPostSubmitModal;
+
 function _debtRoleGated() { const r = Number((currentUser && currentUser.role) || (typeof SALESMAN !== 'undefined' && SALESMAN.level) || 0); return r === 3 || r === 4; }   // เฉพาะเซล Role 3-4 · Role 5+ = อนุมัติเอง (ข้าม)
 // v8.431: currentUser ไม่เคยมี property 'code' (มีแค่ salesmanCode / empId / bplusCode) → fallback เดิมตายสนิท
 //   พอ v8.421 ทำให้ SALESMAN.code = '' เมื่อ Users ไม่มีรหัสเซล → _mySmCode() = '' → ขออนุมัติไม่ได้เลย
@@ -8534,10 +8748,16 @@ function _debtApprRevealDrawer() {
   } catch (e) {}
 }
 // ── เซล: บล็อก + ขออนุมัติ (text box แจ้งหัวหน้า) ──
-window.showDebtGateModal = function (shopId) {
+// v8.529: + opts { ack:true, onDone } = โหมด "รับทราบ" (ดูอย่างเดียว ไม่มีฟอร์มขอ) — ใช้แทนด่านบล็อกเดิม
+window.showDebtGateModal = function (shopId, opts) {
   const s = SHOPS.find(x => x.id === shopId); if (!s) return;
+  const _ackMode = !!(opts && opts.ack);
+  if (_ackMode) { window._debtAckCb = window._debtAckCb || {}; window._debtAckCb[shopId] = (opts && opts.onDone) || null; }
   const modal = document.getElementById('productModal'), mc = document.getElementById('modalContent');
-  if (!modal || !mc) { if (confirm('ร้านนี้เกินเครดิต — ต้องขออนุมัติหัวหน้าก่อนขาย')) {} return; }
+  if (!modal || !mc) {
+    if (_ackMode) { window._debtAckConfirm(shopId); return; }   // ไม่มีที่โชว์ = อย่าบล็อกงานเซล เดินต่อเลย
+    return;
+  }
   const st = _debtApprStatusFor(shopId);
   const debt = Math.round(Number(s.debt || 0)), maxOver = _debtMaxOver(s), nOver = _debtOverdueBills(s).length;
   const nTotal = (typeof _debtUnpaidCount === 'function') ? _debtUnpaidCount(s) : ((s.debtInvoices || []).length);   // v8.402: บิลค้างยังไม่จ่ายทั้งหมด (เกณฑ์ 3)
@@ -8577,28 +8797,50 @@ window.showDebtGateModal = function (shopId) {
     + '<div style="background:#fff;border:1px solid #fecaca;border-radius:8px;padding:8px;text-align:center"><div style="font-size:10px;color:#991B1B;font-weight:700">เกินสูงสุด</div><div style="font-size:15px;font-weight:900;color:#DC2626">' + maxOver + '<span style="font-size:10px"> ว.</span></div></div>'
     + '<div style="background:#fff;border:1px solid #fecaca;border-radius:8px;padding:8px;text-align:center"><div style="font-size:10px;color:#991B1B;font-weight:700">บิลค้าง</div><div style="font-size:15px;font-weight:900;color:#DC2626">' + nTotal + (nOver ? '<span style="font-size:10px;color:#991B1B"> (เกินเทอม ' + nOver + ')</span>' : '') + '</div></div></div>';
   let body, headBg = 'linear-gradient(135deg,#DC2626,#991B1B)', headTitle = '⛔ ร้านเกินเครดิต — ขายเชื่อต้องขออนุมัติ';
+  /* v8.529: โหมดรับทราบ — เซลคีย์ต่อได้ทันที ไม่ต้องขออะไร ระบบส่งคำขอให้เองตอนกดส่งใบ
+     ต้องมาก่อน branch อื่นทั้งหมด (สถานะคำขอเก่าไม่ควรเปลี่ยนหน้าตาจอเตือนนี้) */
+  if (_ackMode) {
+    headTitle = 'ร้านนี้ติดเกณฑ์เครดิต';
+    const _crit = (typeof _debtCriteriaText === 'function') ? _debtCriteriaText(s) : '';
+    body = '<div style="padding:16px">'
+      + (_crit ? '<div style="background:#fff5f5;border:1px solid #fecaca;border-radius:10px;padding:10px 12px;font-size:12.5px;font-weight:800;color:#b91c1c;line-height:1.6;margin-bottom:10px">' + escapeHtml(_crit) + '</div>' : '')
+      + ((typeof _debtBillsHtml === 'function') ? _debtBillsHtml(s.id) : '')
+      + '<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 12px;font-size:12.5px;color:#1e40af;line-height:1.6;font-weight:700">คีย์ขายได้ตามปกติ — บิลใบนี้จะถูกพักไว้ รอหัวหน้า + บัญชีอนุมัติก่อนของออก</div>'
+      + '<button class="btn btn-primary btn-block" style="margin-top:12px;background:#16A34A;border:none" onclick="_debtAckConfirm(\'' + escapeAttr(shopId) + '\')">รับทราบ — คีย์ต่อ</button></div>';
+    mc.innerHTML = '<button type="button" class="modal-close-x" onclick="_debtAckConfirm(\'' + escapeAttr(shopId) + '\')">✕</button>'
+      + '<div class="modal-head" style="background:' + headBg + ';color:#fff"><div class="modal-head-info"><div class="modal-title" style="color:#fff">' + headTitle + '</div><div class="modal-sub" style="color:rgba(255,255,255,.92)">' + escapeHtml(s.name || '') + '</div></div></div>'
+      + stat + flagBanner + cartBanner + limBanner + countBanner + otherBanner + body;
+    modal.classList.add('active'); document.body.style.overflow = 'hidden';
+    return;
+  }
   if (st && st.status === 'อนุมัติ') {   // v8.325 fix: หัวหน้าอนุมัติแล้ว (เซลกดเช็คสถานะเจอ) → เขียว + ปุ่มเช็คอิน (เดิมตกไป else = โชว์ฟอร์มขอซ้ำ = บั๊ก)
-    headBg = 'linear-gradient(135deg,#16A34A,#15803D)'; headTitle = '✅ หัวหน้าอนุมัติขายเชื่อแล้ว';
-    body = '<div style="padding:16px"><div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:12px;font-size:12.5px;color:#166534">อนุมัติแล้ว' + (st.approver ? ' โดย ' + escapeHtml(st.approver) : '') + ' — เช็คอิน + คีย์ขายร้านนี้ได้เลย' + (st.exp ? ' <b>(ใช้ได้ถึง ' + escapeHtml(st.exp) + ')</b>' : ' (ใช้ได้ 3 วัน)') + '</div>'
+    // v8.530: 'อนุมัติ' = หัวหน้าผ่านแล้ว รอบัญชีปล่อยบิล (ยังไม่ใช่จบขั้นตอน) — แก้ข้อความให้ตรงบันไดใหม่ กันเข้าใจผิดว่าจบแล้ว
+    headBg = 'linear-gradient(135deg,#16A34A,#15803D)'; headTitle = '✅ หัวหน้าอนุมัติแล้ว — รอบัญชีปล่อยบิล';
+    body = '<div style="padding:16px"><div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:12px;font-size:12.5px;color:#166534">หัวหน้าอนุมัติแล้ว' + (st.approver ? ' โดย ' + escapeHtml(st.approver) : '') + ' — คีย์ขายร้านนี้ได้ปกติ บิลจะรอบัญชีปล่อยอีกขั้นก่อนของออก' + (st.exp ? ' <b>(ใช้ได้ถึง ' + escapeHtml(st.exp) + ')</b>' : ' (ใช้ได้ 3 วัน)') + '</div>'
+      + ((typeof _debtBillsHtml === 'function') ? _debtBillsHtml(s.id) : '')
       + '<button class="btn btn-primary btn-block" style="margin-top:12px;background:#16A34A;border:none" onclick="closeModal();doCheckIn(\'' + escapeAttr(shopId) + '\')">✓ เช็คอินร้านนี้เลย</button></div>';
   } else if (st && st.status === 'รอ') {
+    /* v8.530 fix: ข้อความเดิม "เช็คอิน/คีย์ขายล็อกจนหัวหน้าอนุมัติ" เป็นของโฟลบล็อกเก่า — ตอนนี้ไม่ล็อกแล้ว
+       ปล่อยไว้แบบเดิมจะขัดกับ "รับทราบ — คีย์ต่อ" ที่เซลเพิ่งกดผ่านมา ทำให้นึกว่าขายไม่ได้ */
     headBg = 'linear-gradient(135deg,#D97706,#B45309)'; headTitle = '🕐 รอหัวหน้าอนุมัติขายเชื่อ';
-    body = '<div style="padding:16px"><div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:12px;font-size:12.5px;color:#92400e">ส่งคำขอแล้ว — เช็คอิน/คีย์ขายร้านนี้ล็อกจนหัวหน้าอนุมัติ<div style="margin-top:6px;font-size:11.5px;color:var(--muted)"><b>ข้อความถึงหัวหน้า:</b> ' + escapeHtml(st.reason || '—') + '</div></div>'
+    body = '<div style="padding:16px"><div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:12px;font-size:12.5px;color:#92400e">คีย์ขายได้ตามปกติ — บิลที่เกี่ยวข้องถูกพักไว้ รอหัวหน้าอนุมัติก่อนของถึงจะออก<div style="margin-top:6px;font-size:11.5px;color:var(--muted)"><b>ข้อความ:</b> ' + escapeHtml(st.reason || '—') + '</div></div>'
+      + ((typeof _debtBillsHtml === 'function') ? _debtBillsHtml(s.id) : '')
       + '<button class="btn btn-block" style="margin-top:12px;background:#06C755;color:#fff;border:none" onclick="shareDebtToLine(\'' + escapeAttr(shopId) + '\')">📲 ส่ง LINE หาหัวหน้า</button>'
-      + '<button class="btn btn-outline btn-block" style="margin-top:8px" onclick="_loadDebtApprovals(true).then(function(){showDebtGateModal(\'' + escapeAttr(shopId) + '\')})">🔄 เช็คสถานะอีกครั้ง</button></div>';
+      + '<button class="btn btn-outline btn-block" style="margin-top:8px" onclick="closeModal()">ปิด</button></div>';
   } else if (st && st.status === 'ไม่อนุมัติ') {
+    /* v8.529: เลิกให้เซลกดขอเอง — ระบบส่งคำขอให้อัตโนมัติตอนกดส่งใบ
+       เดิมมีฟอร์มขอ (textarea + ปุ่ม) ทำให้เซลเข้าใจว่าต้องขอก่อนถึงจะขายได้ ซึ่งไม่จริงแล้ว */
     headBg = 'linear-gradient(135deg,#6B7280,#374151)'; headTitle = '❌ หัวหน้าไม่อนุมัติขายเชื่อ';
     body = '<div style="padding:16px"><div style="background:#f3f4f6;border:1px solid #d1d5db;border-radius:10px;padding:12px;font-size:12.5px;color:#374151;margin-bottom:12px"><b>เหตุผลที่ไม่อนุมัติ:</b><br>' + escapeHtml(st.rejectReason || '—') + '</div>'
-      + _debtEvSlotHtml(shopId)   // v8.438: ติ๊กสลิปที่ตรงกับบิลค้าง
-      + '<label style="display:block;font-size:12px;font-weight:700;color:var(--text)">ขออนุมัติใหม่ — ข้อความถึงหัวหน้า</label>'
-      + '<textarea id="debtReason" placeholder="พิมพ์เหตุผล/ข้อความถึงหัวหน้า..." style="width:100%;min-height:70px;margin-top:6px;padding:10px;border:1px solid var(--border);border-radius:9px;font-size:13px;font-family:inherit;box-sizing:border-box"></textarea>'
-      + '<button id="debtReqBtn" class="btn btn-primary btn-block" style="margin-top:10px" onclick="requestDebtApproval(\'' + escapeAttr(shopId) + '\')">🔄 ขออนุมัติใหม่</button></div>';
+      + ((typeof _debtBillsHtml === 'function') ? _debtBillsHtml(s.id) : '')
+      + '<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 12px;font-size:12.5px;color:#1e40af;line-height:1.6;font-weight:700;margin-top:10px">คีย์ขายได้ตามปกติ — บิลที่ยังไม่ผ่านจะถูกพักไว้ · คีย์ใบใหม่ = ระบบส่งคำขอรอบใหม่ให้เอง</div>'
+      + '<button class="btn btn-block" style="margin-top:12px;background:#06C755;color:#fff;border:none" onclick="shareDebtToLine(\'' + escapeAttr(shopId) + '\')">📲 ส่ง LINE หาหัวหน้า</button>'
+      + '<button class="btn btn-outline btn-block" style="margin-top:8px" onclick="closeModal()">ปิด</button></div>';
   } else {
-    body = '<div style="padding:16px"><div style="font-size:12.5px;color:var(--muted);margin-bottom:10px">ร้านนี้ติดเกณฑ์เครดิต (ติดธง / บิลค้างเกินกำหนด / ยอดเกินวงเงิน / ค้างหลายใบ) — ต้องขออนุมัติหัวหน้าก่อนถึงจะเช็คอิน + คีย์ขายได้</div>'
-      + _debtEvSlotHtml(shopId)   // v8.438: ติ๊กสลิปที่ตรงกับบิลค้าง
-      + '<label style="display:block;font-size:12px;font-weight:700;color:var(--text)">ข้อความถึงหัวหน้า <span style="color:#DC2626">*</span></label>'
-      + '<textarea id="debtReason" placeholder="เช่น ลูกค้ารับปากจ่าย 3 วัน / ของขายดีต้องเติม..." style="width:100%;min-height:80px;margin-top:6px;padding:10px;border:1px solid var(--border);border-radius:9px;font-size:13px;font-family:inherit;box-sizing:border-box"></textarea>'
-      + '<button id="debtReqBtn" class="btn btn-primary btn-block" style="margin-top:12px" onclick="requestDebtApproval(\'' + escapeAttr(shopId) + '\')">📨 ขออนุมัติขายจากหัวหน้า</button></div>';
+    body = '<div style="padding:16px"><div style="font-size:12.5px;color:var(--muted);margin-bottom:10px">ร้านนี้ติดเกณฑ์เครดิต (ติดธง / บิลค้างเกินกำหนด / ยอดเกินวงเงิน / ค้างหลายใบ)</div>'
+      + ((typeof _debtBillsHtml === 'function') ? _debtBillsHtml(s.id) : '')
+      + '<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 12px;font-size:12.5px;color:#1e40af;line-height:1.6;font-weight:700;margin-top:10px">คีย์ขายได้ตามปกติ — พอกดส่งใบ ระบบจะส่งคำขออนุมัติให้เอง แล้วบิลจะถูกพักรอหัวหน้า + บัญชี</div>'
+      + '<button class="btn btn-outline btn-block" style="margin-top:12px" onclick="closeModal()">ปิด</button></div>';
   }
   mc.innerHTML = '<button type="button" class="modal-close-x" onclick="closeModal()">✕</button>'
     + '<div class="modal-head" style="background:' + headBg + ';color:#fff"><div class="modal-head-info"><div class="modal-title" style="color:#fff">' + headTitle + '</div><div class="modal-sub" style="color:rgba(255,255,255,.92)">' + escapeHtml(s.name || '') + '</div></div></div>' + stat + flagBanner + cartBanner + limBanner + countBanner + otherBanner + body;
@@ -8614,6 +8856,25 @@ window.showDebtGateModal = function (shopId) {
 // ═══ v8.496 (Surat 3/8): ชิปสถานะขายเชื่อบนการ์ดร้าน หน้ารูท — รู้ตั้งแต่ก่อนขับไปถึง ═══
 //   เดิมรู้ตอนกดเช็คอินหน้าร้านแล้ว = ยืนรอหัวหน้าอยู่หน้าร้าน · ตอนนี้แตะชิปขออนุมัติล่วงหน้าได้เลย
 //   โชว์เฉพาะ role 3-4 ที่ติดด่านจริง (role 5+ อนุมัติเองอยู่แล้ว ไม่ต้องรก)
+// v8.529: นับบิลของร้านนี้ที่ "ถูกพักรออนุมัติ" อยู่ — ให้เซลตอบลูกค้าได้ว่าของยังไม่มาเพราะรออนุมัติ ไม่ใช่ของหมด
+//   อ่านจาก SHEET_DATA.orders ที่โหลดอยู่แล้ว — ไม่ยิงอะไรเพิ่ม
+function _debtHeldBillCount(shopId) {
+  try {
+    const s = (SHOPS || []).find(function (x) { return x.id === shopId; });
+    const code = String((s && (s.bplusCode || s.id)) || shopId || '').trim();
+    if (!code) return 0;
+    const seen = {};
+    (SHEET_DATA.orders || []).forEach(function (r) {
+      if (String(r['สถานะอนุมัติ'] || '').trim() !== 'รอบัญชีอนุมัติ') return;
+      if (String(r['ยกเลิก'] || '').trim()) return;
+      if (String(r['รหัสร้าน'] || '').trim() !== code) return;
+      const oid = String(r['orderId'] || '').trim();
+      if (oid) seen[oid] = 1;
+    });
+    return Object.keys(seen).length;
+  } catch (e) { return 0; }
+}
+window._debtHeldBillCount = _debtHeldBillCount;
 function _debtGateChipHtml(s) {
   try {
     if (!s || window._DEBT_GATE_ON === false) return '';
@@ -8625,15 +8886,19 @@ function _debtGateChipHtml(s) {
     // ร้านขายสด = บิลที่เกินกำหนดทุกใบตั้งเครดิตไว้ 0 วัน → บอกให้ชัด เซลจะได้ไม่งงว่าทำไมร้านนี้เด้งทุกที
     const cash = ov.length > 0 && ov.every(function (inv) { return Number(inv.terms || 0) === 0; });
     const amt = '฿' + Math.round(Number(s.debt || 0)).toLocaleString();
+    const held = _debtHeldBillCount(s.id);
+    const heldTxt = held ? (' · บิลพัก ' + held + ' ใบ') : '';
     let txt, bg, fg, bd;
+    /* v8.529: บันไดใหม่ — 'อนุมัติ' คือ "ซุปผ่านแล้ว รอบัญชีปล่อยบิล" ไม่ใช่ "ขายได้แล้ว" อีกต่อไป
+       (โฟลใหม่เซลขายได้ตลอด สิ่งที่รออนุมัติคือ "ของออก" ไม่ใช่ "สิทธิ์ขาย") */
     if (st && st.status === 'อนุมัติ') {
-      txt = '✓ อนุมัติขายเชื่อแล้ว' + (st.exp ? ' (ถึง ' + st.exp + ')' : ''); bg = '#f0fdf4'; fg = '#166534'; bd = '#bbf7d0';
+      txt = 'หัวหน้าผ่านแล้ว · รอบัญชีปล่อยบิล' + heldTxt; bg = '#fffbeb'; fg = '#92600a'; bd = '#fde68a';
     } else if (st && st.status === 'รอ') {
-      txt = 'รอหัวหน้าอนุมัติขายเชื่อ — แตะดู'; bg = '#fffbeb'; fg = '#92400e'; bd = '#fde68a';
+      txt = 'รอหัวหน้าอนุมัติ' + (heldTxt || ' — แตะดู'); bg = '#f5f3ff'; fg = '#6d28d9'; bd = '#ddd6fe';
     } else if (st && st.status === 'ไม่อนุมัติ') {
-      txt = 'หัวหน้าไม่อนุมัติ — แตะขอใหม่'; bg = '#f3f4f6'; fg = '#374151'; bd = '#d1d5db';
+      txt = 'หัวหน้าไม่อนุมัติ · บิลถูกพักต่อ' + heldTxt; bg = '#f3f4f6'; fg = '#374151'; bd = '#d1d5db';
     } else {
-      txt = (cash ? 'ขายสด · ' : '') + 'ต้องขออนุมัติก่อนขาย · ค้าง ' + nBill + ' ใบ ' + amt + ' — แตะขอเลย';
+      txt = (cash ? 'ขายสด · ' : '') + 'ติดเครดิต · ค้าง ' + nBill + ' ใบ ' + amt + ' — คีย์ได้ บิลจะถูกพัก';
       bg = '#fef2f2'; fg = '#b91c1c'; bd = '#fecaca';
     }
     return '<div class="shc-amount-chip" onclick="event.stopPropagation();showDebtGateModal(\'' + escapeAttr(s.id) + '\')" title="' + escapeAttr(txt) + '"'
@@ -8737,6 +9002,30 @@ function _debtBillsHtml(shopCode) {
       + '</div>';
   } catch (e) { return ''; }
 }
+/* v8.529: บรรทัด "ใบที่ขออนุมัติ" บนการ์ดหัวหน้า — โฟลใหม่คำขอผูกกับใบจริงแล้ว (คอลัมน์ billId)
+   หัวหน้าต้องรู้ว่ากดอนุมัติแล้วปล่อยของมูลค่าเท่าไหร่ · ยอดดึงจาก SHEET_DATA.orders ที่มีอยู่แล้ว (ไม่ยิงเพิ่ม)
+   แถวเก่ายุคขอก่อนคีย์ billId ว่าง → ไม่โชว์บรรทัดนี้ (ไม่ใช่ข้อผิดพลาด) */
+function _debtApprBillLineHtml(r) {
+  try {
+    const raw = String((r && r['billId']) || '').trim();
+    if (!raw) return '';
+    const ids = raw.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+    if (!ids.length) return '';
+    const sum = {};
+    (SHEET_DATA.orders || []).forEach(function (o) {
+      const oid = String(o['orderId'] || '').trim();
+      if (ids.indexOf(oid) < 0) return;
+      if (String(o['ยกเลิก'] || '').trim()) return;
+      sum[oid] = (sum[oid] || 0) + (numv(o['ยอดเงินรวม']) || 0);
+    });
+    const totAll = Object.keys(sum).reduce(function (a, k) { return a + sum[k]; }, 0);
+    const label = ids.map(function (id) { return sum[id] ? (id + ' ฿' + Math.round(sum[id]).toLocaleString()) : id; }).join(' · ');
+    return '<div style="margin-top:6px;background:rgba(220,38,38,.07);border:1px solid rgba(220,38,38,.25);border-radius:8px;padding:7px 10px;font-size:11.5px;color:#b91c1c;font-weight:800;line-height:1.5">'
+      + 'ใบที่ขออนุมัติ ' + ids.length + ' ใบ' + (totAll > 0 ? (' · รวม ฿' + Math.round(totAll).toLocaleString()) : '')
+      + '<div style="font-weight:600;font-family:ui-monospace,monospace;font-size:11px;margin-top:2px;word-break:break-all">' + escapeHtml(label) + '</div></div>';
+  } catch (e) { return ''; }
+}
+window._debtApprBillLineHtml = _debtApprBillLineHtml;
 function _debtApprRowHtml(r) {
   const shop = escapeHtml(String(r['ชื่อร้าน'] || r['รหัสร้าน'] || '')), sm = escapeHtml(String(r['ชื่อเซล'] || r['รหัสเซลล์'] || ''));
   // v8.431: เดิม strip เครื่องหมายลบทิ้ง → ร้านที่ CN มากกว่าหนี้ (ยอดค้าง '-43') โชว์เป็น "฿43" แดง
@@ -8757,6 +9046,7 @@ function _debtApprRowHtml(r) {
   return '<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px;background:var(--card-bg)">'
     + '<div style="display:flex;justify-content:space-between;gap:8px"><div style="font-weight:800;font-size:14px">' + shop + '</div><div style="font-weight:900;color:#DC2626;font-size:14px">฿' + debt.toLocaleString() + '</div></div>'
     + '<div style="font-size:11.5px;color:var(--muted);margin-top:2px">เซล ' + sm + ' · เกินสูงสุด ' + over + ' ว. · ค้าง ' + nb + ' บิล</div>'
+    + _debtApprBillLineHtml(r)
     + '<div style="background:var(--row-alt);border-radius:8px;padding:8px 10px;margin-top:8px;font-size:12.5px;color:var(--text)"><b>ข้อความ:</b> ' + reason + '</div>'
     + ((typeof _debtBillsHtml === 'function') ? _debtBillsHtml(r['รหัสร้าน']) : '')
     + _ev.html
@@ -12103,17 +12393,20 @@ async function submitCNBatch(cnId, rows) { return postToAppsScript({ action:'app
 async function attachCNPhoto(p)          { return postToAppsScript({ action:'attachCNPhoto', ...p });       }
 
 // v6.5.127: kick off writeQueue auto-flusher — runs on boot + every 30s
+// v8.529: ตัวห่อกันพัง — ตาข่ายนี้ห้ามทำให้ writeQueue หลัก (ออเดอร์) ล้มเด็ดขาด
+function _debtReqFlushSafe() { try { if (typeof _debtReqRetryFlush === 'function') _debtReqRetryFlush(); } catch (e) {} }
 let _wqFlushTimer = null;
 function _startWriteQueueAutoFlush() {
   if (_wqFlushTimer) return;
   // First attempt after 3s (let initial sheet fetch settle)
-  setTimeout(() => { writeQueue.flush().catch(()=>{}); _syncMatchedSubmittedOrders(); _autoResendStuck(); _autoVerifyPhantoms(); }, 3000);
+  setTimeout(() => { writeQueue.flush().catch(()=>{}); _syncMatchedSubmittedOrders(); _autoResendStuck(); _autoVerifyPhantoms(); _debtReqFlushSafe(); }, 3000);
   _wqFlushTimer = setInterval(() => {
     if (!navigator.onLine) return; // don't burn retries while offline
     writeQueue.flush().catch(()=>{});
     _syncMatchedSubmittedOrders();
     _autoResendStuck();   // v8.220: ส่งซ้ำใบค้างทุก 30 วิ (idempotent)
     _autoVerifyPhantoms();   // v8.287: ตรวจใบ "ส่งแล้ว" ที่ชีทจริงไม่มี → ส่งซ้ำเอง
+    _debtReqFlushSafe();     // v8.529: คำขออนุมัติขายเชื่อที่ยังส่งไม่ถึงชีท (เน็ตหลุด/ปิดแอปกลางคัน)
   }, 30000);
   // also flush whenever browser comes back online
   window.addEventListener('online', () => {
@@ -13412,8 +13705,8 @@ function goOrder() {
   const browseMode = !currentShopId;
   const shop = currentShopId ? SHOPS.find(s => s.id === currentShopId) : null;
   setTimeout(function () { try { if (typeof _renderCreditBar === 'function') _renderCreditBar(); } catch (e) {} }, 0);   // v8.519: แถบวงเงินเหลือ (ซ่อนเองถ้าร้านไม่มีวงเงิน)
-  // v8.402 (audit): ด่านขายเชื่อ — ร้านติดเกณฑ์เครดิต + เซล role 3-4 + ยังไม่อนุมัติวันนี้ → บล็อกก่อนเข้าคีย์ขาย (เปิดจอขออนุมัติให้)
-  if (!browseMode && currentShopId && typeof _debtBlockSell === 'function' && _debtBlockSell(currentShopId, true)) return;
+  // v8.529: เลิกบล็อก — เตือนให้รับทราบก่อนเลือกสินค้า แล้วเข้าจอขายต่อได้เลย (บิลถูกพักทีหลังแทน)
+  if (!browseMode && currentShopId && typeof _debtAckGate === 'function' && _debtAckGate(currentShopId, function () { goOrder(); })) return;
 
   // v8.442: เข้าจอขายแต่ visit นี้ยังไม่มีคลังส่ง — เกิดตอนเช็คอินไว้ก่อนแล้วเปิดแอปใหม่ (visit hydrate จากชีท ไม่มี shipWh)
   //   → ถามก่อนขาย ห้าม fallback เงียบ · เลือก/ข้ามแล้ว onDone เรียก goOrder() ซ้ำ (รอบนั้น shipWh มีค่าแล้ว จึงไม่วน)
@@ -19303,14 +19596,14 @@ function _updateRouteProgress() {
 // Direct action handlers from Rich Card — no shop detail page needed (per Surat 2026-05-08, v4.1)
 window.handleShopCheckIn = function(shopId) {
   const s = SHOPS.find(x => x.id === shopId);
-  // v8.323: ร้านเกินเครดิต + เซล Role 3-4 → ประตูอนุมัติขายเชื่อ (บล็อกจนหัวหน้าอนุมัติ · Role 5+ ข้าม → soft เดิม · kill-switch _DEBT_GATE_ON)
-  if (s && window._DEBT_GATE_ON !== false && typeof _debtIsOverCredit === 'function' && _debtIsOverCredit(s) && _debtRoleGated()) {
-    const st = (typeof _debtApprStatusFor === 'function') ? _debtApprStatusFor(shopId) : null;
-    if (st && st.status === 'อนุมัติ') { if (typeof doCheckIn === 'function') doCheckIn(shopId); return; }   // อนุมัติแล้ววันนี้ → ปลดล็อก
-    showDebtGateModal(shopId); return;
-  }
-  // v6.5.226: มีหนี้แต่ไม่เกินเครดิต (หรือ Role 5+) → เตือน soft เดิม (รับทราบ → เช็คอินต่อ)
-  if (s && Number(s.debt || 0) > 0 && Array.isArray(s.debtInvoices) && s.debtInvoices.length > 0) {
+  // v8.529: เลิกบล็อกเช็คอิน — เตือนรับทราบแล้วเช็คอินต่อได้เลย (ของเดิม: บล็อกจนหัวหน้ากด = เซลยืนรอหน้าร้าน)
+  if (typeof _debtAckGate === 'function' && _debtAckGate(shopId, function () { window.handleShopCheckIn(shopId); })) return;
+  /* v6.5.226: มีหนี้แต่ไม่เกินเครดิต (หรือ Role 5+) → เตือน soft เดิม (รับทราบ → เช็คอินต่อ)
+     v8.529 fix: ร้านที่ติดเกณฑ์ถูกเตือนด้วยจอรับทราบไปแล้ว (ข้อมูลครบกว่า) → ห้ามเด้ง soft ซ้ำเป็นจอที่ 2
+     เดิมด่านเก่า return ทิ้งตั้งแต่ต้น จึงไม่เคยเจอปัญหานี้ */
+  const _hardDebt = (typeof _debtIsOverCredit === 'function' && typeof _debtRoleGated === 'function'
+                     && window._DEBT_GATE_ON !== false && _debtRoleGated()) ? _debtIsOverCredit(s) : false;
+  if (!_hardDebt && s && Number(s.debt || 0) > 0 && Array.isArray(s.debtInvoices) && s.debtInvoices.length > 0) {
     showDebtBeforeCheckInModal(shopId);
     return;
   }
@@ -27199,8 +27492,8 @@ function _histCanOrder() {
 function _openHistProduct(r) {
   if (!r) return;
   if (!_histCanOrder()) { showToast('📍 เช็คอินร้านก่อนถึงจะสั่งได้ครับ', 'warning'); return; }
-  // v8.402 (audit): ทางลัดนี้ข้าม goOrder → ต้องดักด่านขายเชื่อเองด้วย (role 3-4 + ติดเกณฑ์ + ยังไม่อนุมัติ)
-  if (currentShopId && typeof _debtBlockSell === 'function' && _debtBlockSell(currentShopId, true)) return;
+  // v8.529: ทางลัดนี้ข้าม goOrder → เตือนรับทราบเองด้วย (ไม่บล็อก · รับทราบแล้วเปิดสินค้าตัวเดิมต่อ)
+  if (currentShopId && typeof _debtAckGate === 'function' && _debtAckGate(currentShopId, function () { _openHistProduct(r); })) return;
   const k = String(r.product_code || '').trim(), prods = SHEET_DATA.products || [];
   let p = k ? prods.find(x => ['CODE EA', 'CODE PA', 'CODE BP', 'CODE CS'].some(cd => x[cd] && String(x[cd]).trim() === k)) : null;
   if (!p) { const nk = _normName(String(r.product_name || '').replace(/^[0-9]+@/, '')); p = nk ? prods.find(x => _normName(x['PRODUCT NAME'] || '') === nk) : null; }
@@ -27633,12 +27926,8 @@ function doCheckIn(shopId, _waited) {
     _handleActiveCheckin(activeId, shopId);   // v8.250: ห่างร้านเดิม >50ม. = ตัดเป็นไม่ซื้อ 0 นาที แล้วเช็คอินใหม่ · ใกล้/ไม่มี GPS = ถามเหมือนเดิม
     return;
   }
-  // v8.400 (Surat): ประตูหนี้ต้องดักในนี้ — doCheckIn ถูกเรียกตรงหลายจุด (ปุ่มลิสต์ 22630 / soft modal / GPS retry / ร้านถัดไป) ข้าม handleShopCheckIn ได้
-  //   ติดเกณฑ์ (บิลเกินเทอม หรือ เกินวงเงิน) + role 3-4 + ยังไม่มีอนุมัติของวันนี้ → เปิดจอขออนุมัติ บล็อกเช็คอิน
-  if (window._DEBT_GATE_ON !== false && typeof _debtIsOverCredit === 'function' && _debtRoleGated() && _debtIsOverCredit(s)) {
-    const _ap = (typeof _debtApprStatusFor === 'function') ? _debtApprStatusFor(shopId) : null;
-    if (!_ap || _ap.status !== 'อนุมัติ') { showDebtGateModal(shopId); return; }
-  }
+  // v8.529: doCheckIn ถูกเรียกตรงหลายจุด (ปุ่มลิสต์ / soft modal / GPS retry / ร้านถัดไป) — เตือนรับทราบที่นี่ด้วย ไม่บล็อก
+  if (typeof _debtAckGate === 'function' && _debtAckGate(shopId, function () { doCheckIn(shopId); })) return;
   // v7.38: force-fill gate — block check-in if shop missing รูท/ความถี่/ผู้ติดต่อ
   //        (gate calls doCheckIn(shopId) again once user saves all 3 fields → falls through here)
   if (typeof _showCheckInGateModal === 'function'
@@ -27891,6 +28180,8 @@ function _executeCheckIn(shopId, distance, inRange, outOfRangeReason, noGps) {
   };
   const _ciTail = noGps ? ' (ไม่มีพิกัด — แจ้งหัวหน้า)' : (!inRange ? ' (นอกพิกัด)' : '');
   showToast(`✓ เช็คอินสำเร็จ ${visits[shopId].checkInTime}${_ciTail}`, (noGps || !inRange) ? 'warning' : 'success');
+  // v8.530: ร้านติดเกณฑ์เครดิต → ส่งคำขออนุมัติตั้งแต่ตอนนี้ หัวหน้าจะได้เริ่มพิจารณาระหว่างเซลคีย์ (ไม่รอผล ไม่บล็อก)
+  try { if (typeof _debtRequestOnCheckin === 'function') _debtRequestOnCheckin(shopId); } catch (e) {}
   // After check-in → go straight to order screen (v6.5.10)
   // v8.442: เซลที่มีสิทธิ์ "เลือกคลังได้" → คั่นด้วยจอเลือกคลังส่งก่อน (จังหวะนี้ตะกร้ายังว่าง = ปลอดภัยสุด)
   //   ปิด/ข้ามจอ = ใช้คลังส่งเดิม แล้วเข้าจอขายตามปกติ (ห้ามบล็อกการขาย)
@@ -36579,21 +36870,20 @@ function _openSubmitGateModal(pend) {
 async function confirmOrder() {
   // v8.79: กู้ร้านก่อนทุกอย่าง — currentShopId อาจหลุดจากการนำทาง (แท็บสินค้า/หน้าหลัก) ระหว่างคีย์
   _recoverShopIdFromCart();
-  // v8.402 (audit): ด่านขายเชื่อ (ด่านตาย) — ต่อให้ข้ามปุ่ม/goOrder/ทางลัดประวัติมาได้ ตอนส่งบิลต้องตัน ถ้าร้านติดเกณฑ์ + role 3-4 + ยังไม่อนุมัติ
-  if (currentShopId && typeof _debtBlockSell === 'function' && _debtBlockSell(currentShopId, true)) return;
-  // v8.519 (Surat 5/8): เกณฑ์ "ยอดใบนี้ทำให้ทะลุวงเงิน" — รู้ได้ตอนนี้เท่านั้น (ต้องมียอดตะกร้าก่อน)
-  //   ร้านไม่ค้างเงินก็ติดได้ ถ้าสั่งทีเดียวเกินวงเงินที่ให้ไว้ · อนุมัติแล้ววันนี้ = ผ่าน (เช็คใน _debtBlockSell แล้ว)
-  if (currentShopId && typeof _debtCartOverLimit === 'function' && typeof _debtRoleGated === 'function' && _debtRoleGated() && window._DEBT_GATE_ON !== false) {
-    const _sNow = (SHOPS || []).find(function (x) { return x.id === currentShopId; });
-    const _ap   = (typeof _debtApprStatusFor === 'function') ? _debtApprStatusFor(currentShopId) : null;
-    const _hit  = (_ap && _ap.status === 'อนุมัติ') ? null : _debtCartOverLimit(_sNow, _debtCartTotalNow());
-    if (_hit) {
-      window._debtCartHit = _hit;   // จอขออนุมัติเอาไปแสดงตัวเลขจริง
-      if (typeof showDebtGateModal === 'function') showDebtGateModal(currentShopId);
-      else showToast('ยอดใบนี้เกินวงเงิน — ต้องขออนุมัติหัวหน้าก่อน', 'warning');
-      return;
+  /* v8.529: ไม่บล็อกการส่งอีกต่อไป — แต่ยังต้องคำนวณ "ยอดใบนี้ทะลุวงเงินไหม" ตรงนี้
+     เพราะเป็นจุดเดียวที่รู้ยอดตะกร้า · ผลไปใช้ตัดสินว่าใบนี้ต้องส่งคำขออนุมัติหรือไม่ (ห้ามลบการคำนวณทิ้ง) */
+  let _debtReqNeeded = false;
+  const _debtShopSnap = currentShopId;   // จำร้านไว้ — ตอน .then เซลอาจเปลี่ยนร้านแล้ว
+  try {
+    if (currentShopId && typeof _debtNeedsRequest === 'function') {
+      const _sNow = (SHOPS || []).find(function (x) { return x.id === currentShopId; });
+      const _tot  = (typeof _debtCartTotalNow === 'function') ? _debtCartTotalNow() : 0;
+      window._debtCartHit = (typeof _debtCartOverLimit === 'function') ? _debtCartOverLimit(_sNow, _tot) : null;
+      _debtReqNeeded = _debtNeedsRequest(currentShopId, _tot);
     }
-  }
+  } catch (e) {}
+  // คิวคำขอที่ค้างจากใบก่อน ๆ (เน็ตหลุด) — ลองส่งซ้ำเงียบ ๆ ไม่รอผล ไม่บล็อกการส่งใบนี้
+  try { if (typeof _debtReqRetryFlush === 'function') _debtReqRetryFlush(); } catch (e) {}
   // v8.218: SMART SUBMIT-GATE — แทน hard-block เดิม (ที่เช็คแค่ isPushing) ด้วย gate ที่:
   //   verify สดผ่าน GAS ก่อน · ลงครบแล้ว=ผ่านเงียบ · ยังไม่ลง=ให้เลือก [ส่งซ้ำก่อน]/[คีย์ใบใหม่ต่อ] (ประตูหนีไฟ)
   //   กันทั้ง isPushing และออเดอร์ที่ timeout/failed/restored ค้าง (เดิมจับแค่ isPushing → ใบที่ค้างจริงหลุด gate)
@@ -36715,6 +37005,12 @@ async function confirmOrder() {
     if (typeof rerenderCurrentScreen === 'function') rerenderCurrentScreen();
   }, 60 * 1000);
 
+  /* v8.529: ใบขายเชื่อ — เข้าคิวคำขอ "ก่อน" ส่งบิล เพื่อไม่ให้คำขอหายในเคสที่บิลไป sync ทีหลัง
+     (ส่งไม่ผ่านรอบแรก → _autoResendStuck ส่งสำเร็จภายหลัง → เดิมจะไม่มีใครยิงคำขอเลย = ของออกโดยไม่ผ่านอนุมัติ)
+     ตัว flush มี guard เช็คว่าบิลลงชีทแล้วจริงก่อนยิงเสมอ */
+  if (_debtReqNeeded && typeof _debtReqPayload === 'function') {
+    try { _debtRetryPush(_debtReqPayload(_debtShopSnap, orderId, total)); } catch (e) {}
+  }
   pushOrderToSheet(orderId, shop, cart, now, orderNotes, deliveryDate, billId)
     .then((result) => {
       // v6.5.226: clear timeout — push completed in time
@@ -36729,6 +37025,13 @@ async function confirmOrder() {
       if (fullySynced) {
         try { localStorage.removeItem('rsa_orders'); } catch {}
         showToast(`✅ ${orderId} ลงชีทเรียบร้อย`, 'success');
+        /* v8.529: ร้านติดเกณฑ์เครดิต → ส่งคำขออนุมัติให้เองหลังบิลลงชีทแล้ว (หลังบ้านจะตามไปพักบิลใบนี้)
+           ยิงหลังสำเร็จเท่านั้น — ใบที่ยังไม่ลงชีท ไม่ควรมีคำขอลอยอยู่ · ล้มเหลว = เข้าคิว retry เอง */
+        if (_debtReqNeeded && typeof _debtAutoRequest === 'function') {
+          _debtAutoRequest(_debtShopSnap, orderId, total)
+            .then(function (r) { try { _debtPostSubmitModal(_debtShopSnap, orderId, total, !!r); } catch (e) {} })
+            .catch(function () { try { _debtPostSubmitModal(_debtShopSnap, orderId, total, false); } catch (e) {} });
+        }
       } else {
         console.error('[Rattana Sales] Order NOT fully synced to sheet', orderId, result);
         showToast(`⚠️ ${orderId} ยังไม่ครบ (${result?.written || 0}/${result?.total || cart.length}) — กด retry ใน Orders`, 'warning');
