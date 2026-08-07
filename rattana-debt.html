@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v5.25</title>
+<title>Rattana ยอดหนี้คงค้าง v6.0</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -776,7 +776,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v5.25</span>
+      <span class="app-ver">v6.0</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -1201,9 +1201,13 @@ const CONFIG = {
   collectionPlansSheetName: 'Collection Plans',
   planReasonsSheetName:     'Plan Reasons',
   // lineGroupId ไม่ต้องใส่ — GAS อ่านจาก tab "Line Groups" อัตโนมัติ
-  // v5.13: หลังบ้าน Sales App — บิลขายเชื่อ (เจ้าของชีท Order + Supabase คือฝั่งนั้น เลยยิงตรงไป ไม่ทำ logic ซ้ำ)
+  // v6.0: ขายเชื่ออ่านจากแท็บ DebtApproval ตรงๆ ผ่าน gviz (เร็วกว่าเรียก GAS มาก)
+  //   ใช้ /exec ของ Sales App เฉพาะตอน "กดตัดสิน" เท่านั้น
   salesScriptUrl: 'https://script.google.com/macros/s/AKfycbxGt9gaXDyunLu_BVBpEdY0zwM49ihlphxh5d-3FjhlXXDhkoLNP8gWzxDb-PJ1LxdT/exec',
-  creditDays: 3,   // ย้อนหลังกี่วันที่ยังให้บัญชีตัดสินได้ (= อายุใบอนุมัติของซุป)
+  backendSheetId: '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI',
+  debtApprovalTab: 'DebtApproval',
+  orderTab: 'Order',
+  creditDays: 7,   // ย้อนหลังกี่วันที่เอามาแสดง
 };
 
 let currentUser = null;
@@ -3121,32 +3125,150 @@ function switchTab(tab){
 }
 
 /* ==========================================================
-   ขายเชื่อ — บัญชีตรวจใบที่ซุปอนุมัติแล้ว (v5.17)
-   ใช้แค่ 2 แท็บของ Sales App: DebtApproval (ตัวตั้ง) + Order (ออเดอร์ที่ reqId ตรงกัน)
-   1 ใบอนุมัติ (reqId) = 1 การ์ด รวมทุกออเดอร์ของใบนั้น · บัญชีกด = เขียน สถานะอนุมัติ
-   ทุกแถวใน Order ที่ ขายเชื่อ-reqId ตรงกัน + mirror Supabase
+   ขายเชื่อ — คิวอนุมัติของบัญชี (v6.0)
+   แหล่งข้อมูล = แท็บ DebtApproval อย่างเดียว (อ่านผ่าน gviz ตรงๆ)
+   ❌ ไม่อ่าน/ไม่เขียน ช่อง สถานะอนุมัติ ในชีท Order อีกแล้ว — ช่องนั้นเป็นเรื่อง "ราคา" ล้วน
+   บันได 4 ขั้นของคอลัมน์ สถานะ:
+     รอ        → ซุปยังไม่กด · บัญชีดูได้อย่างเดียว กดไม่ได้
+     รอบัญชี   → คิวของบัญชี · เลือกได้ 3 ทาง เท่านั้น
+     อนุมัติ    → จบแล้ว (ถ้า 'บัญชีตัดสิน' ว่าง = ใบยุคเก่า ซุปอนุมัติแบบเดิม)
+     ไม่อนุมัติ → จบแล้ว
    ========================================================== */
+const CR_DECISIONS = ['บัญชีอนุมัติ', 'เปิดตามวงเงิน', 'ไม่อนุมัติ'];
+const CR_TABS = [
+  { key:'รอบัญชี',   label:'รอบัญชีตัดสิน', cls:'warn' },
+  { key:'รอ',        label:'รอซุปอนุมัติ',  cls:'' },
+  { key:'อนุมัติ',    label:'อนุมัติแล้ว',   cls:'ok' },
+  { key:'ไม่อนุมัติ', label:'ไม่อนุมัติ',    cls:'bad' },
+];
+
 let creditRows    = [];
 let creditLoaded  = false;
 let creditLoading = false;
 let crQuery       = '';
-const crExpanded  = new Set();   // reqId ที่กดดูรายการสินค้าแล้ว
+let crSt          = 'รอบัญชี';   // ชิปสถานะ — เริ่มที่คิวของบัญชีเสมอ
+let crDay         = '';
+const crExpanded  = new Set();
+const crOrderCache = {};          // billId → รายการสินค้า (โหลดตอนกางเท่านั้น)
 
-const CR_DECIDED = { 'บัญชีไม่อนุมัติ': 'bad', 'เปิดภายในวงเงิน': 'warn' };
-// สถานะของใบ → ป้าย/ชิป · 'รอบัญชีอนุมัติ' คือค่าที่แอปขายเขียนมาให้บัญชีตรวจ
-const CR_ST = [
-  { key:'รอบัญชีอนุมัติ', label:'รอบัญชี',        cls:'warn' },
-  { key:'อนุมัติราคา',    label:'อนุมัติ',         cls:'ok'   },
-  { key:'บัญชีไม่อนุมัติ', label:'ไม่อนุมัติ',      cls:'bad'  },
-  { key:'เปิดภายในวงเงิน', label:'เปิดภายในวงเงิน', cls:'warn' },
-];
-let crSt = '';   // ชิปสถานะที่เลือกอยู่ ('' = ทุกสถานะ)
-let crOnlyKeyed = false;   // ชิป: โชว์เฉพาะใบที่เซลคีย์ออเดอร์แล้ว
-let crDay       = '';      // ชิป: วันที่ที่คีย์ออเดอร์ ('' = ทุกวัน)
-let crDayInit   = false;   // ตั้ง default ครั้งเดียวตอนโหลดรอบแรก ห้ามไปทับที่ผู้ใช้เลือกเอง
+const crNum = v => Number(String(v == null ? '' : v).replace(/[^\d.-]/g, '')) || 0;
+const crShortTs = ts => { const m = String(ts || '').match(/^(\d{4})\/(\d{2})\/(\d{2})[ T]?(\d{2}:\d{2})?/); return m ? (m[3] + '/' + m[2] + (m[4] ? ' ' + m[4] : '')) : String(ts || ''); };
 
-// ยอดหนี้ปัจจุบันรายร้าน — รวมจาก SQL Data ที่แท็บยอดหนี้โหลดไว้แล้ว (1 แถว = 1 ใบค้าง)
-//   ไม่ได้ไปดึงชีทเพิ่ม แค่ join ด้วยรหัสร้านในเครื่อง
+function crSearchable(a){
+  return [a.shopName, a.shopCode, a.smName, a.smCode, a.wh, a.reqId, a.apprBy, a.reason,
+          a.status, a.finDecision, a.finBy, a.billId, a.rejectReason].join(' ').toLowerCase();
+}
+
+async function loadCreditBills(force){
+  if (creditLoading) return;
+  if (creditLoaded && !force) { renderCreditList(); return; }
+  creditLoading = true;
+  if ($('crCount') && !creditRows.length) $('crCount').textContent = 'กำลังโหลด...';
+  try {
+    const raw = await loadFromSheets(CONFIG.backendSheetId, CONFIG.debtApprovalTab);
+    const cutoff = new Date(Date.now() - (CONFIG.creditDays - 1) * 86400000)
+                     .toLocaleDateString('sv-SE').replace(/-/g, '/');
+    creditRows = raw.map(r => {
+      const ts = String(r['วันเวลา'] || '').replace(/-/g, '/').trim();
+      return {
+        reqId:       String(r['reqId'] || '').trim(),
+        apprTs:      ts,
+        shopName:    String(r['ชื่อร้าน'] || '').trim(),
+        shopCode:    String(r['รหัสร้าน'] || '').trim(),
+        wh:          String(r['คลัง'] || '').trim(),
+        smName:      String(r['ชื่อเซล'] || '').trim(),
+        smCode:      String(r['รหัสเซลล์'] || '').trim(),
+        debtAmount:  String(r['ยอดค้าง'] || '').trim(),
+        overdueDays: String(r['เกินกำหนดสูงสุด(วัน)'] || '').trim(),
+        overdueBills:String(r['บิลเกิน(จำนวน)'] || '').trim(),
+        reason:      String(r['เหตุผล'] || '').trim(),
+        status:      String(r['สถานะ'] || '').trim(),
+        apprBy:      String(r['ผู้อนุมัติ'] || '').trim(),
+        expiry:      String(r['วันหมดอายุ'] || '').trim(),
+        rejectReason:String(r['เหตุผลปฏิเสธ'] || '').trim(),
+        billId:      String(r['billId'] || '').trim(),
+        finDecision: String(r['บัญชีตัดสิน'] || '').trim(),
+        finBy:       String(r['ผู้อนุมัติบัญชี'] || '').trim(),
+        finAt:       String(r['เวลาอนุมัติบัญชี'] || '').trim(),
+      };
+    }).filter(a => a.reqId && a.apprTs.slice(0, 10) >= cutoff);
+    creditRows.sort((x, y) => y.apprTs.localeCompare(x.apprTs));   // ล่าสุดอยู่บน
+    creditRows.forEach(a => { a._s = crSearchable(a); });
+    creditLoaded = true;
+  } catch(e){
+    creditLoading = false;
+    if (!creditRows.length){
+      $('crList').innerHTML = `<div class="match-empty">โหลดไม่สำเร็จ: ${escapeHtml(e.message)}</div>`;
+      $('crCount').textContent = 'โหลดไม่สำเร็จ';
+    } else {
+      showToast('ดึงคิวขายเชื่อล่าสุดไม่สำเร็จ — แสดงของเดิม', 'warning');
+      renderCreditList();
+    }
+    return;
+  }
+  creditLoading = false;
+  renderCreditChips();
+  renderCreditList();
+  updateCreditBadge();
+}
+
+// เลขแดง = ใบที่รอบัญชีตัดสินอยู่จริง
+const crPending = a => a.status === 'รอบัญชี' && !a.finDecision;
+
+function updateCreditBadge(){
+  const el = $('creditBadge'); if (!el) return;
+  const n = creditRows.filter(crPending).length;
+  el.textContent = n;
+  el.style.display = n > 0 ? '' : 'none';
+}
+
+function renderCreditChips(){
+  const el = $('crChips'); if (!el) return;
+  const cnt = k => creditRows.filter(a => a.status === k).length;
+  const days = [...new Set(creditRows.map(a => a.apprTs.slice(0, 10)).filter(Boolean))].sort().reverse();
+  const dCnt = d => creditRows.filter(a => a.apprTs.slice(0, 10) === d).length;
+  const _today = new Date().toLocaleDateString('sv-SE').replace(/-/g, '/');
+  el.innerHTML =
+    `<span class="dcr-chiplbl">สถานะ</span>`
+    + `<button class="dcr-chip ${crSt ? '' : 'on'}" onclick="crSetSt('')">ทั้งหมด<span class="n">${creditRows.length}</span></button>`
+    + CR_TABS.map(t => `<button class="dcr-chip ${crSt === t.key ? 'on' : ''}" onclick="crSetSt('${t.key}')">${t.label}<span class="n">${cnt(t.key)}</span></button>`).join('')
+    + (days.length > 1 ? `<span class="dcr-chiplbl">วันที่ขอ</span>
+       <button class="dcr-chip ${crDay ? '' : 'on'}" onclick="crSetDay('')">ทุกวัน</button>`
+       + days.slice(0, 7).map(d => `<button class="dcr-chip ${crDay === d ? 'on' : ''}" onclick="crSetDay('${d}')">${d === _today ? 'วันนี้ ' : ''}${escapeHtml(crShortTs(d))}<span class="n">${dCnt(d)}</span></button>`).join('') : '');
+}
+function crSetSt(k){ crSt = k; renderCreditChips(); renderCreditList(); }
+function crSetDay(d){ crDay = d; renderCreditChips(); renderCreditList(); }
+
+function crOnSearch(){
+  crQuery = ($('crSearch').value || '').trim().toLowerCase();
+  $('crClear').classList.toggle('on', !!crQuery);
+  renderCreditList();
+}
+function crClearSearch(){
+  $('crSearch').value = ''; crQuery = '';
+  crSt = 'รอบัญชี'; crDay = '';          // กลับไปที่คิวของบัญชี
+  $('crClear').classList.remove('on');
+  renderCreditChips(); renderCreditList();
+  $('crSearch').focus();
+}
+
+function renderCreditList(){
+  const terms = crQuery ? crQuery.split(/\s+/).filter(Boolean) : [];
+  let rows = creditRows.filter(a => terms.every(t => a._s.includes(t)));
+  if (crSt)  rows = rows.filter(a => a.status === crSt);
+  if (crDay) rows = rows.filter(a => a.apprTs.slice(0, 10) === crDay);
+  $('crCount').textContent = rows.length
+    ? `${rows.length} ใบ · รอบัญชีตัดสิน ${creditRows.filter(crPending).length}`
+    : '';
+  if (!rows.length){
+    $('crList').innerHTML = `<div class="match-empty">${crQuery ? 'ไม่พบรายการที่ตรงกับคำค้น' : 'ไม่มีใบในสถานะนี้'}</div>`;
+    return;
+  }
+  $('crList').innerHTML = rows.map(crCardHtml).join('');
+}
+
+// ── ยอดหนี้ปัจจุบันรายร้าน — รวมจาก SQL Data ที่แท็บยอดหนี้โหลดไว้แล้ว (1 แถว = 1 ใบค้าง) ──
+//   ไม่ได้ดึงชีทเพิ่ม แค่ join ด้วยรหัสร้านในเครื่อง · ใบที่แนบสลิปเต็มยอดแล้วถือว่าจ่ายแล้ว รอ ERP ตัดยอด
 let _crDebtMap = null, _crDebtLen = '';
 function crDebtMap(){
   const sig = (allRows || []).length + '/' + pendingDocNos.size + '/' + partialDocNos.size;
@@ -3155,8 +3277,6 @@ function crDebtMap(){
   (allRows || []).forEach(r => {
     if (!r.custCode) return;
     const g = m[r.custCode] || (m[r.custCode] = { amount:0, net:0, paid:0, bills:0, paidBills:0, aging:0, credit:null, limit:0, flag:'', note:'' });
-    // แนบสลิปเต็มยอดแล้ว = ถือว่าจ่ายแล้ว รอบัญชีตัดยอดใน ERP เท่านั้น
-    //   'ไม่เต็ม' (partialDocNos) ยังนับเป็นค้างอยู่ เพราะสลิปไม่ครบยอด
     const cleared = pendingDocNos.has(r.docNo) && !partialDocNos.has(r.docNo);
     g.amount += r.amount || 0;
     g.bills++;
@@ -3173,7 +3293,6 @@ function crDebtMap(){
   _crDebtLen = sig; _crDebtMap = m;
   return m;
 }
-// ข้อมูลหนี้ของใบนี้ — ใช้ของสดจาก SQL Data ก่อน ถ้าไม่เจอค่อยใช้สแนปช็อตตอนซุปอนุมัติ
 function crDebtInfo(a){
   if (!(allRows || []).length) return { loading:true, live:false, amount:crNum(a.debtAmount), net:crNum(a.debtAmount),
                                         paid:0, bills:crNum(a.overdueBills), paidBills:0, aging:crNum(a.overdueDays),
@@ -3184,158 +3303,19 @@ function crDebtInfo(a){
   return { live:false, amount:crNum(a.debtAmount), net:crNum(a.debtAmount), paid:0,
            bills:crNum(a.overdueBills), paidBills:0, aging:crNum(a.overdueDays), credit:null, limit:0, flag:'' };
 }
-// ค่าจากชีทเป็น TEXT เสมอ (HARD RULE) — อาจมาเป็น "12,345.67" → Number() ได้ NaN ถ้าไม่ล้าง comma
-const crNum = v => Number(String(v == null ? '' : v).replace(/[^\d.-]/g, '')) || 0;
-// 'yyyy/MM/dd HH:mm:ss' → 'dd/MM HH:mm' (ย่อให้พอดี 1 บรรทัดบนหัวการ์ด)
-const crShortTs = ts => { const m = String(ts || '').match(/^(\d{4})\/(\d{2})\/(\d{2})[ T]?(\d{2}:\d{2})?/); return m ? (m[3] + '/' + m[2] + (m[4] ? ' ' + m[4] : '')) : String(ts || ''); };
-// เวลาที่เซลคีย์ออเดอร์ล่าสุดของใบนี้ (backend เรียงออเดอร์ล่าสุดไว้ตัวแรกให้แล้ว)
-const crWhen = o => o ? crShortTs(o.day + ' ' + o.time) : '';
-
-// ค้นได้ทุก field รวมชื่อสินค้าทุกบรรทัดของทุกออเดอร์ — ทำครั้งเดียวตอนโหลด
-function crSearchable(a){
-  const names = (a.orders || []).flatMap(o => [o.orderId, ...(o.items || []).map(it => it.name)]);
-  return [a.shopName, a.shopCode, a.smName, a.smCode, a.wh, a.reqId, a.apprBy, a.status, a.reason,
-          a.orderCount ? '' : 'ยังไม่มีออเดอร์', ...names].join(' ').toLowerCase();
-}
-
-const CR_CACHE_KEY = 'rattanaCreditBills';
-const CR_CACHE_TTL = 5 * 60 * 1000;
-
-async function loadCreditBills(force){
-  if (creditLoading) return;
-  if (creditLoaded && !force) { renderCreditList(); return; }
-  // v5.25: หลังบ้าน GAS ใช้เวลา ~10 วิ (redirect + cold start) แก้ที่ฝั่งนี้ไม่ได้
-  //   → โชว์ของที่ cache ไว้ก่อนทันที แล้วค่อยดึงของสดมาทับเงียบๆ จอจะไม่ค้างว่าง
-  if (!creditLoaded && !force){
-    try {
-      const c = JSON.parse(localStorage.getItem(CR_CACHE_KEY) || 'null');
-      if (c && Array.isArray(c.rows) && (Date.now() - c.ts) < CR_CACHE_TTL){
-        creditRows = c.rows.map(a => ({ ...a, _s: crSearchable(a) }));
-        creditLoaded = true;
-        crApplyDefaultDay();
-        renderCreditChips(); renderCreditList(); updateCreditBadge();
-      }
-    } catch(e){}
-  }
-  creditLoading = true;
-  if ($('crCount') && !creditRows.length) $('crCount').textContent = 'กำลังโหลด...';
-  try {
-    const res = await fetch(CONFIG.salesScriptUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'listDebtBills', days: CONFIG.creditDays }),
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    if (!data || data.ok === false) throw new Error(data && data.error ? data.error : 'หลังบ้านตอบไม่สำเร็จ');
-    creditRows = (data.rows || []).map(a => ({ ...a, _s: crSearchable(a) }));
-    creditLoaded = true;
-    try { localStorage.setItem(CR_CACHE_KEY, JSON.stringify({ ts: Date.now(), rows: data.rows || [] })); } catch(e){}
-    crApplyDefaultDay();
-  } catch(e){
-    creditLoading = false;
-    if (!creditRows.length){          // ไม่มีของเก่าให้ดู ค่อยแจ้ง error เต็มจอ
-      $('crList').innerHTML = `<div class="match-empty">โหลดไม่สำเร็จ: ${escapeHtml(e.message)}</div>`;
-      $('crCount').textContent = 'โหลดไม่สำเร็จ';
-    } else {
-      showToast('ดึงข้อมูลขายเชื่อล่าสุดไม่สำเร็จ — แสดงของที่โหลดไว้ก่อนหน้า', 'warning');
-      renderCreditList();
-    }
-    return;
-  }
-  creditLoading = false;
-  renderCreditChips();
-  renderCreditList();
-  updateCreditBadge();
-}
-
-// เลขแดง = ใบที่มีออเดอร์เข้ามาแล้วแต่บัญชียังไม่ได้สั่งอะไร (ใบที่ยังไม่มีออเดอร์ ไม่มีอะไรให้ตัดสิน)
-const crPending = a => a.orderCount > 0 && !CR_DECIDED[a.status];
-
-function updateCreditBadge(){
-  const n = creditRows.filter(crPending).length;
-  const el = $('creditBadge');
-  if (!el) return;
-  el.textContent = n;
-  el.style.display = n > 0 ? '' : 'none';
-}
-
-function renderCreditChips(){
-  const el = $('crChips'); if (!el) return;
-  const days = [...new Set(creditRows.flatMap(a => (a.orders || []).map(o => o.day)))].sort().reverse();
-  const _today = new Date().toLocaleDateString('sv-SE').replace(/-/g, '/');
-  const cnt = d => creditRows.filter(a => (a.orders || []).some(o => o.day === d)).length;
-  const keyed = creditRows.filter(a => a.orderCount > 0).length;
-  const stCnt = k => creditRows.filter(a => a.orderCount > 0 && a.status === k).length;
-  el.innerHTML =
-    `<button class="dcr-chip ${crOnlyKeyed ? 'on' : ''}" onclick="crToggleKeyed()">คีย์ออเดอร์แล้ว<span class="n">${keyed}</span></button>`
-    + CR_ST.filter(x => stCnt(x.key) > 0).map(x =>
-        `<button class="dcr-chip ${crSt === x.key ? 'on' : ''}" onclick="crSetSt('${x.key}')">${x.label}<span class="n">${stCnt(x.key)}</span></button>`).join('')
-    + (days.length ? `<span class="dcr-chiplbl">วันที่คีย์</span>
-       <button class="dcr-chip ${crDay ? '' : 'on'}" onclick="crSetDay('')">ทุกวัน</button>`
-       + days.map(d => `<button class="dcr-chip ${crDay === d ? 'on' : ''}" onclick="crSetDay('${d}')">${d === _today ? 'วันนี้ ' : ''}${escapeHtml(crShortTs(d))}<span class="n">${cnt(d)}</span></button>`).join('') : '');
-}
-// ชิป 2 ตัวเป็นอิสระต่อกัน — กดตัวหนึ่งห้ามไปรีเซ็ตอีกตัว (บั๊คเดิม: กดคีย์ออเดอร์แล้ว วันที่เด้งกลับเป็นทุกวัน)
-// เปิดมาครั้งแรก = โฟกัสของวันนี้ก่อน (ถ้าวันนี้ยังไม่มีออเดอร์ ตกเป็นทุกวัน จะได้ไม่เจอจอว่าง)
-function crApplyDefaultDay(){
-  if (crDayInit) return;
-  crDayInit = true;
-  const today = new Date().toLocaleDateString('sv-SE').replace(/-/g, '/');   // yyyy/MM/dd ตามเครื่อง
-  const days = new Set(creditRows.flatMap(a => (a.orders || []).map(o => o.day)));
-  crDay = days.has(today) ? today : '';
-}
-
-function crToggleKeyed(){ crOnlyKeyed = !crOnlyKeyed; renderCreditChips(); renderCreditList(); }
-function crSetDay(d){ crDay = d; renderCreditChips(); renderCreditList(); }
-function crSetSt(k){ crSt = (crSt === k) ? '' : k; renderCreditChips(); renderCreditList(); }   // กดซ้ำ = ยกเลิก
-
-function crOnSearch(){
-  crQuery = ($('crSearch').value || '').trim().toLowerCase();
-  $('crClear').classList.toggle('on', !!crQuery);
-  renderCreditList();
-}
-function crClearSearch(){
-  $('crSearch').value = '';
-  crQuery = '';
-  crOnlyKeyed = false; crDay = ''; crSt = '';   // ล้างชิปทุกตัว — คลิกเดียวเห็นข้อมูลครบทุกวัน
-  $('crClear').classList.remove('on');
-  renderCreditChips();
-  renderCreditList();
-  $('crSearch').focus();
-}
-
-function renderCreditList(){
-  const terms = crQuery ? crQuery.split(/\s+/).filter(Boolean) : [];
-  let rows = creditRows.filter(a => terms.every(t => a._s.includes(t)));   // หลายคำ = AND ทุกคำ
-  if (crOnlyKeyed) rows = rows.filter(a => a.orderCount > 0);
-  if (crDay)       rows = rows.filter(a => (a.orders || []).some(o => o.day === crDay));
-  if (crSt)        rows = rows.filter(a => a.status === crSt);
-  const withOrder = rows.filter(a => a.orderCount > 0).length;
-  $('crCount').textContent = rows.length
-    ? `${withOrder} ใบมีออเดอร์ · รอบัญชี ${rows.filter(crPending).length} · รอเซลคีย์ ${rows.length - withOrder}`
-    : '';
-  if (!rows.length){
-    $('crList').innerHTML = `<div class="match-empty">${crQuery ? 'ไม่พบรายการที่ตรงกับคำค้น' : 'ไม่มีใบอนุมัติขายเชื่อในช่วง ' + CONFIG.creditDays + ' วันล่าสุด'}</div>`;
-    return;
-  }
-  $('crList').innerHTML = rows.map(crCardHtml).join('');
-}
 
 function crCardHtml(a){
-  const rq      = a.reqId;
-  const open    = crExpanded.has(rq);
-  const decided = CR_DECIDED[a.status];
-  const hasOrd  = a.orderCount > 0;
+  const rq   = a.reqId;
+  const open = crExpanded.has(rq);
+  const canAct = a.status === 'รอบัญชี' && !a.finDecision;   // กดได้เฉพาะคิวของบัญชี
+  const tab  = CR_TABS.find(t => t.key === a.status);
 
-  // บรรทัดที่ 2 = สรุปทุกอย่างที่บัญชีต้องเห็นตอนยังไม่กาง (ค้างเท่าไร · เกินกี่วัน · ใครขาย)
-  // บรรทัด 2 = เรื่องเครดิตล้วนๆ (ค้างเท่าไร กี่บิล กี่วัน · วงเงิน · วันเครดิต · ติดเพราะอะไร · ธง)
   const D = crDebtInfo(a);
-  // ตัดสิน "ติด" ด้วยยอดสุทธิ (หักใบที่แนบสลิปเต็มยอดแล้ว) — ไม่งั้นร้านที่จ่ายแล้วยังขึ้นติดค้าง
   const overLimit = D.limit > 0 && D.net > D.limit;
   const overTerm  = D.credit != null && D.net > 0 && D.aging > D.credit;
+
   const bits = [];
-  const stDef = CR_ST.find(x => x.key === a.status);
-  if (stDef && a.status !== 'อนุมัติราคา') bits.push(`<span class="dcr-tag ${stDef.cls}">${stDef.label}</span>`);
+  if (tab) bits.push(`<span class="dcr-tag ${tab.cls}">${a.finDecision ? escapeHtml(a.finDecision) : tab.label}</span>`);
   if (D.amount)         bits.push(`<span class="dcr-hot">ค้าง ฿${fmtInt(Math.round(D.amount))}</span>`);
   if (D.bills)          bits.push(`${fmtInt(D.bills)} บิล`);
   if (D.paid > 0)       bits.push(`<span class="dcr-tag ok">แนบสลิปแล้ว ฿${fmtInt(Math.round(D.paid))} รอตัดยอด</span>`);
@@ -3348,43 +3328,37 @@ function crCardHtml(a){
   if (why.length) bits.push(`<span class="dcr-tag bad">ติด${why.join(' + ')}</span>`);
   if (D.flag)    bits.push(`<span class="dcr-tag warn">ธง ${escapeHtml(D.flag)}</span>`);
   if (D.loading) bits.push(`<span class="dcr-q">กำลังโหลดวงเงิน/เครดิต...</span>`);
-  else if (!D.live) bits.push(`<span class="dcr-q">(ไม่พบยอดค้างในระบบแล้ว — ตัวเลข ณ วันที่ซุปอนุมัติ)</span>`);
+  else if (!D.live) bits.push(`<span class="dcr-q">(ไม่พบยอดค้างในระบบแล้ว — ตัวเลข ณ วันที่ขอ)</span>`);
   const subTxt = bits.join(' · ');
-  const subPlain = subTxt.replace(/<[^>]+>/g, '');
 
-  // บรรทัด 3 = เหตุผลที่ลูกค้ายังไม่จ่าย + ใครขาย
   const bits2 = [];
-  if (a.reason) bits2.push(`<span class="dcr-why">${escapeHtml(a.reason)}</span>`);
-  if (a.smName) bits2.push(escapeHtml(a.smName));
-  if (a.wh)     bits2.push(escapeHtml(a.wh));
+  if (a.reason)       bits2.push(`<span class="dcr-why">${escapeHtml(a.reason)}</span>`);
+  if (a.rejectReason) bits2.push(`<span class="dcr-hot">เหตุผลปฏิเสธ: ${escapeHtml(a.rejectReason)}</span>`);
+  if (a.smName)       bits2.push(escapeHtml(a.smName));
+  if (a.wh)           bits2.push(escapeHtml(a.wh));
   const sub2Txt = bits2.join(' · ');
-  const sub2Plain = sub2Txt.replace(/<[^>]+>/g, '');
 
-  const actHtml = !hasOrd
-    ? `<div class="dcr-locked" title="ซุปอนุมัติแล้ว แต่เซลยังไม่ได้คีย์ออเดอร์เข้าชีท Order">รอเซลคีย์ออเดอร์</div>`
-    : `<div class="dcr-act" onclick="event.stopPropagation()">
+  const bills = a.billId ? a.billId.split(',').map(x => x.trim()).filter(Boolean) : [];
+
+  const actHtml = canAct
+    ? `<div class="dcr-act" onclick="event.stopPropagation()">
          <select id="crSel-${escapeHtml(rq)}" onchange="crOnDecision('${escapeHtml(rq)}')">
-           <option value="">${decided ? 'เปลี่ยนคำสั่ง...' : '— เลือก —'}</option>
-           <option value="approve">อนุมัติ</option>
-           <option value="reject">ไม่อนุมัติ</option>
-           <option value="limit">เปิดภายในวงเงิน</option>
+           <option value="">— เลือก —</option>
+           ${CR_DECISIONS.map(d => `<option value="${d}">${d}</option>`).join('')}
          </select>
          <button id="crBtn-${escapeHtml(rq)}" onclick="crSubmit('${escapeHtml(rq)}')" disabled>ยืนยัน</button>
-       </div>`;
+       </div>`
+    : `<div class="dcr-locked" title="${a.status === 'รอ' ? 'ต้องให้หัวหน้า (ซุป) กดอนุมัติก่อน บัญชีถึงจะตัดสินได้' : 'ใบนี้ตัดสินไปแล้ว'}">${
+         a.status === 'รอ' ? 'รอซุปกดก่อน — บัญชียังตัดสินไม่ได้'
+         : (a.finBy ? escapeHtml(a.finBy) + ' · ' + escapeHtml(crShortTs(a.finAt)) : 'ตัดสินแล้ว')}</div>`;
 
-  // รายละเอียดทั้งหมดย้ายมาอยู่ในส่วนที่กางออก — ตอนพับจึงเหลือ 2 บรรทัด
-  // กางออก: ใช้เต็มความกว้างการ์ด · สินค้าไหลยาวคั่นด้วย , แทนบรรทัดละรายการ
-  //   ออเดอร์ 23 รายการเคยกิน 23 บรรทัด ตอนนี้เหลือ 2-3 บรรทัด
   const bodyHtml = !open ? '' : `
       <div class="dcr-body">
-        ${a.apprBy ? `<div class="dcr-flow dcr-dim">ซุปอนุมัติ: ${escapeHtml(a.apprBy)} · ${escapeHtml(a.apprTs)}${a.expiry ? ' · ใช้ได้ถึง ' + escapeHtml(a.expiry) : ''}</div>` : ''}
-        ${(a.orders || []).map(o => `
-          <div class="dcr-ord">
-            <div class="dcr-flow dcr-ordhead">${escapeHtml(o.orderId)} · ${escapeHtml(crWhen(o))} · ${o.items.length} รายการ · ฿${fmtBaht(o.total)}</div>
-            <div class="dcr-flow">${o.items.map(it =>
-              `${escapeHtml(it.name || '-')}${it.kind === 'แถม' ? '(แถม)' : ''} <span class="dcr-q">${escapeHtml(it.qty)} ${escapeHtml(it.unit)}</span> <b>฿${fmtBaht(it.amount)}</b>`
-            ).join('<span class="dcr-q">, </span>')}</div>
-          </div>`).join('')}
+        <div class="dcr-flow dcr-dim">${a.apprBy ? 'ซุปอนุมัติ: ' + escapeHtml(a.apprBy) + ' · ' : ''}ขอเมื่อ ${escapeHtml(a.apprTs)}${a.expiry ? ' · ใช้ได้ถึง ' + escapeHtml(a.expiry) : ''} · ${escapeHtml(rq)}</div>
+        ${bills.length
+          ? bills.map(b => `<div class="dcr-ord"><div class="dcr-flow dcr-ordhead">${escapeHtml(b)}</div>
+              <div class="dcr-flow" id="crOrd-${escapeHtml(rq)}-${escapeHtml(b)}">${crOrderCache[b] ? crOrderHtml(crOrderCache[b]) : 'กำลังโหลดรายการสินค้า...'}</div></div>`).join('')
+          : '<div class="dcr-flow dcr-dim">ยังไม่มีบิล — เซลเช็คอินขอไว้แต่ยังไม่ได้คีย์ออเดอร์</div>'}
       </div>`;
 
   return `
@@ -3392,21 +3366,65 @@ function crCardHtml(a){
       <div class="dcr-head" onclick="crToggleItems('${escapeHtml(rq)}')">
         <div class="dcr-l">
           <div class="dcr-shop" title="${escapeHtml(a.shopName)} · ${escapeHtml(a.shopCode)}"><span class="dcr-caret">${open ? '&#x25BE;' : '&#x25B8;'}</span>${escapeHtml(a.shopName || '-')}</div>
-          <div class="dcr-sub" title="${escapeHtml(subPlain)}">${subTxt}</div>
-          ${sub2Txt ? `<div class="dcr-sub" title="${escapeHtml(sub2Plain)}">${sub2Txt}</div>` : ''}
+          <div class="dcr-sub" title="${escapeHtml(subTxt.replace(/<[^>]+>/g, ''))}">${subTxt}</div>
+          ${sub2Txt ? `<div class="dcr-sub" title="${escapeHtml(sub2Txt.replace(/<[^>]+>/g, ''))}">${sub2Txt}</div>` : ''}
         </div>
         <div class="dcr-r">
-          <div class="dcr-amt">${hasOrd ? '฿' + fmtInt(Math.round(a.total)) : '<span style="font-size:12px;color:var(--muted)">รอออเดอร์</span>'}</div>
-          <div class="dcr-when">${hasOrd ? escapeHtml(crWhen(a.orders[0])) + ' · ' + a.orderCount + ' ออเดอร์' : 'ซุปอนุมัติ ' + escapeHtml(crShortTs(a.apprTs))}</div>
+          <div class="dcr-amt" style="font-size:12px;color:var(--muted);font-weight:600">${bills.length ? bills.length + ' บิล' : 'ยังไม่มีบิล'}</div>
+          <div class="dcr-when">${escapeHtml(crShortTs(a.apprTs))}</div>
         </div>
         ${actHtml}
       </div>
       ${bodyHtml}
     </div>`;
 }
+
+function crOrderHtml(items){
+  if (!items || !items.length) return '<span class="dcr-q">ไม่พบรายการในชีท Order</span>';
+  const live = items.filter(it => !it.cancelled);
+  if (!live.length) return '<span class="dcr-hot">ยกเลิกทั้งใบแล้ว (' + items.length + ' รายการ)</span>';
+  const total = live.reduce((s, it) => s + it.amount, 0);
+  const body = live.map(it =>
+    `${escapeHtml(it.name || '-')}${it.kind === 'แถม' ? '(แถม)' : ''} <span class="dcr-q">${escapeHtml(it.qty)} ${escapeHtml(it.unit)}</span> <b>฿${fmtBaht(it.amount)}</b>`
+  ).join('<span class="dcr-q">, </span>');
+  const cx = items.length - live.length;
+  return body + ` <b class="dcr-hot">= ฿${fmtBaht(total)}</b>`
+       + (cx ? ` <span class="dcr-q">(ยกเลิก ${cx} รายการ)</span>` : '');
+}
+
+// ดึงรายการสินค้าของบิลเดียว — query gviz เจาะจง orderId ไม่ต้องโหลดชีท Order ทั้งใบ
+async function crLoadOrder(billId){
+  if (crOrderCache[billId]) return crOrderCache[billId];
+  // ดึงรวมบรรทัดที่ยกเลิกด้วย แล้วค่อยไปแยกแสดง — ไม่งั้นบิลที่ยกเลิกทั้งใบจะขึ้นว่า "ไม่พบรายการ" ซึ่งชวนเข้าใจผิด
+  const q = `select A,B,I,K,L,M,N,P where Q = '${billId.replace(/'/g, '')}'`;
+  const url = `https://docs.google.com/spreadsheets/d/${CONFIG.backendSheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(CONFIG.orderTab)}&tq=${encodeURIComponent(q)}`;
+  const res = await fetch(url, { cache: 'no-store' });
+  const txt = await res.text();
+  const items = parseCsv(txt).map(r => ({          // parseCsv คืน object ตามหัวคอลัมน์ที่ gviz ส่งมา
+    kind: r['รูปแบบ'] || '', name: r['ชื่อสินค้า'] || '',
+    qty:  r['จำนวน'] || '',  unit: r['หน่วย'] || '',
+    cancelled: !!String(r['ยกเลิก'] || '').trim(),
+    amount: Number(String(r['ยอดเงินรวม'] || '').replace(/[^\d.-]/g, '')) || 0,
+  })).filter(it => it.name);
+  crOrderCache[billId] = items;
+  return items;
+}
+
 function crToggleItems(rq){
   if (crExpanded.has(rq)) crExpanded.delete(rq); else crExpanded.add(rq);
-  crRepaintCard(rq);   // วาดเฉพาะการ์ดใบนั้น — ห้ามเด้ง scroll กลับบนสุด
+  crRepaintCard(rq);
+  const a = creditRows.find(x => x.reqId === rq);
+  if (!a || !crExpanded.has(rq)) return;
+  (a.billId ? a.billId.split(',').map(x => x.trim()).filter(Boolean) : []).forEach(async b => {
+    try {
+      const items = await crLoadOrder(b);
+      const el = $(`crOrd-${rq}-${b}`);
+      if (el) el.innerHTML = crOrderHtml(items);
+    } catch(e){
+      const el = $(`crOrd-${rq}-${b}`);
+      if (el) el.innerHTML = `<span class="dcr-q">โหลดรายการไม่สำเร็จ</span>`;
+    }
+  });
 }
 
 function crRepaintCard(rq){
@@ -3420,21 +3438,20 @@ function crOnDecision(rq){
   const v = $('crSel-' + rq).value;
   const b = $('crBtn-' + rq);
   b.disabled = !v;
-  b.style.background = (v === 'approve') ? 'var(--success)' : '';   // อนุมัติ = เขียว · บล็อก = แดง
+  b.style.background = (v === 'ไม่อนุมัติ') ? 'var(--danger)' : 'var(--success)';
 }
 
 async function crSubmit(rq){
-  const sel = $('crSel-' + rq);
-  const btn = $('crBtn-' + rq);
+  const sel = $('crSel-' + rq), btn = $('crBtn-' + rq);
   const decision = sel.value;
   if (!decision) return;
   const a = creditRows.find(x => x.reqId === rq);
-  const LBL = { approve: 'อนุมัติ', reject: 'ไม่อนุมัติ', limit: 'เปิดภายในวงเงิน' };
-  const label = LBL[decision] || decision;
-  const warn = decision === 'approve'
-    ? 'สถานะอนุมัติ จะเป็น "อนุมัติราคา" ทุกออเดอร์ของใบนี้ — คลังจัดของได้ตามปกติ'
-    : `จะเขียน "${label}" ลงช่อง สถานะอนุมัติ ทุกออเดอร์ของใบนี้ ในชีท Order และ Supabase — คลังจะจัดบิลนี้ไม่ได้`;
-  if (!confirm(`${a ? a.shopName : rq}\n${a ? a.orderCount : '?'} ออเดอร์ · ฿${fmtBaht(a ? a.total : 0)}\n\n${warn}`)) return;
+  let rejectReason = '';
+  if (decision === 'ไม่อนุมัติ'){
+    rejectReason = (prompt('เหตุผลที่ไม่อนุมัติ (ให้เซล/ซุปเห็น)') || '').trim();
+    if (!rejectReason) return;
+  }
+  if (!confirm(`${a ? a.shopName : rq}\n\nยืนยัน "${decision}"?`)) return;
 
   btn.disabled = true; btn.textContent = 'กำลังบันทึก...';
   try {
@@ -3442,18 +3459,31 @@ async function crSubmit(rq){
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({
-        action: 'financeDebtDecision', reqId: rq, decision,
-        byName:  currentUser ? (currentUser.name  || '') : '',
-        byEmail: currentUser ? (currentUser.email || '') : '',
+        action: 'debtFinanceDecision', reqId: rq, decision, rejectReason,
+        byName: currentUser ? (currentUser.name || '') : '',
       }),
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
+    if (data && data.notReady){
+      showToast(`หัวหน้ายังไม่อนุมัติใบนี้ (สถานะ: ${data.currentStatus || 'รอ'})`, 'warning');
+      await loadCreditBills(true); return;
+    }
+    if (data && data.alreadyDecided){
+      showToast('ใบนี้มีคนตัดสินไปแล้ว — กำลังรีเฟรชคิว', 'warning');
+      await loadCreditBills(true); return;
+    }
     if (!data || data.ok === false) throw new Error(data && data.error ? data.error : 'บันทึกไม่สำเร็จ');
-    if (a) { a.status = data.status || ''; a._s = crSearchable(a); }
-    crRepaintCard(rq);
-    updateCreditBadge();
-    showToast(`บันทึกแล้ว — ${label} (${data.changed} แถว)`, 'success');
+    if (a){
+      a.finDecision = decision;
+      a.finBy = currentUser ? (currentUser.name || '') : '';
+      a.finAt = new Date().toLocaleString('th-TH');
+      a.status = (decision === 'ไม่อนุมัติ') ? 'ไม่อนุมัติ' : 'อนุมัติ';
+      if (rejectReason) a.rejectReason = rejectReason;
+      a._s = crSearchable(a);
+    }
+    renderCreditChips(); renderCreditList(); updateCreditBadge();
+    showToast(`บันทึกแล้ว — ${decision}`, 'success');
   } catch(e){
     btn.disabled = false; btn.textContent = 'ยืนยัน';
     showToast('บันทึกไม่สำเร็จ: ' + e.message, 'error');
