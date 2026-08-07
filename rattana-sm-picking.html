@@ -533,7 +533,7 @@ body.dark .spin-box{background:var(--card-bg)}
 </nav>
 
 <script>
-const VERSION='5.42';
+const VERSION='5.50';
 const DEFAULT_ORDER_ID='1ZOS3vAPbizWCG_Y7A6rODjIznSMf1_FDSGZ_ZUr_RjQ';
 const DEFAULT_ORDER_GID='1632859410';
 const PDDT_ID='16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
@@ -1104,6 +1104,16 @@ async function exportBK12(){
     const header=rows[0].slice();header[BK.B]=prefix+' เลขที่เอกสาร';let data=rows.slice(1);  // บังคับหัว B ตาม prefix (กันหัวเก่า BK12 ค้างในชีทต้นทาง)
     const di=parseISO($('bkDate').value),dhead=prefix+di.yy+di.mm+di.dd+'/',dayHead=prefix+di.yy+di.mm+di.dd;
     // 🛡️ กันของ "รอบก่อน/วันก่อน" ที่ค้างในชีทหลุดเข้าบิล — แถวที่มีเลขเอกสารแล้วแต่ไม่ใช่ของวันนี้ ต้องถามก่อนเสมอ
+    // 🛡️ เช็คก่อนว่าของที่ยิงในเครื่องนี้ขึ้นชีทครบไหม — ยิงแล้วแต่ไม่อยู่ในชีท = จะไม่เข้าบิล
+    if(picked.length){
+      const inSheet=new Set(data.map(r=>bcKey(r[BK.BARCODE])).filter(Boolean));
+      const miss=picked.filter(p=>numv(p.received)>0&&!inSheet.has(bcKey(p.barcode)));
+      if(miss.length){
+        hideSpin();
+        const ls=miss.slice(0,8).map(p=>`• ${p.name} (${fmt(p.received)} ${p.unit})`).join('\n');
+        if(!confirm(`⚠️ มี ${miss.length} รายการที่ยิงในเครื่องนี้ แต่ยังไม่อยู่ในชีท:\n\n${ls}${miss.length>8?`\n… (+${miss.length-8})`:''}\n\nถ้า Export ตอนนี้ ของพวกนี้จะไม่เข้าบิล\n\nยกเลิก = กลับไปกด "บันทึกลงชีท" ก่อน (แนะนำ)\nตกลง = Export ทั้งที่ยังขาด`)){btn.disabled=false;return;}
+      }
+    }
     const stale=data.filter(r=>{const b=clean(r[BK.B]);return b&&b.indexOf(dayHead)!==0;});
     if(stale.length){
       hideSpin();
@@ -1193,7 +1203,7 @@ async function exportTransfer(){
 async function clearAllDay(){
   if(!confirm('เคลียเริ่มวันใหม่? (ล้างทั้งหมด)\n\nจะล้าง:\n• ออเดอร์ (ชีทใบสั่งซื้อ — เก็บหัวตาราง)\n• ใบจัด/แสกน (เช็คสินค้าออก)\n• ใบโอนย้าย\n• รายการค้างในแอป\n\n⚠️ ลบข้อมูลของเมื่อวานทั้งหมด — ยืนยัน?'))return;
   picked=[];sDirty=false;lastBuild=null;scanMap={};scanIndex={};jobClosed=false;try{localStorage.removeItem('smr_jobclosed');}catch(e){}updateJobUI();
-  try{Object.keys(localStorage).filter(k=>k.indexOf('smr_pick_')===0||k.indexOf('smr_links_')===0).forEach(k=>localStorage.removeItem(k));}catch(e){}
+  try{Object.keys(localStorage).filter(k=>k.indexOf('smr_pick_')===0||k.indexOf('smr_links_')===0||k.indexOf('smr_touched_')===0).forEach(k=>localStorage.removeItem(k));}catch(e){}
   try{if(typeof renderPicked==='function')renderPicked();}catch(e){}
   try{$('results').style.display='none';}catch(e){}
   if(!GAS_URL){toast('ล้างในแอปแล้ว (ยังไม่ได้ตั้ง GAS_URL — ล้างชีทเองในชีท)','warning');return;}
@@ -1251,6 +1261,22 @@ function initScan(){
   sOrderDate=lastBuild.date||'';sDoc=buildDocNumber();
   applyLinks();restorePicked();renderScanInfo();renderPicked();
   hydrateFromSheet();   // ดึงจากชีท (รวมทุกเครื่อง) มา merge ทุกครั้งที่โหลด — เห็นของทุกเครื่อง
+  startAutoSync();
+}
+// ── ซิงก์อัตโนมัติ: ดึงของเครื่องอื่นมาแสดงทุก 60 วิ ──
+// ข้ามเมื่อกำลังกรอก/จับคู่/ยังไม่ได้บันทึก — กัน UI สลับกลางคัน
+let autoSyncTimer=null;
+function startAutoSync(){
+  if(autoSyncTimer)return;
+  autoSyncTimer=setInterval(()=>{
+    try{
+      if(document.hidden)return;
+      if($('tabScan').classList.contains('hidden'))return;
+      if($('resultPanel').style.display==='block'||$('linkPanel').style.display==='block')return;
+      if(sDirty||!sDoc)return;
+      hydrateFromSheet();
+    }catch(e){}
+  },60000);
 }
 // ดัชนีหน่วย: บาร์ EA/PA/BP/CS ของสินค้าเดียวกัน → order line เดิม
 // (สั่งเป็นลังแต่ลังไม่มีบาร์ → เช็คเกอร์ยิงบาร์ชิ้น ต้องเข้ารายการเดิมแล้วแปลงจำนวนให้)
@@ -1458,6 +1484,7 @@ function confirmScan(){
   const rn=recvNew(),received=rn.total;   // โหมดเพิ่ม = เดิม + รอบนี้ · โหมดแก้ = ค่าที่ใส่ (ตัดเพดานยอดสั่งแล้ว)
   const alloc=allocate(curItem.per,received);   // เฉลี่ยจากยอดรวมใหม่ครั้งเดียว — ไม่ใช่บวก alloc รายรอบ (กันเศษเพี้ยน)
   const entry={barcode:curItem.barcode,lineBc:curItem.lineBc||curItem.barcode,name:curItem.name,unit:curItem.unit,priceCS:curItem.priceCS,total:curItem.total,per:curItem.per,alloc,received,eaExtra:rn.extra||0,transfer:curTransfer,smr:curItem.smr||false,smCode:curItem.smCode||'',smrName:curItem.smrName||'',ts:nowBKK()};
+  addTouched(entry.barcode,entry.lineBc);   // ตัวนี้เป็นของเครื่องนี้แล้ว (ใช้ตอน merge เข้าชีท)
   const idx=picked.findIndex(p=>(p.lineBc||p.barcode)===(curItem.lineBc||curItem.barcode));
   const su=curUnit?(UNIT_TH[curUnit.level]||curUnit.level):curItem.unit;
   const extNote=rn.extra?` (เศษ ${fmt(rn.extra)} ชิ้น)`:'';
@@ -1606,7 +1633,7 @@ function unlinkSmr(i){
     +(hit.length?'\n\n⚠️ ที่ยิงไว้ '+hit.length+' รายการของตัวนี้จะถูกลบออกจากใบจัดด้วย':'')
     +'\n\nหมายเหตุ: ทะเบียนถาวรใน master ไม่ถูกลบ — ถ้าผูกผิดต้องลบแถวในชีท master เอง'))return;
   delete scanMap[bc];
-  if(hit.length){picked=picked.filter(p=>!((p.lineBc||p.barcode)===bc||p.barcode===bc));sDirty=true;}
+  if(hit.length){hit.forEach(p=>addTouched(p.barcode,p.lineBc));picked=picked.filter(p=>!((p.lineBc||p.barcode)===bc||p.barcode===bc));sDirty=true;}
   if(row._oldBc){row.barcode=row._oldBc;row.name=row._oldName;row.priceCS=row._oldPrice;row.value=(row._oldPrice||0)*(row.total||0);
     if(row._oldEntry)scanMap[row._oldBc]=row._oldEntry;}
   row.linkedBc='';row._oldBc='';row._oldEntry=null;
@@ -1624,10 +1651,26 @@ function closeLinkPanel(silent){
 }
 
 const pickKey=()=>'smr_pick_'+sDoc;
+// ── "ของเครื่องนี้" — บาร์โค้ดที่เครื่องนี้เคยยิง/แก้/ลบในรอบเอกสารนี้ ──
+// ใช้บอก GAS ว่าให้ลบ-เขียนทับเฉพาะแถวเหล่านี้ · แถวของเครื่องอื่นในชีทต้องไม่ถูกแตะ
+// (เดิมบันทึกทีไร GAS ล้างทั้ง tab → เครื่องที่บันทึกทีหลังลบงานเครื่องอื่นทิ้ง = ของหายจากบิล)
+const touchedKey=()=>'smr_touched_'+sDoc;
+function loadTouched(){try{const a=JSON.parse(localStorage.getItem(touchedKey())||'[]');return Array.isArray(a)?a:[];}catch(e){return[];}}
+function addTouched(){const s=new Set(loadTouched());for(let i=0;i<arguments.length;i++){const v=clean(arguments[i]);if(v)s.add(v);}
+  try{localStorage.setItem(touchedKey(),JSON.stringify(Array.from(s)));}catch(e){}}
+function clearTouched(){try{localStorage.removeItem(touchedKey());}catch(e){}}
+// รายการที่ "เครื่องนี้รับผิดชอบ" — ตัวที่ยังไม่เคยแตะ (ดึงจากชีทของเครื่องอื่น) ไม่ส่งซ้ำ กันข้อมูลซ้ำในชีท
+function myPicked(){
+  const t=new Set(loadTouched());
+  if(!t.size)return picked.slice();   // fallback: ไม่มีประวัติ (localStorage หาย) → ถือว่าเป็นของเราทั้งหมด
+  return picked.filter(p=>t.has(p.barcode)||t.has(p.lineBc||''));
+}
+function ownedBarcodes(){const s=new Set(loadTouched());myPicked().forEach(p=>{if(p.barcode)s.add(p.barcode);if(p.lineBc)s.add(p.lineBc);});return Array.from(s);}
 function savePicked(){if(!sDoc)return;try{localStorage.setItem(pickKey(),JSON.stringify({picked,dirty:sDirty}));}catch(e){}}
 function restorePicked(){try{const o=JSON.parse(localStorage.getItem(pickKey())||'null');if(o&&Array.isArray(o.picked)){picked=o.picked;sDirty=!!o.dirty;}else{picked=[];sDirty=false;}}catch(e){picked=[];sDirty=false;}}
 
 // ── ดึง "ที่ยิงแล้ว" จากชีท (รวมทุกเครื่อง) → merge กับตัวในเครื่องที่ยังไม่ได้ save · เรียกทุกครั้งที่โหลด + ปุ่มดึงเอง ──
+let lastHydrateN=-1;
 async function hydrateFromSheet(manual){
   try{
     const src=parseSheetUrl($('bkUrl').value)||{id:DEFAULT_SMR_ID,gid:DEFAULT_SMR_GID};
@@ -1669,7 +1712,9 @@ async function hydrateFromSheet(manual){
     const localOnly=picked.filter(p=>!sheetLine.has(p.lineBc||p.barcode));
     picked=list.concat(localOnly);sDirty=localOnly.length>0;renderPicked();
     $('saveHint').textContent='📡 ดึงจากชีท '+list.length+' รายการ (ทุกเครื่อง)'+(localOnly.length?' + เครื่องนี้ '+localOnly.length+' (ยังไม่ขึ้นชีท)':'')+(unmapped?' · ⚠️ '+unmapped+' แถว map สาขาไม่ได้':'');
-    toast('📡 ดึงจากชีท '+list.length+' รายการ (รวมทุกเครื่อง)'+(localOnly.length?' + '+localOnly.length+' ในเครื่อง':''),'info');
+    // ซิงก์อัตโนมัติทุก 60 วิ → เด้ง toast เฉพาะตอนกดเอง หรือจำนวนเปลี่ยน (มีของเครื่องอื่นเข้ามาใหม่)
+    if(manual||list.length!==lastHydrateN)toast('📡 ดึงจากชีท '+list.length+' รายการ (รวมทุกเครื่อง)'+(localOnly.length?' + '+localOnly.length+' ในเครื่อง':''),'info');
+    lastHydrateN=list.length;
   }catch(e){console.error('hydrate',e);if(manual){hideSpin();toast('ดึงจากชีทไม่สำเร็จ: '+(e.message||e),'error');}}
 }
 let pickBranchFilter='';
@@ -1711,29 +1756,53 @@ function renderPicked(){
   $('btnSave').disabled=!picked.length;savePicked();
 }
 function editPick(i){const p=picked[i];if(!p)return;const it=scanMap[p.lineBc||p.barcode];if(!it){toast('ไม่พบสินค้านี้ในออเดอร์','warning');return;}const eff=Object.assign({},it,{barcode:p.barcode,name:p.name,priceCS:p.priceCS,lineBc:p.lineBc||p.barcode});curItem=eff;curUnit=null;showResult(eff,true);}   // ✎ = โหมด "แก้เป็น" (หน่วยที่สั่งเสมอ)
-function delPick(i){const p=picked[i];if(!p)return;if(confirm('ลบ "'+p.name+'" ออกจากใบจัด?')){picked.splice(i,1);sDirty=true;renderPicked();toast('ลบแล้ว — แสกนใหม่ได้','info');}}
+function delPick(i){const p=picked[i];if(!p)return;if(confirm('ลบ "'+p.name+'" ออกจากใบจัด?')){addTouched(p.barcode,p.lineBc);picked.splice(i,1);sDirty=true;renderPicked();saveToSheet(true);toast('ลบแล้ว — แสกนใหม่ได้','info');}}
 // โยกโอนย้าย เปิด/ปิด ในรายการได้เลย — state ค้างไว้ ไม่รีเซ็ต · ส่งข้อมูลให้ทันที (เปลี่ยนเฉพาะตอนกดเอง)
-function toggleRowTransfer(i){const p=picked[i];if(!p)return;p.transfer=!p.transfer;sDirty=true;renderPicked();toast(p.transfer?'ตั้งโอนย้าย: '+p.name:'ยกเลิกโอนย้าย: '+p.name,'info');saveToSheet(true);}
-function clearPicked(){if(picked.length&&confirm('ล้างใบจัดทั้งหมด?')){picked=[];sDirty=true;renderPicked();}}
+function toggleRowTransfer(i){const p=picked[i];if(!p)return;p.transfer=!p.transfer;addTouched(p.barcode,p.lineBc);sDirty=true;renderPicked();toast(p.transfer?'ตั้งโอนย้าย: '+p.name:'ยกเลิกโอนย้าย: '+p.name,'info');saveToSheet(true);}
+function clearPicked(){if(picked.length&&confirm('ล้างใบจัดทั้งหมด?\n\n(ลบเฉพาะของเครื่องนี้ออกจากชีท — ของเครื่องอื่นไม่ถูกแตะ)')){
+  picked.forEach(p=>addTouched(p.barcode,p.lineBc));picked=[];sDirty=true;renderPicked();saveToSheet(true);}}
 
 // สร้างแถว format SMR 26 คอลัมน์ (1 แถว = 1 สินค้า × 1 สาขา) — รวมเป็นใบเดียว แยกสาขาที่ "ชื่อร้าน" · ช่อง Z = วันเวลาที่ยิง
-function buildSmrRows(){
+function buildSmrRows(list){
   const docDateBE=todayBE(),shipBE=SHIP_DATE?toBE(SHIP_DATE):'',keyDate=todayKey(),rows=[];
-  picked.forEach(p=>{const sm=(p.smr&&p.smCode)?p:(scanMap[p.lineBc||p.barcode]||{});const note=(sm.smr&&sm.smCode)?('SMR '+sm.smCode):'';const ts=p.ts||'';sBL.forEach(b=>{const q=p.alloc[b]||0;if(q<=0)return;const price=p.priceCS||0;rows.push([docDateBE,sDoc,DEBTOR,'','0','SP01','0',SALESMAN,note,shipBE,p.barcode,String(q),'',String(price),'','','','',LOCATION,keyDate,scanBranchFull[b]||sShort[b],p.name,String(price),'',String(Math.round(q*price*100)/100),ts]);});});
+  (list||picked).forEach(p=>{const sm=(p.smr&&p.smCode)?p:(scanMap[p.lineBc||p.barcode]||{});const note=(sm.smr&&sm.smCode)?('SMR '+sm.smCode):'';const ts=p.ts||'';sBL.forEach(b=>{const q=p.alloc[b]||0;if(q<=0)return;const price=p.priceCS||0;rows.push([docDateBE,sDoc,DEBTOR,'','0','SP01','0',SALESMAN,note,shipBE,p.barcode,String(q),'',String(price),'','','','',LOCATION,keyDate,scanBranchFull[b]||sShort[b],p.name,String(price),'',String(Math.round(q*price*100)/100),ts]);});});
   return rows;
 }
 // แถวโอนย้าย — เฉพาะตัวติดธง p.transfer · 4 คอลัมน์ Barcode|ชื่อ|จำนวน|วันเวลาที่ยิง (จำนวน=ยอดได้รับจริง)
-function buildTransferRows(){const rows=[];picked.forEach(p=>{if(p.transfer)rows.push([p.barcode,p.name,String(p.received),p.ts||'']);});return rows;}
+function buildTransferRows(list){const rows=[];(list||picked).forEach(p=>{if(p.transfer)rows.push([p.barcode,p.name,String(p.received),p.ts||'']);});return rows;}
+// หลังบ้านรองรับ merge (GAS v2+) หรือยัง — v2 ขึ้นไปเขียนทับเฉพาะของเครื่องตัวเอง · ของเก่าล้างทั้ง tab ทุกครั้ง
+// ตรวจครั้งเดียวแล้วจำไว้ · ตรวจไม่ได้ = ถือว่าเป็นของเก่า (ปลอดภัยไว้ก่อน)
+let gasMerge=null;
+async function probeGasMerge(){
+  if(gasMerge!==null)return gasMerge;
+  try{
+    const r=await fetch(GAS_URL,{method:'GET'});
+    const t=(await r.text()).trim();let j={};try{j=JSON.parse(t);}catch(e){}
+    gasMerge=!!(j&&j.version&&parseFloat(j.version)>=2);
+  }catch(e){gasMerge=false;}
+  return gasMerge;
+}
 async function saveToSheet(silent){
   if(!GAS_URL){if(!silent)toast('ยังไม่ได้ตั้งค่า GAS_URL ในโค้ด — ใช้ Excel แทนได้','warning');return;}
   if(!picked.length){if(!silent)toast('ยังไม่มีรายการ','info');return;}
-  const rows=buildSmrRows(),trows=buildTransferRows();const btn=$('btnSave');btn.disabled=true;if(!silent)showSpin('บันทึกลงชีท...');
+  const canMerge=await probeGasMerge();
+  // หลังบ้านใหม่ → ส่งเฉพาะ "ของเครื่องนี้" + บอกว่าเป็นเจ้าของบาร์ไหน (GAS เขียนทับเฉพาะแถวเหล่านั้น ไม่แตะงานเครื่องอื่น)
+  // หลังบ้านเก่า → ส่งทั้งหมดที่เห็น (รวมที่ดึงจากชีท) เพราะมันล้างทั้ง tab เสมอ — อย่างน้อยของที่ดึงมาแล้วไม่หาย
+  const mine=canMerge?myPicked():picked,owned=ownedBarcodes();
+  const rows=buildSmrRows(mine),trows=buildTransferRows(mine);const btn=$('btnSave');btn.disabled=true;if(!silent)showSpin('บันทึกลงชีท...');
   const dt=$('dirtyTag');if(dt){dt.className='sub dirty-dot on';dt.textContent='กำลังบันทึก…';}
   try{
-    const payload={action:'saveSMR',mode:'overwrite',doc:sDoc,header:SMR_HEADER,rows,transferTab:TRANSFER_TAB,transferHeader:TRANSFER_HEADER,transferRows:trows};
+    const payload=canMerge
+      ?{action:'saveSMR',mode:'merge',owned,doc:sDoc,header:SMR_HEADER,rows,transferTab:TRANSFER_TAB,transferHeader:TRANSFER_HEADER,transferRows:trows}
+      :{action:'saveSMR',mode:'overwrite',doc:sDoc,header:SMR_HEADER,rows,transferTab:TRANSFER_TAB,transferHeader:TRANSFER_HEADER,transferRows:trows};
     const res=await fetch(GAS_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});
     const txt=(await res.text()).trim();let j={};try{j=JSON.parse(txt);}catch(e){}
-    if(j.ok||/^OK/i.test(txt)){sDirty=false;renderPicked();$('saveHint').textContent=`✓ ลงชีทแล้ว · SMR ${rows.length} แถว${trows.length?' · โอนย้าย '+trows.length+' รายการ':''}`;if(!silent)toast('บันทึกลงชีทสำเร็จ ✓','success');}
+    if(j.ok||/^OK/i.test(txt)){sDirty=false;renderPicked();
+      const others=(typeof j.kept==='number')?j.kept:null;
+      $('saveHint').textContent=(canMerge?'✓ ลงชีทแล้ว · เครื่องนี้ '+rows.length+' แถว'+(others!==null?` · เครื่องอื่นในชีท ${others} แถว · รวม ${j.total}`:'')
+        :'✓ ลงชีทแล้ว '+rows.length+' แถว · ⚠️ หลังบ้านยังไม่อัปเดต — หลายเครื่องยิงพร้อมกันเสี่ยงทับกัน แจ้งแอดมิน')
+        +(trows.length?' · โอนย้าย '+trows.length:'');
+      if(!silent)toast('บันทึกลงชีทสำเร็จ ✓'+(others?` (ของเครื่องอื่น ${others} แถวยังอยู่ครบ)`:''),'success');}
     else throw new Error(j.error||txt||'ตอบกลับไม่ถูกต้อง');
   }catch(e){sDirty=true;renderPicked();toast('⚠️ บันทึกชีทไม่สำเร็จ: '+(e.message||e),'error');$('saveHint').textContent='⚠️ '+(e.message||e)+' — ลองกด 💾 บันทึกลงชีท อีกครั้ง';console.error(e);}
   finally{if(!silent)hideSpin();btn.disabled=false;}
