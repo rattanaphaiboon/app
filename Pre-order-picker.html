@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rattana Pre-order Picker v4.01</title>
+<title>Rattana Pre-order Picker v4.02</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -399,7 +399,7 @@
     <button type="button" class="login-bypass" id="previewBypassBtn" onclick="bypassLogin()" style="display:none;margin-top:10px">🔓 เข้าโหมดพรีวิว (ทดสอบในเครื่อง — ไม่ผ่าน Google Login)</button>
     <div id="loginSpinner">⏳ กำลังเข้าสู่ระบบ…</div>
     <div id="loginError"></div>
-    <div class="login-ver">เวอร์ชัน v4.01</div>
+    <div class="login-ver">เวอร์ชัน v4.02</div>
   </div>
 </div>
 
@@ -416,7 +416,7 @@
         <button type="button" id="srcMenuSb" onclick="setOrderSrc('sb')"><span>🟣</span> ใบจอง จาก Supabase</button>
       </div>
     </div>
-    <div class="title">📦 Pre-order Picker <span class="ver">v4.01</span></div>
+    <div class="title">📦 Pre-order Picker <span class="ver">v4.02</span></div>
     <div class="spacer"></div>
     <div class="who" id="whoBox"></div>
     <a class="hub-btn" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">
@@ -1380,13 +1380,40 @@ async function _fetchSalesOrdersSb(from, to){
   return { soOrders, unconfirmed:(j.unconfirmed||{count:0,byDate:{}}) };
 }
 /* อ่าน ROO 2 ตาราง (anon · เฉพาะ "อนุมัติ") → order objects */
+/* ═══ v4.02 — ปิดบั๊ก "ดึงออเดอร์ ROO ไม่ครบ" + "กด Export แล้วสถานะไม่ลงบางบรรทัด" ═══
+ * รากเดียวกัน: เดิมอ่าน `?limit=8000` แต่ **Supabase/PostgREST คืนสูงสุด 1,000 แถวเสมอ** (max-rows)
+ *   → 2026-08-07 roo_sales มี 4,601 แถว แอปเห็นแค่ 1,000 (ตั้งแต่ 31/07) = ขาด 3,601 แถว
+ *   → บิล ROO ที่แอดมินมองไม่เห็นเลย 191 บิล (ยังไม่จัด 107 บิล · 1,045,517 บาท)
+ *   → บิลที่ "บรรทัดโดนตัดคาบเกี่ยว" เช่น ORD1785949946815-1 คุณ สันติ (ROW301) มี 52 บรรทัด
+ *      แอปเห็น 49 → export ได้ 49 · อีก 3 บรรทัดไม่เข้าไฟล์ + ไม่ถูกมาร์คสถานะ = ลูกค้าได้ของไม่ครบ
+ * แก้: กรองวันฝั่ง server (คอลัมน์ไทยต้องครอบ quote) + **แบ่งหน้าทีละ 1,000 จนหมด**
+ *      เผื่อ filter วันพัง (ค่าวันผิดรูปแบบ) → ถ้าได้ 0 แถว ลองใหม่แบบไม่กรองวัน */
+async function _rooPullAll(tbl, H2){
+  const col=encodeURIComponent('"วัน"');
+  let from=''; try{ from=daysAgoBKK(SB_DAYS+2); }catch(e){}
+  const pull=async(flt)=>{
+    const out=[];
+    for(let off=0; off<30000; off+=1000){
+      let p=[];
+      try{
+        const r=await fetch(`${CONFIG.supaUrl}/rest/v1/${tbl}?select=*${flt}&order=id.desc&limit=1000&offset=${off}`,{headers:H2});
+        if(!r.ok) break;
+        p=await r.json();
+      }catch(e){ break; }
+      if(!Array.isArray(p) || !p.length) break;
+      out.push(...p);
+      if(p.length<1000) break;   // หน้าสุดท้าย
+    }
+    return out;
+  };
+  let rows = from ? await pull(`&${col}=gte.${from}`) : await pull('');
+  if(!rows.length && from) rows = await pull('');   // กันเคส filter วันพัง → ถอยไปดึงทั้งตาราง
+  return rows;
+}
 async function _readRooOrdersSb(){
   try{
     const H2={'apikey':CONFIG.supaAnon,'Authorization':'Bearer '+CONFIG.supaAnon};
-    const [ra,rb]=await Promise.all([
-      fetch(`${CONFIG.supaUrl}/rest/v1/roo_sales?select=*&order=id.desc&limit=8000`,{headers:H2}).then(r=>r.ok?r.json():[]).catch(()=>[]),
-      fetch(`${CONFIG.supaUrl}/rest/v1/roo_special_sales?select=*&order=id.desc&limit=8000`,{headers:H2}).then(r=>r.ok?r.json():[]).catch(()=>[])
-    ]);
+    const [ra,rb]=await Promise.all([ _rooPullAll('roo_sales',H2), _rooPullAll('roo_special_sales',H2) ]);   // v4.02: แบ่งหน้า — เดิม limit=8000 แต่ Supabase คืนสูงสุด 1000 เสมอ (ออเดอร์หายเงียบ)
     // v3.89: ติดชื่อตาราง + id (PK รายแถว) มาด้วย → มาร์ค "จัดแล้ว" ราย "บรรทัด" ได้ (PATCH ?id=in.(...) ตรงจาก client)
     const tagged=[...ra.map(r=>[r,'roo_sales']), ...rb.map(r=>[r,'roo_special_sales'])];
     return tagged.filter(p=>String(p[0]['สถานะอนุมัติ']||'').trim()==='อนุมัติ').map((p,i)=>rooRowToOrder(p[0], 900000+i, p[1]));
