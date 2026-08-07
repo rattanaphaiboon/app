@@ -48,6 +48,21 @@ header{background:var(--navy);color:#fff;padding:12px 16px;position:sticky;top:0
 body.dark .sub-nav{background:var(--card-bg);border-bottom-color:var(--border)}
 body.dark .period-toggle{background:rgba(255,255,255,.04)}
 
+/* Section tabs (รายละเอียด / สรุป) */
+.section-tabs{display:flex;gap:6px;margin-bottom:12px;border-bottom:2px solid var(--border);padding-bottom:0}
+.sec-tab{background:transparent;color:var(--muted);border:none;padding:10px 20px 12px;font-size:14px;font-weight:600;font-family:inherit;cursor:pointer;position:relative;transition:color .18s;white-space:nowrap;border-radius:var(--radius-sm) var(--radius-sm) 0 0}
+.sec-tab:hover{color:var(--text);background:var(--card-bg)}
+.sec-tab.active{color:var(--gold)}
+.sec-tab.active::after{content:'';position:absolute;left:0;right:0;bottom:-2px;height:3px;background:var(--gold);border-radius:2px 2px 0 0}
+.summary-grid{display:grid;grid-template-columns:1fr;gap:16px}
+@media(min-width:900px){.summary-grid{grid-template-columns:1fr 1fr}}
+.sum-card{background:var(--card-bg);border-radius:var(--radius-md);border:1px solid var(--border);box-shadow:var(--shadow-md);overflow:hidden}
+.sum-head{background:var(--navy);color:#fff;padding:12px 16px;font-weight:700;font-size:14px;display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid var(--gold);flex-wrap:wrap;gap:8px}
+.sum-head .h-count{font-size:12px;font-weight:400;color:var(--gold)}
+.sum-empty{padding:32px 16px;text-align:center;color:var(--muted);font-size:13px}
+.sum-empty button{background:var(--gold);color:var(--navy);border:none;padding:10px 20px;border-radius:var(--radius-sm);font-family:inherit;font-weight:700;cursor:pointer;font-size:13px;margin-top:10px;min-height:38px}
+.sum-empty button:hover{opacity:.9}
+
 .filter-bar{background:var(--card-bg);border-radius:var(--radius-md);padding:12px;margin-bottom:12px;box-shadow:var(--shadow-sm);border:1px solid var(--border)}
 .search-row{display:grid;grid-template-columns:1fr;gap:8px}
 @media(min-width:640px){.search-row{grid-template-columns:1fr 170px 180px auto}}
@@ -211,18 +226,38 @@ body.dark .spinner-box{background:var(--card-bg)}
     </div>
   </div>
 
-  <div class="card">
-    <div class="card-head">
-      <h3 id="tblTitle">รายละเอียด</h3>
-      <span class="txt-muted" id="rowCount"></span>
+  <div class="section-tabs">
+    <button class="sec-tab active" data-view="detail" onclick="switchSectionView('detail')">📋 รายละเอียด</button>
+    <button class="sec-tab" data-view="summary" onclick="switchSectionView('summary')">📊 สรุปของแถมที่ให้ครบ</button>
+  </div>
+
+  <div id="detailView">
+    <div class="card">
+      <div class="card-head">
+        <h3 id="tblTitle">รายละเอียด</h3>
+        <span class="txt-muted" id="rowCount"></span>
+      </div>
+      <div class="tbl-wrap">
+        <table class="tbl" id="dataTbl">
+          <thead id="dataHead"></thead>
+          <tbody id="dataBody"></tbody>
+        </table>
+      </div>
+      <div class="pager" id="pager"></div>
     </div>
-    <div class="tbl-wrap">
-      <table class="tbl" id="dataTbl">
-        <thead id="dataHead"></thead>
-        <tbody id="dataBody"></tbody>
-      </table>
+  </div>
+
+  <div id="summaryView" style="display:none">
+    <div class="summary-grid">
+      <div class="sum-card">
+        <div class="sum-head"><span>🔴 เดือนนี้</span><span class="h-count" id="sumCurrentCount">-</span></div>
+        <div id="sumCurrentBody"></div>
+      </div>
+      <div class="sum-card">
+        <div class="sum-head"><span>📅 เดือนที่แล้ว</span><span class="h-count" id="sumLastCount">-</span></div>
+        <div id="sumLastBody"></div>
+      </div>
     </div>
-    <div class="pager" id="pager"></div>
   </div>
 
 </div>
@@ -259,6 +294,9 @@ let sortedCache = null;      // cached sorted rows for current filter+sort
 let sortedCacheKey = '';     // signature of filter+sort — bump to invalidate
 let billFreeMap = new Map(); // DI_REF → Map(normalizedSKU → total Q_FREE)
 let billGiftSummary = new Map(); // DI_REF → Map(giftSKUkey → {expected, actual})
+// Cache สรุปของแต่ละ period (เก็บไว้ให้ tab สรุปเทียบ 2 เดือน)
+let periodCache = { today: null, current: null, last: null };
+let sectionView = 'detail'; // 'detail' | 'summary'
 let pddtMap = new Map();  // PRODUCT NAME (normalized) → { brand, size, group }
 let promos = [];          // last-month promotions
 // Pre-indexed promos by matching method for fast lookup:
@@ -445,6 +483,39 @@ function computeBillGiftSummary() {
   });
 }
 
+// สรุป: ต่อ gift SKU ในช่วงเวลาปัจจุบัน → รวมยอด actual EA (เฉพาะ status=ok) + นับบิล
+function cachePeriodSummary() {
+  const { start } = getPeriodRange();
+  const label = periodMode === 'today'
+    ? `วันนี้ (${formatThaiDate(start)})`
+    : `${TH_MONTHS[start.getMonth()]} ${start.getFullYear()+543}`;
+  const bySku = new Map();  // giftSKU → {gift, totalActual, totalExpected, bills:Set}
+  billGiftSummary.forEach((skuMap, bill) => {
+    skuMap.forEach((v, giftKey) => {
+      const s = statusOf(v.expected, v.actual);
+      if (s !== 'ok') return;
+      if (!bySku.has(giftKey)) bySku.set(giftKey, { gift: giftKey, totalActual: 0, totalExpected: 0, bills: new Set() });
+      const entry = bySku.get(giftKey);
+      entry.totalActual   += v.actual;
+      entry.totalExpected += v.expected;
+      entry.bills.add(bill);
+    });
+  });
+  // เอาชื่อจริงของแถมกลับมา (giftKey เป็น normalized) — หาจาก promo ตัวแรก
+  const nameByKey = new Map();
+  promos.forEach(pm => {
+    const k = normalizeName(pm['แถมสินค้า']);
+    if (!nameByKey.has(k)) nameByKey.set(k, pm['แถมสินค้า']||k);
+  });
+  const rows = [...bySku.values()].map(e => ({
+    gift: nameByKey.get(e.gift) || e.gift,
+    totalActual: e.totalActual,
+    totalExpected: e.totalExpected,
+    bills: e.bills.size,
+  })).sort((a,b) => b.totalActual - a.totalActual);
+  periodCache[periodMode] = { label, rows, loadedAt: Date.now() };
+}
+
 function statusOf(expected, actual) {
   if (expected <= 0) return 'none';
   if (actual === 0) return 'missing';
@@ -616,6 +687,74 @@ async function switchPeriod(mode) {
   periodMode = mode;
   updateBanner();
   await loadData();  // reload DS_DC (same) + PDDT (same) + Promo (different source)
+  if (sectionView === 'summary') renderSummary();
+}
+
+function switchSectionView(v) {
+  sectionView = v;
+  document.querySelectorAll('.sec-tab').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+  document.getElementById('detailView').style.display = (v === 'detail') ? '' : 'none';
+  document.getElementById('summaryView').style.display = (v === 'summary') ? '' : 'none';
+  if (v === 'summary') renderSummary();
+}
+
+function renderSummary() {
+  renderSummaryFor('current', 'sumCurrentBody', 'sumCurrentCount');
+  renderSummaryFor('last', 'sumLastBody', 'sumLastCount');
+}
+
+function renderSummaryFor(mode, bodyId, countId) {
+  const body = document.getElementById(bodyId);
+  const countEl = document.getElementById(countId);
+  const cache = periodCache[mode];
+  const modeLbl = mode === 'current' ? 'เดือนนี้' : 'เดือนที่แล้ว';
+  if (!cache) {
+    countEl.textContent = 'ยังไม่ได้โหลด';
+    body.innerHTML = `<div class="sum-empty">
+      ยังไม่ได้โหลดข้อมูลของ${modeLbl}<br>
+      <button onclick="loadOtherPeriodForSummary('${mode}')">โหลด${modeLbl}เลย</button>
+    </div>`;
+    return;
+  }
+  const rows = cache.rows;
+  countEl.textContent = `${cache.label} • ${fmtInt(rows.length)} ชนิด`;
+  if (!rows.length) {
+    body.innerHTML = `<div class="sum-empty">ไม่มีของแถมที่ให้ครบในช่วงนี้</div>`;
+    return;
+  }
+  const totalActual = rows.reduce((s,r)=>s+r.totalActual,0);
+  const totalBills = rows.reduce((s,r)=>s+r.bills,0);
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  body.innerHTML = `
+    <div class="tbl-wrap" style="max-height:60vh">
+      <table class="tbl" style="min-width:auto">
+        <thead>
+          <tr>
+            <th>ชื่อของแถม</th>
+            <th style="text-align:right">ให้จริง (EA)</th>
+            <th style="text-align:right">บิล</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(r=>`<tr>
+            <td>${esc(r.gift)}</td>
+            <td class="num" style="color:var(--success);font-weight:700">${fmtInt(r.totalActual)}</td>
+            <td class="num">${fmtInt(r.bills)}</td>
+          </tr>`).join('')}
+          <tr style="background:rgba(201,168,76,.08);font-weight:700;border-top:2px solid var(--gold)">
+            <td>รวม</td>
+            <td class="num" style="color:var(--success)">${fmtInt(totalActual)}</td>
+            <td class="num">${fmtInt(totalBills)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>`;
+}
+
+async function loadOtherPeriodForSummary(mode) {
+  if (mode === periodMode) return;
+  // ใช้ switchPeriod ปกติ — จะโหลดใหม่ + cache แล้วกลับมา render summary
+  await switchPeriod(mode);
 }
 
 async function loadData() {
@@ -648,6 +787,8 @@ async function loadData() {
     lastMonthData.forEach(r => { r._gifts = findPromosForLine(r); });
     // Aggregate expected+actual ต่อบิลต่อ SKU แถม (แบบ pool)
     computeBillGiftSummary();
+    // Cache สรุปสำหรับ tab เปรียบเทียบข้ามเดือน
+    cachePeriodSummary();
     applyFilters();
     showToast(`โหลดสำเร็จ: ${fmtInt(lastMonthData.length)} รายการ / PDDT ${fmtInt(pddtMap.size)} / โปร ${fmtInt(promos.length)} / เซลล์ ${fmtInt(userRoleMap.size)} ✓`,'success');
   } catch(e) {
