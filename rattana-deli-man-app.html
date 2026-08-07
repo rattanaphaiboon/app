@@ -916,7 +916,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.226';
+const APP_VERSION='3.227';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1130,7 +1130,47 @@ const CACHE_TTL_LONG=24*60*60*1000;       // 24 ชม. — ลูกค้า/�
 const CACHE_TTL_SYNC=30*1000;             // 30 วิ — งานอนุมัติ (ต้อง fresh บ่อย แต่ throttle กันโหลดถี่)
 // v3.36: bump คีย์ cache รายละเอียดบิล → ทิ้ง cache เก่าที่ค้าง/ว่างทุกเครื่อง โหลดใหม่รอบเดียว (แก้ CN ไม่ดึงรายการสินค้าในบิล)
 const BILLDETAILS_CACHE_KEY='billDetails_v359dsdc';   // v3.59: bump — เปลี่ยนต้นทางเป็น DS_DC (ดึงเฉพาะร้าน/บิล) ทิ้ง cache ก้อนเก่า
-const PRODUCTS_CACHE_KEY='products_v348img';   // v3.48: bump cache → เก็บรูปสินค้า (SKU_USAGE) + index บาร์โค้ดสำหรับสแกน
+const PRODUCTS_CACHE_KEY='products_v3227';   // ★ v3.227: bump → รูปแบบใหม่ (packed array + เก็บใน IndexedDB)
+const PRODUCTS_CACHE_KEY_OLD='products_v348img';   // คีย์เก่าใน localStorage — ลบทิ้งคืนพื้นที่ (ของใหญ่เกินจนแคชไม่เคยติด)
+/* ★ v3.227: แคชสินค้าใน IndexedDB — localStorage มีเพดาน ~5MB แต่แคชสินค้าโตเป็น ~2.9MB
+   → setItem เงียบๆ ไม่ติด = เข้าหน้ารับคืน/CN ทีต้องโหลดชีทสินค้า 3.5MB ใหม่ทุกครั้ง (ต้นเหตุ "แอปช้า")
+   IndexedDB เก็บ object ตรงๆ ไม่ต้อง JSON.stringify/parse ก้อนใหญ่บน main thread ด้วย */
+const IDB_NAME='dman_cache', IDB_STORE='kv';
+function idbOpen_(){
+  return new Promise(function(res,rej){
+    try{
+      if(!('indexedDB' in window)) return rej(new Error('no idb'));
+      const rq=indexedDB.open(IDB_NAME,1);
+      rq.onupgradeneeded=function(){ try{ rq.result.createObjectStore(IDB_STORE); }catch(e){} };
+      rq.onsuccess=function(){ res(rq.result); };
+      rq.onerror=function(){ rej(rq.error); };
+    }catch(e){ rej(e); }
+  });
+}
+async function idbGet_(key){
+  try{
+    const db=await idbOpen_();
+    return await new Promise(function(res,rej){
+      const tx=db.transaction(IDB_STORE,'readonly');
+      const rq=tx.objectStore(IDB_STORE).get(key);
+      rq.onsuccess=function(){ res(rq.result||null); };
+      rq.onerror=function(){ rej(rq.error); };
+    });
+  }catch(e){ return null; }
+}
+async function idbSet_(key,val){
+  try{
+    const db=await idbOpen_();
+    await new Promise(function(res,rej){
+      const tx=db.transaction(IDB_STORE,'readwrite');
+      tx.objectStore(IDB_STORE).put(val,key);
+      tx.oncomplete=function(){ res(); };
+      tx.onerror=function(){ rej(tx.error); };
+      tx.onabort=function(){ rej(tx.error||new Error('abort')); };
+    });
+    return true;
+  }catch(e){ return false; }
+}
 function cacheKey(key){ return 'rdm_cache_'+key; }
 function getCachedSheet(key,ttl){
   try{
@@ -1346,9 +1386,37 @@ function afterProductsLoaded_(){   // v2.14: โหลดสินค้าเ�
   state._prodByCode=null;   // v3.48: reset index บาร์โค้ด → rebuild เมื่อสแกนครั้งถัดไป
   try{ if(state.currentTab==='sec-returns') renderReturnItems(); }catch(e){}
 }
+/* ★ v3.227: แคชสินค้ารูปแบบ "packed array" — ตัดชื่อคีย์ทิ้งทั้งหมด + ตัด prefix ลิงก์ Drive
+   2.88MB → ~2.0MB และเก็บลง IndexedDB ได้เลย (ไม่ต้อง stringify) */
+const PROD_IMG_PRE='https://drive.google.com/uc?export=download&id=';
+function packProducts_(list){
+  return (list||[]).map(p=>{
+    let im=p.image||'';
+    if(im&&im.indexOf(PROD_IMG_PRE)===0) im=im.slice(PROD_IMG_PRE.length);
+    return [p.name||0, im||0,
+      p.codes.EA||0,p.codes.PA||0,p.codes.BP||0,p.codes.CS||0,
+      p.units.EA||0,p.units.PA||0,p.units.BP||0,p.units.CS||0,
+      p.prices.EA||0,p.prices.PA||0,p.prices.BP||0,p.prices.CS||0,
+      p.s03.EA||0,p.s03.PA||0,p.s03.BP||0,p.s03.CS||0];
+  });
+}
+function unpackProducts_(arr){
+  return (arr||[]).map(a=>{
+    let im=a[1]||'';
+    if(im&&String(im).indexOf('http')!==0) im=PROD_IMG_PRE+im;   // คืน prefix ที่ตัดไป
+    return {
+      name:a[0]||'', image:im,
+      codes:{EA:a[2]||'',PA:a[3]||'',BP:a[4]||'',CS:a[5]||''},
+      units:{EA:a[6]||'',PA:a[7]||'',BP:a[8]||'',CS:a[9]||''},
+      prices:{EA:a[10]||0,PA:a[11]||0,BP:a[12]||0,CS:a[13]||0},
+      s03:{EA:a[14]||0,PA:a[15]||0,BP:a[16]||0,CS:a[17]||0},
+    };
+  });
+}
 /* ★ v3.209: คลายแคชสินค้าแบบบีบ (n/i/cXX/uXX/pXX/sXX) กลับเป็นรูปแบบเต็มที่โค้ดอื่นใช้ · รองรับแคชรูปแบบเก่าด้วย */
 function expandProducts_(arr){
   if(!Array.isArray(arr)||!arr.length) return arr||[];
+  if(Array.isArray(arr[0])) return unpackProducts_(arr);   // ★ v3.227: packed array
   if(arr[0]&&arr[0].name!==undefined) return arr;   // แคชรูปแบบเดิม (เต็ม) — ใช้ได้เลย
   return arr.map(o=>({
     name:o.n||'', image:o.i||'',
@@ -1358,9 +1426,19 @@ function expandProducts_(arr){
     s03:{EA:o.sEA||0,PA:o.sPA||0,BP:o.sBP||0,CS:o.sCS||0},
   }));
 }
+let _loadingProducts=null;   // ★ v3.227: promise ที่กำลังโหลดอยู่ (กันโหลดซ้อน)
 async function loadProducts(){
   if(state.products.length) return;
-  // v2.53: 24h cache — สินค้าเปลี่ยนน้อย
+  if(_loadingProducts){ try{ await _loadingProducts; }catch(e){} return; }   // ★ v3.227: กันยิงซ้อน (หลายที่เรียกพร้อมกัน = โหลด 3.5MB หลายรอบ)
+  _loadingProducts=(async function(){
+  // ★ v3.227: แคชอยู่ใน IndexedDB (24 ชม.) — ไม่ต้องโหลดชีท 3.5MB ใหม่ทุกครั้งที่เข้าหน้ารับคืน/CN
+  try{
+    const c=await idbGet_(PRODUCTS_CACHE_KEY);
+    if(c&&c.ts&&Array.isArray(c.data)&&c.data.length&&(Date.now()-c.ts)<CACHE_TTL_LONG){
+      state.products=expandProducts_(c.data); afterProductsLoaded_(); return;
+    }
+  }catch(e){}
+  // v2.53: 24h cache — สินค้าเปลี่ยนน้อย (เครื่องที่ IndexedDB ใช้ไม่ได้ ยังใช้ localStorage เหมือนเดิม)
   const cached=getCachedSheet(PRODUCTS_CACHE_KEY,CACHE_TTL_LONG);
   if(cached){ state.products=expandProducts_(cached); afterProductsLoaded_(); return; }
   try{
@@ -1404,25 +1482,20 @@ async function loadProducts(){
         },
       };
     }).filter(Boolean);
-    // ★ v3.209: แคชแบบบีบ — ตัดช่องว่าง/ราคา 0 ทิ้งก่อนเก็บ (เก็บของใหญ่ในเครื่องเสี่ยงเบียดพื้นที่งาน/คิวส่ง)
-    //   ถ้าบีบแล้วยังเกิน 1.5 MB = ไม่แคช (ยอมโหลดใหม่ ดีกว่าทำให้บันทึกงานไม่ได้)
+    // ★ v3.227: เก็บแคชลง IndexedDB (packed array) — ไม่กินโควตา localStorage และไม่ต้อง stringify ก้อนใหญ่
+    //   ถ้าเครื่องไม่มี IndexedDB ค่อย fallback ไป localStorage (เฉพาะเมื่อเล็กพอ ไม่งั้นเบียดที่ของงาน/คิวส่ง)
     try{
-      const slim=state.products.map(p=>{
-        const o={n:p.name};
-        if(p.image) o.i=p.image;
-        ['EA','PA','BP','CS'].forEach(k=>{
-          if(p.codes[k]) o['c'+k]=p.codes[k];
-          if(p.units[k]) o['u'+k]=p.units[k];
-          if(p.prices[k]) o['p'+k]=p.prices[k];
-          if(p.s03[k]) o['s'+k]=p.s03[k];
-        });
-        return o;
-      });
-      const js=JSON.stringify(slim);
-      if(js.length<1500000) setCachedSheet(PRODUCTS_CACHE_KEY,slim);
+      const packed=packProducts_(state.products);
+      const ok=await idbSet_(PRODUCTS_CACHE_KEY,{ts:Date.now(),data:packed});
+      if(!ok){
+        const js=JSON.stringify(packed);
+        if(js.length<1500000) setCachedSheet(PRODUCTS_CACHE_KEY,packed);
+      }
     }catch(e){}
     afterProductsLoaded_();
   }catch(e){ console.warn('loadProducts failed:',e); }
+  })();
+  try{ await _loadingProducts; }catch(e){} finally { _loadingProducts=null; }
 }
 
 function afterBillDetailsLoaded_(){   // v2.15: โหลดรายละเอียดเสร็จ → เติมตัวเลือกเลขที่เอกสาร
@@ -10475,8 +10548,10 @@ async function bootApp(){
     // ลูกค้า/สินค้า cache (24h) — เอาจาก localStorage มา hydrate state ให้ทันที (ไม่รอ fetch)
     const cachedCust=getCachedSheet('customers_v3155',CACHE_TTL_LONG);   // v3.205: แก้คีย์ผิด (เดิม customers_v351 → พลาด cache ทุกครั้ง ต้องรอโหลดใหม่ทุกเปิดแอป)
     if(cachedCust) state.customers=cachedCust;
+    // ★ v3.227: แคชสินค้าย้ายไป IndexedDB แล้ว (โหลดตอนเข้าหน้าที่ใช้จริง) — ตรงนี้เหลือไว้รองรับแคชเก่าใน localStorage
     const cachedProd=getCachedSheet(PRODUCTS_CACHE_KEY,CACHE_TTL_LONG);
-    if(cachedProd){ state.products=cachedProd; }
+    if(cachedProd){ state.products=expandProducts_(cachedProd); }   // ★ v3.227: ต้องคลายรูปแบบก่อน (เดิมยัดดิบๆ = ชื่อ/ราคาสินค้าเพี้ยน)
+    try{ localStorage.removeItem(cacheKey(PRODUCTS_CACHE_KEY_OLD)); }catch(e){}   // ★ v3.227: ลบแคชสินค้าคีย์เก่า คืนพื้นที่ให้งาน/คิวส่ง
     const cachedBD=getCachedSheet(BILLDETAILS_CACHE_KEY,CACHE_TTL_LONG);
     if(cachedBD && Object.keys(cachedBD).length) state.billDetails=cachedBD;   // v3.36: ข้าม cache ว่าง
     const cachedSS=getCachedSheet('salesStaff_v3120',CACHE_TTL_LONG);
@@ -10706,6 +10781,15 @@ async function openDiag_(){
   const jobs=(state.jobs||[]), bills=jobs.reduce((s,j)=>s+((j.bills||[]).length),0);
   const mb=n=>(n/1048576).toFixed(1)+' MB';
   const row=(k,v)=>`<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)"><span style="flex:1;color:var(--muted);font-size:12px">${k}</span><span style="font-weight:700;font-size:12px;text-align:right">${esc(String(v))}</span></div>`;
+  // ★ v3.227: สถานะแคชสินค้าใน IndexedDB — ถ้าขึ้น "ไม่มี" แปลว่าต้องโหลดชีท 3.5MB ใหม่ทุกครั้ง (ต้นเหตุแอปช้า)
+  let _diagProdCache='ไม่มี ❌';
+  try{
+    const _pc=await idbGet_(PRODUCTS_CACHE_KEY);
+    if(_pc&&Array.isArray(_pc.data)){
+      const _age=Math.round((Date.now()-(_pc.ts||0))/3600000);
+      _diagProdCache='✓ '+_pc.data.length+' รายการ ('+_age+' ชม.)';
+    }
+  }catch(e){ _diagProdCache='ใช้ไม่ได้'; }
   const errs=_errLog.slice(0,8).map(e=>`<div style="font-size:11px;color:var(--danger);padding:4px 0;border-bottom:1px dashed var(--border);word-break:break-word">[${new Date(e.t).toLocaleTimeString('th-TH')}] ${esc(e.msg)}</div>`).join('')||'<div class="txt-xs txt-muted">ไม่มี error ✓</div>';
   $('billDetailTitle').textContent='🩺 ตรวจสภาพเครื่อง';
   $('billDetailBody').innerHTML=`
@@ -10719,6 +10803,7 @@ async function openDiag_(){
     ${row('งานในเครื่อง',jobs.length+' ชุด / '+bills+' บิล')}
     ${row('ร้านค้าที่โหลด',(state.customers||[]).length)}
     ${row('สินค้าที่โหลด',(state.products||[]).length)}
+    ${row('แคชสินค้า (IndexedDB)',_diagProdCache)}
     ${row('รอเข้าชีท (คิวค้าง)',outboxCount()+' รายการ')}
     ${row('เครื่อง',(navigator.userAgent||'').slice(0,60))}
     <div style="margin-top:10px;font-weight:700;font-size:12px">⚠️ ข้อผิดพลาดล่าสุด</div>${errs}
