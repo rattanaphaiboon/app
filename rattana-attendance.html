@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v4.87</title>
+<title>HR Rattana v4.88</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3394,7 +3394,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '9.8';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '9.9';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -3479,7 +3479,8 @@ function bestFaceDist_(probe, descList) {
 /* แตก descriptor ที่อ่านจากชีท: รองรับทั้ง [128 ตัวเลข] (เก่า) และ [[128],[128]] (ใหม่ 2 เทมเพลต) */
 function parseDescriptors_(raw) {
   try {
-    const arr = JSON.parse(raw || 'null');
+    // v9.9: API คืนเป็น array จริงอยู่แล้ว (backend JSON.parse ให้) — JSON.parse ซ้ำจะพัง ต้องเช็คชนิดก่อน
+    const arr = Array.isArray(raw) ? raw : JSON.parse(raw || 'null');
     if (!Array.isArray(arr) || !arr.length) return [];
     if (Array.isArray(arr[0])) return arr.map(a => new Float32Array(a));  // หลายเทมเพลต
     return [new Float32Array(arr)];                                        // เทมเพลตเดียว (เก่า)
@@ -3507,8 +3508,10 @@ let selectedMember = null;
    ============================================================ */
 const LS = {
   get: (k, d) => { try { const v = localStorage.getItem('rfc3_'+k); return v ? JSON.parse(v) : d; } catch { return d; } },
-  set: (k, v) => localStorage.setItem('rfc3_'+k, JSON.stringify(v)),
-  del: (k) => localStorage.removeItem('rfc3_'+k),
+  // v9.9: กัน QuotaExceededError (รูป/descriptor เยอะ) — เก็บไม่ลงให้ทำงานต่อ ไม่ใช่แอปล่มทั้งตัว
+  set: (k, v) => { try { localStorage.setItem('rfc3_'+k, JSON.stringify(v)); return true; }
+                   catch (e) { console.warn('[LS] เก็บ ' + k + ' ไม่ลง (เต็ม?)', e && e.name); return false; } },
+  del: (k) => { try { localStorage.removeItem('rfc3_'+k); } catch (_) {} },
 };
 function loadAll() {
   locations = LS.get('locations', DEFAULT_LOCATIONS);
@@ -3930,12 +3933,15 @@ async function ensurePttRoster_() {
     const res = await callAppsScript('getPTTStaff', { khlang: currentUser.khlang || '', empId: currentUser.empId, all: 1 });
     _pttRoster = (res.staff || []).map(x => ({ empId: empKey_(x.empId), name: x.name || '', dept: x.dept || '', branch: x.saka || res.saka || '' }));
     currentUser.pttPosition = res.myPosition || '';
+  } catch (_) { _pttRosterLoaded = false; return; }   // เน็ตล่ม/ไม่ใช่ PTT → ลองใหม่รอบหน้า
+  // v9.9: ส่วน render แยกจาก fetch — render พังต้องไม่ทำให้ roster ถูกดึงซ้ำวนไปเรื่อยๆ
+  try {
     if (_pttRoster.length && (isPTTManager() || currentUser.role === 'supervisor')) {
       buildTabs();                      // เปิดแท็บ ทีม/Kiosk ให้ผู้จัดการ PTT
       buildTeamFromSheet();             // ลูกทีม + หน้า จากถังข้อมูล
       renderTeamList(); renderDashboard(); fillKioskBranches();
     }
-  } catch (_) { _pttRosterLoaded = false; }   // เน็ตล่ม/ไม่ใช่ PTT → ลองใหม่รอบหน้า
+  } catch (e) { console.warn('[ptt] render หลังโหลด roster พัง', e); }
 }
 
 /* For HR: pass selectedSupervisorName explicitly. For supervisor/employee: uses currentUser.name */
@@ -4114,6 +4120,7 @@ function adoptMyFace_(tag) {
   if (myFace.photo) LS.set('facePhoto', myFace.photo);
   if (myFace.registeredAt) LS.set('faceRegisteredAt', new Date(myFace.registeredAt).getTime());
   LS.set('faceDescriptor', Array.from(myFace.descriptor));
+  LS.set('faceOwner', empKey_(myFace.empId));   // v9.9: จำเจ้าของหน้า
   if (myFace.descriptor2) LS.set('faceDescriptor2', Array.from(myFace.descriptor2)); else LS.del('faceDescriptor2');
   console.log('[face] ' + tag + ': โหลดใบหน้าตัวเองจาก FaceData แล้ว (' + empKey_(myFace.empId) + ')');
   try { renderFaceReg(); evaluateAction(); } catch (_) {}
@@ -4541,7 +4548,7 @@ async function refreshUsersSheet() {
     _myTeamCache = null; _officeRefCache = null;   // v9.8: ดึงรายชื่อใหม่
     const ok = await loadUsersSheet();
     if (!ok) { toast('โหลดไม่สำเร็จ', 'error'); return; }
-    if (currentUser?.role === 'supervisor') {
+    if (currentUser?.role === 'supervisor' || isPTTManager()) {   // v9.9: ผจก. PTT ด้วย
       buildTeamFromSheet();
     } else if (currentUser?.role === 'hr') {
       const sel = document.getElementById('hrSupervisorSelect');
@@ -4580,7 +4587,7 @@ async function refreshFaceDataSheet() {
     }
     if (!ok) ok = await loadFaceDataSheet();
     if (!ok) { toast('โหลดไม่สำเร็จ', 'warning'); return; }
-    if (currentUser?.role === 'supervisor') {
+    if (currentUser?.role === 'supervisor' || isPTTManager()) {   // v9.9: ผจก. PTT ด้วย
       buildTeamFromSheet();
     } else if (currentUser?.role === 'hr') {
       const sel = document.getElementById('hrSupervisorSelect');
@@ -4598,6 +4605,7 @@ function exportFaceDataCsv() {
     empId: m.empId,
     name: m.name,
     descriptor: m.descriptor,
+    descriptor2: m.descriptor2 || null,   // v9.9: อย่าทิ้งเทมเพลตยิ้มตอน export
     photo: m.photo,
     registeredAt: m.registeredAt,
     registeredBy: m.registeredBy,
@@ -4611,6 +4619,7 @@ function exportFaceDataCsv() {
         empId: currentUser.empId,
         name: currentUser.name,
         descriptor: registeredDescriptor,
+        descriptor2: registeredDescriptor2 || null,   // v9.9
         photo: LS.get('facePhoto', null),
         registeredAt: LS.get('faceRegisteredAt', null),
         registeredBy: currentUser.empId, // ตัวเองลงให้ตัวเอง
@@ -4625,7 +4634,9 @@ function exportFaceDataCsv() {
 
   const csvLines = ['empId,name,descriptor,photo,registeredAt,registeredBy'];
   items.forEach(m => {
-    const desc = JSON.stringify(Array.from(m.descriptor).map(n => +n.toFixed(5)));
+    // v9.9: มี 2 เทมเพลต → เก็บเป็น [[...],[...]] (parseDescriptors_ อ่านได้ทั้งสองแบบ)
+    const r5 = a => Array.from(a).map(n => +n.toFixed(5));
+    const desc = JSON.stringify(m.descriptor2 ? [r5(m.descriptor), r5(m.descriptor2)] : r5(m.descriptor));
     const photo = m.photo || '';
     const at = m.registeredAt ? new Date(m.registeredAt).toISOString() : '';
     const by = m.registeredBy || currentUser.empId || '';
@@ -4726,7 +4737,7 @@ function checkSession() {
     currentUser = JSON.parse(s);
     document.getElementById('loginScreen').style.display = 'none';
     document.getElementById('appScreen').style.display = 'block';
-    if (currentUser.role === 'supervisor') buildTeamFromSheet();
+    if (currentUser.role === 'supervisor' || isPTTManager()) buildTeamFromSheet();   // v9.9: ผจก. PTT ด้วย
     else if (currentUser.role === 'hr') team = [];
     initApp();
   } else {
@@ -5019,23 +5030,29 @@ function updateFaceCheck(info) {
 let _frState = null;
 
 async function registerOwnFace() {
+  if (_frState) return;   // v9.9: กันกดซ้ำ — เปิดค้างอยู่แล้ว
   if (faceRegLocked_()) { toast('🔒 ลงทะเบียนใบหน้าได้ครั้งเดียว — ติดต่อ HR หากต้องแก้ไข', 'warning'); return; }   // v9.4
   if (!faceapiReady) { toast('โมเดลยังไม่พร้อม — รอสักครู่แล้วลองใหม่', 'warning'); return; }
   const ov = document.getElementById('faceRegOverlay');
   if (!ov) return;
-  _frState = { step: 1, shot1: null, shot2: null, stream: null, busy: false };
+  const st = { step: 1, shot1: null, shot2: null, stream: null, busy: false };
+  _frState = st;
   ov.style.display = 'flex';
   frRender_();
   try {
-    _frState.stream = await navigator.mediaDevices.getUserMedia({
+    const stream = await navigator.mediaDevices.getUserMedia({
       audio: false, video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 640 } }
     });
+    if (_frState !== st) { try { stream.getTracks().forEach(t => t.stop()); } catch (_) {} return; }   // v9.9: กดยกเลิกไประหว่างขอสิทธิ์ → ปิด stream ไม่ให้กล้องค้าง
+    st.stream = stream;
     const v = document.getElementById('frVideo');
-    v.srcObject = _frState.stream;
+    v.srcObject = stream;
     v.play().catch(() => {});    // อย่า await — ค้างบน iOS (บทเรียน v7.2)
   } catch (e) {
-    closeFaceRegCamera();
-    toast('เปิดกล้องไม่ได้ — อนุญาตการใช้กล้องในเบราว์เซอร์ก่อน', 'error');
+    if (_frState === st) {
+      closeFaceRegCamera();
+      toast('เปิดกล้องไม่ได้ — อนุญาตการใช้กล้องในเบราว์เซอร์ก่อน', 'error');
+    }
   }
 }
 
@@ -5075,10 +5092,12 @@ function frSnapshot_() {
 
 async function faceRegCapture() {
   const s = _frState; if (!s || s.busy) return;
-  s.busy = true;
   const btn = document.getElementById('frCaptureBtn');
+  if (!btn) return;                          // v9.9: DOM หาย — อย่าค้าง busy
+  s.busy = true;
   const ring = document.getElementById('frCamRing');
   btn.disabled = true;
+  const stepAtPress = s.step;                // v9.9: จำ step ตอนกด — กันกด "เริ่มใหม่" ระหว่างตรวจแล้วช็อตยิ้มหลุดไปเป็นช็อต 1
   try {
     // ── ชัตเตอร์: เก็บภาพทันทีที่กด ──
     const snap = frSnapshot_();
@@ -5088,7 +5107,7 @@ async function faceRegCapture() {
     btn.textContent = '⏳ กำลังตรวจใบหน้า...';
     const det = await faceapi.detectSingleFace(snap.canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }))
       .withFaceLandmarks().withFaceDescriptor();
-    if (!_frState) return;                  // ผู้ใช้กดยกเลิกระหว่างตรวจ
+    if (_frState !== s || s.step !== stepAtPress) return;   // v9.9: ยกเลิก/เริ่มใหม่ระหว่างตรวจ → ทิ้งช็อตนี้
     if (!det) { toast('รูปนี้จับใบหน้าไม่ได้ — จัดหน้าให้เต็มวงกลมแล้วกดถ่ายใหม่', 'error'); return; }
     const shot = { descriptor: det.descriptor, photo: snap.photo };
     if (s.step === 1) {
@@ -5125,6 +5144,7 @@ async function frSave_() {
   if (s.shot2) LS.set('faceDescriptor2', Array.from(s.shot2.descriptor)); else LS.del('faceDescriptor2');
   LS.set('facePhoto', s.shot1.photo);
   LS.set('faceRegisteredAt', Date.now());
+  LS.set('faceOwner', empKey_(currentUser && currentUser.empId));   // v9.9: จำว่าหน้าใน LS เป็นของใคร (เครื่องใช้ร่วมกัน)
   const photo1 = s.shot1.photo, photo2 = s.shot2 ? s.shot2.photo : '';
   const d1 = s.shot1.descriptor, d2 = s.shot2 ? s.shot2.descriptor : null;
   closeFaceRegCamera();
@@ -5149,11 +5169,33 @@ async function frSave_() {
         toast(e.message, 'warning');
         try { await loadFaceDataViaApi(); } catch (_) {}
       } else {
-        toast('ลงทะเบียน ✓ · ⚠️ sync ล้มเหลว: ' + e.message, 'warning');
+        LS.set('facePendingSync', 1);   // v9.9: เน็ตล่ม — ไว้ส่งขึ้นระบบใหม่ตอนเปิดแอปครั้งหน้า
+        toast('ลงทะเบียน ✓ · ⚠️ ยังไม่ขึ้นระบบ (จะส่งใหม่อัตโนมัติ): ' + e.message, 'warning');
       }
     } finally { hideSpinner(); }
   } else {
+    if (config.appsScriptUrl) LS.set('facePendingSync', 1);
     toast('ลงทะเบียนสำเร็จ ✓ (เก็บในเครื่อง)', 'success');
+  }
+}
+
+/* v9.9: หน้าเคยลงทะเบียนตอนเน็ตล่ม (ค้างในเครื่อง) → ส่งขึ้นระบบให้จบ */
+async function retryFaceSync_() {
+  if (!LS.get('facePendingSync', null)) return;
+  if (!config.appsScriptUrl || !currentUser?.empId || !registeredDescriptor) { return; }
+  if (LS.get('faceOwner', null) !== empKey_(currentUser.empId)) return;   // หน้าในเครื่องไม่ใช่ของคนนี้
+  try {
+    await apiRegisterFace({
+      empId: currentUser.empId, name: currentUser.name,
+      descriptor: registeredDescriptor, descriptor2: registeredDescriptor2,
+      photo: LS.get('facePhoto', '') || '', photo2: '',
+      registeredBy: currentUser.empId,
+    });
+    LS.del('facePendingSync');
+    toast('☁️ ส่งใบหน้าที่ค้างขึ้นระบบแล้ว ✓', 'success');
+  } catch (e) {
+    if (String(e.message).indexOf('🔒') >= 0) { LS.del('facePendingSync'); try { await loadFaceDataViaApi(); } catch (_) {} }
+    // อื่นๆ: เก็บธงไว้ลองรอบหน้า
   }
 }
 
@@ -5164,13 +5206,22 @@ function closeFaceRegCamera() {
   const v = document.getElementById('frVideo'); if (v) v.srcObject = null;
   const ov = document.getElementById('faceRegOverlay'); if (ov) ov.style.display = 'none';
 }
-function clearOwnFace() {
+async function clearOwnFace() {
   if (!isHROnly()) { toast('🔒 ลบใบหน้าได้เฉพาะ HR — ติดต่อฝ่ายบุคคล', 'warning'); return; }   // v9.4
   if (!confirm('ลบใบหน้าที่ลงทะเบียน?')) return;
+  // v9.9: ลบถึง FaceData ในเซิร์ฟเวอร์ด้วย — ไม่งั้นโหลดรอบหน้าหน้าเดิมถูกกู้กลับ + เจ้าตัวลงใหม่ไม่ได้ (ติดล็อก)
+  if (config.appsScriptUrl && currentUser?.empId) {
+    showSpinner('กำลังลบใบหน้าออกจากระบบ...');
+    try { await callAppsScript('deleteFace', { empId: currentUser.empId }); }
+    catch (e) { hideSpinner(); toast('❌ ลบในระบบไม่สำเร็จ: ' + e.message, 'error'); return; }
+    hideSpinner();
+  }
   registeredDescriptor = null;
   registeredDescriptor2 = null;   // v9.1
-  LS.del('faceDescriptor'); LS.del('faceDescriptor2'); LS.del('facePhoto'); LS.del('faceRegisteredAt');
-  renderFaceReg(); toast('ลบแล้ว', 'info');
+  LS.del('faceDescriptor'); LS.del('faceDescriptor2'); LS.del('facePhoto'); LS.del('faceRegisteredAt'); LS.del('faceOwner');
+  remoteFaceData = remoteFaceData.filter(f => empKey_(f.empId) !== empKey_(currentUser.empId));
+  LS.set('remoteFaceData', remoteFaceData.map(f => ({...f, descriptor: f.descriptor ? Array.from(f.descriptor) : null, descriptor2: f.descriptor2 ? Array.from(f.descriptor2) : null})));
+  renderFaceReg(); toast('ลบแล้ว ✓ (ลบในระบบด้วย)', 'info');
 }
 /* v9.4: ลงทะเบียนหน้าได้ครั้งเดียว — ลบ/แก้ได้เฉพาะ HR (กันสวมหน้าคนอื่น) */
 function faceRegLocked_() {
@@ -5981,12 +6032,13 @@ async function saveMember() {
   if (!editingMember) { toast('ไม่พบข้อมูล', 'error'); return; }
   if (!capturedDescriptor) { toast('จับใบหน้าก่อน', 'warning'); return; }
   const m = team.find(x => x.empId === editingMember.empId);
-  if (m) {
-    m.descriptor = capturedDescriptor;
-    m.photo = capturedPhoto;
-    m.registeredAt = Date.now();
-    m.registeredBy = currentUser.empId;
-  }
+  if (!m) { closeAddCamera(); closeModal('modalMember'); toast('ไม่พบสมาชิกในทีมแล้ว — รีเฟรชทีมก่อน', 'error'); return; }   // v9.9: team ถูก rebuild ระหว่างเปิดโมดัล
+  const prev = { descriptor: m.descriptor, descriptor2: m.descriptor2, photo: m.photo, registeredAt: m.registeredAt, registeredBy: m.registeredBy };   // v9.9: ไว้ revert ถ้า backend ปฏิเสธ
+  m.descriptor = capturedDescriptor;
+  m.descriptor2 = null;   // v9.9: ลงใหม่ 1 ช็อต — ทิ้งเทมเพลตยิ้มเก่า (ไม่งั้นหน้าคนเก่ายังแมตช์ผ่าน)
+  m.photo = capturedPhoto;
+  m.registeredAt = Date.now();
+  m.registeredBy = currentUser.empId;
   saveTeam();
   closeAddCamera();
   closeModal('modalMember');
@@ -6005,7 +6057,15 @@ async function saveMember() {
       });
       toast(`✓ ${m.name} · ☁️ Sheet`, 'success');
     } catch (e) {
-      toast(`✓ ${m.name} · ⚠️ Sheet sync ล้มเหลว`, 'warning');
+      if (String(e.message).indexOf('🔒') >= 0) {
+        // v9.9: backend ล็อกไว้ (คนนี้มีหน้าในระบบแล้ว) → คืนค่าเดิม อย่าให้เครื่องนี้ถือหน้าผิดคน
+        Object.assign(m, prev);
+        saveTeam(); renderTeamList(); renderDashboard();
+        toast(e.message, 'warning');
+        try { await loadFaceDataViaApi(); } catch (_) {}
+      } else {
+        toast(`✓ ${m.name} · ⚠️ Sheet sync ล้มเหลว`, 'warning');
+      }
     } finally { hideSpinner(); }
   } else {
     toast(`ลงทะเบียนใบหน้า ${m.name} แล้ว ✓ (เก็บในเครื่อง)`, 'success');
@@ -6113,14 +6173,23 @@ function onHrSupervisorChange() {
   toast(`โหลดทีม: ${team.length} คน`, 'success');
 }
 
-function clearMemberFace(empId) {
+async function clearMemberFace(empId) {
   if (!isHROnly()) { toast('🔒 ลบใบหน้าได้เฉพาะ HR', 'warning'); return; }   // v9.4
   const m = team.find(x => x.empId === empId);
   if (!m) return;
   if (!confirm(`ลบใบหน้าของ ${m.name}?`)) return;
-  m.descriptor = null; m.photo = null; m.registeredAt = null; m.registeredBy = null;
+  // v9.9: ลบถึง FaceData ในเซิร์ฟเวอร์ด้วย — ไม่งั้น refresh รอบหน้าหน้าเดิมถูกกู้กลับ + เจ้าตัวลงใหม่ไม่ได้ (ติดล็อก)
+  if (config.appsScriptUrl) {
+    showSpinner('กำลังลบใบหน้าออกจากระบบ...');
+    try { await callAppsScript('deleteFace', { empId: String(empId) }); }
+    catch (e) { hideSpinner(); toast('❌ ลบในระบบไม่สำเร็จ: ' + e.message, 'error'); return; }
+    hideSpinner();
+  }
+  m.descriptor = null; m.descriptor2 = null; m.photo = null; m.registeredAt = null; m.registeredBy = null;
+  remoteFaceData = remoteFaceData.filter(f => empKey_(f.empId) !== empKey_(empId));
+  LS.set('remoteFaceData', remoteFaceData.map(f => ({...f, descriptor: f.descriptor ? Array.from(f.descriptor) : null, descriptor2: f.descriptor2 ? Array.from(f.descriptor2) : null})));
   saveTeam(); renderTeamList(); renderDashboard();
-  toast('ลบแล้ว', 'info');
+  toast('ลบแล้ว ✓ (ลบในระบบด้วย)', 'info');
 }
 
 function openRegisterMemberFace(empId) {
@@ -7049,7 +7118,8 @@ function setProgress(p){ document.getElementById('progressFill').style.width = p
 async function refreshAll() {
   const b = document.getElementById('btnRefresh');
   b.style.animation='spin .6s linear'; b.disabled=true;
-  _myTeamCache = null; _officeRefCache = null; _pttRosterLoaded = false;   // v9.8: รีเฟรช = ดึงรายชื่อใหม่
+  _myTeamCache = null; _officeRefCache = null; _pttRoster = []; _pttRosterLoaded = false;   // v9.8: รีเฟรช = ดึงรายชื่อใหม่
+  ensurePttRoster_();   // v9.9: ดึง roster PTT รอบใหม่ด้วย (คนลาออกจะหลุดจากทีม/kiosk)
   loadAll();
   // v1.4: sync logs จาก Sheet ก่อน render
   try { await syncLogsFromSheet(); } catch(_) {}
@@ -7199,13 +7269,14 @@ async function applyPTTMenuVisibility() {
   let isPTT  = currentUser && currentUser.isPTT;
   let khlang = currentUser && currentUser.khlang;
   if (isPTT === undefined || isPTT === null || khlang === undefined || khlang === null) {
+    let probeOk = true;   // v9.9: เน็ตล่มชั่วคราวต้องไม่ฝัง isPTT=false ถาวร (PTT โดนล็อกเช็คอินทั้ง session)
     try {
       const res = await callAppsScript('getSlipDataPTT', { empId: currentUser.empId });
       const row = (res && res.ok && res.rows && res.rows.length) ? res.rows[res.rows.length - 1] : null;
       isPTT  = !!row;
       khlang = row ? (row.khlang || '') : '';
-    } catch(_) { isPTT = false; khlang = ''; }
-    if (currentUser) {
+    } catch(_) { probeOk = false; isPTT = false; khlang = ''; }
+    if (currentUser && probeOk) {   // persist เฉพาะคำตอบจริง — ล้มเหลว = ไว้ลองใหม่รอบหน้า
       currentUser.isPTT  = isPTT;
       currentUser.khlang = khlang;
       try { sessionStorage.setItem('rfc3_user', JSON.stringify(currentUser)); } catch(_) {}
@@ -7677,7 +7748,7 @@ function initApp() {
   fillKioskBranches();
   applyPTTMenuVisibility();   // PTT: ซ่อนปุ่มอุปกรณ์สำนักงาน + สั่งข้าว
   // v9.8: prefetch รายชื่อเข้า cache ล่วงหน้า — เปิดฟอร์มแรกก็ขึ้นทันที ไม่ต้องรอ API
-  setTimeout(() => { try { getOfficeRef_().catch(()=>{}); resolveMyTeam().catch(()=>{}); } catch(_) {} }, 1200);
+  setTimeout(() => { try { getOfficeRef_().catch(()=>{}); resolveMyTeam().catch(()=>{}); retryFaceSync_(); } catch(_) {} }, 1200);
 
   // Setup tab inputs (HR/admin only — employee ไม่เห็น)
   if (currentUser.role === 'hr') {
@@ -7687,6 +7758,16 @@ function initApp() {
     const lvEl = document.getElementById('cfgLiveness'); if (lvEl) lvEl.value = settings.liveness;
   }
 
+  // v9.9: เครื่องใช้ร่วมกัน — หน้าใน LS เป็นของ "คนอื่น" → ล้างทิ้งก่อน
+  // (ไม่งั้นคนใหม่โดนล็อกด้วยหน้าคนเก่า v9.4 + สแกนไม่ผ่านตลอด)
+  {
+    const owner = LS.get('faceOwner', null);
+    if (registeredDescriptor && owner && currentUser?.empId && owner !== empKey_(currentUser.empId)) {
+      registeredDescriptor = null; registeredDescriptor2 = null;
+      LS.del('faceDescriptor'); LS.del('faceDescriptor2'); LS.del('facePhoto'); LS.del('faceRegisteredAt'); LS.del('faceOwner');
+      console.log('[face] ล้างหน้าค้างของ ' + owner + ' (login เป็น ' + empKey_(currentUser.empId) + ')');
+    }
+  }
   // v7.3: กู้ใบหน้าตัวเองจากแคช FaceData (กรณีเปลี่ยนเครื่อง/ล้างแคช faceDescriptor)
   if (!registeredDescriptor && remoteFaceData.length) adoptMyFace_('cache');
 
@@ -7707,7 +7788,7 @@ function initApp() {
     // v1.4: Sync local logs กับ Sheet เพื่อให้ next-action ถูก (Sheet = source of truth)
     await syncLogsFromSheet();
     // Re-build team with fresh face data
-    if (currentUser.role === 'supervisor') {
+    if (currentUser.role === 'supervisor' || isPTTManager()) {   // v9.9: ผจก. PTT ด้วย — FaceData มาช้ากว่า roster
       buildTeamFromSheet();
     }
     // Re-render หน้าทั้งหมดหลัง sync
@@ -9259,25 +9340,34 @@ async function resolveMyTeam() {
   (allUsers || []).forEach(u => {
     if (normName_(u.supervisorName) === myName && String(u.status || '').toLowerCase() === 'active') add(u);
   });
+  let pttOk = false;
   try {
     // v9.7: all:1 → หัวหน้า PTT เต็มระบบ (เช่น จิรวรรณ) ได้พนักงาน PTT ทุกสาขา; คนอื่นได้สาขาตัวเองเหมือนเดิม
     const ptt = await callAppsScript('getPTTStaff', { khlang: currentUser.khlang || '', empId: currentUser.empId, all: 1 });
     (ptt.staff || []).forEach(add);
-  } catch (_) {}
-  _myTeamCache = { ids, names, isHR, members };
-  return _myTeamCache;
+    pttOk = true;
+  } catch (e) {
+    // "ไม่พบพนักงาน PTT" = คำตอบจริง (คนนี้ไม่มีทีม PTT) — ถือว่าสำเร็จ; อื่นๆ = เน็ตล่ม อย่า cache ทีมไม่ครบ
+    if (String(e && e.message).indexOf('ไม่พบพนักงาน PTT') >= 0) pttOk = true;
+  }
+  const result = { ids, names, isHR, members };
+  // v9.9: cache เฉพาะผลสมบูรณ์ — ไม่ cache ผลว่าง (prefetch เร็วกว่า allUsers) หรือผลที่ฝั่ง PTT ล้มเหลว
+  if (isHR || (members.length && pttOk)) _myTeamCache = result;
+  return result;
 }
 function inMyTeam(team, empId, name){
   return team.ids.has(String(empId || '').trim()) || team.names.has(String(name || '').trim());
 }
 
-/* v9.8: cache getOfficeRefData ต่อ session — ฟอร์มไม่ต้องยิง API ซ้ำทุกครั้งที่เปิด */
+/* v9.8: cache getOfficeRefData ต่อ session — ฟอร์มไม่ต้องยิง API ซ้ำทุกครั้งที่เปิด
+   v9.9: เก็บเป็น promise — prefetch กับฟอร์มที่เปิดพร้อมกันแชร์คำขอเดียว ไม่ยิงซ้อน */
 let _officeRefCache = null;
-async function getOfficeRef_() {
-  if (_officeRefCache) return _officeRefCache;
-  const res = await callAppsScript('getOfficeRefData', { empId: currentUser.empId });
-  _officeRefCache = res;
-  return res;
+function getOfficeRef_() {
+  if (!_officeRefCache) {
+    _officeRefCache = callAppsScript('getOfficeRefData', { empId: currentUser.empId })
+      .catch(e => { _officeRefCache = null; throw e; });   // ล้มเหลว → ล้างไว้ลองใหม่
+  }
+  return _officeRefCache;
 }
 
 /* v9.6: รายชื่อในฟอร์มที่หัวหน้าเลือก "ลูกทีมตัวเอง" (ใบเตือน/โอนย้าย/ขอกำลังคน/เงินเดือน)
