@@ -1,4 +1,4 @@
-<!doctype html>
+﻿﻿﻿﻿﻿<!doctype html>
 <html lang="th">
 <head>
 <meta charset="UTF-8">
@@ -239,7 +239,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page hidden" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v7.20</small>
+      <small>ยอดขายเทียบเป้าหมาย v7.25</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -1046,18 +1046,20 @@ function renderPivot() {
     </div>`;
 
   const personMap = new Map();
+  const personOrder = []; // เก็บลำดับตามที่ปรากฏใน sheet
   rows.forEach(r => {
-    if (!personMap.has(r.name)) personMap.set(r.name, { name: r.name, wh: r.wh, empCode: r.empCode, cols: [] });
+    if (!personMap.has(r.name)) {
+      personMap.set(r.name, { name: r.name, wh: r.wh, empCode: r.empCode, cols: [], _sheetIdx: personOrder.length });
+      personOrder.push(r.name);
+    }
     personMap.get(r.name).cols.push(r);
   });
+  // เรียงตาม WH ก่อน แล้วตามลำดับใน sheet (ไม่ sort empCode)
   const whOrder = { W1: 1, W3: 2, W4: 3 };
-  const typeOrder = c => /^HSW/i.test(c) ? 1 : 2;
   const sortedPersons = Array.from(personMap.values()).sort((a, b) => {
     const wa = whOrder[a.wh] ?? 9, wb = whOrder[b.wh] ?? 9;
     if (wa !== wb) return wa - wb;
-    const ta = typeOrder(a.empCode), tb = typeOrder(b.empCode);
-    if (ta !== tb) return ta - tb;
-    return (a.empCode || '').localeCompare(b.empCode || '');
+    return a._sheetIdx - b._sheetIdx;
   });
 
   const container = document.getElementById('pivotContainer');
@@ -1072,10 +1074,19 @@ function renderPivot() {
     return fmtNum(Math.round(n), 0);
   };
 
+  const MAX_COLS = 20;
+  const maxCols = Math.min(MAX_COLS, Math.max(...sortedPersons.map(p => p.cols.length), 1));
+  const EMPTY_COL = { target: null, actual: null, pct: null, stores: null, supported: false, _empty: true, value: '', unit: '' };
+
   let html = '';
   sortedPersons.forEach(person => {
-    const cols = person.cols;
-    const colHdr = cols.map(c => `<th class="ptbl-th"><div class="ptbl-th-val">${c.value}</div><div class="ptbl-th-unit">(${c.unit})</div></th>`).join('');
+    const cols = [...person.cols];
+    while (cols.length < maxCols) cols.push({ ...EMPTY_COL });
+
+    const colHdr = cols.map(c => c._empty
+      ? `<th class="ptbl-th"></th>`
+      : `<th class="ptbl-th"><div class="ptbl-th-val">${c.value}</div><div class="ptbl-th-unit">(${c.unit})</div></th>`
+    ).join('');
 
     const mkRow = (label, fn) => `<tr><td class="ptbl-label">${label}</td>${cols.map(fn).join('')}</tr>`;
 
@@ -1085,19 +1096,22 @@ function renderPivot() {
         ${colHdr}
       </tr></thead>
       <tbody>
-        ${mkRow('เป้าหมาย', c => `<td class="ptbl-td">${fmtC(c, c.target)}</td>`)}
-        ${mkRow('ทำได้', c => `<td class="ptbl-td">${c.supported ? fmtC(c, c.actual) : '<span class="ptbl-muted">-</span>'}</td>`)}
+        ${mkRow('เป้าหมาย', c => `<td class="ptbl-td">${c._empty ? '' : fmtC(c, c.target)}</td>`)}
+        ${mkRow('ทำได้', c => `<td class="ptbl-td">${c._empty ? '' : (c.supported ? fmtC(c, c.actual) : '<span class="ptbl-muted">-</span>')}</td>`)}
         <tr><td class="ptbl-label">%</td>${cols.map(c => {
+          if (c._empty) return `<td class="ptbl-td"></td>`;
           if (c.pct === null) return `<td class="ptbl-td ptbl-muted">-</td>`;
           const cl = c.pct >= wd.pct ? 'ptbl-ok' : 'ptbl-danger';
           return `<td class="ptbl-td ${cl}">${fmtNum(c.pct,2)}%</td>`;
         }).join('')}</tr>
-        ${mkRow('กระจายร้านค้า', c => `<td class="ptbl-td">${c.supported ? fmtNum(c.stores) : '<span class="ptbl-muted">-</span>'}</td>`)}
+        ${mkRow('กระจายร้านค้า', c => `<td class="ptbl-td">${c._empty ? '' : (c.supported ? fmtNum(c.stores) : '<span class="ptbl-muted">-</span>')}</td>`)}
         ${mkRow('ต้องทำเพิ่ม', c => {
+          if (c._empty) return `<td class="ptbl-td"></td>`;
           if (!c.supported || c.pct === null) return `<td class="ptbl-td ptbl-muted">-</td>`;
           return `<td class="ptbl-td">${fmtC(c, Math.max(0, c.target - (c.actual||0)))}</td>`;
         })}
         ${mkRow('ต้องขายต่อวัน', c => {
+          if (c._empty) return `<td class="ptbl-td"></td>`;
           if (!c.supported || c.pct === null || wd.remaining <= 0) return `<td class="ptbl-td ptbl-muted">-</td>`;
           const need = Math.max(0, c.target - (c.actual||0));
           return `<td class="ptbl-td">${fmtC(c, need / wd.remaining)}</td>`;
@@ -1107,13 +1121,21 @@ function renderPivot() {
   });
   container.innerHTML = html;
   requestAnimationFrame(() => {
-    container.querySelectorAll('.ptbl-scroll').forEach(scroll => {
-      const table = scroll.querySelector('table');
-      if (!table) return;
+    const tables = [...container.querySelectorAll('.ptbl-scroll table')];
+    if (!tables.length) return;
+    // ยึดความกว้าง column จากตารางแรก
+    const firstThs = [...tables[0].querySelectorAll('thead th')];
+    const colWidths = firstThs.map(th => th.offsetWidth);
+    tables.forEach(table => {
+      let cg = table.querySelector('colgroup');
+      if (!cg) { cg = document.createElement('colgroup'); table.prepend(cg); }
+      cg.innerHTML = colWidths.map(w => `<col style="width:${w}px;min-width:${w}px">`).join('');
+      table.style.tableLayout = 'fixed';
+      // zoom ถ้ายังเกิน
+      const scroll = table.parentElement;
       table.style.zoom = 1;
-      const cw = scroll.offsetWidth;
-      if (table.scrollWidth > cw) {
-        table.style.zoom = cw / table.scrollWidth;
+      if (table.scrollWidth > scroll.offsetWidth) {
+        table.style.zoom = scroll.offsetWidth / table.scrollWidth;
       }
     });
   });
@@ -1910,8 +1932,8 @@ function renderW1() {
   });
 
   const GOLD='#c9a84c', NAVY='#0d1b3e', TEAL='#1B9EB5', TEAL_DARK='#147a8c', COL_HDR='#b2e4ef', BORDER='#8ecfdd';
-  const pctColor = p => p>=100?'#1a7a3a':p>=wd.pct?'#7a5a00':'#b00000';
-  const pctBg    = p => p>=100?'#d4f4e1':p>=wd.pct?'#fff3cd':'#fde8e8';
+  const pctColor = p => '#000';
+  const pctBg    = p => p >= wd.pct ? '#d4f4e1' : '#fde8e8';
   const rankColor= r => r===1?'#c0392b':r===2?'#e67e22':r===3?'#27ae60':'#555';
   const rankBg   = r => r===1?'#fde8e8':r===2?'#fef3d7':r===3?'#e8f7ee':'#f5f5f5';
   const fmtN = v => v ? Math.round(v).toLocaleString() : '-';
