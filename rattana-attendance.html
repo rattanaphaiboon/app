@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v4.91</title>
+<title>HR Rattana v4.92</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3420,7 +3420,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '10.2';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '10.3';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -4377,17 +4377,27 @@ async function apiCheckin(logData) {
 async function resyncPendingLogs() {
   if (!config.appsScriptUrl) return;
   const cutoff = Date.now() - 3 * 24 * 3600 * 1000;   // ย้อนหลังไม่เกิน 3 วัน
+  // v10.3: รวม log ที่ "รูปยังไม่ขึ้น" (photoPending) ด้วย — backend เส้นทาง dup จะเติมรูปให้
   const pending = logs.filter(l =>
-    !l.remote && l.empId && l.type && l.ts &&
+    (!l.remote || (l.photoPending && l.photo && (l.photoTries || 0) < 5)) &&
+    l.empId && l.type && l.ts &&
     new Date(l.ts).getTime() > cutoff
   ).slice(0, 20);
   if (!pending.length) return;
   let ok = 0;
   for (const l of pending) {
-    try { await apiCheckin(l); l.remote = true; ok++; }
+    try {
+      const r = await apiCheckin(l);
+      l.remote = true; ok++;
+      if (l.photoPending) {
+        if (r && r.photoSaved) { l.photoPending = false; delete l.photoTries; }        // รูปขึ้นแล้ว ✓
+        else if (!l.photo || (r && r.photoSaved == null)) { l.photoPending = false; }  // ไม่มีรูปให้ส่ง/SB ปิด — เลิกวน
+        else { l.photoTries = (l.photoTries || 0) + 1; }                               // ยังไม่ขึ้น — ลองรอบหน้า (สูงสุด 5)
+      }
+    }
     catch (_) { /* ยังส่งไม่ได้ — ไว้รอบหน้า */ }
   }
-  if (ok) { saveLogs(); console.log('[resync] ดันขึ้น Sheet ' + ok + '/' + pending.length + ' รายการ'); }
+  if (ok) { saveLogs(); console.log('[resync] ดันขึ้นระบบ ' + ok + '/' + pending.length + ' รายการ'); }
 }
 
 /* Read FaceData via Apps Script — ใส่ idToken ใน query string */
@@ -5638,9 +5648,11 @@ async function doSelfCheckIn() {
     }
   }
   if (synced) { saved.remote = true; saveLogs(); }   // v8.7: mark synced กัน re-sync ซ้ำ
-  // v10.2: รูปไม่ขึ้น Storage (สแกนบันทึกแล้ว แต่หลักฐานรูปหาย) → เตือนทันที ไม่พลาดเงียบ
+  // v10.2/v10.3: รูปไม่ขึ้น Storage → ตั้งธงส่งซ้ำอัตโนมัติ (30 วิ + ทุกครั้งที่เปิดแอป จนกว่าจะขึ้น)
   if (synced && syncRes && syncRes.photoSaved === false) {
-    toast('⚠ เวลาบันทึกแล้ว แต่รูปประกอบไม่ขึ้นระบบ — เน็ตช้า/ระบบรูปขัดข้อง แจ้ง HR ได้', 'warning');
+    saved.photoPending = true; saved.photoTries = 0; saveLogs();
+    toast('⚠ เวลาบันทึกแล้ว · รูปยังไม่ขึ้นระบบ — จะส่งซ้ำให้อัตโนมัติ', 'warning');
+    setTimeout(() => { resyncPendingLogs().catch(() => {}); }, 30000);
   }
 
   // Toast แสดง error จริง ไม่ใช่ generic message
