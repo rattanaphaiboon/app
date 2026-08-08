@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rattana ใบจองสินค้า SMR v1.1</title>
+<title>Rattana ใบจองสินค้า SMR v1.3</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 <style>
@@ -81,6 +81,7 @@ select.input{cursor:pointer}
 body.dark .btn-primary{background:var(--navy-light);border-color:var(--navy-light)}
 .btn-outline{background:transparent;color:var(--text);border-color:var(--border)}
 .btn-danger{background:var(--danger);color:#fff;border-color:var(--danger)}
+.btn-ok{background:var(--success);color:#fff;border-color:var(--success)}
 .btn-sm{padding:5px 11px;font-size:12px;min-height:34px}
 @media(max-width:640px){.btn-sm{min-height:40px}}
 
@@ -184,7 +185,7 @@ body.dark .spin-box{background:var(--card-bg);color:var(--text)}
 
 <header>
   <span class="logo-text">RATTANA <span>ใบจอง SMR</span></span>
-  <span class="ver">v1.1</span>
+  <span class="ver">v1.3</span>
   <span class="hd-spacer"></span>
   <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="โหลดข้อมูลใหม่">⟳</button>
   <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
@@ -241,6 +242,8 @@ body.dark .spin-box{background:var(--card-bg);color:var(--text)}
     <input class="input f-search" id="fSearch" placeholder="🔍 ค้นหาชื่อสินค้า / บาร์โค้ด / รหัส" oninput="render()">
     <button class="btn btn-outline btn-sm" onclick="setAllSel(true)">เลือกทั้งหมด</button>
     <button class="btn btn-outline btn-sm" onclick="setAllSel(false)">ล้างเลือก</button>
+    <button class="btn btn-ok btn-sm" id="btnConfirmAll" onclick="confirmAllShown()"
+            title="ยืนยันแถวที่ขึ้น ⚠️ ต้องตรวจ ทั้งหมดที่เห็นในตาราง — จำไว้ครั้งหน้าไม่ต้องกดอีก">✓ ยืนยันที่เห็นทั้งหมด</button>
     <span class="hd-spacer" style="flex:1"></span>
     <button class="btn btn-gold" onclick="exportBK()" id="btnExport">📊 Export ใบจอง (Excel)</button>
   </div>
@@ -322,7 +325,50 @@ const showSpin = m => { $('spinMsg').textContent=m||'กำลังโหลด
 const hideSpin = () => $('spin').classList.remove('show');
 function toast(msg,type){ const t=document.createElement('div'); t.className='toast toast-'+(type||'info');
   t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t.remove(),3600); }
-function lsSet(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
+function lsSet(k,v){ try{ localStorage.setItem(k,v); return true; }catch(e){ return false; } }
+
+/* ⚠️ origin rattanaphaiboon.github.io แชร์ localStorage กับแอปอื่น 60+ ตัว → เต็มจริง (เจอกับเครื่องผู้ใช้)
+   พอเต็ม setItem โยน QuotaExceededError = กดยืนยันแล้วไม่ถูกบันทึก กดกี่รอบก็เด้งกลับ
+   → ย้ายมาเก็บที่ IndexedDB (โควตาใหญ่กว่ามาก + แยกจาก localStorage) ไม่ต้องไปลบข้อมูลแอปอื่น
+     localStorage เขียนคู่ไว้เฉยๆ (เผื่ออ่านเร็ว) เขียนไม่ติดก็ไม่เป็นไร */
+const IDB_DB='smrbk', IDB_STORE='kv';
+function idbOpen(){
+  return new Promise((res,rej)=>{
+    const rq=indexedDB.open(IDB_DB,1);
+    rq.onupgradeneeded=()=>{ if(!rq.result.objectStoreNames.contains(IDB_STORE)) rq.result.createObjectStore(IDB_STORE); };
+    rq.onsuccess=()=>res(rq.result); rq.onerror=()=>rej(rq.error);
+  });
+}
+async function idbGet(k){
+  try{ const db=await idbOpen();
+    return await new Promise((res,rej)=>{ const q=db.transaction(IDB_STORE,'readonly').objectStore(IDB_STORE).get(k);
+      q.onsuccess=()=>res(q.result); q.onerror=()=>rej(q.error); });
+  }catch(e){ return undefined; }
+}
+async function idbSet(k,v){
+  try{ const db=await idbOpen();
+    return await new Promise((res,rej)=>{ const q=db.transaction(IDB_STORE,'readwrite').objectStore(IDB_STORE).put(v,k);
+      q.onsuccess=()=>res(true); q.onerror=()=>rej(q.error); });
+  }catch(e){ return false; }
+}
+/* เขียน override — IndexedDB เป็นหลัก · เตือนต่อเมื่อพังทั้งสองที่ */
+function persistOvr(){
+  const json=JSON.stringify(OVR);
+  const lsOk=lsSet(OVR_KEY,json);
+  idbSet(OVR_KEY,json).then(ok=>{
+    if(!ok && !lsOk) toast('⚠️ บันทึกไม่ได้ — เบราว์เซอร์ไม่ให้เก็บข้อมูล (เปิดโหมดไม่ระบุตัวตนอยู่หรือเปล่า?)','error');
+  });
+  return true;
+}
+/* อ่าน override — เชื่อ IndexedDB ก่อน · ถ้ายังไม่มี ย้ายของเก่าจาก localStorage มาให้ */
+async function loadOvr(){
+  let raw=await idbGet(OVR_KEY);
+  if(raw===undefined || raw===null){
+    let ls=null; try{ ls=localStorage.getItem(OVR_KEY); }catch(e){}
+    if(ls){ raw=ls; idbSet(OVR_KEY,ls); }
+  }
+  try{ OVR=raw?JSON.parse(raw):{}; }catch(e){ OVR={}; }
+}
 
 const THEME_KEY='rattana_theme';
 function applyTheme(t){ document.body.classList.toggle('dark',t==='dark');
@@ -452,7 +498,7 @@ async function loadAll(){
     if(!REQ.length) throw new Error('ไม่พบใบขอเบิก (แท็บพันท้าย/คลังกลาง) ในชีท');
     if(!BILL.length) toast('⚠️ ไม่พบข้อมูลในแท็บบิล — จะถือว่ายังไม่ได้ของทุกตัว','warning');
 
-    OVR = JSON.parse(localStorage.getItem(OVR_KEY)||'{}');
+    await loadOvr();
     matchAll(); buildDocs(); compute();
     $('introHint').style.display='none';
     $('docCard').style.display=''; $('stats').style.display=''; $('fbar').style.display='';
@@ -478,7 +524,7 @@ function buildWms(rows){
   }
 }
 function buildStock(rows){
-  PRODS=[]; BY_CODE=new Map(); BY_NAME=new Map();
+  PRODS=[]; BY_CODE=new Map(); BY_NAME=new Map(); NAME_CACHE=new Map();   // สินค้าเปลี่ยน = ล้างแคชชื่อ
   if(!rows.length) return;
   const h=rows[0].map(clean), idx={}; h.forEach((k,i)=>{ if(k&&!(k in idx)) idx[k]=i; });
   for(let i=1;i<rows.length;i++){
@@ -555,12 +601,22 @@ function findByCodes(list){
     for(const k of codeKeys(c)) if(BY_CODE.has(k)) return BY_CODE.get(k); }
   return null;
 }
+/* จับด้วยชื่อ = สแกนสินค้าทั้ง 12,727 ตัว ต่อ 1 รายการ → แพงมาก
+   matchAll() ถูกเรียกใหม่ทุกครั้งที่กดยืนยัน 1 ครั้ง ถ้าไม่แคชไว้แอปจะค้าง → แคชผลไว้ทั้งเซสชัน
+   (PRODS ไม่เปลี่ยนระหว่างโหลด ผลจึงใช้ซ้ำได้) */
+let NAME_CACHE=new Map();
 function findByName(name){
   const nn=normName(name); if(!nn) return null;
-  if(BY_NAME.has(nn)) return { p:BY_NAME.get(nn), sc:1 };
-  let best=null,bs=0;
-  for(const p of PRODS){ const s=nameScore(name,nn,p); if(s>bs){ bs=s; best=p; } }
-  return bs>=0.45 ? { p:best, sc:bs } : null;
+  if(NAME_CACHE.has(nn)) return NAME_CACHE.get(nn);
+  let res=null;
+  if(BY_NAME.has(nn)) res={ p:BY_NAME.get(nn), sc:1 };
+  else{
+    let best=null,bs=0;
+    for(const p of PRODS){ const s=nameScore(name,nn,p); if(s>bs){ bs=s; best=p; } }
+    res = bs>=0.45 ? { p:best, sc:bs } : null;
+  }
+  NAME_CACHE.set(nn,res);
+  return res;
 }
 function matchAll(){
   for(const q of REQ){
@@ -662,12 +718,19 @@ function compute(){
     const key = q.br+'#'+(q.p ? 'p'+q.p.i : 'x'+(q.item||q.name));
     if(!agg.has(key)) agg.set(key,{ br:q.br, p:q.p, lv:q.lv, how:q.how, score:q.score, conflict:q.conflict||'',
                                     noProd:!!q.noProd, name:q.name, item:q.item, unit:q.unit,
-                                    docs:new Set(), reqPc:0, reqQty:0 });
+                                    keys:new Set(), docs:new Set(), reqPc:0, reqQty:0 });
     const a=agg.get(key);
+    /* ⚠️ 1 แถวในตาราง อาจรวมมาจากรหัส SMR หลายตัว (เจอจริง: DNปรับผ้านุ่ม 26332002+26332036)
+       ต้องเก็บทุกรหัสไว้ ไม่งั้นกดยืนยันแล้วบันทึกแค่รหัสแรก อีกรหัสยังจับด้วยชื่อ
+       → แถวเด้งกลับมาขึ้น "ต้องตรวจ" ทุกรอบ กดเท่าไหร่ก็ไม่หาย */
+    a.keys.add(q.item||q.name);
     a.docs.add(q.doc);
     a.reqQty += q.qty;
     a.reqPc  += q.p ? q.qty*per(q.p,q.lv) : q.qty;
     if(!a.p && q.p){ a.p=q.p; a.lv=q.lv; a.how=q.how; a.score=q.score; a.conflict=q.conflict||''; }
+    // ในกลุ่มเดียวกัน ถ้ามีบรรทัดไหนผู้ใช้ยืนยันแล้ว ให้ถือว่าทั้งแถวยืนยันแล้ว (ชี้สินค้าตัวเดียวกันอยู่แล้ว)
+    if(q.how==='ผู้ใช้เลือก'){ a.how='ผู้ใช้เลือก'; a.score=1; a.conflict=''; }
+    else if(q.how && !/ชื่อ/.test(q.how) && /ชื่อ/.test(a.how)){ a.how=q.how; a.score=1; }
   }
 
   ROWS=[];
@@ -675,7 +738,7 @@ function compute(){
     const gotPc = a.p ? (got.get(a.br+'#'+a.p.i)||0) : 0;
     const shortPc = a.reqPc - gotPc;
     const pr = a.p ? per(a.p,a.lv) : 1;
-    const r = { ...a, docs:[...a.docs], gotPc, shortPc,
+    const r = { ...a, docs:[...a.docs], keys:[...a.keys], gotPc, shortPc,
       gotQty : a.p ? gotPc/pr : 0,
       shortQty : Math.max(0, Math.ceil(shortPc/pr - 1e-9)),
       w1pc : a.p ? a.p.w1 : 0, w1raw : a.p ? a.p.w1raw : '',
@@ -763,6 +826,9 @@ function visibleRows(){
 }
 function render(){
   const rows=visibleRows();
+  const nRev=rows.filter(r=>r.needReview&&r.p&&r.st!=='full').length;   // ได้ครบแล้วไม่ต้องยืนยัน (ไม่ขึ้นใบจองอยู่แล้ว)
+  const b=$('btnConfirmAll');
+  if(b){ b.style.display = nRev?'' : 'none'; b.textContent='✓ ยืนยันที่เห็นทั้งหมด ('+nRev+')'; }
   if(!rows.length){ $('tbody').innerHTML='<tr class="empty-row"><td colspan="16">ไม่มีรายการ</td></tr>'; return; }
   $('tbody').innerHTML = rows.map(r=>{
     const i=ROWS.indexOf(r);
@@ -784,7 +850,9 @@ function render(){
           :(r.st==='noprod'?'<span style="color:var(--muted)">— เราไม่มีขาย —</span>'
                            :'<span style="color:var(--danger)">— ไม่เจอ —</span>'))+'</div>'
         +(r.conflict?'<div style="font-size:10px;color:var(--warning)" title="บาร์โค้ดคนละระดับของ SMR ชี้คนละตัว — ตรวจก่อนจอง">⚠️ ขัดกับ: '+esc(r.conflict)+'</div>':'')
-        +'<button class="btn btn-outline btn-sm" style="margin-top:2px" onclick="openPick('+i+')">🔎 เลือกเอง</button></td>'
+        +'<div style="display:flex;gap:4px;margin-top:2px;flex-wrap:wrap">'
+        +(r.needReview&&r.p?'<button class="btn btn-ok btn-sm" onclick="confirmMatch('+i+')" title="ยืนยันว่าจับถูกแล้ว — จำไว้ครั้งหน้าไม่ต้องกดอีก">✓ ถูกแล้ว</button>':'')
+        +'<button class="btn btn-outline btn-sm" onclick="openPick('+i+')">🔎 เลือกเอง</button></div></td>'
       +'<td class="code">'+esc(bc)+'<div style="font-size:10px;color:var(--muted)">'+esc(un)+'</div></td>'
       +'<td class="num">'+(r.p?esc(stockText(r.w1raw))+'<div style="font-size:10px;color:var(--muted)">≈'+fmt(r.w1qty)+' '+esc(r.lv||'')+'</div>':'-')+'</td>'
       +'<td class="num">'+(canBook?'<input type="number" class="qty-in" value="'+r.bookQty+'" min="0" step="1" onchange="setQty('+i+',this.value)">':'-')+'</td>'
@@ -802,18 +870,42 @@ function setAllSel(on){ for(const r of visibleRows()) if(r.st==='ok'||r.st==='pa
   $('chkAll').checked=on; render(); renderStats(); }
 
 /* ═══════════════ เลือกสินค้าเอง ═══════════════ */
-const ovrKeyOf = r => r.br+'|'+(r.item||r.name);
+// คืน "ทุกคีย์" ของแถว (1 แถว = รวมหลายรหัส SMR ได้) — เขียน override ต้องครบทุกตัว
+const ovrKeysOf = r => (r.keys&&r.keys.length ? r.keys : [r.item||r.name]).map(k=>r.br+'|'+k);
+const hasOvr = r => ovrKeysOf(r).some(k=>OVR[k]!==undefined);
 function openPick(i){ pickTarget=i; const r=ROWS[i];
   $('pickTitle').textContent='เลือกสินค้าของเรา — '+r.name;
   $('pickSearch').value=r.name;
-  $('btnClearOvr').style.display = OVR[ovrKeyOf(r)] ? '' : 'none';
+  $('btnClearOvr').style.display = hasOvr(r) ? '' : 'none';
   $('pickModal').classList.add('open'); renderPick(); $('pickSearch').focus(); }
 function closePick(){ $('pickModal').classList.remove('open'); pickTarget=null; }
 function saveOvr(val){
   const r=ROWS[pickTarget];
-  if(val===null) delete OVR[ovrKeyOf(r)]; else OVR[ovrKeyOf(r)]=val;
-  lsSet(OVR_KEY, JSON.stringify(OVR));
+  for(const k of ovrKeysOf(r)){ if(val===null) delete OVR[k]; else OVR[k]=val; }
+  persistOvr();
   closePick(); matchAll(); compute();
+}
+/* ✓ ถูกแล้ว — ยืนยันตัวที่ระบบจับให้ ไม่ต้องเปิด modal ไปหาตัวเดิมกดซ้ำ */
+function confirmMatch(i){
+  const r=ROWS[i]; if(!r||!r.p) return;
+  for(const k of ovrKeysOf(r)) OVR[k] = r.p.name;
+  persistOvr();
+  matchAll(); compute();
+  toast('ยืนยันแล้ว — '+r.p.name,'success');
+}
+/* ✓ ยืนยันที่เห็นทั้งหมด — ไล่ดูในตารางแล้วโอเคหมด กดทีเดียวจบ */
+function confirmAllShown(){
+  const list=visibleRows().filter(r=>r.needReview && r.p && r.st!=='full');
+  if(!list.length){ toast('ไม่มีรายการที่ต้องยืนยันในหน้านี้','info'); return; }
+  // กันกดพลาด — ยืนยันยกชุดแปลว่ารับว่าจับถูกหมด ถ้ามีตัวจับผิดปนจะเข้าใบจองทันที
+  if(!confirm('ยืนยันว่าจับสินค้าถูกแล้ว '+list.length+' รายการ?\n\n'
+      +list.slice(0,8).map(r=>'• '+r.name+'\n   → '+r.p.name).join('\n')
+      +(list.length>8?'\n… และอีก '+(list.length-8)+' รายการ':'')
+      +'\n\n(ถ้ามีตัวที่จับผิด กด ยกเลิก แล้วแก้ด้วยปุ่ม 🔎 เลือกเอง ก่อน)')) return;
+  for(const r of list) for(const k of ovrKeysOf(r)) OVR[k] = r.p.name;
+  persistOvr();
+  matchAll(); compute();
+  toast('ยืนยัน '+list.length+' รายการแล้ว — จำไว้ ครั้งหน้าไม่ต้องกดอีก','success');
 }
 /* เราไม่มีสินค้าตัวนี้ขายจริงๆ (เช่น บิสชิน รสสตอเบอรี่ — เรามีแต่บลูเบอร์รี่/มะพร้าว/กาแฟ)
    → กันไม่ให้ไปเดาจับกับรสอื่นผิดๆ และจำไว้ครั้งหน้า */
