@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v6.1</title>
+<title>Rattana ยอดหนี้คงค้าง v6.2</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -776,7 +776,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v6.1</span>
+      <span class="app-ver">v6.2</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -3210,10 +3210,41 @@ async function loadCreditBills(force){
   renderCreditChips();
   renderCreditList();
   updateCreditBadge();
+  crCheckCancelled();          // เช็คเบื้องหลัง ไม่ต้องรอ จอขึ้นก่อนแล้วค่อยอัปเดต
+}
+
+// ── v6.2: ใบที่ออเดอร์ถูกยกเลิกไปแล้ว ไม่ควรค้างในคิวบัญชี ──────────────────
+//   เคสจริง 7/8: ORD7313975 ยกเลิกครบทั้ง 4 บรรทัด แต่ DebtApproval ยังเป็น 'รอบัญชี'
+//   ฝั่ง Sales App ไม่ได้ปิดใบให้ตอนเซลยกเลิกออเดอร์ → คิวไม่มีวันเคลียร์
+//   แอปนี้เลยเช็คเอง: ถามชีท Order ทีเดียวว่าบิลในคิวเหลือบรรทัดที่ยังไม่ยกเลิกไหม
+async function crCheckCancelled(){
+  const q = creditRows.filter(a => a.status === 'รอบัญชี' && !a.finDecision && a.billId);
+  if (!q.length) return;
+  const ids = [...new Set(q.flatMap(a => a.billId.split(',').map(x => x.trim()).filter(Boolean)))].slice(0, 60);
+  if (!ids.length) return;
+  try {
+    const where = ids.map(i => `Q = '${i.replace(/'/g, '')}'`).join(' or ');
+    const url = `https://docs.google.com/spreadsheets/d/${CONFIG.backendSheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(CONFIG.orderTab)}&tq=${encodeURIComponent('select Q,L where ' + where)}`;
+    const rows = parseCsv(await (await fetch(url, { cache:'no-store' })).text());
+    const seen = {}, live = {};
+    rows.forEach(r => {
+      const oid = String(r['orderId'] || '').trim();
+      if (!oid) return;
+      seen[oid] = true;
+      if (!String(r['ยกเลิก'] || '').trim()) live[oid] = true;
+    });
+    let hit = 0;
+    q.forEach(a => {
+      const bs = a.billId.split(',').map(x => x.trim()).filter(Boolean);
+      // ต้องเจอบิลในชีทจริงก่อน ถึงจะสรุปว่ายกเลิก — ไม่เจอเลย = อาจหลุดช่วงที่ชีทเก็บ อย่าเพิ่งตัดสิน
+      if (bs.length && bs.every(b => seen[b]) && bs.every(b => !live[b])){ a.allCancelled = true; hit++; }
+    });
+    if (hit){ renderCreditChips(); renderCreditList(); updateCreditBadge(); }
+  } catch(e){ console.warn('crCheckCancelled:', e.message); }
 }
 
 // เลขแดง = ใบที่รอบัญชีตัดสินอยู่จริง
-const crPending = a => a.status === 'รอบัญชี' && !a.finDecision;
+const crPending = a => a.status === 'รอบัญชี' && !a.finDecision && !a.allCancelled;
 
 function updateCreditBadge(){
   const el = $('creditBadge'); if (!el) return;
@@ -3228,10 +3259,12 @@ function renderCreditChips(){
   const days = [...new Set(creditRows.map(a => a.apprTs.slice(0, 10)).filter(Boolean))].sort().reverse();
   const dCnt = d => creditRows.filter(a => a.apprTs.slice(0, 10) === d).length;
   const _today = new Date().toLocaleDateString('sv-SE').replace(/-/g, '/');
+  const nCx = creditRows.filter(a => a.allCancelled).length;
   el.innerHTML =
     `<span class="dcr-chiplbl">สถานะ</span>`
     + `<button class="dcr-chip ${crSt ? '' : 'on'}" onclick="crSetSt('')">ทั้งหมด<span class="n">${creditRows.length}</span></button>`
-    + CR_TABS.map(t => `<button class="dcr-chip ${crSt === t.key ? 'on' : ''}" onclick="crSetSt('${t.key}')">${t.label}<span class="n">${cnt(t.key)}</span></button>`).join('')
+    + CR_TABS.map(t => `<button class="dcr-chip ${crSt === t.key ? 'on' : ''}" onclick="crSetSt('${t.key}')">${t.label}<span class="n">${t.key === 'รอบัญชี' ? creditRows.filter(crPending).length : cnt(t.key)}</span></button>`).join('')
+    + (nCx ? `<button class="dcr-chip ${crSt === '_cx' ? 'on' : ''}" onclick="crSetSt('_cx')">ออเดอร์ยกเลิก<span class="n">${nCx}</span></button>` : '')
     + (days.length > 1 ? `<span class="dcr-chiplbl">วันที่ขอ</span>
        <button class="dcr-chip ${crDay ? '' : 'on'}" onclick="crSetDay('')">ทุกวัน</button>`
        + days.slice(0, 7).map(d => `<button class="dcr-chip ${crDay === d ? 'on' : ''}" onclick="crSetDay('${d}')">${d === _today ? 'วันนี้ ' : ''}${escapeHtml(crShortTs(d))}<span class="n">${dCnt(d)}</span></button>`).join('') : '');
@@ -3255,7 +3288,9 @@ function crClearSearch(){
 function renderCreditList(){
   const terms = crQuery ? crQuery.split(/\s+/).filter(Boolean) : [];
   let rows = creditRows.filter(a => terms.every(t => a._s.includes(t)));
-  if (crSt)  rows = rows.filter(a => a.status === crSt);
+  if (crSt === '_cx')  rows = rows.filter(a => a.allCancelled);
+  else if (crSt === 'รอบัญชี') rows = rows.filter(crPending);        // คิวจริง ไม่รวมใบที่ออเดอร์ยกเลิกแล้ว
+  else if (crSt) rows = rows.filter(a => a.status === crSt);
   if (crDay) rows = rows.filter(a => a.apprTs.slice(0, 10) === crDay);
   $('crCount').textContent = rows.length
     ? `${rows.length} ใบ · รอบัญชีตัดสิน ${creditRows.filter(crPending).length}`
@@ -3316,6 +3351,7 @@ function crCardHtml(a){
 
   const bits = [];
   if (tab) bits.push(`<span class="dcr-tag ${tab.cls}">${a.finDecision ? escapeHtml(a.finDecision) : tab.label}</span>`);
+  if (a.allCancelled) bits.push(`<span class="dcr-tag bad">ออเดอร์ถูกยกเลิกแล้ว</span>`);
   if (D.amount)         bits.push(`<span class="dcr-hot">ค้าง ฿${fmtInt(Math.round(D.amount))}</span>`);
   if (D.bills)          bits.push(`${fmtInt(D.bills)} บิล`);
   if (D.paid > 0)       bits.push(`<span class="dcr-tag ok">แนบสลิปแล้ว ฿${fmtInt(Math.round(D.paid))} รอตัดยอด</span>`);
