@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v4.92</title>
+<title>HR Rattana v4.93</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3420,7 +3420,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '10.3';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '10.4';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -4985,20 +4985,28 @@ function startEmpMatching() {
   if (empMatchInterval) clearInterval(empMatchInterval);
   empMatchInterval = setInterval(empMatchTick, 800);
 }
+let _empDetMiss = 0;   // v10.4: นับเฟรมที่จับหน้าไม่ติดต่อเนื่อง → สลับโหมดไวขึ้น (แสงน้อย/กล้องเกรดต่ำ)
 async function empMatchTick() {
   const v = document.getElementById('empVideo');
   if (!v || !v.videoWidth) return;
+  // v10.4: พลาด 3 เฟรมติด → โหมดไว (ภาพละเอียดขึ้น + เกณฑ์จับต่ำลง) — ความปลอดภัยไม่ลด
+  // เพราะด่านจริงคือระยะเทียบกับหน้าที่ลงทะเบียน (faceThr) ซึ่งไม่เปลี่ยน
+  const opts = _empDetMiss >= 3
+    ? new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.3 })
+    : new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
   const det = await faceapi
-    .detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({ inputSize:320, scoreThreshold:0.5 }))
+    .detectSingleFace(v, opts)
     .withFaceLandmarks().withFaceDescriptor();
   if (!empStream || !empMatchInterval) return;   // v7.8: กล้องถูกปิดระหว่าง await — อย่าเขียน state ค้าง
   if (!det) {
+    _empDetMiss++;
     document.getElementById('empCamWrap').className = 'camera-wrap home-cam';
     lastFaceMatch = { found:false };
-    updateFaceCheck({found:false});
+    updateFaceCheck({ found:false, hint: _empDetMiss >= 6 ? 'เข้าใกล้กล้อง · หันหน้าหาแสง' : '' });
     evaluateAction();
     return;
   }
+  _empDetMiss = 0;   // v10.4: จับติดแล้ว — กลับโหมดปกติ
   drawBox('empCanvas', 'empVideo', det);
   if (!registeredDescriptor) {
     document.getElementById('empCamWrap').className = 'camera-wrap home-cam matching';
@@ -5038,8 +5046,8 @@ function updateFaceCheck(info) {
   }
   if (!info.found) {
     if (line) line.classList.add('warn');
-    el.textContent = 'ไม่พบใบหน้า';
-    if (badge) { badge.classList.add('show','warn'); badge.textContent = 'ไม่พบใบหน้า'; }
+    el.textContent = info.hint ? 'ไม่พบใบหน้า — ' + info.hint : 'ไม่พบใบหน้า';   // v10.4: บอกวิธีแก้ ไม่ใช่แค่บอกปัญหา
+    if (badge) { badge.classList.add('show','warn'); badge.textContent = info.hint ? '👤 ' + info.hint : 'ไม่พบใบหน้า'; }
     return;
   }
   if (!info.registered) {
@@ -5141,10 +5149,14 @@ async function faceRegCapture() {
     if (ring) { ring.style.borderColor = 'var(--success)'; setTimeout(() => { const r = document.getElementById('frCamRing'); if (r) r.style.borderColor = 'var(--gold)'; }, 300); }  // แฟลช = ถ่ายแล้ว
     // ── ตรวจว่ารูปที่ถ่ายมีใบหน้าไหม ──
     btn.textContent = '⏳ กำลังตรวจใบหน้า...';
-    const det = await faceapi.detectSingleFace(snap.canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }))
+    let det = await faceapi.detectSingleFace(snap.canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }))
       .withFaceLandmarks().withFaceDescriptor();
+    if (!det) {   // v10.4: รอบสองโหมดไว (แสงน้อย/กล้องเกรดต่ำ) — รูปนิ่งอยู่แล้ว ตรวจซ้ำถูกมาก
+      det = await faceapi.detectSingleFace(snap.canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.3 }))
+        .withFaceLandmarks().withFaceDescriptor();
+    }
     if (_frState !== s || s.step !== stepAtPress) return;   // v9.9: ยกเลิก/เริ่มใหม่ระหว่างตรวจ → ทิ้งช็อตนี้
-    if (!det) { toast('รูปนี้จับใบหน้าไม่ได้ — จัดหน้าให้เต็มวงกลมแล้วกดถ่ายใหม่', 'error'); return; }
+    if (!det) { toast('รูปนี้จับใบหน้าไม่ได้ — เข้าใกล้กล้อง หันหน้าหาแสง แล้วถ่ายใหม่', 'error'); return; }
     const shot = { descriptor: det.descriptor, photo: snap.photo };
     if (s.step === 1) {
       s.shot1 = shot; s.step = 2;
