@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Colgate Call Card v2.1 — บันทึกสต็อกร้าน</title>
+<title>Colgate Call Card v2.2 — บันทึกสต็อกร้าน</title>
 
 <!-- ══ RK-BASE · Rattana UI Kit (D:\Calude\tools\ui-kit\rk-base.html) ══ -->
 <style id="rk-base">
@@ -688,7 +688,7 @@ table.histtbl th,table.histtbl td{padding:5px 6px;font-size:11.5px}
    flow: สแกน/พิมพ์ชื่อ → เปิดแผงกรอก → ใส่เลข → "ส่ง" ทันที ทีละรายการ
    เหตุผล: ไม่สะสมตัวเลขค้างไว้ในเครื่องเป็นกอง ส่งจบทีละตัว ตัวเลขไม่มีทางหายยกชุด
    ══════════════════════════════════════════════════════════════════════════ */
-const VER = 'v2.1';
+const VER = 'v2.2';
 const DB  = JSON.parse(document.getElementById('DB').textContent);
 const MN  = DB.months.length;
 const WIN = 4;                       /* เฉลี่ยยอดขายจาก 4 เดือนล่าสุด */
@@ -726,11 +726,21 @@ const S = {
    ทุกครั้งที่พิมพ์เลข เขียนลงเครื่องทันที (ไม่รอ blur ไม่รอกดส่ง)
    ══════════════════════════════════════════════════════════════════════════ */
 const LSKEY = 'colgateCallCard.v3';
+/* ❗ cache ในหน่วยความจำ — ก่อนหน้านี้ render ทีนึงอ่าน+parse localStorage 300-1,100 ครั้ง
+   ยิ่งเก็บงานเยอะยิ่งช้าเป็นเงาตามตัว (มือถือเซลจะหน่วงชัดเจน) */
 const store = {
-  broken:false,
-  load(){ try{ return JSON.parse(localStorage.getItem(LSKEY)||'{}'); }catch(e){ return {}; } },
-  save(o){ try{ localStorage.setItem(LSKEY, JSON.stringify(o)); this.broken = false; return true; }
-           catch(e){ if (!this.broken){ this.broken = true; toast('เครื่องนี้เก็บข้อมูลไม่ได้ — ส่งทีละรายการทันทีอย่าค้างไว้','bad'); } return false; } }
+  broken:false, _c:null,
+  load(){
+    if (this._c) return this._c;
+    try{ this._c = JSON.parse(localStorage.getItem(LSKEY)||'{}'); }catch(e){ this._c = {}; }
+    return this._c;
+  },
+  save(o){
+    this._c = o;
+    try{ localStorage.setItem(LSKEY, JSON.stringify(o)); this.broken = false; return true; }
+    catch(e){ if (!this.broken){ this.broken = true; toast('เครื่องนี้เก็บข้อมูลไม่ได้ — ส่งทีละรายการทันทีอย่าค้างไว้','bad'); } return false; }
+  },
+  drop(){ this._c = null; }
 };
 const uid = () => (crypto && crypto.randomUUID ? crypto.randomUUID()
                   : 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2,10));
@@ -804,37 +814,70 @@ function autoQty(p, st, h, stock, cust){ return h ? suggestQty(st, stock) : star
    ══════════════════════════════════════════════════════════════════════════ */
 const HKEY = 'colgateHist.v1';
 const histCache = {
-  load(){ try{ return JSON.parse(localStorage.getItem(HKEY)||'{}'); }catch(e){ return {}; } },
+  _c:null,
+  load(){
+    if (this._c) return this._c;
+    try{ this._c = JSON.parse(localStorage.getItem(HKEY)||'{}'); }catch(e){ this._c = {}; }
+    return this._c;
+  },
   get(cust){ return this.load()[cust] || null; },
-  put(cust, rows){ const a = this.load(); a[cust] = rows; try{ localStorage.setItem(HKEY, JSON.stringify(a)); }catch(e){} }
+  put(cust, rows){ const a = this.load(); a[cust] = rows; try{ localStorage.setItem(HKEY, JSON.stringify(a)); }catch(e){} },
+  drop(){ this._c = null; }
 };
 const dayDiff = (a,b) => Math.round((new Date(b+'T00:00:00') - new Date(a+'T00:00:00')) / 864e5);
 
 async function loadStoreHist(cust){
-  S.hist = { cust, loading:true, err:'', byCode: buildHist(histCache.get(cust) || []) };
+  histMem.drop(cust);
+  S.hist = { cust, loading:true, err:'', byCode: buildHist(histCache.get(cust) || [], cust) };
   renderCard(); if (S.entry) paintEntry();
-  if (!execReady()){ S.hist.loading = false; S.hist.err = 'ยังไม่ได้ตั้งค่าหลังบ้าน'; return done(); }
-  try {
-    const j = await readJson(await fetch(EXEC_URL + '?action=store&cust=' + encodeURIComponent(cust), {redirect:'follow'}));
-    histCache.put(cust, j.rows || []);
-    S.hist.byCode = buildHist(j.rows || []);
-  } catch (err) { S.hist.err = String(err.message || err); }
-  S.hist.loading = false; done();
-  function done(){ if (S.cust && S.cust.c === cust){ renderCard(); if (S.entry) paintEntry(); } }
+  let err = '';
+  if (execReady()){
+    try {
+      const j = await readJson(await fetch(EXEC_URL + '?action=store&cust=' + encodeURIComponent(cust), {redirect:'follow'}));
+      histCache.put(cust, j.rows || []);
+      histMem.drop(cust);
+    } catch (e) { err = String(e.message || e); }
+  } else err = 'ยังไม่ได้ตั้งค่าหลังบ้าน';
+  /* เซลกดสลับร้านระหว่างรอโหลด → ห้ามเอาประวัติร้านเก่าไปทับร้านใหม่ */
+  if (!S.hist || S.hist.cust !== cust) return;
+  S.hist.byCode = buildHist(histCache.get(cust) || [], cust);
+  S.hist.loading = false; S.hist.err = err;
+  if (S.cust && S.cust.c === cust){ renderCard(); if (S.entry) paintEntry(); }
 }
 /* รวมของที่ขึ้นชีทแล้ว + ของที่ยังค้างในเครื่อง · วันเดียวกันเก็บครั้งล่าสุดครั้งเดียว */
-function buildHist(rows){
+function buildHist(rows, cust){
   const by = {};
   const push = r => {
     const a = by[r.code] = by[r.code] || [];
     const i = a.findIndex(x=>x.d === r.d);
     if (i >= 0) a[i] = r; else a.push(r);
   };
-  (rows||[]).forEach(r=>push({d:r.d, s:RK.num(r.s), o:RK.num(r.o), at:r.at||'', sent:true}));
-  items.list().filter(x=>x.cust === (S.hist ? S.hist.cust : '') && x.status !== 'sent')
-    .forEach(x=>push({d:x.d, s:RK.num(x.s), o:RK.num(x.o), at:x.at||'', sent:false}));
+  (rows||[]).forEach(r=>push({d:r.d, code:r.code, s:RK.num(r.s), o:RK.num(r.o), at:r.at||'', sent:true}));
+  items.list().filter(x=>x.cust === cust && x.status !== 'sent')
+    .forEach(x=>push({d:x.d, code:x.code, s:RK.num(x.s), o:RK.num(x.o), at:x.at||'', sent:false}));
   Object.values(by).forEach(a=>a.sort((x,y)=>x.d < y.d ? -1 : x.d > y.d ? 1 : 0));
   return by;
+}
+/* ประวัติของร้าน "ที่ไม่ได้เปิดอยู่" — งานค้างข้ามร้านต้องคิดด้วยประวัติของร้านตัวเอง
+   ❌ ก่อนหน้านี้ใช้ S.hist ตัวเดียวเสมอ = ส่งขึ้นชีทด้วยตัวเลขของร้านที่เปิดอยู่ */
+const histMem = {
+  m:{},
+  get(cust){
+    if (S.hist && S.hist.cust === cust) return S.hist.byCode;
+    if (!this.m[cust]) this.m[cust] = buildHist(histCache.get(cust) || [], cust);
+    return this.m[cust];
+  },
+  drop(cust){ delete this.m[cust]; }
+};
+/* ส่งสำเร็จ = ประวัติมีจุดใหม่ทันที ❌ ห้ามรอโหลดรอบหน้า ไม่งั้น SKU นั้นกลายเป็น "ยังไม่เคยเช็ค" */
+function noteSent(it){
+  const rows = (histCache.get(it.cust) || []).slice();
+  const rec = {d:it.d, code:it.code, name:it.name, s:it.s, o:it.o, at:it.d + ' ' + hhmm() + ':00'};
+  const i = rows.findIndex(r=>r.d === it.d && String(r.code) === String(it.code));
+  if (i >= 0) rows[i] = rec; else rows.push(rec);
+  histCache.put(it.cust, rows);
+  histMem.drop(it.cust);
+  if (S.hist && S.hist.cust === it.cust) S.hist.byCode = buildHist(rows, it.cust);
 }
 /* list = ประวัติเรียงเก่า→ใหม่ (รวมค่าที่กำลังกรอกอยู่เป็นจุดล่าสุด) */
 function segsOf(list){
@@ -859,15 +902,16 @@ function rateOf(segs){
            cyc: Math.max(7, Math.min(35, gaps[Math.floor(gaps.length/2)])) };
 }
 /* ประวัติของ SKU นี้ + จุดล่าสุดคือค่าที่กำลังกรอก */
-function histFor(code, stockNow){
-  const past = ((S.hist && S.hist.byCode[code]) || []).filter(x=>x.d !== isoToday());
+function histFor(code, stockNow, cust){
+  const by = cust ? histMem.get(cust) : (S.hist ? S.hist.byCode : {});
+  const past = ((by && by[code]) || []).filter(x=>x.d !== isoToday());
   const list = past.slice();
   if (stockNow !== '' && stockNow != null) list.push({d:isoToday(), s:RK.num(stockNow), o:0, live:true});
   return { past, list, segs: segsOf(list) };
 }
 /* แนะนำจำนวนสั่ง — มีการนับจริง >=2 ครั้ง ใช้อัตราจริง · ไม่มีก็ถอยไปใช้ยอดบิลย้อนหลัง */
 function advise(p, st, h, stockNow, cust, code){
-  const H = histFor(code, stockNow);
+  const H = histFor(code, stockNow, cust.c);
   const rate = rateOf(H.segs);
   const counted = String(stockNow) !== '' && stockNow != null;
   if (rate){
@@ -911,8 +955,15 @@ function pickRep(code){ S.rep = code; S.cust = null; S.qStore = ''; S.storeF = '
 
 /* ══════════ 2 · เลือกร้าน ══════════ */
 const ST_BADGE = {draft:['b-gap','ค้างส่ง'], pending:['b-hot','รอส่ง'], sent:['b-ok','ส่งแล้ว']};
-function storeStat(code){
-  const list = items.forStore(code, isoToday());
+/* ❗ ทำ index ของ "งานวันนี้ แยกตามร้าน" ครั้งเดียวต่อ render
+   ก่อนหน้านี้ไล่กองงานทั้งหมดใหม่ทุกร้าน = 150 ร้าน x งานสะสม (ใช้ไปสักเดือนก็หน่วงชัดเจน) */
+function todayByStore(){
+  const d = isoToday(), by = {};
+  items.list().forEach(x=>{ if (x.d === d) (by[x.cust] = by[x.cust] || []).push(x); });
+  return by;
+}
+function storeStat(code, idx){
+  const list = idx ? (idx[code] || []) : items.forStore(code, isoToday());
   if (!list.length) return null;
   const openN = list.filter(x=>x.status!=='sent').length;
   return { n:list.length, open:openN,
@@ -921,21 +972,24 @@ function storeStat(code){
 function renderStores(){
   el('storeSub').textContent = repNm(REPNAME[S.rep]) + ' · ' + S.rep;
   const mine = DB.custs.filter(c=>c.r===S.rep);
-  const nOpen = mine.filter(c=>{ const s = storeStat(c.c); return s && s.open; }).length;
-  const nSent = mine.filter(c=>{ const s = storeStat(c.c); return s && !s.open; }).length;
+  const idx = todayByStore();
+  const st$ = {};
+  mine.forEach(c=>{ st$[c.c] = storeStat(c.c, idx); });
+  const nOpen = mine.filter(c=>st$[c.c] && st$[c.c].open).length;
+  const nSent = mine.filter(c=>st$[c.c] && !st$[c.c].open).length;
   el('storeChips').innerHTML =
     '<span class="chip'+(!S.storeF?' on':'')+'" onclick="setStoreF(\'\')">ทั้งหมด <span class="n">'+mine.length+'</span></span>'+
     '<span class="chip'+(S.storeF==='open'?' on':'')+'" onclick="setStoreF(\'open\')">ยังไม่ส่ง <span class="n">'+nOpen+'</span></span>'+
     '<span class="chip'+(S.storeF==='sent'?' on':'')+'" onclick="setStoreF(\'sent\')">ส่งแล้ววันนี้ <span class="n">'+nSent+'</span></span>';
   let list = RK.filter(mine, S.qStore, ['_s']);
-  if (S.storeF === 'open') list = list.filter(c=>{ const s = storeStat(c.c); return s && s.open; });
-  if (S.storeF === 'sent') list = list.filter(c=>{ const s = storeStat(c.c); return s && !s.open; });
+  if (S.storeF === 'open') list = list.filter(c=>st$[c.c] && st$[c.c].open);
+  if (S.storeF === 'sent') list = list.filter(c=>st$[c.c] && !st$[c.c].open);
   /* ไม่มี deadline → ล่าสุดอยู่บน · แต่ของที่ยังไม่ส่งต้องขึ้นก่อน ไม่งั้นเซลลืมว่ามีค้าง */
-  const rank = c => { const s = storeStat(c.c); return !s ? 2 : (s.status==='pending'?0:(s.open?1:3)); };
+  const rank = c => { const s = st$[c.c]; return !s ? 2 : (s.status==='pending'?0:(s.open?1:3)); };
   list = list.slice().sort((a,b)=> (rank(a)-rank(b)) || (b.last||'').localeCompare(a.last||''));
   el('storeBanner').innerHTML = bannerHtml();
   el('storeList').innerHTML = list.length ? list.map(c=>{
-    const s = storeStat(c.c), b = s && ST_BADGE[s.status];
+    const s = st$[c.c], b = s && ST_BADGE[s.status];
     return '<div class="rowline" onclick="pickCust('+c.i+')">'+
       '<span class="rk-grow" style="min-width:0">'+
         '<span class="rk-1line" style="display:block;font-weight:600">'+esc(c.n)+'</span>'+
@@ -1085,7 +1139,7 @@ function pcard(r){
   const meta = r.sold
     ? esc(p.c) + ' · ซื้อล่าสุด ' + fmtD(st.last) + ' ' + fmt(st.lq,1) + ' ลัง' + (dAgo != null ? ' (' + dAgo + ' วัน)' : '')
     : esc(p.c) + ' · ' + (p.ns ? 'ร้านอื่น '+p.ns+' ร้านขาย' : 'ยังไม่มีร้านไหนในเขตนี้ซื้อ');
-  const H = histFor(p.c, null), rate = rateOf(H.segs);
+  const H = histFor(p.c, null, S.cust.c), rate = rateOf(H.segs);
   const meta2 = it
     ? 'บันทึกไว้ สต็อก ' + it.s + ' ลัง · สั่ง ' + it.o + ' ลัง · ' + (it.at||'')
     : rate
@@ -1110,7 +1164,10 @@ function openEntry(pi){
   const st = stat(h, S.cust);
   const prev = itemOf(p.c);
   const s = prev ? prev.s : '';
-  S.entry = { pi, p, st, h, s, o: prev ? prev.o : '', prev };
+  S.entry = { pi, p, st, h, s, o: prev ? prev.o : '', prev,
+    /* ตรึง batchId/รอบที่ ตอนเปิดแผง — ไม่งั้นพิมพ์ทีละตัวอักษร batchId เปลี่ยนทุกครั้ง */
+    batchId: (prev && prev.status !== 'sent') ? prev.batchId : uid(),
+    rev: prev ? (prev.status === 'sent' ? (prev.rev||1) + 1 : (prev.rev||1)) : 1 };
   paintEntry();
   el('entryBack').classList.add('on');
   el('entry').classList.add('on');
@@ -1196,10 +1253,10 @@ function paintEntry(){
         '</div><div class="hint rk-1line">'+hintS+'</div></div>'+
       '<div><div class="lab rk-1line">สั่งรอบนี้ (ลัง)</div>'+
         '<div class="step'+(counted && RK.num(E.o)>0 ?' sug':'')+'">'+
-          '<button type="button" onclick="bumpEntry(\'o\',-1)">&minus;</button>'+
-          '<input id="eOrder" type="number" inputmode="numeric" step="1" min="0" placeholder="&mdash;" value="'+esc(E.o)+'" '+
+          '<button type="button" onclick="bumpEntry(\'o\',-1)"'+(counted?'':' disabled')+'>&minus;</button>'+
+          '<input id="eOrder" type="number" inputmode="numeric" step="1" min="0" placeholder="&mdash;" value="'+esc(counted?E.o:'')+'" '+(counted?'':'disabled ')+
             'oninput="setEntry(\'o\',this.value,1)" onchange="setEntry(\'o\',this.value)" onfocus="this.select()">'+
-          '<button type="button" onclick="bumpEntry(\'o\',1)">+</button>'+
+          '<button type="button" onclick="bumpEntry(\'o\',1)"'+(counted?'':' disabled')+'>+</button>'+
         '</div><div class="hint rk-1line">'+hintO+'</div></div>'+
     '</div>'+
     (h ? sparkHtml(st) : '')+
@@ -1268,9 +1325,8 @@ function stash(){
   const it = {
     k, d:isoToday(), cust:S.cust.c, custName:S.cust.n, rep:S.rep, repName:REPNAME[S.rep],
     code:E.p.c, name:E.p.n, s:RK.num(E.s), o:RK.num(E.o||0),
-    status: (prev && prev.status === 'sent') ? 'draft' : (prev ? prev.status === 'pending' ? 'pending' : 'draft' : 'draft'),
-    rev: (prev && prev.status === 'sent') ? (prev.rev||1) + 1 : (prev ? prev.rev||1 : 1),
-    batchId: (prev && prev.status === 'sent') ? uid() : (prev ? prev.batchId : uid()),
+    status: (prev && prev.status === 'pending') ? 'pending' : 'draft',
+    rev: E.rev, batchId: E.batchId,
     at: hhmm(), err:''
   };
   if (prev && prev.status === 'sent'){ it.prevSentAt = prev.at; }
@@ -1347,7 +1403,7 @@ async function sendItem(it, quiet){
     it.status = 'sent'; it.err = ''; it.at = hhmm();
     items.put(it);
     if (!quiet) toast(j.duplicate ? 'ส่งไปแล้วก่อนหน้านี้ ไม่เขียนซ้ำ' : ('ส่งขึ้นชีทแล้ว: ' + it.name), 'good');
-    if (S.hist && S.hist.cust === it.cust) S.hist.byCode = buildHist(histCache.get(it.cust) || []);
+    noteSent(it);
     return true;
   } catch (err) {
     it.err = String(err.message || err); items.put(it);
@@ -1579,6 +1635,11 @@ document.addEventListener('keydown', e=>{ if (e.key === 'Escape' && S.entry) clo
 
 /* เน็ตกลับมา = ลองส่งของที่ค้างเองเลย ไม่ต้องรอเซลกด */
 window.addEventListener('online', ()=>{ const q = items.list().filter(x=>x.status==='pending'); if (q.length) sendMany(q); });
+window.addEventListener('storage', e=>{        /* เปิดแอปไว้หลายแท็บ → cache ในหน่วยความจำจะเก่า */
+  if (e.key === LSKEY) store.drop();
+  if (e.key === HKEY){ histCache.drop(); histMem.m = {}; if (S.cust) loadStoreHist(S.cust.c); }
+  if (S.cust) renderCard(); else if (S.rep) renderStores(); else renderReps();
+});
 renderReps();
 { const q = items.list().filter(x=>x.status==='pending'); if (q.length) setTimeout(()=>sendMany(q), 1200); }
 </script>
