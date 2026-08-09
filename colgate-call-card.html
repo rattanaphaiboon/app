@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Colgate Call Card v2.0 — บันทึกสต็อกร้าน</title>
+<title>Colgate Call Card v2.1 — บันทึกสต็อกร้าน</title>
 
 <!-- ══ RK-BASE · Rattana UI Kit (D:\Calude\tools\ui-kit\rk-base.html) ══ -->
 <style id="rk-base">
@@ -245,6 +245,13 @@ pre.json{background:var(--bg);border:1px solid var(--border);border-radius:10px;
 .daycard.open .daylist{display:block}
 .dayitem{padding:7px 0;font-size:13px}
 .dayitem+.dayitem{border-top:1px solid var(--border)}
+
+.why{background:var(--bg);border:1px solid var(--border);border-radius:11px;padding:9px 10px;margin-top:9px;font-size:12.5px;line-height:1.5}
+.why b{font-weight:700}
+.why .linkbtn{margin-top:3px}
+.why.muted{color:var(--muted)}
+table.histtbl{margin-top:6px}
+table.histtbl th,table.histtbl td{padding:5px 6px;font-size:11.5px}
 </style>
 </head>
 <body>
@@ -681,7 +688,7 @@ pre.json{background:var(--bg);border:1px solid var(--border);border-radius:10px;
    flow: สแกน/พิมพ์ชื่อ → เปิดแผงกรอก → ใส่เลข → "ส่ง" ทันที ทีละรายการ
    เหตุผล: ไม่สะสมตัวเลขค้างไว้ในเครื่องเป็นกอง ส่งจบทีละตัว ตัวเลขไม่มีทางหายยกชุด
    ══════════════════════════════════════════════════════════════════════════ */
-const VER = 'v2.0';
+const VER = 'v2.1';
 const DB  = JSON.parse(document.getElementById('DB').textContent);
 const MN  = DB.months.length;
 const WIN = 4;                       /* เฉลี่ยยอดขายจาก 4 เดือนล่าสุด */
@@ -708,7 +715,9 @@ RK.scan.index(DB.prods.map(p=>({
 /* ══════════ state ══════════ */
 const S = {
   rep:null, cust:null, qStore:'', storeF:'', qProd:'', filter:'all',
-  safety:7, entry:null, sending:false, day:{date:'', repOnly:true, rows:null, loading:false, err:''}
+  safety:7, entry:null, sending:false, showHist:false,
+  hist:{cust:'', loading:false, err:'', byCode:{}},
+  day:{date:'', repOnly:true, rows:null, loading:false, err:'', detail:false}
 };
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -785,6 +794,92 @@ function starterQty(p, cust){
   return Math.max(1, Math.round(p.md * ((cust.cyc || 15) + S.safety) / 30.4));
 }
 function autoQty(p, st, h, stock, cust){ return h ? suggestQty(st, stock) : starterQty(p, cust); }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ประวัติการเช็คสต็อกของร้าน → "ขายไปจริงเท่าไร" ระหว่าง 2 ครั้งที่เข้าไปนับ
+     ขายไป = (สต็อกครั้งก่อน + ที่สั่งครั้งก่อน) − สต็อกครั้งนี้
+   แม่นกว่ายอดบิลย้อนหลัง เพราะบิลบอกแค่ "ร้านซื้อไปเท่าไร" ไม่ได้บอกว่าขายออกจริงไหม
+   ⚠️ ตั้งอยู่บนสมมติฐานว่าของที่สั่งไปส่งถึงร้านก่อนรอบถัดไป — แอปโชว์ตัวเลขดิบให้เห็นทุกตัว
+      เซลจะได้ทักได้ทันทีถ้าไม่ตรง
+   ══════════════════════════════════════════════════════════════════════════ */
+const HKEY = 'colgateHist.v1';
+const histCache = {
+  load(){ try{ return JSON.parse(localStorage.getItem(HKEY)||'{}'); }catch(e){ return {}; } },
+  get(cust){ return this.load()[cust] || null; },
+  put(cust, rows){ const a = this.load(); a[cust] = rows; try{ localStorage.setItem(HKEY, JSON.stringify(a)); }catch(e){} }
+};
+const dayDiff = (a,b) => Math.round((new Date(b+'T00:00:00') - new Date(a+'T00:00:00')) / 864e5);
+
+async function loadStoreHist(cust){
+  S.hist = { cust, loading:true, err:'', byCode: buildHist(histCache.get(cust) || []) };
+  renderCard(); if (S.entry) paintEntry();
+  if (!execReady()){ S.hist.loading = false; S.hist.err = 'ยังไม่ได้ตั้งค่าหลังบ้าน'; return done(); }
+  try {
+    const j = await readJson(await fetch(EXEC_URL + '?action=store&cust=' + encodeURIComponent(cust), {redirect:'follow'}));
+    histCache.put(cust, j.rows || []);
+    S.hist.byCode = buildHist(j.rows || []);
+  } catch (err) { S.hist.err = String(err.message || err); }
+  S.hist.loading = false; done();
+  function done(){ if (S.cust && S.cust.c === cust){ renderCard(); if (S.entry) paintEntry(); } }
+}
+/* รวมของที่ขึ้นชีทแล้ว + ของที่ยังค้างในเครื่อง · วันเดียวกันเก็บครั้งล่าสุดครั้งเดียว */
+function buildHist(rows){
+  const by = {};
+  const push = r => {
+    const a = by[r.code] = by[r.code] || [];
+    const i = a.findIndex(x=>x.d === r.d);
+    if (i >= 0) a[i] = r; else a.push(r);
+  };
+  (rows||[]).forEach(r=>push({d:r.d, s:RK.num(r.s), o:RK.num(r.o), at:r.at||'', sent:true}));
+  items.list().filter(x=>x.cust === (S.hist ? S.hist.cust : '') && x.status !== 'sent')
+    .forEach(x=>push({d:x.d, s:RK.num(x.s), o:RK.num(x.o), at:x.at||'', sent:false}));
+  Object.values(by).forEach(a=>a.sort((x,y)=>x.d < y.d ? -1 : x.d > y.d ? 1 : 0));
+  return by;
+}
+/* list = ประวัติเรียงเก่า→ใหม่ (รวมค่าที่กำลังกรอกอยู่เป็นจุดล่าสุด) */
+function segsOf(list){
+  const out = [];
+  for (let i = 1; i < list.length; i++){
+    const a = list[i-1], b = list[i];
+    const days = dayDiff(a.d, b.d);
+    if (!(days > 0)) continue;                      /* เช็คซ้ำวันเดียวกัน = แก้ไข ไม่ใช่รอบใหม่ */
+    const had = a.s + a.o;
+    out.push({ from:a.d, to:b.d, days, had, sold: had - b.s, perDay: (had - b.s) / days });
+  }
+  return out;
+}
+/* ใช้ 3 รอบล่าสุด รวมยอดหารรวมวัน (นิ่งกว่าเฉลี่ยอัตรารายรอบ) · ขายติดลบ = ร้านหาของมาเอง ปัดเป็น 0 */
+function rateOf(segs){
+  const use = segs.slice(-3);
+  const days = use.reduce((a,s)=>a+s.days, 0);
+  if (!(days > 0)) return null;
+  const sold = use.reduce((a,s)=>a+Math.max(0, s.sold), 0);
+  const gaps = use.map(s=>s.days).sort((a,b)=>a-b);
+  return { perDay: sold/days, perWeek: sold/days*7, days, sold, n: use.length,
+           cyc: Math.max(7, Math.min(35, gaps[Math.floor(gaps.length/2)])) };
+}
+/* ประวัติของ SKU นี้ + จุดล่าสุดคือค่าที่กำลังกรอก */
+function histFor(code, stockNow){
+  const past = ((S.hist && S.hist.byCode[code]) || []).filter(x=>x.d !== isoToday());
+  const list = past.slice();
+  if (stockNow !== '' && stockNow != null) list.push({d:isoToday(), s:RK.num(stockNow), o:0, live:true});
+  return { past, list, segs: segsOf(list) };
+}
+/* แนะนำจำนวนสั่ง — มีการนับจริง >=2 ครั้ง ใช้อัตราจริง · ไม่มีก็ถอยไปใช้ยอดบิลย้อนหลัง */
+function advise(p, st, h, stockNow, cust, code){
+  const H = histFor(code, stockNow);
+  const rate = rateOf(H.segs);
+  const counted = String(stockNow) !== '' && stockNow != null;
+  if (rate){
+    const cyc = rate.cyc, cover = cyc + S.safety;
+    const target = rate.perDay * cover;
+    const d = target - RK.num(stockNow);
+    return { basis:'count', H, rate, cyc, cover, target,
+             qty: counted ? (d <= 0 ? 0 : (d < 1 ? Math.round(d) : Math.ceil(d))) : null };
+  }
+  return { basis: h ? 'bill' : 'peer', H, rate:null, cyc:cust.cyc, cover:cust.cyc + S.safety,
+           target: st.target, qty: counted ? autoQty(p, st, h, stockNow, cust) : null };
+}
 
 /* ══════════ นำทาง ══════════ */
 function go(id){
@@ -879,9 +974,11 @@ function resume(code){
 /* ══════════ 3 · คอลการ์ด ══════════ */
 function pickCust(i){
   S.cust = DB.custs[i];
-  S.qProd = ''; S.filter = 'all';
+  S.qProd = ''; S.filter = 'all'; S.showHist = false;
+  S.hist = { cust:S.cust.c, loading:true, err:'', byCode:{} };
   qProdBind.set('');
   renderCard(); go('scCard');
+  loadStoreHist(S.cust.c);
   const mine = items.forStore(S.cust.c, isoToday());
   if (mine.length) toast('ร้านนี้วันนี้ส่งไปแล้ว ' + mine.filter(x=>x.status==='sent').length + '/' + mine.length + ' รายการ');
 }
@@ -930,7 +1027,10 @@ function setFilter(k){ const y = window.scrollY; S.filter = k; renderCard(); win
 function renderStrip(){
   const mine = items.forStore(S.cust.c, isoToday());
   if (!mine.length){
-    el('sentStrip').innerHTML = '<div class="strip tip"><span class="rk-1line">สแกนบาร์โค้ด หรือพิมพ์ชื่อสินค้า แล้วกดส่งทีละรายการ</span></div>';
+    el('sentStrip').innerHTML = '<div class="strip tip"><span class="rk-1line">'+
+      (S.hist.loading ? 'กำลังโหลดประวัติเช็คสต็อกของร้านนี้…'
+       : S.hist.err ? 'โหลดประวัติไม่ได้ — ' + esc(S.hist.err)
+       : 'สแกนบาร์โค้ด หรือพิมพ์ชื่อสินค้า แล้วกดส่งทีละรายการ')+'</span></div>';
     return;
   }
   const sent = mine.filter(x=>x.status==='sent'), open = mine.filter(x=>x.status!=='sent');
@@ -985,10 +1085,13 @@ function pcard(r){
   const meta = r.sold
     ? esc(p.c) + ' · ซื้อล่าสุด ' + fmtD(st.last) + ' ' + fmt(st.lq,1) + ' ลัง' + (dAgo != null ? ' (' + dAgo + ' วัน)' : '')
     : esc(p.c) + ' · ' + (p.ns ? 'ร้านอื่น '+p.ns+' ร้านขาย' : 'ยังไม่มีร้านไหนในเขตนี้ซื้อ');
+  const H = histFor(p.c, null), rate = rateOf(H.segs);
   const meta2 = it
     ? 'บันทึกไว้ สต็อก ' + it.s + ' ลัง · สั่ง ' + it.o + ' ลัง · ' + (it.at||'')
-    : (r.sold ? 'เฉลี่ย ' + fmt(st.avgMonth,1) + ' ลัง/เดือน · ควรมี ' + fmt(st.target,1) + ' ลัง'
-              : (p.md ? 'ร้านอื่นเฉลี่ย ' + fmt(p.md,1) + ' ลัง/เดือน' : (p.pk ? 'บรรจุ '+esc(p.pk) : '')));
+    : rate
+      ? 'เช็คมาแล้ว ' + H.past.length + ' ครั้ง · ขายได้ ' + fmt(rate.perWeek,1) + ' ลัง/สัปดาห์'
+      : (r.sold ? 'เฉลี่ย ' + fmt(st.avgMonth,1) + ' ลัง/เดือน · ควรมี ' + fmt(st.target,1) + ' ลัง'
+                : (p.md ? 'ร้านอื่นเฉลี่ย ' + fmt(p.md,1) + ' ลัง/เดือน' : (p.pk ? 'บรรจุ '+esc(p.pk) : '')));
 
   return '<div class="pcard'+(it ? (it.status==='sent'?' done':' need') : '')+'" id="pc'+p.i+'" onclick="openEntry('+p.i+')">'+
     '<div class="rk-row"><span class="rk-grow rk-1line pname" title="'+esc(p.n)+'">'+esc(p.n)+'</span>'+badge+'</div>'+
@@ -1025,58 +1128,104 @@ function paintEntry(){
   const E = S.entry; if (!E) return;
   const {p, st, h, prev} = E;
   const counted = String(E.s) !== '';
-  const sug = counted ? autoQty(p, st, h, E.s, S.cust) : null;
+  const A = advise(p, st, h, E.s, S.cust, p.c);
+  E.adv = A;
+  const sug = A.qty;
   const dAgo = daysAgo(st.last);
+  const bcs = [p.be && 'IND '+p.be, p.bb && 'BUN '+p.bb, p.bc && 'CASE '+p.bc].filter(Boolean).join('  ');
+
+  /* ── ที่มาของ "ควรสั่งเท่าไร" — โชว์ตัวเลขดิบทุกตัว เซลจะได้ทักได้ทันทีถ้าไม่ตรง ── */
+  const last = A.H.past[A.H.past.length-1];
+  const liveSeg = A.H.segs.length ? A.H.segs[A.H.segs.length-1] : null;
+  const hasLive = counted && liveSeg && liveSeg.to === isoToday();
+  let why = '';
+  if (last){
+    why = '<div class="why">'+
+      '<div class="rk-1line"><b>ครั้งก่อน '+fmtISO(last.d)+'</b> — นับได้ '+fmt(last.s,1)+' + สั่ง '+fmt(last.o,1)+' = มี '+fmt(last.s+last.o,1)+' ลัง</div>'+
+      (hasLive
+        ? '<div class="rk-1line">วันนี้เหลือ '+fmt(RK.num(E.s),1)+' ลัง → <b>ขายไป '+fmt(Math.max(0,liveSeg.sold),1)+' ลัง ใน '+liveSeg.days+' วัน</b>'+
+          (liveSeg.sold < 0 ? ' (สต็อกเพิ่มเอง — ร้านหาของมาจากที่อื่น?)' : '')+'</div>'
+        : '<div class="rk-1line muted">ใส่สต็อกวันนี้ แล้วจะคำนวณให้ว่าขายไปเท่าไร</div>')+
+      (A.rate
+        ? '<div class="rk-1line">ขายได้ <b>'+fmt(A.rate.perWeek,1)+' ลัง/สัปดาห์</b> (จาก '+A.rate.n+' รอบล่าสุด · '+A.rate.days+' วัน) → ควรมี '+fmt(A.target,1)+' ลังถึงรอบหน้า</div>'
+        : '')+
+      '<button class="linkbtn" onclick="S.showHist=!S.showHist;paintEntry()">'+
+        (S.showHist ? 'ซ่อนประวัติ' : 'ดูประวัติเช็คสต็อก '+A.H.past.length+' ครั้ง')+'</button>'+
+      (S.showHist ? histTable(A.H) : '')+
+    '</div>';
+  } else if (S.hist.loading){
+    why = '<div class="why muted rk-1line">กำลังโหลดประวัติเช็คสต็อก…</div>';
+  } else {
+    why = '<div class="why muted"><div class="rk-1line">ร้านนี้ยังไม่เคยเช็คสต็อก SKU นี้ — รอบนี้คิดจาก'+
+      (h ? 'ยอดบิลย้อนหลัง (เฉลี่ย '+fmt(st.avgMonth,1)+' ลัง/เดือน)' : (p.ns ? 'ยอดร้านอื่น '+p.ns+' ร้าน' : 'ยังไม่มีฐาน'))+
+      '</div><div class="rk-1line">เช็คครั้งที่ 2 เมื่อไร ระบบจะเปลี่ยนไปคิดจากยอดขายจริงของร้านนี้ให้เอง</div></div>';
+  }
+
   const info = h
-    ? 'ซื้อล่าสุด ' + fmtD(st.last) + ' ' + fmt(st.lq,1) + ' ลัง' + (dAgo!=null?' ('+dAgo+' วัน)':'') +
-      ' · เฉลี่ย ' + fmt(st.avgMonth,1) + ' ลัง/เดือน'
+    ? 'ซื้อล่าสุด ' + fmtD(st.last) + ' ' + fmt(st.lq,1) + ' ลัง' + (dAgo!=null?' ('+dAgo+' วัน)':'') + ' · เฉลี่ย ' + fmt(st.avgMonth,1) + ' ลัง/เดือน'
     : (p.ns ? 'ร้านนี้ยังไม่เคยซื้อ · ร้านอื่น ' + p.ns + ' ร้านขาย เฉลี่ย ' + fmt(p.md,1) + ' ลัง/เดือน'
             : 'ร้านนี้ยังไม่เคยซื้อ · ยังไม่มีร้านไหนในเขตนี้ซื้อ SKU นี้');
-  const bcs = [p.be && 'IND '+p.be, p.bb && 'BUN '+p.bb, p.bc && 'CASE '+p.bc].filter(Boolean).join('  ');
   const hintS = counted
     ? [ p.cv ? '= ' + fmt(RK.num(E.s) * p.cv) + ' ' + esc(uTh(p.u)) : '',
-        st.avgDay > 0 ? 'พอขาย ' + fmt(RK.num(E.s)/st.avgDay) + ' วัน' : '' ].filter(Boolean).join(' · ')
+        A.rate && A.rate.perDay > 0 ? 'พอขาย ' + fmt(RK.num(E.s)/A.rate.perDay) + ' วัน'
+          : (st.avgDay > 0 ? 'พอขาย ' + fmt(RK.num(E.s)/st.avgDay) + ' วัน' : '') ].filter(Boolean).join(' · ')
     : '&nbsp;';
+  const basisTxt = A.basis === 'count' ? 'อิงยอดขายจริง' : A.basis === 'bill' ? 'อิงยอดบิลย้อนหลัง' : 'อิงร้านอื่น';
   const hintO = !counted ? 'ใส่สต็อกก่อน ระบบจะคำนวณให้'
     : RK.num(E.o) !== sug
       ? '<button class="linkbtn" onclick="setEntry(\'o\','+sug+')">ใช้ค่าแนะนำ '+sug+' ลัง</button>'
-      : !h ? (sug > 0 ? 'ล็อตเปิดบิล '+sug+' ลัง (อิงร้านอื่น)' : 'ยังไม่มีฐานให้แนะนำ — เซลกรอกเอง')
-      : (sug === 0 && deficit(st, E.s) > 0 && p.cv
-          ? 'ขาดอีก ~' + fmt(deficit(st, E.s) * p.cv) + ' ' + esc(uTh(p.u)) + ' (ไม่ถึงลัง)'
-          : 'ระบบแนะนำ ' + sug + ' ลัง');
+      : (sug === 0 && A.target - RK.num(E.s) > 0 && p.cv
+          ? 'ขาดอีก ~' + fmt((A.target - RK.num(E.s)) * p.cv) + ' ' + esc(uTh(p.u)) + ' (ไม่ถึงลัง)'
+          : 'แนะนำ ' + sug + ' ลัง · ' + basisTxt);
 
   const sentBefore = prev && prev.status === 'sent';
   el('entryBody').innerHTML =
     '<div class="rk-row"><b class="rk-grow rk-1line" title="'+esc(p.n)+'" style="font-size:16px">'+esc(p.n)+'</b>'+
-      '<button class="iconbtn ghost rk-nogrow" onclick="closeEntry()" aria-label="ปิด">✕</button></div>'+
+      '<button class="iconbtn ghost rk-nogrow" onclick="closeEntry()" aria-label="ปิด">&#10005;</button></div>'+
     '<div class="rk-1line pmeta">'+esc(p.c)+' · '+(p.pk?esc(p.pk)+' · ':'')+fmt(p.cv)+' '+esc(uTh(p.u))+'/ลัง</div>'+
     '<div class="rk-1line pmeta">'+info+'</div>'+
-    (h ? '<div class="rk-1line pmeta">ควรมีถึงรอบหน้า '+fmt(st.target,1)+' ลัง (รอบ '+S.cust.cyc+'+'+S.safety+' วัน)</div>' : '')+
     (bcs ? '<div class="rk-1line pmeta" title="'+esc(bcs)+'">'+esc(bcs)+'</div>' : '')+
-    (h ? sparkHtml(st) : '')+
+    why+
     '<div class="ctl">'+
       '<div><div class="lab rk-1line">สต็อกที่นับได้ (ลัง)</div>'+
         '<div class="step'+(counted?' filled':'')+'">'+
-          '<button type="button" onclick="bumpEntry(\'s\',-1)">−</button>'+
-          '<input id="eStock" type="number" inputmode="decimal" step="0.5" min="0" placeholder="—" value="'+esc(E.s)+'" '+
+          '<button type="button" onclick="bumpEntry(\'s\',-1)">&minus;</button>'+
+          '<input id="eStock" type="number" inputmode="decimal" step="0.5" min="0" placeholder="&mdash;" value="'+esc(E.s)+'" '+
             'oninput="setEntry(\'s\',this.value,1)" onchange="setEntry(\'s\',this.value)" onfocus="this.select()">'+
           '<button type="button" onclick="bumpEntry(\'s\',1)">+</button>'+
         '</div><div class="hint rk-1line">'+hintS+'</div></div>'+
       '<div><div class="lab rk-1line">สั่งรอบนี้ (ลัง)</div>'+
         '<div class="step'+(counted && RK.num(E.o)>0 ?' sug':'')+'">'+
-          '<button type="button" onclick="bumpEntry(\'o\',-1)">−</button>'+
-          '<input id="eOrder" type="number" inputmode="numeric" step="1" min="0" placeholder="—" value="'+esc(E.o)+'" '+
+          '<button type="button" onclick="bumpEntry(\'o\',-1)">&minus;</button>'+
+          '<input id="eOrder" type="number" inputmode="numeric" step="1" min="0" placeholder="&mdash;" value="'+esc(E.o)+'" '+
             'oninput="setEntry(\'o\',this.value,1)" onchange="setEntry(\'o\',this.value)" onfocus="this.select()">'+
           '<button type="button" onclick="bumpEntry(\'o\',1)">+</button>'+
         '</div><div class="hint rk-1line">'+hintO+'</div></div>'+
     '</div>'+
+    (h ? sparkHtml(st) : '')+
     (prev ? '<div class="savestate rk-row" style="margin-top:8px"><span class="dot '+(prev.status==='sent'?'ok':'warn')+'"></span>'+
         '<span class="rk-1line">'+(prev.status==='sent'
-          ? 'ส่งขึ้นชีทแล้ว '+(prev.at||'')+' — แก้แล้วส่งใหม่จะเป็นรอบที่ '+((prev.rev||1)+1)
-          : 'เก็บในเครื่องแล้ว '+(prev.at||'')+' · ยังไม่ขึ้นชีท'+(prev.err?' — '+esc(prev.err):''))+'</span></div>' : '')+
+          ? 'ส่งขึ้นชีทแล้ว '+(prev.at||'')+' &mdash; แก้แล้วส่งใหม่จะเป็นรอบที่ '+((prev.rev||1)+1)
+          : 'เก็บในเครื่องแล้ว '+(prev.at||'')+' · ยังไม่ขึ้นชีท'+(prev.err?' &mdash; '+esc(prev.err):''))+'</span></div>' : '')+
     '<button class="btn btn-primary" id="eSend" style="margin-top:10px" onclick="sendEntry()"'+(counted?'':' disabled')+'>'+
       (sentBefore ? 'ส่งใหม่ (รอบที่ '+((prev.rev||1)+1)+')' : 'ส่งรายการนี้')+'</button>'+
     '<button class="btn btn-ghost" style="margin-top:6px" onclick="closeEntry()">ปิด</button>';
+}
+/* ประวัติเช็คสต็อกทุกครั้ง — ล่าสุดอยู่บน (§ Sort Rule ข้อ 2) */
+function histTable(H){
+  if (!H.past.length) return '<div class="tiny muted" style="padding:6px 0">ยังไม่มีประวัติ</div>';
+  const seg = {}; H.segs.forEach(x=>{ seg[x.to] = x; });
+  const rows = H.past.slice().reverse();
+  return '<div class="wrapx"><table class="prev histtbl"><thead><tr>'+
+    '<th>วันที่</th><th style="text-align:right">นับได้</th><th style="text-align:right">สั่ง</th>'+
+    '<th style="text-align:right">ขายไป</th><th style="text-align:right">/สัปดาห์</th></tr></thead><tbody>'+
+    rows.map(r=>{
+      const g = seg[r.d];
+      return '<tr><td>'+fmtISO(r.d)+(r.sent?'':' <span class="badge b-hot">ค้าง</span>')+'</td>'+
+        '<td class="n">'+fmt(r.s,1)+'</td><td class="n">'+fmt(r.o,1)+'</td>'+
+        '<td class="n">'+(g ? fmt(Math.max(0,g.sold),1)+' <span class="muted">/'+g.days+'ว.</span>' : '&mdash;')+'</td>'+
+        '<td class="n">'+(g && g.days ? fmt(Math.max(0,g.sold)/g.days*7,1) : '&mdash;')+'</td></tr>';
+    }).join('')+'</tbody></table></div>';
 }
 function sparkHtml(st){
   const mx = Math.max(1, ...st.m.map(v=>Math.max(0,v)));
@@ -1091,7 +1240,10 @@ function setEntry(f, v, quiet){
   if (f === 's'){
     const s = String(v).trim();
     E.s = s === '' ? '' : String(Math.max(0, RK.num(s)));
-    if (E.s !== '' && (E.o === '' || !E.touchedO)) E.o = String(autoQty(E.p, E.st, E.h, E.s, S.cust));
+    if (E.s !== '' && (E.o === '' || !E.touchedO)){
+      const a = advise(E.p, E.st, E.h, E.s, S.cust, E.p.c);
+      E.o = String(a.qty == null ? 0 : a.qty);
+    }
   } else {
     if (String(E.s) === '') { if (!quiet) toast('ใส่สต็อกที่นับได้ก่อน แล้วระบบจะคำนวณจำนวนสั่งให้','bad'); return; }
     E.o = String(Math.max(0, Math.round(RK.num(v)))); E.touchedO = true;
@@ -1129,6 +1281,10 @@ function stash(){
 function rowOf(it){
   const p = PBYCODE[it.code], c = CBYCODE[it.cust];
   const h = (HIST[c.i]||{})[p.i], st = stat(h, c);
+  const A = advise(p, st, h, it.s, c, p.c);
+  const last = A.H.past[A.H.past.length-1];
+  const seg = A.H.segs.length ? A.H.segs[A.H.segs.length-1] : null;
+  const liveSeg = seg && seg.to === it.d ? seg : null;
   return {
     'วันที่': it.d,
     'รหัสเซล': it.rep, 'ชื่อเซล': repNm(it.repName), 'เบอร์เซล': repTel(it.repName),
@@ -1136,15 +1292,22 @@ function rowOf(it){
     'รหัสสินค้า': p.c, 'ชื่อสินค้า': p.n,
     'บาร์โค้ด_IND': p.be || '', 'บาร์โค้ด_BUN': p.bb || '', 'บาร์โค้ด_CASE': p.bc || '',
     'สต็อกที่นับ_CS': it.s, 'สั่งรอบนี้_CS': it.o,
-    'ระบบแนะนำ_CS': autoQty(p, st, h, it.s, c),
-    'ควรมี_CS': Math.round(st.target*10)/10,
-    'ขาดอีก_ชิ้น': Math.max(0, Math.round(deficit(st, it.s) * (p.cv||0))),
+    'ระบบแนะนำ_CS': A.qty == null ? '' : A.qty,
+    'ควรมี_CS': Math.round(A.target*10)/10,
+    'ขาดอีก_ชิ้น': Math.max(0, Math.round((A.target - RK.num(it.s)) * (p.cv||0))),
     'เฉลี่ยต่อเดือน_CS': Math.round(st.avgMonth*10)/10,
     'ซื้อล่าสุด': st.last ? iso(dOf(st.last)) : '',
     'ซื้อล่าสุดจำนวน_CS': st.lq || 0,
     'สินค้าใหม่ของร้าน': h ? '' : 'ใช่',
     'ร้านอื่นที่ขาย_ร้าน': p.ns || 0,
-    'รอบที่': it.rev || 1
+    'รอบที่': it.rev || 1,
+    /* ── ตัวเลขที่คิดจากการนับสต็อกจริง (ว่างเมื่อยังเช็คไม่ถึง 2 ครั้ง) ── */
+    'ครั้งก่อนเช็ค': last ? last.d : '',
+    'ครั้งก่อนนับได้_CS': last ? last.s : '',
+    'ครั้งก่อนสั่ง_CS': last ? last.o : '',
+    'ขายไประหว่างรอบ_CS': liveSeg ? Math.max(0, Math.round(liveSeg.sold*10)/10) : '',
+    'ขายได้_ลังต่อสัปดาห์': A.rate ? Math.round(A.rate.perWeek*10)/10 : '',
+    'เช็คมาแล้ว_ครั้ง': A.H.past.length + 1
   };
 }
 
@@ -1184,6 +1347,7 @@ async function sendItem(it, quiet){
     it.status = 'sent'; it.err = ''; it.at = hhmm();
     items.put(it);
     if (!quiet) toast(j.duplicate ? 'ส่งไปแล้วก่อนหน้านี้ ไม่เขียนซ้ำ' : ('ส่งขึ้นชีทแล้ว: ' + it.name), 'good');
+    if (S.hist && S.hist.cust === it.cust) S.hist.byCode = buildHist(histCache.get(it.cust) || []);
     return true;
   } catch (err) {
     it.err = String(err.message || err); items.put(it);
@@ -1276,12 +1440,19 @@ async function loadDay(){
 /* รวม 2 แหล่ง: ขึ้นชีทแล้ว (จริง) + ยังค้างในเครื่อง (ต้องเห็นด้วย ไม่งั้นนึกว่าหาย) */
 function dayRows(){
   const sheet = (S.day.rows || []).map(r=>({
-    cust:r['รหัสร้าน'], custName:r['ชื่อร้าน'], code:r['รหัสสินค้า'], name:r['ชื่อสินค้า'],
-    s:r['สต็อกที่นับ_CS'], o:r['สั่งรอบนี้_CS'], rep:r['รหัสเซล'], repName:r['ชื่อเซล'],
-    at:String(r['เวลาที่ส่ง']||'').slice(11,16), rev:r['รอบที่'], status:'sent'
+    cust:r['รหัสร้าน'], custName:r['ชื่อร้าน'],
+    code:r['รหัสสินค้า'], name:r['ชื่อสินค้า'],
+    s:r['สต็อกที่นับ_CS'], o:r['สั่งรอบนี้_CS'],
+    rep:r['รหัสเซล'], repName:r['ชื่อเซล'],
+    at:String(r['เวลาที่ส่ง']||'').slice(11,16),
+    rev:r['รอบที่'], status:'sent'
   }));
-  const local = items.list().filter(x=>x.d === S.day.date && x.status !== 'sent'
-      && (!S.day.repOnly || !S.rep || x.rep === S.rep))
+  /* เอาของในเครื่องมาเสริมทุกสถานะ (ไม่ใช่แค่ที่ค้าง) — เน็ตไม่ดีแล้วชีทโหลดไม่ได้
+     ต้องยังเห็นงานที่ทำไปวันนี้ ไม่ใช่จอว่างเปล่าจนนึกว่าหาย */
+  const seen = new Set(sheet.map(r=>r.cust + '|' + r.code));
+  const local = items.list()
+    .filter(x=>x.d === S.day.date && (!S.day.repOnly || !S.rep || x.rep === S.rep))
+    .filter(x=>!seen.has(x.cust + '|' + x.code))
     .map(x=>({cust:x.cust, custName:x.custName, code:x.code, name:x.name, s:x.s, o:x.o,
               rep:x.rep, repName:repNm(x.repName), at:x.at, rev:x.rev, status:x.status}));
   return sheet.concat(local);
@@ -1291,7 +1462,8 @@ function renderDay(){
   el('dayChips').innerHTML =
     '<span class="chip'+(S.day.repOnly?' on':'')+'" onclick="setDayRep(1)">เฉพาะเซลนี้</span>'+
     '<span class="chip'+(!S.day.repOnly?' on':'')+'" onclick="setDayRep(0)">ทุกเซล</span>'+
-    '<span class="chip" onclick="openDay(\''+isoToday()+'\')">วันนี้</span>';
+    '<span class="chip" onclick="openDay(\''+isoToday()+'\')">วันนี้</span>'+
+    '<span class="chip'+(S.day.detail?' on':'')+'" onclick="S.day.detail=!S.day.detail;renderDay()">ใส่รายสินค้าในข้อความ</span>';
 
   const rows = dayRows();
   const byStore = {};
@@ -1311,7 +1483,11 @@ function renderDay(){
         '<button class="linkbtn rk-nogrow" onclick="loadDay()">ลองใหม่</button></div></div></div>' : '')+
     (!list.length && !S.day.loading ? '<div class="empty">วันนี้ยังไม่มีการบันทึก</div>' :
       '<div class="pad"><div class="card"><div class="rk-row"><b class="rk-grow rk-1line">รวม '+list.length+' ร้าน · '+rows.length+' รายการ</b>'+
-        '<span class="rk-nogrow">สั่งรวม <b>'+fmt(totalOrder)+'</b> ลัง</span></div></div></div>'+
+        '<span class="rk-nogrow">สั่งรวม <b>'+fmt(totalOrder)+'</b> ลัง</span></div>'+
+        '<div class="rk-row" style="margin-top:9px;gap:8px">'+
+          '<button class="btn btn-primary rk-grow" style="padding:11px" onclick="shareLine()">ส่งไลน์</button>'+
+          '<button class="btn btn-ghost rk-nogrow" style="padding:11px 14px;width:auto" onclick="copyDay()">คัดลอก</button>'+
+        '</div></div></div>'+
       list.map(g=>
         '<div class="daycard">'+
           '<div class="rk-row dayhead" onclick="this.parentElement.classList.toggle(\'open\')">'+
@@ -1329,6 +1505,58 @@ function renderDay(){
         '</div>').join(''));
 }
 function setDayRep(v){ S.day.repOnly = !!v; loadDay(); }
+
+/* ══ ข้อความสรุปสำหรับส่งไลน์ ══ */
+function dayText(){
+  const rows = dayRows();
+  if (!rows.length) return 'สรุปคอลการ์ด ' + fmtISO(S.day.date) + '\nยังไม่มีการบันทึก';
+  const byStore = {};
+  rows.forEach(r=>{
+    const g = byStore[r.cust] = byStore[r.cust] || {name:r.custName, items:[], order:0, open:0, at:''};
+    g.items.push(r); g.order += RK.num(r.o);
+    if (r.status !== 'sent') g.open++;
+    if ((r.at||'') > g.at) g.at = r.at || '';
+  });
+  const list = Object.values(byStore).sort((a,b)=>(b.at||'').localeCompare(a.at||''));
+  const totOrder = rows.reduce((a,r)=>a+RK.num(r.o), 0);
+  const who = S.day.repOnly && S.rep ? repNm(REPNAME[S.rep]) : 'ทุกเซล';
+  const L = [];
+  L.push('สรุปเช็คสต็อก ' + fmtISO(S.day.date));
+  L.push('เซล: ' + who);
+  L.push('เช็ค ' + list.length + ' ร้าน · ' + rows.length + ' รายการ · สั่งรวม ' + fmt(totOrder) + ' ลัง');
+  L.push('');
+  list.forEach((g,i)=>{
+    L.push((i+1) + ') ' + g.name + ' — ' + g.items.length + ' รายการ · สั่ง ' + fmt(g.order) + ' ลัง' +
+           (g.at ? ' (' + g.at + ')' : '') + (g.open ? ' [ยังไม่ส่ง ' + g.open + ']' : ''));
+    if (S.day.detail){
+      g.items.slice().sort((a,b)=>RK.num(b.o)-RK.num(a.o)).forEach(r=>{
+        L.push('   • ' + r.name + ' — เหลือ ' + r.s + ' สั่ง ' + r.o);
+      });
+    }
+  });
+  return L.join('\n');
+}
+async function shareLine(){
+  const text = dayText();
+  if (navigator.share){
+    try { await navigator.share({ text }); return; }
+    catch(e){ if (e && e.name === 'AbortError') return; }
+  }
+  window.open('https://line.me/R/share?text=' + encodeURIComponent(text), '_blank');
+}
+function copyDay(){
+  const t = dayText();
+  (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject())
+    .then(()=>toast('คัดลอกข้อความสรุปแล้ว วางในไลน์ได้เลย','good'))
+    .catch(()=>{
+      const ta = document.createElement('textarea');
+      ta.value = t; ta.style.position='fixed'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); toast('คัดลอกแล้ว','good'); }
+      catch(e){ toast('คัดลอกไม่ได้ในเบราว์เซอร์นี้','bad'); }
+      ta.remove();
+    });
+}
 
 /* ══════════ init ══════════ */
 const qStoreBind = RK.bindSearch('#qStore', {
