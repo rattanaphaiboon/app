@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v6.2</title>
+<title>Rattana ยอดหนี้คงค้าง v6.3</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -776,7 +776,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v6.2</span>
+      <span class="app-ver">v6.3</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -3141,6 +3141,11 @@ const CR_TABS = [
   { key:'อนุมัติ',    label:'อนุมัติแล้ว',   cls:'ok' },
   { key:'ไม่อนุมัติ', label:'ไม่อนุมัติ',    cls:'bad' },
 ];
+/* v6.3: สถานะที่ 5 — ระบบปิดให้เอง ไม่ใช่ขั้นที่คนกด จึงไม่อยู่ใน CR_TABS (บันได 4 ขั้นคงเดิม)
+   ปลอดภัยกับ Sales App: ทุกจุดที่อ่าน DebtApproval กรองใบหมดอายุด้วย 'วันหมดอายุ' ก่อนดูสถานะอยู่แล้ว
+   (_buildDebtApprMap ตัดใบ exp < today ทิ้ง · handleAppendDebtApproval ใช้ซ้ำเฉพาะ exp >= today) */
+const CR_EXPIRED_ST  = 'หมดอายุ';
+const CR_EXPIRED_FIN = 'หมดอายุ-ไม่ได้คีย์บิล';
 
 let creditRows    = [];
 let creditLoaded  = false;
@@ -3184,7 +3189,7 @@ async function loadCreditBills(force){
         reason:      String(r['เหตุผล'] || '').trim(),
         status:      String(r['สถานะ'] || '').trim(),
         apprBy:      String(r['ผู้อนุมัติ'] || '').trim(),
-        expiry:      String(r['วันหมดอายุ'] || '').trim(),
+        expiry:      String(r['วันหมดอายุ'] || '').replace(/-/g, '/').trim(),   // v6.3: normalize ก่อน เทียบ string กับวันนี้ตรงๆ ได้
         rejectReason:String(r['เหตุผลปฏิเสธ'] || '').trim(),
         billId:      String(r['billId'] || '').trim(),
         finDecision: String(r['บัญชีตัดสิน'] || '').trim(),
@@ -3211,7 +3216,16 @@ async function loadCreditBills(force){
   renderCreditList();
   updateCreditBadge();
   crCheckCancelled();          // เช็คเบื้องหลัง ไม่ต้องรอ จอขึ้นก่อนแล้วค่อยอัปเดต
+  crSweepExpired();            // v6.3: ปิดใบที่หมดอายุโดยไม่เคยมีบิล — เบื้องหลังเหมือนกัน
 }
+
+/* ── v6.3: แยก "มีบิลให้ปลดจริง" ออกจาก "ยังไม่คีย์บิล" ──────────────────────
+   Sales App v8.530 ยิงคำขอตั้งแต่ "เซลเช็คอินเสร็จ" → billId ว่างจนกว่าเซลจะคีย์ออเดอร์จบ
+   เคสจริง 10/8: คิว 6 ใบ มีบิลจริงแค่ 3 · อีก 2 ใบเลขใบตามมาทีหลัง 11 ชม. · 1 ใบไม่คีย์เลยทั้งวัน
+   → บัญชีต้องเห็นเฉพาะใบที่มีของให้ปลด · เลขแดงก็นับเฉพาะตัวนั้น ไม่งั้นตัวเลขหลอก */
+const crWaitFin = a => a.status === 'รอบัญชี' && !a.finDecision && !a.allCancelled;
+const crPending = a => crWaitFin(a) && !!a.billId;   // คิวจริง — เลขแดง + ชิป "รอบัญชีตัดสิน"
+const crNoBill  = a => crWaitFin(a) && !a.billId;    // เช็คอินขอไว้ ยังไม่มีบิลให้ปลด
 
 // ── v6.2: ใบที่ออเดอร์ถูกยกเลิกไปแล้ว ไม่ควรค้างในคิวบัญชี ──────────────────
 //   เคสจริง 7/8: ORD7313975 ยกเลิกครบทั้ง 4 บรรทัด แต่ DebtApproval ยังเป็น 'รอบัญชี'
@@ -3243,8 +3257,40 @@ async function crCheckCancelled(){
   } catch(e){ console.warn('crCheckCancelled:', e.message); }
 }
 
-// เลขแดง = ใบที่รอบัญชีตัดสินอยู่จริง
-const crPending = a => a.status === 'รอบัญชี' && !a.finDecision && !a.allCancelled;
+/* ── v6.3: ปิดคำขอที่ "หมดอายุแล้วและไม่เคยมีบิล" ให้อัตโนมัติ ─────────────────
+   คำขอเกิดตั้งแต่เซลเช็คอิน → เซลเช็คอินแล้วไม่ได้ขายเชื่อ = ใบนั้นค้างคิวถาวร
+   crCheckCancelled ปิดให้ไม่ได้ (มันกรองเฉพาะใบที่มี billId) → ต้องมีตัวนี้มาเก็บกวาด
+   ยิงเฉพาะตอนเห็นของค้างจริง — หลังบ้านเช็คเงื่อนไขซ้ำอีกชั้นก่อนเขียนเสมอ
+   ⚠️ กดได้เฉพาะบัญชี/ผู้บริหาร อยู่แล้ว (แท็บนี้ซ่อนจาก role อื่น) */
+let _crSweeping = false;
+async function crSweepExpired(){
+  if (_crSweeping) return;
+  const today = new Date().toLocaleDateString('sv-SE').replace(/-/g, '/');
+  const stale = creditRows.filter(a => crNoBill(a) && a.expiry && a.expiry < today);
+  if (!stale.length) return;
+  _crSweeping = true;
+  try {
+    const res = await fetch(CONFIG.scriptUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'sweepExpiredCredit' }),
+    });
+    const data = await res.json();
+    if (!data || !data.ok || !data.closed) return;
+    const done = new Set(data.reqIds || []);
+    creditRows.forEach(a => {
+      if (!done.has(a.reqId)) return;
+      a.status      = CR_EXPIRED_ST;
+      a.finDecision = CR_EXPIRED_FIN;
+      a.finBy       = 'ระบบ (ปิดอัตโนมัติ)';
+      a.finAt       = data.at || '';
+      a._s          = crSearchable(a);
+    });
+    renderCreditChips(); renderCreditList(); updateCreditBadge();
+    showToast(`ปิดคำขอที่หมดอายุโดยไม่มีบิล ${data.closed} ใบ`, 'info');
+  } catch(e){ console.warn('crSweepExpired:', e.message); }
+  finally { _crSweeping = false; }
+}
 
 function updateCreditBadge(){
   const el = $('creditBadge'); if (!el) return;
@@ -3260,11 +3306,20 @@ function renderCreditChips(){
   const dCnt = d => creditRows.filter(a => a.apprTs.slice(0, 10) === d).length;
   const _today = new Date().toLocaleDateString('sv-SE').replace(/-/g, '/');
   const nCx = creditRows.filter(a => a.allCancelled).length;
+  const nNb = creditRows.filter(crNoBill).length;
+  const nEx = cnt(CR_EXPIRED_ST);
   el.innerHTML =
     `<span class="dcr-chiplbl">สถานะ</span>`
     + `<button class="dcr-chip ${crSt ? '' : 'on'}" onclick="crSetSt('')">ทั้งหมด<span class="n">${creditRows.length}</span></button>`
-    + CR_TABS.map(t => `<button class="dcr-chip ${crSt === t.key ? 'on' : ''}" onclick="crSetSt('${t.key}')">${t.label}<span class="n">${t.key === 'รอบัญชี' ? creditRows.filter(crPending).length : cnt(t.key)}</span></button>`).join('')
-    + (nCx ? `<button class="dcr-chip ${crSt === '_cx' ? 'on' : ''}" onclick="crSetSt('_cx')">ออเดอร์ยกเลิก<span class="n">${nCx}</span></button>` : '')
+    // ชิป "ยังไม่คีย์บิล" ต่อท้ายคิวจริงทันที — คนละกองกัน แต่ต้องเห็นคู่กันว่ายังมีค้างอยู่
+    + CR_TABS.map(t => {
+        const chip = `<button class="dcr-chip ${crSt === t.key ? 'on' : ''}" onclick="crSetSt('${t.key}')">${t.label}<span class="n">${t.key === 'รอบัญชี' ? creditRows.filter(crPending).length : cnt(t.key)}</span></button>`;
+        return (t.key === 'รอบัญชี' && (nNb || crSt === '_nb'))
+          ? chip + `<button class="dcr-chip ${crSt === '_nb' ? 'on' : ''}" onclick="crSetSt('_nb')" title="เซลเช็คอินขอไว้ แต่ยังไม่ได้คีย์ออเดอร์ — ยังไม่มีบิลให้ปลด">ยังไม่คีย์บิล<span class="n">${nNb}</span></button>`
+          : chip;
+      }).join('')
+    + (nCx || crSt === '_cx' ? `<button class="dcr-chip ${crSt === '_cx' ? 'on' : ''}" onclick="crSetSt('_cx')">ออเดอร์ยกเลิก<span class="n">${nCx}</span></button>` : '')
+    + (nEx || crSt === CR_EXPIRED_ST ? `<button class="dcr-chip ${crSt === CR_EXPIRED_ST ? 'on' : ''}" onclick="crSetSt('${CR_EXPIRED_ST}')" title="หมดอายุโดยไม่เคยมีบิล — ระบบปิดให้อัตโนมัติ">หมดอายุ<span class="n">${nEx}</span></button>` : '')
     + (days.length > 1 ? `<span class="dcr-chiplbl">วันที่ขอ</span>
        <button class="dcr-chip ${crDay ? '' : 'on'}" onclick="crSetDay('')">ทุกวัน</button>`
        + days.slice(0, 7).map(d => `<button class="dcr-chip ${crDay === d ? 'on' : ''}" onclick="crSetDay('${d}')">${d === _today ? 'วันนี้ ' : ''}${escapeHtml(crShortTs(d))}<span class="n">${dCnt(d)}</span></button>`).join('') : '');
@@ -3289,11 +3344,14 @@ function renderCreditList(){
   const terms = crQuery ? crQuery.split(/\s+/).filter(Boolean) : [];
   let rows = creditRows.filter(a => terms.every(t => a._s.includes(t)));
   if (crSt === '_cx')  rows = rows.filter(a => a.allCancelled);
-  else if (crSt === 'รอบัญชี') rows = rows.filter(crPending);        // คิวจริง ไม่รวมใบที่ออเดอร์ยกเลิกแล้ว
+  else if (crSt === '_nb') rows = rows.filter(crNoBill);             // v6.3: กองแยก — ยังไม่มีของให้ปลด
+  else if (crSt === 'รอบัญชี') rows = rows.filter(crPending);        // คิวจริง ไม่รวมใบที่ยังไม่คีย์บิล/ออเดอร์ยกเลิกแล้ว
   else if (crSt) rows = rows.filter(a => a.status === crSt);
   if (crDay) rows = rows.filter(a => a.apprTs.slice(0, 10) === crDay);
+  // v6.3: แยกเลข 2 กองให้ชัด — ไม่งั้นตอนดูชิป "ยังไม่คีย์บิล" จะอ่านเหมือนว่านั่นคือคิวจริง
+  const _nNb = creditRows.filter(crNoBill).length;
   $('crCount').textContent = rows.length
-    ? `${rows.length} ใบ · รอบัญชีตัดสิน ${creditRows.filter(crPending).length}`
+    ? `${rows.length} ใบ · รอบัญชีตัดสิน ${creditRows.filter(crPending).length}` + (_nNb ? ` · ยังไม่คีย์บิล ${_nNb}` : '')
     : '';
   if (!rows.length){
     $('crList').innerHTML = `<div class="match-empty">${crQuery ? 'ไม่พบรายการที่ตรงกับคำค้น' : 'ไม่มีใบในสถานะนี้'}</div>`;
@@ -3343,7 +3401,8 @@ function crCardHtml(a){
   const rq   = a.reqId;
   const open = crExpanded.has(rq);
   const canAct = a.status === 'รอบัญชี' && !a.finDecision;   // กดได้เฉพาะคิวของบัญชี
-  const tab  = CR_TABS.find(t => t.key === a.status);
+  const tab  = CR_TABS.find(t => t.key === a.status)
+            || (a.status === CR_EXPIRED_ST ? { label:'หมดอายุ', cls:'' } : null);   // v6.3: สถานะที่ระบบปิดเอง
 
   const D = crDebtInfo(a);
   const overLimit = D.limit > 0 && D.net > D.limit;
@@ -3352,6 +3411,7 @@ function crCardHtml(a){
   const bits = [];
   if (tab) bits.push(`<span class="dcr-tag ${tab.cls}">${a.finDecision ? escapeHtml(a.finDecision) : tab.label}</span>`);
   if (a.allCancelled) bits.push(`<span class="dcr-tag bad">ออเดอร์ถูกยกเลิกแล้ว</span>`);
+  if (crNoBill(a))    bits.push(`<span class="dcr-tag warn">ยังไม่คีย์บิล</span>`);   // v6.3: เห็นได้ตอนดูชิป "ทั้งหมด" ด้วย
   if (D.amount)         bits.push(`<span class="dcr-hot">ค้าง ฿${fmtInt(Math.round(D.amount))}</span>`);
   if (D.bills)          bits.push(`${fmtInt(D.bills)} บิล`);
   if (D.paid > 0)       bits.push(`<span class="dcr-tag ok">แนบสลิปแล้ว ฿${fmtInt(Math.round(D.paid))} รอตัดยอด</span>`);
