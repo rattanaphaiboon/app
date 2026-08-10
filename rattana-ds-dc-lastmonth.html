@@ -762,27 +762,33 @@ async function loadOtherPeriodForSummary(mode) {
   await switchPeriod(mode);
 }
 
-// สะสมยอดซื้อ เบียร์ช้างคลาสสิก (CS) ต่อลูกค้า · คลัง W4 · เฉพาะ CS-unit · เฉพาะบรรทัดที่ซื้อจริง (ไม่นับ Q_FREE)
+// สะสมยอดซื้อ เบียร์ช้างคลาสสิก (CS) ต่อลูกค้า × เดือน · คลัง W4 · เฉพาะ CS-unit · เฉพาะบรรทัดซื้อจริง · เฉพาะเซลล์ Role 4
+// แยกเป็น pivot matrix: แถว=ลูกค้า, คอลัมน์=เดือน (จาก DI_DATE) — ใช้ allData ทั้งหมด (ไม่ผูกกับ toggle)
 function renderChangW4() {
   const brandTarget = normalizeName('ช้างคลาสสิก');
-  const byCust = new Map();  // AR_CODE → {code, name, totalCS, bySku:Map}
-  lastMonthData.forEach(r => {
+  const byCust = new Map();  // AR_CODE → {code, name, monthly:{yyyy-mm→CS}, total}
+  const allMonths = new Set();  // 'yyyy-mm'
+  (allData || []).forEach(r => {
     if (String(r.WL_CODE||'').trim().toUpperCase() !== 'W4') return;
     if (extractUnit(r.TRD_UTQNAME) !== 'CS') return;
     const qty = parseFloat(r.TRD_QTY) || 0;
     if (qty <= 0) return;
     const p = pddtMap.get(normalizeName(r.SKU_NAME));
     if (!p || normalizeName(p.brand) !== brandTarget) return;
-    // เฉพาะเซลล์ Role = 4
     const salesRole = userRoleMap.get(normalizeSalesName(r.SLMN_NAME));
     if (salesRole !== 4) return;
+    const d = parseDate(r.DI_DATE);
+    if (!d) return;
+    const mk = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    allMonths.add(mk);
     const code = String(r.AR_CODE||'').trim() || '-';
-    if (!byCust.has(code)) byCust.set(code, { code, name: r.AR_NAME||'', totalCS: 0, bySku: new Map() });
-    const c = byCust.get(code);
-    c.totalCS += qty;
-    c.bySku.set(r.SKU_NAME, (c.bySku.get(r.SKU_NAME)||0) + qty);
+    if (!byCust.has(code)) byCust.set(code, { code, name: r.AR_NAME||'', monthly: {}, total: 0 });
+    const rec = byCust.get(code);
+    rec.monthly[mk] = (rec.monthly[mk]||0) + qty;
+    rec.total += qty;
   });
-  // เตรียมโปร CAT BRAND=ช้างคลาสสิก, unit=CS, ไม่มี ราคาขายกำหนด (เพราะเป็น aggregate ต่อลูกค้า) เรียงตามเทียร์
+  const sortedMonths = [...allMonths].sort();  // เก่า→ใหม่
+  // เตรียมโปร CAT BRAND=ช้างคลาสสิก, unit=CS, ไม่มี ราคาขายกำหนด — ใช้กับเดือนล่าสุด (เพราะโหลดโปรจากชีตเดียว)
   const brandPromos = (promosByBrand.get(brandTarget) || [])
     .filter(pm => {
       const pmUnit = String(pm['รูปแบบขาย']||'').trim().toUpperCase();
@@ -790,28 +796,33 @@ function renderChangW4() {
       const pmQty = parseFloat(String(pm['จำนวน']||'').replace(/,/g,'')) || 0;
       if (pmQty <= 0) return false;
       const priceCode = String(pm['ราคาขายกำหนด']||'').trim();
-      if (priceCode) return false;  // ตัดโปรที่ต้องเช็คราคาต่อบิล (เช่น S03)
+      if (priceCode) return false;
       return true;
     })
     .sort((a,b) => (parseFloat(String(b['จำนวน']||'').replace(/,/g,''))||0) - (parseFloat(String(a['จำนวน']||'').replace(/,/g,''))||0));
-  const rows = [...byCust.values()].sort((a,b) => b.totalCS - a.totalCS);
-  const modeLblMap = { today:'⚡ วันนี้', current:'🔴 เดือนนี้', last:'📅 เดือนที่แล้ว' };
-  const { start } = getPeriodRange();
-  const periodLabel = periodMode === 'today'
-    ? `วันนี้ (${formatThaiDate(start)})`
-    : `${TH_MONTHS[start.getMonth()]} ${start.getFullYear()+543}`;
-  document.getElementById('chgCount').textContent = `${modeLblMap[periodMode]||''} • ${periodLabel} • ${fmtInt(rows.length)} ลูกค้า`;
+  const rows = [...byCust.values()].sort((a,b) => b.total - a.total);
+  document.getElementById('chgCount').textContent = `${fmtInt(rows.length)} ลูกค้า · ${sortedMonths.length} เดือน`;
   const body = document.getElementById('chgBody');
   if (!rows.length) {
-    body.innerHTML = `<div class="sum-empty">ไม่มีการซื้อเบียร์ช้างคลาสสิก (CS) ที่ W4 ในช่วงนี้</div>`;
+    body.innerHTML = `<div class="sum-empty">ไม่มีการซื้อเบียร์ช้างคลาสสิก (CS) ที่ W4 · Role 4</div>`;
     return;
   }
   const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  const totalCS = rows.reduce((s,r)=>s+r.totalCS,0);
-  // สำหรับ totalCS ที่ให้มา — คืนโปรเทียร์สูงสุดที่ลูกค้าเข้าเงื่อนไข (หรือ null ถ้าไม่ถึงเทียร์ไหน)
+  const grandTotal = rows.reduce((s,r)=>s+r.total,0);
+  const monthLabel = mk => {
+    const [y,m] = mk.split('-'); return TH_MONTHS[+m-1].slice(0,3)+'. '+((+y+543)%100);
+  };
+  const monthTotals = Object.fromEntries(sortedMonths.map(mk => [mk, rows.reduce((s,r)=>s+(r.monthly[mk]||0),0)]));
+  const latestMonth = sortedMonths[sortedMonths.length-1];
+  // สำหรับยอด CS ที่ให้มา — คืนโปรเทียร์สูงสุดที่ลูกค้าเข้าเงื่อนไข (หรือ null ถ้าไม่ถึงเทียร์ไหน)
   const pmNum = pm => parseFloat(String(pm['จำนวน']||'').replace(/,/g,'')) || 0;
   const pmGift = pm => parseFloat(String(pm['จำนวนแถมEA']||'').replace(/,/g,'')) || 0;
-  const bestPromoFor = totalCS => brandPromos.find(pm => totalCS >= pmNum(pm)) || null;
+  const bestPromoFor = cs => brandPromos.find(pm => cs >= pmNum(pm)) || null;
+  const promoBadge = cs => {
+    const pm = bestPromoFor(cs);
+    if (!pm) return '<span class="txt-muted" style="font-size:10px">-</span>';
+    return `<div style="font-size:10px;color:var(--success);font-weight:700;line-height:1.3">✓ ${fmtInt(pmNum(pm))}<br>+${fmtInt(pmGift(pm))} EA</div>`;
+  };
   body.innerHTML = `
     <div class="tbl-wrap" style="max-height:70vh">
       <table class="tbl" style="min-width:auto">
@@ -819,44 +830,38 @@ function renderChangW4() {
           <tr>
             <th style="width:50px;text-align:right">#</th>
             <th>ลูกค้า</th>
-            <th>รายละเอียด SKU</th>
-            <th style="text-align:right">รวม CS</th>
-            <th>🎁 โปรที่ได้</th>
+            ${sortedMonths.map(mk => `<th style="text-align:right;min-width:90px">${esc(monthLabel(mk))}<div style="font-weight:400;color:var(--gold);font-size:10px">โปร (เดือนล่าสุด)</div></th>`).join('')}
+            <th style="text-align:right;background:rgba(201,168,76,.15)">รวมทั้งหมด</th>
           </tr>
         </thead>
         <tbody>
           ${rows.map((r,i)=>{
-            const skuLines = [...r.bySku.entries()].sort((a,b)=>b[1]-a[1])
-              .map(([sku,q]) => `<div style="font-size:11px;color:var(--muted)">${esc(sku)} — <b>${fmtInt(q)} CS</b></div>`).join('');
-            const pm = bestPromoFor(r.totalCS);
-            let promoHtml = '<span class="txt-muted" style="font-size:11px">ยังไม่ถึงเทียร์โปร</span>';
-            if (pm) {
-              const tier = pmNum(pm);
-              const giftEA = pmGift(pm);
-              const gift = pm['แถมสินค้า']||'';
-              const overBy = r.totalCS - tier;
-              promoHtml = `<div style="font-size:12px">
-                <div style="color:var(--success);font-weight:700">✓ ครบ ${fmtInt(tier)} CS</div>
-                <div style="color:var(--success)">แถม <b>${esc(gift)}</b> ×${fmtInt(giftEA)} EA</div>
-                <div class="txt-muted" style="font-size:10px">เกินเทียร์ ${fmtInt(overBy)} CS</div>
-              </div>`;
-            }
+            const monthCells = sortedMonths.map(mk => {
+              const q = r.monthly[mk] || 0;
+              if (q === 0) return `<td class="num txt-muted">-</td>`;
+              const isLatest = mk === latestMonth;
+              const promoHtml = isLatest ? `<div>${promoBadge(q)}</div>` : '';
+              return `<td class="num" style="font-weight:600">${fmtInt(q)}${promoHtml}</td>`;
+            }).join('');
             return `<tr>
               <td class="num" style="color:var(--muted)">${i+1}</td>
-              <td><div style="font-weight:600">${esc(r.name)}</div><div class="code txt-muted" style="font-size:11px">${esc(r.code)}</div></td>
-              <td>${skuLines}</td>
-              <td class="num" style="color:var(--gold);font-weight:700;font-size:15px">${fmtInt(r.totalCS)}</td>
-              <td>${promoHtml}</td>
+              <td><div style="font-weight:600;font-size:12px">${esc(r.name)}</div><div class="code txt-muted" style="font-size:11px">${esc(r.code)}</div></td>
+              ${monthCells}
+              <td class="num" style="color:var(--gold);font-weight:700;font-size:15px;background:rgba(201,168,76,.06)">${fmtInt(r.total)}</td>
             </tr>`;
           }).join('')}
           <tr style="background:rgba(201,168,76,.08);font-weight:700;border-top:2px solid var(--gold)">
             <td></td>
-            <td colspan="2">รวมทั้งหมด</td>
-            <td class="num" style="color:var(--gold);font-size:16px">${fmtInt(totalCS)}</td>
-            <td></td>
+            <td>รวม</td>
+            ${sortedMonths.map(mk => `<td class="num">${fmtInt(monthTotals[mk])}</td>`).join('')}
+            <td class="num" style="color:var(--gold);font-size:16px">${fmtInt(grandTotal)}</td>
           </tr>
         </tbody>
       </table>
+    </div>
+    <div class="txt-muted" style="font-size:11px;margin-top:8px;padding:6px 10px;background:var(--bg);border-left:3px solid var(--gold);border-radius:4px">
+      * เทียร์โปรที่แสดง = โปรที่โหลดจาก toggle ปัจจุบัน (${periodMode === 'last' ? 'เก็บ promotion  app / เดือนที่แล้ว' : 'Promotion / เดือนนี้'})
+      · เดือนเก่ากว่านั้นไม่มีข้อมูลโปร
     </div>`;
 }
 
