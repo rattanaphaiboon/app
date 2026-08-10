@@ -915,7 +915,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.234';
+const APP_VERSION='3.235';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -3515,10 +3515,24 @@ function cnCanDelete_(c){
   if(cnApproved(c)) return false;   // อนุมัติแล้ว ล็อก ลบไม่ได้
   return cnIsMine_(c);              // ไม่ใช่ชื่อตัวเองทำ → ลบไม่ได้
 }
+/* ★ v3.235: เลขบิลทั้งหมดในใบคุม "ของคลังเรา" — ใช้ปลดล็อกเคส CN ลงคลังไม่ตรงกับใบคุม */
+function cnDocsOfMyJobs_(){
+  const s=new Set();
+  try{
+    (state.jobs||[]).forEach(j=>{
+      if(!whPass_(j.warehouse)) return;
+      (j.bills||[]).forEach(b=>{ const d=String(b.doc||'').trim().toUpperCase(); if(d) s.add(d); });
+    });
+  }catch(e){}
+  return s;
+}
 function myCNList(){
   const all=state.cnHistory||[]; const u=state.user||{};
   if(u.canApproveCN||u.canApprove){                     // v3.127: ฝ่ายคลัง/หัวหน้า → กรองตามคลัง (whPass_: คลัง=ของตัวเอง / HQ+หัวหน้ารวม=ทุกคลัง+ปุ่มกรอง)
-    return all.filter(c=>whPass_(c.warehouse));
+    // ★ v3.235: + CN ที่ผูกกับบิลในใบคุมของคลังเรา ให้เห็นเสมอ แม้คอลัมน์ "คลัง" ของ CN จะเป็นคลังอื่น
+    //   (คนขับต่างคลังมาวิ่งงานให้ → CN ลงคลังต้นสังกัดคนขับ → คลังเจ้าของงานไม่เห็น = อนุมัติไม่ได้ ปิดงานไม่ได้)
+    const myDocs=cnDocsOfMyJobs_();
+    return all.filter(c=>whPass_(c.warehouse)||myDocs.has(String(c.docNo||'').trim().toUpperCase()));
   }
   const me=[u.name,u.nickname,u.displayName].filter(Boolean).map(s=>String(s).toLowerCase());
   return all.filter(c=>{ const d=String(c.driver||'').toLowerCase(); return me.some(m=>m&&d.indexOf(m)>=0); });
@@ -3852,7 +3866,9 @@ async function confirmOwnReturn(){
     barcode:it.barcode||it.product?.codes?.[it.unitKey]||'',
     name:it.productName, qty:parseFloat(it.qty)||0, price:parseFloat(it.price)||0, unit:it.unit
   }));
-  const wh=driverWarehouse_(returnState.driverName)||((state.user||{}).warehouse)||'W1';
+  // ★ v3.235: คลังของ CN ต้องยึด "ใบคุมของบิลที่คืน" ก่อนเสมอ
+  //   เจอจริง: คนขับสังกัด W4 วิ่งงานใบคุม W1 → CN ลงคลัง W4 → คลัง W1 มองไม่เห็น อนุมัติไม่ได้ → ปิดงานไม่ได้ (deadlock)
+  const wh=cnJobWarehouse_(returnState.docNo)||driverWarehouse_(returnState.driverName)||((state.user||{}).warehouse)||'W1';
   const cust=(state.customers||[]).find(c=>c.code===returnState.customerCode);
   const shopName=returnState.customerName||(cust&&cust.name)||returnState.customerCode;
   returnState._submitting=true;
@@ -4121,6 +4137,15 @@ function resetDriverName_(){
   saveDriverName_('');   // ล้างค่า override
 }
 // v2.95: หา warehouse ของคนขับที่ถูกเลือก (ยังใช้ใน CN routing) — ไม่ใช้ filter dropdown แล้ว
+/* ★ v3.235: คลังของใบคุมที่มีบิลเลขนี้ (ใช้ตั้งคลังให้ CN ให้ตรงกับงานจริง ไม่ใช่คลังต้นสังกัดคนขับ) */
+function cnJobWarehouse_(docNo){
+  const d=String(docNo||'').trim().toUpperCase(); if(!d) return '';
+  try{
+    const j=(state.jobs||[]).find(x=>(x.bills||[]).some(b=>String(b.doc||'').trim().toUpperCase()===d));
+    const wh=j?String(j.warehouse||'').trim():'';
+    return /^W[1-4]$/.test(wh)?wh:'';
+  }catch(e){ return ''; }
+}
 function driverWarehouse_(name){
   if(!name) return '';
   const drv=state.drivers.find(d=>{
@@ -6881,7 +6906,8 @@ function renderCNPending(){
 }
 function paintCNPending(){
   const box=$('cnPendingList'); if(!box) return;
-  const sale=(state._cnSalePending||[]).filter(c=>whPass_(c.warehouse)&&cnAwaiting(c));   // ★ v3.231: กรองคลังเหมือน myCNList + ที่กดไปแล้วหายจากลิสต์
+  const _myDocs=cnDocsOfMyJobs_();   // ★ v3.235: CN ที่ผูกกับบิลในใบคุมของคลังเรา ให้เห็นแม้คลังของ CN ไม่ตรง
+  const sale=(state._cnSalePending||[]).filter(c=>(whPass_(c.warehouse)||_myDocs.has(String(c.docNo||'').trim().toUpperCase()))&&cnAwaiting(c));   // ★ v3.231: กรองคลัง + ที่กดไปแล้วหายจากลิสต์
   // ★ v3.232: กล่องนี้เอาเฉพาะ "ที่ขนส่งเก็บมาแล้ว แต่คลังยังไม่อนุมัติ" — ตัดใบที่มาจากฟอร์มรับคืนเดิม (save_return) ออก
   const list=myCNList().filter(cnAwaiting).filter(cnFromCollect_).concat(sale).sort((a,b)=>cnTime(b)-cnTime(a));
   state._cnView=list;
@@ -7443,10 +7469,14 @@ function isMyOwnJob(j){
 async function pendingCNBlockers(j){
   try{ await loadCNHistory(); }catch(e){}
   const docs=new Set((j.bills||[]).map(b=>String(b.doc||'').trim().toUpperCase()).filter(Boolean));
+  const jwh=String(j.warehouse||'').trim();
   const bad=[];
   (state.cnHistory||[]).forEach(c=>{
     const d=String(c.docNo||'').trim().toUpperCase();
-    if(d&&docs.has(d)&&!cnApproved(c)) bad.push(c.docNo);
+    if(!d||!docs.has(d)||cnApproved(c)) return;
+    const cwh=String(c.warehouse||'').trim();
+    // ★ v3.235: บอกด้วยว่า CN ใบนั้นลงคลังไหน (ถ้าไม่ตรงกับใบคุม จะได้รู้ว่าทำไมหาไม่เจอในกล่อง)
+    bad.push(c.docNo+((cwh&&jwh&&cwh!==jwh)?(' [CN ลงคลัง '+cwh+']'):''));
   });
   return [...new Set(bad)];
 }
