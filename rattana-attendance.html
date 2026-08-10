@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v4.97</title>
+<title>HR Rattana v4.98</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3420,7 +3420,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '10.8';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '11.0';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -3570,7 +3570,16 @@ function loadAll() {
   registeredDescriptor2 = desc2 ? new Float32Array(desc2) : null;
 }
 function saveLocations(){ LS.set('locations', locations); }
-function saveLogs(){ LS.set('logs', logs); }
+/* v10.9: กัน localStorage บวม — log เก็บรูป base64 ต่อสแกน (เครื่อง kiosk สะสมเร็วมาก)
+   เก็บ 7 วันพอ + รูปที่ส่งขึ้นระบบครบแล้ว (remote && ไม่ค้างรูป) ไม่ต้องถือไว้ในเครื่องต่อ */
+function pruneLogs_() {
+  // v11.0: 45 วัน (หน้า "สรุปเดือนนี้"/export ใช้ log ทั้งเดือน — 7 วันสั้นไป) · ตัวกินที่จริงคือรูป
+  // ซึ่งถูกลบทันทีที่ส่งขึ้นระบบครบ → log เปล่าๆ ~300 bytes เก็บ 45 วันสบาย
+  const cutoff = Date.now() - 45 * 24 * 3600 * 1000;
+  logs = logs.filter(l => { const t = new Date(l.ts).getTime(); return isNaN(t) ? true : t > cutoff; });
+  logs.forEach(l => { if (l.photo && l.remote && !l.photoPending) delete l.photo; });
+}
+function saveLogs(){ pruneLogs_(); LS.set('logs', logs); }
 
 /* v2.8 — Sync local logs จาก Sheet
    FIX: ใช้ ค.ศ. (CE) ใน date filter, เคลียร์ local หลัง sync สำเร็จ (ไม่ใช่ก่อน) */
@@ -3593,9 +3602,17 @@ async function syncLogsFromSheet(opts = {}) {
     const remoteLogs = (res.logs || []).filter(l => String(l.empId) === String(currentUser.empId));
 
     // v2.8 FIX: เคลียร์ local ของวันนี้เฉพาะหลัง sync สำเร็จ
-    logs = logs.filter(l => l.dateKey !== todayKey_ || String(l.empId) !== String(currentUser.empId));
+    // v10.9: แต่ "ห้ามทิ้ง" log ที่ยังส่งไม่สำเร็จ (!remote = สแกนออฟไลน์ค้าง) หรือรูปยังค้าง (photoPending)
+    // — เดิมโดนกวาดทิ้งด้วย = สแกน/รูปหายถาวร
+    logs = logs.filter(l => l.dateKey !== todayKey_ || String(l.empId) !== String(currentUser.empId)
+                          || !l.remote || l.photoPending);
+    // v11.0: local ที่เก็บไว้ (ยังไม่ส่ง/รูปค้าง) อาจเป็นสแกนเดียวกับแถวจากชีท — กันนับเบิ้ล
+    const keptLocal = logs.filter(l => l.dateKey === todayKey_ && String(l.empId) === String(currentUser.empId));
 
     remoteLogs.forEach(r => {
+      const rts = new Date(r.timestamp).getTime() || 0;
+      const rType = r.type === 'out' ? 'out' : 'in';
+      if (keptLocal.some(k => k.type === rType && Math.abs(new Date(k.ts).getTime() - rts) < 90000)) return;   // v11.0: ตัวเดียวกัน — ใช้ local ที่ถือรูป/ธงอยู่
       // v2.9 FIX: handle Date-serialized time "1899-12-30T07:36:53Z" จาก Sheets auto-conversion
       let timeStr = String(r.time || '');
       if (timeStr.startsWith('1899') || (timeStr.includes('T') && timeStr.includes('Z'))) {
@@ -3618,6 +3635,8 @@ async function syncLogsFromSheet(opts = {}) {
         faceDist: r.faceDist || null,
         scannedBy: r.scannedBy || 'self',
         synced: true,
+        remote: true,   // v10.9: ⚠ ตัวการแถวโคลน — log จากชีทไม่เคยติดธง remote → resync ส่งซ้ำ
+                        // แบบไม่มี clientId/รูป ทุกครั้งที่เปิดแอป = แถวเบิ้ลเวลาเดิมไม่มีรูป
       });
     });
     saveLogs();
@@ -4129,14 +4148,16 @@ function parseCsvToObjects(text) {
    ทำให้ '11202' === 11202 เป็น false → หาใบหน้าตัวเองไม่เจอ) */
 function empKey_(x) { return String(x == null ? '' : x).trim(); }
 
-/* หาใบหน้าตัวเองใน remoteFaceData → เทียบด้วยรหัสก่อน ถ้าไม่เจอค่อยเทียบชื่อ */
+/* หาใบหน้าตัวเองใน remoteFaceData → เทียบด้วยรหัสก่อน ถ้าไม่เจอค่อยเทียบชื่อ
+   v11.0: ชื่อต้องแมตช์ "คนเดียวเท่านั้น" — ชื่อซ้ำ (คนละคน) ห้ามเดา ไม่งั้นได้หน้าคนอื่นมาเทียบ */
 function findMyFace_() {
   if (!currentUser) return null;
   const id = empKey_(currentUser.empId);
-  const nm = (currentUser.name || '').trim();
-  return remoteFaceData.find(f => f.descriptor && id && empKey_(f.empId) === id)
-      || remoteFaceData.find(f => f.descriptor && nm && (f.name || '').trim() === nm)
-      || null;
+  const byId = remoteFaceData.find(f => f.descriptor && id && empKey_(f.empId) === id);
+  if (byId) return byId;
+  const nm = normName_(currentUser.name);
+  const byName = remoteFaceData.filter(f => f.descriptor && nm && normName_(f.name) === nm);
+  return byName.length === 1 ? byName[0] : null;
 }
 /* v10.5: HR ลบหน้าในระบบ → เครื่องพนักงานต้องรู้และปลดล็อกให้ลงทะเบียนใหม่
    (เดิมเครื่องถือหน้าเก่าใน LS ค้าง → ล็อกครั้งเดียวซ่อนปุ่มตลอด ลงใหม่ไม่ได้)
@@ -4144,6 +4165,8 @@ function findMyFace_() {
 function syncFaceDeletion_(tag) {
   if (!currentUser?.empId || !registeredDescriptor) return;
   if (LS.get('facePendingSync', null)) return;   // ลงทะเบียนค้างส่ง (เน็ตล่ม) — ระบบยังไม่เคยได้ ห้ามล้าง
+  // v11.0: เพิ่งลงทะเบียน/ส่งหน้าขึ้นระบบใน 2 นาที — snapshot ที่โหลดมาอาจถ่ายก่อนหน้านั้น (race) ห้ามล้าง
+  if (Date.now() - (window._faceJustSynced || 0) < 120000) return;
   if (findMyFace_()) return;                      // ระบบยังมีหน้าเรา → ปกติ
   registeredDescriptor = null; registeredDescriptor2 = null;
   LS.del('faceDescriptor'); LS.del('faceDescriptor2'); LS.del('facePhoto'); LS.del('faceRegisteredAt'); LS.del('faceOwner');
@@ -4160,7 +4183,9 @@ function adoptMyFace_(tag) {
   if (myFace.photo) LS.set('facePhoto', myFace.photo);
   if (myFace.registeredAt) LS.set('faceRegisteredAt', new Date(myFace.registeredAt).getTime());
   LS.set('faceDescriptor', Array.from(myFace.descriptor));
-  LS.set('faceOwner', empKey_(myFace.empId));   // v9.9: จำเจ้าของหน้า
+  // v11.0: ประทับ "รหัสคน login" ไม่ใช่รหัสในแถวที่แมตช์ — แถวเก่าอาจรหัสคนละ format
+  // (เดิมประทับรหัสแถว → ไม่ตรงกับคน login → โดนล้าง/กู้วนไม่รู้จบ กดบันทึกไม่ได้เลย)
+  LS.set('faceOwner', empKey_(currentUser && currentUser.empId));
   if (myFace.descriptor2) LS.set('faceDescriptor2', Array.from(myFace.descriptor2)); else LS.del('faceDescriptor2');
   console.log('[face] ' + tag + ': โหลดใบหน้าตัวเองจาก FaceData แล้ว (' + empKey_(myFace.empId) + ')');
   try { renderFaceReg(); evaluateAction(); } catch (_) {}
@@ -4406,8 +4431,10 @@ async function resyncPendingLogs() {
       l.remote = true; ok++;
       if (l.photoPending) {
         if (r && r.photoSaved) { l.photoPending = false; delete l.photoTries; }        // รูปขึ้นแล้ว ✓
-        else if (!l.photo || (r && r.photoSaved == null)) { l.photoPending = false; }  // ไม่มีรูปให้ส่ง/SB ปิด — เลิกวน
-        else { l.photoTries = (l.photoTries || 0) + 1; }                               // ยังไม่ขึ้น — ลองรอบหน้า (สูงสุด 5)
+        else if (!l.photo) { l.photoPending = false; }                                 // ไม่มีรูปให้ส่งแล้ว — เลิกวน
+        else if (r && r.guard) { l.photoTries = (l.photoTries || 0) + 1; }             // v11.0: โดนด่านกันซ้ำ = ยังไม่ได้อัป — ลองรอบหน้า
+        else if (r && r.photoSaved === false) { l.photoTries = (l.photoTries || 0) + 1; }  // อัปพลาด — ลองรอบหน้า (สูงสุด 5)
+        else { l.photoPending = false; }                                               // photoSaved ไม่มีในคำตอบ = SB ปิด/แบ็กเอนด์เก่า — เลิกวน
       }
     }
     catch (_) { /* ยังส่งไม่ได้ — ไว้รอบหน้า */ }
@@ -4643,7 +4670,9 @@ async function refreshFaceDataSheet() {
       buildTeamFromSheet();
     } else if (currentUser?.role === 'hr') {
       const sel = document.getElementById('hrSupervisorSelect');
-      if (sel?.value) buildTeamFromSheet(sel.value);
+      // v11.0: ตัวเลือกทีม PTT (PTT:xxxxx) ไม่ใช่ชื่อหัวหน้าในชีท — ส่งเข้า buildTeamFromSheet จะได้ทีมว่างทับของจริง
+      if (sel?.value && sel.value.indexOf('PTT:') === 0) { await onHrSupervisorChange(); }
+      else if (sel?.value) buildTeamFromSheet(sel.value);
     }
     renderTeamList(); renderDashboard();
     toast(`โหลด FaceData แล้ว: ${remoteFaceData.length} คน ✓`, 'success');
@@ -4976,6 +5005,7 @@ async function startEmpCamera() {
   } finally { _empCamBusy = false; }
 }
 function stopEmpCamera() {
+  _empDetMiss = 0;   // v11.0: อย่าให้ session หน้าเริ่มที่โหมดไว (เปลืองแบต) ทั้งที่แสงอาจปกติ
   if (empMatchInterval) { clearInterval(empMatchInterval); empMatchInterval = null; }
   if (empStream) { empStream.getTracks().forEach(t => t.stop()); empStream = null; }
   if (gpsWatchId !== null) { navigator.geolocation.clearWatch(gpsWatchId); gpsWatchId = null; }
@@ -5002,7 +5032,11 @@ function startEmpMatching() {
   empMatchInterval = setInterval(empMatchTick, 800);
 }
 let _empDetMiss = 0;   // v10.4: นับเฟรมที่จับหน้าไม่ติดต่อเนื่อง → สลับโหมดไวขึ้น (แสงน้อย/กล้องเกรดต่ำ)
+let _empTickBusy = false;   // v10.9: กัน tick ซ้อน — โหมดไว (416) บนมือถือช้าอาจกินเวลาเกินรอบ interval 800ms
 async function empMatchTick() {
+  if (_empTickBusy) return;
+  _empTickBusy = true;
+  try {
   const v = document.getElementById('empVideo');
   if (!v || !v.videoWidth) return;
   // v10.4: พลาด 3 เฟรมติด → โหมดไว (ภาพละเอียดขึ้น + เกณฑ์จับต่ำลง) — ความปลอดภัยไม่ลด
@@ -5037,6 +5071,7 @@ async function empMatchTick() {
   lastFaceMatch = { found:true, ok, distance:dist, descriptor:det.descriptor, time:Date.now() };
   updateFaceCheck({found:true, registered:true, ok, distance:dist});
   evaluateAction();
+  } finally { _empTickBusy = false; }   // v10.9
 }
 function drawBox(canvasId, videoId, det) {
   const v = document.getElementById(videoId);
@@ -5226,6 +5261,7 @@ async function frSave_() {
         photo2: photo2,
         registeredBy: currentUser.empId,
       });
+      window._faceJustSynced = Date.now();   // v11.0: กัน syncFaceDeletion_ ลบผิดจาก snapshot เก่า (race)
       toast(`ลงทะเบียนสำเร็จ ✓ (${d2 ? '2 เทมเพลต ยิ้ม/ไม่ยิ้ม' : '1 เทมเพลต'}) · ☁️`, 'success');
     } catch (e) {
       if (String(e.message).indexOf('🔒') >= 0) {
@@ -5256,6 +5292,7 @@ async function retryFaceSync_() {
       registeredBy: currentUser.empId,
     });
     LS.del('facePendingSync');
+    window._faceJustSynced = Date.now();   // v11.0: กัน syncFaceDeletion_ ลบผิดจาก snapshot เก่า (race)
     toast('☁️ ส่งใบหน้าที่ค้างขึ้นระบบแล้ว ✓', 'success');
   } catch (e) {
     if (String(e.message).indexOf('🔒') >= 0) { LS.del('facePendingSync'); try { await loadFaceDataViaApi(); } catch (_) {} }
@@ -5592,6 +5629,17 @@ async function doSelfCheckIn() {
   if (_checkinBusy) return;                                  // v7.4: กันกดซ้ำระหว่างบันทึก
   if (!lastGps?.withinRadius) { toast('📍 นอกรัศมี — เข้าใกล้สาขามากกว่านี้', 'error'); return; }
   if (faceapiReady && registeredDescriptor && (!lastFaceMatch?.ok)) { toast('❌ ใบหน้าไม่ตรง', 'error'); return; }
+  // v11.0: ผลเทียบหน้าเก่าเกิน 25 วิ (พับจอ/สลับแอปแล้วกลับมา) → ต้องมองกล้องยืนยันใหม่
+  // กันส่งเครื่องต่อให้เพื่อนกดหลังตัวจริงเดินหนีไปแล้ว
+  if (faceapiReady && registeredDescriptor && lastFaceMatch?.ok && (Date.now() - (lastFaceMatch.time || 0)) > 25000) {
+    lastFaceMatch = null; evaluateAction();
+    toast('👤 ยืนยันใบหน้าอีกครั้ง — มองกล้องแล้วกดบันทึก', 'warning');
+    return;
+  }
+  // v11.0: ป้ายเจ้าของหายแต่หน้าเป็นของ session นี้ (LS เคยเต็ม) → ประทับซ้ำก่อน ไม่ใช่ล้างทิ้ง
+  if (registeredDescriptor && LS.get('faceOwner', null) == null) {
+    LS.set('faceOwner', empKey_(currentUser?.empId));
+  }
   // v10.0: กันชั้นสุดท้าย — ใบหน้าที่ใช้เทียบต้องเป็นของคน login เท่านั้น (เครื่องใช้ร่วมกัน)
   if (registeredDescriptor && LS.get('faceOwner', null) !== empKey_(currentUser?.empId)) {
     registeredDescriptor = null; registeredDescriptor2 = null;
@@ -5675,10 +5723,13 @@ async function doSelfCheckIn() {
       }
     }
   }
-  if (synced) { saved.remote = true; saveLogs(); }   // v8.7: mark synced กัน re-sync ซ้ำ
-  // v10.2/v10.3: รูปไม่ขึ้น Storage → ตั้งธงส่งซ้ำอัตโนมัติ (30 วิ + ทุกครั้งที่เปิดแอป จนกว่าจะขึ้น)
-  if (synced && syncRes && syncRes.photoSaved === false) {
-    saved.photoPending = true; saved.photoTries = 0; saveLogs();
+  // v11.0: ตั้งธงรูปค้าง "ก่อน" saveLogs — ไม่งั้น pruneLogs_ เห็น remote+ไม่มีธง → ลบรูปทิ้งก่อนได้ส่งซ้ำ
+  if (synced) {
+    if (syncRes && syncRes.photoSaved === false) { saved.photoPending = true; saved.photoTries = 0; }
+    saved.remote = true; saveLogs();   // v8.7: mark synced กัน re-sync ซ้ำ
+  }
+  // v10.2/v10.3: รูปไม่ขึ้น Storage → แจ้ง + ส่งซ้ำอัตโนมัติ (30 วิ + ทุกครั้งที่เปิดแอป จนกว่าจะขึ้น)
+  if (synced && saved.photoPending) {
     toast('⚠ เวลาบันทึกแล้ว · รูปยังไม่ขึ้นระบบ — จะส่งซ้ำให้อัตโนมัติ', 'warning');
     setTimeout(() => { resyncPendingLogs().catch(() => {}); }, 30000);
   }
@@ -5796,6 +5847,7 @@ async function confirmOffSiteCheckOut(btn) {
   };
 
   saveLog(logData);
+  const savedOff = logs[0] || logData;   // v11.0: อ้าง log ที่มี id — clientId กันซ้ำทำงาน + ติดธง remote ได้
 
   // v7.4: ปิดจอสแกน กลับหน้าแรกทันที แล้ว sync เบื้องหลัง
   modal?.remove();
@@ -5805,9 +5857,10 @@ async function confirmOffSiteCheckOut(btn) {
 
   let synced = false;
   if (config.appsScriptUrl) {
-    try { await apiCheckin({...logData, retroactive:false}); synced = true; }
+    try { await apiCheckin(savedOff); synced = true; }
     catch(e) { console.error(e); }
   }
+  if (synced) { savedOff.remote = true; saveLogs(); }   // v11.0: เดิมไม่ติดธง → ถูก resync ส่งซ้ำ (ไม่มี id = แถวเบิ้ล) + รูปค้างเครื่อง 7 วัน
   if (synced) toast(`☁️ ส่งขึ้นระบบแล้ว`, 'success');
   else if (config.appsScriptUrl) toast(`⚠ ยังส่งขึ้นระบบไม่ได้ — เก็บไว้ในเครื่อง จะ sync อัตโนมัติ`, 'warning');
   renderTodayStatus(); renderTodayPage(); renderHistory(); renderDashboard(); renderHomeTodayCard();
@@ -6025,9 +6078,12 @@ function kioskCommit() {
     livenessAction: kioskState.liveness?.action || null,
   };
   saveLog(kioskLogData);
+  const savedKiosk = logs[0] || kioskLogData;   // v11.0: log ที่มี id — clientId กันซ้ำทำงาน + ติดธง remote ได้
   // ── ส่งขึ้น Sheet โดยใช้ empId ของลูกน้อง (ไม่ใช่หัวหน้า) ──
   if (config.appsScriptUrl) {
-    apiCheckin(kioskLogData).catch(e => console.error('[Kiosk] Sheet sync error:', e));
+    apiCheckin(savedKiosk)
+      .then(() => { savedKiosk.remote = true; saveLogs(); })   // v11.0: เดิมไม่ติดธง → resync ส่งซ้ำทั้งทีม + รูปค้างเต็มเครื่อง kiosk
+      .catch(e => console.error('[Kiosk] Sheet sync error:', e));
   }
   // update recent
   kioskState.recent.unshift({
@@ -6449,7 +6505,9 @@ function saveRetroactive() {
    PAGE RENDERS
    ============================================================ */
 function renderTodayStatus() {
-  const tl = todayLogsForUser(currentUser.empId);
+  // v11.0: เรียงตามเวลาจริงก่อน (logs ใหม่สุดก่อน) — เอา เข้าแรก/ออกสุดท้าย ให้ถูก
+  const tl = todayLogsForUser(currentUser.empId)
+    .slice().sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
   const el = document.getElementById('todayStatus');
   if (!el) return;
   if (tl.length === 0) { el.innerHTML = '<div class="text-sm text-muted">ยังไม่มีรายการวันนี้</div>'; return; }
@@ -9656,8 +9714,14 @@ async function renderAuditPage() {
     _auditRows = res.rows || [];
     drawAuditList();
   } catch (e) {
-    if (list) list.innerHTML = `<div class="alert alert-warn">โหลดไม่ได้: ${e.message}<br><span class="text-sm text-muted">ต้อง deploy backend v2.2 ขึ้นไป</span></div>`;
+    _auditRows = [];   // v11.0: ห้ามค้างข้อมูลวันเก่า — เปลี่ยนสาขาแล้ว redraw จะหลอกว่าเป็นวันใหม่
+    if (list) list.innerHTML = `<div class="alert alert-warn">โหลดไม่ได้: ${escH_(e.message)}<br><span class="text-sm text-muted">ต้อง deploy backend v2.2 ขึ้นไป</span></div>`;
   }
+}
+
+/* v11.0: escape HTML — ชื่อ/สาขา/scannedBy มาจาก client อื่นได้ ห้ามฉีดเข้า innerHTML ดิบ (XSS ใส่ HR) */
+function escH_(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function auditFlags_(r) {
@@ -9675,7 +9739,9 @@ function drawAuditList() {
   const sum = document.getElementById('auditSummary');
   if (!list) return;
   const br = document.getElementById('auditBranch')?.value || '';
-  const rows = _auditRows.filter(r => !br || r.branch === br);
+  // v11.0: ค่า branch ในแถวอาจเป็น code (HQ) หรือชื่อเต็ม — จับทั้งคู่ (เดิมกรองแล้วว่างเปล่าตลอด)
+  const brLoc = br ? locations.find(l => l.code === br) : null;
+  const rows = _auditRows.filter(r => !br || r.branch === br || (brLoc && r.branch === brLoc.name));
   const people = new Set(rows.map(r => r.empId)).size;
   const flagged = rows.filter(r => auditFlags_(r).some(f => f.warn > 0)).length;
   if (sum) sum.innerHTML = [['สแกน', rows.length], ['คน', people], ['ติดธง', flagged]].map(([l, n]) =>
@@ -9686,7 +9752,12 @@ function drawAuditList() {
   const flagColor = w => w === 2 ? 'var(--danger)' : w === 1 ? 'var(--warning)' : 'var(--info)';
   const escA = s => String(s || '').replace(/"/g, '&quot;');
   list.innerHTML = rows.map(r => {
-    const t = r.scanAt ? new Date(r.scanAt).toLocaleTimeString('th-TH', { hour:'2-digit', minute:'2-digit' }) : '-';
+    // v11.0: เวลาไทยตายตัว (เครื่อง HR อยู่ timezone อื่นต้องไม่เพี้ยน) + กันวันที่พัง
+    let t = '-';
+    if (r.scanAt) {
+      const d = new Date(r.scanAt);
+      if (!isNaN(d.getTime())) t = d.toLocaleTimeString('th-TH', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Bangkok' });
+    }
     const flags = auditFlags_(r);
     const danger = flags.some(f => f.warn === 2);
     const img = r.photoUrl
@@ -9696,9 +9767,9 @@ function drawAuditList() {
     return `<div class="list-item">
       <div style="margin-right:10px;flex-shrink:0">${img}</div>
       <div class="info">
-        <div class="title">${r.name || r.empId} <span class="text-sm text-muted">· ${r.empId}</span></div>
-        <div class="sub">${t} น. · ${r.type === 'out' ? '🔴 ออก' : '🟢 เข้า'} · ${r.branch || '-'}
-        ${flags.length ? '<br>' + flags.map(f => `<span style="color:${flagColor(f.warn)};font-weight:700;font-size:12px">⚑ ${f.t}</span>`).join(' · ') : ''}</div>
+        <div class="title">${escH_(r.name || r.empId)} <span class="text-sm text-muted">· ${escH_(r.empId)}</span></div>
+        <div class="sub">${t} น. · ${r.type === 'out' ? '🔴 ออก' : '🟢 เข้า'} · ${escH_(r.branch || '-')}
+        ${flags.length ? '<br>' + flags.map(f => `<span style="color:${flagColor(f.warn)};font-weight:700;font-size:12px">⚑ ${escH_(f.t)}</span>`).join(' · ') : ''}</div>
       </div>
     </div>`;
   }).join('');
@@ -11416,18 +11487,22 @@ function renderHomeTodayCard() {
   if (dateEl) dateEl.textContent = dateStr;
 
   // times from local logs
-  const tl = currentUser ? todayLogsForUser(currentUser.empId) : [];
+  // v11.0: logs เก็บใหม่สุดก่อน (unshift) — ต้องเรียงตามเวลาจริงก่อนหา เข้าแรก/ออกสุดท้าย
+  // (เดิมวันหลายกะได้ เข้า=ครั้งหลังสุด / ออก=ครั้งแรกสุด สลับกัน)
+  const tl = (currentUser ? todayLogsForUser(currentUser.empId) : [])
+    .slice().sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
   const inEvt  = tl.find(l => l.type === 'in');
   const outEvt = tl.slice().reverse().find(l => l.type === 'out');
   const inEl  = document.getElementById('homeTodayIn');
   const outEl = document.getElementById('homeTodayOut');
+  const fmtT = l => (l && l.timeStr) ? String(l.timeStr).substring(0, 5) : '--:--';   // v11.0: กัน timeStr ว่าง
   // v10.7: ใช้ var(--text) ไม่ใช่ var(--navy) — โหมดกลางคืน navy กลืนพื้นเข้ม ตัวเลขล่องหน
   if (inEl) {
-    inEl.textContent  = inEvt  ? inEvt.timeStr.substring(0,5)  : '--:--';
+    inEl.textContent  = inEvt  ? fmtT(inEvt)  : '--:--';
     inEl.style.color  = inEvt  ? 'var(--text)'   : 'var(--muted)';
   }
   if (outEl) {
-    outEl.textContent = outEvt ? outEvt.timeStr.substring(0,5) : '--:--';
+    outEl.textContent = outEvt ? fmtT(outEvt) : '--:--';
     outEl.style.color = outEvt ? 'var(--text)'   : 'var(--muted)';
   }
 }
