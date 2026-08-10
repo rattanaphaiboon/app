@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v19.4</title>
+<title>Rattana Sales Dashboard v19.1</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
 </script>
@@ -457,7 +457,7 @@ body.dark .ptbl-td{border-color:var(--border)}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.4</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.1</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -1220,7 +1220,9 @@ function startApp() {
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('appScreen').style.display = 'block';
   document.getElementById('userChip').textContent = (currentUser.nickname || currentUser.name || 'User') + ' ออกจากระบบ';
-  document.getElementById('tabBtnSummary').style.display = '';
+  if ((currentUser.role || 0) >= 5 || TGT_SUPER_ADMINS.includes(String(currentUser.email||'').toLowerCase())) {
+    document.getElementById('tabBtnSummary').style.display = '';
+  }
   bindHeaderSort();
   loadData();
   startAutoRefresh();
@@ -1234,7 +1236,7 @@ async function loadData(showSpin=true) {
   if (showSpin) showSpinner('กำลังโหลดข้อมูลยอดขาย...');
   setBar(true);
   try {
-    const isAdmin = true;
+    const isAdmin = (currentUser.role || 0) >= 5;
     const prefixes = ['คุณ ','นาย ','นาง ','นางสาว ','ด.ช. ','ด.ญ. '];
     const stripPfx = s => { let v=String(s||'').trim(); for(const p of prefixes) if(v.startsWith(p)) return v.slice(p.length).trim(); return v; };
 
@@ -3077,7 +3079,7 @@ async function loadLowStoreData() {
 function renderLowStore() {
   if (!lowStoreLoaded) { loadLowStoreData(); return; }
 
-  const isAdmin = true;
+  const isAdmin = (currentUser.role || 0) >= 5;
   const prefixes = ['คุณ ','นาย ','นาง ','นางสาว ','ด.ช. ','ด.ญ. '];
   const stripPfxLow = s => { let v=String(s||'').trim(); for(const p of prefixes) if(v.startsWith(p)) return v.slice(p.length).trim(); return v; };
 
@@ -3309,11 +3311,7 @@ function closeProdModal() {
 // ── BOOT ──────────────────────────────────────────────────────────────────
 (function init() {
   if (localStorage.getItem('darkMode') === 'true') document.body.classList.add('dark');
-  // bypass login
-  document.getElementById('loginScreen').style.display = 'none';
-  document.getElementById('appScreen').style.display = 'block';
-  currentUser = { name:'Admin', nickname:'Admin', role:8, warehouse:'ALL', empId:'', email:'' };
-  loadData();
+  checkSession();
 })();
 // ─────────────────────────────────────────────────────
 // TARGET TAB (🎯 เทียบเป้าหมาย)
@@ -3703,7 +3701,10 @@ function initTargetTab() {
 
 /* ================= FILTERS ================= */
 const TGT_SUPER_ADMINS = ['waraphon.tho@rattanaphaiboon.com'];
-function tgtGetUserRole() { return 8; }
+function tgtGetUserRole() {
+  if (currentUser && TGT_SUPER_ADMINS.includes(String(currentUser.email||'').toLowerCase())) return 99;
+  return (currentUser && currentUser.role) ? parseInt(currentUser.role) : 1;
+}
 
 function buildTgtFilterControls() {
   const role = tgtGetUserRole();
@@ -4707,7 +4708,6 @@ function renderSummaryTab() {
   const bpByMonth  = new Map(); // 'mm/yyyy' → total EXVat
   const bpByPersonByMonth = new Map(); // normName → Map('mm/yyyy' → total EXVat)
   const bpByPersonByWeek  = new Map(); // normName → [W1,W2,W3,W4,W5]
-  const bpByPersonByDay   = new Map(); // normName → Map(dd → sum EXVat+CN*2)
   const catMap     = new Map(); // Cat_BU → total
 
   const bpCustSalesIdx = new Map();   // normName → Map(Customer_Code → sum EXVat+CN*2)
@@ -4733,11 +4733,6 @@ function renderSummaryTab() {
       const wk = Math.min(Math.ceil(dd/7), 5) - 1; // 0-4
       if (!bpByPersonByWeek.has(normName)) bpByPersonByWeek.set(normName, [0,0,0,0,0]);
       bpByPersonByWeek.get(normName)[wk] += val;
-      // daily EXVat+CN*2
-      if (!bpByPersonByDay.has(normName)) bpByPersonByDay.set(normName, new Map());
-      const dayKey = String(dd).padStart(2,'0');
-      const dm = bpByPersonByDay.get(normName);
-      dm.set(dayKey, (dm.get(dayKey)||0) + valCN2);
     }
     const cat = tgtNormalizeText(String(r['Cat_BU'] || 'อื่นๆ')).trim() || 'อื่นๆ';
     catMap.set(cat, (catMap.get(cat) || 0) + val);
@@ -5378,36 +5373,35 @@ function renderSummaryTab() {
         </div>`;
       })()}
       ${(()=>{
-        /* ── Daily bar chart from BP sheet (EXVat+CN*2) ── */
-        const dayMap = bpByPersonByDay.get(normN) || new Map();
-        const sorted = [...dayMap.entries()].sort((a,b)=>+a[0]-+b[0]);
+        /* ── Weekly bar chart from BP sheet ── */
+        const wv = p.weekVals || [0,0,0,0,0];
+        const mx = Math.max(...wv, 1);
+        const totalWk = wv.reduce((s,v)=>s+v,0);
         const fmtW = v => v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(0)+'K':Math.round(v).toLocaleString();
-        if (!sorted.length) return `<div style="grid-column:span 2;background:rgba(59,130,246,.10);border-radius:8px;padding:7px 10px;display:flex;align-items:center;justify-content:center"><span style="font-size:11px;color:rgba(255,255,255,.3)">ไม่มีข้อมูล</span></div>`;
-        const vals = sorted.map(([,v])=>v);
-        const mx = Math.max(...vals, 1);
-        const total = vals.reduce((s,v)=>s+v,0);
-        const today = String(new Date().getDate()).padStart(2,'0');
-        const barMaxH = 48;
-        const bars = sorted.map(([dd,v])=>{
-          const h = Math.max(Math.round(v/mx*barMaxH), 2);
-          const isToday = dd === today;
-          const isMax = v === mx;
-          const barCol = isToday ? '#f5c518' : isMax ? col : 'rgba(255,255,255,.22)';
-          return `<div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
-            <div style="height:${barMaxH}px;display:flex;align-items:flex-end;width:100%">
-              <div style="flex:1;height:${h}px;background:${barCol};border-radius:2px 2px 0 0" title="${dd}: ${fmtW(v)} บาท"></div>
+        const barMaxH = 44;
+        const weekLabels = ['W1','W2','W3','W4','W5'];
+        const bars = wv.map((v,i)=>{
+          const h = mx>0 ? Math.max(Math.round(v/mx*barMaxH),1) : 2;
+          const isLast = v===Math.max(...wv);
+          return `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;flex:1">
+            <div style="font-size:7px;color:${isLast?'#f5c518':'rgba(255,255,255,.5)'};font-weight:${isLast?700:400}">${v>0?fmtW(v):''}</div>
+            <div style="height:${barMaxH}px;display:flex;align-items:flex-end">
+              <div style="width:14px;height:${h}px;background:${isLast?col:'rgba(255,255,255,.25)'};border-radius:3px 3px 0 0;transition:height .3s"></div>
             </div>
-            ${isToday||isMax||+dd%5===0?`<div style="font-size:7px;color:${isToday?'#f5c518':'rgba(255,255,255,.4)'};margin-top:1px">${+dd}</div>`:'<div style="height:10px"></div>'}
+            <div style="font-size:8px;color:rgba(255,255,255,.5)">${weekLabels[i]}</div>
           </div>`;
         }).join('');
-        return `<div style="grid-column:span 2;background:rgba(59,130,246,.10);border-radius:8px;padding:7px 10px;display:flex;flex-direction:column;cursor:pointer" onclick="${onclickAttr}">
+        const nowDay = new Date().getDate();
+        const curWk = Math.min(Math.ceil(nowDay/7),5);
+        return `<div style="grid-column:span 2;background:rgba(59,130,246,.12);border-radius:8px;padding:7px 10px;display:flex;flex-direction:column;cursor:pointer" onclick="${onclickAttr}">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-            <div style="font-size:9px;color:rgba(255,255,255,.55);font-weight:700;letter-spacing:.3px">📈 ยอดรายวัน (EXVat+CN×2)</div>
-            <div style="font-size:9px;color:#f5c518;font-weight:700">${fmtW(total)}</div>
+            <div style="font-size:9px;color:rgba(255,255,255,.55);font-weight:700;letter-spacing:.3px">📈 ยอดรายสัปดาห์ (BP)</div>
+            <div style="font-size:9px;color:rgba(255,255,255,.45)">W${curWk} now</div>
           </div>
-          <div style="display:flex;align-items:flex-end;gap:1px;flex:1;overflow:hidden">
+          <div style="display:flex;align-items:flex-end;gap:4px;flex:1">
             ${bars}
           </div>
+          <div style="margin-top:4px;font-size:9px;color:rgba(255,255,255,.55);text-align:right">รวม <b style="color:#f5c518">${fmtW(totalWk)}</b> บาท</div>
         </div>`;
       })()}
     </div>
@@ -7972,10 +7966,7 @@ window.tsExportDetailExcel = exportDetailExcel;
 </script>
 </body>
 </html>
-<!-- v19.4 -->
-
-
-
+<!-- v19.1 -->
 
 
 
