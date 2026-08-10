@@ -229,6 +229,7 @@ body.dark .spinner-box{background:var(--card-bg)}
   <div class="section-tabs">
     <button class="sec-tab active" data-view="detail" onclick="switchSectionView('detail')">📋 รายละเอียด</button>
     <button class="sec-tab" data-view="summary" onclick="switchSectionView('summary')">📊 สรุปของแถมที่ให้ครบ</button>
+    <button class="sec-tab" data-view="changW4" onclick="switchSectionView('changW4')">🍺 สะสมเบียร์ช้าง W4</button>
   </div>
 
   <div id="detailView">
@@ -251,6 +252,13 @@ body.dark .spinner-box{background:var(--card-bg)}
     <div class="sum-card">
       <div class="sum-head"><span id="sumHeadLabel">-</span><span class="h-count" id="sumCount">-</span></div>
       <div id="sumBody"></div>
+    </div>
+  </div>
+
+  <div id="changW4View" style="display:none">
+    <div class="sum-card">
+      <div class="sum-head"><span id="chgHeadLabel">🍺 สะสมเบียร์ช้างคลาสสิก · คลัง W4 (นครปฐม)</span><span class="h-count" id="chgCount">-</span></div>
+      <div id="chgBody"></div>
     </div>
   </div>
 
@@ -685,14 +693,17 @@ async function switchPeriod(mode) {
   updateBanner();
   await loadData();  // reload DS_DC (same) + PDDT (same) + Promo (different source)
   if (sectionView === 'summary') renderSummary();
+  if (sectionView === 'changW4') renderChangW4();
 }
 
 function switchSectionView(v) {
   sectionView = v;
   document.querySelectorAll('.sec-tab').forEach(b => b.classList.toggle('active', b.dataset.view === v));
-  document.getElementById('detailView').style.display = (v === 'detail') ? '' : 'none';
+  document.getElementById('detailView').style.display  = (v === 'detail')  ? '' : 'none';
   document.getElementById('summaryView').style.display = (v === 'summary') ? '' : 'none';
+  document.getElementById('changW4View').style.display = (v === 'changW4') ? '' : 'none';
   if (v === 'summary') renderSummary();
+  if (v === 'changW4') renderChangW4();
 }
 
 function renderSummary() {
@@ -749,6 +760,69 @@ async function loadOtherPeriodForSummary(mode) {
   if (mode === periodMode) return;
   // ใช้ switchPeriod ปกติ — จะโหลดใหม่ + cache แล้วกลับมา render summary
   await switchPeriod(mode);
+}
+
+// สะสมยอดซื้อ เบียร์ช้างคลาสสิก (CS) ต่อลูกค้า · คลัง W4 · เฉพาะ CS-unit · เฉพาะบรรทัดที่ซื้อจริง (ไม่นับ Q_FREE)
+function renderChangW4() {
+  const brandTarget = normalizeName('ช้างคลาสสิก');
+  const byCust = new Map();  // AR_CODE → {code, name, totalCS, bySku:Map}
+  lastMonthData.forEach(r => {
+    if (String(r.WL_CODE||'').trim().toUpperCase() !== 'W4') return;
+    if (extractUnit(r.TRD_UTQNAME) !== 'CS') return;
+    const qty = parseFloat(r.TRD_QTY) || 0;
+    if (qty <= 0) return;
+    const p = pddtMap.get(normalizeName(r.SKU_NAME));
+    if (!p || normalizeName(p.brand) !== brandTarget) return;
+    const code = String(r.AR_CODE||'').trim() || '-';
+    if (!byCust.has(code)) byCust.set(code, { code, name: r.AR_NAME||'', totalCS: 0, bySku: new Map() });
+    const c = byCust.get(code);
+    c.totalCS += qty;
+    c.bySku.set(r.SKU_NAME, (c.bySku.get(r.SKU_NAME)||0) + qty);
+  });
+  const rows = [...byCust.values()].sort((a,b) => b.totalCS - a.totalCS);
+  const modeLblMap = { today:'⚡ วันนี้', current:'🔴 เดือนนี้', last:'📅 เดือนที่แล้ว' };
+  const { start } = getPeriodRange();
+  const periodLabel = periodMode === 'today'
+    ? `วันนี้ (${formatThaiDate(start)})`
+    : `${TH_MONTHS[start.getMonth()]} ${start.getFullYear()+543}`;
+  document.getElementById('chgCount').textContent = `${modeLblMap[periodMode]||''} • ${periodLabel} • ${fmtInt(rows.length)} ลูกค้า`;
+  const body = document.getElementById('chgBody');
+  if (!rows.length) {
+    body.innerHTML = `<div class="sum-empty">ไม่มีการซื้อเบียร์ช้างคลาสสิก (CS) ที่ W4 ในช่วงนี้</div>`;
+    return;
+  }
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const totalCS = rows.reduce((s,r)=>s+r.totalCS,0);
+  body.innerHTML = `
+    <div class="tbl-wrap" style="max-height:70vh">
+      <table class="tbl" style="min-width:auto">
+        <thead>
+          <tr>
+            <th style="width:50px;text-align:right">#</th>
+            <th>ลูกค้า</th>
+            <th>รายละเอียด SKU</th>
+            <th style="text-align:right">รวม CS</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((r,i)=>{
+            const skuLines = [...r.bySku.entries()].sort((a,b)=>b[1]-a[1])
+              .map(([sku,q]) => `<div style="font-size:11px;color:var(--muted)">${esc(sku)} — <b>${fmtInt(q)} CS</b></div>`).join('');
+            return `<tr>
+              <td class="num" style="color:var(--muted)">${i+1}</td>
+              <td><div style="font-weight:600">${esc(r.name)}</div><div class="code txt-muted" style="font-size:11px">${esc(r.code)}</div></td>
+              <td>${skuLines}</td>
+              <td class="num" style="color:var(--gold);font-weight:700;font-size:15px">${fmtInt(r.totalCS)}</td>
+            </tr>`;
+          }).join('')}
+          <tr style="background:rgba(201,168,76,.08);font-weight:700;border-top:2px solid var(--gold)">
+            <td></td>
+            <td colspan="2">รวมทั้งหมด</td>
+            <td class="num" style="color:var(--gold);font-size:16px">${fmtInt(totalCS)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>`;
 }
 
 async function loadData() {
