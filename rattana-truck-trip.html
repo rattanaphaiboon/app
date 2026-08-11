@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Truck Trip — บันทึกเที่ยววิ่งขนส่ง v1.2</title>
+<title>Rattana Truck Trip — บันทึกเที่ยววิ่งขนส่ง v1.3</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
@@ -293,7 +293,7 @@ footer{text-align:center;font-size:11px;color:var(--muted);padding:20px 12px max
 <div id="appScreen" style="display:none">
 <header>
   <span class="logo-text">RATTANA <span>TRIP</span></span>
-  <span class="ver-chip" id="verChip">v1.2</span>
+  <span class="ver-chip" id="verChip">v1.3</span>
   <span class="h-spacer"></span>
   <span class="user-chip"><span class="u-name" id="userName">-</span></span>
   <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -451,8 +451,10 @@ footer{text-align:center;font-size:11px;color:var(--muted);padding:20px 12px max
         <div class="row-gap">
           <button class="btn btn-gold" onclick="saveGasUrl()">บันทึก URL</button>
           <button class="btn btn-outline" onclick="testConnection()">ทดสอบการเชื่อมต่อ</button>
+          <button class="btn btn-outline" onclick="testSave()">ทดสอบการส่งข้อมูล</button>
         </div>
         <p class="hint mt-8" id="connStatus"></p>
+        <p class="hint mt-8" id="lastErrBox"></p>
       </div>
     </div>
 
@@ -484,7 +486,7 @@ footer{text-align:center;font-size:11px;color:var(--muted);padding:20px 12px max
 
 </main>
 
-<footer>Rattana Truck Trip v1.2 · บริษัท รัตนไพบูลย์ จำกัด</footer>
+<footer>Rattana Truck Trip v1.3 · บริษัท รัตนไพบูลย์ จำกัด</footer>
 </div>
 
 <!-- ══════════ MODAL ══════════ -->
@@ -505,7 +507,7 @@ footer{text-align:center;font-size:11px;color:var(--muted);padding:20px 12px max
 /* ═══════════════════════════════════════════════════════
    Rattana Truck Trip v1.0
    ═══════════════════════════════════════════════════════ */
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.3';
 
 /* ค่าเริ่มต้น — ถ้าวาง URL ตรงนี้ ผู้ใช้ทุกคนจะได้เลยไม่ต้องตั้งเอง */
 const GAS_URL_DEFAULT = '';
@@ -542,7 +544,7 @@ const joinMulti  = a => a.join(', ');
 const CACHE_TTL   = 5 * 60 * 1000;
 
 const state = {
-  user: null, rows: [], lists: {}, listColumns: [], listMap: {}, schema: null,
+  user: null, rows: [], lists: {}, listColumns: [], listMap: {}, schema: null, lastError: '',
   editingId: null, listLimit: 50, sumRange: '7d', loading: false,
   form: { date:'', driver:'', crew:'', job:'', qty:'', transfer:'' },
   filters: { from:'', to:'', driver:'', job:'', q:'' }
@@ -690,22 +692,47 @@ function logout(){
 function getGasUrl(){ return clean(localStorage.getItem(KEY.gasUrl) || GAS_URL_DEFAULT); }
 function hasGas(){ const u = getGasUrl(); return !!u && /^https:\/\/script\.google\.com\//.test(u); }
 
+/** err.server = true → ติดต่อ backend ได้แล้ว แต่ถูกปฏิเสธ (อย่าเอาเข้าคิว ให้บอกสาเหตุตรงๆ) */
+function serverErr(msg){ const e = new Error(msg); e.server = true; return e; }
+
 async function gasGet(action, params){
-  if(!hasGas()) throw new Error('ยังไม่ได้ตั้งค่า Web App URL (ไปที่แท็บ ตั้งค่า)');
+  if(!hasGas()) throw serverErr('ยังไม่ได้ตั้งค่า Web App URL (ไปที่แท็บ ตั้งค่า)');
   const q = new URLSearchParams(Object.assign({ action }, params || {}));
   const r = await fetch(getGasUrl() + '?' + q.toString(), { method:'GET' });
   if(!r.ok) throw new Error('HTTP ' + r.status);
   const j = await r.json();
-  if(!j.ok) throw new Error(j.error || 'ไม่ทราบสาเหตุ');
+  if(!j.ok) throw serverErr(j.error || 'ไม่ทราบสาเหตุ');
   return j.data;
 }
 async function gasPost(payload){
-  if(!hasGas()) throw new Error('ยังไม่ได้ตั้งค่า Web App URL (ไปที่แท็บ ตั้งค่า)');
+  if(!hasGas()) throw serverErr('ยังไม่ได้ตั้งค่า Web App URL (ไปที่แท็บ ตั้งค่า)');
   const r = await fetch(getGasUrl(), { method:'POST', body: JSON.stringify(payload) });
   if(!r.ok) throw new Error('HTTP ' + r.status);
   const j = await r.json();
-  if(!j.ok) throw new Error(j.error || 'ไม่ทราบสาเหตุ');
+  if(!j.ok) throw serverErr(j.error || 'ไม่ทราบสาเหตุ');
   return j.data;
+}
+/**
+ * บันทึกข้อมูล (create/update/delete)
+ * บางเครือข่าย/พร็อกซีบล็อก POST ข้ามโดเมนไปที่ script.google.com ทั้งที่ GET ผ่าน
+ * ถ้า POST ยิงไม่ถึงเลย ให้ลองยิงเป็น GET ซ้ำอีกหนึ่งครั้งก่อนค่อยยอมแพ้
+ */
+async function gasSend(payload){
+  try {
+    return await gasPost(payload);
+  } catch(e){
+    if(e.server) { state.lastError = 'POST: ' + e.message; throw e; }
+    try {
+      const d = await gasGet(payload.action, payload);
+      state.lastError = 'POST ไม่ผ่าน (' + e.message + ') — ใช้ GET สำรองสำเร็จ';
+      console.warn('[trip]', state.lastError);
+      return d;
+    } catch(e2){
+      state.lastError = 'POST: ' + e.message + ' | GET: ' + e2.message;
+      if(e2.server) throw e2;
+      throw new Error(e.message);
+    }
+  }
 }
 
 /* ─────────── cache ─────────── */
@@ -752,7 +779,7 @@ async function flushQueue(manual){
   const left = [];
   let sent = 0;
   for(const item of q){
-    try { await gasPost(Object.assign({ action:'create' }, item)); sent++; }
+    try { await gasSend(Object.assign({ action:'create' }, item)); sent++; }
     catch(e){ left.push(item); }
   }
   saveQueue(left);
@@ -956,23 +983,25 @@ async function submitForm(){
   showSpinner(state.editingId ? 'กำลังบันทึกการแก้ไข...' : 'กำลังส่งข้อมูล...');
   try{
     if(state.editingId){
-      await gasPost(Object.assign({ action:'update', id: state.editingId }, payload));
+      await gasSend(Object.assign({ action:'update', id: state.editingId }, payload));
       showToast('แก้ไขรายการเรียบร้อย ✓', 'success');
       cancelEdit();
     } else {
-      await gasPost(Object.assign({ action:'create' }, payload));
+      await gasSend(Object.assign({ action:'create' }, payload));
       showToast('บันทึกเที่ยววิ่งเรียบร้อย ✓', 'success');
       resetForm(false);
     }
     await loadData(true);
   } catch(e){
-    if(!state.editingId && /fail|network|load|HTTP|fetch/i.test(e.message)){
+    // e.server = backend ตอบกลับมาว่าไม่ผ่าน → บอกสาเหตุตรงๆ ไม่ต้องเข้าคิว
+    if(!state.editingId && !e.server){
       const q = loadQueue(); q.push(payload); saveQueue(q);
-      showToast('ส่งไม่สำเร็จ — เก็บไว้ในเครื่องแล้ว จะส่งให้อีกครั้งภายหลัง', 'warning');
+      showToast('ส่งไม่สำเร็จ (' + e.message + ') — เก็บไว้ในเครื่องแล้ว', 'warning');
       resetForm(false);
     } else {
       showToast('บันทึกไม่สำเร็จ: ' + e.message, 'error');
     }
+    renderSettings();
   } finally {
     btn.disabled = false;
     hideSpinner();
@@ -1130,7 +1159,7 @@ async function confirmDelete(){
   closeDelModal();
   showSpinner('กำลังลบ...');
   try{
-    await gasPost({ action:'delete', id });
+    await gasSend({ action:'delete', id });
     showToast('ลบรายการแล้ว', 'success');
     if(state.editingId === id) cancelEdit();
     await loadData(true);
@@ -1231,13 +1260,40 @@ async function testConnection(){
   el.textContent = 'กำลังทดสอบ...';
   try{
     const d = await gasGet('health');
-    el.innerHTML = '✅ เชื่อมต่อสำเร็จ — backend v' + esc(d.version || '?');
+    el.innerHTML = '✅ อ่านข้อมูลได้ — backend v' + esc(d.version || '?');
   } catch(e){
-    el.innerHTML = '❌ ' + esc(e.message);
+    el.innerHTML = '❌ อ่านข้อมูลไม่ได้ — ' + esc(e.message);
   }
+}
+/** ตรวจว่า "ส่งข้อมูลขึ้นชีท" ใช้ได้ไหม โดยไม่เขียนแถวจริง
+ *  ยิง action ที่ backend ไม่รู้จัก — ถ้าได้คำตอบกลับมา แปลว่าเส้นทางส่งข้อมูลถึงปลายทางแล้ว */
+async function testSave(){
+  const el = document.getElementById('connStatus');
+  el.textContent = 'กำลังทดสอบการส่ง...';
+  try{
+    await gasPost({ action:'__ping__' });
+    el.innerHTML = '✅ ส่งข้อมูลได้ปกติ';
+  } catch(e){
+    if(e.server){
+      el.innerHTML = '✅ ส่งข้อมูลถึง backend ได้ปกติ (ตอบกลับ: ' + esc(e.message) + ')';
+    } else {
+      try{
+        await gasGet('health');
+        el.innerHTML = '⚠️ POST ถูกบล็อก (' + esc(e.message) + ') แต่อ่านผ่าน GET ได้ — แอปจะสลับไปใช้ GET สำรองให้อัตโนมัติ';
+      } catch(e2){
+        el.innerHTML = '❌ ส่งไม่ได้ทั้ง POST และ GET — ' + esc(e.message) +
+          '<br>ตรวจว่า deploy เป็น Web app / Execute as: Me / Who has access: Anyone แล้วหรือยัง';
+      }
+    }
+  }
+  renderSettings();
 }
 function renderSettings(){
   document.getElementById('setGasUrl').value = getGasUrl();
+  const eb = document.getElementById('lastErrBox');
+  if(eb) eb.innerHTML = state.lastError
+    ? '🔎 ข้อผิดพลาดล่าสุด: <span class="txt-danger">' + esc(state.lastError) + '</span>'
+    : '';
 
   const cols = state.listColumns || [];
   document.getElementById('mapFields').innerHTML = PICK_FIELDS.map(f => `
