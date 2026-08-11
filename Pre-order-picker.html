@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rattana Pre-order Picker v4.12</title>
+<title>Rattana Pre-order Picker v4.13</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -399,7 +399,7 @@
     <button type="button" class="login-bypass" id="previewBypassBtn" onclick="bypassLogin()" style="display:none;margin-top:10px">🔓 เข้าโหมดพรีวิว (ทดสอบในเครื่อง — ไม่ผ่าน Google Login)</button>
     <div id="loginSpinner">⏳ กำลังเข้าสู่ระบบ…</div>
     <div id="loginError"></div>
-    <div class="login-ver">เวอร์ชัน v4.12</div>
+    <div class="login-ver">เวอร์ชัน v4.13</div>
   </div>
 </div>
 
@@ -416,7 +416,7 @@
         <button type="button" id="srcMenuSb" onclick="setOrderSrc('sb')"><span>🟣</span> ใบจอง จาก Supabase</button>
       </div>
     </div>
-    <div class="title">📦 Pre-order Picker <span class="ver">v4.12</span></div>
+    <div class="title">📦 Pre-order Picker <span class="ver">v4.13</span></div>
     <div class="spacer"></div>
     <div class="who" id="whoBox"></div>
     <a class="hub-btn" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">
@@ -1813,6 +1813,7 @@ function rooRowToOrder(r, seq, tbl){
     cancel:String(r['ยกเลิก']||'').trim(), qty:num(r['จำนวน']), unit:String(r['หน่วย']||''),
     price:num(r['ราคา']), total:num(r['ยอดเงินรวม']),
     orderId:(String(r['billId']||'').trim() || String(r['orderId']||'').trim()),
+    rawOrderId:String(r['orderId']||'').trim(),   // v4.13: เลขออเดอร์ดิบ — ชีท ROO เก็บเลขนี้ (ไม่ใช่ billId ที่รวมแล้ว)
     note:String(r['หมายเหตุ']||'').trim(), promo:String(r['โปรที่ใช้']||'').trim(),
     done:/จัดแล้ว/.test(String(r['สถานะจัด']||'')),
     doneBy:String(r['แอดมินจัด']||'').trim(), doneDate:String(r['วันสั่งจัด']||'').trim(), doneTime:String(r['เวลาสั่งจัด']||'').trim(),
@@ -1972,6 +1973,30 @@ async function markDoneRooLines(rooLines){
 /* v3.67: หลัง Export — ย้ายบิลไป "นำเข้าแล้ว" ทันที (optimistic) + เขียนสถานะกลับ Supabase 2 ที่:
  *  • sales_orders (bdshn…) ผ่าน GAS markDoneSb  → แหล่งหลัก · หน้า "นำเข้าแล้ว" ค้างถูกหลังรีโหลด
  *  • roo_sales/roo_special (ncmgq…) PATCH ตรง    → ฝั่ง ROO เห็น "จัดแล้ว" (แทน order-picker) */
+/* ⭐ v4.13 (Surat 2026-08-08): "ROO เวลาเอาไปเปิดบิลแล้ว ก็ควรลงข้อมูล Supabase และ Google Sheet
+ *    เพื่อที่จะได้รู้ว่าอะไรเปิดบิลไปแล้วบ้าง"
+ * ยิงไป .gs action `markDoneRooSheet` → เขียน สถานะจัด/แอดมินจัด/วันสั่งจัด/เวลาสั่งจัด
+ * ลงชีท ROO (18RSfuDd… แท็บ "order") ให้ตรงกับที่เขียนใน Supabase
+ * ⚠️ คอลัมน์ `lineId` ของ ROO **ไม่ใช่รหัสบรรทัด** (เป็น LINE user id · 1,000 แถวมีแค่ 46 ค่า)
+ *    → จับคู่ด้วย `orderId|Barcode|รูปแบบ|หน่วย` + **นับจำนวนซ้ำ** (1 บิลมีสินค้าตัวเดียวกันซ้ำได้)
+ *    ⚠️ ใช้ o.rawOrderId (เลขออเดอร์ดิบ) ไม่ใช่ o.orderId (billId ที่รวมแล้ว) — ชีทเก็บ orderId */
+async function markDoneRooSheet(rooLines, by){
+  const L=(rooLines||[]).filter(l=>l && l._src==='roo');
+  if(!CONFIG.gasUrl || !L.length) return null;
+  const cnt={};
+  L.forEach(l=>{ const k=[String(l.rawOrderId||l.orderId||'').trim(), String(l.barcode||'').trim(),
+                          String(l.type||'').trim(), String(l.unit||'').trim()].join('|');
+    cnt[k]=(cnt[k]||0)+1; });
+  const keys=Object.entries(cnt).map(([k,n])=>({k,n}));
+  try{
+    const res=await fetch(CONFIG.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify({action:'markDoneRooSheet', keys, by:String(by||'')})});
+    const txt=(await res.text()).trim(); let j={}; try{ j=JSON.parse(txt); }catch(e){}
+    if(!j.ok) console.warn('[ชีท ROO] เขียนไม่สำเร็จ', txt.slice(0,200));
+    else if((j.missing||[]).length) console.warn('[ชีท ROO] หาแถวไม่เจอ', j.missing);
+    return j;
+  }catch(e){ console.warn('[ชีท ROO] เขียนไม่สำเร็จ', e); return {ok:false, error:String(e.message||e)}; }
+}
 async function exportMarkDone(orderIds, expLines){
   orderIds = (orderIds||[]).filter(Boolean); if(!orderIds.length) return;
   const by=(currentUser&&currentUser.email)||(currentUser&&currentUser.name)||'';
@@ -1998,9 +2023,10 @@ async function exportMarkDone(orderIds, expLines){
   _explogAdd(orderIds, storeMap);   // v3.83: จำว่า "export แล้ว" → reconcile ทุกครั้งที่โหลด (กันสถานะหายเงียบ)
   process(); render();
   // v3.83: เขียน Supabase + retry สูงสุด 3 ครั้ง (กัน mark ล้มเหลวเงียบ — "export ต้องลง จัดแล้ว เสมอ")
-  let sb={ok:true, n:0}, roo={ok:true, n:0};
+  let sb={ok:true, n:0}, roo={ok:true, n:0}, rsh=null;
   const _both=[];
   if(_rooLines.length) _both.push((async()=>{ for(let t=1;t<=3;t++){ roo=await markDoneRooLines(_rooLines); if(roo.ok) break; await new Promise(r=>setTimeout(r,800*t)); } })());
+  if(_rooLines.length) _both.push((async()=>{ rsh=await markDoneRooSheet(_rooLines, by); })());   // v4.13: เขียนลงชีท ROO ด้วย (Surat: "ควรลงทั้ง Supabase และ Google Sheet")
   /* v4.00: sales_orders → ลองมาร์ค "รายบรรทัด" (line_id) ก่อน · ถ้า .gs ยังไม่ได้วาง patch ค่อยถอยไปรายบิลแบบเดิม */
   let byLine=false;
   if(_gasBills.length && _gasBills.some(id=>!DONE_SB[id]))
@@ -2013,7 +2039,8 @@ async function exportMarkDone(orderIds, expLines){
     })());
   await Promise.all(_both);   // ยิงขนาน = ไม่ช้ากว่าเดิม
   let msg='';
-  if(sb.ok && roo.ok) msg=' · ✅ เขียน Supabase สำเร็จ'+(byLine?` (รายบรรทัด ${sb.n})`:'')+(_rooLines.length?` (ROO ${roo.n})`:'');
+  const _shMsg = rsh ? (rsh.ok ? ` · 📗 ชีท ROO ${rsh.rows}/${rsh.want} แถว`+((rsh.rows<rsh.want)?' ⚠️ ไม่ครบ':'') : ' · ⚠️ เขียนชีท ROO ไม่สำเร็จ') : '';
+  if(sb.ok && roo.ok) msg=' · ✅ เขียน Supabase สำเร็จ'+(byLine?` (รายบรรทัด ${sb.n})`:'')+(_rooLines.length?` (ROO ${roo.n})`:'')+_shMsg;
   else if(sb.needSetup) msg=' · ⏸ ยังไม่ตั้ง SB_URL/KEY ใน .gs';
   else msg=' · ❌ เขียน Supabase ไม่สำเร็จ — ดูแถบแดง กด "มาร์คซ้ำ"';
   toast(`📥 ย้ายไป "นำเข้าแล้ว" ${orderIds.length} บิล`+msg);
