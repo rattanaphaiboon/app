@@ -1425,6 +1425,8 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
         <span>ข้อมูลประจำวัน</span>
         <button class="home-section-link" onclick="showPage('history')">ดูเพิ่มเติม</button>
       </div>
+      <!-- v12.0: กล่องเตือนลืมสแกนเข้า/ออก — โชว์เมื่อพบวันที่สแกนไม่ครบคู่ -->
+      <div id="scanAlertBox" style="display:none"></div>
       <div class="home-today-card" id="homeTodayCard" onclick="openAttendanceCalendar()" style="cursor:pointer;position:relative">
         <div style="position:absolute;top:12px;right:14px;font-size:11px;color:var(--muted)">ดูประวัติ</div>
         <div class="home-today-date" id="homeTodayDate">—</div>
@@ -3421,7 +3423,11 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '11.2';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.0';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+/* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
+const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
+const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
+const LATE_FIRST_SCAN_HOUR = 12;   // สแกนแรกของวันตั้งแต่กี่โมง = ถามก่อนว่าเข้ากะบ่ายจริง หรือลืมสแกนเช้า
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
 
 const DEFAULT_LOCATIONS = [
@@ -5546,6 +5552,85 @@ function nextActionType(empId) {
   return lastType === 'in' ? 'out' : 'in';
 }
 
+/* v12.0 — ด่านเว้นช่วงสแกน: หาสแกนล่าสุด "ทุกชนิด" ของ emp ภายใน N นาที (ไม่มี = null)
+   เหตุผล: ด่านเดิมกันเฉพาะชนิดเดียวกัน แต่ nextActionType สลับ เข้า⇄ออก อัตโนมัติ
+   → สแกนซ้ำ 07:40→07:50 กลายเป็น "ออก" หลุดด่าน = เข้า-ออกซ้อนตอนเช้า HR งงตอนทำเงินเดือน */
+function lastScanWithin_(empId, minutes) {
+  const now = Date.now();
+  const cutoff = now - minutes * 60000;
+  let last = null, lastMs = 0;
+  logs.forEach(l => {
+    if (String(l.empId) !== String(empId)) return;
+    const t = new Date(l.ts).getTime();
+    if (isNaN(t) || t < cutoff || t > now + 120000) return;   // อนาคตเกิน 2 นาที = นาฬิกาเพี้ยน ข้าม
+    if (!last || t > lastMs) { last = l; lastMs = t; }
+  });
+  return last;
+}
+function scanGapInfo_(empId) {
+  const last = lastScanWithin_(empId, SCAN_GAP_MIN);
+  if (!last) return null;
+  const lastMs = new Date(last.ts).getTime();
+  const mins = Math.max(0, Math.round((Date.now() - lastMs) / 60000));
+  const readyAt = new Date(lastMs + SCAN_GAP_MIN * 60000);
+  const p2 = n => String(n).padStart(2, '0');
+  const d = new Date(lastMs);
+  const timeStr = (last.timeStr && String(last.timeStr).length >= 4)
+    ? String(last.timeStr).substring(0, 5) : p2(d.getHours()) + ':' + p2(d.getMinutes());
+  return {
+    last, mins, timeStr,
+    readyStr: p2(readyAt.getHours()) + ':' + p2(readyAt.getMinutes()),
+    typeLabel: last.type === 'out' ? 'ออกงาน' : 'เข้างาน',
+  };
+}
+/* v12.0 — จอแจ้ง "สแกนแล้ว ไม่ต้องสแกนซ้ำ" (แทน toast ที่หายเร็ว พนักงานไม่ทันอ่าน) */
+function showScanGapModal_(gap) {
+  const old = document.getElementById('scanGapModal'); if (old) old.remove();
+  const modal = document.createElement('div'); modal.id = 'scanGapModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:600;display:flex;align-items:center;justify-content:center;padding:24px';
+  modal.innerHTML = `
+    <div style="background:var(--card-bg);border-radius:18px;padding:28px 24px;max-width:340px;width:100%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.3)">
+      <div style="width:64px;height:64px;border-radius:50%;background:#E8F5EC;display:flex;align-items:center;justify-content:center;margin:0 auto 14px;font-size:30px">✅</div>
+      <div style="font-size:17px;font-weight:800;color:var(--text);margin-bottom:6px">สแกน${gap.typeLabel}แล้ว ${gap.timeStr} น.</div>
+      <div style="font-size:13px;color:var(--muted);line-height:1.7">ระบบบันทึกเวลาไว้เรียบร้อยแล้ว <b>ไม่ต้องสแกนซ้ำ</b><br>
+        สแกนครั้งถัดไปได้หลัง <b style="color:var(--text)">${gap.readyStr} น.</b></div>
+      <button onclick="document.getElementById('scanGapModal').remove()"
+        style="margin-top:18px;width:100%;padding:13px;border:none;border-radius:10px;background:var(--navy);color:#fff;font-weight:700;font-size:15px;cursor:pointer">รับทราบ</button>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+}
+/* v12.0 — สแกนแรกของวันหลังเที่ยง: ถามให้ชัวร์ว่า "เข้ากะบ่ายจริง" หรือ "ลืมสแกนเช้า"
+   (เดิมสแกนเย็น 17:00 ทั้งที่ลืมสแกนเช้า → ระบบบันทึกเป็น "เข้างาน 17:00" ข้อมูลผิดทันที) */
+function showFirstScanChoiceModal_() {
+  const old = document.getElementById('firstScanChoiceModal'); if (old) old.remove();
+  const hhmm = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+  const modal = document.createElement('div'); modal.id = 'firstScanChoiceModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:600;display:flex;align-items:flex-end';
+  modal.innerHTML = `
+    <div style="background:var(--card-bg);border-radius:18px 18px 0 0;padding:24px;width:100%">
+      <div style="font-size:16px;font-weight:800;color:var(--text);margin-bottom:6px">⚠️ สแกนแรกของวันนี้ เวลา ${hhmm} น.</div>
+      <div style="font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:16px">
+        วันนี้ยังไม่มี "สแกนเข้า" ในระบบเลย — เลือกให้ตรงความจริง ไม่งั้นระบบคิดเวลาทำงานผิด</div>
+      <button onclick="chooseFirstScan_('in')"
+        style="width:100%;padding:14px;border:1px solid var(--border);border-radius:10px;background:var(--card-bg);color:var(--text);font-size:14px;font-weight:700;margin-bottom:8px;cursor:pointer;text-align:left">
+        🌅 ฉันเพิ่งมาถึงที่ทำงาน<div style="font-size:11px;font-weight:400;color:var(--muted);margin-top:2px">บันทึกเป็น "เข้างาน" (เข้ากะบ่าย / มาสาย)</div></button>
+      <button onclick="chooseFirstScan_('out')"
+        style="width:100%;padding:14px;border:1px solid #E5B8B8;border-radius:10px;background:#FDF3F3;color:#A32D2D;font-size:14px;font-weight:700;margin-bottom:8px;cursor:pointer;text-align:left">
+        🌙 เมื่อเช้าลืมสแกนเข้า — ตอนนี้จะกลับบ้าน<div style="font-size:11px;font-weight:400;color:#B85555;margin-top:2px">บันทึกเป็น "ออกงาน" แล้วไปยื่นแก้เวลา "เข้างาน" ของเมื่อเช้า</div></button>
+      <button onclick="document.getElementById('firstScanChoiceModal').remove()"
+        style="width:100%;padding:12px;border:none;background:none;color:var(--muted);font-size:13px;cursor:pointer">ยกเลิก</button>
+    </div>`;
+  document.body.appendChild(modal);
+}
+function chooseFirstScan_(t) {
+  const m = document.getElementById('firstScanChoiceModal'); if (m) m.remove();
+  window._firstScanAsked = todayKey();       // ถามครั้งเดียวต่อวัน
+  window._forceNextType = t;                 // ใช้กลไก override เดิมของ nextActionType
+  if (t === 'out') toast('บันทึกเป็น "ออกงาน" — อย่าลืมยื่นแก้เวลา "เข้างาน" ของเมื่อเช้าด้วย', 'warning');
+  doSelfCheckIn();
+}
+
 /* v1.5 — สลับ เข้า ⇄ ออก ด้วยมือ (กรณี auto-detect ผิด) */
 function forceInOutToggle() {
   const current = nextActionType(currentUser.empId);
@@ -5610,16 +5695,24 @@ function evaluateAction() {
   const ready = reasons.length === 0;
 
   // ปุ่มหลัก
-  txt.textContent = next==='in' ? 'บันทึกเข้างาน' : 'บันทึกออกงาน';
-  btn.disabled = !ready;
-  sub.textContent = !ready ? reasons[0]
-    : faceDown ? '⚠ บันทึกแบบไม่มีใบหน้า (ระบบใบหน้าไม่พร้อม) · กดเพื่อยืนยัน'
-    : '✓ พร้อมบันทึก · กดเพื่อยืนยัน';
+  // v12.0: อยู่ในช่วงเว้นสแกน 60 นาที — ปุ่มโชว์ "สแกนแล้ว" และกดไม่ได้ (กันลงเวลาซ้อน)
+  const gapNow = scanGapInfo_(currentUser.empId);
+  if (gapNow) {
+    txt.textContent = `✓ สแกน${gapNow.typeLabel}แล้ว ${gapNow.timeStr} น.`;
+    btn.disabled = true;
+    sub.textContent = `บันทึกไว้เรียบร้อย — สแกนครั้งถัดไปได้หลัง ${gapNow.readyStr} น.`;
+  } else {
+    txt.textContent = next==='in' ? 'บันทึกเข้างาน' : 'บันทึกออกงาน';
+    btn.disabled = !ready;
+    sub.textContent = !ready ? reasons[0]
+      : faceDown ? '⚠ บันทึกแบบไม่มีใบหน้า (ระบบใบหน้าไม่พร้อม) · กดเพื่อยืนยัน'
+      : '✓ พร้อมบันทึก · กดเพื่อยืนยัน';
+  }
 
-  // ปุ่ม Off-site check-out (เฉพาะ check-out นอกพื้นที่ + ใบหน้าผ่าน)
+  // ปุ่ม Off-site check-out (เฉพาะ check-out นอกพื้นที่ + ใบหน้าผ่าน + ไม่ติดด่านเว้นช่วง)
   const offSiteBtn = document.getElementById('btnOffSite');
   if (offSiteBtn) {
-    if (isOffSitePossible && faceOk) {
+    if (isOffSitePossible && faceOk && !gapNow) {
       offSiteBtn.style.display = 'block';
       offSiteBtn.textContent = `📍 Check-out นอกพื้นที่ · ${lastGps.locName ? 'ห่าง '+lastGps.distance.toFixed(0)+' ม.' : 'GPS พร้อม'}`;
     } else {
@@ -5663,18 +5756,26 @@ async function doSelfCheckIn() {
 
   const type = nextActionType(currentUser.empId);
 
-  // ── Duplicate guard: ห้ามสแกนซ้ำประเภทเดิมภายใน 1 ชั่วโมง ──
-  const dupLog = logs.find(l =>
-    l.empId === currentUser.empId &&
-    l.type  === type &&
-    (Date.now() - new Date(l.ts).getTime()) < 3_600_000
-  );
-  if (dupLog) {
-    const mins = Math.round((Date.now() - new Date(dupLog.ts).getTime()) / 60000);
-    toast(`⚠ สแกน${type === 'in' ? 'เข้า' : 'ออก'}ไปแล้ว ${mins} นาทีก่อน — รอครบ 1 ชม.`, 'warning');
+  // ── v12.0 ด่านเว้นช่วง: ห้ามสแกน "ทุกชนิด" ภายใน SCAN_GAP_MIN นาทีจากสแกนก่อนหน้า ──
+  // (เดิมกันเฉพาะชนิดเดียวกัน → สแกนซ้ำถูกสลับเป็นอีกชนิดแล้วหลุดด่าน = เข้า-ออกซ้อนตอนเช้า)
+  const gap = scanGapInfo_(currentUser.empId);
+  if (gap) {
     _checkinBusy = false;
     if (btn) btn.disabled = false;
     if (sub) sub.textContent = '';
+    cancelCheckinFlow();          // ปิดจอสแกนไปเลย — ไม่มีอะไรให้ทำต่อ
+    showScanGapModal_(gap);       // จอเต็มแจ้ง "สแกนแล้ว" อ่านชัดกว่า toast
+    return;
+  }
+
+  // v12.0: สแกนแรกของวันตั้งแต่เที่ยงไป — อาจลืมสแกนเช้า (หรือเข้ากะบ่ายจริง) ให้เลือกก่อนบันทึก
+  if (type === 'in' && window._firstScanAsked !== todayKey() &&
+      todayLogsForUser(currentUser.empId).length === 0 &&
+      new Date().getHours() >= LATE_FIRST_SCAN_HOUR) {
+    _checkinBusy = false;
+    if (btn) btn.disabled = false;
+    if (sub) sub.textContent = '';
+    showFirstScanChoiceModal_();
     return;
   }
 
@@ -5767,6 +5868,7 @@ async function doSelfCheckIn() {
   } else {
     renderHomeTodayCard();
   }
+  checkScanPairAlert();   // v12.0: อัปเดตแบนเนอร์เตือนทันทีหลังสแกน (เช่น สแกนออกแล้ว → แบนเนอร์หาย)
   } finally { _checkinBusy = false; }   // v7.7: กัน busy ค้างถาวรถ้ามี exception กลางทาง
 }
 
@@ -5786,6 +5888,9 @@ function saveLog(data) {
 function doOffSiteCheckOut() {
   if (!lastGps) { toast('รอ GPS ก่อน', 'warning'); return; }
   if (faceapiReady && registeredDescriptor && (!lastFaceMatch?.ok)) { toast('❌ ใบหน้าไม่ตรง', 'error'); return; }
+  // v12.0: ด่านเว้นช่วง — เพิ่งสแกนไปไม่ถึง SCAN_GAP_MIN นาที ไม่ให้ check-out ซ้อน
+  const gapOff = scanGapInfo_(currentUser.empId);
+  if (gapOff) { showScanGapModal_(gapOff); return; }
 
   // Modal popup ให้กรอกเหตุผล
   const modal = document.createElement('div');
@@ -5832,6 +5937,10 @@ async function confirmOffSiteCheckOut(btn) {
   const note = noteEl?.value?.trim() || '';
   const fullReason = note ? `${reason}: ${note}` : reason;
 
+  // v12.0: กันเคสเปิด modal ทิ้งไว้นานแล้วมีสแกนอื่นแทรกไปแล้ว
+  const gapOff2 = scanGapInfo_(currentUser.empId);
+  if (gapOff2) { if (modal) modal.remove(); showScanGapModal_(gapOff2); return; }
+
   btn.textContent = '⏳ กำลังบันทึก...';
   btn.disabled = true;
 
@@ -5866,6 +5975,193 @@ async function confirmOffSiteCheckOut(btn) {
   if (synced) toast(`☁️ ส่งขึ้นระบบแล้ว`, 'success');
   else if (config.appsScriptUrl) toast(`⚠ ยังส่งขึ้นระบบไม่ได้ — เก็บไว้ในเครื่อง จะ sync อัตโนมัติ`, 'warning');
   renderTodayStatus(); renderTodayPage(); renderHistory(); renderDashboard(); renderHomeTodayCard();
+}
+
+/* ============================================================
+   v12.0 — เตือนสแกนไม่ครบ (ลืมสแกนเข้า/ลืมสแกนออก) ตอนเปิดแอป
+   เข้าอย่างเดียว/ออกอย่างเดียว = จับคู่เวลาไม่ได้ → HR คิดเงินเดือนไม่ได้
+   ตรวจ "เมื่อวาน" (จากชีท — รวมสแกนผ่าน kiosk/เครื่องอื่น) + "วันนี้" (logs ในเครื่องที่ sync แล้ว)
+   ============================================================ */
+let _scanAlerts = [];                 // ผลตรวจล่าสุด (ไว้ render ซ้ำ)
+let _ydLogsCache = null;              // { key:'empId|YYYY-MM-DD', items } — ยิงเซิร์ฟเวอร์ครั้งเดียวต่อวันต่อคน
+
+function _scanAlertDateKey_(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function _thaiShortDate_(d) {
+  const days = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
+  const months = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+  return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}`;
+}
+function _normScan_(type, ms, hhmm) { return { type: type === 'out' ? 'out' : 'in', ms: ms || 0, hhmm: hhmm || '' }; }
+function _pairStatus_(items) {
+  const s = items.slice().sort((a, b) => a.ms - b.ms);
+  const ins = s.filter(x => x.type === 'in'), outs = s.filter(x => x.type === 'out');
+  return { count: s.length, hasIn: ins.length > 0, hasOut: outs.length > 0,
+           firstIn: ins[0] || null, lastOut: outs[outs.length - 1] || null,
+           first: s[0] || null, last: s[s.length - 1] || null };
+}
+/* แปลงเวลาแบบชีท (รวมเคส Date-serialized "1899-…") → 'HH:mm' */
+function _hhmmFromSheetTime_(t, ms) {
+  t = String(t || '');
+  if (t.startsWith('1899') || (t.includes('T') && t.includes('Z'))) {
+    try {
+      const d = new Date(t); const bkk = new Date(d.getTime() + 7 * 3600 * 1000);
+      return String(bkk.getUTCHours()).padStart(2, '0') + ':' + String(bkk.getUTCMinutes()).padStart(2, '0');
+    } catch (_) {}
+  }
+  if (/^\d{1,2}:\d{2}/.test(t)) { const p = t.split(':'); return p[0].padStart(2, '0') + ':' + p[1]; }
+  const d = new Date(ms || 0);
+  return isNaN(d.getTime()) || !ms ? '' : String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+/* สแกนของเมื่อวาน — เอาจากชีท (รวมที่หัวหน้าสแกนให้ผ่าน kiosk); เน็ตล่ม → ใช้ log ในเครื่อง */
+async function _logsForYesterday_(empId) {
+  const yd = new Date(); yd.setDate(yd.getDate() - 1);
+  const key = String(empId) + '|' + _scanAlertDateKey_(yd);
+  if (_ydLogsCache && _ydLogsCache.key === key) return _ydLogsCache.items;
+  let items = null;
+  if (config.appsScriptUrl) {
+    try {
+      const ddmm = String(yd.getDate()).padStart(2, '0') + '/' + String(yd.getMonth() + 1).padStart(2, '0') + '/' + yd.getFullYear();
+      const res = await callAppsScript('getCheckinLog', { empId, date: ddmm, limit: 50 });
+      items = (res.logs || []).filter(l => String(l.empId) === String(empId)).map(r => {
+        const ms = new Date(r.timestamp).getTime() || 0;
+        return _normScan_(r.type, ms, _hhmmFromSheetTime_(r.time, ms));
+      });
+    } catch (_) { items = null; }
+  }
+  if (items === null) {
+    const ydKey = _scanAlertDateKey_(yd);
+    items = logs.filter(l => String(l.empId) === String(empId) && l.dateKey === ydKey).map(l => {
+      const ms = new Date(l.ts).getTime() || 0;
+      return _normScan_(l.type, ms, l.timeStr ? String(l.timeStr).substring(0, 5) : _hhmmFromSheetTime_('', ms));
+    });
+  }
+  _ydLogsCache = { key, items };
+  return items;
+}
+
+async function checkScanPairAlert() {
+  try {
+    if (!currentUser || !currentUser.empId) return;
+    // คนที่ยังไม่เปิดใช้สแกน (นอกกลุ่มนำร่อง) — ไม่ต้องเตือน (เงื่อนไขเดียวกับปุ่มสแกน)
+    try { if (CHECKIN_HR_ONLY && !isHROnly() && !isPTTPilot()) return; } catch (_) {}
+    const empId = currentUser.empId;
+    const now = new Date();
+    const alerts = [];
+
+    const today = _pairStatus_(todayLogsForUser(empId).map(l => {
+      const ms = new Date(l.ts).getTime() || 0;
+      return _normScan_(l.type, ms, l.timeStr ? String(l.timeStr).substring(0, 5) : _hhmmFromSheetTime_('', ms));
+    }));
+    const yItems = await _logsForYesterday_(empId);
+    const y = _pairStatus_(yItems);
+    const yd = new Date(); yd.setDate(yd.getDate() - 1);
+
+    // กะข้ามคืน: เมื่อวานจบด้วย "เข้า" ช่วงค่ำ และวันนี้เริ่มด้วย "ออก" ช่วงเช้า = คู่ข้ามวัน — ไม่เตือน
+    const crossMidnight =
+      !!(y.last && y.last.type === 'in' && y.last.ms && new Date(y.last.ms).getHours() >= 18 &&
+         today.first && today.first.type === 'out' && today.first.ms && new Date(today.first.ms).getHours() <= 12);
+
+    // ── เมื่อวาน ──
+    if (y.count > 0 && !crossMidnight) {
+      if (y.hasIn && !y.hasOut) alerts.push({
+        key: 'y-noout-' + _scanAlertDateKey_(yd), sev: 'danger', icon: '⏰', cta: 'adjust',
+        title: `เมื่อวาน (${_thaiShortDate_(yd)}) ไม่มีสแกนออก`,
+        desc: `สแกนเข้า ${y.firstIn.hhmm} น. แต่ไม่มีสแกนออก — ระบบจับคู่เวลาไม่ได้ จะคิดเงินเดือนไม่ได้ กรุณายื่นแก้เวลา`,
+      });
+      else if (!y.hasIn && y.hasOut) alerts.push({
+        key: 'y-noin-' + _scanAlertDateKey_(yd), sev: 'danger', icon: '⏰', cta: 'adjust',
+        title: `เมื่อวาน (${_thaiShortDate_(yd)}) ไม่มีสแกนเข้า`,
+        desc: `มีสแกนออก ${y.lastOut.hhmm} น. แต่ไม่มีสแกนเข้า — กรุณายื่นแก้เวลา ไม่งั้นวันนั้นถูกคิดเวลาผิด`,
+      });
+      else if (y.count % 2 !== 0) alerts.push({
+        key: 'y-odd-' + _scanAlertDateKey_(yd), sev: 'warning', icon: '⚠️', cta: 'adjust',
+        title: `เมื่อวาน (${_thaiShortDate_(yd)}) สแกน ${y.count} ครั้ง — ไม่ครบคู่`,
+        desc: 'จำนวนสแกนเป็นเลขคี่ จับคู่ เข้า-ออก ไม่ได้ — ตรวจสอบและยื่นแก้เวลาให้ครบ',
+      });
+    }
+    // ── วันนี้ ──
+    if (today.count > 0 && !crossMidnight) {
+      // เข้าแล้วยังไม่ออก: เตือนตั้งแต่ MISS_OUT_ALERT_HOUR และผ่านมาแล้ว ≥9 ชม.จากสแกนเข้า (กะบ่ายจะไม่โดนเตือนตอน 19:00)
+      const spanOk = !today.firstIn || !today.firstIn.ms || (Date.now() - today.firstIn.ms) >= 9 * 3600000;
+      if (today.hasIn && !today.hasOut && now.getHours() >= MISS_OUT_ALERT_HOUR && spanOk) alerts.push({
+        key: 't-noout-' + todayKey(), sev: 'warning', icon: '🌙', cta: 'scan+adjust',
+        title: 'วันนี้ยังไม่ได้สแกนออก',
+        desc: `สแกนเข้า ${today.firstIn.hhmm} น. — ถ้ายังอยู่ที่ทำงาน สแกนออกก่อนกลับ · ถ้ากลับมาแล้ว ให้ยื่นแก้เวลา`,
+      });
+      else if (!today.hasIn && today.hasOut) alerts.push({
+        key: 't-noin-' + todayKey(), sev: 'danger', icon: '☀️', cta: 'adjust',
+        title: 'วันนี้มีสแกนออก แต่ไม่มีสแกนเข้า',
+        desc: `มีสแกนออก ${today.lastOut.hhmm} น. — ถ้าลืมสแกนเข้าเมื่อเช้า ให้ยื่นแก้เวลา ไม่งั้นระบบคิดเงินเดือนไม่ได้`,
+      });
+    }
+
+    _scanAlerts = alerts;
+    renderScanAlertBox_();
+    maybePopupScanAlert_();
+  } catch (e) { console.warn('[scanAlert]', e); }
+}
+
+function renderScanAlertBox_() {
+  const box = document.getElementById('scanAlertBox');
+  if (!box) return;
+  if (!_scanAlerts.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const btnBase = 'border:none;border-radius:8px;padding:9px 13px;font-weight:700;font-size:12px;cursor:pointer';
+  box.style.display = 'block';
+  box.innerHTML = _scanAlerts.map(a => {
+    const danger = a.sev === 'danger';
+    const bg = danger ? 'linear-gradient(135deg,#8E2323,#A93434)' : 'linear-gradient(135deg,#8A5A00,#B47B10)';
+    const btns = [];
+    if (a.cta === 'scan+adjust') btns.push(`<button onclick="event.stopPropagation();startCheckinFlow()" style="${btnBase};background:#fff;color:#6B4A00">📷 สแกนออกตอนนี้</button>`);
+    btns.push(`<button onclick="event.stopPropagation();showPage('timeadjust')" style="${btnBase};${a.cta === 'scan+adjust'
+      ? 'background:rgba(255,255,255,.18);color:#fff;border:1px solid rgba(255,255,255,.55)'
+      : 'background:#fff;color:' + (danger ? '#8E2323' : '#6B4A00')}">🕐 ยื่นแก้เวลา</button>`);
+    return `<div style="background:${bg};color:#fff;border-radius:14px;padding:14px 16px;margin-bottom:10px;box-shadow:0 4px 14px rgba(0,0,0,.18)">
+      <div style="display:flex;gap:10px;align-items:flex-start">
+        <div style="font-size:22px;line-height:1.2">${a.icon}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:800;font-size:14px;line-height:1.4">${a.title}</div>
+          <div style="font-size:12px;opacity:.94;margin-top:3px;line-height:1.55">${a.desc}</div>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">${btns.join('')}</div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+/* popup เด้งครั้งเดียวต่อเรื่องต่อวัน — แบนเนอร์หน้าแรกค้างไว้จนกว่าข้อมูลจะครบ */
+function maybePopupScanAlert_() {
+  if (!_scanAlerts.length) return;
+  let seen = {};
+  try { seen = LS.get('scanAlertSeen', {}) || {}; } catch (_) {}
+  const a = _scanAlerts.find(x => !seen[x.key]);
+  if (!a) return;
+  seen[a.key] = Date.now();
+  Object.keys(seen).forEach(k => { if (Date.now() - seen[k] > 3 * 86400000) delete seen[k]; });   // เก็บแค่ ~3 วัน กัน LS บวม
+  try { LS.set('scanAlertSeen', seen); } catch (_) {}
+  showScanAlertPopup_(a);
+}
+function showScanAlertPopup_(a) {
+  const old = document.getElementById('scanAlertModal'); if (old) old.remove();
+  const danger = a.sev === 'danger';
+  const modal = document.createElement('div'); modal.id = 'scanAlertModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:600;display:flex;align-items:flex-end';
+  const btnScan = a.cta === 'scan+adjust'
+    ? `<button onclick="document.getElementById('scanAlertModal').remove();startCheckinFlow()"
+         style="width:100%;padding:14px;border:none;border-radius:10px;background:var(--navy);color:#fff;font-weight:700;font-size:15px;margin-bottom:8px;cursor:pointer">📷 สแกนออกตอนนี้ (ยังอยู่ที่ทำงาน)</button>` : '';
+  modal.innerHTML = `
+    <div style="background:var(--card-bg);border-radius:18px 18px 0 0;padding:24px;width:100%">
+      <div style="display:flex;gap:12px;align-items:center;margin-bottom:10px">
+        <div style="width:46px;height:46px;border-radius:50%;background:${danger ? '#FDECEC' : '#FFF4E0'};display:flex;align-items:center;justify-content:center;font-size:24px;flex:none">${a.icon}</div>
+        <div style="font-size:16px;font-weight:800;color:${danger ? '#A32D2D' : '#8A5A00'};line-height:1.35">${a.title}</div>
+      </div>
+      <div style="font-size:13px;color:var(--text);line-height:1.7;margin-bottom:18px">${a.desc}</div>
+      ${btnScan}
+      <button onclick="document.getElementById('scanAlertModal').remove();showPage('timeadjust')"
+        style="width:100%;padding:14px;border:none;border-radius:10px;background:${danger ? '#A32D2D' : 'var(--navy)'};color:#fff;font-weight:700;font-size:15px;cursor:pointer">🕐 ไปยื่นแก้เวลา</button>
+      <button onclick="document.getElementById('scanAlertModal').remove()"
+        style="width:100%;padding:12px;border:none;background:none;color:var(--muted);font-size:13px;margin-top:6px;cursor:pointer">รับทราบ — ดูจากแบนเนอร์หน้าแรกภายหลังได้</button>
+    </div>`;
+  document.body.appendChild(modal);
 }
 
 /* ============================================================
@@ -6056,15 +6352,13 @@ function onLivenessFail() {
 function kioskCommit() {
   const c = kioskState.candidate;
   const branch = kioskState.branch;
-  // duplicate guard: same person same mode within last 1 hour → block
-  const recent = logs.find(l =>
-    l.empId === c.member.empId &&
-    l.type === kioskState.mode &&
-    (Date.now() - new Date(l.ts).getTime()) < 3_600_000
-  );
+  // v12.0 ด่านเว้นช่วง: คนเดิมสแกน "ทุกชนิด" ภายใน SCAN_GAP_MIN นาที → ไม่บันทึกซ้ำ
+  // (เดิมกันเฉพาะโหมดเดียวกัน — เข้า 07:40 แล้วสแกนซ้ำโหมดออก 07:50 ยังหลุดได้)
+  const recent = lastScanWithin_(c.member.empId, SCAN_GAP_MIN);
   if (recent) {
     const mins = Math.round((Date.now() - new Date(recent.ts).getTime()) / 60000);
-    setKioskHeadline('⚠ บันทึกซ้ำ', `สแกนไปแล้ว ${mins} นาทีก่อน`, 'warn');
+    const rLabel = recent.type === 'out' ? 'ออก' : 'เข้า';
+    setKioskHeadline('✅ สแกนแล้ว — ไม่บันทึกซ้ำ', `${c.member.name} สแกน${rLabel}ไปแล้ว ${mins} นาทีก่อน`, 'warn');
     kioskState.phase = 'cooldown';
     setTimeout(resetKioskPhase, 2500);
     return;
@@ -8016,12 +8310,17 @@ function initApp() {
     evaluateAction();   // refresh ปุ่ม "เข้างาน/ออกงาน" ตาม logs ใหม่
     renderHomeTodayCard();  // v2.0: อัพเดท today card ด้วย
     renderHomeFeed();       // v2.0: โหลด news feed
+    checkScanPairAlert();   // v12.0: เตือนลืมสแกนเข้า/ออก (เมื่อวาน+วันนี้) หลัง logs ตรงกับชีทแล้ว
   }, 200);
 
   // Update time + button state every second (only when home tab active)
   setInterval(() => {
     if (document.getElementById('page-home').classList.contains('active')) evaluateAction();
   }, 1000);
+
+  // v12.0: เช็คเตือนลืมสแกน — ตอนกลับมาที่แอป + ทุก 10 นาที (เผื่อเปิดค้างจนเลยเวลาเตือน 19:00)
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkScanPairAlert(); });
+  setInterval(checkScanPairAlert, 10 * 60 * 1000);
 
   // Preload face models in background (so first scan ไวกว่า) — แต่ไม่เปิดกล้อง
   setTimeout(async () => {
@@ -8115,6 +8414,9 @@ function dismissQuickStart() {
    ============================================================ */
 async function startCheckinFlow() {
   if (CHECKIN_HR_ONLY && !isHROnly() && !isPTTPilot()) { toast('ยังไม่พร้อมใช้งานขณะนี้ค่ะ', 'info'); return; }
+  // v12.0: เพิ่งสแกนไปไม่ถึง SCAN_GAP_MIN นาที — ไม่ต้องเปิดกล้องเลย แจ้งทันทีว่าสแกนแล้ว
+  const gapStart = (currentUser && currentUser.empId) ? scanGapInfo_(currentUser.empId) : null;
+  if (gapStart) { showScanGapModal_(gapStart); return; }
   // v2.2: ไม่มี homeStartScreen แล้ว — เปิด overlay homeActiveScreen ตรงๆ
   const overlay = document.getElementById('homeActiveScreen');
   if (!overlay) return;
