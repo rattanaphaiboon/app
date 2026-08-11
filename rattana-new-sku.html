@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana New SKU v1.0 — ฟอร์มขอนำสินค้าเข้ามาขาย</title>
+<title>Rattana New SKU v1.1 — ฟอร์มขอนำสินค้าเข้ามาขาย</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -161,6 +161,13 @@ textarea.input{resize:vertical}
 .toast-error{background:var(--danger)} .toast-success{background:var(--success)}
 @keyframes tin{from{opacity:0;transform:translate(-50%,8px)}to{opacity:1;transform:translate(-50%,0)}}
 
+/* ── แถบร่างอัตโนมัติ ── */
+.draft-bar{display:none;align-items:center;gap:8px;border:1.5px solid rgba(201,168,76,.5);background:var(--tint-gold);border-radius:var(--radius-sm);padding:8px 10px;margin-top:8px;min-width:0}
+.draft-bar.show{display:flex}
+.draft-bar .db-txt{flex:1;min-width:0;font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.draft-bar .db-clear{flex-shrink:0;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:var(--radius-sm);min-height:30px;padding:2px 10px;font-size:12px;font-weight:600}
+.draft-bar .db-clear:hover{color:var(--danger);border-color:var(--danger)}
+
 /* ── Spinner ── */
 .spinner-overlay{display:none;position:fixed;inset:0;background:rgba(13,27,62,.55);align-items:center;justify-content:center;z-index:99999;backdrop-filter:blur(3px);padding:16px}
 .spinner-overlay.show{display:flex}
@@ -177,7 +184,7 @@ textarea.input{resize:vertical}
 
 <header>
   <span class="logo-text">RATTANA <span>NEW SKU</span></span>
-  <span class="ver-chip">v1.0</span>
+  <span class="ver-chip">v1.1</span>
   <span class="head-spacer"></span>
   <button type="button" class="theme-btn" id="themeBtn" onclick="toggleTheme()">โหมดมืด</button>
 </header>
@@ -234,6 +241,11 @@ textarea.input{resize:vertical}
         <div class="vb-sub" id="vbPhone"></div>
       </div>
       <button type="button" class="vb-change" onclick="changeVendor()">เปลี่ยนเบอร์</button>
+    </div>
+
+    <div class="draft-bar" id="draftBar">
+      <span class="db-txt" id="draftTxt">บันทึกร่างอัตโนมัติแล้ว</span>
+      <button type="button" class="db-clear" onclick="discardDraft()">เริ่มใหม่</button>
     </div>
 
     <!-- 1. ผู้ติดต่อ -->
@@ -304,7 +316,7 @@ textarea.input{resize:vertical}
     </div>
 
     <button type="button" class="btn btn-gold btn-block btn-lg" style="margin-top:6px" onclick="submitForm()">ส่งคำขอให้ฝ่ายจัดซื้อ</button>
-    <div class="foot-note">ฝ่ายจัดซื้อจะพิจารณาและติดต่อกลับภายใน 5 วันทำการ<br>Rattana New SKU v0.4</div>
+    <div class="foot-note">ฝ่ายจัดซื้อจะพิจารณาและติดต่อกลับภายใน 5 วันทำการ<br>Rattana New SKU v1.1</div>
   </div>
 </div>
 
@@ -513,12 +525,144 @@ function enterForm(){
   $('vbPhone').textContent = 'เบอร์ที่ลงทะเบียน: ' + VENDOR.phone;
   $('scrLogin').classList.add('hidden');
   $('scrForm').classList.remove('hidden');
-  if (!document.querySelector('.prod-card')) addProduct();
+
+  const d = loadDraft();
+  if (d && restoreDraft(d)){
+    showToast('กู้ข้อมูลที่กรอกค้างไว้แล้ว — ต้องแนบรูปและไฟล์ใหม่', 'success');
+  } else if (!document.querySelector('.prod-card')) {
+    addProduct();
+  }
   window.scrollTo(0, 0);
 }
-function changeVendor(){
-  if (!confirm('เปลี่ยนเบอร์จะล้างข้อมูลที่กรอกไว้ทั้งหมด ยืนยันหรือไม่')) return;
+/* ═══════════ ร่างอัตโนมัติ (localStorage · แยกตามเบอร์ · เก็บ 7 วัน) ═══════════ */
+/* ⚠️ เก็บเฉพาะข้อความ — รูป/ไฟล์แนบเก็บไม่ได้ (localStorage ~5MB) ต้องแนบใหม่ตอนกลับมา */
+const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const draftKey = () => 'newsku_draft_' + (VENDOR ? VENDOR.phone : '');
+let RESTORING = false, draftTimer = null;
+
+const ddValue = (scope, cfg) => {
+  const t = scope.querySelector('.dd-trigger[data-cfg="' + cfg + '"]');
+  return t ? (t.dataset.value || '') : '';
+};
+function setDD(scope, cfg, val){
+  const t = scope.querySelector('.dd-trigger[data-cfg="' + cfg + '"]');
+  if (!t || !val) return;
+  t.dataset.value = val;
+  const v = t.querySelector('.dd-val');
+  v.textContent = val; v.title = val; v.classList.remove('ph');
+}
+
+function collectDraft(){
+  return {
+    ts: Date.now(),
+    contact: { name: $('ctName').value, pos: $('ctPos').value },
+    trade: {
+      credit: document.querySelector('.dd-trigger[data-key=credit]').dataset.value || '',
+      moq: $('tMoq').value, lead: $('tLead').value, promo: $('tPromo').value, note: $('tNote').value,
+    },
+    conds: [...document.querySelectorAll('#condList input[type=checkbox]')].map(cb => cb.checked),
+    items: [...document.querySelectorAll('.prod-card')].map(c => {
+      const f = {};
+      c.querySelectorAll('[data-f]').forEach(el => { f[el.dataset.f] = el.value; });
+      return { f: f, cat: ddValue(c, 'หมวดสินค้า'), storage: ddValue(c, 'สภาพจัดเก็บ') };
+    }),
+  };
+}
+function saveDraft(){
+  if (!VENDOR || RESTORING) return;
+  try {
+    localStorage.setItem(draftKey(), JSON.stringify(collectDraft()));
+    showDraftBar('บันทึกร่างอัตโนมัติแล้ว · ปิดแอปได้ กลับมากรอกต่อได้');
+  } catch (e) { /* โควต้าเต็ม/โหมดส่วนตัว — ปล่อยผ่าน ไม่ขัดจังหวะการกรอก */ }
+}
+function scheduleSaveDraft(){
+  if (!VENDOR || RESTORING) return;
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(saveDraft, 600);
+}
+function loadDraft(){
+  try {
+    const raw = localStorage.getItem(draftKey());
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    if (!d || !d.ts || (Date.now() - d.ts) > DRAFT_TTL_MS){ clearDraft(); return null; }
+    return d;
+  } catch (e) { return null; }
+}
+function clearDraft(){
+  try { localStorage.removeItem(draftKey()); } catch (e) {}
+  $('draftBar').classList.remove('show');
+}
+function showDraftBar(txt){
+  $('draftTxt').textContent = txt;
+  $('draftTxt').title = txt;
+  $('draftBar').classList.add('show');
+}
+function restoreDraft(d){
+  if (!d || !d.items || !d.items.length) return false;
+  RESTORING = true;
+  try {
+    $('ctName').value = d.contact.name || '';
+    $('ctPos').value  = d.contact.pos  || '';
+    $('tMoq').value   = d.trade.moq   || '';
+    $('tLead').value  = d.trade.lead  || '';
+    $('tPromo').value = d.trade.promo || '';
+    $('tNote').value  = d.trade.note  || '';
+    if (d.trade.credit){
+      const t = document.querySelector('.dd-trigger[data-key=credit]');
+      t.dataset.value = d.trade.credit;
+      const v = t.querySelector('.dd-val');
+      v.textContent = d.trade.credit; v.title = d.trade.credit; v.classList.remove('ph');
+    }
+    (d.conds || []).forEach((on, i) => {
+      const row = document.querySelectorAll('#condList .cond-row')[i];
+      if (!row) return;
+      const cb = row.querySelector('input');
+      cb.checked = !!on;
+      row.classList.toggle('ok', !!on);
+    });
+
+    $('prodList').innerHTML = '';
+    d.items.forEach(it => {
+      addProduct();
+      const c = document.querySelector('.prod-card:last-child');
+      Object.keys(it.f || {}).forEach(k => {
+        const el = c.querySelector('[data-f=' + k + ']');
+        if (el) el.value = it.f[k];
+      });
+      // ติ๊ก chip อายุสินค้าให้ตรงกับค่าที่กู้มา
+      const life = (it.f || {}).life;
+      if (life){
+        c.querySelectorAll('[data-chips=life] .chip').forEach(b => {
+          b.classList.toggle('active', b.textContent.trim() === life + ' วัน');
+        });
+      }
+      setDD(c, 'หมวดสินค้า', it.cat);
+      setDD(c, 'สภาพจัดเก็บ', it.storage);
+      syncPackState(c);
+    });
+    const when = new Date(d.ts);
+    showDraftBar('กู้ร่างเมื่อ ' + formatThaiDate(when) + ' ' + String(when.getHours()).padStart(2,'0') + '.' + String(when.getMinutes()).padStart(2,'0') + ' — แนบรูปใหม่ด้วย');
+    return true;
+  } catch (e) {
+    return false;
+  } finally {
+    RESTORING = false;
+  }
+}
+function discardDraft(){
+  if (!confirm('ล้างข้อมูลที่กรอกไว้ทั้งหมดแล้วเริ่มใหม่ ยืนยันหรือไม่')) return;
+  clearDraft();
+  resetFormFields();
   $('prodList').innerHTML = '';
+  addProduct();
+  showToast('เริ่มกรอกใหม่แล้ว', 'success');
+}
+
+// เก็บร่างทุกครั้งที่มีการพิมพ์/เลือก — debounce กันเขียนถี่
+['input','change'].forEach(ev => $('scrForm').addEventListener(ev, scheduleSaveDraft, true));
+
+function resetFormFields(){
   document.querySelectorAll('#scrForm input, #scrForm textarea').forEach(el => {
     if (el.type === 'checkbox') el.checked = false; else el.value = '';
   });
@@ -526,6 +670,8 @@ function changeVendor(){
   document.querySelectorAll('#scrForm .up-box').forEach(b => {
     b.classList.remove('has-file');
     b.querySelector('.up-mark').textContent = '+';
+    const n = b.querySelector('.up-name');
+    n.textContent = 'แตะเพื่อถ่ายรูป / เลือกรูป'; n.title = '';
   });
   document.querySelectorAll('#scrForm .dd-trigger').forEach(t => {
     delete t.dataset.value;
@@ -533,6 +679,13 @@ function changeVendor(){
     v.textContent = v.dataset.ph || 'เลือก';
     v.classList.add('ph');
   });
+}
+
+function changeVendor(){
+  if (!confirm('เปลี่ยนเบอร์จะล้างข้อมูลที่กรอกไว้ทั้งหมด ยืนยันหรือไม่')) return;
+  clearDraft();
+  $('prodList').innerHTML = '';
+  resetFormFields();
   $('scrForm').classList.add('hidden');
   $('scrLogin').classList.remove('hidden');
   resetLookup();
@@ -646,12 +799,14 @@ function addProduct(){
   wireBarcodes(card);
   wirePackToggle(card);
   renumberProducts();
+  scheduleSaveDraft();
 }
 function removeProduct(pid){
   const cards = document.querySelectorAll('.prod-card');
   if (cards.length <= 1){ showToast('ต้องมีสินค้าอย่างน้อย 1 รายการ'); return; }
   document.querySelector('.prod-card[data-pid="' + pid + '"]').remove();
   renumberProducts();
+  scheduleSaveDraft();
 }
 function renumberProducts(){
   const cards = document.querySelectorAll('.prod-card');
@@ -671,6 +826,7 @@ function buildLifeChips(card){
       row.querySelectorAll('.chip').forEach(x => x.classList.remove('active'));
       b.classList.add('active');
       hidden.value = d;
+      scheduleSaveDraft();
     };
     row.appendChild(b);
   });
@@ -833,6 +989,7 @@ function ddSelect(val){
   v.textContent = val; v.title = val;
   v.classList.remove('ph');
   ddClose();
+  scheduleSaveDraft();
 }
 function ddClose(){
   if (!ddState) return;
@@ -883,6 +1040,7 @@ async function attachFiles(payload, cards){
 }
 
 function showDone(res, count){
+  clearDraft();   // ส่งสำเร็จแล้ว ร่างไม่ต้องเก็บต่อ
   $('doneNo').textContent = res.requestNo;
   $('doneVendor').textContent = VENDOR.company;
   $('doneVendor').title = VENDOR.company;
@@ -947,7 +1105,9 @@ async function submitForm(){
   }
 }
 function submitMore(){
+  clearDraft();
   $('prodList').innerHTML = '';
+  resetFormFields();
   addProduct();
   $('scrDone').classList.add('hidden');
   $('scrForm').classList.remove('hidden');
