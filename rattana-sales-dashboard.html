@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v19.06</title>
+<title>Rattana Sales Dashboard v19.07</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -407,7 +407,7 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.06</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.07</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -808,7 +808,7 @@ const USERS_SHEET_ID  = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';
 const USERS_SHEET     = 'Rattana Users for apps';
 const BUDGET_SHEET_ID = '1ww64IJdFJk8z8CDCCoFYZyE8FNzuH9W6sFDO6K44gWw';
 const BUDGET_SHEET    = 'Budget';
-const TTL = 5 * 60 * 1000;
+const TTL = 30 * 60 * 1000;
 
 // ── STATE ────────────────────────────────────────────────────────────────
 let currentUser = null;
@@ -1180,7 +1180,7 @@ function _clearAllCaches() {
   const toRemove = [];
   for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && !keep.has(k)) toRemove.push(k); }
   toRemove.forEach(k => localStorage.removeItem(k));
-  _rsSlmnIdx = null; _rsAvgIdx = null; _rsBpRaw = null;
+  _rsSlmnIdx = null; _rsAvgIdx = null; _rsBpRaw = null; localStorage.removeItem('allSalesData');
   skuImageMap = {}; productImageMap = {};
   lowStoreLoaded = false; Object.keys(lowHistByCode).forEach(k => delete lowHistByCode[k]);
   tgtState.allSalesRaw = []; tgtState.bpRaw = []; tgtState.customerRaw = [];
@@ -2377,74 +2377,47 @@ async function renderRouteStore() {
   if (_rsLoading) return;
   const tbody = document.getElementById('rsTbody');
 
-  // ── 1. โหลด Customer sheet ถ้ายังไม่มี ──
-  if (!tgtState.customerRaw || !tgtState.customerRaw.length) {
+  // ── โหลดข้อมูลที่จำเป็นพร้อมกันทั้งหมด (parallel) ──
+  const _rsNeedCust  = !tgtState.customerRaw?.length;
+  const _rsNeedBp    = !_rsBpRaw && !(allRawRows?.length) && !(tgtState.bpRaw?.length);
+  const _rsNeedSlmn  = !_rsSlmnIdx;
+  const _rsNeedAvg   = !_rsAvgIdx;
+  if (_rsNeedCust || _rsNeedBp || _rsNeedSlmn || _rsNeedAvg) {
     _rsLoading = true;
-    tbody.innerHTML = '<tr class="empty-row"><td colspan="8">⏳ กำลังโหลดข้อมูลร้านค้า…</td></tr>';
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="8">⏳ กำลังโหลดข้อมูล…</td></tr>';
     try {
-      tgtState.customerRaw = await fetchSheet(CUSTOMER_SHEET_ID, CUSTOMER_SHEET_NAME);
+      const [_custR, _bpR, _slmnR, _avgR] = await Promise.all([
+        _rsNeedCust ? fetchSheet(CUSTOMER_SHEET_ID, CUSTOMER_SHEET_NAME).catch(()=>null) : Promise.resolve(null),
+        _rsNeedBp   ? fetchSheet(SALES_SHEET_ID, SALES_SHEET).catch(()=>null) : Promise.resolve(null),
+        _rsNeedSlmn ? (getCached('slmnData') || fetchSheet(SLMN_SHEET_ID, SLMN_SHEET_NAME).then(r=>{setCache('slmnData',r);return r;}).catch(()=>[])) : Promise.resolve(null),
+        _rsNeedAvg  ? (getCached('allSalesData') || fetchSheet(ALL_SALES_SHEET_ID, ALL_SALES_SHEET_NAME).then(r=>{setCache('allSalesData',r);return r;}).catch(()=>[])) : Promise.resolve(null),
+      ]);
+      if (_custR) tgtState.customerRaw = _custR;
+      if (_bpR)  _rsBpRaw = _bpR;
+      else if (!_rsBpRaw) _rsBpRaw = allRawRows?.length ? allRawRows : tgtState.bpRaw || [];
+      if (_slmnR && !_rsSlmnIdx) {
+        _rsSlmnIdx = new Map();
+        _slmnR.forEach(r => { const nm=String(r['SLMN_NAME']||'').trim(),cd=String(r['SLMN_CODE']||'').trim(); if(nm) _rsSlmnIdx.set(nm,cd); });
+      }
+      if (_avgR && !_rsAvgIdx) {
+        const allMonths=[...new Set(_avgR.map(r=>String(r['Month_Year']||'').trim()).filter(Boolean))].sort((a,b)=>b.localeCompare(a));
+        const last3Months=new Set(allMonths.slice(0,3));
+        const sumIdx=new Map();
+        _avgR.forEach(r=>{
+          if(!last3Months.has(String(r['Month_Year']||'').trim())) return;
+          const seller=_rsStripKhun(String(r['Sale_No_ROO']||r['Sale NO ROO']||'').trim());
+          const cust=_rsNormCust(r['Customer_Name']||'');
+          if(!seller||!cust) return;
+          const key=seller+'§'+cust;
+          sumIdx.set(key,(sumIdx.get(key)||0)+(parseFloat(String(r['Exvat']||r['EXVat']||'0').replace(/,/g,''))||0));
+        });
+        _rsAvgIdx=new Map(); sumIdx.forEach((sum,key)=>_rsAvgIdx.set(key,sum/3));
+      }
     } catch(e) {
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="8">โหลดข้อมูล Customer ไม่สำเร็จ</td></tr>';
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="8">โหลดข้อมูลไม่สำเร็จ</td></tr>';
       _rsLoading = false; return;
     }
     _rsLoading = false;
-  }
-
-  // ── 2. โหลด BP sheet ถ้ายังไม่มี ──
-  if (!_rsBpRaw) {
-    const src = (allRawRows && allRawRows.length) ? allRawRows
-              : (tgtState.bpRaw && tgtState.bpRaw.length) ? tgtState.bpRaw
-              : null;
-    if (src) {
-      _rsBpRaw = src;
-    } else {
-      _rsLoading = true;
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="7">⏳ กำลังโหลดข้อมูลยอดขาย…</td></tr>';
-      try {
-        _rsBpRaw = await fetchSheet(SALES_SHEET_ID, SALES_SHEET);
-      } catch(e) {
-        tbody.innerHTML = '<tr class="empty-row"><td colspan="8">โหลดข้อมูล BP ไม่สำเร็จ</td></tr>';
-        _rsLoading = false; return;
-      }
-      _rsLoading = false;
-    }
-  }
-
-  // ── 2b. โหลด SLMN sheet ถ้ายังไม่มี ──
-  if (!_rsSlmnIdx) {
-    try {
-      const slmnRows = await fetchSheet(SLMN_SHEET_ID, SLMN_SHEET_NAME);
-      _rsSlmnIdx = new Map();
-      slmnRows.forEach(r => {
-        const name = String(r['SLMN_NAME']||'').trim();
-        const code = String(r['SLMN_CODE']||'').trim();
-        if (name) _rsSlmnIdx.set(name, code);
-      });
-    } catch(e) { _rsSlmnIdx = new Map(); }
-  }
-
-  // ── 2c. โหลด All Sales → AVG index ──
-  if (!_rsAvgIdx) {
-    try {
-      const allSalesRows = await fetchSheet(ALL_SALES_SHEET_ID, ALL_SALES_SHEET_NAME);
-      // หา 3 เดือนล่าสุดจาก Month_Year
-      const allMonths = [...new Set(allSalesRows.map(r => String(r['Month_Year']||'').trim()).filter(Boolean))];
-      allMonths.sort((a,b) => b.localeCompare(a));
-      const last3Months = new Set(allMonths.slice(0,3));
-      const sumIdx = new Map(); // key → sum Exvat
-      allSalesRows.forEach(r => {
-        const month  = String(r['Month_Year']||'').trim();
-        if (!last3Months.has(month)) return;
-        const seller = _rsStripKhun(String(r['Sale_No_ROO'] || r['Sale NO ROO'] || '').trim());
-        const cust   = _rsNormCust(r['Customer_Name'] || '');
-        if (!seller || !cust) return;
-        const key = seller + '§' + cust;
-        const v = parseFloat(String(r['Exvat'] || r['EXVat'] || '0').replace(/,/g,'')) || 0;
-        sumIdx.set(key, (sumIdx.get(key) || 0) + v);
-      });
-      _rsAvgIdx = new Map();
-      sumIdx.forEach((sum, key) => _rsAvgIdx.set(key, sum / 3));
-    } catch(e) { _rsAvgIdx = new Map(); }
   }
 
   const _rsIsAdmin = (currentUser?.role || 0) >= 5;
