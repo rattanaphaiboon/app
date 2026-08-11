@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v3.83</title>
+<title>Rattana Online Order v3.84</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -549,7 +549,7 @@ body.dark .seg-tab.on{background:var(--gold);color:var(--navy);border-color:var(
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.83</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.84</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -1432,6 +1432,7 @@ function computeGifts(srcItems){
     reached.filter(t=>t.threshold===maxTh).forEach(t=>{
       const mult=Math.floor(g.qty/t.threshold);
       const ent=barcodeEntry(t.barcode); const gp=ent?ent.p:null;
+      if(gp && blockedProduct(gp, displayWarehouse(currentCustomer), currentCustomer)) return;   // ⭐ v3.84: ของแถมเป็นเหล้า + ร้านอยู่ข้ามเขต → ไม่แถม
       const giftName=t.giftName||(gp?clean(gp['PRODUCT NAME']):'')||('บาร์โค้ด '+t.barcode);
       const giftUnit=ent?clean(ent.p['UNIT '+ent.type]):'';
       const k=rep.key+'|'+t.barcode;
@@ -1499,6 +1500,28 @@ function isSellable(p,wh){
   if(['W1','W2','W3'].includes(wh)) return !!clean(p['IB '+wh]);
   return true; // HQ/อื่นๆ เห็นทั้งหมด
 }
+/* ⭐ v3.84 — 🚫 ห้ามขายสุรา/เบียร์ "ข้ามเขต" (ใบอนุญาตผูกกับจังหวัดของคลัง)
+   สินค้า CAT BU = "Bplus Thaibev Al" ขายได้เฉพาะร้านที่อยู่ "จังหวัดเดียวกับคลังส่ง"
+     คลังส่ง W1 → สมุทรสงคราม · คลังส่ง W4 → นครปฐม · คลังอื่น (W2/W3) ยังไม่มีกฎ
+   ⚠️ ร้านที่ยังไม่รู้จังหวัด (ที่อยู่ว่าง) = ซ่อนไว้ก่อน — ปลอดภัยกว่าปล่อยให้สั่งผิดเขต
+   จังหวัดหาได้ 2 ทาง: ชีทลงทะเบียน (c.province) → ไม่มีก็ดูชีท Customer ด้วยรหัสร้าน (ครอบคลุมร้านส่ง) */
+const AL_BU='bplus thaibev al';
+const AL_PROV={ W1:'สมุทรสงคราม', W4:'นครปฐม' };
+function isAlcohol(p){ return clean(p&&p['CAT BU']).toLowerCase()===AL_BU; }
+function custProvince(c){
+  if(!c) return '';
+  const j=clean(c.province); if(j) return j;
+  const code=clean(c.shopCode);
+  return (code && WH_BY_AREA && WH_BY_AREA.provByCode && WH_BY_AREA.provByCode[code]) || '';
+}
+function alcoholOK(wh,c){
+  const need=AL_PROV[String(wh||'').toUpperCase()];
+  if(!need) return true;                       // คลังที่ไม่มีกฎ (W2/W3) หรือ guest ที่ยังไม่มีคลัง
+  const j=normArea(custProvince(c));
+  if(!j) return false;                         // ไม่รู้จังหวัด → ห้ามไว้ก่อน
+  return j===normArea(need);
+}
+function blockedProduct(p,wh,c){ return isAlcohol(p) && !alcoholOK(wh,c); }
 /* สต๊อกคงเหลือจริงอยู่ในคอลัมน์ STOCK Wn (เลขล้วน) — ไม่ใช่ IB Wn (= ข้อมูลรับเข้าล่าสุด, ไม่ใช่ยอดคงเหลือ)
    W4 = STOCK W4 + STOCK C4 (รวมกัน), guest/HQ = รวมทุกคลัง */
 function stockForWh(p,wh){
@@ -1570,8 +1593,10 @@ let _visCache=null, _visKey='', _outSet=null;   // memo visibleProducts (เร�
                                                 // _outSet = ชุดสินค้า "หมดชั่วคราว" ของคลังนั้น (คำนวณรอบเดียวพร้อมกัน ไม่ต้องเรียก stockBadge ซ้ำ 12k ตัวทุกครั้งที่วาด)
 function visibleProducts(){
   const wh=displayWarehouse(currentCustomer);
-  if(_visCache && _visKey===wh) return _visCache;   // ⚡ cache: กันเรียงสินค้าซ้ำทุกครั้งที่กด (renderCart/reco/grid เรียกหลายรอบ)
-  const base=PRODUCTS.filter(p=>clean(p['PRODUCT NAME']) && hasPrice(p) && isSellable(p,wh));   // ร้านพิเศษ = กรองตามคลังจริงเหมือน ROO
+  const alOK=alcoholOK(wh,currentCustomer);          // v3.84: ร้านนี้ซื้อเหล้าจากคลังนี้ได้ไหม (ข้ามเขตไม่ได้)
+  const vkey=wh+'|'+(alOK?'1':'0');                  // ← ต้องอยู่ในคีย์แคชด้วย ไม่งั้นสลับร้านแล้วยังเห็นของร้านก่อน
+  if(_visCache && _visKey===vkey) return _visCache;   // ⚡ cache: กันเรียงสินค้าซ้ำทุกครั้งที่กด (renderCart/reco/grid เรียกหลายรอบ)
+  const base=PRODUCTS.filter(p=>clean(p['PRODUCT NAME']) && hasPrice(p) && isSellable(p,wh) && (alOK || !isAlcohol(p)));   // ร้านพิเศษ = กรองตามคลังจริงเหมือน ROO
   const keyed=base.map(p=>({p,out:stockBadge(p)==='out',s:salesForWh(p,wh)}));
   // พร้อมขาย + อาจจะหมด → เรียงยอดขายคลังลูกค้า มาก→น้อย
   const avail=keyed.filter(x=>!x.out).sort((a,b)=>b.s-a.s);
@@ -1589,7 +1614,7 @@ function visibleProducts(){
     }
   }
   _outSet=new Set(out.map(x=>x.p));   // v3.80: จำไว้ว่าตัวไหน "หมดชั่วคราว" (ใช้ซ่อนในหน้ารวม)
-  _visCache=result; _visKey=wh; return result;
+  _visCache=result; _visKey=vkey; return result;
 }
 function newestProducts(){
   const wh=displayWarehouse(currentCustomer);
@@ -1875,6 +1900,11 @@ async function closeScan(){ await stopScan(); closeModal('scanModal'); }
 function onScanHit(text){
   if(_scanBusy) return true;
   const e=findByScan(text);
+  /* ⭐ v3.84: สแกนเจอ แต่เป็นเหล้าที่ขายข้ามเขตไม่ได้ → ไม่เปิดหน้าสินค้า (กันเลี่ยงการซ่อนด้วยการสแกน) */
+  if(e && blockedProduct(e.p, displayWarehouse(currentCustomer), currentCustomer)){
+    document.getElementById('scanHint').textContent='สินค้านี้ขายเฉพาะในเขต '+(AL_PROV[String(displayWarehouse(currentCustomer)||'').toUpperCase()]||'ที่กำหนด')+' — สั่งไม่ได้';
+    return false;
+  }
   if(e){
     _scanBusy=true;
     const nm=clean(e.p['PRODUCT NAME']);
@@ -3110,7 +3140,7 @@ async function refreshData(){
   checkAppUpdate();   // กด ↻ = เช็คเวอร์ชันใหม่ด้วย
 }
 // ชีทสินค้ามี 122 คอลัมน์ (~28MB) แต่แอปใช้จริงแค่ ~35 → ตัดทิ้งก่อนแคช/ใช้งาน (เล็กลง 4-5 เท่า, แคชลง localStorage ได้, เร็วขึ้นมาก)
-const PRODUCT_COLS=['PRODUCT NAME','SHORT NAME','SKU_USAGE','DESCRIPTION','CAT GROUP','CAT BRAND','CAT SIZE','CAT TYPE','CAT VENDOR','VENDOR CODE','VAT STATUS','FIRST STOCK DATE','CS PALLET','QTY EA','QTY PA','QTY BP','QTY CS',
+const PRODUCT_COLS=['PRODUCT NAME','SHORT NAME','SKU_USAGE','DESCRIPTION','CAT GROUP','CAT BRAND','CAT SIZE','CAT TYPE','CAT VENDOR','CAT BU','VENDOR CODE','VAT STATUS','FIRST STOCK DATE','CS PALLET','QTY EA','QTY PA','QTY BP','QTY CS',
   'PRICE S00 CS','PRICE S00 PA','PRICE S00 EA','PRICE S01 CS','PRICE S01 PA','PRICE S01 EA','PRICE S02 CS','PRICE S02 PA','PRICE S02 EA','PRICE S03 CS','PRICE S03 PA','PRICE S03 EA','UNIT CS','UNIT PA','UNIT EA','CODE CS','CODE PA','CODE EA','CODE BP',
   'IB W1','IB W2','IB W3','IB W4','IB C4','STOCK W1','STOCK W2','STOCK W3','STOCK W4','STOCK C4','RANK W1','RANK W2','RANK W3','RANK W4','RANK C4',
   'OR_CS.EA W1','OR_CS.EA W2','OR_CS.EA W3','OR_CS.EA W4','OR_CS.EA C4',
