@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v6.5</title>
+<title>Rattana ยอดหนี้คงค้าง v6.6</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -797,7 +797,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v6.5</span>
+      <span class="app-ver">v6.6</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -3201,7 +3201,8 @@ const crShortTs = ts => { const m = String(ts || '').match(/^(\d{4})\/(\d{2})\/(
 
 function crSearchable(a){
   return [a.shopName, a.shopCode, a.smName, a.smCode, a.wh, a.reqId, a.apprBy, a.reason,
-          a.status, a.finDecision, a.finBy, a.billId, a.rejectReason].join(' ').toLowerCase();
+          a.status, a.finDecision, a.finBy, a.billId, a.rejectReason,
+          (a.guessBills || []).join(' ')].join(' ').toLowerCase();   // v6.6: ค้นเลขใบที่ระบบจับให้ได้ด้วย
 }
 
 async function loadCreditBills(force){
@@ -3256,7 +3257,58 @@ async function loadCreditBills(force){
   renderCreditList();
   updateCreditBadge();
   crCheckCancelled();          // เช็คเบื้องหลัง ไม่ต้องรอ จอขึ้นก่อนแล้วค่อยอัปเดต
-  crSweepExpired();            // v6.3: ปิดใบที่หมดอายุโดยไม่เคยมีบิล — เบื้องหลังเหมือนกัน
+  // v6.6: จับเลขใบที่หลุดให้ก่อน แล้วค่อยกวาดใบหมดอายุ — ไม่งั้นใบที่มีของออกจริงโดนปิดทิ้ง
+  crGuessBills().then(crSweepExpired);
+}
+
+/* ── v6.6: ใบที่ "เลขใบหลุด" — คำขอไม่มี billId แต่เซลคีย์ออเดอร์จริง ────────────
+   ต้นเหตุอยู่ที่แอปขาย: `_debtNeedsRequest` คิดเกณฑ์ใหม่ตอนกดส่งบิล ถ้าเกณฑ์หายไประหว่างวัน
+   (เช่น "ขายสด ค้างข้ามวัน" พอบิลเงินสดถูกตัดใน ERP) แอปจะไม่ยิงคำขอรอบที่พ่วงเลขใบเลย
+   → คำขอตอนเช็คอินค้างแบบไม่มีบิลตลอดไป ทั้งที่ของออกไปแล้ว
+   เคสจริง 11/8: ร้านลุงช้าง (โรงเข้) PMW104 · ร้านสมใจพานิช(บางแพ) PMW105 — หนี้เหลือ 0 ทั้งคู่
+   ตัวนี้จับให้เอง: ร้านเดียวกัน + เซลคนเดียวกัน + คีย์ในช่วง [วันที่ขอ .. วันหมดอายุ] + ไม่ถูกยกเลิก
+   ⚠️ เป็นการ "จับให้" ไม่ใช่ของที่แอปขายผูกมา → ต้องติดป้ายบอกเสมอ ห้ามทำให้ดูเหมือน billId จริง
+   ⚠️ คอลัมน์ 'วัน' ในชีท Order เป็น TEXT — ต้องเทียบ string (`A >= '2026/08/04'`)
+      ❌ ห้ามใช้ `A >= date '...'` gviz จะคืน 0 แถวเงียบๆ โดยไม่ error (พลาดมาแล้ว 10/8) */
+async function crGuessBills(){
+  const q = creditRows.filter(a => !a.billId && a.status !== CR_EXPIRED_ST && a.shopCode && a.smCode);
+  if (!q.length) return;
+  const codes = [...new Set(q.map(a => a.shopCode))];
+  const from  = q.map(a => a.apprTs.slice(0, 10)).filter(Boolean).sort()[0];
+  if (!codes.length || !from) return;
+  /* ❌ ห้ามตัดรายชื่อร้านให้พอดี query เดียว — 7 วันมีได้ 70+ ร้าน ตัดแล้วร้านท้ายๆ หายเงียบ
+     (เจอตอนทดสอบ 11/8: cap 50 ร้าน ทำให้ร้านลุงช้างซึ่งเป็นต้นเรื่องหลุดออกไปเอง)
+     → แบ่งเป็นชุดละ 40 ยิงขนานกันแล้วรวมผล ครบทุกร้านเสมอ */
+  const chunks = [];
+  for (let i = 0; i < codes.length; i += 40) chunks.push(codes.slice(i, i + 40));
+  try {
+    const sheetUrl = tq => `https://docs.google.com/spreadsheets/d/${CONFIG.backendSheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(CONFIG.orderTab)}&tq=${encodeURIComponent(tq)}`;
+    const parts = await Promise.all(chunks.map(async cs => {
+      const where = cs.map(c => `H = '${c.replace(/'/g, '')}'`).join(' or ');
+      const tq = `select A,E,H,Q,L where (${where}) and A >= '${from}'`;
+      return parseCsv(await (await fetch(sheetUrl(tq), { cache:'no-store' })).text());
+    }));
+    const rows = parts.flat();
+    const byKey = {};
+    rows.forEach(r => {
+      if (String(r['ยกเลิก'] || '').trim()) return;                 // ยกเลิกแล้ว = ของไม่ได้ออก ไม่ต้องจับให้
+      const oid = String(r['orderId'] || '').trim();
+      const key = String(r['รหัสร้าน'] || '').trim() + '|' + String(r['รหัสเซลล์'] || '').trim();
+      if (!oid) return;
+      (byKey[key] || (byKey[key] = [])).push({ day: String(r['วัน'] || '').replace(/-/g, '/').trim(), oid });
+    });
+    let hit = 0;
+    q.forEach(a => {
+      const start = a.apprTs.slice(0, 10);
+      const end   = a.expiry || start;                              // ใบที่ยังไม่หมดอายุ = คีย์ได้ถึงวันนั้น
+      const ids = [...new Set((byKey[a.shopCode + '|' + a.smCode] || [])
+        .filter(o => o.day && o.day >= start && o.day <= end)
+        .map(o => o.oid))];
+      if (!ids.length) return;
+      a.guessBills = ids; a._s = crSearchable(a); hit++;
+    });
+    if (hit){ renderCreditChips(); renderCreditList(); updateCreditBadge(); }
+  } catch(e){ console.warn('crGuessBills:', e.message); }
 }
 
 /* ── v6.3: แยก "มีบิลให้ปลดจริง" ออกจาก "ยังไม่คีย์บิล" ──────────────────────
@@ -3264,8 +3316,18 @@ async function loadCreditBills(force){
    เคสจริง 10/8: คิว 6 ใบ มีบิลจริงแค่ 3 · อีก 2 ใบเลขใบตามมาทีหลัง 11 ชม. · 1 ใบไม่คีย์เลยทั้งวัน
    → บัญชีต้องเห็นเฉพาะใบที่มีของให้ปลด · เลขแดงก็นับเฉพาะตัวนั้น ไม่งั้นตัวเลขหลอก */
 const crWaitFin = a => a.status === 'รอบัญชี' && !a.finDecision && !a.allCancelled;
-const crPending = a => crWaitFin(a) && !!a.billId;   // คิวจริง — เลขแดง + ชิป "รอบัญชีตัดสิน"
-const crNoBill  = a => crWaitFin(a) && !a.billId;    // เช็คอินขอไว้ ยังไม่มีบิลให้ปลด
+const crHasBill = a => !!a.billId || !!(a.guessBills && a.guessBills.length);   // v6.6: นับใบที่ระบบจับให้ด้วย
+const crPending = a => crWaitFin(a) && crHasBill(a);    // คิวจริง — เลขแดง + ชิป "รอบัญชีตัดสิน"
+const crNoBill  = a => crWaitFin(a) && !crHasBill(a);   // เช็คอินขอไว้ ยังไม่มีบิลให้ปลดจริงๆ
+
+/* v6.6: เลขใบที่ผูกกับคำขอนี้ — ของจริงจาก billId ก่อน ถ้าไม่มีค่อยใช้ที่ระบบจับให้ (crGuessBills)
+   ห้ามเอามารวมกัน: ถ้ามี billId แล้ว แปลว่าแอปขายผูกให้เรียบร้อย ไม่ต้องเดาซ้อน */
+function crBillList(a){
+  const real = a.billId ? a.billId.split(',').map(x => x.trim()).filter(Boolean) : [];
+  if (real.length) return { list: real, guessed: false };
+  const g = (a.guessBills || []).slice();
+  return { list: g, guessed: !!g.length };
+}
 
 // ── v6.2: ใบที่ออเดอร์ถูกยกเลิกไปแล้ว ไม่ควรค้างในคิวบัญชี ──────────────────
 //   เคสจริง 7/8: ORD7313975 ยกเลิกครบทั้ง 4 บรรทัด แต่ DebtApproval ยังเป็น 'รอบัญชี'
@@ -3315,10 +3377,13 @@ async function crSweepExpired(){
   if (!stale.length && sweptToday === today) return;
   _crSweeping = true;
   try {
+    /* v6.6: กันปิดผิดใบ — ใบที่ระบบจับเลขบิลให้ได้ = ของออกไปแล้วจริง ห้ามปิดเป็น "ไม่ได้คีย์บิล"
+       หลังบ้านมองไม่เห็นชีท Order จึงต้องส่งรายการที่ต้องเว้นไปให้ */
+    const keep = creditRows.filter(a => !a.billId && (a.guessBills || []).length).map(a => a.reqId);
     const res = await fetch(CONFIG.scriptUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'sweepExpiredCredit' }),
+      body: JSON.stringify({ action: 'sweepExpiredCredit', keepReqIds: keep }),
     });
     const data = await res.json();
     if (!data || !data.ok) return;                       // ล้มเหลว = ไม่ประทับวัน จะได้ลองใหม่รอบหน้า
@@ -3477,6 +3542,9 @@ function crCardHtml(a){
   if (tab) bits.push(`<span class="dcr-tag ${tab.cls}">${a.finDecision ? escapeHtml(a.finDecision) : tab.label}</span>`);
   if (a.allCancelled) bits.push(`<span class="dcr-tag bad">ออเดอร์ถูกยกเลิกแล้ว</span>`);
   if (crNoBill(a))    bits.push(`<span class="dcr-tag warn">ยังไม่คีย์บิล</span>`);   // v6.3: เห็นได้ตอนดูชิป "ทั้งหมด" ด้วย
+  // v6.6: มีของออกจริงแต่แอปขายไม่ได้ผูกเลขใบมาให้ — ต้องบอกว่าเลขใบนี้ "ระบบจับให้" ไม่ใช่ของที่ผูกมา
+  else if (!a.billId && (a.guessBills || []).length)
+    bits.push(`<span class="dcr-tag warn">เลขใบหลุด — ระบบจับให้ ${a.guessBills.length} ใบ</span>`);
   if (D.amount)         bits.push(`<span class="dcr-hot">ค้าง ฿${fmtInt(Math.round(D.amount))}</span>`);
   if (D.bills)          bits.push(`${fmtInt(D.bills)} บิล`);
   if (D.paid > 0)       bits.push(`<span class="dcr-tag ok">แนบสลิปแล้ว ฿${fmtInt(Math.round(D.paid))} รอตัดยอด</span>`);
@@ -3499,7 +3567,8 @@ function crCardHtml(a){
   if (a.wh)           bits2.push(escapeHtml(a.wh));
   const sub2Txt = bits2.join(' · ');
 
-  const bills = a.billId ? a.billId.split(',').map(x => x.trim()).filter(Boolean) : [];
+  const B = crBillList(a);                    // v6.6: .list = เลขใบที่จะโชว์ · .guessed = ระบบจับให้เอง
+  const bills = B.list;
 
   const actHtml = canAct
     ? `<div class="dcr-act" onclick="event.stopPropagation()">
@@ -3535,8 +3604,9 @@ function crCardHtml(a){
       <div class="dcr-body">
         <div class="dcr-flow dcr-dim">${a.apprBy ? 'ซุปอนุมัติ: ' + escapeHtml(a.apprBy) + ' · ' : ''}ขอเมื่อ ${escapeHtml(a.apprTs)}${a.expiry ? ' · ใช้ได้ถึง ' + escapeHtml(a.expiry) : ''} · ${escapeHtml(rq)}</div>
         ${slipHtml}
+        ${B.guessed ? `<div class="dcr-flow dcr-hot">บิลที่น่าจะเป็นของคำขอนี้ — ระบบจับให้จาก ร้าน + เซลคนเดียวกัน + คีย์ในช่วง ${escapeHtml(a.apprTs.slice(0,10))} ถึง ${escapeHtml(a.expiry || a.apprTs.slice(0,10))} (แอปขายไม่ได้ผูกเลขใบมาให้)</div>` : ''}
         ${bills.length
-          ? bills.map(b => `<div class="dcr-ord"><div class="dcr-flow dcr-ordhead">${escapeHtml(b)}</div>
+          ? bills.map(b => `<div class="dcr-ord"><div class="dcr-flow dcr-ordhead">${escapeHtml(b)}${B.guessed ? ' <span class="dcr-q">(จับให้)</span>' : ''}</div>
               <div class="dcr-flow" id="crOrd-${escapeHtml(rq)}-${escapeHtml(b)}">${crOrderCache[b] ? crOrderHtml(crOrderCache[b]) : 'กำลังโหลดรายการสินค้า...'}</div></div>`).join('')
           : '<div class="dcr-flow dcr-dim">ยังไม่มีบิล — เซลเช็คอินขอไว้แต่ยังไม่ได้คีย์ออเดอร์</div>'}
       </div>`;
@@ -3550,7 +3620,7 @@ function crCardHtml(a){
           ${sub2Txt ? `<div class="dcr-sub" title="${escapeHtml(sub2Txt.replace(/<[^>]+>/g, ''))}">${sub2Txt}</div>` : ''}
         </div>
         <div class="dcr-r">
-          <div class="dcr-amt" style="font-size:12px;color:var(--muted);font-weight:600">${bills.length ? bills.length + ' บิล' : 'ยังไม่มีบิล'}</div>
+          <div class="dcr-amt" style="font-size:12px;color:var(--muted);font-weight:600">${bills.length ? (B.guessed ? '≈ ' : '') + bills.length + ' บิล' : 'ยังไม่มีบิล'}</div>
           <div class="dcr-when">${escapeHtml(crShortTs(a.apprTs))}</div>
         </div>
         ${actHtml}
@@ -3595,7 +3665,7 @@ function crToggleItems(rq){
   crRepaintCard(rq);
   const a = creditRows.find(x => x.reqId === rq);
   if (!a || !crExpanded.has(rq)) return;
-  (a.billId ? a.billId.split(',').map(x => x.trim()).filter(Boolean) : []).forEach(async b => {
+  crBillList(a).list.forEach(async b => {   // v6.6: โหลดรายการสินค้าของใบที่ระบบจับให้ด้วย
     try {
       const items = await crLoadOrder(b);
       const el = $(`crOrd-${rq}-${b}`);
