@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rattana ใบจองสินค้า SMR v2.0</title>
+<title>Rattana ใบจองสินค้า SMR v2.1</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 <style>
@@ -195,7 +195,7 @@ body.dark .spin-box{background:var(--card-bg);color:var(--text)}
 
 <header>
   <span class="logo-text">RATTANA <span>ใบจอง SMR</span></span>
-  <span class="ver">v2.0</span>
+  <span class="ver">v2.1</span>
   <span class="hd-spacer"></span>
   <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="โหลดข้อมูลใหม่">⟳</button>
   <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
@@ -244,7 +244,8 @@ body.dark .spin-box{background:var(--card-bg);color:var(--text)}
   <div class="card" id="docCard" style="display:none">
     <div class="card-head"><h3>📄 เลือกใบขอเบิกที่จะคิด</h3>
       <span style="font-size:12px;color:var(--muted)" id="docHint"></span></div>
-    <div class="card-body"><div class="docchk" id="docList"></div></div>
+    <div class="card-body"><div class="docchk" id="docList"></div>
+      <div id="brWarn" class="hint" style="display:none;margin:10px 0 0"></div></div>
   </div>
 
   <!-- ── สรุป ── -->
@@ -367,8 +368,11 @@ body.dark .spin-box{background:var(--card-bg);color:var(--text)}
 const CFG = {
   // ชีท "นำเข้าส่งของ SMR" — 3 แท็บ (พันท้าย / คลังกลาง / บิล) ตรวจชนิดจากหัวคอลัมน์เอง gid เปลี่ยนก็ยังทำงาน
   smrSheetId : '1KnnDIS6_8jkxlKzcvR8d0wm69zl_JBy5cZHeHsfIe5c',
-  smrGids    : ['0','1616998387','1538901462'],
-  songtamGid : '45403786',        // แท็บ "สินค้าส่งตาม" — คนละโหมด (ไม่เทียบบิล · คลัง W4)
+  /* ดึงทั้งไฟล์ครั้งเดียวแล้วอ่าน "ตามชื่อแท็บ" — เพิ่มสาขาใหม่แค่เพิ่มแท็บ ไม่ต้องแก้แอป
+     ชื่อแท็บ = ชื่อสาขา (ต้องตรงกับคำในคอลัมน์หมายเหตุของชีทบิล เช่น "สาขา บางกระดี่") */
+  songtamTab : 'สินค้าส่งตาม',      // แท็บโหมด 2 (ไม่เทียบบิล · คลัง W4)
+  billTab    : 'บิล',
+  skipTabs   : ['ชีต4','ชีท4','Sheet4'],
   // WMS_barcode_SMR — itemCode ของ SMR → บาร์โค้ด (สะพานให้แท็บพันท้ายที่ไม่มีบาร์โค้ด)
   wmsSheetId : '1HJNXh0Z7jDoMUz9OAU8L3XZv4K3nwbO28tpeaBSOSEk', wmsGid:'0',
   // Stocksync (PDDT) — ดึงเฉพาะคอลัมน์ที่ใช้ ~3MB (ทั้งชีท 10MB)
@@ -379,11 +383,16 @@ const CFG = {
   pickerSheetId:'1YL8WN6C7wuozb3fUOvylriaTL66o-xK_9HRZxiH1rr0', pickerTab:'W4',
   pickerFbSheetId:'1_EXR_c5qYkjILICpYyOfB48vz_CQGuQ5hjlfze84Y0g', pickerFbTab:'คนจัดสินค้า W4',
 };
-// สาขาในคอลัมน์หมายเหตุของชีทบิล → ค่าเริ่มต้นของใบจอง (ดึงมาจากบิลจริง)
+/* ค่าเริ่มต้นใบจองต่อสาขา (ดึงมาจากบิลจริง) — สาขาไหนไม่อยู่ในนี้ใช้ DEF_OTHER
+   เพิ่มสาขาใหม่: แค่เพิ่มแท็บในชีท SMR ชื่อตรงกับที่เขียนในหมายเหตุบิล แอปจับเองไม่ต้องแก้โค้ด */
+const DEF_OTHER = { cust:'7000300340', shop:'บริษัท สยามมิตร รีเทล จำกัด', sale:'HSW402' };
 const BRANCH_DEF = {
-  'พันท้าย' : { cust:'7000300340', shop:'บริษัท สยามมิตร รีเทล จำกัด',         sale:'HSW402' },
   'คลังกลาง': { cust:'7000090266', shop:'บริษัท สยามมิตร ดิสทริบิวชั่น จํากัด', sale:'PMW401' },
+  'พันท้าย'  : DEF_OTHER, 'บางกระดี่': DEF_OTHER, 'เจดีหัก': DEF_OTHER, 'ดอนตะโก': DEF_OTHER,
 };
+const defOf = b => BRANCH_DEF[b] || DEF_OTHER;
+let BRANCHES = [];   // ชื่อสาขาที่เจอจริงจากแท็บในชีท (เรียงตามลำดับแท็บ)
+let BILL_ONLY = [];  // สาขาที่มีในบิล แต่ยังไม่มีแท็บใบขอเบิก → เทียบไม่ได้
 const LV = ['CS','BP','PA','EA'];                       // เรียงจากใหญ่ → เล็ก
 const UNIT_LV = { 'ลัง':'CS','ลัง.':'CS','กระสอบ':'CS','มัด':'CS','ถาด':'CS','กส.':'CS',
                   'แพ็ค':'PA','แพค':'PA','แพ๊ค':'PA','ห่อ':'PA',
@@ -394,7 +403,7 @@ const NO_PROD = '__NO_PRODUCT__';   // ผู้ใช้ยืนยันว�
 /* ═══════════════════════ STATE ═══════════════════════ */
 let PRODS=[], BY_CODE=new Map(), BY_NAME=new Map();
 let WMS=new Map();                 // itemCode → [barcode]
-let REQ=[], BILL=[], ROWS=[];
+let REQ=[], BILL=[], ROWS=[], SMR_WB=null;   // SMR_WB = ทุกแท็บในไฟล์ SMR (ใช้ร่วม 2 โหมด)
 let DOCS=[], docOn=new Set(), brFilter='', statFilter='';
 let OVR = {};                      // key(สาขา|รหัส) → PRODUCT NAME ที่ผู้ใช้เลือกเอง
 let pickTarget=null;
@@ -484,6 +493,27 @@ const clean = s => String(s??'').replace(/[​‌‍﻿]/g,'').replace(/ /g,' '
 /* gviz = ใช้ได้เฉพาะชีทที่หัวคอลัมน์อยู่แถวเดียวบรรทัดแรก (Stocksync) เพราะรองรับ select เลือกคอลัมน์
    ⚠️ ชีท SMR หัวไม่ได้อยู่แถวแรก → gviz จะเดาหัวเองแล้ว "รวมหลายแถวบนเป็นแถวเดียว" ข้อมูลเพี้ยน
    → ใช้ export?format=csv ที่คืนแถวดิบ 1:1 กับชีท */
+/* ดึงทั้งไฟล์ (.xlsx) ครั้งเดียว → { ชื่อแท็บ : แถว[][] } เป็น string ทั้งหมด
+   ทำให้เพิ่ม/ลบแท็บสาขาได้เองโดยไม่ต้องมาแก้ gid ในโค้ด
+   ⚠️ ต้องใช้ raw:true — ถ้าใช้ raw:false จะได้ค่าตาม "รูปแบบที่แสดง" ซึ่งบาร์โค้ด 13-14 หลัก
+      ในเซลล์ General จะกลายเป็นเลขวิทยาศาสตร์ (1.8855E+13) แล้วอ่านบาร์โค้ดไม่ออกทั้งชีท */
+const cellStr = v => {
+  if(v===null||v===undefined) return '';
+  if(v instanceof Date){ const p=n=>String(n).padStart(2,'0');
+    return v.getFullYear()+'-'+p(v.getMonth()+1)+'-'+p(v.getDate()); }
+  return String(v);
+};
+async function fetchWorkbook(sheetId){
+  const r=await fetch('https://docs.google.com/spreadsheets/d/'+sheetId+'/export?format=xlsx',{cache:'no-store'});
+  if(!r.ok) throw new Error('โหลดชีทไม่ได้ — ตรวจว่าแชร์แบบ "ทุกคนที่มีลิงก์" แล้วหรือยัง');
+  const wb=XLSX.read(await r.arrayBuffer(),{type:'array',cellDates:true});
+  const out={};
+  for(const n of wb.SheetNames)
+    out[String(n).trim()]=XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,raw:true,defval:''})
+      .map(row=>row.map(cellStr));
+  return out;
+}
+
 /* อ่านชีทด้วย "ชื่อแท็บ" (ตารางคนจัดใช้ชื่อ ไม่ใช่ gid) */
 async function fetchCsvByName(sheetId,sheetName,tq){
   let url='https://docs.google.com/spreadsheets/d/'+sheetId+'/gviz/tq?tqx=out:csv&sheet='+encodeURIComponent(sheetName);
@@ -571,20 +601,31 @@ function nameScore(qName,qn,p){
 async function loadAll(){
   showSpin('กำลังโหลดชีท…');
   try{
-    const [smr0,smr1,smr2,wmsRows,stkRows] = await Promise.all([
-      fetchCsv(CFG.smrSheetId,CFG.smrGids[0]),
-      fetchCsv(CFG.smrSheetId,CFG.smrGids[1]),
-      fetchCsv(CFG.smrSheetId,CFG.smrGids[2]),
+    const [WB,wmsRows,stkRows] = await Promise.all([
+      fetchWorkbook(CFG.smrSheetId),
       fetchCsv(CFG.wmsSheetId,CFG.wmsGid),
       fetchCsv(CFG.stockSheetId,CFG.stockGid,'select '+CFG.stockCols),
     ]);
+    SMR_WB=WB;
     showSpin('กำลังจับคู่สินค้า…');
     buildWms(wmsRows); buildStock(stkRows);
 
-    REQ=[]; BILL=[];
-    for(const rows of [smr0,smr1,smr2]) ingestSheet(rows);
+    /* ไล่ทุกแท็บในไฟล์ — ชื่อแท็บ = ชื่อสาขา · ตรวจชนิดจากหัวตารางเอง
+       แท็บไหนไม่ใช่ใบขอเบิก/บิล (เช่น สินค้าส่งตาม, ชีต4) ข้ามไป */
+    REQ=[]; BILL=[]; BRANCHES=[];
+    const skipped=[];
+    for(const [name,rows] of Object.entries(WB)){
+      if(name===CFG.songtamTab || CFG.skipTabs.includes(name)) continue;
+      const kind=ingestSheet(rows,name);
+      if(kind==='req') BRANCHES.push(name);
+      else if(!kind) skipped.push(name);
+    }
+    resolveBillBranches();
 
-    if(!REQ.length) throw new Error('ไม่พบใบขอเบิก (แท็บพันท้าย/คลังกลาง) ในชีท');
+    if(!REQ.length) throw new Error('ไม่พบแท็บใบขอเบิกในชีท (แท็บสาขาต้องมีหัวตาราง "เลขที่เอกสารขอเบิก" หรือ "รหัสสินค้าเดี่ยว")');
+    if(skipped.length) console.log('[smr] ข้ามแท็บที่อ่านไม่ออก:',skipped.join(', '));
+    // สาขาที่มีในบิล แต่ยังไม่มีแท็บใบขอเบิก → เทียบไม่ได้ บอกให้รู้
+    BILL_ONLY=[...new Set(BILL.map(b=>b.br).filter(b=>b && !BRANCHES.includes(b)))];
     if(!BILL.length) toast('⚠️ ไม่พบข้อมูลในแท็บบิล — จะถือว่ายังไม่ได้ของทุกตัว','warning');
 
     await loadOvr();
@@ -640,51 +681,64 @@ function buildStock(rows){
   }
 }
 
-/* ── ตรวจว่าแท็บไหนเป็นอะไร แล้วอ่านตามชนิด ── */
-function ingestSheet(rows){
-  if(!rows.length) return;
+/* ── ตรวจว่าแท็บไหนเป็นอะไร แล้วอ่านตามชนิด · คืน 'req' | 'bill' | null
+   br = ชื่อแท็บ (= ชื่อสาขา) ไม่ hardcode แล้ว → เพิ่มสาขาใหม่ได้เองแค่เพิ่มแท็บ ── */
+function ingestSheet(rows,br){
+  if(!rows.length) return null;
   const flat = rows.slice(0,40).map(r=>r.map(clean).join('|')).join('\n');
-  if(/เลขที่เอกสารขอเบิก/.test(flat))      readWithdraw(rows);   // พันท้าย
-  else if(/รหัสสินค้าเดี่ยว/.test(flat))    readCentral(rows);    // คลังกลาง
-  else if(/หมายเหตุ/.test(flat) && /รหัสซื้อขาย/.test(flat)) readBill(rows);
+  if(/เลขที่เอกสารขอเบิก/.test(flat)){ readWithdraw(rows,br); return 'req'; }   // แบบพันท้าย
+  if(/รหัสสินค้าเดี่ยว/.test(flat))   { readCentral(rows,br);  return 'req'; }   // แบบคลังกลาง
+  if(/หมายเหตุ/.test(flat) && /รหัสซื้อขาย/.test(flat)){ readBill(rows); return 'bill'; }
+  return null;
+}
+/* จับสาขาให้แถวบิล — เทียบกับชื่อแท็บที่เจอจริงก่อน แล้วค่อยชื่อสาขาที่รู้จัก
+   ทำหลังอ่านครบทุกแท็บ เพราะแท็บบิลอาจมาก่อนแท็บสาขา */
+function resolveBillBranches(){
+  const known=[...new Set([...BRANCHES, ...Object.keys(BRANCH_DEF)])]
+    .sort((a,b)=>b.length-a.length);   // ชื่อยาวก่อน กันชื่อสั้นซ้อนอยู่ในชื่อยาว
+  for(const b of BILL){
+    b.br='';
+    // อ่านชื่อสาขาจากหมายเหตุตรงๆ ("… สาขา นครปฐม") → สาขาใหม่ไม่ต้องมาเพิ่มในโค้ด
+    const m=b.note.match(/สาขา\s*([ก-๙A-Za-z0-9]+)/);
+    if(m) b.br=m[1];
+    else for(const k of known) if(b.note.indexOf(k)>=0){ b.br=k; break; }
+  }
 }
 
-/* พันท้าย — รายงานการขอเบิก (มีหลายบล็อก หัวซ้ำได้ · มีแต่ item code ไม่มีบาร์โค้ด) */
-function readWithdraw(rows){
+/* แบบพันท้าย — รายงานการขอเบิก (มีหลายบล็อก หัวซ้ำได้ · มีแต่ item code ไม่มีบาร์โค้ด) */
+function readWithdraw(rows,br){
   for(const r of rows){
     const doc=clean(r[3]); if(!/^IR\d+/i.test(doc)) continue;
     const item=normCode(r[7]); const name=clean(r[8]);
     if(!item&&!name) continue;
-    REQ.push({ br:'พันท้าย', doc, date:clean(r[0]).slice(0,10),
+    REQ.push({ br, doc, date:clean(r[0]).slice(0,10),
                item, name, qty:num(r[9]), unit:clean(r[10]) });
   }
 }
-/* คลังกลาง — มีบาร์โค้ด 3 ระดับ (เดี่ยว/แพ็ค/ลัง) */
-function readCentral(rows){
+/* แบบคลังกลาง — มีบาร์โค้ด 3 ระดับ (เดี่ยว/แพ็ค/ลัง) */
+function readCentral(rows,br){
   let start=-1;
   for(let i=0;i<rows.length;i++) if(clean(rows[i][0])==='รหัสสินค้าเดี่ยว'){ start=i+1; break; }
   if(start<0) return;
-  let doc='คลังกลาง';
+  let doc=br;
   for(let i=0;i<start;i++){ const c=clean(rows[i][0]); const m=c.match(/^(\d{4,})\s*:/); if(m){ doc='SMR-'+m[1]; break; } }
   for(let i=start;i<rows.length;i++){
     const r=rows[i]; const name=clean(r[6]); if(!name) continue;
     if(/^รวม/.test(clean(r[0]))) continue;
-    REQ.push({ br:'คลังกลาง', doc, date:'', name, qty:num(r[7]), unit:clean(r[8]),
+    REQ.push({ br, doc, date:'', name, qty:num(r[7]), unit:clean(r[8]),
                item:normCode(r[0]),
                codes:{ EA:normCode(r[1]), PA:normCode(r[3]), CS:normCode(r[5]) },
                items:{ EA:normCode(r[0]), PA:normCode(r[2]), CS:normCode(r[4]) } });
   }
 }
-/* บิล — จับสาขาจากคอลัมน์หมายเหตุ */
+/* บิล — เก็บหมายเหตุดิบไว้ก่อน ค่อยจับสาขาใน resolveBillBranches() */
 function readBill(rows){
   const h=rows[0].map(clean), idx={}; h.forEach((k,i)=>{ if(k&&!(k in idx)) idx[k]=i; });
   const need=['หมายเหตุ','รหัสซื้อขาย','จำนวน']; if(need.some(k=>!(k in idx))) return;
   for(let i=1;i<rows.length;i++){
     const r=rows[i]; const code=normCode(r[idx['รหัสซื้อขาย']]); if(!code) continue;
     const note=clean(r[idx['หมายเหตุ']]).replace(/\s+/g,' ');
-    let br=''; for(const b of Object.keys(BRANCH_DEF)) if(note.indexOf(b)>=0){ br=b; break; }
-    if(!br){ for(const b of ['บางกระดี่','เจดีหัก','ดอนตะโก']) if(note.indexOf(b)>=0){ br=b; break; } }
-    BILL.push({ br, note, code, qty:num(r[idx['จำนวน']]), name:clean(r[idx['ชื่อสินค้า']]||'') });
+    BILL.push({ br:'', note, code, qty:num(r[idx['จำนวน']]), name:clean(r[idx['ชื่อสินค้า']]||'') });
   }
 }
 
@@ -788,6 +842,12 @@ function buildDocs(){
       +'<span>'+esc(d.br)+' · '+esc(d.doc)+(d.date?' · '+esc(d.date):'')+' <b>('+d.n+')</b></span></label>';
   }).join('');
   $('docHint').textContent = 'ติ๊กออกได้ถ้าไม่อยากรวมใบเก่า ('+DOCS.length+' ใบ)';
+  // เตือนว่าบิลมีสาขาอื่นที่ยังไม่ได้เอามาเทียบ (ยังไม่มีแท็บใบขอเบิก)
+  const w=$('brWarn');
+  if(BILL_ONLY.length){ w.style.display='';
+    w.innerHTML='⚠️ ในชีท <b>บิล</b> มีสาขา <b>'+BILL_ONLY.map(esc).join(' · ')+'</b> ที่<b>ยังไม่มีแท็บใบขอเบิก</b> → เทียบให้ไม่ได้'
+      +'<div style="font-size:11.5px;color:var(--muted);margin-top:3px">อยากให้เทียบด้วย: เพิ่มแท็บในชีท SMR ตั้งชื่อแท็บให้ตรงกับชื่อสาขา (เช่น <b>'+esc(BILL_ONLY[0])+'</b>) วางรายงานขอเบิกแบบเดียวกับแท็บพันท้าย/คลังกลาง แล้วกดโหลดใหม่ — ไม่ต้องแก้แอป</div>';
+  } else w.style.display='none';
 }
 function toggleDoc(el){
   const k=el.dataset.k, on=!el.classList.contains('on');
@@ -890,7 +950,7 @@ function setBranch(el,b){ brFilter=b; renderBranchChips(); render(); }
 function renderBranchCfg(){
   const brs=[...new Set(ROWS.map(r=>r.br))];
   $('branchCfg').innerHTML = brs.map(b=>{
-    const d=BRANCH_DEF[b]||{cust:'',shop:'',sale:''};
+    const d=defOf(b);
     return '<div style="margin-top:8px"><div style="font-size:11.5px;font-weight:700;color:var(--gold);margin-bottom:4px">📍 สาขา '+esc(b)+'</div>'
       +'<div class="setup">'
       +'<div class="field"><label>รหัสลูกหนี้</label><input class="input" id="c_'+esc(b)+'_cust" value="'+esc(d.cust)+'"></div>'
@@ -901,9 +961,9 @@ function renderBranchCfg(){
   }).join('');
 }
 const brCfg = b => ({
-  cust : ($('c_'+b+'_cust')||{}).value || (BRANCH_DEF[b]||{}).cust || '',
-  shop : ($('c_'+b+'_shop')||{}).value || (BRANCH_DEF[b]||{}).shop || '',
-  sale : ($('c_'+b+'_sale')||{}).value || (BRANCH_DEF[b]||{}).sale || '',
+  cust : ($('c_'+b+'_cust')||{}).value || defOf(b).cust || '',
+  shop : ($('c_'+b+'_shop')||{}).value || defOf(b).shop || '',
+  sale : ($('c_'+b+'_sale')||{}).value || defOf(b).sale || '',
   note : ($('c_'+b+'_note')||{}).value || ('สาขา '+b),
 });
 
@@ -1164,13 +1224,17 @@ function lvCS(p){ for(const l of LV) if(p.code[l]) return l; return 'CS'; }
 async function loadSongtam(){
   showSpin('กำลังโหลดชีทสินค้าส่งตาม…');
   try{
-    const jobs=[fetchCsv(CFG.smrSheetId,CFG.songtamGid)];
+    const jobs=[fetchWorkbook(CFG.smrSheetId)];
     if(!PRODS.length){                       // ยังไม่เคยโหลดสินค้า/WMS ในเซสชันนี้
       jobs.push(fetchCsv(CFG.wmsSheetId,CFG.wmsGid));
       jobs.push(fetchCsv(CFG.stockSheetId,CFG.stockGid,'select '+CFG.stockCols));
     }
     const res=await Promise.all(jobs);
+    SMR_WB=res[0];
     if(res[1]){ showSpin('กำลังสร้างดัชนีสินค้า…'); buildWms(res[1]); buildStock(res[2]); }
+    const songRows = SMR_WB[CFG.songtamTab];
+    if(!songRows) throw new Error('ไม่พบแท็บ "'+CFG.songtamTab+'" ในชีท (มีแท็บ: '+Object.keys(SMR_WB).join(', ')+')');
+    res[0]=songRows;
     const nCat=await loadPickerMap();
     if(!nCat) toast('⚠️ อ่านตารางคนจัดไม่ได้ — ใบจัดจะรวมเป็นใบเดียว','warning');
     parseSongtam(res[0]);
