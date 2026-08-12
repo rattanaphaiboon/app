@@ -68,3 +68,19 @@ function scanGapStamp_(empId, type) {
     );
   } catch (e) {}
 }
+
+/******************************************************************
+ * ทดสอบก่อน deploy: แถบบนเลือกฟังก์ชัน testScanGap → กด "เรียกใช้ (Run)"
+ * ดูผลใน Execution log — ต้องได้:
+ *   บรรทัด 1: {msg=สแกนเข้างานไปแล้วเมื่อ ...}   ← ด่านทำงาน บล็อกสแกนสด
+ *   บรรทัด 2: null                                ← re-sync ของเก่า (>10 นาที) ปล่อยผ่าน
+ *   บรรทัด 3: null                                ← คนละคน ไม่โดนบล็อก
+ * ฟังก์ชันนี้ทิ้งไว้ในไฟล์ได้ ไม่มีผลกับระบบจริง (ใช้ empId 'TEST')
+ ******************************************************************/
+function testScanGap() {
+  scanGapStamp_('TEST', 'in');
+  Logger.log(scanGapGuard_('TEST'));                                                    // ต้องเห็น msg
+  Logger.log(scanGapGuard_('TEST', new Date(Date.now() - 20 * 60000).toISOString()));   // ต้องเป็น null
+  Logger.log(scanGapGuard_('TEST-อีกคน'));                                              // ต้องเป็น null
+  CacheService.getScriptCache().remove('scanGap_TEST');   // เก็บกวาดหลังทดสอบ
+}
