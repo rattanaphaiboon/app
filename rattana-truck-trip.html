@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Truck Trip — บันทึกเที่ยววิ่งขนส่ง v1.7</title>
+<title>Rattana Truck Trip — บันทึกเที่ยววิ่งขนส่ง v1.8</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
@@ -293,7 +293,7 @@ footer{text-align:center;font-size:11px;color:var(--muted);padding:20px 12px max
 <div id="appScreen" style="display:none">
 <header>
   <span class="logo-text">RATTANA <span>TRIP</span></span>
-  <span class="ver-chip" id="verChip">v1.7</span>
+  <span class="ver-chip" id="verChip">v1.8</span>
   <span class="h-spacer"></span>
   <span class="user-chip"><span class="u-name" id="userName">-</span></span>
   <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -498,7 +498,7 @@ footer{text-align:center;font-size:11px;color:var(--muted);padding:20px 12px max
 
 </main>
 
-<footer>Rattana Truck Trip v1.7 · บริษัท รัตนไพบูลย์ จำกัด</footer>
+<footer>Rattana Truck Trip v1.8 · บริษัท รัตนไพบูลย์ จำกัด</footer>
 </div>
 
 <!-- ══════════ MODAL ══════════ -->
@@ -519,7 +519,7 @@ footer{text-align:center;font-size:11px;color:var(--muted);padding:20px 12px max
 /* ═══════════════════════════════════════════════════════
    Rattana Truck Trip v1.0
    ═══════════════════════════════════════════════════════ */
-const APP_VERSION = '1.7';
+const APP_VERSION = '1.8';
 
 /* Web App URL ที่มากับแอป — ผู้ใช้ไม่ต้องตั้งเอง
    ถ้าวันหลัง deploy ใหม่จนได้ URL ใหม่ ให้แก้ตรงนี้แล้ว bump เวอร์ชัน
@@ -880,7 +880,7 @@ async function flushQueue(manual){
   }
   saveQueue(left);
   if(manual) hideSpinner();
-  if(sent) { showToast(`ส่งรายการค้าง ${sent} รายการสำเร็จ`, 'success'); await loadData(true); }
+  if(sent) { showToast(`ส่งรายการค้าง ${sent} รายการสำเร็จ`, 'success'); reconcileRows(); }
   else if(manual) showToast('ยังส่งไม่สำเร็จ ลองใหม่เมื่อสัญญาณดีขึ้น', 'warning');
 }
 
@@ -1081,14 +1081,58 @@ async function refreshData(){
   b.disabled = false;
   setTimeout(()=>{ b.style.transform=''; b.style.transition=''; }, 600);
 }
-function renderAll(){
-  renderPickers();
+function renderData(){
   renderRecent();
   renderFilterOptions();
   renderList();
   renderSummary();
+}
+function renderAll(){
+  renderPickers();
+  renderData();
   renderSettings();
   renderQueue();
+}
+
+/** เรียงรายการแบบเดียวกับ backend — ใหม่สุดขึ้นก่อน */
+function sortRows(){
+  state.rows.sort((a,b) => {
+    const d = String(b.date||'').localeCompare(String(a.date||''));
+    return d !== 0 ? d : String(b.savedAt||'').localeCompare(String(a.savedAt||''));
+  });
+}
+
+/** สร้างแถวจำลองจากข้อมูลที่เพิ่งส่ง — โชว์ผลทันทีโดยไม่ต้องรอโหลดชีทกลับมา */
+function localRowFromPayload(id, p){
+  const now = new Date();
+  const stamp = now.getFullYear()+'-'+pad2(now.getMonth()+1)+'-'+pad2(now.getDate())+
+                'T'+pad2(now.getHours())+':'+pad2(now.getMinutes())+':'+pad2(now.getSeconds());
+  const r = { id: id || '', date: p.date, driver: p.driver, crew: p.crew, job: p.job,
+              transfer: p.transfer, user: p.user, savedAt: stamp,
+              qty: p.qty === '' ? '' : Number(p.qty) };
+  for(let i = 1; i <= MAX_CUST; i++){
+    r['cust'+i] = p['cust'+i] || '';
+    r['qty'+i]  = (p['qty'+i] === '' || p['qty'+i] == null) ? '' : Number(p['qty'+i]);
+  }
+  return r;
+}
+function cacheCurrent(){
+  setCache({ rows: state.rows, lists: state.lists,
+             listColumns: state.listColumns, schema: state.schema });
+}
+
+/** โหลดเฉพาะแถวข้อมูลมาปรับให้ตรงชีท (เบา+เงียบ) — ใช้หลังบันทึก ไม่ต้องดึง List/schema ซ้ำ */
+let reconciling = false;
+async function reconcileRows(){
+  if(reconciling || !hasGas()) return;
+  reconciling = true;
+  try{
+    const d = await gasGet('list');
+    state.rows = d.rows || [];
+    cacheCurrent();
+    renderData();
+  } catch(e){ console.warn('[trip] reconcile:', e.message); }
+  finally { reconciling = false; }
 }
 
 /* ─────────── form ─────────── */
@@ -1138,15 +1182,25 @@ async function submitForm(){
   showSpinner(state.editingId ? 'กำลังบันทึกการแก้ไข...' : 'กำลังส่งข้อมูล...');
   try{
     if(state.editingId){
-      await gasSend(Object.assign({ action:'update', id: state.editingId }, payload));
+      const editId = state.editingId;
+      await gasSend(Object.assign({ action:'update', id: editId }, payload));
+      // อัพเดทแถวในเครื่องทันที — ไม่ต้องรอโหลดชีทกลับมา
+      const r = state.rows.find(x => x.id === editId);
+      if(r){
+        const nr = localRowFromPayload(r.id, payload);
+        nr.savedAt = r.savedAt;          // เวลาแรกบันทึกคงเดิม
+        Object.assign(r, nr);
+      }
       showToast('แก้ไขรายการเรียบร้อย ✓', 'success');
       cancelEdit();
     } else {
-      await gasSend(Object.assign({ action:'create' }, payload));
+      const res = await gasSend(Object.assign({ action:'create' }, payload));
+      state.rows.unshift(localRowFromPayload((res && res.id) || payload.cid, payload));
       showToast('บันทึกเที่ยววิ่งเรียบร้อย ✓', 'success');
       resetForm(false);
     }
-    await loadData(true);
+    sortRows(); cacheCurrent(); renderData();
+    reconcileRows();                     // ปรับให้ตรงชีทเบื้องหลัง ผู้ใช้ไม่ต้องรอ
   } catch(e){
     // e.server = backend ตอบกลับมาว่าไม่ผ่าน → บอกสาเหตุตรงๆ ไม่ต้องเข้าคิว
     if(!state.editingId && !e.server){
@@ -1328,9 +1382,11 @@ async function confirmDelete(){
   showSpinner('กำลังลบ...');
   try{
     await gasSend({ action:'delete', id });
+    state.rows = state.rows.filter(x => x.id !== id);   // เอาออกจากจอทันที
+    cacheCurrent(); renderData();
     showToast('ลบรายการแล้ว', 'success');
     if(state.editingId === id) cancelEdit();
-    await loadData(true);
+    reconcileRows();
   } catch(e){
     showToast('ลบไม่สำเร็จ: ' + e.message, 'error');
   } finally { hideSpinner(); }
