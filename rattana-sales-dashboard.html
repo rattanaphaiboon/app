@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v18.97</title>
+<title>Rattana Sales Dashboard v19.07</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -407,7 +407,7 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v18.97</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.07</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -808,7 +808,7 @@ const USERS_SHEET_ID  = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';
 const USERS_SHEET     = 'Rattana Users for apps';
 const BUDGET_SHEET_ID = '1ww64IJdFJk8z8CDCCoFYZyE8FNzuH9W6sFDO6K44gWw';
 const BUDGET_SHEET    = 'Budget';
-const TTL = 5 * 60 * 1000;
+const TTL = 30 * 60 * 1000;
 
 // ── STATE ────────────────────────────────────────────────────────────────
 let currentUser = null;
@@ -931,7 +931,11 @@ async function handleGoogleLogin(r) {
       warehouse: user['W'], company: user['บริษัท'],
       dept: user['แผนก'],
     };
-    localStorage.setItem('rattanaUser', JSON.stringify({data:currentUser, exp:Date.now()+365*24*60*60*1000}));
+    const _sess = JSON.stringify({data:currentUser, exp:Date.now()+365*24*60*60*1000});
+    localStorage.setItem('rattanaUser', _sess);
+    // backup ใน cookie กันกรณี localStorage ถูกล้าง
+    const _expDate = new Date(Date.now()+365*24*60*60*1000).toUTCString();
+    document.cookie = 'rattanaUser='+encodeURIComponent(_sess)+'; expires='+_expDate+'; path=/; SameSite=Strict';
     startApp();
   } catch(e) {
     console.error(e);
@@ -947,11 +951,22 @@ function showLoginError(msg) {
 }
 function checkSession() {
   try {
-    const raw = localStorage.getItem('rattanaUser');
+    let raw = localStorage.getItem('rattanaUser');
+    // fallback: อ่านจาก cookie ถ้า localStorage ว่าง
+    if (!raw) {
+      const m = document.cookie.match(/(?:^|;\s*)rattanaUser=([^;]*)/);
+      if (m) raw = decodeURIComponent(m[1]);
+    }
     if (!raw) return;
     const {data, exp} = JSON.parse(raw);
-    if (Date.now() > exp) { localStorage.removeItem('rattanaUser'); return; }
+    if (Date.now() > exp) {
+      localStorage.removeItem('rattanaUser');
+      document.cookie = 'rattanaUser=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+      return;
+    }
     currentUser = data;
+    // sync กลับ localStorage ถ้าหายไป
+    localStorage.setItem('rattanaUser', raw);
     startApp();
   } catch { localStorage.removeItem('rattanaUser'); }
 }
@@ -1165,7 +1180,7 @@ function _clearAllCaches() {
   const toRemove = [];
   for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && !keep.has(k)) toRemove.push(k); }
   toRemove.forEach(k => localStorage.removeItem(k));
-  _rsSlmnIdx = null; _rsAvgIdx = null; _rsBpRaw = null;
+  _rsSlmnIdx = null; _rsAvgIdx = null; _rsBpRaw = null; localStorage.removeItem('allSalesData');
   skuImageMap = {}; productImageMap = {};
   lowStoreLoaded = false; Object.keys(lowHistByCode).forEach(k => delete lowHistByCode[k]);
   tgtState.allSalesRaw = []; tgtState.bpRaw = []; tgtState.customerRaw = [];
@@ -2362,76 +2377,51 @@ async function renderRouteStore() {
   if (_rsLoading) return;
   const tbody = document.getElementById('rsTbody');
 
-  // ── 1. โหลด Customer sheet ถ้ายังไม่มี ──
-  if (!tgtState.customerRaw || !tgtState.customerRaw.length) {
+  // ── โหลดข้อมูลที่จำเป็นพร้อมกันทั้งหมด (parallel) ──
+  const _rsNeedCust  = !tgtState.customerRaw?.length;
+  const _rsNeedBp    = !_rsBpRaw && !(allRawRows?.length) && !(tgtState.bpRaw?.length);
+  const _rsNeedSlmn  = !_rsSlmnIdx;
+  const _rsNeedAvg   = !_rsAvgIdx;
+  if (_rsNeedCust || _rsNeedBp || _rsNeedSlmn || _rsNeedAvg) {
     _rsLoading = true;
-    tbody.innerHTML = '<tr class="empty-row"><td colspan="8">⏳ กำลังโหลดข้อมูลร้านค้า…</td></tr>';
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="8">⏳ กำลังโหลดข้อมูล…</td></tr>';
     try {
-      tgtState.customerRaw = await fetchSheet(CUSTOMER_SHEET_ID, CUSTOMER_SHEET_NAME);
+      const [_custR, _bpR, _slmnR, _avgR] = await Promise.all([
+        _rsNeedCust ? fetchSheet(CUSTOMER_SHEET_ID, CUSTOMER_SHEET_NAME).catch(()=>null) : Promise.resolve(null),
+        _rsNeedBp   ? fetchSheet(SALES_SHEET_ID, SALES_SHEET).catch(()=>null) : Promise.resolve(null),
+        _rsNeedSlmn ? (getCached('slmnData') || fetchSheet(SLMN_SHEET_ID, SLMN_SHEET_NAME).then(r=>{setCache('slmnData',r);return r;}).catch(()=>[])) : Promise.resolve(null),
+        _rsNeedAvg  ? (getCached('allSalesData') || fetchSheet(ALL_SALES_SHEET_ID, ALL_SALES_SHEET_NAME).then(r=>{setCache('allSalesData',r);return r;}).catch(()=>[])) : Promise.resolve(null),
+      ]);
+      if (_custR) tgtState.customerRaw = _custR;
+      if (_bpR)  _rsBpRaw = _bpR;
+      else if (!_rsBpRaw) _rsBpRaw = allRawRows?.length ? allRawRows : tgtState.bpRaw || [];
+      if (_slmnR && !_rsSlmnIdx) {
+        _rsSlmnIdx = new Map();
+        _slmnR.forEach(r => { const nm=String(r['SLMN_NAME']||'').trim(),cd=String(r['SLMN_CODE']||'').trim(); if(nm) _rsSlmnIdx.set(nm,cd); });
+      }
+      if (_avgR && !_rsAvgIdx) {
+        const allMonths=[...new Set(_avgR.map(r=>String(r['Month_Year']||'').trim()).filter(Boolean))].sort((a,b)=>b.localeCompare(a));
+        const last3Months=new Set(allMonths.slice(0,3));
+        const sumIdx=new Map();
+        _avgR.forEach(r=>{
+          if(!last3Months.has(String(r['Month_Year']||'').trim())) return;
+          const seller=_rsStripKhun(String(r['Sale_No_ROO']||r['Sale NO ROO']||'').trim());
+          const cust=_rsNormCust(r['Customer_Name']||'');
+          if(!seller||!cust) return;
+          const key=seller+'§'+cust;
+          sumIdx.set(key,(sumIdx.get(key)||0)+(parseFloat(String(r['Exvat']||r['EXVat']||'0').replace(/,/g,''))||0));
+        });
+        _rsAvgIdx=new Map(); sumIdx.forEach((sum,key)=>_rsAvgIdx.set(key,sum/3));
+      }
     } catch(e) {
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="8">โหลดข้อมูล Customer ไม่สำเร็จ</td></tr>';
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="8">โหลดข้อมูลไม่สำเร็จ</td></tr>';
       _rsLoading = false; return;
     }
     _rsLoading = false;
   }
 
-  // ── 2. โหลด BP sheet ถ้ายังไม่มี ──
-  if (!_rsBpRaw) {
-    const src = (allRawRows && allRawRows.length) ? allRawRows
-              : (tgtState.bpRaw && tgtState.bpRaw.length) ? tgtState.bpRaw
-              : null;
-    if (src) {
-      _rsBpRaw = src;
-    } else {
-      _rsLoading = true;
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="7">⏳ กำลังโหลดข้อมูลยอดขาย…</td></tr>';
-      try {
-        _rsBpRaw = await fetchSheet(SALES_SHEET_ID, SALES_SHEET);
-      } catch(e) {
-        tbody.innerHTML = '<tr class="empty-row"><td colspan="8">โหลดข้อมูล BP ไม่สำเร็จ</td></tr>';
-        _rsLoading = false; return;
-      }
-      _rsLoading = false;
-    }
-  }
-
-  // ── 2b. โหลด SLMN sheet ถ้ายังไม่มี ──
-  if (!_rsSlmnIdx) {
-    try {
-      const slmnRows = await fetchSheet(SLMN_SHEET_ID, SLMN_SHEET_NAME);
-      _rsSlmnIdx = new Map();
-      slmnRows.forEach(r => {
-        const name = String(r['SLMN_NAME']||'').trim();
-        const code = String(r['SLMN_CODE']||'').trim();
-        if (name) _rsSlmnIdx.set(name, code);
-      });
-    } catch(e) { _rsSlmnIdx = new Map(); }
-  }
-
-  // ── 2c. โหลด All Sales → AVG index ──
-  if (!_rsAvgIdx) {
-    try {
-      const allSalesRows = await fetchSheet(ALL_SALES_SHEET_ID, ALL_SALES_SHEET_NAME);
-      // หา 3 เดือนล่าสุดจาก Month_Year
-      const allMonths = [...new Set(allSalesRows.map(r => String(r['Month_Year']||'').trim()).filter(Boolean))];
-      allMonths.sort((a,b) => b.localeCompare(a));
-      const last3Months = new Set(allMonths.slice(0,3));
-      const sumIdx = new Map(); // key → sum Exvat
-      allSalesRows.forEach(r => {
-        const month  = String(r['Month_Year']||'').trim();
-        if (!last3Months.has(month)) return;
-        const seller = _rsStripKhun(String(r['Sale_No_ROO'] || r['Sale NO ROO'] || '').trim());
-        const cust   = _rsNormCust(r['Customer_Name'] || '');
-        if (!seller || !cust) return;
-        const key = seller + '§' + cust;
-        const v = parseFloat(String(r['Exvat'] || r['EXVat'] || '0').replace(/,/g,'')) || 0;
-        sumIdx.set(key, (sumIdx.get(key) || 0) + v);
-      });
-      _rsAvgIdx = new Map();
-      sumIdx.forEach((sum, key) => _rsAvgIdx.set(key, sum / 3));
-    } catch(e) { _rsAvgIdx = new Map(); }
-  }
-
+  const _rsIsAdmin = (currentUser?.role || 0) >= 5;
+  const _rsMyName  = _rsIsAdmin ? null : String(currentUser?.name || '').trim();
   const rows = tgtState.customerRaw || [];
   if (!rows.length) {
     tbody.innerHTML = '<tr class="empty-row"><td colspan="7">ไม่พบข้อมูลในชีต Customer</td></tr>';
@@ -2486,6 +2476,7 @@ async function renderRouteStore() {
   const sellF      = document.getElementById('rsSellerFilter')?.value||'';
   const onlySales  = document.getElementById('rsOnlySales')?.checked;
   let filtered = rows.filter(r => {
+    if (!_rsIsAdmin && _rsMyName && (r[sellerKey]||'').trim() !== _rsMyName) return false;
     if (routeF && (r[routeKey]||'').trim() !== routeF) return false;
     if (sellF  && (r[sellerKey]||'').trim() !== sellF) return false;
     if (q && ![(r[routeKey]||''),(r[nameKey]||''),(r[sellerKey]||''),(r[codeKey]||'')].some(v=>v.normalize('NFC').includes(q))) return false;
@@ -2550,46 +2541,81 @@ async function renderRouteStore() {
       wIdx.get(key)[wk] = (wIdx.get(key)[wk] || 0) + (parseFloat(String(r['EXVat']||'0').replace(/,/g,'')) || 0);
     });
     const fmtW = v => v > 0 ? Math.round(v).toLocaleString('th-TH') : '<span style="color:var(--muted)">-</span>';
-    // คำนวณ WEEKNUM ของเดือนนี้ (จำนวนวีคทั้งหมด และวีคปัจจุบัน)
-    const _now = new Date();
-    const _firstDow = new Date(_now.getFullYear(), _now.getMonth(), 1).getDay();
-    const _lastDay  = new Date(_now.getFullYear(), _now.getMonth() + 1, 0).getDate();
+    // คำนวณ WEEKNUM ของเดือนนี้
+    const _now = new Date(); _now.setHours(0,0,0,0);
+    const _yr2 = _now.getFullYear(), _mo2 = _now.getMonth();
+    const _firstDow = new Date(_yr2, _mo2, 1).getDay();
+    const _lastDay  = new Date(_yr2, _mo2 + 1, 0).getDate();
     const _maxWkNum = Math.ceil((_lastDay + _firstDow) / 7);
     const _allWks   = Array.from({length: _maxWkNum}, (_, i) => 'w' + (i + 1));
     const _curWkNum = Math.ceil((_now.getDate() + _firstDow) / 7);
-    const _pastWks  = _allWks.slice(0, _curWkNum - 1);
+    // หาวันรูทจริงในแต่ละวีค (สำหรับแบบ B)
+    const thDayToJS2 = {'จันทร์':1,'อังคาร':2,'พุธ':3,'พฤหัสบดี':4,'พฤหัส':4,'ศุกร์':5,'เสาร์':6,'อาทิตย์':0};
+    // _routeDayInWk(routeDow, wkIdx) → วันที่ในเดือนของวันรูทในวีคนั้น หรือ null ถ้าไม่มี
+    const _routeDayInWk = (routeDow, wkIdx) => {
+      const w = wkIdx + 1;
+      const s = Math.max(1, (w-1)*7 - _firstDow + 1);
+      const e = Math.min(_lastDay, w*7 - _firstDow);
+      for (let d = s; d <= e; d++) {
+        if (new Date(_yr2, _mo2, d).getDay() === routeDow) return d;
+      }
+      return null;
+    };
+    // คำนวณช่วงวันที่ของแต่ละวีค
+    const _wkRange = _allWks.map((_, i) => {
+      const w = i + 1;
+      const s = Math.max(1, (w-1)*7 - _firstDow + 1);
+      const e = Math.min(_lastDay, w*7 - _firstDow);
+      return s === e ? `${s}` : `${s}-${e}`;
+    });
     // อัพเดท thead ให้ตรงกับจำนวนวีคในเดือนนี้
     const _theadRow = document.getElementById('rsThead2Row');
     if (_theadRow) {
-      const _totalCols = 6 + _maxWkNum + 1;
       _theadRow.innerHTML = `<th style="width:36px">#</th>
         <th>ชื่อรูท</th><th>รหัสบีพลัส</th><th>ชื่อร้านค้า</th>
         <th>เซลล์ผู้ดูแล</th><th>รหัสเซลล์</th>
-        ${_allWks.map(w=>`<th style="text-align:right">${w.toUpperCase()}</th>`).join('')}
+        ${_allWks.map((w,i)=>`<th style="text-align:right">${w.toUpperCase()}<br><span style="font-weight:400;font-size:10px;opacity:.7">${_wkRange[i]}</span></th>`).join('')}
+        <th style="text-align:right">AVG<br><span style="font-weight:400;font-size:10px;opacity:.7">3 เดือน</span></th>
         <th style="text-align:right">ไม่ซื้อ</th>`;
     }
     // sort ใหม่: วันรูท → ชื่อเซลล์ → ชื่อร้าน
-    const filtered2 = [...filtered].sort((a,b) => {
-      const sc = (a[sellerKey]||'').localeCompare(b[sellerKey]||'','th');
+    // คำนวณ missed ก่อน sort
+    const _calcMissed = (r) => {
+      const name2 = (r[nameKey]||'').trim(), seller2 = (r[sellerKey]||'').trim();
+      const route2 = (r[routeKey]||'').trim();
+      const wData = wIdx.get(normName(name2) + '§' + normStr(seller2)) || {};
+      const routeDow2 = thDayToJS2[route2] ?? -1;
+      let m = 0;
+      _allWks.forEach((wk, wi) => {
+        const routeDate = routeDow2 >= 0 ? _routeDayInWk(routeDow2, wi) : null;
+        const roundPassed = routeDow2 >= 0 ? (routeDate != null && new Date(_yr2, _mo2, routeDate) < _now) : wi < _curWkNum - 1;
+        if (!roundPassed) return;
+        if ((wData[wk]||0) === 0) m++;
+      });
+      return m;
+    };
+    const filtered2 = [...filtered].map(r => {
+      const name2 = (r[nameKey]||'').trim(), seller2 = (r[sellerKey]||'').trim();
+      const avg = (_rsAvgIdx && _rsAvgIdx.get(_rsStripKhun(seller2) + '§' + _rsNormCust(name2))) || 0;
+      return {r, missed: _calcMissed(r), avg};
+    }).sort((a,b) => {
+      const sc = (a.r[sellerKey]||'').localeCompare(b.r[sellerKey]||'','th');
       if (sc !== 0) return sc;
-      const ra = (dayOrder[(a[routeKey]||'').trim()]||99), rb = (dayOrder[(b[routeKey]||'').trim()]||99);
-      if (ra !== rb) return ra - rb;
-      const va = bpIdx.get(normName((a[nameKey]||'').trim())+'§'+normStr((a[sellerKey]||'').trim()))||0;
-      const vb = bpIdx.get(normName((b[nameKey]||'').trim())+'§'+normStr((b[sellerKey]||'').trim()))||0;
-      return va - vb;
+      const ra = (dayOrder[(a.r[routeKey]||'').trim()]||99), rb2 = (dayOrder[(b.r[routeKey]||'').trim()]||99);
+      if (ra !== rb2) return ra - rb2;
+      if (b.missed !== a.missed) return b.missed - a.missed;
+      return b.avg - a.avg; // ถ้าไม่ซื้อเท่ากัน เรียง AVG มากสุดก่อน
     });
     let html2 = '', lastRoute2 = null, lastSeller2 = null;
-    filtered2.forEach((r, i) => {
+    filtered2.forEach(({r, missed, avg}, i) => {
       const route2    = (r[routeKey]||'').trim();
       const code2     = String(r[codeKey]||'').trim();
       const name2     = (r[nameKey]||'').trim();
       const seller2   = (r[sellerKey]||'').trim();
       const slmnCode2 = (_rsSlmnIdx && _rsSlmnIdx.get(seller2)) || '';
-      const wData    = wIdx.get(normName(name2) + '§' + normStr(seller2)) || {};
-      const curWkKey = 'w' + _curWkNum;
-      const boughtCur = (wData[curWkKey]||0) > 0;
-      const missed   = boughtCur ? 0 : _pastWks.filter(wk => (wData[wk]||0) === 0).length;
-      const _totalCols = 6 + _maxWkNum + 1;
+      const wData   = wIdx.get(normName(name2) + '§' + normStr(seller2)) || {};
+      const avgVal2  = avg;
+      const _totalCols = 6 + _maxWkNum + 2;
       if (seller2 && seller2 !== lastSeller2) {
         lastSeller2 = seller2; lastRoute2 = null;
         html2 += `<tr style="background:rgba(26,43,93,.12)"><td colspan="${_totalCols}" style="padding:5px 10px;font-size:12px;font-weight:700;color:var(--navy)">👤 ${escH(seller2)}${slmnCode2 ? ' · '+escH(slmnCode2) : ''}</td></tr>`;
@@ -2606,10 +2632,11 @@ async function renderRouteStore() {
         <td>${escH(seller2)}</td>
         <td class="code">${escH(slmnCode2)}</td>
         ${_allWks.map(w=>`<td class="num">${fmtW(wData[w]||0)}</td>`).join('')}
+        <td class="num" style="color:var(--info)">${avgVal2>0?Math.round(avgVal2).toLocaleString('th-TH'):'-'}</td>
         <td class="num" style="font-weight:700;color:${missed>0?'var(--danger)':'var(--muted)'}">${missed>0?missed+' รอบ':'-'}</td>
       </tr>`;
     });
-    tbody2.innerHTML = html2 || `<tr class="empty-row"><td colspan="${6+_maxWkNum+1}">ไม่พบข้อมูล</td></tr>`;
+    tbody2.innerHTML = html2 || `<tr class="empty-row"><td colspan="${6+_maxWkNum+2}">ไม่พบข้อมูล</td></tr>`;
   }
 
   // ── ตาราง 2: ร้านต่ำกว่า Effective Outlet ──
@@ -5155,6 +5182,73 @@ function renderSummaryTab() {
       <span style="font-weight:600;color:var(--text)">${value??'-'}</span>
     </div>`;
 
+  // ── Route missed stores by seller (for today's route day) ──
+  const _routeMissedBySeller = (() => {
+    if (!tgtState.customerRaw?.length || !_rsBpRaw?.length) return new Map();
+    const _n = new Date(); _n.setHours(0,0,0,0);
+    const _yr3=_n.getFullYear(), _mo3=_n.getMonth();
+    const _fd3 = new Date(_yr3,_mo3,1).getDay();
+    const _ld3 = new Date(_yr3,_mo3+1,0).getDate();
+    const _mxWk3 = Math.ceil((_ld3+_fd3)/7);
+    const _allWks3 = Array.from({length:_mxWk3},(_,i)=>'w'+(i+1));
+    const _todayDow = _n.getDay();
+    const thDowToName = {0:'อาทิตย์',1:'จันทร์',2:'อังคาร',3:'พุธ',4:'พฤหัส',5:'ศุกร์',6:'เสาร์'};
+    const todayRouteName = thDowToName[_todayDow];
+    const thDayToJS3 = {'จันทร์':1,'อังคาร':2,'พุธ':3,'พฤหัสบดี':4,'พฤหัส':4,'ศุกร์':5,'เสาร์':6,'อาทิตย์':0};
+    // wIdx3: normName§normSeller → {w1,w2,...}
+    const wIdx3 = new Map();
+    _rsBpRaw.forEach(r => {
+      const cname  = String(r['Customer_Name']||'').trim();
+      const seller = String(r['Sale NO ROO']||'').trim();
+      if (!cname||!seller) return;
+      const ds = String(r['Doc_Date']||'').trim();
+      const dt3 = ds ? new Date(ds.replace(/(\d+)\/(\d+)\/(\d+)/,'$3-$2-$1')) : null;
+      if (!dt3||isNaN(dt3)) return;
+      const fd3 = new Date(dt3.getFullYear(),dt3.getMonth(),1).getDay();
+      const wk3 = 'w'+Math.ceil((dt3.getDate()+fd3)/7);
+      const key3 = cname+'§'+seller;
+      if (!wIdx3.has(key3)) wIdx3.set(key3,{});
+      wIdx3.get(key3)[wk3] = (wIdx3.get(key3)[wk3]||0) + (parseFloat(String(r['EXVat']||'0').replace(/,/g,''))||0);
+    });
+    const _routeDayInWk3 = (dow, wi) => {
+      const w=wi+1, s=Math.max(1,(w-1)*7-_fd3+1), e=Math.min(_ld3,w*7-_fd3);
+      for (let d=s;d<=e;d++) if (new Date(_yr3,_mo3,d).getDay()===dow) return d;
+      return null;
+    };
+    const custRows = tgtState.customerRaw;
+    const sampleK = Object.keys(custRows[0]||{});
+    const findK3 = terms => sampleK.find(k=>terms.some(t=>k.replace(/[\s_]/g,'').toUpperCase().includes(t.toUpperCase())));
+    const rKey3 = findK3(['ชื่อรูท','รูท'])||'ชื่อรูท';
+    const nKey3 = findK3(['ชื่อร้านค้า','ร้านค้า'])||'ชื่อร้านค้า';
+    const sKey3 = findK3(['เซลล์ผู้ดูแล','เซลล์'])||'เซลล์ผู้ดูแล';
+    const res = new Map();
+    custRows.forEach(r => {
+      const route3  = (r[rKey3]||'').trim();
+      if (route3 !== todayRouteName) return;
+      const name3   = (r[nKey3]||'').trim();
+      const seller3 = (r[sKey3]||'').trim();
+      if (!name3||!seller3) return;
+      const wData3 = wIdx3.get(name3+'§'+seller3)||{};
+      const dow3 = thDayToJS3[route3]??-1;
+      let missed3 = 0;
+      _allWks3.forEach((wk,wi) => {
+        const rd = dow3>=0 ? _routeDayInWk3(dow3,wi) : null;
+        const passed = dow3>=0 ? (rd!=null && new Date(_yr3,_mo3,rd)<_n) : wi<Math.ceil((_n.getDate()+_fd3)/7)-1;
+        if (!passed) return;
+        if ((wData3[wk]||0)===0) missed3++;
+      });
+      if (missed3 <= 0) return;
+      const avg3 = (_rsAvgIdx && _rsAvgIdx.get(_rsStripKhun(seller3)+'§'+_rsNormCust(name3)))||0;
+      if (!res.has(seller3)) res.set(seller3,[]);
+      res.get(seller3).push({name:name3, missed:missed3, avg:avg3});
+    });
+    res.forEach((arr,k) => {
+      arr.sort((a,b) => b.missed!==a.missed ? b.missed-a.missed : b.avg-a.avg);
+      res.set(k, arr.slice(0,3));
+    });
+    return res;
+  })();
+
   // ── Person cards ──
   const personCardsHtml = personList.map((p,i)=>{
     const pct=p.bpPct, col=avatarColors[i%avatarColors.length];
@@ -5280,6 +5374,27 @@ function renderSummaryTab() {
           <div style="text-align:right;margin-top:4px"><button onclick="mpGoTo(${selVal});setTimeout(()=>mpSwitchView('brand'),400)" style="font-size:9px;background:rgba(255,255,255,.12);color:rgba(255,255,255,.65);border:none;border-radius:4px;padding:2px 8px;cursor:pointer;font-family:inherit">ดูทั้งหมด →</button></div>
         </div>`;
       })()}
+      ${(()=>{
+        const todayStores = _routeMissedBySeller.get(p.name)||[];
+        if (!todayStores.length) return '';
+        const thDowToName2 = {0:'อาทิตย์',1:'จันทร์',2:'อังคาร',3:'พุธ',4:'พฤหัส',5:'ศุกร์',6:'เสาร์'};
+        const todayDayName = thDowToName2[new Date().getDay()]||'';
+        const rows2 = todayStores.map(s=>`
+          <div style="display:grid;grid-template-columns:1fr 52px 48px;gap:4px;align-items:center;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.07)">
+            <div style="font-size:10px;color:rgba(255,255,255,.9);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.name}">${s.name}</div>
+            <div style="font-size:10px;text-align:right;color:rgba(255,255,255,.6)">${s.avg>0?fmtNum(s.avg):'-'}</div>
+            <div style="font-size:10px;text-align:center"><span style="background:rgba(220,60,60,.6);border-radius:4px;padding:1px 6px;font-weight:700;color:#fff">${s.missed} รอบ</span></div>
+          </div>`).join('');
+        return `<div style="grid-column:span 2;background:rgba(140,30,30,.25);border-radius:8px;padding:7px 10px;display:flex;flex-direction:column">
+          <div style="font-size:9px;color:rgba(255,200,200,.7);font-weight:700;margin-bottom:4px;letter-spacing:.3px">🚫 ร้านไม่ซื้อตามรูท${todayDayName?` (${todayDayName})`:''}</div>
+          <div style="display:grid;grid-template-columns:1fr 52px 48px;gap:4px;margin-bottom:3px;padding-bottom:3px;border-bottom:1px solid rgba(255,255,255,.1);align-items:center">
+            <div style="font-size:7px;color:rgba(255,255,255,.4)">ร้านค้า</div>
+            <div style="font-size:7px;color:rgba(255,255,255,.35);text-align:right">AVG 3M</div>
+            <div style="font-size:7px;color:rgba(255,255,255,.35);text-align:center">ไม่ซื้อ</div>
+          </div>
+          ${rows2}
+        </div>`;
+      })()}
     </div>
   </div>
 </div>
@@ -5383,6 +5498,14 @@ function exportSummaryExcel() {
 </body>
 </html>
 <!-- v9.9 -->
+
+
+
+
+
+
+
+
 
 
 
