@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.04</title>
+<title>HR Rattana v5.05</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3423,7 +3423,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.4';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.5';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -10716,9 +10716,45 @@ function openAttendanceCalendar() {
   _calYear  = now.getFullYear();
   _calMonth = now.getMonth();
   _calRemoteCache = {};   // v12.3: เปิดปฏิทินใหม่ = ดึงข้อมูลระบบสด (เผื่อเพิ่งยื่นแก้เวลา)
+  _calMonthCache = {};    // v12.5: โหลดสีทั้งเดือนจากระบบใหม่ทุกครั้งที่เปิด
   document.getElementById('calendarModal').style.display = 'block';
   _buildCalAttData();
   _renderCal();
+  _loadCalMonthFromServer_();
+}
+
+/* v12.5: ดึงสแกน "ทั้งเดือน" ของ user จากระบบมาระบายสีตาราง — เดิมสีอ่านจาก log เครื่องอย่างเดียว
+   คนที่สแกนผ่าน kiosk/เครื่องอื่นเลยขึ้นเทา (ไม่มีสแกน) ทั้งที่ระบบมีข้อมูล (เคส 10,12 ส.ค. ของ 12023)
+   backend ≥ v4.1 กรองเดือนให้จากเซิร์ฟเวอร์; backend เก่าจะคืนรายการล่าสุดของคนนั้น → กรองเดือนซ้ำในแอป */
+let _calMonthCache = {};   // 'MM/yyyy' → { 'y-m-d': [{ms,type,hhmm}] }
+function _calMonthKey_() { return String(_calMonth + 1).padStart(2, '0') + '/' + _calYear; }
+async function _loadCalMonthFromServer_() {
+  if (!currentUser || !config.appsScriptUrl) return;
+  const mk = _calMonthKey_();
+  if (_calMonthCache[mk]) return;
+  try {
+    const res = await callAppsScript('getCheckinLog', { empId: currentUser.empId, month: mk, limit: 250 });
+    const wantY = parseInt(mk.slice(3), 10), wantM = parseInt(mk, 10);
+    const byDay = {};
+    (res.logs || []).filter(r => String(r.empId) === String(currentUser.empId)).forEach(r => {
+      const ms = new Date(r.timestamp).getTime() || 0;
+      if (!ms) return;
+      const d = new Date(ms);
+      if (d.getFullYear() !== wantY || (d.getMonth() + 1) !== wantM) return;
+      const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+      (byDay[key] = byDay[key] || []).push({ ms, type: r.type === 'out' ? 'out' : 'in', hhmm: _hhmmFromSheetTime_(r.time, ms), remote: true });
+    });
+    _calMonthCache[mk] = byDay;
+    // ยังเปิดเดือนเดิมอยู่ → ระบายสีใหม่ + ถ้ามีวันที่กดดูค้างไว้ วาดรายละเอียดกลับ
+    const modal = document.getElementById('calendarModal');
+    if (_calMonthKey_() === mk && modal && modal.style.display !== 'none') {
+      _renderCal();
+      if (_calSelKey) {
+        const parts = _calSelKey.split('-');
+        if (parseInt(parts[0], 10) === _calYear && parseInt(parts[1], 10) === _calMonth) calSelectDay(parseInt(parts[2], 10));
+      }
+    }
+  } catch (_) {}   // เน็ตล่ม — ตารางใช้ข้อมูลเครื่องตามเดิม
 }
 
 function closeAttendanceCalendar() {
@@ -10745,8 +10781,8 @@ function _buildCalAttData() {
   });
 }
 
-function calPrevMonth() { _calMonth--; if (_calMonth < 0) { _calMonth = 11; _calYear--; } _renderCal(); }
-function calNextMonth() { _calMonth++; if (_calMonth > 11) { _calMonth = 0;  _calYear++; } _renderCal(); }
+function calPrevMonth() { _calMonth--; if (_calMonth < 0) { _calMonth = 11; _calYear--; } _renderCal(); _loadCalMonthFromServer_(); }
+function calNextMonth() { _calMonth++; if (_calMonth > 11) { _calMonth = 0;  _calYear++; } _renderCal(); _loadCalMonthFromServer_(); }
 
 function _renderCal() {
   const MONTHS_TH = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน',
@@ -10760,6 +10796,18 @@ function _renderCal() {
   const firstDay = new Date(_calYear, _calMonth, 1).getDay();  // 0=Sun
   const daysInMonth = new Date(_calYear, _calMonth + 1, 0).getDate();
   const today = new Date();
+
+  // v12.5: ข้อมูลเดือนจากระบบ (สแกนผ่าน kiosk/เครื่องอื่น) — ใช้ทั้งระบายสีและขยับจุดเริ่ม "วันแรกที่มีข้อมูล"
+  const mcache = _calMonthCache[_calMonthKey_()] || null;
+  let firstMs = _calFirstMs;
+  if (mcache) Object.keys(mcache).forEach(k => {
+    const rs = mcache[k];
+    if (rs && rs.length) {
+      const d0 = new Date(rs[0].ms);
+      const mid = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate()).getTime();
+      if (!firstMs || mid < firstMs) firstMs = mid;
+    }
+  });
 
   let html = '';
   // blank cells before first day
@@ -10778,17 +10826,19 @@ function _renderCal() {
     let bg  = '';
     let textColor = isWeekend ? 'var(--danger)' : 'var(--text)';
 
-    if (att && (att.ins.length > 0 || att.outs.length > 0)) {
-      const hasIn  = att.ins.length  > 0;
-      const hasOut = att.outs.length > 0;
+    // v12.5: นับรวมสแกนจากระบบ (kiosk/เครื่องอื่น) ด้วย — สีจะตรงความจริงตั้งแต่เปิดปฏิทิน
+    const srv = mcache ? (mcache[key] || null) : null;
+    const hasIn  = (att ? att.ins.length  : 0) + (srv ? srv.filter(r => r.type === 'in').length  : 0) > 0;
+    const hasOut = (att ? att.outs.length : 0) + (srv ? srv.filter(r => r.type === 'out').length : 0) > 0;
+    if (hasIn || hasOut) {
       if (hasIn && hasOut) { bg = 'rgba(46,204,113,.15)'; dot = '<div style="width:5px;height:5px;background:var(--success);border-radius:50%;margin:1px auto 0"></div>'; }
       // v12.4: มีแต่ออก (ไม่มีเข้า) ก็ไม่ครบเหมือนกัน — เดิมไม่ติดสีเลย
       else { bg = 'rgba(243,156,18,.15)'; dot = '<div style="width:5px;height:5px;background:var(--warning);border-radius:50%;margin:1px auto 0"></div>'; }
-    } else if (dow !== 0 && _calFirstMs) {
+    } else if (dow !== 0 && firstMs) {
       // v12.4: วันทำงานที่ผ่านมาแล้ว "ไม่มีสแกนเลย" = เทา (ไม่นับ อาทิตย์ / วันอนาคต-วันนี้ / ก่อนวันแรกที่มีข้อมูล)
       const cellMs  = new Date(_calYear, _calMonth, d).getTime();
       const todayMid = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
-      if (cellMs < todayMid && cellMs >= _calFirstMs) {
+      if (cellMs < todayMid && cellMs >= firstMs) {
         bg = 'rgba(127,140,141,.16)';
         dot = '<div style="width:5px;height:5px;background:var(--muted);border-radius:50%;margin:1px auto 0"></div>';
       }
@@ -10889,6 +10939,9 @@ function calSelectDay(d) {
     render(merged, '');
   };
 
+  // v12.5: ถ้าโหลดข้อมูลทั้งเดือนไว้แล้ว — ใช้เลย ไม่ต้องยิงรายวัน (ครอบคลุมแม้วันที่ระบบก็ว่าง)
+  const mkNow = _calMonthKey_();
+  if (_calMonthCache[mkNow]) { applyServer(_calMonthCache[mkNow][key] || []); return; }
   if (_calRemoteCache[cacheKey]) { applyServer(_calRemoteCache[cacheKey]); return; }
   if (!config.appsScriptUrl) { render(localRows, ''); return; }
 
