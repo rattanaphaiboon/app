@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v3.92</title>
+<title>Rattana Online Order v3.93</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -620,7 +620,7 @@ body.dark .seg-tab.on{background:var(--gold);color:var(--navy);border-color:var(
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.92</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v3.93</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -1001,6 +1001,13 @@ function lsSet(k,v){
   }
 }
 async function getData(key,fn){ try{const d=await fn(); setCache(key,d); return d;}catch(e){ const c=getCached(key,true); if(c) return c; throw e; } }
+/* ⭐ v3.93 — เหมือน getData แต่แคชลง IndexedDB แทน localStorage (สำหรับข้อมูลก้อนใหญ่)
+   rop_whmap ก้อนเดียว = 993KB ใหญ่สุดของ ROO (ทั้งแอปใช้ ~2MB บนโดเมนที่แชร์กับแอปอื่น 60+ ตัวจนเต็ม)
+   พอ quota เต็ม lsSet ล้มเงียบทั้งกระดาน รวมถึง rop_orderId → เกิดบั๊กเลขบิลร่างหลุด (ดู draftOrderId v3.93) */
+async function getDataIdb(key,fn){
+  try{ const d=await fn(); idbSet(key,d); try{ localStorage.removeItem(key); }catch(e){} return d; }
+  catch(e){ const c=await idbGet(key); if(c) return c; throw e; }
+}
 /* IndexedDB cache — สำหรับข้อมูลก้อนใหญ่ (สินค้า ~10MB) ที่ใหญ่เกิน localStorage บนมือถือ */
 function idbOpen(){ return new Promise((res,rej)=>{ const r=indexedDB.open('rop_db',1); r.onupgradeneeded=()=>r.result.createObjectStore('kv'); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
 async function idbGet(k){ try{ const db=await idbOpen(); return await new Promise(res=>{ const t=db.transaction('kv').objectStore('kv').get(k); t.onsuccess=()=>res((t.result&&t.result.data)||null); t.onerror=()=>res(null); }); }catch(e){ return null; } }
@@ -1097,8 +1104,36 @@ let cart=loadCart();               // { 'name__TYPE': {key,name,type,unitName,pr
 let removedItems=(function(){ try{return JSON.parse(localStorage.getItem('rop_removed'))||{};}catch{return{}} })();
 function saveRemoved(){ lsSet('rop_removed',JSON.stringify(removedItems)); }
 let cartUnsel=(function(){ try{return new Set(JSON.parse(localStorage.getItem('rop_unsel'))||[]);}catch{return new Set()} })();   // ชิ้นที่ "ไม่ติ๊ก" (จะไม่สั่งรอบนี้) — ที่เหลือ = ติ๊กอัตโนมัติ
-function draftOrderId(){ let id=localStorage.getItem('rop_orderId'); if(!id){ id='ORD'+Date.now(); lsSet('rop_orderId',id); } return id; }
-function resetDraft(){ localStorage.removeItem('rop_orderId'); removedItems={}; saveRemoved(); }
+/* 🚨 v3.93 — เลขบิลร่าง (orderId) ต้องไม่หลุดแม้ localStorage เขียนไม่ได้
+   บั๊กเดิม: draftOrderId() เขียนเลขลง localStorage ด้วย lsSet แล้ว "ไม่เช็คว่าเขียนติดไหม"
+   โดเมน rattanaphaiboon.github.io แชร์กับแอปอื่น 60+ ตัวจน quota เต็ม (ROO ตัวเดียวกิน ~2MB)
+   → setItem โยน QuotaExceededError เงียบ ๆ → **เรียก draftOrderId() ทีไร ได้เลขใหม่ทุกครั้ง**
+   ผลที่เกิดจริง (ร้านกิมเจริญเอ็กซ์เพรส 13/08 + ร่องรอยในชีท ORD1785779214142 กับ ORD1785779215862
+   ที่ห่างกันแค่ 1.7 วินาที = คนละเลขทั้งที่เป็นตะกร้าใบเดียว):
+     draft ครั้งที่ 1 → เขียนแถวใต้ ORD_A · draft ครั้งที่ 2 → ORD_B · กดยืนยัน → ORD_C
+     หลังบ้านหาแถวของ ORD_C ไม่เจอ → **append แถวใหม่ทั้งชุด** ส่วนแถวเดิมค้าง "รออนุมัติ" ตลอดไป
+     (ตรงกับที่ผู้ใช้เจอเป๊ะ: "ออเดอร์ไปเพิ่มแถวใหม่ แต่ที่รออนุมัติด้านบนไม่ลง ค้างไว้แบบนั้น")
+     และฝั่งลูกค้า = ตะกร้าเดี๋ยวมีเดี๋ยวหาย เพราะ getPending คืนเฉพาะ orderId ใหม่สุด
+   แก้: จำไว้ใน **หน่วยความจำ** (กันภายในเซสชัน) + **IndexedDB** (กันข้ามการรีโหลด) คู่กับ localStorage */
+let _draftOid='';
+function _setDraftOid(id){
+  _draftOid = id || '';
+  try{ if(id) lsSet('rop_orderId',id); else localStorage.removeItem('rop_orderId'); }catch(e){}
+  try{ idbSet('rop_orderId', id||''); }catch(e){}   // async best-effort — โควตาใหญ่กว่ามาก ไม่ค่อยเต็ม
+}
+function draftOrderId(){
+  let id=_draftOid;
+  if(!id){ try{ id=localStorage.getItem('rop_orderId')||''; }catch(e){} }
+  if(id){ if(!_draftOid) _draftOid=id; return id; }
+  id='ORD'+Date.now(); _setDraftOid(id); return id;
+}
+/* กู้เลขบิลร่างตอนเปิดแอป — localStorage เขียนไม่ติดตั้งแต่รอบก่อน ก็ยังได้เลขเดิมจาก IndexedDB */
+async function restoreDraftOid(){
+  if(_draftOid) return;
+  try{ const ls=localStorage.getItem('rop_orderId'); if(ls){ _draftOid=ls; return; } }catch(e){}
+  try{ const v=await idbGet('rop_orderId'); if(v) _draftOid=String(v); }catch(e){}
+}
+function resetDraft(){ _setDraftOid(''); removedItems={}; saveRemoved(); }
 function cancelItem(key){ if(cart[key]){ removedItems[key]=Object.assign({},cart[key]); saveRemoved(); delete cart[key]; } if(cartUnsel.delete(key)) saveUnsel(); }  // ลบจากตะกร้า = ทำเครื่องหมาย "ไม่อนุมัติ"
 /* ── ติ๊กเลือกสินค้าที่จะสั่ง (หน้าตะกร้า แบบ Shopee) — สั่งเฉพาะที่ติ๊ก ที่เหลือค้างในตะกร้า ── */
 function isSel(key){ return !cartUnsel.has(key); }
@@ -1214,7 +1249,7 @@ function pullCart(force){
       const items=r.items||[];
       if(r.orderId && items.length){
         window._emptyPulls=0;                           // เซิร์ฟเวอร์มีของ → รีเซ็ตตัวนับล้างตะกร้า (v3.75)
-        lsSet('rop_orderId',r.orderId);                 // ใช้ orderId ร่วมทุกเครื่อง → กันออเดอร์เบิ้ล
+        _setDraftOid(r.orderId);                        // ใช้ orderId ร่วมทุกเครื่อง → กันออเดอร์เบิ้ล (v3.93: จำในหน่วยความจำ+IDB ด้วย)
         const obj={}; items.forEach(row=>{ const it=cartItemFromRow(row); if(it){ if(obj[it.key]) obj[it.key].qty+=it.qty; else obj[it.key]=it; } });
         const sig=o=>Object.keys(o).sort().map(k=>k+'#'+o[k].qty).join('|');   // ลายเซ็นตะกร้า (key+จำนวน)
         const changed=sig(obj)!==sig(cart);
@@ -1273,6 +1308,7 @@ function clearCartState(){
   try{ if(_syncTimer){ clearTimeout(_syncTimer); _syncTimer=null; } }catch(e){}   // กัน sync ค้างยิงตะกร้าเก่าใส่ร้านใหม่
   cart={}; removedItems={}; try{ cartUnsel.clear(); }catch(e){}
   ['rop_orderId','rop_cart','rop_removed','rop_unsel'].forEach(function(k){ try{ localStorage.removeItem(k); }catch(e){} });
+  try{ _setDraftOid(''); }catch(e){}   // ⭐ v3.93: ล้างเลขบิลร่างในหน่วยความจำ+IDB ด้วย ไม่งั้นร้านใหม่หยิบเลขของร้านเก่าไปใช้
 }
 function _shopKeyOf(c){ return c ? (clean(c.name||'')+'|'+clean(c.shopCode||'')) : ''; }
 function syncCartOwner(c){
@@ -3683,6 +3719,7 @@ async function loadAll(silent){
   localStorage.removeItem('rop_products');   // ของเก่าเคยเก็บที่นี่ (28MB) — ย้ายไป IndexedDB แล้ว คืนพื้นที่
   // ── วาดทันทีจากแคช: สินค้าอ่านจาก IndexedDB, ที่เหลืออ่านจาก localStorage ──
   const small=['rop_promo','rop_users','rop_customers','rop_ea','rop_whmap','rop_special','rop_rubclaim','rop_override','rop_specialprice','rop_dcwh'].map(k=>getCached(k,true));
+  small[4]=small[4]||await idbGet('rop_whmap');   // v3.93: whmap ย้ายไป IndexedDB แล้ว (ค่าใน localStorage = ของเก่าที่ยังไม่ถูกล้าง)
   const prodCache=await idbGet('rop_products');
   const haveCache=prodCache && small.slice(0,4).every(Boolean);   // whmap/rubclaim ไม่บังคับสำหรับ instant paint
   if(haveCache){ applyData(prodCache,small[0],small[1],small[2],small[3],small[4],small[5],small[6],small[7],small[8],small[9]); renderAll(); }   // ⚡ instant paint (v3.91: +dcwh กันวาดครั้งแรกด้วยคลังผิด)
@@ -3696,7 +3733,7 @@ async function loadAll(silent){
       getData('rop_users',()=>fetchCsvGid(CFG.usersSheetId,CFG.usersGid)),
       getData('rop_customers',()=>fetchCsvGid(CFG.regSheetId,CFG.regGid)),
       getData('rop_ea',()=>fetchCsvExport(CFG.regSheetId,CFG.eaGid)),   // gviz มั่วกับชีทนี้ (รวมคอลัมน์) → ใช้ export
-      getData('rop_whmap',()=>fetchCsvExport(CFG.regSheetId,CFG.customerGid).then(buildWhByArea)),   // map พื้นที่→WH จากชีท Customer
+      getDataIdb('rop_whmap',()=>fetchCsvExport(CFG.regSheetId,CFG.customerGid).then(buildWhByArea)),   // map พื้นที่→WH จากชีท Customer (v3.93: ย้ายไป IndexedDB — 993KB ใหญ่เกินสำหรับ localStorage ที่แชร์กัน)
       getData('rop_special',()=>fetchCsvExport(CFG.regSheetId,CFG.specialGid)),   // ร้านทำราคาพิเศษ (ร้านส่ง) — ใช้ export (gviz มั่วเมื่อเพิ่มคอลัมน์)
       getData('rop_rubclaim',()=>fetchCsvExport(CFG.promoSheetId,'1980490376')),   // ชีทรับเคลม (Vendor code → เครดิต)
       getData('rop_override',()=>fetchCsvExport(CFG.promoSheetId,CFG.overrideGid)),   // Price Override (สินค้าปรับราคา → ทับ Stocksync)
@@ -3722,6 +3759,7 @@ document.addEventListener('click',e=>{
 async function boot(){
   if(localStorage.getItem('rop_dark')==='1') document.body.classList.add('dark');
   updateLogo(); checkSession();
+  try{ await restoreDraftOid(); }catch(e){}   // ⭐ v3.93: กู้เลขบิลร่างก่อนทำอย่างอื่น (กัน draft/ยืนยัน ใช้คนละเลข)
   try{ fillLoginHelp(); }catch(e){}   // v3.90: เติมปุ่มทักแชท/โทร ในกล่องช่วยเหลือหน้าเข้าสู่ระบบ
   await loadAll(false);
 }
