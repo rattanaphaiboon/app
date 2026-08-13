@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v19.42</title>
+<title>Rattana Sales Dashboard v19.43</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -408,7 +408,7 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.42</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.43</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -1236,7 +1236,7 @@ function _clearAllCaches() {
   const toRemove = [];
   for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && !keep.has(k)) toRemove.push(k); }
   toRemove.forEach(k => localStorage.removeItem(k));
-  _rsSlmnIdx = null; _rsAvgIdx = null; _rsBpRaw = null; _rsOrderIdx = null; _rsRooIdx = null; _rsCardDataBySeller = null; _rsYesterdayCardDataBySeller = null; _rsTodayNoOrderBySeller = null; localStorage.removeItem('allSalesData'); localStorage.removeItem('orderData');
+  _rsSlmnIdx = null; _rsAvgIdx = null; _rsBpRaw = null; _rsOrderIdx = null; _rsRooIdx = null; _rsCardDataBySeller = null; _rsYesterdayCardDataBySeller = null; _rsTodayNoOrderBySeller = null; localStorage.removeItem('allSalesData'); localStorage.removeItem('bpDataTab'); localStorage.removeItem('orderData');
   skuImageMap = {}; productImageMap = {};
   lowStoreLoaded = false; Object.keys(lowHistByCode).forEach(k => delete lowHistByCode[k]);
   tgtState.allSalesRaw = []; tgtState.bpRaw = []; tgtState.customerRaw = [];
@@ -5701,19 +5701,28 @@ function exportSummaryExcel() {
 
 // ── DATA TAB ─────────────────────────────────────────────────────────────────
 let _dataLoaded = false;
-let _dataRows = []; // [{seller, customer, brand, avgCs, months}]
+let _dataRows = []; // [{seller, customer, brand, avgCs, thisMonthCs}]
 
 async function loadDataTab() {
   const wrap = document.getElementById('dataTableWrap');
   if (!wrap) return;
   wrap.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)"><div class="spinner-ring" style="margin:0 auto 12px"></div>กำลังโหลด All Sales…</div>';
   try {
-    const raw = getCached('allSalesData') ||
-      await fetchSheet(ALL_SALES_SHEET_ID, ALL_SALES_SHEET_NAME).then(r => { setCache('allSalesData', r); return r; });
+    const fetchAllSales = getCached('allSalesData')
+      ? Promise.resolve(getCached('allSalesData'))
+      : fetchSheet(ALL_SALES_SHEET_ID, ALL_SALES_SHEET_NAME).then(r => { setCache('allSalesData', r); return r; });
+    const bpSrc = _rsBpRaw?.length ? _rsBpRaw : (tgtState.bpRaw?.length ? tgtState.bpRaw : null);
+    const fetchBp = bpSrc
+      ? Promise.resolve(bpSrc)
+      : (getCached('bpDataTab')
+          ? Promise.resolve(getCached('bpDataTab'))
+          : fetchSheet(SALES_SHEET_ID, SALES_SHEET).then(r => { setCache('bpDataTab', r); return r; }));
+    const [raw, bpRaw] = await Promise.all([fetchAllSales, fetchBp]);
+
     // หา 3 เดือนล่าสุดจาก Month_Year
     const months = [...new Set(raw.map(r => String(r['Month_Year']||'').trim()).filter(Boolean))].sort((a,b)=>b.localeCompare(a));
     const last3 = new Set(months.slice(0, 3));
-    // aggregate: key = seller§customer§brand → {sumCs, cnt}
+    // aggregate all-sales: key = seller§customer§brand
     const agg = new Map();
     raw.forEach(r => {
       const mo = String(r['Month_Year']||'').trim();
@@ -5729,10 +5738,20 @@ async function loadDataTab() {
       e.sumCs += cs;
       e.months.add(mo);
     });
+    // build BP map: customer_lower§brand_lower → sumCs (เดือนนี้)
+    const bpMap = new Map();
+    (bpRaw || []).forEach(r => {
+      const cust  = String(r['Customer_Name']||'').trim().toLowerCase();
+      const brand = String(r['Cat_Brand']||'').trim().toLowerCase();
+      const cs    = parseFloat(String(r['Sales_CS']||'0').replace(/,/g,'')) || 0;
+      if (!cust) return;
+      const k = cust + '§' + brand;
+      bpMap.set(k, (bpMap.get(k)||0) + cs);
+    });
     _dataRows = [...agg.values()].map(e => ({
       seller: e.seller, customer: e.customer, brand: e.brand,
       avgCs: e.sumCs / 3,
-      months: e.months.size
+      thisMonthCs: bpMap.get(e.customer.toLowerCase()+'§'+e.brand.toLowerCase()) || 0
     })).sort((a, b) => a.seller.localeCompare(b.seller, 'th') || b.avgCs - a.avgCs);
     // build seller dropdown
     const selSel = document.getElementById('dataSellerFilter');
@@ -5774,14 +5793,17 @@ function renderDataTable() {
   filtered.forEach(r => {
     if (r.seller !== lastSeller) {
       lastSeller = r.seller;
-      html += `<tr style="background:rgba(26,43,93,.08)"><td colspan="4" style="padding:6px 12px;font-size:12px;font-weight:700;color:var(--navy)">👤 ${escH(r.seller)}</td></tr>`;
+      html += `<tr style="background:rgba(26,43,93,.08)"><td colspan="5" style="padding:6px 12px;font-size:12px;font-weight:700;color:var(--navy)">👤 ${escH(r.seller)}</td></tr>`;
     }
     no++;
+    const _diff = r.thisMonthCs - r.avgCs;
+    const _diffColor = _diff >= 0 ? 'var(--success,#16a34a)' : 'var(--danger,#dc2626)';
     html += `<tr>
       <td style="color:var(--muted);font-size:11px;text-align:center;width:36px">${no}</td>
       <td style="font-size:12px;font-weight:500">${escH(r.customer)}</td>
       <td style="font-size:12px;color:var(--muted)">${escH(r.brand)||'<span style="color:var(--border)">—</span>'}</td>
       <td style="font-size:12px;text-align:right;font-weight:700;color:var(--info)">${fmtCs(r.avgCs)}</td>
+      <td style="font-size:12px;text-align:right;font-weight:700;color:${_diffColor}">${fmtCs(r.thisMonthCs)}</td>
     </tr>`;
   });
   wrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-family:inherit">
@@ -5790,6 +5812,7 @@ function renderDataTable() {
       <th style="padding:8px;font-size:11px;text-align:left">ชื่อร้านค้า</th>
       <th style="padding:8px;font-size:11px;text-align:left">Cat Brand</th>
       <th style="padding:8px;font-size:11px;text-align:right">AVG CS/เดือน</th>
+      <th style="padding:8px;font-size:11px;text-align:right">เดือนนี้ (CS)</th>
     </tr></thead>
     <tbody>${html}</tbody>
   </table>`;
