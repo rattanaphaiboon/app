@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v19.34</title>
+<title>Rattana Sales Dashboard v19.35</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -408,7 +408,7 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.34</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.35</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -5336,8 +5336,67 @@ function renderSummaryTab() {
       <span style="font-weight:600;color:var(--text)">${value??'-'}</span>
     </div>`;
 
-  // ── Route missed stores by seller: ดึงจาก _rsCardDataBySeller ที่คำนวณใน renderRouteStore() ──
-  const _routeMissedBySeller = _rsCardDataBySeller || new Map();
+  // ── Route missed stores by seller ──
+  // ใช้ข้อมูลจาก renderRouteStore() ถ้ามี ไม่งั้นคำนวณ inline
+  const _routeMissedBySeller = (() => {
+    if (_rsCardDataBySeller && _rsCardDataBySeller.size > 0) return _rsCardDataBySeller;
+    const _bpSrc = _rsBpRaw?.length ? _rsBpRaw : (allRawRows?.length ? allRawRows : tgtState.bpRaw);
+    const _custSrc = tgtState.customerRaw;
+    if (!_custSrc?.length || !_bpSrc?.length) return new Map();
+    const _n = new Date(); _n.setHours(0,0,0,0);
+    const _yr=_n.getFullYear(), _mo=_n.getMonth();
+    const _fd = new Date(_yr,_mo,1).getDay(), _ld = new Date(_yr,_mo+1,0).getDate();
+    const _mxWk = Math.ceil((_ld+_fd)/7);
+    const _wks = Array.from({length:_mxWk},(_,i)=>'w'+(i+1));
+    const _todayRN = {0:'อาทิตย์',1:'จันทร์',2:'อังคาร',3:'พุธ',4:'พฤหัส',5:'ศุกร์',6:'เสาร์'}[_n.getDay()];
+    const _dayJS = {'จันทร์':1,'อังคาร':2,'พุธ':3,'พฤหัสบดี':4,'พฤหัส':4,'ศุกร์':5,'เสาร์':6,'อาทิตย์':0};
+    const stripK = s => String(s||'').replace(/^คุณ\s*/,'').replace(/\s+/g,' ').trim();
+    const wIdx = new Map();
+    _bpSrc.forEach(r => {
+      const cn = stripK(String(r['Customer_Name']||'').trim());
+      const sl = stripK(String(r['Sale NO ROO']||'').trim());
+      if (!cn||!sl) return;
+      const ds = String(r['Doc_Date']||'').trim();
+      const dt = ds ? new Date(ds.replace(/(\d+)\/(\d+)\/(\d+)/,'$3-$2-$1')) : null;
+      if (!dt||isNaN(dt)) return;
+      const fd = new Date(dt.getFullYear(),dt.getMonth(),1).getDay();
+      const wk = 'w'+Math.ceil((dt.getDate()+fd)/7);
+      const key = cn+'§'+sl;
+      if (!wIdx.has(key)) wIdx.set(key,{});
+      wIdx.get(key)[wk] = (wIdx.get(key)[wk]||0)+(parseFloat(String(r['EXVat']||'0').replace(/,/g,''))||0);
+    });
+    const sK = Object.keys(_custSrc[0]||{});
+    const fk = terms => sK.find(k=>terms.some(t=>k.replace(/[\s_]/g,'').toUpperCase().includes(t.toUpperCase())));
+    const rKey = fk(['ชื่อรูท','รูท'])||'ชื่อรูท';
+    const nKey = fk(['ชื่อร้านค้า','ร้านค้า'])||'ชื่อร้านค้า';
+    const sKey = fk(['เซลล์ผู้ดูแล','เซลล์'])||'เซลล์ผู้ดูแล';
+    const rdInWk = (dow,wi) => { const w=wi+1,s=Math.max(1,(w-1)*7-_fd+1),e=Math.min(_ld,w*7-_fd); for(let d=s;d<=e;d++) if(new Date(_yr,_mo,d).getDay()===dow) return d; return null; };
+    const res = new Map();
+    _custSrc.forEach(r => {
+      const route = (r[rKey]||'').trim();
+      if (route !== _todayRN) return;
+      const nameFull = (r[nKey]||'').trim();
+      const name = stripK(nameFull);
+      const seller = (r[sKey]||'').trim();
+      const selK = stripK(seller);
+      if (!name||!selK) return;
+      const wData = wIdx.get(name+'§'+selK)||{};
+      const dow = _dayJS[route]??-1;
+      let missed = 0;
+      _wks.forEach((wk,wi) => {
+        const rd = dow>=0 ? rdInWk(dow,wi) : null;
+        const passed = dow>=0 ? (rd!=null&&new Date(_yr,_mo,rd)<_n) : wi<Math.ceil((_n.getDate()+_fd)/7)-1;
+        if (!passed) return;
+        if ((wData[wk]||0)===0) missed++;
+      });
+      if (missed<=0) return;
+      const avg = (_rsAvgIdx&&_rsAvgIdx.get(selK+'§'+_rsNormCust(name)))||0;
+      if (!res.has(selK)) res.set(selK,[]);
+      res.get(selK).push({name:nameFull, avg, missed});
+    });
+    res.forEach((arr,k) => { arr.sort((a,b)=>b.missed-a.missed||b.avg-a.avg); res.set(k,arr.slice(0,5)); });
+    return res;
+  })();
 
   // ── Person cards ──
   const personCardsHtml = personList.map((p,i)=>{
