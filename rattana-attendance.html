@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.02</title>
+<title>HR Rattana v5.03</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3423,7 +3423,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.2';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.3';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -10715,6 +10715,7 @@ function openAttendanceCalendar() {
   const now = new Date();
   _calYear  = now.getFullYear();
   _calMonth = now.getMonth();
+  _calRemoteCache = {};   // v12.3: เปิดปฏิทินใหม่ = ดึงข้อมูลระบบสด (เผื่อเพิ่งยื่นแก้เวลา)
   document.getElementById('calendarModal').style.display = 'block';
   _buildCalAttData();
   _renderCal();
@@ -10790,41 +10791,101 @@ function _renderCal() {
   document.getElementById('calDayDetail').innerHTML = '';
 }
 
+/* v12.3: กดดูวันในปฏิทิน = รวม log เครื่อง + ข้อมูลจากระบบ (สแกนผ่าน kiosk/เครื่องอื่น
+   ไม่อยู่ในเครื่องนี้ — เดิมแบนเนอร์เตือน "สแกน 3 ครั้ง" แต่ปฏิทินขึ้น "ไม่มีรายการ" ขัดกันเอง) */
+let _calRemoteCache = {};   // 'empId|dd/MM/yyyy' → rows จากระบบ (ต่อการเปิดปฏิทินหนึ่งครั้ง)
+let _calSelKey = '';
+
 function calSelectDay(d) {
   const key = `${_calYear}-${_calMonth}-${d}`;
-  const att = _calAttData[key];
+  _calSelKey = key;
   const MONTHS_TH = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
   const dateLabel = `${d} ${MONTHS_TH[_calMonth]} ${_calYear}`;
   const el = document.getElementById('calDayDetail');
-  if (!el) return;
+  if (!el || !currentUser) return;
 
-  if (!att || (att.ins.length === 0 && att.outs.length === 0)) {
-    el.innerHTML = `<div style="background:var(--bg);border-radius:12px;padding:14px 16px;font-size:13px;color:var(--muted);text-align:center">
-      ${dateLabel}<br>ไม่มีรายการ
+  const localRows = logs
+    .filter(l => String(l.empId) === String(currentUser.empId) && l.dateKey && (() => {
+      const dt = new Date(l.dateKey);
+      return !isNaN(dt.getTime()) && `${dt.getFullYear()}-${dt.getMonth()}-${dt.getDate()}` === key;
+    })())
+    .map(l => {
+      const ms = new Date(l.ts).getTime() || 0;
+      return { ms, type: l.type === 'out' ? 'out' : 'in',
+               hhmm: l.timeStr ? String(l.timeStr).substring(0, 5) : _hhmmFromSheetTime_('', ms), remote: false };
+    });
+
+  const render = (rowsIn, note) => {
+    const rows = rowsIn.slice().sort((a, b) => a.ms - b.ms);
+    if (rows.length === 0) {
+      el.innerHTML = `<div style="background:var(--bg);border-radius:12px;padding:14px 16px;font-size:13px;color:var(--muted);text-align:center">
+        ${dateLabel}<br>${note || 'ไม่มีรายการ'}
+      </div>`;
+      return;
+    }
+    const ins  = rows.filter(r => r.type === 'in');
+    const outs = rows.filter(r => r.type === 'out');
+    const inTime  = ins.length  ? ins[0].hhmm                 : '--:--';
+    const outTime = outs.length ? outs[outs.length - 1].hhmm  : '--:--';
+    const pairBad = (rows.length % 2 !== 0) || !ins.length || !outs.length;
+    const hasRemote = rows.some(r => r.remote);
+    const listHtml = (rows.length > 2 || hasRemote || pairBad) ? `
+      <div style="margin-top:10px">
+        ${rows.map(r => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 2px;border-bottom:1px dashed var(--border);color:var(--text)">
+          <span>${r.type === 'in' ? '🟢 เข้า' : '🔵 ออก'}</span><span>${r.hhmm} น.${r.remote ? ' ☁️' : ''}</span>
+        </div>`).join('')}
+        ${hasRemote ? '<div style="font-size:11px;color:var(--muted);margin-top:5px">☁️ = สแกนที่อยู่ในระบบ (จาก kiosk/เครื่องอื่น)</div>' : ''}
+      </div>` : '';
+    el.innerHTML = `<div style="background:var(--bg);border-radius:12px;padding:14px 16px">
+      <div style="font-weight:700;font-size:14px;color:var(--navy);margin-bottom:10px">${dateLabel}${rows.length > 2 ? ` · สแกน ${rows.length} ครั้ง` : ''}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="background:var(--card-bg);border-radius:10px;padding:10px 12px;text-align:center;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px">เข้างาน</div>
+          <div style="font-size:22px;font-weight:700;color:${ins.length ? 'var(--navy)' : 'var(--muted)'}">${inTime}</div>
+        </div>
+        <div style="background:var(--card-bg);border-radius:10px;padding:10px 12px;text-align:center;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px">ออกงาน</div>
+          <div style="font-size:22px;font-weight:700;color:${outs.length ? 'var(--navy)' : 'var(--muted)'}">${outTime}</div>
+        </div>
+      </div>
+      ${listHtml}
+      ${pairBad ? `<div style="margin-top:8px;padding:8px 10px;background:rgba(243,156,18,.1);border-radius:8px;font-size:12px;color:var(--warning);text-align:center">
+        ⚠️ ลงเวลาไม่ครบ — <button onclick="showPage('timeadjust');closeAttendanceCalendar()" style="background:none;border:0;color:var(--navy);font-weight:700;cursor:pointer;font-size:12px">ยื่นขอแก้เวลา</button>
+      </div>` : ''}
+      ${note ? `<div style="margin-top:6px;font-size:11px;color:var(--muted);text-align:center">${note}</div>` : ''}
     </div>`;
-    return;
-  }
+  };
 
-  const inTime  = att.ins.length  ? att.ins[0].substring(0,5)              : '--:--';
-  const outTime = att.outs.length ? att.outs[att.outs.length-1].substring(0,5) : '--:--';
-  const bothOk  = att.ins.length > 0 && att.outs.length > 0;
+  const ddmm = `${String(d).padStart(2, '0')}/${String(_calMonth + 1).padStart(2, '0')}/${_calYear}`;
+  const cacheKey = String(currentUser.empId) + '|' + ddmm;
+  const applyServer = (srows) => {
+    if (_calSelKey !== key) return;   // ผู้ใช้กดวันอื่นไปแล้ว — ทิ้งผลนี้
+    const merged = localRows.slice();
+    srows.forEach(r => {
+      if (merged.some(m => m.type === r.type && Math.abs(m.ms - r.ms) < 90000)) return;   // ตัวเดียวกับ log เครื่อง
+      merged.push(r);
+    });
+    render(merged, '');
+  };
 
-  el.innerHTML = `<div style="background:var(--bg);border-radius:12px;padding:14px 16px">
-    <div style="font-weight:700;font-size:14px;color:var(--navy);margin-bottom:10px">${dateLabel}</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-      <div style="background:var(--card-bg);border-radius:10px;padding:10px 12px;text-align:center;border:1px solid var(--border)">
-        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px">เข้างาน</div>
-        <div style="font-size:22px;font-weight:700;color:${att.ins.length?'var(--navy)':'var(--muted)'}">${inTime}</div>
-      </div>
-      <div style="background:var(--card-bg);border-radius:10px;padding:10px 12px;text-align:center;border:1px solid var(--border)">
-        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px">ออกงาน</div>
-        <div style="font-size:22px;font-weight:700;color:${att.outs.length?'var(--navy)':'var(--muted)'}">${outTime}</div>
-      </div>
-    </div>
-    ${!bothOk ? `<div style="margin-top:8px;padding:8px 10px;background:rgba(243,156,18,.1);border-radius:8px;font-size:12px;color:var(--warning);text-align:center">
-      ⚠️ ลงเวลาไม่ครบ — <button onclick="showPage('timeadjust');closeAttendanceCalendar()" style="background:none;border:0;color:var(--navy);font-weight:700;cursor:pointer;font-size:12px">ยื่นขอแก้เวลา</button>
-    </div>` : ''}
-  </div>`;
+  if (_calRemoteCache[cacheKey]) { applyServer(_calRemoteCache[cacheKey]); return; }
+  if (!config.appsScriptUrl) { render(localRows, ''); return; }
+
+  render(localRows, 'กำลังเช็คข้อมูลในระบบ…');
+  callAppsScript('getCheckinLog', { empId: currentUser.empId, date: ddmm, limit: 50 })
+    .then(res => {
+      const srows = (res.logs || [])
+        .filter(r => String(r.empId) === String(currentUser.empId))
+        .map(r => {
+          const ms = new Date(r.timestamp).getTime() || 0;
+          return { ms, type: r.type === 'out' ? 'out' : 'in', hhmm: _hhmmFromSheetTime_(r.time, ms), remote: true };
+        });
+      const now = new Date();
+      const isToday = key === `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+      if (!isToday) _calRemoteCache[cacheKey] = srows;   // วันนี้ไม่แคช — สแกนใหม่ต้องเห็นทันที
+      applyServer(srows);
+    })
+    .catch(() => { if (_calSelKey === key) render(localRows, ''); });
 }
 
 loadAll();
