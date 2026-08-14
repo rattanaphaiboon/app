@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v19.43</title>
+<title>Rattana Sales Dashboard v19.44</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -408,7 +408,7 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.43</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.44</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -423,6 +423,7 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
     <button class="tab-btn" onclick="switchTab('routestore',this)">🛣️ ร้านตามรูท</button>
     <button class="tab-btn" onclick="switchTab('storegrid',this)">🏪 Product Suggestion</button>
     <button class="tab-btn" onclick="switchTab('missing',this)">📉 สินค้าหาย</button>
+    <button class="tab-btn" onclick="switchTab('bpweek',this)">📅 รายสัปดาห์</button>
   </nav>
 
   <div class="content">
@@ -503,6 +504,25 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
       </div>
     </div>
 
+
+<!-- BP WEEKLY TAB -->
+<div class="tab-panel" id="tab-bpweek">
+  <div style="padding:16px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+      <div style="font-size:15px;font-weight:700;color:var(--navy)">📅 ยอดขาย BP รายสัปดาห์ (7 วัน)</div>
+      <input id="bpwSearch" type="text" placeholder="ค้นหาสินค้า / WS…" oninput="renderBpWeekTable()" style="flex:1;min-width:160px;padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text)">
+      <select id="bpwWsFilter" onchange="renderBpWeekTable()" style="padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text)">
+        <option value="">🏪 ทุก WS</option>
+      </select>
+      <span id="bpwCount" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div id="bpwTableWrap" style="overflow-x:auto">
+      <div style="text-align:center;padding:40px;color:var(--muted)">
+        <div class="spinner-ring" style="margin:0 auto 12px"></div>กำลังโหลดข้อมูล…
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- MISSING PRODUCTS TAB -->
 <div class="tab-panel" id="tab-missing">
@@ -2399,6 +2419,7 @@ function switchTab(id, btn) {
   if (id === 'routestore') renderRouteStore();
   if (id === 'storegrid' && !sgLoaded) sgLoadStoreData();
   if (id === 'missing') renderMissingProducts();
+  if (id === 'bpweek' && !_bpWeekLoaded) loadBpWeekTab();
   if (id === 'summary') { if (!tgtLoaded) initTargetTab(); setTimeout(renderSummaryTab, tgtLoaded ? 0 : 3000); }
 }
 
@@ -5681,6 +5702,129 @@ function exportSummaryExcel() {
   XLSX.writeFile(wb, 'summary-leaderboard.xlsx');
 }
 
+// ── BP WEEKLY TAB ─────────────────────────────────────────────────────────────
+let _bpWeekLoaded = false;
+let _bpWeekRows   = []; // [{ws, product, byWeek: {weekKey: sumCs}}]
+let _bpWeekCols   = []; // sorted weekKey strings
+
+function _bpwParseDate(s) {
+  s = String(s||'').trim();
+  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return new Date(+m[3], +m[2]-1, +m[1]);
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return new Date(+m[1], +m[2]-1, +m[3]);
+  return null;
+}
+function _bpwWeekKey(d) {
+  // floor to Monday of that week
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  const mon = new Date(d);
+  mon.setDate(d.getDate() + diff);
+  const dd = String(mon.getDate()).padStart(2,'0');
+  const mm = String(mon.getMonth()+1).padStart(2,'0');
+  const yy = mon.getFullYear();
+  return `${yy}-${mm}-${dd}`;
+}
+function _bpwFmtKey(k) {
+  // "YYYY-MM-DD" → "DD/MM – DD/MM" (mon–sun)
+  const [y,m,d] = k.split('-').map(Number);
+  const mon = new Date(y, m-1, d);
+  const sun = new Date(y, m-1, d+6);
+  const fmt = dt => `${String(dt.getDate()).padStart(2,'0')}/${String(dt.getMonth()+1).padStart(2,'0')}`;
+  return `${fmt(mon)}–${fmt(sun)}`;
+}
+
+async function loadBpWeekTab() {
+  const wrap = document.getElementById('bpwTableWrap');
+  if (!wrap) return;
+  wrap.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)"><div class="spinner-ring" style="margin:0 auto 12px"></div>กำลังโหลด BP…</div>';
+  try {
+    const bpSrc = _rsBpRaw?.length ? _rsBpRaw : (tgtState.bpRaw?.length ? tgtState.bpRaw : null);
+    const bpRaw = bpSrc || await fetchSheet(SALES_SHEET_ID, SALES_SHEET);
+
+    const agg = new Map(); // "ws§product" → {ws, product, byWeek: Map<weekKey, sumCs>}
+    const weekSet = new Set();
+
+    bpRaw.forEach(r => {
+      const ws      = String(r['WS']||'').trim();
+      const product = String(r['Product_Name']||'').trim();
+      const cs      = parseFloat(String(r['Sales_CS']||'0').replace(/,/g,'')) || 0;
+      const dateRaw = r['Doc_Date'] || r['doc_date'] || '';
+      if (!product || !dateRaw) return;
+      const d = _bpwParseDate(dateRaw);
+      if (!d) return;
+      const wk = _bpwWeekKey(d);
+      weekSet.add(wk);
+      const key = ws + '§' + product;
+      if (!agg.has(key)) agg.set(key, {ws, product, byWeek: new Map()});
+      const e = agg.get(key);
+      e.byWeek.set(wk, (e.byWeek.get(wk)||0) + cs);
+    });
+
+    _bpWeekCols = [...weekSet].sort();
+    _bpWeekRows = [...agg.values()].sort((a,b) => a.ws.localeCompare(b.ws,'th') || a.product.localeCompare(b.product,'th'));
+
+    // build WS dropdown
+    const wsSel = document.getElementById('bpwWsFilter');
+    if (wsSel && wsSel.options.length <= 1) {
+      const wsList = [...new Set(_bpWeekRows.map(r => r.ws).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'th'));
+      wsList.forEach(w => { const o = document.createElement('option'); o.value = o.textContent = w; wsSel.appendChild(o); });
+    }
+    _bpWeekLoaded = true;
+    renderBpWeekTable();
+  } catch(e) {
+    wrap.innerHTML = `<div style="text-align:center;padding:40px;color:var(--danger)">โหลดไม่สำเร็จ: ${e.message}</div>`;
+  }
+}
+
+function renderBpWeekTable() {
+  const wrap = document.getElementById('bpwTableWrap');
+  if (!wrap || !_bpWeekLoaded) return;
+  const escH = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const fmt  = v => v > 0 ? v.toLocaleString('th-TH', {minimumFractionDigits:1, maximumFractionDigits:1}) : '-';
+  const q    = (document.getElementById('bpwSearch')?.value||'').toLowerCase().trim();
+  const ws   = document.getElementById('bpwWsFilter')?.value||'';
+
+  let rows = _bpWeekRows;
+  if (ws) rows = rows.filter(r => r.ws === ws);
+  if (q)  rows = rows.filter(r => r.ws.toLowerCase().includes(q) || r.product.toLowerCase().includes(q));
+
+  document.getElementById('bpwCount').textContent = `${rows.length.toLocaleString()} รายการ`;
+  if (!rows.length) { wrap.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)">ไม่พบข้อมูล</div>'; return; }
+
+  const colW = Math.max(70, Math.floor(520 / Math.max(_bpWeekCols.length,1)));
+  const thCols = _bpWeekCols.map(k => `<th style="padding:6px 8px;font-size:10px;text-align:right;white-space:nowrap;min-width:${colW}px">${escH(_bpwFmtKey(k))}</th>`).join('');
+
+  let lastWs = null, html = '';
+  rows.forEach(r => {
+    if (r.ws !== lastWs) {
+      lastWs = r.ws;
+      html += `<tr style="background:var(--navy);color:#fff"><td colspan="${2+_bpWeekCols.length}" style="padding:5px 12px;font-size:12px;font-weight:700">🏪 ${escH(r.ws)}</td></tr>`;
+    }
+    const cells = _bpWeekCols.map(k => {
+      const v = r.byWeek.get(k)||0;
+      return `<td style="font-size:11px;text-align:right;padding:5px 8px;color:${v>0?'var(--info)':'var(--muted)'}">${fmt(v)}</td>`;
+    }).join('');
+    html += `<tr style="border-bottom:1px solid var(--border)">
+      <td style="font-size:11px;color:var(--muted);padding:5px 8px;white-space:nowrap">${escH(r.ws)}</td>
+      <td style="font-size:12px;padding:5px 8px">${escH(r.product)}</td>
+      ${cells}
+    </tr>`;
+  });
+
+  wrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-family:inherit">
+    <thead><tr style="background:var(--navy);color:#fff;position:sticky;top:0;z-index:2">
+      <th style="padding:8px;font-size:11px;text-align:left;white-space:nowrap;min-width:80px">WS</th>
+      <th style="padding:8px;font-size:11px;text-align:left;min-width:200px">Product Name</th>
+      ${thCols}
+    </tr></thead>
+    <tbody>${html}</tbody>
+  </table>`;
+  wrap.querySelectorAll('tbody tr:not([style*="background:var(--navy)"])').forEach((tr,i)=>{
+    if (!tr.style.background) tr.style.background = i%2===0?'':'rgba(0,0,0,.03)';
+  });
+}
 
 </script>
 </body>
