@@ -915,7 +915,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.241';
+const APP_VERSION='3.242';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -8031,6 +8031,58 @@ async function syncToSheets(job){
   }catch(e){ console.warn('sync failed',e); }
 }
 
+/* ★★ v3.242: โหลดเฉพาะใบคุมของตัวเอง (คนขับ) — ต้นเหตุ "แอปโหลดช้า" ที่ผู้ใช้แจ้งกันหลายคน
+   เดิม: ทุกเครื่องดึงบิล "ทั้งบริษัท" 21 วันจากชีท Cin ทุกครั้งที่เปิดแอป + ทุก 3 นาที
+         วัดจริง 2026-08-14 = 2,215,621 ไบต์ (3,090 แถว × 60 คอลัมน์) และโตเกือบเท่าตัวใน 4 วัน (1.16MB → 2.22MB)
+         คนขับ 1 คนมีใบคุมแค่ 1-3 ใบ แต่ต้องโหลด+parse ของทุกคน แล้วยัดลง state.jobs/localStorage ทั้งก้อน
+   ใหม่: กรองด้วย "เลขใบคุม" (คอลัมน์ A) เฉพาะของตัวเอง → วัดได้ 19,009 ไบต์ (−99%)
+   ลดหน้าต่างวันไม่ช่วย (10 วัน = 1.85MB ลดแค่ 16% เพราะข้อมูลกระจุกช่วงหลัง) — ต้องกรองที่ "คนละใบคุม" เท่านั้น
+   ⚠️ ใช้เฉพาะคนขับล้วน — คลัง/บัญชี/ผู้อนุมัติ ยังโหลดเต็มเหมือนเดิม เพราะต้องเห็นงานคนอื่น (อนุมัติ/ช่วยบันทึก/รายงาน) */
+const JOB_SCOPE_MAX=80;   // ใบคุมในสโคปมากกว่านี้ = ผิดปกติ → กลับไปโหลดแบบเดิม (กัน URL gviz ยาวเกิน)
+function jobScopeDriverOnly_(){
+  const u=state.user||{};
+  if(!u.email) return false;
+  if(u.canApprove||u.canCoRecord||u.canApproveCN||u.canApprovePallet) return false;   // ฝั่งออฟฟิศ — ต้องเห็นงานทุกคน
+  if((parseInt(u.userRole)||0)>=3) return false;
+  return true;
+}
+/* รายชื่อ "เลขใบคุม" ที่เครื่องนี้ต้องใช้ = ของตัวเองในชีท INPUT + งานที่อยู่บนเครื่องนี้อยู่แล้ว
+   (เผื่อชื่อในชีทไม่ตรงกับชื่อล็อกอิน / บัญชีบันทึกให้ / เพิ่งรับงานยังไม่ลงชีท → งานต้องไม่หาย) */
+function myJobIdsForScope_(inputRows){
+  const me=[state.user.displayName,state.user.nickname,state.user.name].map(s=>cleanCell(s||'')).filter(Boolean);
+  const hit=v=>{ const s=cleanCell(v||''); return !!s&&me.indexOf(s)>=0; };
+  const ids=new Set();
+  (inputRows||[]).forEach(r=>{
+    const jid=cleanCell(r['รหัสใบคุม']||r['🔒 Row ID']||''); if(!jid) return;
+    if(hit(r['ชื่อคนขับ'])||[1,2,3,4,5,6].some(i=>hit(r['ผู้ช่วย'+i]))) ids.add(jid);
+  });
+  (state.jobs||[]).forEach(j=>{ if(j&&j.id&&j.status!=='available') ids.add(String(j.id).trim()); });
+  if(state.activeJobId) ids.add(String(state.activeJobId).trim());
+  return [...ids].filter(x=>x&&!/['"\\]/.test(x));   // ตัด id ที่มีอัญประกาศ (พังคิวรี gviz) — เลขใบคุมจริงไม่มี
+}
+/* v3.242: ดัชนี "CN (IS) ที่ถูกใช้ไปแล้ว" ของทั้งบริษัท — select C,AH where AH contains '[CN:'
+   วัดจริง 5.4KB/130 แถว → คนขับที่โหลดแบบ scope ยังกัน "เลือก CN ซ้ำกับคนขับคนอื่น" ได้เหมือนเดิม */
+async function loadUsedCNIndex_(){
+  const rows=await fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',{fresh:true,tq:"select C,AH where AH contains '[CN:'"});
+  return rows||[];
+}
+function cinScopedFetch_(ids){
+  return fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',{fresh:true,tq:'select * where '+ids.map(id=>`A = '${id}'`).join(' or ')});
+}
+/* v3.242: จำ "ใบคุมของฉัน" รอบก่อนไว้ → รอบถัดไปยิงบิลพร้อม INPUT ได้เลย (ขนาน) ไม่ต้องรอ INPUT ก่อน
+   ปกติใบคุมไม่เปลี่ยนระหว่างรอบ · ถ้ามีใบใหม่โผล่ ค่อยยิงเก็บเฉพาะใบที่ขาด (เล็กมาก) */
+const JOB_SCOPE_IDS_KEY='dman_scopeIds_v3242';
+function readScopeIds_(){
+  try{
+    const o=JSON.parse(localStorage.getItem(JOB_SCOPE_IDS_KEY)||'null');
+    if(!o||o.email!==(state.user||{}).email||!Array.isArray(o.ids)) return [];
+    return o.ids;
+  }catch(e){ return []; }
+}
+function writeScopeIds_(ids){
+  try{ localStorage.setItem(JOB_SCOPE_IDS_KEY,JSON.stringify({email:(state.user||{}).email||'',ids:ids})); }catch(e){}
+}
+
 /* อ่านงานทั้งหมดจากชีท "บันทึกการเก็บเงิน" (Apps Script bound to Jobs sheet) */
 async function loadJobsFromSheet(){
   try{
@@ -8044,16 +8096,40 @@ async function loadJobsFromSheet(){
     const _p2=n=>String(n).padStart(2,'0');
     const _cutD=new Date(Date.now()-21*86400000);
     const _cutStr=`${_cutD.getFullYear()}-${_p2(_cutD.getMonth()+1)}-${_p2(_cutD.getDate())} 00:00:00`;
-    const [cinRows,inputRows]=await Promise.all([
-      fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',{fresh:true,tq:`select * where K >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];}),
-      fetchSheet(CFG.jobsSheetId,'บันทึกเที่ยวส่ง',{fresh:true,tq:`select * where AD >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];}),
-    ]);
+    const _cinFull=()=>fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',{fresh:true,tq:`select * where K >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];});
+    const _inputAll=()=>fetchSheet(CFG.jobsSheetId,'บันทึกเที่ยวส่ง',{fresh:true,tq:`select * where AD >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];});
+    let cinRows,inputRows,scopeIds=null,_usedCNRows=null;
+    if(jobScopeDriverOnly_()){
+      // ★ v3.242: คนขับ — ยิงพร้อมกัน 3 อย่าง: INPUT (เบา) + บิลของใบคุมที่จำไว้รอบก่อน + ดัชนี CN ที่ใช้แล้ว
+      const _prev=readScopeIds_().filter(x=>x&&!/['"\\]/.test(x)).slice(0,JOB_SCOPE_MAX);
+      const _pre=await Promise.all([
+        _inputAll(),
+        _prev.length?cinScopedFetch_(_prev).catch(()=>null):Promise.resolve(null),
+        loadUsedCNIndex_().catch(()=>null),
+      ]);
+      inputRows=_pre[0]; _usedCNRows=_pre[2];
+      if(!fetchOK) return null;
+      scopeIds=myJobIdsForScope_(inputRows);
+      if(scopeIds.length>JOB_SCOPE_MAX) scopeIds=null;   // เยอะผิดปกติ → กลับไปโหลดแบบเดิม (กัน URL ยาวเกิน)
+      if(scopeIds){
+        writeScopeIds_(scopeIds);
+        const _prevSet=new Set(_pre[1]?_prev:[]);                        // ถ้ารอบนั้น fetch ล้ม ถือว่าไม่ได้อะไรมาเลย
+        const _need=scopeIds.filter(id=>!_prevSet.has(id));              // ใบคุมที่ยังไม่ได้ดึง (ใบใหม่/รอบแรก)
+        const _more=_need.length?await cinScopedFetch_(_need).catch(()=>{fetchOK=false;return[];}):[];
+        cinRows=(_pre[1]||[]).concat(_more);
+      } else {
+        cinRows=await _cinFull();
+      }
+    } else {
+      [cinRows,inputRows]=await Promise.all([_cinFull(),_inputAll()]);
+    }
     if(!fetchOK) return null;          // โหลดชีทไม่สำเร็จ — อย่าลบงานใน local
     if(!cinRows.length&&!inputRows.length) return [];
 
     // v3.157: รวมเลข CN (IS) ที่ "ใช้ไปแล้ว" จากทุกแถวในชีทบันทึกบิลและการชำระ (แท็ก [CN: ...] ในหมายเหตุ) → กันเลือกซ้ำ
+    // v3.242: โหมด scope อ่านจากดัชนีเบา (ทั้งบริษัท) — ถ้าดัชนีล้ม ค่อย fallback มาไล่จากแถวที่โหลดมา
     const usedCN={};
-    cinRows.forEach(r=>{
+    (_usedCNRows||cinRows).forEach(r=>{
       const m=cleanCell(r['หมายเหตุ']||'').match(/\[CN:\s*([^\]]*)\]/);
       if(!m) return;
       const doc=cleanCell(r['Doc_No']||'').trim().toUpperCase();
@@ -8078,7 +8154,12 @@ async function loadJobsFromSheet(){
       billsByJob[jid].push(r);
     });
 
-    const allJobIds=new Set([...Object.keys(inputByJob),...Object.keys(billsByJob)]);
+    let allJobIds=new Set([...Object.keys(inputByJob),...Object.keys(billsByJob)]);
+    if(scopeIds){
+      // v3.242: โหมด scope — เอาเฉพาะใบคุมของตัวเอง (เดิมงานของ "ทุกคน" ใน 21 วันถูกยัดลง state.jobs/localStorage ทุกเครื่อง)
+      const _sc=new Set(scopeIds.map(normJobId));
+      allJobIds=new Set([...allJobIds].filter(jid=>_sc.has(normJobId(jid))));
+    }
     return [...allJobIds].map(jid=>{
       const inRow=inputByJob[jid]||{};
       const billRows=billsByJob[jid]||[];
@@ -11073,7 +11154,10 @@ async function autoRefreshTick(){
 }
 function startAutoRefresh(){
   stopAutoRefresh();
-  _autoRefreshTimer=setInterval(autoRefreshTick,AUTO_REFRESH_MS);
+  // ★ v3.242: คนขับโหลดแค่ใบคุมตัวเอง (~20KB) → 180 วิเหมือนเดิมสบายๆ
+  //   ฝั่งออฟฟิศยังต้องดึงทั้งบริษัท (~2.4MB/รอบ) → ยืดเป็น 300 วิ ลดภาระลง 40% (กด ↻ ได้ตลอด)
+  const ms=(typeof jobScopeDriverOnly_==='function'&&jobScopeDriverOnly_())?AUTO_REFRESH_MS:300000;
+  _autoRefreshTimer=setInterval(autoRefreshTick,ms);
 }
 function stopAutoRefresh(){
   if(_autoRefreshTimer){ clearInterval(_autoRefreshTimer); _autoRefreshTimer=null; }
