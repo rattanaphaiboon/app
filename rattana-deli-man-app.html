@@ -915,7 +915,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.241';
+const APP_VERSION='3.244';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1181,6 +1181,22 @@ async function idbSet_(key,val){
     });
     return true;
   }catch(e){ return false; }
+}
+/* ★ v3.242: แคชลูกค้า (5,190 ร้าน ~1.5MB) ย้ายจาก localStorage → IndexedDB
+   เหตุผลเดียวกับสินค้าใน v3.227: localStorage เพดาน ~5MB ของทั้งแอป (แชร์กับงาน/คิวส่ง/รูปสลิป)
+   ก้อนนี้กินไปเกือบ 1 ใน 4 และต้อง JSON.parse ทั้งก้อนบน main thread ทุกครั้งที่เปิดแอป
+   IndexedDB เก็บ object ตรงๆ (structured clone) — ไม่ต้อง stringify/parse เลย */
+const CUSTOMERS_CACHE_KEY='customers_v3243';
+const CUSTOMERS_CACHE_KEY_OLD='customers_v3155';   // คีย์เก่าใน localStorage — ลบทิ้งคืนพื้นที่
+async function getCustomersCache_(){
+  try{
+    const o=await idbGet_(CUSTOMERS_CACHE_KEY);
+    if(o&&o.ts&&Array.isArray(o.rows)&&o.rows.length&&(Date.now()-o.ts)<CACHE_TTL_LONG) return o.rows;
+  }catch(e){}
+  return null;
+}
+function setCustomersCache_(rows){
+  try{ idbSet_(CUSTOMERS_CACHE_KEY,{ts:Date.now(),rows:rows}).catch(()=>{}); }catch(e){}
 }
 function cacheKey(key){ return 'rdm_cache_'+key; }
 function getCachedSheet(key,ttl){
@@ -1598,7 +1614,8 @@ function resetBillDetails_(){
 async function loadCustomers(){
   // v2.53: cache 24 ชม. (5,303 rows — หนัก, ลูกค้าไม่ค่อยเปลี่ยน)
   // v3.51: bump คีย์ cache → ทิ้ง cache เก่าที่ parse เพี้ยน (หัวคอลัมน์พัง ข้อมูลร้าน/พิกัดว่าง) โหลดใหม่รอบเดียวทุกเครื่อง
-  const cached=getCachedSheet('customers_v3155',CACHE_TTL_LONG);   // v3.155: bump คีย์ → ทิ้ง cache เก่าที่ไม่มี creditDays
+  // ★ v3.242: ย้ายไป IndexedDB (ดู CUSTOMERS_CACHE_KEY) — localStorage เพดาน ~5MB ต้องแชร์กับงาน/คิวส่ง/รูป
+  const cached=await getCustomersCache_();
   if(cached){ state.customers=cached; enrichBills(); return; }
   try{
     // v3.73: ดึงเฉพาะคอลัมน์ที่ใช้จริง (A=ชื่อ B=รหัส C=ที่อยู่ F=เบอร์ G=Location K=WH N=เซลล์ T=รูป)
@@ -1623,7 +1640,7 @@ async function loadCustomers(){
         warehouse:cleanCell(r['WH']||''),
       };
     });
-    setCachedSheet('customers_v3155',state.customers);
+    setCustomersCache_(state.customers);   // ★ v3.242: เขียนลง IndexedDB (ไม่ block main thread ด้วย JSON.stringify ก้อนใหญ่)
     enrichBills();   // v3.51: เติมข้อมูลร้าน/พิกัดให้บิลทันทีที่ลูกค้าโหลดเสร็จ (ไม่รอ loadJobs รอบถัดไป)
   }catch(e){ state.customers=[]; }
 }
@@ -1701,7 +1718,13 @@ function allowedDeliverDates(){
 
 /* ดึงงานว่าง (status=available) จากชีท Jobs — group rows by Trans_Code
    กรองเฉพาะวันที่ส่งสินค้า = วันนี้ */
+/* ★ v3.242: memo 15 วิ — ตอนเปิดแอป ชีทใบคุม (0.27MB · 0.79 วิ) ถูกดึง 2 รอบเสมอ
+   (loadJobs → loadAvailableJobs() แล้ว syncJobsFromSheet → loadAvailableJobs(force) อีกรอบ)
+   คำขอชีท 1 ครั้งมีค่าคงที่ ~0.7 วิไม่ว่าข้อมูลเล็กแค่ไหน → ตัดรอบซ้ำ = เร็วขึ้นทันที
+   15 วิสั้นพอที่กด ↻ ทีหลังยังได้ของสด (auto-refresh 180 วิอยู่แล้ว) */
+let _availCache=null;
 async function loadAvailableJobs(fresh){
+  if(_availCache&&(Date.now()-_availCache.ts)<15000) return _availCache.data;
   try{
     const rows=await fetchSheet(CFG.jobsSheetId,CFG.jobsSheetName,fresh?{fresh:true}:undefined);   // v3.180: manual refresh → cache-bust (กัน gviz cache ~1-2 นาที ค้างใบคุมเก่า)
     if(!rows||!rows.length) return [];
@@ -1737,7 +1760,7 @@ async function loadAvailableJobs(fresh){
         payment:{},
       });
     });
-    return Object.values(byCode).map(j=>{
+    const _out=Object.values(byCode).map(j=>{
       // เดาคลังจาก prefix เช่น TSW1 → W1
       const m=j.id.match(/W(\d)/i);
       const warehouse=m?'W'+m[1]:'W1';
@@ -1747,6 +1770,8 @@ async function loadAvailableJobs(fresh){
         docDate:j.docDate, bills:j.bills,
       };
     });
+    _availCache={ts:Date.now(),data:_out};   // v3.242: ตัดการดึงชีทใบคุมซ้ำรอบที่ 2 ตอน boot
+    return _out;
   }catch(e){ console.warn('loadAvailableJobs failed:',e); return []; }
 }
 
@@ -8031,6 +8056,116 @@ async function syncToSheets(job){
   }catch(e){ console.warn('sync failed',e); }
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   ★ v3.244 — อ่านบิลจาก Supabase (นำร่อง · จุดเดียว · ถอยกลับชีทอัตโนมัติ)
+   ทำไม: gviz คิดค่าคงที่ ~0.7 วิต่อคำขอ ไม่ว่าข้อมูลเล็กแค่ไหน (วัดจริง: ขอ 1 แถว 2.6KB = 0.73 วิ)
+         Supabase ตอบ ~0.2 วิ + มี index (ข้อมูลโตขึ้นก็ไม่ช้าลง) — ต่างกัน 3.5 เท่าต่อคำขอ
+   ขอบเขตนำร่อง: แทนที่ "การดึงบิลของใบคุมตัวเอง" อย่างเดียว · ที่เหลือยังอ่านชีทเหมือนเดิมทุกอย่าง
+   ปลอดภัย: ชีทยังเป็นตัวจริง · เขียนยังผ่าน GAS→ชีท · ถ้า Supabase ล่ม/ช้า/สำเนาเก่า → ถอยไปอ่านชีทเอง
+   ปิดสวิตช์: ตั้ง SB_URL='' แล้ว deploy (หรือใส่อีเมลใน SB_PILOT_EMAILS เพื่อจำกัดเฉพาะคนทดลอง)
+   ═══════════════════════════════════════════════════════════════ */
+const SB_URL='';                    // https://xxxxx.supabase.co  ← ใส่ตอนเปิดใช้
+const SB_ANON='';                   // anon public key — อ่านอย่างเดียว (RLS ให้สิทธิ์แค่ select)
+const SB_PILOT_EMAILS=[];           // [] = ทุกคนที่โหลดแบบ scope · ใส่อีเมลเพื่อจำกัดเฉพาะคนทดลอง
+const SB_MAX_STALE_MS=15*60000;     // สำเนาเก่ากว่านี้ = ไม่เชื่อ ถอยไปอ่านชีท (trigger ซิงก์ทุก 5 นาที)
+const SB_TIMEOUT_MS=8000;
+let _sbHealth={ok:null,ms:0,rows:0,stale:null,why:''};   // ให้หน้า 🩺 อ่านไปโชว์
+function sbReady_(){
+  if(!SB_URL||!SB_ANON) return false;
+  if(!SB_PILOT_EMAILS.length) return true;
+  return SB_PILOT_EMAILS.map(e=>String(e).toLowerCase()).indexOf(String((state.user||{}).email||'').toLowerCase())>=0;
+}
+async function sbGet_(path){
+  const ctrl=('AbortController' in window)?new AbortController():null;
+  const to=setTimeout(()=>{ if(ctrl) ctrl.abort(); },SB_TIMEOUT_MS);
+  try{
+    const res=await fetch(SB_URL+'/rest/v1/'+path,Object.assign({
+      headers:{apikey:SB_ANON,Authorization:'Bearer '+SB_ANON,Accept:'application/json'},
+      cache:'no-store',
+    },ctrl?{signal:ctrl.signal}:{}));
+    clearTimeout(to);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    return await res.json();
+  }catch(e){ clearTimeout(to); throw e; }
+}
+const sbQuote_=v=>'"'+String(v).split('"').join('')+'"';   // ค่าใน in.(...) ของ PostgREST ต้องครอบ " (เลขใบคุมมี / อยู่ด้วย)
+/* คืน array ของแถวบิลรูปแบบเดียวกับที่ parse จาก CSV เป๊ะ (row_json = {หัวคอลัมน์: ค่า})
+   → โค้ดแปลงข้อมูลด้านล่างไม่ต้องแก้อะไรเลย · คืน null = ใช้ไม่ได้ ให้ผู้เรียกถอยไปอ่านชีท */
+async function sbBillsForJobs_(ids){
+  if(!sbReady_()||!ids||!ids.length) return null;
+  const t0=performance.now();
+  try{
+    const [bills,st]=await Promise.all([
+      sbGet_('dman_bills?select=row_json&job_id=in.('+ids.map(sbQuote_).join(',')+')'),
+      sbGet_('dman_sync_state?select=synced_at&id=eq.bills').catch(()=>null),
+    ]);
+    const syncedAt=(st&&st[0]&&st[0].synced_at)?new Date(st[0].synced_at).getTime():0;
+    const age=syncedAt?(Date.now()-syncedAt):Infinity;
+    if(age>SB_MAX_STALE_MS){
+      _sbHealth={ok:false,ms:Math.round(performance.now()-t0),rows:0,stale:age,why:'สำเนาเก่าเกิน '+Math.round(SB_MAX_STALE_MS/60000)+' นาที'};
+      return null;                                            // สำเนาไม่สด → อ่านชีทแทน (ปลอดภัยไว้ก่อน)
+    }
+    if(!Array.isArray(bills)) throw new Error('รูปแบบข้อมูลไม่ถูกต้อง');
+    _sbHealth={ok:true,ms:Math.round(performance.now()-t0),rows:bills.length,stale:age,why:''};
+    return bills.map(r=>r.row_json||{}).filter(o=>o&&Object.keys(o).length);
+  }catch(e){
+    _sbHealth={ok:false,ms:Math.round(performance.now()-t0),rows:0,stale:null,why:String((e&&e.message)||e).slice(0,60)};
+    return null;                                              // ล่ม/ช้า/ยังไม่ได้ตั้งค่า → ถอยไปอ่านชีท
+  }
+}
+
+/* ★★ v3.242: โหลดเฉพาะใบคุมของตัวเอง (คนขับ) — ต้นเหตุ "แอปโหลดช้า" ที่ผู้ใช้แจ้งกันหลายคน
+   เดิม: ทุกเครื่องดึงบิล "ทั้งบริษัท" 21 วันจากชีท Cin ทุกครั้งที่เปิดแอป + ทุก 3 นาที
+         วัดจริง 2026-08-14 = 2,215,621 ไบต์ (3,090 แถว × 60 คอลัมน์) และโตเกือบเท่าตัวใน 4 วัน (1.16MB → 2.22MB)
+         คนขับ 1 คนมีใบคุมแค่ 1-3 ใบ แต่ต้องโหลด+parse ของทุกคน แล้วยัดลง state.jobs/localStorage ทั้งก้อน
+   ใหม่: กรองด้วย "เลขใบคุม" (คอลัมน์ A) เฉพาะของตัวเอง → วัดได้ 19,009 ไบต์ (−99%)
+   ลดหน้าต่างวันไม่ช่วย (10 วัน = 1.85MB ลดแค่ 16% เพราะข้อมูลกระจุกช่วงหลัง) — ต้องกรองที่ "คนละใบคุม" เท่านั้น
+   ⚠️ ใช้เฉพาะคนขับล้วน — คลัง/บัญชี/ผู้อนุมัติ ยังโหลดเต็มเหมือนเดิม เพราะต้องเห็นงานคนอื่น (อนุมัติ/ช่วยบันทึก/รายงาน) */
+const JOB_SCOPE_MAX=80;   // ใบคุมในสโคปมากกว่านี้ = ผิดปกติ → กลับไปโหลดแบบเดิม (กัน URL gviz ยาวเกิน)
+function jobScopeDriverOnly_(){
+  const u=state.user||{};
+  if(!u.email) return false;
+  if(u.canApprove||u.canCoRecord||u.canApproveCN||u.canApprovePallet) return false;   // ฝั่งออฟฟิศ — ต้องเห็นงานทุกคน
+  if((parseInt(u.userRole)||0)>=3) return false;
+  return true;
+}
+/* รายชื่อ "เลขใบคุม" ที่เครื่องนี้ต้องใช้ = ของตัวเองในชีท INPUT + งานที่อยู่บนเครื่องนี้อยู่แล้ว
+   (เผื่อชื่อในชีทไม่ตรงกับชื่อล็อกอิน / บัญชีบันทึกให้ / เพิ่งรับงานยังไม่ลงชีท → งานต้องไม่หาย) */
+function myJobIdsForScope_(inputRows){
+  const me=[state.user.displayName,state.user.nickname,state.user.name].map(s=>cleanCell(s||'')).filter(Boolean);
+  const hit=v=>{ const s=cleanCell(v||''); return !!s&&me.indexOf(s)>=0; };
+  const ids=new Set();
+  (inputRows||[]).forEach(r=>{
+    const jid=cleanCell(r['รหัสใบคุม']||r['🔒 Row ID']||''); if(!jid) return;
+    if(hit(r['ชื่อคนขับ'])||[1,2,3,4,5,6].some(i=>hit(r['ผู้ช่วย'+i]))) ids.add(jid);
+  });
+  (state.jobs||[]).forEach(j=>{ if(j&&j.id&&j.status!=='available') ids.add(String(j.id).trim()); });
+  if(state.activeJobId) ids.add(String(state.activeJobId).trim());
+  return [...ids].filter(x=>x&&!/['"\\]/.test(x));   // ตัด id ที่มีอัญประกาศ (พังคิวรี gviz) — เลขใบคุมจริงไม่มี
+}
+/* v3.242: ดัชนี "CN (IS) ที่ถูกใช้ไปแล้ว" ของทั้งบริษัท — select C,AH where AH contains '[CN:'
+   วัดจริง 5.4KB/130 แถว → คนขับที่โหลดแบบ scope ยังกัน "เลือก CN ซ้ำกับคนขับคนอื่น" ได้เหมือนเดิม */
+async function loadUsedCNIndex_(){
+  const rows=await fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',{fresh:true,tq:"select C,AH where AH contains '[CN:'"});
+  return rows||[];
+}
+function cinScopedFetch_(ids){
+  return fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',{fresh:true,tq:'select * where '+ids.map(id=>`A = '${id}'`).join(' or ')});
+}
+/* v3.242: จำ "ใบคุมของฉัน" รอบก่อนไว้ → รอบถัดไปยิงบิลพร้อม INPUT ได้เลย (ขนาน) ไม่ต้องรอ INPUT ก่อน
+   ปกติใบคุมไม่เปลี่ยนระหว่างรอบ · ถ้ามีใบใหม่โผล่ ค่อยยิงเก็บเฉพาะใบที่ขาด (เล็กมาก) */
+const JOB_SCOPE_IDS_KEY='dman_scopeIds_v3242';
+function readScopeIds_(){
+  try{
+    const o=JSON.parse(localStorage.getItem(JOB_SCOPE_IDS_KEY)||'null');
+    if(!o||o.email!==(state.user||{}).email||!Array.isArray(o.ids)) return [];
+    return o.ids;
+  }catch(e){ return []; }
+}
+function writeScopeIds_(ids){
+  try{ localStorage.setItem(JOB_SCOPE_IDS_KEY,JSON.stringify({email:(state.user||{}).email||'',ids:ids})); }catch(e){}
+}
+
 /* อ่านงานทั้งหมดจากชีท "บันทึกการเก็บเงิน" (Apps Script bound to Jobs sheet) */
 async function loadJobsFromSheet(){
   try{
@@ -8044,16 +8179,47 @@ async function loadJobsFromSheet(){
     const _p2=n=>String(n).padStart(2,'0');
     const _cutD=new Date(Date.now()-21*86400000);
     const _cutStr=`${_cutD.getFullYear()}-${_p2(_cutD.getMonth()+1)}-${_p2(_cutD.getDate())} 00:00:00`;
-    const [cinRows,inputRows]=await Promise.all([
-      fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',{fresh:true,tq:`select * where K >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];}),
-      fetchSheet(CFG.jobsSheetId,'บันทึกเที่ยวส่ง',{fresh:true,tq:`select * where AD >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];}),
-    ]);
+    const _cinFull=()=>fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',{fresh:true,tq:`select * where K >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];});
+    const _inputAll=()=>fetchSheet(CFG.jobsSheetId,'บันทึกเที่ยวส่ง',{fresh:true,tq:`select * where AD >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];});
+    let cinRows,inputRows,scopeIds=null,_usedCNRows=null;
+    if(jobScopeDriverOnly_()){
+      // ★ v3.242: คนขับ — ยิงพร้อมกัน 3 อย่าง: INPUT (เบา) + บิลของใบคุมที่จำไว้รอบก่อน + ดัชนี CN ที่ใช้แล้ว
+      // ★ v3.244: ถ้าเปิด Supabase อยู่ ข้ามการยิงบิลล่วงหน้าฝั่งชีท (จะไปเอาจาก Supabase แทน — เร็วกว่า)
+      const _sbOn=sbReady_();
+      const _prev=_sbOn?[]:readScopeIds_().filter(x=>x&&!/['"\\]/.test(x)).slice(0,JOB_SCOPE_MAX);
+      const _pre=await Promise.all([
+        _inputAll(),
+        _prev.length?cinScopedFetch_(_prev).catch(()=>null):Promise.resolve(null),
+        loadUsedCNIndex_().catch(()=>null),
+      ]);
+      inputRows=_pre[0]; _usedCNRows=_pre[2];
+      if(!fetchOK) return null;
+      scopeIds=myJobIdsForScope_(inputRows);
+      if(scopeIds.length>JOB_SCOPE_MAX) scopeIds=null;   // เยอะผิดปกติ → กลับไปโหลดแบบเดิม (กัน URL ยาวเกิน)
+      if(scopeIds){
+        writeScopeIds_(scopeIds);
+        const _sb=_sbOn?await sbBillsForJobs_(scopeIds):null;   // ★ v3.244 · null = ใช้ไม่ได้ → ถอยไปอ่านชีทข้างล่าง
+        if(_sb){
+          cinRows=_sb;
+        } else {
+          const _prevSet=new Set(_pre[1]?_prev:[]);                        // ถ้ารอบนั้น fetch ล้ม ถือว่าไม่ได้อะไรมาเลย
+          const _need=scopeIds.filter(id=>!_prevSet.has(id));              // ใบคุมที่ยังไม่ได้ดึง (ใบใหม่/รอบแรก)
+          const _more=_need.length?await cinScopedFetch_(_need).catch(()=>{fetchOK=false;return[];}):[];
+          cinRows=(_pre[1]||[]).concat(_more);
+        }
+      } else {
+        cinRows=await _cinFull();
+      }
+    } else {
+      [cinRows,inputRows]=await Promise.all([_cinFull(),_inputAll()]);
+    }
     if(!fetchOK) return null;          // โหลดชีทไม่สำเร็จ — อย่าลบงานใน local
     if(!cinRows.length&&!inputRows.length) return [];
 
     // v3.157: รวมเลข CN (IS) ที่ "ใช้ไปแล้ว" จากทุกแถวในชีทบันทึกบิลและการชำระ (แท็ก [CN: ...] ในหมายเหตุ) → กันเลือกซ้ำ
+    // v3.242: โหมด scope อ่านจากดัชนีเบา (ทั้งบริษัท) — ถ้าดัชนีล้ม ค่อย fallback มาไล่จากแถวที่โหลดมา
     const usedCN={};
-    cinRows.forEach(r=>{
+    (_usedCNRows||cinRows).forEach(r=>{
       const m=cleanCell(r['หมายเหตุ']||'').match(/\[CN:\s*([^\]]*)\]/);
       if(!m) return;
       const doc=cleanCell(r['Doc_No']||'').trim().toUpperCase();
@@ -8078,7 +8244,12 @@ async function loadJobsFromSheet(){
       billsByJob[jid].push(r);
     });
 
-    const allJobIds=new Set([...Object.keys(inputByJob),...Object.keys(billsByJob)]);
+    let allJobIds=new Set([...Object.keys(inputByJob),...Object.keys(billsByJob)]);
+    if(scopeIds){
+      // v3.242: โหมด scope — เอาเฉพาะใบคุมของตัวเอง (เดิมงานของ "ทุกคน" ใน 21 วันถูกยัดลง state.jobs/localStorage ทุกเครื่อง)
+      const _sc=new Set(scopeIds.map(normJobId));
+      allJobIds=new Set([...allJobIds].filter(jid=>_sc.has(normJobId(jid))));
+    }
     return [...allJobIds].map(jid=>{
       const inRow=inputByJob[jid]||{};
       const billRows=billsByJob[jid]||[];
@@ -8742,7 +8913,7 @@ async function saveOwnCN_(){
   else showToast('บันทึกไม่สำเร็จ: '+((r&&r.error)||'ลองใหม่'),'error');
 }
 
-const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.241 (v3.241 กัน CN ซ้ำจาก timeout: create_cn_own รับ reqId (idempotency) → เจอ reqId เดิมในชีท = ไม่สร้างใบใหม่ คืนใบเดิม + เขียนคอลัมน์ reqId ต่อท้าย CN-Sale-dman | v3.237 เมนูจัดการบิลซ้ำในชีท Cin แบบปลอดภัย: 🔍 ตรวจ (รายงานอย่างเดียว) + 🗑 ล้าง (ถามยืนยัน · ลบเฉพาะแถวเก่า เก็บแถวล่างสุด · deleteRows เป็นช่วง ไม่ clearContents) | v3.236 ★ ใส่ LockService ครอบ "บันทึกใบคุม/บิล" (เดิมเป็น action เดียวที่ไม่มีล็อก) — batchUpsertByHeader_ เป็น read-modify-write พอ 2 คำขอของใบคุมเดียวกันคาบเกี่ยวกัน ต่างฝ่ายอ่านชีทก่อนอีกฝ่ายเขียนเสร็จ → เห็นว่ายังไม่มีแถว → ต่อท้ายทั้งคู่ = บิลเบิ้ลบรรทัด | v3.234 เมนู "📤 มิเรอร์ CN เก่า (รออนุมัติ) → ชีท Sale App" (backfillReturnToSale_) ไล่ใบที่ยังไม่มี cnLineId ลง CN-Sale-dman ย้อนหลัง + เติม cnLineId กลับ | v3.233 "ลง 2 ที่": save_return (ฟอร์มรับคืนเดิม) มิเรอร์ลงชีท CN-Sale-dman ด้วย ผ่าน saleCNMirrorFromReturn_ (cnId ขึ้นต้น CNR · ที่มา=ขนส่ง · เก็บแล้ว/รออนุมัติ) + เขียน cnLineId กลับลงชีท CN ของ D-Man ให้จับคู่กัน · re-save/ลบ CN = ลบเฉพาะแถว CNR ของบิลนั้น ไม่แตะแถว Sales App · approve_cn มิเรอร์ผลอนุมัติด้วยเกณฑ์ "มี cnLineId" (ครอบคลุมทั้ง CNT/CNR) · cancel_job มาร์กแถวที่ถูกลบเป็นปฏิเสธฝั่ง Sale App | v3.229 action void_cn: คลัง "ไม่อนุมัติ" = ยกเลิก CN ใบนั้นทันที (สถานะคืน="ไม่อนุมัติ" · ล้างเลขที่เอกสาร CN/ภาพอนุมัติ) ต่างจาก reject_cn ที่ตีกลับให้คนขับแก้ · แถวขนส่งเก็บเองมิเรอร์ไป CN-Sale-dman เป็น "ปฏิเสธ" + เหตุผล "❌ ไม่อนุมัติ (ยกเลิก CN)" | v3.226 คลังอนุมัติ/ตีกลับ/ยกเลิกอนุมัติ CN จากหน้าอนุมัติ D-Man → มิเรอร์กลับชีทต้นทาง CN-Sale-dman (ไฟล์ Sale App) เฉพาะแถวขนส่งเก็บเอง จับด้วย cnLineId (เดิมลงแต่ชีท CN ของ D-Man ฝั่งเซลล์ไม่เห็นว่าอนุมัติแล้ว) + เมนู "🔁 ซิงก์ผลอนุมัติ CN" ไล่ย้อนหลัง | v3.224 คอลัมน์ ชื่อ-สกุล ลงชื่อจริงอย่างเดียว ตัดชื่อเล่นในวงเล็บออก (ให้ตรงรูปแบบ Sale App) | v3.223 undo_cn_collect เขียนคอลัมน์ "ยกเลิกการเก็บ" ในชีท CN-Sale-dman (วันเวลา+ชื่อคนกด) ให้ฝั่งเซลล์รู้ว่ายกเลิก · เก็บใหม่แล้วล้างข้อความออก | v3.221 create_cn_own ลงชีท 'CN' ของ D-Man ทันทีที่กดบันทึก (สถานะคืน="รออนุมัติ") ไม่ต้องรอคลังอนุมัติ · อนุมัติ/ปฏิเสธค่อยอัปเดตแถวเดิม (idempotent ตาม cnLineId) | v3.215 เก็บเองบังคับเลขที่บิล → ชีท CN D-Man เก็บ "เลขที่บิล DS" ด้วย · กันข้อมูลหาย: save_return + cancel_job(delCNForJobExcept_) ข้ามแถว ประเภทคืน="ขนส่งเก็บ" ไม่ลบ | v3.213 เลิกก๊อปชีท CN ลง CNSaleapp — แอปอ่าน CN-Sale-dman (ไฟล์ Sale App) ตรงๆ อยู่แล้ว · ย้าย "ตรวจซ้ำ" ไปเขียนคอลัมน์ท้ายชีทต้นทางเอง (markCNDupOnSource_ + เมนู/trigger 30 นาที · ลบ trigger ก๊อปเก่าให้) | v3.198 INPUT บันทึกเที่ยว: เขียนทีม (คนขับ/ผู้ช่วย/ทะเบียน/การส่ง) เฉพาะเมื่อ editTeam:true (assign/แก้ทีม) เท่านั้น → บันทึกบิล/ช่วยบันทึกไม่ทับทีม กันชื่อคนขับ↔ผู้ช่วยสลับ | v3.197 create_cn_own รับช่องเพิ่มจากฟอร์มเต็ม (ประเภทคืน/ประเภทบิล/เลขที่บิล DS/ชื่อเซลล์/ผิดพลาดจาก) → เก็บใน CN-Sale-dman · ชีท CN D-Man พาประเภทบิลมาด้วย เลขที่บิล DS คงว่างกันชน save_return | v3.196 create_cn_own cnId เติมสุ่ม 3 หลักต่อท้าย CNT+timestamp กันชนกันเองในมิลลิวินาทีเดียว | v3.195 create_cn_own → ตอนคลังอนุมัติเก็บ ลงชีท 'CN' ของ D-Man ด้วย (2 ชีท) · idempotent ตาม cnLineId · reject/undo = มาร์กแถว CN D-Man เป็น "ยกเลิก" ไม่ลบ · เฉพาะที่มา=ขนส่ง | v3.194 action create_cn_own: ขนส่งเก็บเอง (ไม่มีใบสั่งเซลล์) เพิ่มแถวลง CN-Sale-dman ที่มา=ขนส่ง+หมายเหตุ"ขนส่งเก็บ"+เก็บแล้ว/รออนุมัติ (append) | v3.191 undo_cn_collect reset ครบ: รวมเลขที่เอกสาร CN + ภาพอนุมัติ CN (AE/AF) | v3.190 อนุมัติ CN: กรอกเลขที่เอกสาร CN + ภาพอนุมัติ CN ตอนคลังอนุมัติ (เขียนคอลัมน์เดิม AE/AF เฉพาะเมื่อกรอก) | v3.189 action approve_cn_collect: คลังอนุมัติ/ปฏิเสธรอบเก็บ CN (สถานะอนุมัติเก็บ/รหัสรอบเก็บ) + save_cn_collect ใส่รหัสรอบเก็บ+รออนุมัติ + undo ล็อกที่อนุมัติแล้ว | v3.188 action undo_cn_collect: ยกเลิกการเก็บ—เคลียร์เฉพาะคอลัมน์ระบบตาม cnLineId ไม่ลบแถว/ไม่แตะข้อมูลเดิม | v3.183 action save_cn_collect: ขนส่งเก็บของคืน CN → เขียนกลับ CN-Sale-dman ตาม cnLineId + คอลัมน์ ภาพเก็บขนส่ง/เวลาเก็บ | v3.182 Status บิล: ขาดโดยไม่มีเงินจริง (มีแต่ CN/ลดหนี้หัก) → "ยังไม่ชำระ" | v3.181 Status จ่าย: ไม่มีเงินจริงแม้มี CN/ลดหนี้หัก → "ไม่ชำระ" ไม่ปล่อยว่าง | CN: คอลัมน์ cnId + ชื่อเซลล์=เซลล์สั่งคืน จาก cnRef | รวมช่องหักยอด: creditNote รวม CN+นอกCN, ลดหนี้=ส่วนนอกCN subset ไม่บวกซ้ำ + เหตุผลลดหนี้ ชีท Cin | เมนู Sync CN-Sale-dman → CNSaleapp + trigger 5 นาที + มาร์ก CN ซ้ำ เนื้อหาทั้งใบ | คอลัมน์ "วันเครดิต" ชีท Cin จาก b.creditDays, ไม่มีวัน=0 | ขอสินค้าเพิ่มขึ้นรถ: request_load + approve/reject/delete_load_req + ชีท "ขอสินค้าเพิ่ม" + Discord | v3.130 CN คืนเต็มบิล → คอลัมน์ "ใบลดหนี้" ชีท Cin | v3.124 cancel_job เก็บ CN คนอื่น | v3.122 fixCinSalesmanColumn | v3.120 SLMN | v3.90 แท็ก [CN: ...]) */
+const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.244 (v3.244 ★ นำร่อง Supabase: มิเรอร์ชีท Cin+INPUT ขึ้นตาราง dman_bills/dman_jobs (jsonb ทั้งแถว ไม่ต้องแก้ตารางเวลาชีทเพิ่มคอลัมน์) ผ่าน sbSyncNow_/sbSyncTick + เมนู ⚡ + trigger 5 นาที · โหมด delta ใช้คอลัมน์ "แก้ไขเมื่อ" · ตั้งค่าใน Script properties SB_URL/SB_SERVICE_KEY (ลบ SB_URL = ปิดทันที) · ทางเขียนเดิมไม่ถูกแตะเลย ชีทยังเป็นตัวจริง 100% | v3.241 กัน CN ซ้ำจาก timeout: create_cn_own รับ reqId (idempotency) → เจอ reqId เดิมในชีท = ไม่สร้างใบใหม่ คืนใบเดิม + เขียนคอลัมน์ reqId ต่อท้าย CN-Sale-dman | v3.237 เมนูจัดการบิลซ้ำในชีท Cin แบบปลอดภัย: 🔍 ตรวจ (รายงานอย่างเดียว) + 🗑 ล้าง (ถามยืนยัน · ลบเฉพาะแถวเก่า เก็บแถวล่างสุด · deleteRows เป็นช่วง ไม่ clearContents) | v3.236 ★ ใส่ LockService ครอบ "บันทึกใบคุม/บิล" (เดิมเป็น action เดียวที่ไม่มีล็อก) — batchUpsertByHeader_ เป็น read-modify-write พอ 2 คำขอของใบคุมเดียวกันคาบเกี่ยวกัน ต่างฝ่ายอ่านชีทก่อนอีกฝ่ายเขียนเสร็จ → เห็นว่ายังไม่มีแถว → ต่อท้ายทั้งคู่ = บิลเบิ้ลบรรทัด | v3.234 เมนู "📤 มิเรอร์ CN เก่า (รออนุมัติ) → ชีท Sale App" (backfillReturnToSale_) ไล่ใบที่ยังไม่มี cnLineId ลง CN-Sale-dman ย้อนหลัง + เติม cnLineId กลับ | v3.233 "ลง 2 ที่": save_return (ฟอร์มรับคืนเดิม) มิเรอร์ลงชีท CN-Sale-dman ด้วย ผ่าน saleCNMirrorFromReturn_ (cnId ขึ้นต้น CNR · ที่มา=ขนส่ง · เก็บแล้ว/รออนุมัติ) + เขียน cnLineId กลับลงชีท CN ของ D-Man ให้จับคู่กัน · re-save/ลบ CN = ลบเฉพาะแถว CNR ของบิลนั้น ไม่แตะแถว Sales App · approve_cn มิเรอร์ผลอนุมัติด้วยเกณฑ์ "มี cnLineId" (ครอบคลุมทั้ง CNT/CNR) · cancel_job มาร์กแถวที่ถูกลบเป็นปฏิเสธฝั่ง Sale App | v3.229 action void_cn: คลัง "ไม่อนุมัติ" = ยกเลิก CN ใบนั้นทันที (สถานะคืน="ไม่อนุมัติ" · ล้างเลขที่เอกสาร CN/ภาพอนุมัติ) ต่างจาก reject_cn ที่ตีกลับให้คนขับแก้ · แถวขนส่งเก็บเองมิเรอร์ไป CN-Sale-dman เป็น "ปฏิเสธ" + เหตุผล "❌ ไม่อนุมัติ (ยกเลิก CN)" | v3.226 คลังอนุมัติ/ตีกลับ/ยกเลิกอนุมัติ CN จากหน้าอนุมัติ D-Man → มิเรอร์กลับชีทต้นทาง CN-Sale-dman (ไฟล์ Sale App) เฉพาะแถวขนส่งเก็บเอง จับด้วย cnLineId (เดิมลงแต่ชีท CN ของ D-Man ฝั่งเซลล์ไม่เห็นว่าอนุมัติแล้ว) + เมนู "🔁 ซิงก์ผลอนุมัติ CN" ไล่ย้อนหลัง | v3.224 คอลัมน์ ชื่อ-สกุล ลงชื่อจริงอย่างเดียว ตัดชื่อเล่นในวงเล็บออก (ให้ตรงรูปแบบ Sale App) | v3.223 undo_cn_collect เขียนคอลัมน์ "ยกเลิกการเก็บ" ในชีท CN-Sale-dman (วันเวลา+ชื่อคนกด) ให้ฝั่งเซลล์รู้ว่ายกเลิก · เก็บใหม่แล้วล้างข้อความออก | v3.221 create_cn_own ลงชีท 'CN' ของ D-Man ทันทีที่กดบันทึก (สถานะคืน="รออนุมัติ") ไม่ต้องรอคลังอนุมัติ · อนุมัติ/ปฏิเสธค่อยอัปเดตแถวเดิม (idempotent ตาม cnLineId) | v3.215 เก็บเองบังคับเลขที่บิล → ชีท CN D-Man เก็บ "เลขที่บิล DS" ด้วย · กันข้อมูลหาย: save_return + cancel_job(delCNForJobExcept_) ข้ามแถว ประเภทคืน="ขนส่งเก็บ" ไม่ลบ | v3.213 เลิกก๊อปชีท CN ลง CNSaleapp — แอปอ่าน CN-Sale-dman (ไฟล์ Sale App) ตรงๆ อยู่แล้ว · ย้าย "ตรวจซ้ำ" ไปเขียนคอลัมน์ท้ายชีทต้นทางเอง (markCNDupOnSource_ + เมนู/trigger 30 นาที · ลบ trigger ก๊อปเก่าให้) | v3.198 INPUT บันทึกเที่ยว: เขียนทีม (คนขับ/ผู้ช่วย/ทะเบียน/การส่ง) เฉพาะเมื่อ editTeam:true (assign/แก้ทีม) เท่านั้น → บันทึกบิล/ช่วยบันทึกไม่ทับทีม กันชื่อคนขับ↔ผู้ช่วยสลับ | v3.197 create_cn_own รับช่องเพิ่มจากฟอร์มเต็ม (ประเภทคืน/ประเภทบิล/เลขที่บิล DS/ชื่อเซลล์/ผิดพลาดจาก) → เก็บใน CN-Sale-dman · ชีท CN D-Man พาประเภทบิลมาด้วย เลขที่บิล DS คงว่างกันชน save_return | v3.196 create_cn_own cnId เติมสุ่ม 3 หลักต่อท้าย CNT+timestamp กันชนกันเองในมิลลิวินาทีเดียว | v3.195 create_cn_own → ตอนคลังอนุมัติเก็บ ลงชีท 'CN' ของ D-Man ด้วย (2 ชีท) · idempotent ตาม cnLineId · reject/undo = มาร์กแถว CN D-Man เป็น "ยกเลิก" ไม่ลบ · เฉพาะที่มา=ขนส่ง | v3.194 action create_cn_own: ขนส่งเก็บเอง (ไม่มีใบสั่งเซลล์) เพิ่มแถวลง CN-Sale-dman ที่มา=ขนส่ง+หมายเหตุ"ขนส่งเก็บ"+เก็บแล้ว/รออนุมัติ (append) | v3.191 undo_cn_collect reset ครบ: รวมเลขที่เอกสาร CN + ภาพอนุมัติ CN (AE/AF) | v3.190 อนุมัติ CN: กรอกเลขที่เอกสาร CN + ภาพอนุมัติ CN ตอนคลังอนุมัติ (เขียนคอลัมน์เดิม AE/AF เฉพาะเมื่อกรอก) | v3.189 action approve_cn_collect: คลังอนุมัติ/ปฏิเสธรอบเก็บ CN (สถานะอนุมัติเก็บ/รหัสรอบเก็บ) + save_cn_collect ใส่รหัสรอบเก็บ+รออนุมัติ + undo ล็อกที่อนุมัติแล้ว | v3.188 action undo_cn_collect: ยกเลิกการเก็บ—เคลียร์เฉพาะคอลัมน์ระบบตาม cnLineId ไม่ลบแถว/ไม่แตะข้อมูลเดิม | v3.183 action save_cn_collect: ขนส่งเก็บของคืน CN → เขียนกลับ CN-Sale-dman ตาม cnLineId + คอลัมน์ ภาพเก็บขนส่ง/เวลาเก็บ | v3.182 Status บิล: ขาดโดยไม่มีเงินจริง (มีแต่ CN/ลดหนี้หัก) → "ยังไม่ชำระ" | v3.181 Status จ่าย: ไม่มีเงินจริงแม้มี CN/ลดหนี้หัก → "ไม่ชำระ" ไม่ปล่อยว่าง | CN: คอลัมน์ cnId + ชื่อเซลล์=เซลล์สั่งคืน จาก cnRef | รวมช่องหักยอด: creditNote รวม CN+นอกCN, ลดหนี้=ส่วนนอกCN subset ไม่บวกซ้ำ + เหตุผลลดหนี้ ชีท Cin | เมนู Sync CN-Sale-dman → CNSaleapp + trigger 5 นาที + มาร์ก CN ซ้ำ เนื้อหาทั้งใบ | คอลัมน์ "วันเครดิต" ชีท Cin จาก b.creditDays, ไม่มีวัน=0 | ขอสินค้าเพิ่มขึ้นรถ: request_load + approve/reject/delete_load_req + ชีท "ขอสินค้าเพิ่ม" + Discord | v3.130 CN คืนเต็มบิล → คอลัมน์ "ใบลดหนี้" ชีท Cin | v3.124 cancel_job เก็บ CN คนอื่น | v3.122 fixCinSalesmanColumn | v3.120 SLMN | v3.90 แท็ก [CN: ...]) */
 const SHEET_INPUT='บันทึกเที่ยวส่ง';
 const SHEET_CIN='บันทึกบิลและการชำระ';
 const SHEET_CN='CN';
@@ -8794,7 +8965,7 @@ const HEADERS_CIN=['เลขใบคุม','Doc_Date','Doc_No','Customer_Code
 function doGet(e){
   let drive='unknown';
   try{ DriveApp.getRootFolder().getName(); drive='OK'; }catch(err){ drive='NOT_AUTHORIZED'; }
-  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.241',drive:drive}))
+  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.244',drive:drive}))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -10866,10 +11037,204 @@ function backfillCreditDays(){
   range.setValues(out);
   SpreadsheetApp.getUi().alert('✓ เติมวันเครดิตย้อนหลังเรียบร้อย (ไม่มีวัน = 0)\\n- แถวทั้งหมด: '+out.length+'\\n- เติม/อัปเดต (>0 วัน): '+filled+'\\n- เงินสด (ใส่ 0): '+cash+'\\n- ไม่พบร้าน (ใส่ 0): '+notFound+(samples.length?'\\n\\nตัวอย่าง:\\n'+samples.join('\\n'):''));
 }
+/* ═══════════════════════════════════════════════════════════════
+   ★ v3.244 — มิเรอร์ชีท → Supabase (นำร่อง · "ตัวอ่าน" อย่างเดียว)
+   ชีทยังเป็นตัวจริง 100% — ทางเขียนเดิม (แอป→GAS→ชีท) ไม่ถูกแตะแม้แต่บรรทัดเดียว
+   ตรงนี้แค่ "ก๊อปตามหลัง" ลงตาราง Postgres ให้แอปอ่านเร็วขึ้น (gviz คิดค่าคงที่ ~0.7 วิ/คำขอ · Supabase ~0.2 วิ)
+
+   ตั้งค่า: Apps Script > ⚙ Project Settings > Script properties
+     SB_URL         = https://xxxxx.supabase.co
+     SB_SERVICE_KEY = service_role key   ⚠️ ห้ามใส่ในแอป/หน้าเว็บเด็ดขาด (ข้าม RLS ได้)
+   ปิดทันที: ลบ property SB_URL ทิ้ง → ทุกฟังก์ชันข้ามเงียบๆ ไม่กระทบการบันทึกชีท
+   ═══════════════════════════════════════════════════════════════ */
+function sbCfg_(){
+  var p=PropertiesService.getScriptProperties();
+  var u=String(p.getProperty('SB_URL')||'').trim();
+  while(u.slice(-1)==='/') u=u.slice(0,-1);
+  return {url:u, key:String(p.getProperty('SB_SERVICE_KEY')||'').trim()};
+}
+function sbOn_(){ var c=sbCfg_(); return !!(c.url&&c.key); }
+function sbUpsert_(table,rows,onConflict){
+  if(!rows||!rows.length||!sbOn_()) return 0;
+  var c=sbCfg_(), n=0, CH=400;
+  for(var i=0;i<rows.length;i+=CH){
+    var chunk=rows.slice(i,i+CH);
+    var res=UrlFetchApp.fetch(c.url+'/rest/v1/'+table+'?on_conflict='+encodeURIComponent(onConflict),{
+      method:'post', contentType:'application/json',
+      headers:{apikey:c.key, Authorization:'Bearer '+c.key, Prefer:'resolution=merge-duplicates,return=minimal'},
+      payload:JSON.stringify(chunk), muteHttpExceptions:true
+    });
+    var code=res.getResponseCode();
+    if(code>=300) throw new Error('Supabase '+table+' HTTP '+code+' : '+String(res.getContentText()).slice(0,240));
+    n+=chunk.length;
+  }
+  return n;
+}
+function sbCell_(v){
+  if(v instanceof Date) return Utilities.formatDate(v,'Asia/Bangkok','yyyy-MM-dd HH:mm:ss');
+  return (v===null||v===undefined)?'':String(v);
+}
+function sbIso_(v){
+  if(v instanceof Date) return isNaN(v.getTime())?null:v.toISOString();
+  var s=String(v||'').trim(); if(!s) return null;
+  var d=new Date(s); return isNaN(d.getTime())?null:d.toISOString();
+}
+function sbReadSheet_(name){
+  var sh=SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+  if(!sh) return null;
+  var last=sh.getLastRow(), lastc=sh.getLastColumn();
+  if(last<2||lastc<1) return null;
+  var vals=sh.getRange(1,1,last,lastc).getValues();
+  var head=vals[0].map(function(h){ return String(h).trim(); });
+  return {head:head, rows:vals.slice(1)};
+}
+/* เก็บทั้งแถวเป็น jsonb ตามหัวคอลัมน์ → ชีทเพิ่มคอลัมน์เมื่อไหร่ ไม่ต้องแก้ตารางหรือโค้ดฝั่งแอปเลย
+   (หัวคอลัมน์ซ้ำ เช่น "รูปเช็ค" 2 ช่อง → เอาช่องหลัง เหมือนที่ตัว parse CSV ในแอปทำอยู่) */
+function sbRowJson_(head,row){
+  var o={};
+  for(var c=0;c<head.length;c++){ if(head[c]) o[head[c]]=sbCell_(row[c]); }
+  return o;
+}
+function sbGetJson_(path){
+  var c=sbCfg_();
+  var res=UrlFetchApp.fetch(c.url+'/rest/v1/'+path,{
+    method:'get', headers:{apikey:c.key,Authorization:'Bearer '+c.key,Accept:'application/json'}, muteHttpExceptions:true});
+  if(res.getResponseCode()>=300) throw new Error('Supabase GET '+res.getResponseCode()+' : '+String(res.getContentText()).slice(0,200));
+  return JSON.parse(res.getContentText());
+}
+function sbDelete_(path){
+  var c=sbCfg_();
+  var res=UrlFetchApp.fetch(c.url+'/rest/v1/'+path,{
+    method:'delete', headers:{apikey:c.key,Authorization:'Bearer '+c.key,Prefer:'return=minimal'}, muteHttpExceptions:true});
+  if(res.getResponseCode()>=300) throw new Error('Supabase DELETE '+res.getResponseCode()+' : '+String(res.getContentText()).slice(0,200));
+}
+var SB_Q='"';
+/* ★ สำคัญ: ลบสำเนาที่ "ไม่มีในชีทแล้ว" ทิ้งด้วย
+   ถ้าไม่ทำ = บิลที่ลบออกจากชีทหลังบ้านจะค้างในสำเนาตลอดกาล แล้วเด้งกลับมาโชว์ในแอป (บั๊กเดิม v3.239)
+   คีย์ทั้งตารางมีแค่ ~3,000 แถว × 30 ไบต์ ≈ 90KB → ดึงมาเทียบทุกรอบได้สบาย
+   guard: ถ้าอ่านชีทแล้วได้ 0 คีย์ (ชีทพัง/อ่านไม่ออก) → ไม่ลบอะไรเลย */
+function sbPruneBills_(wantKeys){
+  var nWant=0; for(var _k in wantKeys){ nWant++; break; }
+  if(!nWant) return 0;
+  var have=sbGetJson_('dman_bills?select=job_id,doc_no');
+  var byJob={}, total=0;
+  for(var i=0;i<have.length;i++){
+    var k=have[i].job_id+'|'+have[i].doc_no;
+    if(wantKeys[k]) continue;
+    if(!byJob[have[i].job_id]) byJob[have[i].job_id]=[];
+    byJob[have[i].job_id].push(have[i].doc_no); total++;
+  }
+  if(!total) return 0;
+  Object.keys(byJob).forEach(function(jid){
+    var docs=byJob[jid];
+    for(var i=0;i<docs.length;i+=100){
+      var list=docs.slice(i,i+100).map(function(d){ return SB_Q+String(d).split(SB_Q).join('')+SB_Q; }).join(',');
+      sbDelete_('dman_bills?job_id=eq.'+encodeURIComponent(jid)+'&doc_no=in.('+encodeURIComponent(list)+')');
+    }
+  });
+  return total;
+}
+function sbSyncBills_(days,sinceMs){
+  var t=sbReadSheet_(SHEET_CIN); if(!t) return {up:0,del:0};
+  var iJob=t.head.indexOf('เลขใบคุม'), iDoc=t.head.indexOf('Doc_No');
+  var iAdd=t.head.indexOf('U_ADD'), iEdit=t.head.indexOf('แก้ไขเมื่อ');
+  if(iJob<0||iDoc<0) throw new Error('ไม่พบคอลัมน์ เลขใบคุม / Doc_No ในชีท '+SHEET_CIN);
+  var cut=days?(Date.now()-days*86400000):0;
+  var map={}, keys=[], want={};
+  for(var r=0;r<t.rows.length;r++){
+    var row=t.rows[r];
+    var jid=String(row[iJob]||'').trim(), doc=String(row[iDoc]||'').trim();
+    if(!jid||!doc) continue;
+    var iso=(iAdd>=0)?sbIso_(row[iAdd]):null;
+    if(cut&&iso&&(new Date(iso)).getTime()<cut) continue;              // นอกช่วงวัน — ข้าม
+    var k=jid+'|'+doc;
+    want[k]=1;                                                         // เก็บคีย์ "ที่ควรมี" ทุกแถวในช่วง (ไม่ว่าจะ delta หรือไม่)
+    if(sinceMs&&iEdit>=0){                                             // โหมด delta: อัปเฉพาะแถวที่แก้ไขหลังซิงก์รอบก่อน
+      var ed=sbIso_(row[iEdit]);
+      if(!ed||(new Date(ed)).getTime()<sinceMs) continue;
+    }
+    if(map[k]===undefined) keys.push(k);                               // แถวซ้ำ (job,doc) → เก็บแถวล่างสุด (กฎเดียวกับเมนูล้างบิลซ้ำ)
+    map[k]={job_id:jid, doc_no:doc, u_add:iso, row_json:sbRowJson_(t.head,row)};
+  }
+  var up=sbUpsert_('dman_bills',keys.map(function(k){ return map[k]; }),'job_id,doc_no');
+  var del=sbPruneBills_(want);
+  return {up:up, del:del};
+}
+function sbSyncJobs_(days){
+  var t=sbReadSheet_(SHEET_INPUT); if(!t) return 0;
+  var iJid=t.head.indexOf('รหัสใบคุม'), iDrv=t.head.indexOf('ชื่อคนขับ');
+  var iWh=t.head.indexOf('คลัง'), iRcv=t.head.indexOf('วันเวลาที่รับงาน');
+  if(iJid<0) throw new Error('ไม่พบคอลัมน์ รหัสใบคุม ในชีท '+SHEET_INPUT);
+  var cut=days?(Date.now()-days*86400000):0;
+  var map={}, keys=[];
+  for(var r=0;r<t.rows.length;r++){
+    var row=t.rows[r];
+    var jid=String(row[iJid]||'').trim(); if(!jid) continue;
+    var iso=(iRcv>=0)?sbIso_(row[iRcv]):null;
+    if(cut&&iso&&(new Date(iso)).getTime()<cut) continue;
+    if(map[jid]===undefined) keys.push(jid);
+    map[jid]={job_id:jid,
+      driver:(iDrv>=0)?String(row[iDrv]||'').trim():'',
+      warehouse:(iWh>=0)?String(row[iWh]||'').trim():'',
+      received_at:iso, row_json:sbRowJson_(t.head,row)};
+  }
+  var out=keys.map(function(k){ return map[k]; });
+  return sbUpsert_('dman_jobs',out,'job_id');
+}
+/* full=true → กวาดใหม่ทั้งช่วง 21 วัน (ใช้ตอนตั้งครั้งแรก/ซ่อม) · ปกติ trigger จะวิ่งโหมด delta */
+function sbSyncNow_(days,full){
+  if(!sbOn_()) return {ok:false,msg:'ยังไม่ได้ตั้ง Script properties: SB_URL / SB_SERVICE_KEY'};
+  var p=PropertiesService.getScriptProperties();
+  var d=days||21;
+  var last=parseInt(p.getProperty('SB_LAST_SYNC')||'0',10)||0;
+  var since=(full||!last)?0:Math.max(0,last-10*60000);   // เผื่อเหลื่อม 10 นาที กันแถวตกหล่นช่วงคาบเกี่ยว
+  var t0=Date.now();
+  var b=sbSyncBills_(d,since), j=sbSyncJobs_(d);
+  var nowIso=new Date().toISOString();
+  sbUpsert_('dman_sync_state',[
+    {id:'bills', synced_at:nowIso, rows_count:b.up, note:(since?'delta':'full')+' '+d+' วัน · ลบ '+b.del},
+    {id:'jobs',  synced_at:nowIso, rows_count:j,    note:'full '+d+' วัน'}
+  ],'id');
+  p.setProperty('SB_LAST_SYNC',String(Date.now()));
+  return {ok:true, bills:b.up, deleted:b.del, jobs:j, mode:(since?'delta':'full'), ms:(Date.now()-t0)};
+}
+function sbSyncTick(){ try{ sbSyncNow_(21,false); }catch(e){ console.error('sbSyncTick: '+e); } }
+function sbSyncNowUI(){
+  var ui=SpreadsheetApp.getUi();
+  try{
+    var r=sbSyncNow_(21,false);
+    if(!r.ok){ ui.alert(r.msg); return; }
+    ui.alert('✓ ซิงก์ขึ้น Supabase แล้ว ('+r.mode+')\\n- บิล: '+r.bills+' แถว\\n- ลบสำเนาที่ไม่มีในชีทแล้ว: '+r.deleted+' แถว\\n- ใบคุม: '+r.jobs+' แถว\\n- ใช้เวลา: '+Math.round(r.ms/1000)+' วิ');
+  }catch(e){ ui.alert('❌ ซิงก์ไม่สำเร็จ\\n\\n'+e); }
+}
+function sbSyncFullUI(){
+  var ui=SpreadsheetApp.getUi();
+  try{
+    var r=sbSyncNow_(21,true);
+    if(!r.ok){ ui.alert(r.msg); return; }
+    ui.alert('✓ กวาดใหม่ทั้งช่วง 21 วันแล้ว\\n- บิล: '+r.bills+' แถว\\n- ลบสำเนาที่ไม่มีในชีทแล้ว: '+r.deleted+' แถว\\n- ใบคุม: '+r.jobs+' แถว\\n- ใช้เวลา: '+Math.round(r.ms/1000)+' วิ');
+  }catch(e){ ui.alert('❌ ซิงก์ไม่สำเร็จ\\n\\n'+e); }
+}
+function sbSetupTrigger(){
+  ScriptApp.getProjectTriggers().forEach(function(t){ if(t.getHandlerFunction()==='sbSyncTick') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('sbSyncTick').timeBased().everyMinutes(5).create();
+  SpreadsheetApp.getUi().alert('✓ ตั้งซิงก์ Supabase อัตโนมัติทุก 5 นาทีแล้ว');
+}
+function sbStopTrigger(){
+  var n=0;
+  ScriptApp.getProjectTriggers().forEach(function(t){ if(t.getHandlerFunction()==='sbSyncTick'){ ScriptApp.deleteTrigger(t); n++; } });
+  SpreadsheetApp.getUi().alert('หยุดซิงก์ Supabase อัตโนมัติแล้ว (ลบ '+n+' trigger)');
+}
+
 function onOpen(){
   try{
     SpreadsheetApp.getUi().createMenu('🚚 D-Man')
       .addItem('▶ Sync ใบคุม (ตอนนี้)','syncAllSheetsUI')   // v3.60: เหลือ sync ใบคุม อย่างเดียว
+      .addSeparator()
+      .addItem('⚡ ซิงก์ขึ้น Supabase (ตอนนี้)','sbSyncNowUI')                 // ★ v3.244 นำร่อง
+      .addItem('⚡ กวาดใหม่ทั้งช่วง 21 วัน → Supabase','sbSyncFullUI')        // ★ v3.244
+      .addItem('⏰ ตั้งซิงก์ Supabase อัตโนมัติ (ทุก 5 นาที)','sbSetupTrigger') // ★ v3.244
+      .addItem('⏹ หยุดซิงก์ Supabase','sbStopTrigger')                        // ★ v3.244
       .addSeparator()
       .addItem('⏰ ตั้ง Trigger 9:00 · 15:00 · 21:00','setupJadRotTriggers')
       .addSeparator()
@@ -11001,8 +11366,16 @@ async function bootApp(){
       pruneLocalJobs_();   // ★ v3.206: ล้างงานเก่าทิ้งตั้งแต่เปิดแอป (กันสะสมจนเครื่องค้าง)
     }catch(e){}
     // ลูกค้า/สินค้า cache (24h) — เอาจาก localStorage มา hydrate state ให้ทันที (ไม่รอ fetch)
-    const cachedCust=getCachedSheet('customers_v3155',CACHE_TTL_LONG);   // v3.205: แก้คีย์ผิด (เดิม customers_v351 → พลาด cache ทุกครั้ง ต้องรอโหลดใหม่ทุกเปิดแอป)
-    if(cachedCust) state.customers=cachedCust;
+    // ★ v3.242: ลูกค้าย้ายไป IndexedDB (ดู CUSTOMERS_CACHE_KEY) — v3.205: แก้คีย์ผิดที่ทำให้พลาด cache ทุกครั้ง
+    const cachedCustOld=getCachedSheet(CUSTOMERS_CACHE_KEY_OLD,CACHE_TTL_LONG);
+    if(cachedCustOld&&cachedCustOld.length){
+      state.customers=cachedCustOld;
+      setCustomersCache_(cachedCustOld);   // ย้ายของเดิมเข้า IndexedDB เลย — เครื่องที่อัปเดตจะได้ไม่ต้องโหลดชีทลูกค้าใหม่
+    } else {
+      const cachedCust=await getCustomersCache_();   // อ่าน IDB ~10ms — รอได้ เพื่อให้ render รอบแรกมีชื่อร้านครบ
+      if(cachedCust) state.customers=cachedCust;
+    }
+    try{ localStorage.removeItem(cacheKey(CUSTOMERS_CACHE_KEY_OLD)); }catch(e){}   // คืนพื้นที่ localStorage ~1MB
     // ★ v3.227: แคชสินค้าย้ายไป IndexedDB แล้ว (โหลดตอนเข้าหน้าที่ใช้จริง) — ตรงนี้เหลือไว้รองรับแคชเก่าใน localStorage
     const cachedProd=getCachedSheet(PRODUCTS_CACHE_KEY,CACHE_TTL_LONG);
     if(cachedProd){ state.products=expandProducts_(cachedProd); }   // ★ v3.227: ต้องคลายรูปแบบก่อน (เดิมยัดดิบๆ = ชื่อ/ราคาสินค้าเพี้ยน)
@@ -11023,9 +11396,15 @@ async function bootApp(){
       loadChoices().catch(()=>{}),
       loadSalesStaff().catch(()=>{}),   // v3.120: รหัสเซลล์ (SLMN) → ชื่อเซลล์ CN
     ];
-    Promise.all([loadVehicles().catch(()=>{})].concat(_heavy)).then(()=>loadJobs().catch(()=>{}))
+    // ★ v3.242: เดิมโซ่นี้ต่อกันเป็นชั้นๆ — ต้องรอ "รถ+ลูกค้า+เซลล์" (ลูกค้าอย่างเดียว 1.4 วิ) ให้เสร็จก่อน
+    //   ถึงจะเริ่มโหลดงาน ทั้งที่งานไม่ได้ต้องใช้ข้อมูลพวกนั้นเลย (enrichBills เติมทีหลังได้อยู่แล้ว)
+    //   แยกเป็น 2 สายวิ่งขนานกัน → ตัดเวลารอตอนเปิดแอปลงประมาณ 1.5 วิ
+    //   คำขอชีทมีค่าคงที่ ~0.7 วิ/ครั้ง (วัดจริง แม้ขอแค่ 1 แถว) → ยิงพร้อมกันคุ้มกว่าไล่ทีละอัน
+    const _sideP=Promise.all([loadVehicles().catch(()=>{})].concat(_heavy));
+    const _jobsP=loadJobs().catch(()=>{})
       .then(()=>flushOutbox().catch(()=>{}))                     // v3.28: ส่ง outbox ค้างจาก session ก่อน
-      .then(()=>{ if(outboxCount()) return; return syncJobsFromSheet({force:true}).catch(()=>{}); })   // ข้าม sync ถ้ายังค้าง (กันเขียนทับ)
+      .then(()=>{ if(outboxCount()) return; return syncJobsFromSheet({force:true}).catch(()=>{}); });   // ข้าม sync ถ้ายังค้าง (กันเขียนทับ)
+    Promise.all([_sideP,_jobsP])
       .then(()=>{
         state._bgLoading=false;
         pruneLocalJobs_();   // ★ v3.206: หลังซิงค์เสร็จ ล้างงานเก่าอีกรอบ (ชีทเติมงานเก่ากลับมาได้)
@@ -11073,7 +11452,10 @@ async function autoRefreshTick(){
 }
 function startAutoRefresh(){
   stopAutoRefresh();
-  _autoRefreshTimer=setInterval(autoRefreshTick,AUTO_REFRESH_MS);
+  // ★ v3.242: คนขับโหลดแค่ใบคุมตัวเอง (~20KB) → 180 วิเหมือนเดิมสบายๆ
+  //   ฝั่งออฟฟิศยังต้องดึงทั้งบริษัท (~2.4MB/รอบ) → ยืดเป็น 300 วิ ลดภาระลง 40% (กด ↻ ได้ตลอด)
+  const ms=(typeof jobScopeDriverOnly_==='function'&&jobScopeDriverOnly_())?AUTO_REFRESH_MS:300000;
+  _autoRefreshTimer=setInterval(autoRefreshTick,ms);
 }
 function stopAutoRefresh(){
   if(_autoRefreshTimer){ clearInterval(_autoRefreshTimer); _autoRefreshTimer=null; }
@@ -11236,6 +11618,25 @@ async function openDiag_(){
       _diagProdCache='✓ '+_pc.data.length+' รายการ ('+_age+' ชม.)';
     }
   }catch(e){ _diagProdCache='ใช้ไม่ได้'; }
+  // ★ v3.243: สถานะแคชลูกค้าใน IndexedDB — ถ้าขึ้น "ไม่มี" แปลว่าต้องโหลดชีทลูกค้า 1.6MB ใหม่ทุกครั้งที่เปิดแอป
+  let _diagCustCache='ไม่มี ❌';
+  try{
+    const _cc=await idbGet_(CUSTOMERS_CACHE_KEY);
+    if(_cc&&Array.isArray(_cc.rows)){
+      const _age=Math.round((Date.now()-(_cc.ts||0))/3600000);
+      _diagCustCache='✓ '+_cc.rows.length+' ร้าน ('+_age+' ชม.)';
+    }
+  }catch(e){ _diagCustCache='ใช้ไม่ได้'; }
+  // ★ v3.243: โหมดโหลดงาน — "เฉพาะของฉัน" = คนขับ (เบา ~20KB) · "ทั้งบริษัท" = ฝั่งออฟฟิศ (หนัก ~2.2MB)
+  const _diagScope=(typeof jobScopeDriverOnly_==='function'&&jobScopeDriverOnly_())
+    ? '⚡ เฉพาะใบคุมของฉัน ('+(readScopeIds_().length||0)+' ใบ)' : 'ทั้งบริษัท (ฝั่งออฟฟิศ)';
+  // ★ v3.244: สถานะการอ่านจาก Supabase (นำร่อง) — ต้องเห็นได้ว่าใช้จริงไหม/ถอยไปชีทเพราะอะไร
+  let _diagSB='ปิดอยู่ (อ่านจากชีท)';
+  if(typeof sbReady_==='function'&&sbReady_()){
+    if(_sbHealth.ok===true) _diagSB='✓ ใช้อยู่ · '+_sbHealth.rows+' บิล · '+_sbHealth.ms+' ms'+(_sbHealth.stale!==null&&isFinite(_sbHealth.stale)?' · สำเนาอายุ '+Math.round(_sbHealth.stale/60000)+' นาที':'');
+    else if(_sbHealth.ok===false) _diagSB='⚠️ ถอยไปอ่านชีท — '+(_sbHealth.why||'?');
+    else _diagSB='เปิดอยู่ · ยังไม่ได้เรียก';
+  }
   const errs=_errLog.slice(0,8).map(e=>`<div style="font-size:11px;color:var(--danger);padding:4px 0;border-bottom:1px dashed var(--border);word-break:break-word">[${new Date(e.t).toLocaleTimeString('th-TH')}] ${esc(e.msg)}</div>`).join('')||'<div class="txt-xs txt-muted">ไม่มี error ✓</div>';
   $('billDetailTitle').textContent='🩺 ตรวจสภาพเครื่อง';
   $('billDetailBody').innerHTML=`
@@ -11250,6 +11651,9 @@ async function openDiag_(){
     ${row('ร้านค้าที่โหลด',(state.customers||[]).length)}
     ${row('สินค้าที่โหลด',(state.products||[]).length)}
     ${row('แคชสินค้า (IndexedDB)',_diagProdCache)}
+    ${row('แคชร้านค้า (IndexedDB)',_diagCustCache)}
+    ${row('โหลดงานแบบ',_diagScope)}
+    ${row('Supabase (นำร่อง)',_diagSB)}
     ${row('รอเข้าชีท (คิวค้าง)',outboxCount()+' รายการ')}
     ${row('เครื่อง',(navigator.userAgent||'').slice(0,60))}
     <div style="margin-top:10px;font-weight:700;font-size:12px">⚠️ ข้อผิดพลาดล่าสุด</div>${errs}
