@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v19.28</title>
+<title>Rattana Sales Dashboard v19.41</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -408,7 +408,7 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.28</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.41</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -725,7 +725,7 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
   </div>
   <!-- ตารางร้านตามรูท (W columns + AVG/Week + ไม่ซื้อ) -->
   <div style="padding:0 16px 8px;margin-top:8px">
-    <div style="font-size:13px;font-weight:700;color:var(--navy);padding:8px 0 4px">🛣️ รายชื่อร้านตามรูท</div>
+    <div style="font-size:13px;font-weight:700;color:var(--navy);padding:8px 0 4px">🛣️ ซื้อไม่ตรงรูท</div>
   </div>
   <div class="tbl-wrap" style="padding:0 16px 24px;overflow-y:auto;max-height:50vh">
     <table class="tbl">
@@ -1191,11 +1191,18 @@ async function loadData(showSpin=true) {
     if (pddt && pddt.length) setCache('pddtData', pddt);
     if (slmnRows && slmnRows.length) setCache('slmnData', slmnRows);
     _applyData(fetchedAll, budgetRows, allCust, pddt, slmnRows, isAdmin);
-    // ── Preload แท็บ ร้านตามรูท ใน background ──
+    // ── Preload ข้อมูลทุกแท็บใน background ──
     setTimeout(() => {
       if (!getCached('allSalesData')) fetchSheet(ALL_SALES_SHEET_ID, ALL_SALES_SHEET_NAME).then(r=>setCache('allSalesData',r)).catch(()=>{});
       try { const _od=JSON.parse(localStorage.getItem('orderData')); if(!_od||Date.now()-_od.ts>10*60*1000) fetchSheet(CUSTOMER_SHEET_ID,ORDER_SHEET_NAME).then(r=>{try{localStorage.setItem('orderData',JSON.stringify({ts:Date.now(),data:r}));}catch{}}).catch(()=>{}); }catch{ fetchSheet(CUSTOMER_SHEET_ID,ORDER_SHEET_NAME).then(r=>{try{localStorage.setItem('orderData',JSON.stringify({ts:Date.now(),data:r}));}catch{}}).catch(()=>{}); }
     }, 1500);
+    // ── Preload ทุกแท็บ (staggered) ──
+    setTimeout(() => { try { renderLowStore(); } catch(e) { console.warn('[preload lowstore]', e); } }, 3000);
+    setTimeout(() => { try { renderRouteStore(); } catch(e) { console.warn('[preload routestore]', e); } }, 4000);
+    setTimeout(() => { try { if (!skuLoaded) loadSkuData(); } catch(e) { console.warn('[preload sku]', e); } }, 5000);
+    setTimeout(() => { try { if (!sgLoaded) sgLoadStoreData(); } catch(e) { console.warn('[preload storegrid]', e); } }, 6000);
+    setTimeout(() => { try { renderMissingProducts(); } catch(e) { console.warn('[preload missing]', e); } }, 7000);
+    setTimeout(() => { try { if (!tgtLoaded) initTargetTab(); } catch(e) { console.warn('[preload summary]', e); } }, 8000);
   } catch(e) {
     console.error(e);
     if (!staleSales) showToast('โหลดข้อมูลไม่สำเร็จ: ' + e.message, 'error');
@@ -1210,7 +1217,7 @@ function _clearAllCaches() {
   const toRemove = [];
   for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && !keep.has(k)) toRemove.push(k); }
   toRemove.forEach(k => localStorage.removeItem(k));
-  _rsSlmnIdx = null; _rsAvgIdx = null; _rsBpRaw = null; _rsOrderIdx = null; _rsRooIdx = null; localStorage.removeItem('allSalesData'); localStorage.removeItem('orderData');
+  _rsSlmnIdx = null; _rsAvgIdx = null; _rsBpRaw = null; _rsOrderIdx = null; _rsRooIdx = null; _rsCardDataBySeller = null; _rsYesterdayCardDataBySeller = null; _rsTodayNoOrderBySeller = null; localStorage.removeItem('allSalesData'); localStorage.removeItem('orderData');
   skuImageMap = {}; productImageMap = {};
   lowStoreLoaded = false; Object.keys(lowHistByCode).forEach(k => delete lowHistByCode[k]);
   tgtState.allSalesRaw = []; tgtState.bpRaw = []; tgtState.customerRaw = [];
@@ -2401,6 +2408,9 @@ let _rsLoading = false;
 let _rsBpRaw  = null;
 let _rsSlmnIdx = null; // SLMN_NAME → SLMN_CODE
 let _rsAvgIdx  = null; // Sale_No_ROO§Customer_Name → avg(Exvat) over last 3 months
+let _rsCardDataBySeller = null; // Map: stripKhun(seller) → [{name,avg,missed}] top5 today's route missed stores
+let _rsYesterdayCardDataBySeller = null; // Map: stripKhun(seller) → [{name,avg}] top5 yesterday route stores with no order & ROO empty
+let _rsTodayNoOrderBySeller = null; // Map: stripKhun(seller) → [{name,avg,missed}] top5 today route stores with current week = 0 (no purchase this week)
 const _rsStripKhun = s => String(s||'').replace(/^คุณ\s*/,'').replace(/\s+/g,' ').trim();
 const _rsNormCust  = s => String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
 
@@ -2487,6 +2497,8 @@ async function renderRouteStore() {
     }
     _rsLoading = false;
   }
+  // ── ให้ _rsBpRaw เซตเสมอ แม้ไม่ได้ fetch ใหม่ ──
+  if (!_rsBpRaw) _rsBpRaw = allRawRows?.length ? allRawRows : tgtState.bpRaw || [];
 
   const _rsIsAdmin = _isAdmin();
   const _rsMyName  = _rsIsAdmin ? null : String(currentUser?.name || '').trim();
@@ -2674,6 +2686,56 @@ async function renderRouteStore() {
       if (b.missed !== a.missed) return b.missed - a.missed;
       return b.avg - a.avg; // ถ้าไม่ซื้อเท่ากัน เรียง AVG มากสุดก่อน
     });
+    // ── สร้าง card data สำหรับ summary tab: รูทวันนี้, missed>0, top5 ──
+    {
+      const _todayRN = {0:'อาทิตย์',1:'จันทร์',2:'อังคาร',3:'พุธ',4:'พฤหัส',5:'ศุกร์',6:'เสาร์'}[new Date().getDay()];
+      const _cardMap = new Map();
+      filtered2.forEach(({r, missed, avg}) => {
+        if ((r[routeKey]||'').trim() !== _todayRN) return;
+        if (missed <= 0) return;
+        const _sel = _rsStripKhun((r[sellerKey]||'').trim());
+        if (!_cardMap.has(_sel)) _cardMap.set(_sel, []);
+        _cardMap.get(_sel).push({name:(r[nameKey]||'').trim(), avg, missed});
+      });
+      _cardMap.forEach((arr, k) => { arr.sort((a,b)=>b.missed-a.missed||b.avg-a.avg); _cardMap.set(k, arr.slice(0,5)); });
+      _rsCardDataBySeller = _cardMap;
+    }
+    // ── card data: รูทเมื่อวาน, ยังไม่ซื้อ, ROO ว่าง, top5 ──
+    {
+      const _dow = new Date().getDay();
+      const _ydayMap2 = {0:'เสาร์',1:'อาทิตย์',2:'จันทร์',3:'อังคาร',4:'พุธ',5:'พฤหัส',6:'ศุกร์'};
+      const _ydayRN = _ydayMap2[_dow];
+      const _ycardMap = new Map();
+      filtered2.forEach(({r, avg}) => {
+        if ((r[routeKey]||'').trim() !== _ydayRN) return;
+        const _code = String(r[codeKey]||'').trim();
+        if ((_rsOrderIdx?.get(_code)) === 'yesterday') return;
+        if ((_rsRooIdx?.get(_code) || '')) return;
+        const _sel = _rsStripKhun((r[sellerKey]||'').trim());
+        if (!_ycardMap.has(_sel)) _ycardMap.set(_sel, []);
+        _ycardMap.get(_sel).push({name:(r[nameKey]||'').trim(), avg});
+      });
+      _ycardMap.forEach((arr, k) => { arr.sort((a,b)=>b.avg-a.avg); _ycardMap.set(k, arr.slice(0,5)); });
+      _rsYesterdayCardDataBySeller = _ycardMap;
+    }
+    // ── card data: รูทวันนี้, ยังไม่ซื้อสัปดาห์นี้ (current week = 0), top5 ──
+    {
+      const _todayRN2 = {0:'อาทิตย์',1:'จันทร์',2:'อังคาร',3:'พุธ',4:'พฤหัส',5:'ศุกร์',6:'เสาร์'}[new Date().getDay()];
+      const _curWk2 = 'w' + _curWkNum;
+      const _todayMap = new Map();
+      filtered2.forEach(({r, missed, avg}) => {
+        if ((r[routeKey]||'').trim() !== _todayRN2) return;
+        const _name2 = (r[nameKey]||'').trim();
+        const _seller2 = (r[sellerKey]||'').trim();
+        const _wData2 = wIdx.get(normName(_name2) + '§' + normStr(_seller2)) || {};
+        if ((_wData2[_curWk2] || 0) > 0) return; // ซื้อแล้วสัปดาห์นี้
+        const _sel2 = _rsStripKhun(_seller2);
+        if (!_todayMap.has(_sel2)) _todayMap.set(_sel2, []);
+        _todayMap.get(_sel2).push({name:_name2, avg, missed});
+      });
+      _todayMap.forEach((arr, k) => { arr.sort((a,b)=>b.missed-a.missed||b.avg-a.avg); _todayMap.set(k, arr.slice(0,5)); });
+      _rsTodayNoOrderBySeller = _todayMap;
+    }
     let html2 = '', lastRoute2 = null, lastSeller2 = null;
     filtered2.forEach(({r, missed, avg}, i) => {
       const route2    = (r[routeKey]||'').trim();
@@ -2759,6 +2821,8 @@ async function renderRouteStore() {
       tbody3.innerHTML = html3 || `<tr class="empty-row"><td colspan="9">ไม่พบข้อมูล</td></tr>`;
     }
   }
+  // ── re-render summary tab เพื่ออัพเดทการ์ด route missed ──
+  if (tgtLoaded) setTimeout(renderSummaryTab, 0);
 
   // ── ตาราง 2: ร้านต่ำกว่า Effective Outlet ──
   const eoTbody = document.getElementById('rsEoTbody');
@@ -3698,19 +3762,19 @@ async function loadTargetData(showSpin) {
   if (showSpin) showSpinner('กำลังโหลดข้อมูลยอดขาย...');
   try {
     const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, outletRaw, eoRaw, customerRaw, onTopRaw, rooRaw, onlineRaw, allSalesRaw] = await Promise.all([
-      fetchSheet(CUSTOMER_SHEET_ID, TGT_TARGET_SHEET_NAME),
+      fetchSheet(CUSTOMER_SHEET_ID, TGT_TARGET_SHEET_NAME).catch(()=>[]),
       // reuse bpRaw จาก allRawRows ที่โหลดใน loadData แล้ว
-      (allRawRows && allRawRows.length) ? Promise.resolve(allRawRows) : fetchSheet(SALES_SHEET_ID, SALES_SHEET),
-      fetchSheet(TGT_CN_SHEET_ID, TGT_CN_SHEET_NAME),
-      fetchSheet(BUDGET_SHEET_ID, TGT_BUDGET_INCENTIVE_NAME),
-      fetchSheet(TGT_NEWSKU_SHEET_ID, TGT_NEWSKU_SHEET_NAME),
-      fetchSheet(TGT_OUTLET_SHEET_ID, TGT_OUTLET_SHEET_NAME),
-      fetchSheet(TGT_EO_SHEET_ID, TGT_EO_SHEET_NAME),
+      (allRawRows && allRawRows.length) ? Promise.resolve(allRawRows) : fetchSheet(SALES_SHEET_ID, SALES_SHEET).catch(()=>[]),
+      fetchSheet(TGT_CN_SHEET_ID, TGT_CN_SHEET_NAME).catch(()=>[]),
+      fetchSheet(BUDGET_SHEET_ID, TGT_BUDGET_INCENTIVE_NAME).catch(()=>[]),
+      fetchSheet(TGT_NEWSKU_SHEET_ID, TGT_NEWSKU_SHEET_NAME).catch(()=>[]),
+      fetchSheet(TGT_OUTLET_SHEET_ID, TGT_OUTLET_SHEET_NAME).catch(()=>[]),
+      fetchSheet(TGT_EO_SHEET_ID, TGT_EO_SHEET_NAME).catch(()=>[]),
       // reuse customerRaw จาก allCustomerRows ที่โหลดใน loadData แล้ว
-      (allCustomerRows && allCustomerRows.length) ? Promise.resolve(allCustomerRows) : fetchSheet(CUSTOMER_SHEET_ID, CUSTOMER_SHEET_NAME),
-      fetchSheet(TGT_OUTLET_SHEET_ID, TGT_ON_TOP_SHEET_NAME),
-      fetchSheet(TGT_OUTLET_SHEET_ID, TGT_ROO_SHEET_NAME),
-      fetchSheet(TGT_OUTLET_SHEET_ID, TGT_ONLINE_SHEET_NAME),
+      (allCustomerRows && allCustomerRows.length) ? Promise.resolve(allCustomerRows) : fetchSheet(CUSTOMER_SHEET_ID, CUSTOMER_SHEET_NAME).catch(()=>[]),
+      fetchSheet(TGT_OUTLET_SHEET_ID, TGT_ON_TOP_SHEET_NAME).catch(()=>[]),
+      fetchSheet(TGT_OUTLET_SHEET_ID, TGT_ROO_SHEET_NAME).catch(()=>[]),
+      fetchSheet(TGT_OUTLET_SHEET_ID, TGT_ONLINE_SHEET_NAME).catch(()=>[]),
       // reuse allSalesRaw ถ้ามีอยู่แล้ว (ชีตใหญ่มาก)
       (tgtState.allSalesRaw && tgtState.allSalesRaw.length) ? Promise.resolve(tgtState.allSalesRaw) : fetchSheet(ALL_SALES_SHEET_ID, ALL_SALES_SHEET_NAME).catch(()=>[]),
     ]);
@@ -3730,6 +3794,10 @@ async function loadTargetData(showSpin) {
     tgtState.rows = tgtComputeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw);
     buildTgtFilterControls();
     renderTgtAll();
+    // re-render summary cards ทันทีหลังข้อมูลพร้อม (เพื่อให้การ์ด _routeMissedBySeller ถูกต้อง)
+    if (document.getElementById('tab-summary')?.classList.contains('active') || tgtLoaded) {
+      setTimeout(renderSummaryTab, 0);
+    }
   } catch (e) {
     console.error(e);
     showToast('โหลดข้อมูลไม่สำเร็จ ลองรีเฟรชอีกครั้ง', 'error');
@@ -5306,71 +5374,65 @@ function renderSummaryTab() {
       <span style="font-weight:600;color:var(--text)">${value??'-'}</span>
     </div>`;
 
-  // ── Route missed stores by seller (for today's route day) ──
+  // ── Route missed stores by seller ──
+  // ใช้ข้อมูลจาก renderRouteStore() ถ้ามี ไม่งั้นคำนวณ inline
   const _routeMissedBySeller = (() => {
-    if (!tgtState.customerRaw?.length || !_rsBpRaw?.length) return new Map();
+    if (_rsCardDataBySeller && _rsCardDataBySeller.size > 0) return _rsCardDataBySeller;
+    const _bpSrc = _rsBpRaw?.length ? _rsBpRaw : (allRawRows?.length ? allRawRows : tgtState.bpRaw);
+    const _custSrc = tgtState.customerRaw?.length ? tgtState.customerRaw : allCustomerRows;
+    if (!_custSrc?.length || !_bpSrc?.length) return new Map();
     const _n = new Date(); _n.setHours(0,0,0,0);
-    const _yr3=_n.getFullYear(), _mo3=_n.getMonth();
-    const _fd3 = new Date(_yr3,_mo3,1).getDay();
-    const _ld3 = new Date(_yr3,_mo3+1,0).getDate();
-    const _mxWk3 = Math.ceil((_ld3+_fd3)/7);
-    const _allWks3 = Array.from({length:_mxWk3},(_,i)=>'w'+(i+1));
-    const _todayDow = _n.getDay();
-    const thDowToName = {0:'อาทิตย์',1:'จันทร์',2:'อังคาร',3:'พุธ',4:'พฤหัส',5:'ศุกร์',6:'เสาร์'};
-    const todayRouteName = thDowToName[_todayDow];
-    const thDayToJS3 = {'จันทร์':1,'อังคาร':2,'พุธ':3,'พฤหัสบดี':4,'พฤหัส':4,'ศุกร์':5,'เสาร์':6,'อาทิตย์':0};
-    // wIdx3: normName§normSeller → {w1,w2,...}
-    const wIdx3 = new Map();
-    _rsBpRaw.forEach(r => {
-      const cname  = String(r['Customer_Name']||'').trim();
-      const seller = String(r['Sale NO ROO']||'').trim();
-      if (!cname||!seller) return;
+    const _yr=_n.getFullYear(), _mo=_n.getMonth();
+    const _fd = new Date(_yr,_mo,1).getDay(), _ld = new Date(_yr,_mo+1,0).getDate();
+    const _mxWk = Math.ceil((_ld+_fd)/7);
+    const _wks = Array.from({length:_mxWk},(_,i)=>'w'+(i+1));
+    const _todayRN = {0:'อาทิตย์',1:'จันทร์',2:'อังคาร',3:'พุธ',4:'พฤหัส',5:'ศุกร์',6:'เสาร์'}[_n.getDay()];
+    const _dayJS = {'จันทร์':1,'อังคาร':2,'พุธ':3,'พฤหัสบดี':4,'พฤหัส':4,'ศุกร์':5,'เสาร์':6,'อาทิตย์':0};
+    const stripK = s => String(s||'').replace(/^คุณ\s*/,'').replace(/\s+/g,' ').trim();
+    const wIdx = new Map();
+    _bpSrc.forEach(r => {
+      const cn = stripK(String(r['Customer_Name']||'').trim());
+      const sl = stripK(String(r['Sale NO ROO']||'').trim());
+      if (!cn||!sl) return;
       const ds = String(r['Doc_Date']||'').trim();
-      const dt3 = ds ? new Date(ds.replace(/(\d+)\/(\d+)\/(\d+)/,'$3-$2-$1')) : null;
-      if (!dt3||isNaN(dt3)) return;
-      const fd3 = new Date(dt3.getFullYear(),dt3.getMonth(),1).getDay();
-      const wk3 = 'w'+Math.ceil((dt3.getDate()+fd3)/7);
-      const key3 = cname+'§'+seller;
-      if (!wIdx3.has(key3)) wIdx3.set(key3,{});
-      wIdx3.get(key3)[wk3] = (wIdx3.get(key3)[wk3]||0) + (parseFloat(String(r['EXVat']||'0').replace(/,/g,''))||0);
+      const dt = ds ? new Date(ds.replace(/(\d+)\/(\d+)\/(\d+)/,'$3-$2-$1')) : null;
+      if (!dt||isNaN(dt)) return;
+      const fd = new Date(dt.getFullYear(),dt.getMonth(),1).getDay();
+      const wk = 'w'+Math.ceil((dt.getDate()+fd)/7);
+      const key = cn+'§'+sl;
+      if (!wIdx.has(key)) wIdx.set(key,{});
+      wIdx.get(key)[wk] = (wIdx.get(key)[wk]||0)+(parseFloat(String(r['EXVat']||'0').replace(/,/g,''))||0);
     });
-    const _routeDayInWk3 = (dow, wi) => {
-      const w=wi+1, s=Math.max(1,(w-1)*7-_fd3+1), e=Math.min(_ld3,w*7-_fd3);
-      for (let d=s;d<=e;d++) if (new Date(_yr3,_mo3,d).getDay()===dow) return d;
-      return null;
-    };
-    const custRows = tgtState.customerRaw;
-    const sampleK = Object.keys(custRows[0]||{});
-    const findK3 = terms => sampleK.find(k=>terms.some(t=>k.replace(/[\s_]/g,'').toUpperCase().includes(t.toUpperCase())));
-    const rKey3 = findK3(['ชื่อรูท','รูท'])||'ชื่อรูท';
-    const nKey3 = findK3(['ชื่อร้านค้า','ร้านค้า'])||'ชื่อร้านค้า';
-    const sKey3 = findK3(['เซลล์ผู้ดูแล','เซลล์'])||'เซลล์ผู้ดูแล';
+    const sK = Object.keys(_custSrc[0]||{});
+    const fk = terms => sK.find(k=>terms.some(t=>k.replace(/[\s_]/g,'').toUpperCase().includes(t.toUpperCase())));
+    const rKey = fk(['ชื่อรูท','รูท'])||'ชื่อรูท';
+    const nKey = fk(['ชื่อร้านค้า','ร้านค้า'])||'ชื่อร้านค้า';
+    const sKey = fk(['เซลล์ผู้ดูแล','เซลล์'])||'เซลล์ผู้ดูแล';
+    const rdInWk = (dow,wi) => { const w=wi+1,s=Math.max(1,(w-1)*7-_fd+1),e=Math.min(_ld,w*7-_fd); for(let d=s;d<=e;d++) if(new Date(_yr,_mo,d).getDay()===dow) return d; return null; };
     const res = new Map();
-    custRows.forEach(r => {
-      const route3  = (r[rKey3]||'').trim();
-      if (route3 !== todayRouteName) return;
-      const name3   = (r[nKey3]||'').trim();
-      const seller3 = (r[sKey3]||'').trim();
-      if (!name3||!seller3) return;
-      const wData3 = wIdx3.get(name3+'§'+seller3)||{};
-      const dow3 = thDayToJS3[route3]??-1;
-      let missed3 = 0;
-      _allWks3.forEach((wk,wi) => {
-        const rd = dow3>=0 ? _routeDayInWk3(dow3,wi) : null;
-        const passed = dow3>=0 ? (rd!=null && new Date(_yr3,_mo3,rd)<_n) : wi<Math.ceil((_n.getDate()+_fd3)/7)-1;
+    _custSrc.forEach(r => {
+      const route = (r[rKey]||'').trim();
+      if (route !== _todayRN) return;
+      const nameFull = (r[nKey]||'').trim();
+      const name = stripK(nameFull);
+      const seller = (r[sKey]||'').trim();
+      const selK = stripK(seller);
+      if (!name||!selK) return;
+      const wData = wIdx.get(name+'§'+selK)||{};
+      const dow = _dayJS[route]??-1;
+      let missed = 0;
+      _wks.forEach((wk,wi) => {
+        const rd = dow>=0 ? rdInWk(dow,wi) : null;
+        const passed = dow>=0 ? (rd!=null&&new Date(_yr,_mo,rd)<_n) : wi<Math.ceil((_n.getDate()+_fd)/7)-1;
         if (!passed) return;
-        if ((wData3[wk]||0)===0) missed3++;
+        if ((wData[wk]||0)===0) missed++;
       });
-      if (missed3 <= 0) return;
-      const avg3 = (_rsAvgIdx && _rsAvgIdx.get(_rsStripKhun(seller3)+'§'+_rsNormCust(name3)))||0;
-      const sellerKey3 = _rsStripKhun(seller3);
-      if (!res.has(sellerKey3)) res.set(sellerKey3,[]);
-      res.get(sellerKey3).push({name:name3, missed:missed3, avg:avg3});
+      if (missed<=0) return;
+      const avg = (_rsAvgIdx&&_rsAvgIdx.get(selK+'§'+_rsNormCust(name)))||0;
+      if (!res.has(selK)) res.set(selK,[]);
+      res.get(selK).push({name:nameFull, avg, missed});
     });
-    res.forEach((arr,k) => {
-      arr.sort((a,b) => b.missed!==a.missed ? b.missed-a.missed : b.avg-a.avg);
-      res.set(k, arr.slice(0,3)); // top 3
-    });
+    res.forEach((arr,k) => { arr.sort((a,b)=>b.missed-a.missed||b.avg-a.avg); res.set(k,arr.slice(0,5)); });
     return res;
   })();
 
@@ -5500,24 +5562,23 @@ function renderSummaryTab() {
         </div>`;
       })()}
       ${(()=>{
-        const todayStores = _routeMissedBySeller.get(_rsStripKhun(p.name))||[];
-        if (!todayStores.length) return '';
-        const thDowToName2 = {0:'อาทิตย์',1:'จันทร์',2:'อังคาร',3:'พุธ',4:'พฤหัส',5:'ศุกร์',6:'เสาร์'};
-        const todayDayName = thDowToName2[new Date().getDay()]||'';
-        const rows2 = todayStores.map(s=>`
-          <div style="display:grid;grid-template-columns:1fr 52px 48px;gap:4px;align-items:center;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.07)">
+        if (!_rsYesterdayCardDataBySeller || !_rsYesterdayCardDataBySeller.size) return '';
+        const _ydayStores = _rsYesterdayCardDataBySeller.get(_rsStripKhun(p.name))||[];
+        if (!_ydayStores.length) return '';
+        const _thDow = {0:'เสาร์',1:'อาทิตย์',2:'จันทร์',3:'อังคาร',4:'พุธ',5:'พฤหัส',6:'ศุกร์'};
+        const _ydayName = _thDow[new Date().getDay()]||'';
+        const _yrows = _ydayStores.map(s=>`
+          <div style="display:grid;grid-template-columns:1fr 56px;gap:4px;align-items:center;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.07)">
             <div style="font-size:10px;color:rgba(255,255,255,.9);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.name}">${s.name}</div>
             <div style="font-size:10px;text-align:right;color:rgba(255,255,255,.6)">${s.avg>0?fmtNum(s.avg):'-'}</div>
-            <div style="font-size:10px;text-align:center"><span style="background:rgba(220,60,60,.6);border-radius:4px;padding:1px 6px;font-weight:700;color:#fff">${s.missed} รอบ</span></div>
           </div>`).join('');
-        return `<div style="background:rgba(140,30,30,.25);border-radius:8px;padding:7px 10px;display:flex;flex-direction:column">
-          <div style="font-size:9px;color:rgba(255,200,200,.7);font-weight:700;margin-bottom:4px;letter-spacing:.3px">🚫 ร้านไม่ซื้อตามรูท${todayDayName?` (${todayDayName})`:''}</div>
-          <div style="display:grid;grid-template-columns:1fr 52px 48px;gap:4px;margin-bottom:3px;padding-bottom:3px;border-bottom:1px solid rgba(255,255,255,.1);align-items:center">
+        return `<div style="background:rgba(180,80,0,.25);border-radius:8px;padding:7px 10px;display:flex;flex-direction:column">
+          <div style="font-size:9px;color:rgba(255,210,160,.8);font-weight:700;margin-bottom:4px;letter-spacing:.3px">⏰ ยังไม่ซื้อรูทเมื่อวาน${_ydayName?` (${_ydayName})`:''}</div>
+          <div style="display:grid;grid-template-columns:1fr 56px;gap:4px;margin-bottom:3px;padding-bottom:3px;border-bottom:1px solid rgba(255,255,255,.1);align-items:center">
             <div style="font-size:7px;color:rgba(255,255,255,.4)">ร้านค้า</div>
             <div style="font-size:7px;color:rgba(255,255,255,.35);text-align:right">AVG/Wk</div>
-            <div style="font-size:7px;color:rgba(255,255,255,.35);text-align:center">ไม่ซื้อ</div>
           </div>
-          ${rows2}
+          ${_yrows}
         </div>`;
       })()}
     </div>
