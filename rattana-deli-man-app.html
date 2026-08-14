@@ -915,7 +915,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.242';
+const APP_VERSION='3.243';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1181,6 +1181,22 @@ async function idbSet_(key,val){
     });
     return true;
   }catch(e){ return false; }
+}
+/* ★ v3.242: แคชลูกค้า (5,190 ร้าน ~1.5MB) ย้ายจาก localStorage → IndexedDB
+   เหตุผลเดียวกับสินค้าใน v3.227: localStorage เพดาน ~5MB ของทั้งแอป (แชร์กับงาน/คิวส่ง/รูปสลิป)
+   ก้อนนี้กินไปเกือบ 1 ใน 4 และต้อง JSON.parse ทั้งก้อนบน main thread ทุกครั้งที่เปิดแอป
+   IndexedDB เก็บ object ตรงๆ (structured clone) — ไม่ต้อง stringify/parse เลย */
+const CUSTOMERS_CACHE_KEY='customers_v3243';
+const CUSTOMERS_CACHE_KEY_OLD='customers_v3155';   // คีย์เก่าใน localStorage — ลบทิ้งคืนพื้นที่
+async function getCustomersCache_(){
+  try{
+    const o=await idbGet_(CUSTOMERS_CACHE_KEY);
+    if(o&&o.ts&&Array.isArray(o.rows)&&o.rows.length&&(Date.now()-o.ts)<CACHE_TTL_LONG) return o.rows;
+  }catch(e){}
+  return null;
+}
+function setCustomersCache_(rows){
+  try{ idbSet_(CUSTOMERS_CACHE_KEY,{ts:Date.now(),rows:rows}).catch(()=>{}); }catch(e){}
 }
 function cacheKey(key){ return 'rdm_cache_'+key; }
 function getCachedSheet(key,ttl){
@@ -1598,7 +1614,8 @@ function resetBillDetails_(){
 async function loadCustomers(){
   // v2.53: cache 24 ชม. (5,303 rows — หนัก, ลูกค้าไม่ค่อยเปลี่ยน)
   // v3.51: bump คีย์ cache → ทิ้ง cache เก่าที่ parse เพี้ยน (หัวคอลัมน์พัง ข้อมูลร้าน/พิกัดว่าง) โหลดใหม่รอบเดียวทุกเครื่อง
-  const cached=getCachedSheet('customers_v3155',CACHE_TTL_LONG);   // v3.155: bump คีย์ → ทิ้ง cache เก่าที่ไม่มี creditDays
+  // ★ v3.242: ย้ายไป IndexedDB (ดู CUSTOMERS_CACHE_KEY) — localStorage เพดาน ~5MB ต้องแชร์กับงาน/คิวส่ง/รูป
+  const cached=await getCustomersCache_();
   if(cached){ state.customers=cached; enrichBills(); return; }
   try{
     // v3.73: ดึงเฉพาะคอลัมน์ที่ใช้จริง (A=ชื่อ B=รหัส C=ที่อยู่ F=เบอร์ G=Location K=WH N=เซลล์ T=รูป)
@@ -1623,7 +1640,7 @@ async function loadCustomers(){
         warehouse:cleanCell(r['WH']||''),
       };
     });
-    setCachedSheet('customers_v3155',state.customers);
+    setCustomersCache_(state.customers);   // ★ v3.242: เขียนลง IndexedDB (ไม่ block main thread ด้วย JSON.stringify ก้อนใหญ่)
     enrichBills();   // v3.51: เติมข้อมูลร้าน/พิกัดให้บิลทันทีที่ลูกค้าโหลดเสร็จ (ไม่รอ loadJobs รอบถัดไป)
   }catch(e){ state.customers=[]; }
 }
@@ -1701,7 +1718,13 @@ function allowedDeliverDates(){
 
 /* ดึงงานว่าง (status=available) จากชีท Jobs — group rows by Trans_Code
    กรองเฉพาะวันที่ส่งสินค้า = วันนี้ */
+/* ★ v3.242: memo 15 วิ — ตอนเปิดแอป ชีทใบคุม (0.27MB · 0.79 วิ) ถูกดึง 2 รอบเสมอ
+   (loadJobs → loadAvailableJobs() แล้ว syncJobsFromSheet → loadAvailableJobs(force) อีกรอบ)
+   คำขอชีท 1 ครั้งมีค่าคงที่ ~0.7 วิไม่ว่าข้อมูลเล็กแค่ไหน → ตัดรอบซ้ำ = เร็วขึ้นทันที
+   15 วิสั้นพอที่กด ↻ ทีหลังยังได้ของสด (auto-refresh 180 วิอยู่แล้ว) */
+let _availCache=null;
 async function loadAvailableJobs(fresh){
+  if(_availCache&&(Date.now()-_availCache.ts)<15000) return _availCache.data;
   try{
     const rows=await fetchSheet(CFG.jobsSheetId,CFG.jobsSheetName,fresh?{fresh:true}:undefined);   // v3.180: manual refresh → cache-bust (กัน gviz cache ~1-2 นาที ค้างใบคุมเก่า)
     if(!rows||!rows.length) return [];
@@ -1737,7 +1760,7 @@ async function loadAvailableJobs(fresh){
         payment:{},
       });
     });
-    return Object.values(byCode).map(j=>{
+    const _out=Object.values(byCode).map(j=>{
       // เดาคลังจาก prefix เช่น TSW1 → W1
       const m=j.id.match(/W(\d)/i);
       const warehouse=m?'W'+m[1]:'W1';
@@ -1747,6 +1770,8 @@ async function loadAvailableJobs(fresh){
         docDate:j.docDate, bills:j.bills,
       };
     });
+    _availCache={ts:Date.now(),data:_out};   // v3.242: ตัดการดึงชีทใบคุมซ้ำรอบที่ 2 ตอน boot
+    return _out;
   }catch(e){ console.warn('loadAvailableJobs failed:',e); return []; }
 }
 
@@ -11082,8 +11107,16 @@ async function bootApp(){
       pruneLocalJobs_();   // ★ v3.206: ล้างงานเก่าทิ้งตั้งแต่เปิดแอป (กันสะสมจนเครื่องค้าง)
     }catch(e){}
     // ลูกค้า/สินค้า cache (24h) — เอาจาก localStorage มา hydrate state ให้ทันที (ไม่รอ fetch)
-    const cachedCust=getCachedSheet('customers_v3155',CACHE_TTL_LONG);   // v3.205: แก้คีย์ผิด (เดิม customers_v351 → พลาด cache ทุกครั้ง ต้องรอโหลดใหม่ทุกเปิดแอป)
-    if(cachedCust) state.customers=cachedCust;
+    // ★ v3.242: ลูกค้าย้ายไป IndexedDB (ดู CUSTOMERS_CACHE_KEY) — v3.205: แก้คีย์ผิดที่ทำให้พลาด cache ทุกครั้ง
+    const cachedCustOld=getCachedSheet(CUSTOMERS_CACHE_KEY_OLD,CACHE_TTL_LONG);
+    if(cachedCustOld&&cachedCustOld.length){
+      state.customers=cachedCustOld;
+      setCustomersCache_(cachedCustOld);   // ย้ายของเดิมเข้า IndexedDB เลย — เครื่องที่อัปเดตจะได้ไม่ต้องโหลดชีทลูกค้าใหม่
+    } else {
+      const cachedCust=await getCustomersCache_();   // อ่าน IDB ~10ms — รอได้ เพื่อให้ render รอบแรกมีชื่อร้านครบ
+      if(cachedCust) state.customers=cachedCust;
+    }
+    try{ localStorage.removeItem(cacheKey(CUSTOMERS_CACHE_KEY_OLD)); }catch(e){}   // คืนพื้นที่ localStorage ~1MB
     // ★ v3.227: แคชสินค้าย้ายไป IndexedDB แล้ว (โหลดตอนเข้าหน้าที่ใช้จริง) — ตรงนี้เหลือไว้รองรับแคชเก่าใน localStorage
     const cachedProd=getCachedSheet(PRODUCTS_CACHE_KEY,CACHE_TTL_LONG);
     if(cachedProd){ state.products=expandProducts_(cachedProd); }   // ★ v3.227: ต้องคลายรูปแบบก่อน (เดิมยัดดิบๆ = ชื่อ/ราคาสินค้าเพี้ยน)
@@ -11104,9 +11137,15 @@ async function bootApp(){
       loadChoices().catch(()=>{}),
       loadSalesStaff().catch(()=>{}),   // v3.120: รหัสเซลล์ (SLMN) → ชื่อเซลล์ CN
     ];
-    Promise.all([loadVehicles().catch(()=>{})].concat(_heavy)).then(()=>loadJobs().catch(()=>{}))
+    // ★ v3.242: เดิมโซ่นี้ต่อกันเป็นชั้นๆ — ต้องรอ "รถ+ลูกค้า+เซลล์" (ลูกค้าอย่างเดียว 1.4 วิ) ให้เสร็จก่อน
+    //   ถึงจะเริ่มโหลดงาน ทั้งที่งานไม่ได้ต้องใช้ข้อมูลพวกนั้นเลย (enrichBills เติมทีหลังได้อยู่แล้ว)
+    //   แยกเป็น 2 สายวิ่งขนานกัน → ตัดเวลารอตอนเปิดแอปลงประมาณ 1.5 วิ
+    //   คำขอชีทมีค่าคงที่ ~0.7 วิ/ครั้ง (วัดจริง แม้ขอแค่ 1 แถว) → ยิงพร้อมกันคุ้มกว่าไล่ทีละอัน
+    const _sideP=Promise.all([loadVehicles().catch(()=>{})].concat(_heavy));
+    const _jobsP=loadJobs().catch(()=>{})
       .then(()=>flushOutbox().catch(()=>{}))                     // v3.28: ส่ง outbox ค้างจาก session ก่อน
-      .then(()=>{ if(outboxCount()) return; return syncJobsFromSheet({force:true}).catch(()=>{}); })   // ข้าม sync ถ้ายังค้าง (กันเขียนทับ)
+      .then(()=>{ if(outboxCount()) return; return syncJobsFromSheet({force:true}).catch(()=>{}); });   // ข้าม sync ถ้ายังค้าง (กันเขียนทับ)
+    Promise.all([_sideP,_jobsP])
       .then(()=>{
         state._bgLoading=false;
         pruneLocalJobs_();   // ★ v3.206: หลังซิงค์เสร็จ ล้างงานเก่าอีกรอบ (ชีทเติมงานเก่ากลับมาได้)
@@ -11320,6 +11359,18 @@ async function openDiag_(){
       _diagProdCache='✓ '+_pc.data.length+' รายการ ('+_age+' ชม.)';
     }
   }catch(e){ _diagProdCache='ใช้ไม่ได้'; }
+  // ★ v3.243: สถานะแคชลูกค้าใน IndexedDB — ถ้าขึ้น "ไม่มี" แปลว่าต้องโหลดชีทลูกค้า 1.6MB ใหม่ทุกครั้งที่เปิดแอป
+  let _diagCustCache='ไม่มี ❌';
+  try{
+    const _cc=await idbGet_(CUSTOMERS_CACHE_KEY);
+    if(_cc&&Array.isArray(_cc.rows)){
+      const _age=Math.round((Date.now()-(_cc.ts||0))/3600000);
+      _diagCustCache='✓ '+_cc.rows.length+' ร้าน ('+_age+' ชม.)';
+    }
+  }catch(e){ _diagCustCache='ใช้ไม่ได้'; }
+  // ★ v3.243: โหมดโหลดงาน — "เฉพาะของฉัน" = คนขับ (เบา ~20KB) · "ทั้งบริษัท" = ฝั่งออฟฟิศ (หนัก ~2.2MB)
+  const _diagScope=(typeof jobScopeDriverOnly_==='function'&&jobScopeDriverOnly_())
+    ? '⚡ เฉพาะใบคุมของฉัน ('+(readScopeIds_().length||0)+' ใบ)' : 'ทั้งบริษัท (ฝั่งออฟฟิศ)';
   const errs=_errLog.slice(0,8).map(e=>`<div style="font-size:11px;color:var(--danger);padding:4px 0;border-bottom:1px dashed var(--border);word-break:break-word">[${new Date(e.t).toLocaleTimeString('th-TH')}] ${esc(e.msg)}</div>`).join('')||'<div class="txt-xs txt-muted">ไม่มี error ✓</div>';
   $('billDetailTitle').textContent='🩺 ตรวจสภาพเครื่อง';
   $('billDetailBody').innerHTML=`
@@ -11334,6 +11385,8 @@ async function openDiag_(){
     ${row('ร้านค้าที่โหลด',(state.customers||[]).length)}
     ${row('สินค้าที่โหลด',(state.products||[]).length)}
     ${row('แคชสินค้า (IndexedDB)',_diagProdCache)}
+    ${row('แคชร้านค้า (IndexedDB)',_diagCustCache)}
+    ${row('โหลดงานแบบ',_diagScope)}
     ${row('รอเข้าชีท (คิวค้าง)',outboxCount()+' รายการ')}
     ${row('เครื่อง',(navigator.userAgent||'').slice(0,60))}
     <div style="margin-top:10px;font-weight:700;font-size:12px">⚠️ ข้อผิดพลาดล่าสุด</div>${errs}
