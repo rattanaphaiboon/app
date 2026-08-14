@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Receive-IB v3.9</title>
+<title>Rattana Receive-IB v4.0</title>
 <link rel="icon" href="data:,">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -416,7 +416,7 @@ button{font-family:inherit}
 <section class="screen" id="scr-start">
   <header class="hdr">
     <div class="ttl">RATTANA <b>RECEIVE-IB</b>
-      <span class="sub">ตรวจรับสินค้า · <span class="verchip" id="verChip">v3.9</span></span>
+      <span class="sub">ตรวจรับสินค้า · <span class="verchip" id="verChip">v4.0</span></span>
     </div>
     <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับโหมดสี">🌙</button>
     <a class="hub-btn" href="https://rattanaphaiboon.github.io/app/rattana-hub.html" title="กลับ Hub">
@@ -643,6 +643,22 @@ button{font-family:inherit}
   <div class="loadbar" id="loadBarWrap" style="display:none"><i id="loadBar"></i></div>
 </div>
 
+<div class="ov" id="ov-draft">
+  <div class="sheet">
+    <!-- ✕ = ปิดไปก่อน ไม่ทิ้ง — เดี๋ยวเปิดแอปรอบหน้าถามใหม่ · การทิ้งต้องกดปุ่มทิ้งเท่านั้น -->
+    <div class="sheethdr"><div class="t">มีใบที่ตรวจค้างไว้</div>
+      <button class="xbtn" onclick="closeOv('ov-draft')">✕</button></div>
+    <div class="card" style="margin:0 0 10px">
+      <div class="pad" style="font-size:13px;line-height:1.7" id="draftInfo">—</div>
+    </div>
+    <div class="hint" style="padding:0 2px 12px;white-space:normal">
+      ทำต่อได้เลย ไม่ต้องอ่านใบใหม่ · ถ้าทิ้ง ผลตรวจนี้จะหายถาวรและต้องอ่านใบใหม่ทั้งใบ
+    </div>
+    <button class="btn btn-dark" onclick="resumeDraft()">ทำต่อจากที่ค้างไว้</button>
+    <button class="txtlink" onclick="discardDraft()">ทิ้งแล้วเริ่มใบใหม่</button>
+  </div>
+</div>
+
 <div class="ov" id="ov-err">
   <div class="sheet">
     <div class="sheethdr"><div class="t" style="color:var(--red)">อ่านใบไม่สำเร็จ</div>
@@ -681,7 +697,7 @@ var WH_ORDER = ['W1','W2','W3','W4','C4','HQ'];
 var S = {
   wl: '', day: '', ven: '', q: '', poShow: 0,
   user: '', me: null,
-  pos: [], po: null, photos: [], result: null, pendingRow: null
+  pos: [], po: null, photos: [], result: null, pendingRow: null, draft: null
 };
 
 /* ---------- helper ---------- */
@@ -1346,6 +1362,7 @@ function startApp(me){
   $('loginScreen').classList.remove('on');
   $('scr-start').classList.add('active');
   renderWho(); renderShots(); syncGo();
+  askDraft();          // มีใบค้างไว้ไหม — ถามก่อนที่คนจะเริ่มถ่ายใบใหม่
   loadPOs();
   fetch(GAS_URL).then(function(r){ return r.json(); }).then(function(j){
     if (j && j.version) $('verChip').textContent = j.version + ' · ' + String(j.model||'').replace('claude-','');
@@ -1565,6 +1582,7 @@ function runCheck(deep){
     settled = true; halt();
     if (!r || !r.ok){ showErr(r && r.error ? r.error : 'อ่านใบไม่สำเร็จ'); return; }
     S.result = r;
+    saveDraft();          // เก็บทันทีที่อ่านเสร็จ — จ่ายค่าอ่านไปแล้ว ห้ามให้หายเพราะยังไม่ได้กดบันทึก
     renderResult();
     go('scr-res');
   }
@@ -1972,6 +1990,73 @@ function row2(k, v, color){
     '<b class="ellip" style="max-width:58%;text-align:right' + (color ? ';color:' + color : '') + '">' + esc(v) + '</b></div>';
 }
 
+/* ═══ ใบที่ตรวจค้างไว้ — กันผลตรวจหายทั้งที่จ่ายค่าอ่านไปแล้ว ═══
+   เดิม: อ่านใบเสร็จแล้วไม่กดบันทึก (เดินไปทำอย่างอื่น · แอปปิด · แบตหมด · กดพลาด)
+   = ผลตรวจหายเกลี้ยง ต้องอ่านใหม่ทั้งใบ เสียเงินซ้ำ และไม่มีร่องรอยว่าเคยตรวจใบนี้เจออะไร
+   เก็บไว้ในเครื่อง (localStorage) ไม่ขึ้นเซิร์ฟเวอร์ ไม่แตะชีท — ชีทยังมีแต่ของที่คนกดบันทึกแล้ว
+   ⚠️ กู้ได้เฉพาะเครื่องเดิมคนเดิม · เครื่องพัง/ย้ายเครื่อง = ไม่เห็น (ยอมรับข้อจำกัดนี้ Surat เลือกแบบนี้) */
+var DRAFT_KEY = 'rattana_receive_draft';
+var DRAFT_MAX_AGE = 12 * 60 * 60 * 1000;   // รับของเป็นงานรายวัน ข้ามคืนไปแล้วไม่ควรทำต่อ
+
+function saveDraft(){
+  if (!S.result || !S.po || !S.me) return;
+  // raw = คำตอบดิบของโมเดล หน้าจอไม่ได้ใช้และตอนบันทึกก็ไม่ได้ส่ง → ตัดทิ้ง ประหยัดที่ราว 20%
+  var slim = {}; for (var k in S.result) if (k !== 'raw') slim[k] = S.result[k];
+  var body = { v:1, ts: Date.now(), email: S.me.email || '', po: S.po, result: slim,
+    note: ($('sumNote') && $('sumNote').value) || '',
+    photos: S.photos.map(function(p){ return { b64:p.b64, mime:p.mime, w:p.w, h:p.h }; }) };
+  try { localStorage.setItem(DRAFT_KEY, JSON.stringify(body)); return; }
+  catch(e){ /* เต็ม — ลองใหม่แบบไม่เอารูป ยังดีกว่าไม่เหลืออะไรเลย */ }
+  try { body.photos = []; body.noPhotos = true; localStorage.setItem(DRAFT_KEY, JSON.stringify(body)); }
+  catch(e2){ /* ยังไม่ไหวก็ปล่อย ห้ามให้เรื่องเก็บ draft ไปทำให้หน้าผลพัง */ }
+}
+function clearDraft(){ try{ localStorage.removeItem(DRAFT_KEY); }catch(e){} }
+function readDraft(){
+  try{
+    var d = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
+    if (!d || d.v !== 1 || !d.result || !d.po) return null;
+    if (Date.now() - (d.ts || 0) > DRAFT_MAX_AGE) { clearDraft(); return null; }
+    // คนละคนมาใช้เครื่องเดียวกัน ห้ามเอาใบของคนก่อนมาให้ทำต่อ
+    if (d.email && S.me && S.me.email && d.email !== S.me.email) return null;
+    return d;
+  }catch(e){ return null; }
+}
+function askDraft(){
+  var d = readDraft();
+  if (!d) return;
+  S.draft = d;
+  var mins = Math.round((Date.now() - d.ts) / 60000);
+  var ago = mins < 60 ? (mins + ' นาทีที่แล้ว') : (Math.round(mins/60) + ' ชั่วโมงที่แล้ว');
+  var R = d.result, need = (R.rows||[]).filter(function(r){ return caseOf(r) !== 'ok'; }).length;
+  $('draftInfo').innerHTML =
+      '<b>PO ' + esc(d.po.ref) + '</b> · ' + esc(d.po.vendor || '') + '<br>'
+    + 'ใบกำกับ ' + esc(R.invoiceNo || '—') + ' · อ่านไว้เมื่อ ' + ago + '<br>'
+    + 'ตรวจแล้ว ' + (R.rows||[]).length + ' รายการ — '
+    + (need ? '<span style="color:var(--red)">ต้องดู ' + need + '</span>' : '<span style="color:var(--green)">ตรงครบทุกรายการ</span>')
+    + (R.claim > 0 ? ' · ต้องเคลม ' + nf(R.claim,0) + ' บาท' : '')
+    + (d.noPhotos ? '<br><span style="color:var(--amber)">รูปใบกำกับเก็บไว้ไม่ได้ (เครื่องเต็ม) — ถ่ายใหม่ก่อนบันทึกถ้าต้องการเก็บรูปเข้า Drive</span>' : '');
+  openOv('ov-draft');
+}
+function resumeDraft(){
+  var d = S.draft; if (!d) return;
+  S.po = d.po;
+  S.result = d.result;
+  S.photos = (d.photos || []).map(function(p){
+    return { b64:p.b64, mime:p.mime, w:p.w, h:p.h, url:'data:' + p.mime + ';base64,' + p.b64,
+             kb: Math.round(p.b64.length/1024) };
+  });
+  renderShots(); syncGo();
+  closeOv('ov-draft');
+  renderResult();
+  go('scr-res');
+  if (d.note && $('sumNote')) $('sumNote').value = d.note;
+  toast('ทำต่อจากใบที่ค้างไว้');
+}
+function discardDraft(){
+  clearDraft(); S.draft = null; closeOv('ov-draft');
+  toast('ทิ้งใบที่ค้างไว้แล้ว');
+}
+
 /* ---------- บันทึก ---------- */
 /* ปุ่มเดียว — สถานะให้ระบบสรุปเองจากผลตรวจ คนคลังไม่ต้องตัดสินว่าจะรอของหรือไม่รอ
    (PO จะปิดหรือค้าง ERP เป็นคนตัดสินจากใบ IB จริงอยู่แล้ว) */
@@ -2007,6 +2092,7 @@ function saveAll(status){
     hideLoad();
     if (!r) return;
     REP.rows = [];
+    clearDraft();         // ลงชีทแล้ว ไม่ต้องเก็บสำรองในเครื่องอีก
     toast('บันทึกแล้ว' + (r && r.learned ? ' · จำคู่สินค้าใหม่ ' + r.learned + ' คู่' : ''));
     resetAll();
   }).catch(function(){ hideLoad(); toast('บันทึกไม่สำเร็จ ลองใหม่'); });
