@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Sales Dashboard v19.45</title>
+<title>Rattana Sales Dashboard v19.46</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -408,7 +408,7 @@ body.dark .sg-sc-type{background:#0f2a4a;color:#7ab8e8;border-color:#1a4570}
     <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
       <div>
         <div class="logo-text">RATTANA <span>SALES</span></div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.45</span></div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">ยอดขายของฉัน <span style="color:var(--gold);font-weight:600">v19.46</span></div>
       </div>
     </div>
     <button class="icon-btn" onclick="refreshData()" id="btnRefresh" title="รีเฟรช">↻</button>
@@ -5742,7 +5742,27 @@ async function loadBpWeekTab() {
   wrap.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)"><div class="spinner-ring" style="margin:0 auto 12px"></div>กำลังโหลด BP…</div>';
   try {
     const bpSrc = _rsBpRaw?.length ? _rsBpRaw : (tgtState.bpRaw?.length ? tgtState.bpRaw : null);
-    const bpRaw = bpSrc || await fetchSheet(SALES_SHEET_ID, SALES_SHEET);
+    const [bpRaw, allSalesRaw] = await Promise.all([
+      bpSrc ? Promise.resolve(bpSrc) : fetchSheet(SALES_SHEET_ID, SALES_SHEET),
+      getCached('allSalesData')
+        ? Promise.resolve(getCached('allSalesData'))
+        : fetchSheet(ALL_SALES_SHEET_ID, ALL_SALES_SHEET_NAME).then(r => { setCache('allSalesData', r); return r; })
+    ]);
+
+    // build AVG/Week map from All Sales: last 3 months, sum Sales_CS / 12
+    const allMonths = [...new Set(allSalesRaw.map(r => String(r['Month_Year']||'').trim()).filter(Boolean))].sort((a,b)=>b.localeCompare(a));
+    const last3Mo = new Set(allMonths.slice(0,3));
+    const avgAgg = new Map(); // "wh_lower§product_lower" → sumCs
+    allSalesRaw.forEach(r => {
+      const mo = String(r['Month_Year']||'').trim();
+      if (!last3Mo.has(mo)) return;
+      const wh  = String(r['WH']||'').trim().toLowerCase();
+      const prod = String(r['Product_Name']||'').trim().toLowerCase();
+      const cs  = parseFloat(String(r['Sales_CS']||'0').replace(/,/g,'')) || 0;
+      if (!wh && !prod) return;
+      const k = wh + '§' + prod;
+      avgAgg.set(k, (avgAgg.get(k)||0) + cs);
+    });
 
     const agg = new Map(); // "ws§product" → {ws, product, byWeek: Map<weekKey, sumCs>}
     const weekSet = new Set();
@@ -5757,7 +5777,7 @@ async function loadBpWeekTab() {
       if (!product || !dateRaw) return;
       const d = _bpwParseDate(dateRaw);
       if (!d) return;
-      if (d.getFullYear() !== _curY || d.getMonth() !== _curM) return; // เฉพาะเดือนนี้
+      if (d.getFullYear() !== _curY || d.getMonth() !== _curM) return;
       const wk = _bpwWeekKey(d);
       weekSet.add(wk);
       const key = ws + '§' + product;
@@ -5767,7 +5787,10 @@ async function loadBpWeekTab() {
     });
 
     _bpWeekCols = [...weekSet].sort();
-    _bpWeekRows = [...agg.values()].sort((a,b) => a.ws.localeCompare(b.ws,'th') || a.product.localeCompare(b.product,'th'));
+    _bpWeekRows = [...agg.values()].map(e => {
+      const k = e.ws.toLowerCase() + '§' + e.product.toLowerCase();
+      return {...e, avgWeek: (avgAgg.get(k)||0) / 12};
+    }).sort((a,b) => a.ws.localeCompare(b.ws,'th') || a.product.localeCompare(b.product,'th'));
 
     // build WS dropdown
     const wsSel = document.getElementById('bpwWsFilter');
@@ -5804,27 +5827,32 @@ function renderBpWeekTable() {
   rows.forEach(r => {
     if (r.ws !== lastWs) {
       lastWs = r.ws;
-      html += `<tr style="background:var(--navy);color:#fff"><td colspan="${2+_bpWeekCols.length}" style="padding:5px 12px;font-size:12px;font-weight:700">🏪 ${escH(r.ws)}</td></tr>`;
+      html += `<tr style="background:var(--navy);color:#fff"><td colspan="${3+_bpWeekCols.length}" style="padding:5px 12px;font-size:12px;font-weight:700">🏪 ${escH(r.ws)}</td></tr>`;
     }
     const cells = _bpWeekCols.map(k => {
       const v = r.byWeek.get(k)||0;
-      return `<td style="font-size:11px;text-align:right;padding:5px 8px;color:${v>0?'var(--info)':'var(--muted)'}">${fmt(v)}</td>`;
+      const _diff = v - r.avgWeek;
+      const _col = v <= 0 ? 'var(--muted)' : _diff >= 0 ? 'var(--success,#16a34a)' : 'var(--danger,#dc2626)';
+      return `<td style="font-size:11px;text-align:right;padding:5px 8px;color:${_col}">${fmt(v)}</td>`;
     }).join('');
+    const avgColor = r.avgWeek > 0 ? 'var(--gold)' : 'var(--muted)';
     html += `<tr style="border-bottom:1px solid var(--border)">
       <td style="font-size:11px;color:var(--muted);padding:5px 8px;white-space:nowrap">${escH(r.ws)}</td>
       <td style="font-size:12px;padding:5px 8px">${escH(r.product)}</td>
+      <td style="font-size:11px;text-align:right;padding:5px 8px;font-weight:700;color:${avgColor}">${fmt(r.avgWeek)}</td>
       ${cells}
     </tr>`;
   });
 
-  wrap.innerHTML = `<table style="width:100%;border-collapse:collapse;font-family:inherit">
+  wrap.innerHTML = `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-family:inherit;min-width:600px">
     <thead><tr style="background:var(--navy);color:#fff;position:sticky;top:0;z-index:2">
-      <th style="padding:8px;font-size:11px;text-align:left;white-space:nowrap;min-width:80px">WS</th>
+      <th style="padding:8px;font-size:11px;text-align:left;white-space:nowrap;min-width:70px">WS</th>
       <th style="padding:8px;font-size:11px;text-align:left;min-width:200px">Product Name</th>
+      <th style="padding:8px;font-size:11px;text-align:right;white-space:nowrap;min-width:80px">AVG/Week<br><span style="font-weight:400;font-size:9px;opacity:.8">3M÷12</span></th>
       ${thCols}
     </tr></thead>
     <tbody>${html}</tbody>
-  </table>`;
+  </table></div>`;
   wrap.querySelectorAll('tbody tr:not([style*="background:var(--navy)"])').forEach((tr,i)=>{
     if (!tr.style.background) tr.style.background = i%2===0?'':'rgba(0,0,0,.03)';
   });
