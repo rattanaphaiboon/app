@@ -915,7 +915,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.247';
+const APP_VERSION='3.249';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1263,7 +1263,8 @@ function stripBase64Photos_(obj){
 }
 /* ★ v3.206: ล้างงานเก่าที่ไม่ต้องใช้ออกจากเครื่อง — เจอเครื่องจริงสะสม 436 ชุด / 1,390 บิล
    ทุกครั้งที่ render/บันทึก/ซิงค์ ต้องประมวลผลทั้งหมด → เครื่องค้าง/โหลดไม่เสร็จ
-   เก็บไว้เฉพาะ: งานที่ยังไม่จบ (ทุกกรณี) · งานว่างล่าสุด 2 วัน · งานที่จบแล้วภายใน 14 วัน · สูงสุด 60 ชุด */
+   เก็บไว้เฉพาะ: งานที่ยังไม่จบ (ทุกกรณี) · งานว่างล่าสุด 2 วัน · งานที่จบแล้วภายใน 14 วัน
+   ★ v3.249: เพดานจำนวนใช้กับ "งานที่จบแล้ว" เท่านั้น (เดิมนับงานว่างด้วย → ใบคุมหายจากเครื่อง) */
 function pruneLocalJobs_(){
   try{
     const now=Date.now(), cut14=now-14*86400000, cut2=now-2*86400000;
@@ -1276,10 +1277,18 @@ function pruneLocalJobs_(){
       if(st==='available') return tOf(j)===0||tOf(j)>=cut2;                            // งานว่าง เก็บ 2 วัน
       return tOf(j)>=cut14;                                                            // จบแล้ว เก็บ 14 วัน
     });
-    if(keep.length>60){   // กันบวมสุดๆ — เรียงใหม่สุดก่อน แต่คงงานที่ยังไม่จบไว้ทั้งหมด
-      const active=keep.filter(j=>['in_progress','pending_approval','rejected'].includes(j.status||''));
-      const rest=keep.filter(j=>!active.includes(j)).sort((a,b)=>tOf(b)-tOf(a)).slice(0,Math.max(0,60-active.length));
-      keep=active.concat(rest);
+    /* ★★ v3.249: "งานว่าง" (ใบคุมที่รอคนไปรับ) ห้ามโดนตัดเด็ดขาด
+       บั๊กเดิม: เพดาน 60 ชุด นับงานว่างรวมเข้าไปด้วย → วันที่ใบคุมเยอะ (วันนี้+ย้อนหลัง 2 วัน = ~100 ใบ)
+                 ถูกตัดทิ้ง 39 ใบ · ใบไหนรอดขึ้นกับลำดับ → คนละเครื่องเห็นไม่เท่ากัน
+                 = อาการ "คนขับหาใบคุมไม่เจอ ทั้งที่ข้อมูลในชีทถูกทุกอย่าง" หลายคนพร้อมกัน (เจอ 2026-08-14)
+       ตอนนี้: งานที่ยังไม่จบ + งานว่าง = เก็บทั้งหมดเสมอ · จำกัดเฉพาะ "งานที่จบแล้ว" ไว้ 40 ชุดล่าสุด
+       ยังกันบวมได้อยู่ เพราะต้นเหตุจริงของ v3.206 คืองานเก่าที่จบแล้วสะสม (436 ชุด) ไม่ใช่งานว่าง
+       (งานว่างถูกโหลดใหม่จากชีททุกครั้งอยู่แล้ว และถูกจำกัดด้วยวันที่ส่ง = วันนี้+ย้อนหลัง 2 วันทำการ) */
+    const KEEP_ALWAYS=['in_progress','pending_approval','rejected','available'];
+    const must=keep.filter(j=>KEEP_ALWAYS.includes(j.status||''));
+    if(keep.length>must.length+40){
+      const done=keep.filter(j=>!KEEP_ALWAYS.includes(j.status||'')).sort((a,b)=>tOf(b)-tOf(a)).slice(0,40);
+      keep=must.concat(done);
     }
     if(keep.length!==before){ state.jobs=keep; persistJobs(); console.log('[prune] jobs',before,'→',keep.length); }
   }catch(e){}
@@ -8064,8 +8073,9 @@ async function syncToSheets(job){
    ปลอดภัย: ชีทยังเป็นตัวจริง · เขียนยังผ่าน GAS→ชีท · ถ้า Supabase ล่ม/ช้า/สำเนาเก่า → ถอยไปอ่านชีทเอง
    ปิดสวิตช์: SB_ENABLED=false แล้ว deploy (หรือใส่อีเมลใน SB_PILOT_EMAILS เพื่อจำกัดเฉพาะคนทดลอง)
    ═══════════════════════════════════════════════════════════════ */
-const SB_ENABLED=true;              // ★ สวิตช์หลัก — ปิดเมื่อไหร่ก็ได้ (ตั้ง false แล้ว deploy = กลับไปอ่านชีททันที)
-                                    //   เปิดเมื่อ 2026-08-14 หลังเทียบสำเนา vs ชีทครบ 3,274 บิล: ขาด 0 · เกิน 0 · ค่าต่างกัน 0 ช่อง
+const SB_ENABLED=false;             // ★ สวิตช์หลัก — v3.248 ปิดกลับ (มีรายงาน "ใบคุมไม่ขึ้น") กลับไปอ่านชีทเหมือนเดิมก่อน
+                                    //   เปิดครั้งแรก 2026-08-14 v3.247 หลังเทียบสำเนา vs ชีทครบ 3,274 บิล (ขาด 0 · เกิน 0 · ต่างกัน 0 ช่อง)
+                                    //   ตารางฝั่ง Supabase + trigger 5 นาที ยังทำงานอยู่ (สำเนายังสด) เปิดกลับได้ทันทีเมื่อพร้อม
 const SB_URL='https://uytzsuwapwkqkougorvb.supabase.co';        // โปรเจกต์ Rattana Base (ตัวเดียวกับแอปเช็คเอาท์)
 const SB_ANON='sb_publishable_2iDqojkyM2pqJxQJfvnxyg_Y6WMQ6Q8';  // publishable key — เขียนไม่ได้ (ทดสอบแล้ว RLS ปฏิเสธ 42501)
 const SB_PILOT_EMAILS=[];           // [] = ทุกคนที่โหลดแบบ scope · ใส่อีเมลเพื่อจำกัดเฉพาะคนทดลอง
