@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Receive-IB v3.6</title>
+<title>Rattana Receive-IB v3.7</title>
 <link rel="icon" href="data:,">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -411,7 +411,7 @@ button{font-family:inherit}
 <section class="screen" id="scr-start">
   <header class="hdr">
     <div class="ttl">RATTANA <b>RECEIVE-IB</b>
-      <span class="sub">ตรวจรับสินค้า · <span class="verchip" id="verChip">v3.6</span></span>
+      <span class="sub">ตรวจรับสินค้า · <span class="verchip" id="verChip">v3.7</span></span>
     </div>
     <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับโหมดสี">🌙</button>
     <a class="hub-btn" href="https://rattanaphaiboon.github.io/app/rattana-hub.html" title="กลับ Hub">
@@ -1509,11 +1509,13 @@ function toggleTheme(){
 /* ---------- อ่านใบ ---------- */
 var loadTick = null;
 /* เวลาที่ใช้ขึ้นกับ "จำนวนบรรทัด" เป็นหลัก เพราะโมเดลต้องพิมพ์ผลออกมาทีละบรรทัด
-   วัดจริงบนหลังบ้าน v2.4: 2 รายการ = 9 วิ · 35 รายการ = 36 วิ → ราว 8 วิ + 0.9 วิ/รายการ
-   เผื่อไว้นิดหน่อย เสร็จก่อนกำหนดดีกว่าเลยกำหนด */
+   วัดจริง v2.4: 2 รายการ = 9 วิ · 35 รายการ = 36 วิ
+   วัดซ้ำ 2026-08-14 ใบ ORT6908/294 (16 รายการ + บรรทัดส่วนลดย่อยทุกตัว) = 48 วิ
+   ใบที่มีส่วนลดย่อยกินเวลากว่าที่สูตรเดิมบอกเยอะ ปรับขึ้นเป็น 10 วิ + 1.5 วิ/รายการ
+   เดาต่ำไปแล้วผู้ใช้รอเกินกำหนด แย่กว่าเดาสูงไปแล้วเสร็จก่อน */
 function estSecs(lines){
   var n = Math.max(1, lines || 1);
-  return Math.max(10, Math.round((8 + 0.9 * n) / 5) * 5);
+  return Math.max(15, Math.round((10 + 1.5 * n) / 5) * 5);
 }
 function startTick(est){
   var t0 = Date.now();
@@ -1534,27 +1536,54 @@ function stopTick(){
   $('loadBarWrap').style.display = 'none';
 }
 
+/* ═══ อ่านใบ — ทนสายขาด ═══
+   Safari บน iPhone ตัด fetch ทิ้งที่ราว 60 วินาที (ค่า default ของ iOS) ตัว AbortController 4 นาทีข้างล่างไม่มีผล
+   เคสจริง 2026-08-14 ใบ ORT6908/294: หลังบ้านอ่านเสร็จถูกต้องที่ 84 วิ แต่จอขึ้น "Load failed" ตั้งแต่ 60 วิ
+   แล้วกด "ลองใหม่อีกครั้ง" ก็ยิงใหม่ทั้งใบ = จ่ายค่า API ซ้ำโดยไม่มีทางสำเร็จ
+   ✅ วิธีแก้: แนบเลขงานไปด้วย หลังบ้านเก็บผลไว้ให้ก่อนตอบ แล้วยิง request สั้นๆ มาถามผลคู่ขนาน
+      ใครได้ผลก่อนก็จบงาน — สายหลักขาดตอนไหน ตัวถามผลรับช่วงต่อได้เสมอ */
 function runCheck(deep){
   if (!S.po || !S.photos.length) return;
   var n = S.po.lines || 0;
-  var est = deep ? estSecs(n) * 3 : estSecs(n);
+  var est = deep ? Math.round(estSecs(n) * 1.5) : estSecs(n);
   showLoad(deep ? 'กำลังอ่านใหม่ด้วยโมเดลใหญ่' : ('กำลังอ่านใบ ' + S.po.ref),
     deep ? 'อ่านละเอียดกว่าเดิม ใช้เวลานานกว่าปกติ'
          : ('PO ใบนี้มี ' + n + ' รายการ · ปกติใช้เวลาราว ' + est + ' วินาที'));
   startTick(est);
-  api({
-    action:'check', ref:S.po.ref, deep: deep === true,
-    photos: S.photos.map(function(p){ return {b64:p.b64, mime:p.mime}; })
-  }).then(function(r){
-    stopTick(); hideLoad();
+
+  var job = 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
+  var settled = false, ivPoll = null, toPoll = null, tries = 0;
+
+  function halt(){ clearTimeout(toPoll); clearInterval(ivPoll); stopTick(); hideLoad(); }
+  function done(r){
+    if (settled) return;
+    settled = true; halt();
     if (!r || !r.ok){ showErr(r && r.error ? r.error : 'อ่านใบไม่สำเร็จ'); return; }
     S.result = r;
     renderResult();
     go('scr-res');
-  }).catch(function(e){
-    stopTick(); hideLoad();
-    showErr(String((e && e.message) || e || 'เชื่อมต่อไม่ได้'));
-  });
+  }
+  function fail(msg){
+    if (settled) return;
+    settled = true; halt(); showErr(msg);
+  }
+
+  api({
+    action:'check', job:job, ref:S.po.ref, deep: deep === true,
+    photos: S.photos.map(function(p){ return {b64:p.b64, mime:p.mime}; })
+  }).then(done)
+    .catch(function(){ /* สายขาด/หมดเวลา — หลังบ้านยังอ่านอยู่ ให้ตัวถามผลตัดสินแทน */ });
+
+  // เริ่มถามผลหลัง 20 วิ (ก่อนหน้านั้นยังไงก็ยังไม่เสร็จ) แล้วถามทุก 5 วิ · หยุดที่ราว 6 นาทีเท่าลิมิต Apps Script
+  toPoll = setTimeout(function(){
+    ivPoll = setInterval(function(){
+      if (settled){ clearInterval(ivPoll); return; }
+      if (++tries > 70){ fail('ใช้เวลานานผิดปกติ — ลองถ่ายทีละหน้าแล้วส่งใหม่'); return; }
+      api({ action:'jobGet', job:job }, 20000)
+        .then(function(r){ if (r && r.ok && r.done) done(r.result); })
+        .catch(function(){ /* ถามไม่ติดรอบเดียวไม่เป็นไร เดี๋ยวรอบหน้าถามใหม่ */ });
+    }, 5000);
+  }, 20000);
 }
 function showErr(msg){
   $('errMsg').textContent = msg;
@@ -1683,17 +1712,25 @@ function renderResult(){
     + (need ? '<span style="color:var(--red)">ต้องดู ' + need + '</span>' : '<span style="color:var(--green)">ตรงครบทุกรายการ</span>');
   $('resSub2').textContent = R.po.vendor + ' · คลัง ' + R.po.wl
     + (R.ms ? ' · อ่านใบเสร็จใน ' + Math.round((R.ms.total||0)/1000) + ' วินาที' : '')
-    + (R.escalated ? ' (อ่านซ้ำ 1 รอบ)' : '');
+    + (R.escalated ? ' (ยิงซ้ำ 1 รอบ)' : '')
+    + (R.deep ? ' · โมเดลใหญ่' : '');
   $('resMoney').innerHTML =
       '<div>ยอดบนใบ<b>' + nf(R.supLineSum,0) + '</b></div>'
     + '<div>ยอดตาม PO<b>' + nf(R.poCompare,0) + '</b></div>'
     + '<div class="' + (R.claim > 0 ? 'claim' : '') + '">ต้องเคลม<b>' + nf(R.claim,0) + '</b></div>';
 
-  $('resDeep').innerHTML = (R.arithBad)
-    ? '<div class="warnbox" style="border-color:var(--red-line);background:var(--red-bg);color:var(--red)">'
-      + '<b>ตัวเลขบนใบยังไม่ลงตัว</b> — อ่านซ้ำด้วยโมเดลใหญ่แล้วก็ยังไม่ลง '
-      + 'อาจเป็นใบที่มีส่วนลดพิเศษหรือรูปไม่ชัด ตรวจแต่ละบรรทัดเองก่อนบันทึก</div>'
-    : '';
+  /* ปกติอ่านด้วย Sonnet รอบเดียวจบ · ใบที่เลขยังไม่ลงตัวจริงๆ ค่อยให้คนกดยกไปโมเดลใหญ่เอง
+     ❌ ไม่ยกให้เองอัตโนมัติแล้ว — เดิมยกทุกใบที่ซัพพิมพ์ส่วนลดเป็นบรรทัดย่อย = ทุกคนรอเพิ่ม 30 วินาทีฟรีๆ */
+  $('resDeep').innerHTML = (!R.arithBad) ? ''
+    : '<div class="warnbox" style="border-color:var(--red-line);background:var(--red-bg);color:var(--red)">'
+      + '<b>ตัวเลขบนใบยังไม่ลงตัว</b> — ' + (R.deep
+          ? 'อ่านด้วยโมเดลใหญ่แล้วก็ยังไม่ลง อาจเป็นใบที่มีส่วนลดพิเศษหรือรูปไม่ชัด ตรวจแต่ละบรรทัดเองก่อนบันทึก'
+          : 'อาจเป็นใบที่มีส่วนลดพิเศษหรือรูปไม่ชัด ตรวจแต่ละบรรทัดเองก่อนบันทึก')
+      + (R.deep ? ''
+          : '<button class="btn btn-line" onclick="runCheck(true)" '
+            + 'style="margin-top:9px;padding:9px;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
+            + 'อ่านลึกด้วยโมเดลใหญ่</button>')
+      + '</div>';
 
   // ชิปแยกเคส — โชว์เฉพาะเคสที่มีจริง
   var cnt = {};
