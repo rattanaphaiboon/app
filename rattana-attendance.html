@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.15</title>
+<title>HR Rattana v5.16</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3472,7 +3472,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.15';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.16';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -7844,10 +7844,19 @@ async function applyPTTMenuVisibility() {
   if (isPTT === undefined || isPTT === null || khlang === undefined || khlang === null) {
     let probeOk = true;   // v9.9: เน็ตล่มชั่วคราวต้องไม่ฝัง isPTT=false ถาวร (PTT โดนล็อกเช็คอินทั้ง session)
     try {
-      const res = await callAppsScript('getSlipDataPTT', { empId: currentUser.empId });
-      const row = (res && res.ok && res.rows && res.rows.length) ? res.rows[res.rows.length - 1] : null;
-      isPTT  = !!row;
-      khlang = row ? (row.khlang || '') : '';
+      // v12.16: ถามจาก "ทะเบียนพนักงาน PTT" ก่อน — เดิมดูจากสลิปเงินเดือน คนที่ยังไม่มีสลิป
+      // (พนักงานใหม่/สลิปยังไม่ออก) เลยถูกตัดสินว่าไม่ใช่ PTT แล้วโดนล็อกเช็คอิน "ยังไม่พร้อมใช้งาน"
+      const rs = await callAppsScript('getPTTStaff', {});
+      if (rs && rs.ok) {
+        isPTT = true;
+        khlang = rs.khlang || '';
+        if (rs.myPosition && currentUser) currentUser.pttPosition = rs.myPosition;
+      } else {
+        const res = await callAppsScript('getSlipDataPTT', { empId: currentUser.empId });   // fallback เดิม
+        const row = (res && res.ok && res.rows && res.rows.length) ? res.rows[res.rows.length - 1] : null;
+        isPTT  = !!row;
+        khlang = row ? (row.khlang || '') : '';
+      }
     } catch(_) { probeOk = false; isPTT = false; khlang = ''; }
     if (currentUser && probeOk) {   // persist เฉพาะคำตอบจริง — ล้มเหลว = ไว้ลองใหม่รอบหน้า
       currentUser.isPTT  = isPTT;
@@ -8494,8 +8503,31 @@ function dismissQuickStart() {
 /* ============================================================
    CHECK-IN FLOW (start/cancel)
    ============================================================ */
+/* v12.16: ยืนยันสิทธิ์ PTT แบบถามทะเบียนสดตอนถูกปฏิเสธ — กันเคสค่าที่แคชไว้ผิด/probe ยังไม่เสร็จ
+   (พนักงาน PTT ตัวจริงเคยกดสแกนแล้วขึ้น "ยังไม่พร้อมใช้งาน" ทั้งที่มีชื่อในทะเบียน) */
+async function verifyPTTPilot_() {
+  if (isPTTPilot()) return true;
+  if (!currentUser) return false;
+  try {
+    const res = await callAppsScript('getPTTStaff', {});
+    if (res && res.ok) {
+      currentUser.isPTT = true;
+      if (res.khlang) currentUser.khlang = res.khlang;
+      if (res.myPosition) currentUser.pttPosition = res.myPosition;
+      try { sessionStorage.setItem('rfc3_user', JSON.stringify(currentUser)); } catch(_) {}
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
 async function startCheckinFlow() {
-  if (CHECKIN_HR_ONLY && !isHROnly() && !isPTTPilot()) { toast('ยังไม่พร้อมใช้งานขณะนี้ค่ะ', 'info'); return; }
+  if (CHECKIN_HR_ONLY && !isHROnly() && !isPTTPilot()) {
+    showSpinner('กำลังตรวจสอบสิทธิ์...');
+    let allowed = false;
+    try { allowed = await verifyPTTPilot_(); } finally { hideSpinner(); }
+    if (!allowed) { toast('ยังไม่พร้อมใช้งานขณะนี้ค่ะ', 'info'); return; }
+  }
   // v12.0: เพิ่งสแกนไปไม่ถึง SCAN_GAP_MIN นาที — ไม่ต้องเปิดกล้องเลย แจ้งทันทีว่าสแกนแล้ว
   const gapStart = (currentUser && currentUser.empId) ? scanGapInfo_(currentUser.empId) : null;
   if (gapStart) { showScanGapModal_(gapStart); return; }
@@ -11373,12 +11405,12 @@ function canUseLeaveTime(page) {
   if (!LEAVE_TIME_HR_ONLY || isHROnly()) return true;
   return isPTTPilot() && ['leave', 'changeoffday', 'timeadjust'].indexOf(page) >= 0;
 }
-function gateLeaveTime(page) {
-  if (canUseLeaveTime(page)) {
-    showPage(page);
-  } else {
-    toast('ยังไม่พร้อมใช้งานขณะนี้ค่ะ', 'info');
-  }
+async function gateLeaveTime(page) {
+  if (canUseLeaveTime(page)) { showPage(page); return; }
+  // v12.16: ถูกปฏิเสธ → ยืนยันสิทธิ์ PTT จากทะเบียนสดอีกรอบก่อนตัดสิน (เหมือนด่านเช็คอิน)
+  const ok = await verifyPTTPilot_();
+  if (ok && canUseLeaveTime(page)) { showPage(page); return; }
+  toast('ยังไม่พร้อมใช้งานขณะนี้ค่ะ', 'info');
 }
 
 async function renderDocsFeed() {
