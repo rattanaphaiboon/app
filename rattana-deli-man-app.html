@@ -915,7 +915,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.253';
+const APP_VERSION='3.254';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -3464,33 +3464,52 @@ async function loadCNHistory(){
         returnType:r['ประเภทคืน']||'', billType:r['ประเภทบิล']||'',
         reason:r['สาเหตุรับคืน']||'', errorFrom:r['ผิดพลาดจาก']||'',
         note:r['หมายเหตุการคืน']||'',
-        // ★ v3.253: เดิมหยิบยอดจาก "แถวแรก" แถวเดียว → ถ้าบิลเดียวมี CN หลายใบ (กดส่งหลายครั้ง)
-        //   จะได้แค่ยอดของใบแรก · เคสจริง DC526908/00333 ส่ง 2 ครั้งห่างกัน 1 นาที (274 + 278) แต่โชว์/หัก 274
-        //   กระทบเงินจริง เพราะ cnAmtForBill_ เอา total ไปหักยอดในหน้าเก็บเงิน
-        total:0, _bt:{},
+        total:0,
         status:(r['สถานะคืน']||'').trim(),
         approver:r['ผู้อนุมัติ']||'',
         approveNote:r['หมายเหตุอนุมัติ']||'',
         photo:r['ภาพคืน']||'',
         cnDocNo:r['เลขที่เอกสาร CN']||'', approvePhoto:r['ภาพอนุมัติ CN']||'',
         driver:r['ผู้ขับ']||r['ชื่อ-สกุล']||'',
-        items:[], lineIds:[]   // ★ v3.232: cnLineId = ตัวบอกว่าใบนี้มาจากหน้า CN (ขนส่งเก็บเอง) ไม่ใช่ฟอร์มรับคืนเดิม
+        items:[], lineIds:[],   // ★ v3.232: cnLineId = ตัวบอกว่าใบนี้มาจากหน้า CN (ขนส่งเก็บเอง) ไม่ใช่ฟอร์มรับคืนเดิม
+        _b:{}, _order:[]        // ★ v3.254: แยกเก็บรายใบ CN ก่อน แล้วค่อยรวมทีหลัง (ดูบล็อกสรุปข้างล่าง)
       };
     }
     { const _l=String(r['cnLineId']||'').trim(); if(_l) groups[key].lineIds.push(_l); }   // ★ v3.232
-    // ★ v3.253: บวก "ยอดรวมทั้งใบ" ครั้งเดียวต่อ 1 ใบ CN (ใบเดียวกันมีหลายบรรทัด ยอดซ้ำทุกบรรทัด)
-    { const _bk=cnBatchKey_(r);
-      if(!groups[key]._bt[_bk]){ groups[key]._bt[_bk]=1; groups[key].total+=parseFloat(r['ยอดรวมทั้งใบ']||'0')||0; } }
-    const nm=r['ชื่อสินค้า']||'';
-    if(nm) groups[key].items.push({
-      barcode:r['บาร์โค้ด']||'', name:nm,
-      qty:parseFloat(r['จำนวน']||'0')||0,
-      price:parseFloat(r['ราคา']||'0')||0,
-      unit:r['หน่วย']||''
-    });
+    /* ★ v3.254: เก็บแยก "รายใบ CN" (1 ใบ = 1 ครั้งที่กดส่ง) — คอลัมน์ ยอดรวมทั้งใบ ถูกเขียนซ้ำทุกบรรทัดของใบเดียวกัน
+       จึงต้องจำยอดไว้ใบละครั้ง แล้วค่อยตัดสินตอนสรุปว่าใบไหนนับ ใบไหนเป็นใบซ้ำ */
+    { const _bk=cnBatchKey_(r), _g=groups[key];
+      if(!_g._b[_bk]){ _g._b[_bk]={total:parseFloat(r['ยอดรวมทั้งใบ']||'0')||0, items:[]}; _g._order.push(_bk); }
+      const nm=r['ชื่อสินค้า']||'';
+      if(nm) _g._b[_bk].items.push({
+        barcode:r['บาร์โค้ด']||'', name:nm,
+        qty:parseFloat(r['จำนวน']||'0')||0,
+        price:parseFloat(r['ราคา']||'0')||0,
+        unit:r['หน่วย']||''
+      });
+    }
   });
   state.cnHistory=Object.values(groups);
-  state.cnHistory.forEach(g=>{ g._cnCount=Object.keys(g._bt||{}).length; delete g._bt; });   // ★ v3.253: เก็บแค่จำนวนใบ CN ที่รวมกันอยู่
+  /* ★★ v3.254: สรุปยอดต่อบิล — บวก "ใบละครั้ง" แต่ "ใบที่เนื้อหาเหมือนกันเป๊ะ นับใบเดียว"
+     เพราะบิลเดียวมี CN หลายใบได้ 2 แบบ แยกกันด้วยเนื้อหา:
+       (ก) CN คนละใบจริง  — สินค้าคนละตัว/ยอดคนละยอด → ต้องบวกกัน
+            เคสจริง DC526908/00333: ลอรีเอะS&S 274 + ลอรีเอะซอฟท์แอนด์เซฟ 278 = 552
+       (ข) ใบซ้ำจากกดส่งซ้ำ — สินค้า/จำนวน/ราคา/ยอด เหมือนกันเป๊ะ (ปัญหา timeout ดู v3.241) → ต้องนับใบเดียว
+            เคสจริง DC596908/00145: เบอร์ดี้+เมจิกฟาร์มเฟรช 2,210 สองใบเหมือนกัน = 2,210 ไม่ใช่ 4,420
+     ลายเซ็นใบ = (บาร์โค้ด|ชื่อ):จำนวน:ราคา เรียงแล้ว + ยอดรวมทั้งใบ — แนวเดียวกับ markCNDupOnSource_ ฝั่ง GAS
+     ⚠️ v3.253 บวกทุกใบโดยไม่ดูเนื้อหา → นับใบซ้ำเกิน แก้เป็นแบบนี้แล้ว */
+  state.cnHistory.forEach(g=>{
+    const seen={}; let total=0, n=0, dup=0; const items=[];
+    (g._order||[]).forEach(bk=>{
+      const b=g._b[bk];
+      const sig=b.items.map(it=>[(it.barcode||it.name),it.qty,it.price].join(':')).sort().join('|')+'#'+b.total;
+      if(seen[sig]){ dup++; return; }
+      seen[sig]=1; n++; total+=b.total;
+      b.items.forEach(it=>items.push(it));
+    });
+    g.total=total; g.items=items; g._cnCount=n; g._cnDup=dup;
+    delete g._b; delete g._order;
+  });
   // ★ v3.231: จำ cnLineId ที่มีในชีท CN ของ D-Man แล้ว → ใช้กันซ้ำตอนดึงของจากชีท Sale App มาต่อท้าย
   const seen={}; rows.forEach(r=>{ const k=String(r['cnLineId']||'').trim(); if(k) seen[k]=1; });
   state._cnLineSeen=seen;
