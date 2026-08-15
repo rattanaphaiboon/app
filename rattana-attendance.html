@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.16</title>
+<title>HR Rattana v5.17</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3472,7 +3472,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.16';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.17';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -8505,9 +8505,12 @@ function dismissQuickStart() {
    ============================================================ */
 /* v12.16: ยืนยันสิทธิ์ PTT แบบถามทะเบียนสดตอนถูกปฏิเสธ — กันเคสค่าที่แคชไว้ผิด/probe ยังไม่เสร็จ
    (พนักงาน PTT ตัวจริงเคยกดสแกนแล้วขึ้น "ยังไม่พร้อมใช้งาน" ทั้งที่มีชื่อในทะเบียน) */
+/* v12.17: แยก "ทะเบียนบอกว่าไม่ใช่ PTT" ออกจาก "ถามระบบไม่ได้" (เซสชันหมดอายุ/เน็ตล่ม)
+   — เคสจริง: เครื่องหนึ่งสแกนไม่ได้ อีกเครื่องได้ ข้อมูลในระบบปกติ = เซสชันเครื่องนั้นเสีย
+   แต่ข้อความเดิมบอกแค่ "ยังไม่พร้อมใช้งาน" ทำให้ไล่ผิดทาง */
 async function verifyPTTPilot_() {
-  if (isPTTPilot()) return true;
-  if (!currentUser) return false;
+  if (isPTTPilot()) return { ok: true };
+  if (!currentUser) return { ok: false };
   try {
     const res = await callAppsScript('getPTTStaff', {});
     if (res && res.ok) {
@@ -8515,18 +8518,33 @@ async function verifyPTTPilot_() {
       if (res.khlang) currentUser.khlang = res.khlang;
       if (res.myPosition) currentUser.pttPosition = res.myPosition;
       try { sessionStorage.setItem('rfc3_user', JSON.stringify(currentUser)); } catch(_) {}
-      return true;
+      return { ok: true };
     }
-  } catch (_) {}
-  return false;
+    return { ok: false };                          // ทะเบียนตอบแล้วว่าไม่มีชื่อ
+  } catch (e) {
+    const m = String((e && e.message) || e).toLowerCase();
+    if (m.indexOf('ไม่พบพนักงาน ptt') >= 0) return { ok: false };   // ทะเบียนตอบชัดเจน
+    return { ok: false, err: (e && e.message) || 'เชื่อมต่อระบบไม่ได้' };
+  }
+}
+/* แจ้งสาเหตุจริง + ทางแก้ (ไม่ปล่อยให้เข้าใจว่า "ระบบยังไม่เปิดให้ใช้") */
+function pttGateFailToast_(r) {
+  if (r && r.err) {
+    const m = String(r.err).toLowerCase();
+    const isAuth = m.indexOf('idtoken') >= 0 || m.indexOf('unauthorized') >= 0 || m.indexOf('session') >= 0;
+    toast(isAuth ? '⚠ เซสชันหมดอายุ — กดออกจากระบบแล้วเข้าใหม่' : '⚠ ต่อระบบไม่ได้: ' + r.err, 'warning');
+    if (isAuth) { try { sessionStorage.removeItem('rfc3_idToken'); sessionStorage.removeItem('rfc3_idTokenExp'); } catch(_) {} }
+  } else {
+    toast('ยังไม่พร้อมใช้งานขณะนี้ค่ะ', 'info');
+  }
 }
 
 async function startCheckinFlow() {
   if (CHECKIN_HR_ONLY && !isHROnly() && !isPTTPilot()) {
     showSpinner('กำลังตรวจสอบสิทธิ์...');
-    let allowed = false;
-    try { allowed = await verifyPTTPilot_(); } finally { hideSpinner(); }
-    if (!allowed) { toast('ยังไม่พร้อมใช้งานขณะนี้ค่ะ', 'info'); return; }
+    let r = { ok: false };
+    try { r = await verifyPTTPilot_(); } finally { hideSpinner(); }
+    if (!r.ok) { pttGateFailToast_(r); return; }
   }
   // v12.0: เพิ่งสแกนไปไม่ถึง SCAN_GAP_MIN นาที — ไม่ต้องเปิดกล้องเลย แจ้งทันทีว่าสแกนแล้ว
   const gapStart = (currentUser && currentUser.empId) ? scanGapInfo_(currentUser.empId) : null;
@@ -11408,9 +11426,9 @@ function canUseLeaveTime(page) {
 async function gateLeaveTime(page) {
   if (canUseLeaveTime(page)) { showPage(page); return; }
   // v12.16: ถูกปฏิเสธ → ยืนยันสิทธิ์ PTT จากทะเบียนสดอีกรอบก่อนตัดสิน (เหมือนด่านเช็คอิน)
-  const ok = await verifyPTTPilot_();
-  if (ok && canUseLeaveTime(page)) { showPage(page); return; }
-  toast('ยังไม่พร้อมใช้งานขณะนี้ค่ะ', 'info');
+  const r = await verifyPTTPilot_();
+  if (r.ok && canUseLeaveTime(page)) { showPage(page); return; }
+  pttGateFailToast_(r);
 }
 
 async function renderDocsFeed() {
