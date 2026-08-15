@@ -915,7 +915,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.250';
+const APP_VERSION='3.251';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1752,6 +1752,9 @@ async function loadAvailableJobs(fresh){
       const cust=custByCode[code]||{};
       const amount=parseFloat(cleanCell(r['TotalBaht']).replace(/,/g,''))||0;
       byCode[tc].bills.push({
+        // ★ v3.251: seq = ลำดับแถวในชีทใบคุม → หน้ากรอกเก็บเงินเรียงตามใบคุมที่คนขับถืออยู่เป๊ะ
+        //   (เดิมเรียง "ยังไม่ส่งขึ้นก่อน" ทำให้ไล่ตามกระดาษไม่ได้ · ชีทเรียงตามเส้นทางส่ง ไม่ใช่เลขบิล)
+        seq:byCode[tc].bills.length,
         doc:cleanCell(r['Doc_No']),
         docDate:cleanCell(r['Doc_Date']),
         code,
@@ -5138,11 +5141,15 @@ function renderActiveJob(){
   const collected=j.bills.reduce((s,b)=>s+payTotal(b.payment),0);
   // v2.78: บิลจ่ายไม่ครบ (เก็บเงินแล้วแต่ยอดขาด) — ใช้ปิดปุ่มขออนุมัติ + โชว์บนปุ่ม
   const shortCount=j.bills.filter(b=>isBillShort_(j,b)).length;
-  // เรียงบิล: pending ก่อน → ที่ส่งแล้วลงล่าง
+  /* ★ v3.251: บิลที่ยังไม่ได้กรอกขึ้นก่อน "เรียงตามหน้าใบคุม" → กรอกแล้วเลื่อนลงล่าง
+     seq = ลำดับแถวในชีทใบคุม (= ลำดับเส้นทางส่ง ไม่ใช่เลขบิล) → ไล่ตามกระดาษที่คนขับถืออยู่ได้เป๊ะ
+     เดิมเรียงแค่ pending ก่อน ภายในกลุ่มเป็นลำดับที่ข้อมูลเข้ามา ซึ่งไม่ตรงกับใบคุม
+     บิลที่ไม่มี seq (ถูกตัดออกจากใบคุมทีหลัง) ไปท้ายกลุ่มของตัวเอง */
+  const _seq=b=>(b&&b.seq!==undefined&&b.seq!==null&&b.seq!=='')?Number(b.seq):99999;
   const sorted=[...j.bills].sort((a,b)=>{
-    const ap=a.status==='pending'?0:1;
-    const bp=b.status==='pending'?0:1;
-    return ap-bp;
+    const ap=a.status==='pending'?0:1, bp=b.status==='pending'?0:1;
+    if(ap!==bp) return ap-bp;          // ยังไม่กรอก → ขึ้นบน · กรอกแล้ว → ลงล่าง
+    return _seq(a)-_seq(b);            // ในแต่ละกลุ่ม เรียงตามใบคุม
   });
   const coHelp=(state.user.canCoRecord&&!isMyOwnJob(j));   // v3.97: บัญชีเปิดงานของคนขับมาช่วยบันทึก
   let html=`
@@ -8387,6 +8394,15 @@ function hasLocalPaymentEdits_(p){
   if(p.unpaidNote||p.combinedRef) return true;
   return false;
 }
+/* ★ v3.251: เติม "ลำดับใบคุม" (seq) ให้บิลทุกใบของงาน จากชีทใบคุมล่าสุด
+   จำเป็นเพราะบิลที่บันทึกแล้วถูกสร้างจากชีท Cin ซึ่งไม่มีคอลัมน์ลำดับ
+   และใบคุมอาจถูกจัดลำดับใหม่ตอน sync (9:00/15:00/21:00 ฯลฯ) → ยึดของล่าสุดเสมอ */
+function applyTicketSeq_(job,ticketBills){
+  if(!job||!Array.isArray(job.bills)||!Array.isArray(ticketBills)||!ticketBills.length) return;
+  const by={};
+  ticketBills.forEach((x,i)=>{ const d=String(x&&x.doc||'').trim(); if(d) by[d]=(x.seq!==undefined&&x.seq!==null)?Number(x.seq):i; });
+  job.bills.forEach(b=>{ const s=by[String(b&&b.doc||'').trim()]; if(s!==undefined) b.seq=s; });
+}
 async function syncJobsFromSheet(opts){
   // v2.53: throttle การอ่านชีทซ้ำ (default 30 วิ) — force=true จะข้าม throttle (auto-refresh/manual refresh)
   const force=opts&&opts.force;
@@ -8453,6 +8469,7 @@ async function syncJobsFromSheet(opts){
           }
           // v3.29: Cin แยก cn/failed ไม่ได้ (ทั้งคู่ ไม่ได้ส่ง=YES) → ถ้า local รู้ว่าเป็น CN คงไว้
           if(lb.status==='cn' && sb.status==='failed'){ sb.status='cn'; sb.isCN=true; }
+          if(sb.seq===undefined&&lb.seq!==undefined) sb.seq=lb.seq;   // ★ v3.251: คงลำดับใบคุมไว้ (ชีท Cin ไม่มีคอลัมน์นี้)
         }
       });
       // ใส่บิลจาก local ที่ไม่อยู่ในชีท (กรณีคนขับยังส่งไม่ครบ)
@@ -8470,6 +8487,7 @@ async function syncJobsFromSheet(opts){
       // v2.23: เติมบิลจากชีท Jobs ที่ยังไม่มี (Cin ยังไม่มีบิลของงานที่เพิ่งรับ → กันบิลหาย)
       const _ab=availBillsById[key];
       if(_ab) _ab.forEach(x=>{ if(!sj.bills.find(sb=>sb.doc===x.doc)) sj.bills.push({...x}); });
+      applyTicketSeq_(sj,availBillsById[key]);   // ★ v3.251: เติม/อัปเดตลำดับใบคุมให้ทุกบิล (ใบคุมอาจสลับลำดับหลัง sync)
       // เก็บ id เดิมที่ user เห็นบนแอป (ไม่เอา id ที่โดน Sheets เปลี่ยน)
       sj.id=local.id;
       // v3.30: gviz ทำทะเบียนตัวอักษร (บฉ1693) หายเมื่อคอลัมน์ปนเลข → ถ้าชีทคืนว่างแต่ local มี ให้คงไว้
@@ -8491,6 +8509,7 @@ async function syncJobsFromSheet(opts){
       // v2.23: งานใหม่จากชีท ถ้า Cin ยังไม่มีบิล → เติมจากชีท Jobs
       const _ab2=availBillsById[key];
       if(_ab2) _ab2.forEach(x=>{ if(!sj.bills.find(sb=>sb.doc===x.doc)) sj.bills.push({...x}); });
+      applyTicketSeq_(sj,_ab2);   // ★ v3.251
       state.jobs.push(sj);
     }
   });
