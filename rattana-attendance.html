@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.14</title>
+<title>HR Rattana v5.15</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3472,7 +3472,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.14';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.15';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -4909,6 +4909,7 @@ function saveSharedSession(userData) {
 /* ============================================================
    FACE-API
    ============================================================ */
+let _faceLoadFailed = false;   // v12.15: ใช้บอกสาเหตุที่สแกนไม่เริ่ม (แทนคำว่า "รอสแกน" ลอยๆ)
 async function loadFaceModels(silent) {
   if (faceapiReady) return true;
   if (typeof faceapi === 'undefined') { if(!silent) setFaceModelStatus('❌ face-api ไม่พร้อม', 'err'); return false; }
@@ -4918,9 +4919,11 @@ async function loadFaceModels(silent) {
     await faceapi.nets.faceLandmark68Net.loadFromUri(FACE_MODELS_URL); if(!silent) setProgress(70);
     await faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODELS_URL); if(!silent) setProgress(100);
     faceapiReady = true;
+    _faceLoadFailed = false;
     setFaceModelStatus('✓ พร้อม', 'ok');
     return true;
   } catch (e) {
+    _faceLoadFailed = true;   // v12.15
     console.error(e);
     if(!silent){ setFaceModelStatus('⚠ โหลดโมเดลไม่ได้', 'warn'); toast('โหลดโมเดลไม่ได้ — บันทึกได้แต่ไม่มีใบหน้า', 'warning'); }
     return false;
@@ -5052,8 +5055,8 @@ async function startEmpCamera() {
     if (!got) throw new Error('NoFrame');
 
     setEmpOverlay(false);
+    startEmpMatching();                        // v12.15: เริ่มลูปก่อน — ลูปจะรอ/ลองโหลดโมเดลเอง
     if (!faceapiReady) await loadFaceModels();
-    if (faceapiReady) startEmpMatching();
   } catch (e) {
     console.error('[cam]', e && e.name, e && e.message, e);
     if (empStream) { try { empStream.getTracks().forEach(t => t.stop()); } catch (_) {} empStream = null; }
@@ -5083,8 +5086,9 @@ function setEmpOverlay(show, text, isErr) {
   const rt = document.getElementById('empCamRetry');
   if (rt) rt.style.display = isErr ? '' : 'none';
 }
+/* v12.15: เดินลูปแม้โมเดลยังไม่พร้อม — เพื่ออัปเดตข้อความสถานะ + เริ่มจับหน้าเองทันทีที่โมเดลมา
+   (เดิม return ทิ้ง ถ้าโมเดลโหลดไม่ทันตอนเปิดกล้อง จอค้าง "รอสแกน" จนกว่าจะปิด-เปิดกล้องใหม่) */
 function startEmpMatching() {
-  if (!faceapiReady) return;
   if (empMatchInterval) clearInterval(empMatchInterval);
   empMatchInterval = setInterval(empMatchTick, 800);
 }
@@ -5094,8 +5098,10 @@ async function empMatchTick() {
   if (_empTickBusy) return;
   _empTickBusy = true;
   try {
+  // v12.15: โมเดลยังไม่พร้อม → โชว์สาเหตุ + สั่ง retry (ไม่ปล่อยให้ค้างเงียบ)
+  if (!faceapiReady) { updateFaceCheck(null); retryFaceModels(); return; }
   const v = document.getElementById('empVideo');
-  if (!v || !v.videoWidth) return;
+  if (!v || !v.videoWidth) { updateFaceCheck(null); return; }
   // v10.4: พลาด 3 เฟรมติด → โหมดไว (ภาพละเอียดขึ้น + เกณฑ์จับต่ำลง) — ความปลอดภัยไม่ลด
   // เพราะด่านจริงคือระยะเทียบกับหน้าที่ลงทะเบียน (faceThr) ซึ่งไม่เปลี่ยน
   const opts = _empDetMiss >= 3
@@ -5140,6 +5146,33 @@ function drawBox(canvasId, videoId, det) {
   ctx.strokeStyle = '#c9a84c'; ctx.lineWidth = 4;
   ctx.strokeRect(b.x, b.y, b.width, b.height);
 }
+/* v12.15: บอก "ติดตรงไหน" แทนคำว่า รอสแกน ลอยๆ — เคสจริง: โมเดลโหลดไม่ผ่านบนเน็ตมือถือ
+   แล้วหน้าจอค้าง "รอสแกน" ตลอด ไม่มีใครรู้ว่าต้องแก้อะไร */
+let _faceWaitSince = 0, _faceLibRetried = false;
+/* v12.15: ไลบรารีสแกน (โหลดจาก CDN แบบ defer) ไม่มา — ยิงโหลดซ้ำจาก CDN สำรอง 1 ครั้ง */
+function ensureFaceApiLib_() {
+  if (typeof faceapi !== 'undefined' || _faceLibRetried) return;
+  _faceLibRetried = true;
+  const s = document.createElement('script');
+  s.src = 'https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js';
+  s.onload = () => { _faceWaitSince = 0; loadFaceModels(true).catch(() => {}); };
+  document.head.appendChild(s);
+}
+function faceStageText_() {
+  if (typeof faceapi === 'undefined') {
+    if (!_faceWaitSince) _faceWaitSince = Date.now();
+    const secs = Math.round((Date.now() - _faceWaitSince) / 1000);
+    if (secs >= 8) ensureFaceApiLib_();
+    return secs >= 20 ? '❌ โหลดระบบสแกนไม่ได้ — เช็คเน็ตแล้วปิด-เปิดแอป' : '⏳ กำลังโหลดระบบสแกน…';
+  }
+  if (!faceapiReady) return _faceLoadFailed
+    ? '❌ โหลดโมเดลไม่ได้ — เช็คเน็ต/ปิดเปิดแอป'
+    : '⏳ กำลังเตรียมโมเดล…';
+  const v = document.getElementById('empVideo');
+  if (!v || !v.srcObject) return 'กล้องยังไม่เปิด';
+  if (!v.videoWidth) return '⏳ กล้องยังไม่ส่งภาพ…';
+  return 'รอสแกน';
+}
 function updateFaceCheck(info) {
   const el = document.getElementById('chkFace'); if (!el) return;
   const line = document.getElementById('lineFace');
@@ -5148,8 +5181,10 @@ function updateFaceCheck(info) {
   if (badge) badge.classList.remove('show','ok','warn','err');
 
   if (!info) {
-    if (line) line.classList.add('pending');
-    el.textContent = 'รอสแกน';
+    const txt = faceStageText_();
+    if (line) line.classList.add(txt.indexOf('❌') === 0 ? 'err' : 'pending');
+    el.textContent = txt;
+    if (badge && txt.indexOf('❌') === 0) { badge.classList.add('show','err'); badge.textContent = 'โหลดโมเดลไม่ได้'; }
     return;
   }
   if (!info.found) {
