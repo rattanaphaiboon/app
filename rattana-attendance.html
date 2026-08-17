@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.17</title>
+<title>HR Rattana v5.18</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3472,12 +3472,20 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.17';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.18';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
 const LATE_FIRST_SCAN_HOUR = 12;   // สแกนแรกของวันตั้งแต่กี่โมง = ถามก่อนว่าเข้ากะบ่ายจริง หรือลืมสแกนเช้า
 const FACE_MODELS_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
+/* v12.18: แหล่งโมเดลสำรอง — บางเครื่อง/บางเน็ตโหลดจากแหล่งหลักไม่ได้ (ขึ้น "ระบบใบหน้าไม่พร้อม"
+   ทั้งที่เครื่องอื่นสแกนได้) ระบบจะไล่ลองทีละแหล่งจนกว่าจะสำเร็จ แล้วจำแหล่งที่ใช้ได้ไว้ */
+const FACE_MODEL_HOSTS = [
+  FACE_MODELS_URL,
+  'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights',
+  'https://rawcdn.githack.com/justadudewhohacks/face-api.js/master/weights',
+];
+let _faceModelHost = 0;
 
 const DEFAULT_LOCATIONS = [
   { code:'HQ', name:'สำนักงานใหญ่ สมุทรสงคราม', lat:13.4099, lng:100.0023, radius:30 },
@@ -4915,13 +4923,26 @@ async function loadFaceModels(silent) {
   if (typeof faceapi === 'undefined') { if(!silent) setFaceModelStatus('❌ face-api ไม่พร้อม', 'err'); return false; }
   try {
     if(!silent){ setFaceModelStatus('⏳ โหลดโมเดล...', 'pending'); showSpinner('กำลังโหลดโมเดลสแกนใบหน้า...', true); setProgress(10); }
-    await faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODELS_URL); if(!silent) setProgress(40);
-    await faceapi.nets.faceLandmark68Net.loadFromUri(FACE_MODELS_URL); if(!silent) setProgress(70);
-    await faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODELS_URL); if(!silent) setProgress(100);
-    faceapiReady = true;
-    _faceLoadFailed = false;
-    setFaceModelStatus('✓ พร้อม', 'ok');
-    return true;
+    // v12.18: ไล่ลองทุกแหล่งจนกว่าจะสำเร็จ (เริ่มจากแหล่งที่เคยใช้ได้ล่าสุด)
+    let lastErr = null;
+    for (let i = 0; i < FACE_MODEL_HOSTS.length; i++) {
+      const idx = (_faceModelHost + i) % FACE_MODEL_HOSTS.length;
+      const url = FACE_MODEL_HOSTS[idx];
+      try {
+        await faceapi.nets.tinyFaceDetector.loadFromUri(url); if(!silent) setProgress(40);
+        await faceapi.nets.faceLandmark68Net.loadFromUri(url); if(!silent) setProgress(70);
+        await faceapi.nets.faceRecognitionNet.loadFromUri(url); if(!silent) setProgress(100);
+        _faceModelHost = idx;
+        faceapiReady = true;
+        _faceLoadFailed = false;
+        setFaceModelStatus('✓ พร้อม' + (idx ? ' (แหล่งสำรอง ' + idx + ')' : ''), 'ok');
+        return true;
+      } catch (e1) {
+        lastErr = e1;
+        console.warn('[face] โหลดโมเดลจากแหล่ง ' + idx + ' ไม่สำเร็จ —', e1 && e1.message);
+      }
+    }
+    throw lastErr || new Error('โหลดโมเดลไม่ได้ทุกแหล่ง');
   } catch (e) {
     _faceLoadFailed = true;   // v12.15
     console.error(e);
@@ -4943,6 +4964,20 @@ function retryFaceModels() {
     if (ok && empStream) { startEmpMatching(); }
     evaluateAction();
   }, 6000);
+}
+/* v12.18: ผู้ใช้กดลองโหลดโมเดลใหม่เอง — เริ่มจากแหล่งถัดไป (เผื่อแหล่งเดิมโดนบล็อกบนเน็ตนั้น) */
+async function forceReloadFaceModels() {
+  if (faceapiReady) { toast('ระบบใบหน้าพร้อมแล้ว', 'success'); return; }
+  _faceLoadFailed = false;
+  _faceModelHost = (_faceModelHost + 1) % FACE_MODEL_HOSTS.length;
+  const ok = await loadFaceModels(false);
+  if (ok) {
+    toast('✓ โหลดระบบใบหน้าสำเร็จ', 'success');
+    if (empStream) startEmpMatching();
+  } else {
+    toast('ยังโหลดไม่ได้ — ลองสลับเน็ต (WiFi ⇄ มือถือ) แล้วแตะอีกครั้ง', 'warning');
+  }
+  evaluateAction();
 }
 function setFaceModelStatus(text, kind) {
   const el = document.getElementById('faceModelStatus'); if (!el) return;
@@ -5770,8 +5805,12 @@ function evaluateAction() {
   if (faceDown) {
     const chkFace = document.getElementById('chkFace');
     const lineFace = document.getElementById('lineFace');
-    if (chkFace) chkFace.textContent = '⚠ ระบบใบหน้าไม่พร้อม';
-    if (lineFace) { lineFace.classList.remove('ok','pending','err'); lineFace.classList.add('warn'); }
+    if (chkFace) chkFace.textContent = '⚠ ระบบใบหน้าไม่พร้อม — แตะเพื่อลองใหม่';
+    if (lineFace) {
+      lineFace.classList.remove('ok','pending','err'); lineFace.classList.add('warn');
+      lineFace.style.cursor = 'pointer';
+      lineFace.onclick = forceReloadFaceModels;   // v12.18: กดลองโหลดใหม่ได้เอง (ไล่แหล่งสำรอง)
+    }
     retryFaceModels();
   }
 
