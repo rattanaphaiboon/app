@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v4.05</title>
+<title>Rattana Online Order v4.06</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -667,7 +667,7 @@ body.dark .seg-tab.on{background:var(--gold);color:var(--navy);border-color:var(
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.05</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.06</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -2128,17 +2128,51 @@ function salesForWh(p,wh){
 }
 let _visCache=null, _visKey='', _outSet=null;   // memo visibleProducts (เรียง 12k แพง) — ขึ้นกับคลังลูกค้า ; ล้าง _visCache=null ตอนโหลดข้อมูลใหม่ (applyData)
                                                 // _outSet = ชุดสินค้า "หมดชั่วคราว" ของคลังนั้น (คำนวณรอบเดียวพร้อมกัน ไม่ต้องเรียก stockBadge ซ้ำ 12k ตัวทุกครั้งที่วาด)
+/* ═══════════════════════════════════════════════════════════════════════════════
+   🔢 ลำดับสินค้า (v4.06) — Surat 18/08 เลือก "แบบ B" หลังดูเดโม
+     ① RANK ของสินค้าในคลังลูกค้า  A › B › C › D › E › F › NEW › (ว่าง)
+     ② หมวด (CAT GROUP) ที่ขายดีกว่ามาก่อน — วัดด้วยมูลค่าขาย 60 วันรวมทั้งหมวด
+     ③ ขนาด (CAT SIZE) เรียงชื่อ
+     ④ ตัวตัดสินสุดท้าย = ยอดขายของตัวมันเอง มาก→น้อย
+   หน้าตาแอป **ไม่เปลี่ยนอะไรเลย** ไม่มีหัวข้อคั่น ไม่มี % — เปลี่ยนแค่ลำดับการ์ด
+   ⚠️ RANK A-E ที่ W1 มีอย่างละ 100 ตัวพอดี (= top 500) · F 1,340 · ว่าง 713 · NEW 16
+      สินค้าที่ RANK ว่าง จึงไปกองท้ายสุดโดยธรรมชาติ (ผู้ใช้รับทราบตอนดูเดโมแล้ว)
+   ⚠️ ของ "หมดชั่วคราว" ยังแทรกกระจายเหมือนเดิม (v3.80) — เปลี่ยนแค่เกณฑ์เรียง ไม่แตะกติกานั้น */
+const RANK_ORDER={A:0,B:1,C:2,D:3,E:4,F:5,NEW:6};
+function rankOrderOf(p,wh){ const v=RANK_ORDER[String(productRank(p,wh)||'').toUpperCase()]; return v==null?7:v; }
+/* อันดับหมวดตามมูลค่าขาย 60 วัน (ยอด × ราคา S03) — คิดครั้งเดียวต่อคลัง แล้วแคชไว้
+   ล้างพร้อม _visCache ตอนโหลดข้อมูลใหม่ (applyData) */
+let _catRank=null, _catRankWh='';
+function catSalesRank(wh){
+  if(_catRank && _catRankWh===wh) return _catRank;
+  const t={};
+  PRODUCTS.forEach(p=>{ const g=clean(p['CAT GROUP']); if(!g) return;
+    t[g]=(t[g]||0)+salesForWh(p,wh)*numOr0(p['PRICE S03 CS']); });
+  const m={}; Object.keys(t).sort((a,b)=>t[b]-t[a]).forEach((g,i)=>{ m[g]=i; });
+  _catRank=m; _catRankWh=wh; return m;
+}
+function sortKeyOf(p,wh,cr){
+  const g=clean(p['CAT GROUP']);
+  return [ rankOrderOf(p,wh), (g && cr[g]!=null) ? cr[g] : 99999, clean(p['CAT SIZE'])||'\uffff' ];
+}
+function cmpSortKey(a,b){
+  if(a.k[0]!==b.k[0]) return a.k[0]-b.k[0];              // ① RANK
+  if(a.k[1]!==b.k[1]) return a.k[1]-b.k[1];              // ② หมวดขายดี
+  if(a.k[2]!==b.k[2]) return a.k[2]<b.k[2]?-1:1;         // ③ ขนาด
+  return b.s-a.s;                                        // ④ ยอดขายตัวเอง
+}
 function visibleProducts(){
   const wh=displayWarehouse(currentCustomer);
   const alOK=alcoholOK(wh,currentCustomer);          // v3.84: ร้านนี้ซื้อเหล้าจากคลังนี้ได้ไหม (ข้ามเขตไม่ได้)
   const vkey=wh+'|'+(alOK?'1':'0');                  // ← ต้องอยู่ในคีย์แคชด้วย ไม่งั้นสลับร้านแล้วยังเห็นของร้านก่อน
   if(_visCache && _visKey===vkey) return _visCache;   // ⚡ cache: กันเรียงสินค้าซ้ำทุกครั้งที่กด (renderCart/reco/grid เรียกหลายรอบ)
   const base=PRODUCTS.filter(p=>clean(p['PRODUCT NAME']) && hasPrice(p) && isSellable(p,wh) && (alOK || !isAlcohol(p)) && !isPremiumOnly(p));   // ร้านพิเศษ = กรองตามคลังจริงเหมือน ROO · v4.03: ตัดของพรีเมียม (แถมได้ ขายไม่ได้)
-  const keyed=base.map(p=>({p,out:stockBadge(p)==='out',s:salesForWh(p,wh)}));
-  // พร้อมขาย + อาจจะหมด → เรียงยอดขายคลังลูกค้า มาก→น้อย
-  const avail=keyed.filter(x=>!x.out).sort((a,b)=>b.s-a.s);
-  // หมดชั่วคราว → เรียงยอดขาย แล้ว "แทรกกระจายสม่ำเสมอทั่วทั้งลิสต์" (ไม่กองท้าย ลูกค้าจะได้ไม่เจอหน้าหมดติดกันยาวๆ)
-  const out=keyed.filter(x=>x.out).sort((a,b)=>b.s-a.s);
+  const cr=catSalesRank(wh);
+  const keyed=base.map(p=>({p,out:stockBadge(p)==='out',s:salesForWh(p,wh),k:sortKeyOf(p,wh,cr)}));
+  // ⭐ v4.06: เรียง RANK สินค้า → หมวดที่ขายดี → ขนาด (เดิมเรียงยอดขายรายตัวล้วน ๆ)
+  const avail=keyed.filter(x=>!x.out).sort(cmpSortKey);
+  // หมดชั่วคราว → เรียงเกณฑ์เดียวกัน แล้ว "แทรกกระจายสม่ำเสมอทั่วทั้งลิสต์" (ไม่กองท้าย ลูกค้าจะได้ไม่เจอหน้าหมดติดกันยาวๆ)
+  const out=keyed.filter(x=>x.out).sort(cmpSortKey);
   let result;
   if(!out.length){ result=avail.map(x=>x.p); }
   else {
@@ -4149,7 +4183,7 @@ function applyPriceOverride(products, overrideRows){
 }
 function applyData(prod,promo,users,cust,ea,whmap,special,rubclaim,override,specialPrice,dcwh){
   PRODUCTS=prod||[]; PROD_BY_NAME=new Map(PRODUCTS.map(p=>[clean(p['PRODUCT NAME']),p]));   // index หาชื่อ O(1) (ใช้กับตะกร้า/คละลัง)
-  _visCache=null;   // ข้อมูลสินค้า/สต็อกเปลี่ยน → ล้าง memo visibleProducts
+  _visCache=null; _catRank=null;   // ข้อมูลสินค้า/สต็อกเปลี่ยน → ล้าง memo visibleProducts
   applyPriceOverride(PRODUCTS, override); PROMOS=promo||[]; USERS=users||[]; CUSTOMERS=(cust||[]).map(mapCustomer); SPECIAL_SHOPS=(special||[]).map(mapSpecial);
   SPECIAL_PRICES=(specialPrice||[]).map(mapSpecialPrice);
   VENDOR_CREDIT=buildVendorCredit(rubclaim);
