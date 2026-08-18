@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.18</title>
+<title>HR Rattana v5.19</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -1516,6 +1516,10 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
           </button>
           <button class="btn btn-outline" id="btnOffSite" onclick="doOffSiteCheckOut()" style="display:none;margin-top:8px;width:100%;padding:12px">
             📍 Check-out นอกพื้นที่
+          </button>
+          <!-- v12.19: ทางสำรองเมื่อระบบใบหน้าไม่พร้อม — สแกน QR ที่ติดไว้ประจำจุด -->
+          <button class="btn btn-outline" id="btnQRScan" onclick="startQRScanMode()" style="display:none;margin-top:8px;width:100%;padding:12px">
+            📷 สแกน QR ประจำจุด (ใช้แทนใบหน้า)
           </button>
         </div>
         <details class="advanced-toggle" style="margin-top:10px;padding:0 12px">
@@ -3173,6 +3177,10 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
           <button class="btn btn-outline" onclick="showConfigEdit()">✎ แก้ไข Config</button>
           <button class="btn btn-outline" onclick="debugAuth()">🔍 Debug Auth</button>
         </div>
+        <div class="btn-row mt-12">
+          <!-- v12.19: HR/ผู้จัดการ พิมพ์ QR ไปติดประจำจุด (สิทธิ์ตรวจซ้ำฝั่งเซิร์ฟเวอร์) -->
+          <button class="btn btn-outline" onclick="openQRPrint()">🖨 พิมพ์ QR ประจำจุดสแกน</button>
+        </div>
         <div id="configEditPanel" style="display:none" class="mt-12">
           <hr class="divider">
           <div class="input-group">
@@ -3472,7 +3480,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.18';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.19';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -4319,6 +4327,7 @@ async function loadLocationsSheet() {
     lng: +r.lng,
     radius: +r.radius || settings.radius,
     type: r.type || 'branch',
+    qr: !!r.qr,   // v12.19: จุดนี้มี QR ประจำจุดแล้ว (ธงจาก backend — ไม่มี secret)
   }));
   if (out.length > 0) {
     locations = out;
@@ -4642,6 +4651,7 @@ async function loadLocationsViaApi() {
     lng: +r.lng,
     radius: +r.radius || settings.radius,
     type: r.type || 'branch',
+    qr: !!r.qr,   // v12.19: จุดนี้มี QR ประจำจุดแล้ว (ธงจาก backend — ไม่มี secret)
   }));
   if (out.length > 0) { locations = out; saveLocations(); }
   return true;
@@ -5760,6 +5770,101 @@ function forceInOutToggle() {
   toast(`สลับเป็น: ${window._forceNextType === 'in' ? 'บันทึกเข้างาน' : 'บันทึกออกงาน'}`, 'info');
 }
 
+/* ============================================================
+   v12.19: QR ประจำจุด — หลักฐานสำรองเมื่อระบบใบหน้าไม่พร้อม
+   HR พิมพ์ QR จากหน้า "ตั้งค่า" ไปติดไว้แต่ละจุด · สแกนได้เฉพาะคนอยู่หน้างานจริง
+   อ่านด้วย BarcodeDetector ในเครื่อง (Android/Chrome — ไม่ต้องโหลดอะไรเพิ่ม)
+   ตกรุ่น → โหลด jsQR ตัวเล็ก (~40KB) จาก CDN สำรอง 2 แหล่ง
+   ============================================================ */
+let _qrProof = null, _qrScanning = false, _qrInterval = null, _qrDetector = null;
+function _qrProofValid_() { return !!(_qrProof && Date.now() - _qrProof.at < 5 * 60000); }
+function _nearestLocHasQR_() {
+  if (!lastGps || lastGps.nearestIdx == null || lastGps.nearestIdx < 0) return false;
+  const l = locations[lastGps.nearestIdx];
+  return !!(l && l.qr);
+}
+function _loadScript_(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = res; s.onerror = () => rej(new Error('โหลดไม่ได้: ' + src));
+    document.head.appendChild(s);
+  });
+}
+async function startQRScanMode() {
+  if (_qrScanning) return;
+  if (!empStream) { toast('เปิดกล้องก่อน แล้วกด "สแกน QR" อีกครั้ง', 'warning'); startEmpCamera(); return; }
+  _qrScanning = true;
+  const btn = document.getElementById('btnQRScan');
+  if (btn) btn.textContent = '⏳ เล็งกล้องไปที่ QR ประจำจุด...';
+  try {
+    if ('BarcodeDetector' in window && !_qrDetector) {
+      try { _qrDetector = new BarcodeDetector({ formats: ['qr_code'] }); } catch (_) { _qrDetector = null; }
+    }
+    if (!_qrDetector && typeof jsQR === 'undefined') {
+      await _loadScript_('https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js')
+        .catch(() => _loadScript_('https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js'));
+    }
+    if (!_qrDetector && typeof jsQR === 'undefined') throw new Error('เครื่องนี้ไม่รองรับตัวอ่าน QR');
+    if (_qrInterval) clearInterval(_qrInterval);
+    _qrInterval = setInterval(_qrTick_, 600);
+  } catch (e) {
+    stopQRScanMode();
+    toast('❌ ' + (e.message || 'เปิดตัวอ่าน QR ไม่ได้'), 'error');
+  }
+}
+function stopQRScanMode() {
+  _qrScanning = false;
+  if (_qrInterval) { clearInterval(_qrInterval); _qrInterval = null; }
+  const btn = document.getElementById('btnQRScan');
+  if (btn) btn.textContent = '📷 สแกน QR ประจำจุด (ใช้แทนใบหน้า)';
+}
+async function _qrTick_() {
+  const v = document.getElementById('empVideo');
+  if (!v || !v.videoWidth || !_qrScanning) return;
+  let text = '';
+  try {
+    if (_qrDetector) {
+      const codes = await _qrDetector.detect(v);
+      if (codes && codes.length) text = String(codes[0].rawValue || '');
+    } else if (typeof jsQR !== 'undefined') {
+      const c = document.createElement('canvas');
+      c.width = v.videoWidth; c.height = v.videoHeight;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(v, 0, 0);
+      const img = ctx.getImageData(0, 0, c.width, c.height);
+      const code = jsQR(img.data, img.width, img.height);
+      if (code) text = String(code.data || '');
+    }
+  } catch (_) { return; }
+  if (!text) return;
+  const m = text.match(/^RTQR\|([^|]+)\|(.+)$/);
+  if (!m) { return; }   // QR อื่นๆ ในเฟรม (เช่นสติกเกอร์สินค้า) — ข้ามเงียบๆ
+  _qrProof = { loc: m[1].trim(), token: m[2].trim(), at: Date.now() };
+  stopQRScanMode();
+  toast('✓ สแกน QR ประจำจุด "' + _qrProof.loc + '" แล้ว — กดบันทึกได้เลย', 'success');
+  evaluateAction();
+}
+/* HR: พิมพ์ QR ประจำจุดทุกจุด (1 หน้า/จุด พร้อมชื่อจุด) */
+async function openQRPrint() {
+  try {
+    showSpinner('กำลังดึงข้อมูล QR...');
+    const res = await callAppsScript('getLocationQR', {});
+    const rows = res.rows || [];
+    if (!rows.length) { toast('ยังไม่มี QR ประจำจุด — รัน setupLocationQR ใน Apps Script ก่อน', 'warning'); return; }
+    const w = window.open('', '_blank');
+    w.document.write('<!doctype html><html><head><title>QR ประจำจุดสแกน</title><style>' +
+      'body{font-family:sans-serif;text-align:center}.q{page-break-after:always;padding:60px 0}' +
+      'img{width:340px;height:340px}h1{font-size:30px;margin:10px 0}p{color:#555;font-size:15px}' +
+      '</style></head><body>' + rows.map(r =>
+        '<div class="q"><h1>' + (r.name || r.code) + '</h1>' +
+        '<img src="https://quickchart.io/qr?text=' + encodeURIComponent('RTQR|' + r.code + '|' + r.token) + '&size=340">' +
+        '<p>จุดสแกน: ' + r.code + '<br>สแกนด้วยแอป HR Rattana เมื่อระบบใบหน้าไม่พร้อม</p></div>'
+      ).join('') + '<' + 'script>window.onload=function(){setTimeout(function(){window.print()},900)}<' + '/script></body></html>');
+    w.document.close();
+  } catch (e) { toast('❌ ' + e.message, 'error'); }
+  finally { hideSpinner(); }
+}
+
 /* v1.5 — ล้าง logs ของวันนี้ในเครื่อง (emergency reset) */
 function resetTodayLogs() {
   if (!confirm('ล้างประวัติเช็คอินวันนี้ในเครื่อง? (ของใน Sheet ไม่ถูกแตะ)')) return;
@@ -5805,14 +5910,28 @@ function evaluateAction() {
   if (faceDown) {
     const chkFace = document.getElementById('chkFace');
     const lineFace = document.getElementById('lineFace');
-    if (chkFace) chkFace.textContent = '⚠ ระบบใบหน้าไม่พร้อม — แตะเพื่อลองใหม่';
-    if (lineFace) {
-      lineFace.classList.remove('ok','pending','err'); lineFace.classList.add('warn');
-      lineFace.style.cursor = 'pointer';
-      lineFace.onclick = forceReloadFaceModels;   // v12.18: กดลองโหลดใหม่ได้เอง (ไล่แหล่งสำรอง)
+    if (_qrProofValid_()) {
+      // v12.19: มีหลักฐาน QR แล้ว — ใช้แทนใบหน้าได้
+      if (chkFace) chkFace.textContent = '✓ QR ประจำจุด: ' + _qrProof.loc;
+      if (lineFace) {
+        lineFace.classList.remove('warn','pending','err'); lineFace.classList.add('ok');
+        lineFace.style.cursor = ''; lineFace.onclick = null;
+      }
+    } else {
+      if (chkFace) chkFace.textContent = '⚠ ระบบใบหน้าไม่พร้อม — แตะเพื่อลองใหม่';
+      if (lineFace) {
+        lineFace.classList.remove('ok','pending','err'); lineFace.classList.add('warn');
+        lineFace.style.cursor = 'pointer';
+        lineFace.onclick = forceReloadFaceModels;   // v12.18: กดลองโหลดใหม่ได้เอง (ไล่แหล่งสำรอง)
+      }
+      // v12.19: จุดนี้มี QR ติดไว้ → บังคับสแกน QR ก่อนบันทึก (จุดที่ยังไม่มี QR = บันทึกแบบไม่มีใบหน้าได้ตามเดิม)
+      if (_nearestLocHasQR_()) reasons.push('📷 ระบบใบหน้าไม่พร้อม — กด "สแกน QR ประจำจุด" ก่อนบันทึก');
     }
     retryFaceModels();
   }
+  // v12.19: ปุ่มสแกน QR — โชว์เมื่อระบบใบหน้าไม่พร้อมและยังไม่มีหลักฐาน QR
+  const qrBtn = document.getElementById('btnQRScan');
+  if (qrBtn) qrBtn.style.display = (faceDown && !_qrProofValid_()) ? '' : 'none';
 
   const faceOk = !faceapiReady || !registeredDescriptor || lastFaceMatch?.ok;
   const ready = reasons.length === 0;
@@ -5828,7 +5947,8 @@ function evaluateAction() {
     txt.textContent = next==='in' ? 'บันทึกเข้างาน' : 'บันทึกออกงาน';
     btn.disabled = !ready;
     sub.textContent = !ready ? reasons[0]
-      : faceDown ? '⚠ บันทึกแบบไม่มีใบหน้า (ระบบใบหน้าไม่พร้อม) · กดเพื่อยืนยัน'
+      : faceDown ? (_qrProofValid_() ? '✓ ยืนยันจุดด้วย QR แล้ว · กดเพื่อยืนยัน'
+                                     : '⚠ บันทึกแบบไม่มีใบหน้า (ระบบใบหน้าไม่พร้อม) · กดเพื่อยืนยัน')
       : '✓ พร้อมบันทึก · กดเพื่อยืนยัน';
   }
 
@@ -5914,11 +6034,16 @@ async function doSelfCheckIn() {
     lat: lastGps.lat, lng: lastGps.lng, accuracy: lastGps.accuracy,
     distance: lastGps.distance, locCode: lastGps.locCode, locName: lastGps.locName,
     faceDist: (lastFaceMatch && lastFaceMatch.distance != null) ? +lastFaceMatch.distance.toFixed(3) : null,
-    photo, scannedBy: 'self',
+    photo,
+    // v12.19: หลักฐาน QR ประจำจุด (ตอนระบบใบหน้าไม่พร้อม) — เซิร์ฟเวอร์ตรวจ token ก่อนบันทึก
+    scannedBy: _qrProofValid_() ? ('qr:' + _qrProof.loc) : 'self',
+    qrLoc: _qrProofValid_() ? _qrProof.loc : '',
+    qrToken: _qrProofValid_() ? _qrProof.token : '',
   };
 
   // 1) Save local first (offline backup)
   saveLog(logData);
+  _qrProof = null;   // v12.19: หลักฐาน QR ใช้ครั้งเดียวต่อการบันทึก — สแกนใหม่รอบหน้า
   const saved = logs[0] || logData;   // v8.7: อ้างถึง log ที่บันทึก (มี id+ts) เพื่อ mark remote + re-sync
 
   // v7.4: สแกนเสร็จ → ปิดจอสแกน กลับหน้าแรกทันที (ไม่ต้องรอเน็ต) แล้วค่อย sync เบื้องหลัง
@@ -8611,6 +8736,7 @@ async function startCheckinFlow() {
 }
 
 function cancelCheckinFlow() {
+  stopQRScanMode();   // v12.19: ปิดจอสแกน = หยุดลูปอ่าน QR ด้วย
   stopEmpCamera();
   const overlay = document.getElementById('homeActiveScreen');
   if (overlay) overlay.style.display = 'none';
