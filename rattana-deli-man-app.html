@@ -915,7 +915,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.261';
+const APP_VERSION='3.262';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1368,8 +1368,8 @@ function checkSession(){
 }
 
 /* ========== DATA LOADING ========== */
-async function loadUsers(){
-  const rows=await fetchSheet(CFG.usersSheetId,CFG.usersSheetName);
+const USERS_CACHE_KEY='users_v3262';   // ★ v3.262: แคชรายชื่อผู้ใช้ 24 ชม. — เปิดแอปไม่ต้องรอชีทตอบก่อน (ดู bootApp)
+function applyUsersRows_(rows){
   state.users=rows;
   const supSet=new Set();
   rows.forEach(r=>{
@@ -1378,6 +1378,11 @@ async function loadUsers(){
   });
   state.supervisors=[...supSet];
   state.drivers=rows.filter(r=>cleanCell(r['แผนก'])==='คลังและขนส่ง'&&String(r['Status']||'').trim().toLowerCase()==='active');
+}
+async function loadUsers(){
+  const rows=await fetchSheet(CFG.usersSheetId,CFG.usersSheetName);
+  applyUsersRows_(rows);
+  setCachedSheet(USERS_CACHE_KEY,rows);   // ★ v3.262: boot ครั้งหน้าใช้แคชก่อน แล้วรีเฟรชเบื้องหลัง
 }
 
 /* v3.120: โหลดรหัสเซลล์จากไฟล์ SLMN (A=SLMN_CODE, B=SLMN_NAME, C=NICKNAME) → ชื่อเซลล์มาตรฐาน = SLMN_NAME
@@ -3451,7 +3456,19 @@ function cnBatchKey_(r){
   return 't:'+String(r['วัน เวลา']||'').trim()+'|'+String(r['รวมรายการ']||'');
 }
 /* ===== ประวัติ CN: อ่านชีท CN กลับมา → แก้ไข/ลบได้ (v1.93) ===== */
+/* ★ v3.262: ชีท CN (~0.4MB) เคยถูกดึงใหม่ทุกครั้งที่เปิดหน้า/สลับแท็บ (รออนุมัติ · งานของฉัน · ฟอร์มบิล · ปิดงาน · ประวัติ)
+   → single-flight + memo 15 วิ: เรียกซ้อนกัน = รอตัวเดิม ไม่ยิงซ้ำ · ผลสดอายุ < 15 วิ = ใช้เลย
+   หลังเขียน CN ทุกชนิด memo ถูกล้างผ่าน cnMemoBust_ (ใน postSyncGAS_) → หน้าจอหลังบันทึกได้ของสดเสมอ */
+let _cnHistMemo={ts:0,n:null,inflight:null};
 async function loadCNHistory(){
+  if(Array.isArray(state.cnHistory)&&_cnHistMemo.ts&&(Date.now()-_cnHistMemo.ts)<15000) return _cnHistMemo.n;
+  if(_cnHistMemo.inflight) return _cnHistMemo.inflight;
+  _cnHistMemo.inflight=loadCNHistoryNow_()
+    .then(n=>{ if(n===null){ _cnHistMemo.inflight=null; } else { _cnHistMemo={ts:Date.now(),n:n,inflight:null}; } return n; })
+    .catch(e=>{ _cnHistMemo.inflight=null; throw e; });
+  return _cnHistMemo.inflight;
+}
+async function loadCNHistoryNow_(){
   let rows;
   try{ rows=await fetchSheet(CFG.jobsSheetId,'CN'); }catch(e){ return null; }
   const groups={};
@@ -3526,7 +3543,7 @@ async function loadCNHistory(){
    หมายเหตุ: ไม่ยัดเข้า state.cnHistory เพราะจะไปกระทบการคิดยอดหักในบิล (cnAmtForBill_) */
 async function loadCNSalePending_(){
   let rows;
-  try{ rows=await fetchSheet(CFG.customerSheetId,'CN-Sale-dman',{fresh:true}); }catch(e){ return null; }
+  try{ rows=await fetchCNSaleRows_(); }catch(e){ return null; }   // ★ v3.262: ผ่าน memo — boot ฝั่งคลังเคยดึงชีทเดียวกันนี้ซ้อน 2 รอบใน 2 วิ
   const seen=state._cnLineSeen||{};
   const groups={}, order=[];
   rows.forEach(r=>{
@@ -8047,7 +8064,13 @@ function scheduleOutboxRetry(){
 /* ★ v3.241: รหัสอ้างอิงต่อ 1 การกดบันทึก (idempotency key) — ส่งไปกับ create_cn_own
    ถ้าแอป timeout แล้วผู้ใช้กดใหม่ จะส่งรหัสเดิม → GAS ไม่สร้างใบซ้ำ */
 function newReqId_(){ return 'R'+Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
+/* ★ v3.262: เขียนอะไรที่เกี่ยวกับ CN/รับคืนสำเร็จ → ล้าง memo ชีท CN + CN-Sale-dman ให้การอ่านรอบถัดไปได้ของสด */
 async function postSyncGAS_(payload,timeoutMs){
+  const r=await postSyncGASRaw_(payload,timeoutMs);
+  try{ if(r&&r.ok&&/cn|return/i.test(String((payload||{}).action||''))) cnMemoBust_(); }catch(e){}
+  return r;
+}
+async function postSyncGASRaw_(payload,timeoutMs){
   const url=getAppsUrl();
   if(!url) return {ok:false,error:'ยังไม่ได้ตั้งค่า Apps Script URL'};
   const ctrl=('AbortController' in window)?new AbortController():null;
@@ -8203,9 +8226,9 @@ async function syncToSheets(job){
    ปลอดภัย: ชีทยังเป็นตัวจริง · เขียนยังผ่าน GAS→ชีท · ถ้า Supabase ล่ม/ช้า/สำเนาเก่า → ถอยไปอ่านชีทเอง
    ปิดสวิตช์: SB_ENABLED=false แล้ว deploy (หรือใส่อีเมลใน SB_PILOT_EMAILS เพื่อจำกัดเฉพาะคนทดลอง)
    ═══════════════════════════════════════════════════════════════ */
-const SB_ENABLED=false;             // ★ สวิตช์หลัก — v3.248 ปิดกลับ (มีรายงาน "ใบคุมไม่ขึ้น") กลับไปอ่านชีทเหมือนเดิมก่อน
+const SB_ENABLED=true;              // ★ สวิตช์หลัก — v3.262 เปิดกลับ: "ใบคุมไม่ขึ้น" (เหตุที่ปิดใน v3.248) พิสูจน์แล้วว่ามาจาก pruneLocalJobs_ ไม่ใช่ Supabase (แก้จบ v3.249)
                                     //   เปิดครั้งแรก 2026-08-14 v3.247 หลังเทียบสำเนา vs ชีทครบ 3,274 บิล (ขาด 0 · เกิน 0 · ต่างกัน 0 ช่อง)
-                                    //   ตารางฝั่ง Supabase + trigger 5 นาที ยังทำงานอยู่ (สำเนายังสด) เปิดกลับได้ทันทีเมื่อพร้อม
+                                    //   เช็ค 2026-08-18: สำเนายังซิงก์สดทุก 5 นาที · อ่านบิลคนขับ 95-115ms (ชีท ~650ms) · ล่ม/เก่าเกิน 15 นาที → ถอยอ่านชีทเองอัตโนมัติ
 const SB_URL='https://uytzsuwapwkqkougorvb.supabase.co';        // โปรเจกต์ Rattana Base (ตัวเดียวกับแอปเช็คเอาท์)
 const SB_ANON='sb_publishable_2iDqojkyM2pqJxQJfvnxyg_Y6WMQ6Q8';  // publishable key — เขียนไม่ได้ (ทดสอบแล้ว RLS ปฏิเสธ 42501)
 const SB_PILOT_EMAILS=[];           // [] = ทุกคนที่โหลดแบบ scope · ใส่อีเมลเพื่อจำกัดเฉพาะคนทดลอง
@@ -8698,10 +8721,23 @@ function cncGrandTotal_(){
 }
 /* ★ v3.218: แยกตัวโหลด/จัดกลุ่มข้อมูล CN ออกมา — ใช้ร่วมกันระหว่างหน้า "เก็บของคืน" กับ "รออนุมัติ" (คลัง)
    คืน true = สำเร็จ · เติมค่าให้ _cncGroups/_cncDone/_cncApprove */
+/* ★ v3.262: ชีท CN-Sale-dman (~0.3MB) เคยถูกดึงซ้ำหลายจุดติดๆ กัน (การ์ดของคืนหน้างานของฉัน · หน้าเก็บของคืน · กล่องรออนุมัติ · CN เซลล์สั่งเก็บ)
+   → รวมเป็นตัวโหลดเดียว: กำลังโหลดอยู่ = รอตัวเดิม ไม่ยิงซ้อน · ผลล่าสุดอายุ < 60 วิ = ใช้เลย
+   หลังบันทึก/อนุมัติ CN ทุกชนิด memo ถูกล้างใน postSyncGAS_ (cnMemoBust_) → หน้าจอหลังกดบันทึกได้ของสดเสมอ */
+let _cnSaleMemo={ts:0,rows:null,inflight:null};
+function cnMemoBust_(){ _cnSaleMemo={ts:0,rows:null,inflight:null}; _cnHistMemo={ts:0,n:null,inflight:null}; }
+async function fetchCNSaleRows_(){
+  if(_cnSaleMemo.rows&&(Date.now()-_cnSaleMemo.ts)<60000) return _cnSaleMemo.rows;
+  if(_cnSaleMemo.inflight) return _cnSaleMemo.inflight;
+  _cnSaleMemo.inflight=fetchSheet(CFG.customerSheetId,'CN-Sale-dman',{fresh:true})
+    .then(rows=>{ _cnSaleMemo={ts:Date.now(),rows:rows||[],inflight:null}; return _cnSaleMemo.rows; })
+    .catch(e=>{ _cnSaleMemo.inflight=null; throw e; });
+  return _cnSaleMemo.inflight;
+}
 async function cncLoadData_(){
   let rows=[];
-  // v3.188: อ่านจากชีทต้นทาง CN-Sale-dman ตรงๆ (เรียลไทม์) — customerSheetId = ไฟล์เดียวกับต้นทาง
-  try{ rows=await fetchSheet(CFG.customerSheetId,'CN-Sale-dman',{fresh:true}); }
+  // v3.188: อ่านจากชีทต้นทาง CN-Sale-dman ตรงๆ — ★ v3.262: ผ่าน memo กันดึงซ้ำ (ดู fetchCNSaleRows_ ข้างบน)
+  try{ rows=await fetchCNSaleRows_(); }
   catch(e){ return false; }
   const pMap={},pOrd=[],dMap={},dOrd=[],aMap={},aOrd=[];
   (rows||[]).forEach(r=>{
@@ -11669,16 +11705,33 @@ async function refreshData(){
 window.addEventListener('scroll',()=>{ const b=$('backToTop'); if(b) b.classList.toggle('show',window.scrollY>300); },{passive:true});   // v3.93: passive → ไม่บล็อกการเลื่อนบนมือถือ
 
 /* ========== BOOT ========== */
+/* v3.128 (แยกเป็นฟังก์ชัน v3.262): อัปเดตคลังของ user จากชีท Users — เรียกซ้ำหลังรีเฟรชรายชื่อเบื้องหลังได้ */
+function reDeriveMyWarehouse_(){
+  if(!(state.user&&state.user.email&&state.users.length)) return;
+  const _me=state.users.find(x=>normEmail(x['E-mail'])===normEmail(state.user.email));
+  if(_me){ state.user.warehouse=cleanCell(_me['W']||''); persistUser(); }
+}
 async function bootApp(){
   showSpinner('เข้าสู่ระบบ...');
   try{
     if(loadStore().dark) document.body.classList.add('dark');
-    if(!state.users.length){ await loadUsers(); }
-    // v3.128: re-derive คลังของ user จากชีท Users (กัน session เก่าที่ default W ว่าง → 'HQ' ค้าง → เห็นข้อมูลรวมทั้งที่ไม่ควร)
-    if(state.user&&state.user.email&&state.users.length){
-      const _me=state.users.find(x=>normEmail(x['E-mail'])===normEmail(state.user.email));
-      if(_me){ state.user.warehouse=cleanCell(_me['W']||''); persistUser(); }
+    // ★ v3.262: เปิดแอปให้ติดทันที — มีแคชรายชื่อผู้ใช้ = ใช้ก่อนเลย แล้วรีเฟรชเบื้องหลัง
+    //   เดิมทุกการเปิดแอปต้องรอชีท Users ตอบก่อนถึงเห็นหน้าจอ (เน็ตอืด = จอค้าง "เข้าสู่ระบบ..." สูงสุด 15 วิ
+    //   และถ้าโหลดล้ม bootApp โยน error → โดนเตะออกไปหน้า login ทั้งที่มี session = อาการ "เข้าแอปไม่ได้")
+    if(!state.users.length){
+      const _cu=getCachedSheet(USERS_CACHE_KEY,CACHE_TTL_LONG);
+      if(_cu&&_cu.length){
+        applyUsersRows_(_cu);
+        loadUsers().then(()=>reDeriveMyWarehouse_()).catch(()=>{});
+      } else {
+        try{ await loadUsers(); }
+        catch(e){
+          if(!(state.user&&state.user.email)) throw e;                  // ไม่มี session จริง → ไปหน้า login ตามเดิม
+          loadUsers().then(()=>reDeriveMyWarehouse_()).catch(()=>{});   // มี session → เข้าแอปก่อน รายชื่อตามมาทีหลัง
+        }
+      }
     }
+    reDeriveMyWarehouse_();   // v3.128: กัน session เก่าที่ default W ว่าง → 'HQ' ค้าง → เห็นข้อมูลรวมทั้งที่ไม่ควร
     // ★ แสดง UI ทันที (หน้าหลัก 5 การ์ดไม่ต้องใช้ข้อมูล)
     $('loginScreen').style.display='none';
     $('appScreen').style.display='flex';
@@ -12002,10 +12055,16 @@ let _updBannerShown=false;
 async function checkAppUpdate_(){
   try{
     if(_updBannerShown||document.hidden) return;
-    const r=await fetch(location.pathname+'?vcheck='+Date.now(),{cache:'no-store'});
+    // ★ v3.262: ขอแค่ 128KB แรกพอ (เลขเวอร์ชันอยู่ช่วง ~67KB) — เดิมโหลดทั้งไฟล์ ~1.2MB ทุก 10 นาทีทุกเครื่อง กินเน็ตมือถือฟรีๆ
+    const r=await fetch(location.pathname+'?vcheck='+Date.now(),{cache:'no-store',headers:{'Range':'bytes=0-131071'}});
     if(!r.ok) return;
-    const t=await r.text();
-    const m=t.match(/APP_VERSION\s*=\s*'([\d.]+)'/);
+    let t=await r.text();
+    let m=t.match(/APP_VERSION\s*=\s*'([\d.]+)'/);
+    if(!m&&r.status===206){   // เผื่ออนาคตตำแหน่งเวอร์ชันเลื่อนเกินช่วงที่ขอ → โหลดเต็มแบบเดิม
+      const r2=await fetch(location.pathname+'?vcheck='+Date.now(),{cache:'no-store'});
+      if(!r2.ok) return;
+      t=await r2.text(); m=t.match(/APP_VERSION\s*=\s*'([\d.]+)'/);
+    }
     if(!m||m[1]===APP_VERSION) return;
     // ★ v3.207: อัปเดตให้เอง ไม่ต้องกดอะไร — ถ้าปลอดภัย (ไม่มีข้อมูลค้างส่ง, ไม่ได้เปิดหน้าต่าง, ไม่ได้กรอกอยู่)
     const _ae=document.activeElement;
