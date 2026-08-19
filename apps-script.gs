@@ -136,35 +136,31 @@ function submitCreditBatch(data) {
     sheet.setFrozenRows(1);
   }
 
-  const today      = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd');
-  const headers    = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+  const today       = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd');
+  const headers     = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
   const shopCredits = data.shopCredits || shopNames.map(n => ({ name: n, bplusCode: '', days: data.creditDays||'', amount: data.creditAmount||0, note: data.note||'' }));
 
-  const shopNamesStr  = shopCredits.map(s => s.name).join(' | ');
-  const bplusStr      = shopCredits.map(s => s.bplusCode || lookupBplus(ss, s.name)).join(' | ');
-  const uniqueDays    = [...new Set(shopCredits.map(s => s.days).filter(Boolean))];
-  const creditDaysStr = uniqueDays.join(' | ') || '';
-  const uniqueAmounts = [...new Set(shopCredits.map(s => String(s.amount)).filter(Boolean))];
-  const creditAmtStr  = uniqueAmounts.join(' | ') || '0';
-
-  const map = {
-    'วันที่บันทึก':                  today,
-    'ชื่อร้านค้า':                   shopNamesStr,
-    'รหัสบีพลัส':                    bplusStr,
-    'วันที่ขอเครดิต':                data.creditDate    || '',
-    'จำนวนวันเครดิต':               creditDaysStr,
-    'วงเงิน (บาท)':                  creditAmtStr,
-    'หนังสือขอเครดิต':               creditRequestUrl,
-    'สำเนาหนังสือรับรองบริษัท':     creditDocUrl,
-    'บัตรประชาชน':                   idCardUrl,
-    'ภพ.20':                         vatUrl,
-    'อื่นๆ':                         otherUrl,
-    'หมายเหตุ':                      data.note || '',
-    'ผู้บันทึก (Email)':             data.recordedBy    || '',
-    'ชื่อผู้บันทึก':                 data.recordedName  || '',
-    'สถานะ':                         'ถูกต้อง',
-  };
-  sheet.appendRow(buildRow(headers, map));
+  shopCredits.forEach(function(sc) {
+    const bplusCode = sc.bplusCode || lookupBplus(ss, sc.name);
+    const map = {
+      'วันที่บันทึก':                today,
+      'ชื่อร้านค้า':                 sc.name,
+      'รหัสบีพลัส':                  bplusCode,
+      'วันที่ขอเครดิต':              data.creditDate   || '',
+      'จำนวนวันเครดิต':             sc.days           || '',
+      'วงเงิน (บาท)':                sc.amount         || 0,
+      'หนังสือขอเครดิต':             creditRequestUrl,
+      'สำเนาหนังสือรับรองบริษัท':   creditDocUrl,
+      'บัตรประชาชน':                 idCardUrl,
+      'ภพ.20':                       vatUrl,
+      'อื่นๆ':                       otherUrl,
+      'หมายเหตุ':                    (sc.note || '') + (data.batchId ? '||' + data.batchId : ''),
+      'ผู้บันทึก (Email)':           data.recordedBy   || '',
+      'ชื่อผู้บันทึก':               data.recordedName || '',
+      'สถานะ':                       'ถูกต้อง',
+    };
+    sheet.appendRow(buildRow(headers, map));
+  });
 
   return { success: true, creditDocUrl, idCardUrl, vatUrl, creditRequestUrl, otherUrl };
 }
