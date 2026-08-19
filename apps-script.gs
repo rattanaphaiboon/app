@@ -115,12 +115,13 @@ function submitCreditBatch(data) {
   const fileLabel  = makeFileLabel(shopLabel, dateStr);
 
   const creditDocFiles = Array.isArray(data.files.creditDoc) ? data.files.creditDoc : (data.files.creditDoc ? [data.files.creditDoc] : []);
-  const idCardFiles    = Array.isArray(data.files.idCard)    ? data.files.idCard    : (data.files.idCard    ? [data.files.idCard]    : []);
-  const creditDocUrl     = uploadFiles(creditDocFiles, getFolderForType('creditDoc', root), fileLabel);
-  const idCardUrl        = uploadFiles(idCardFiles,    getFolderForType('idCard',    root), fileLabel);
-  const vatUrl           = uploadFile(data.files.vat,            getFolderForType('vat',            root), fileLabel);
-  const creditRequestUrl = uploadFile(data.files.creditRequest,  getFolderForType('creditRequest',  root), fileLabel);
-  const otherUrl         = uploadFile(data.files.other,          getFolderForType('other',          root), fileLabel);
+  const idCardFiles    = Array.isArray(data.files.idCard) ? data.files.idCard : (data.files.idCard ? [data.files.idCard] : []);
+  const otherFiles     = Array.isArray(data.files.other)  ? data.files.other  : (data.files.other  ? [data.files.other]  : []);
+  const creditDocUrl     = uploadFiles(creditDocFiles, getFolderForType('creditDoc',     root), fileLabel);
+  const idCardUrl        = uploadFiles(idCardFiles,    getFolderForType('idCard',        root), fileLabel);
+  const otherUrl         = uploadFiles(otherFiles,     getFolderForType('other',         root), fileLabel);
+  const vatUrl           = uploadFile(data.files.vat,           getFolderForType('vat',           root), fileLabel);
+  const creditRequestUrl = uploadFile(data.files.creditRequest, getFolderForType('creditRequest', root), fileLabel);
 
   const ss    = SpreadsheetApp.openById(SHEET_ID);
   let   sheet = ss.getSheetByName(REC_SHEET_NAME);
