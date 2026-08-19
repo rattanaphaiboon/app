@@ -155,6 +155,7 @@ function submitCreditBatch(data) {
       'หมายเหตุ':          data.note          || '',
       'ผู้บันทึก (Email)': data.recordedBy    || '',
       'ชื่อผู้บันทึก':     data.recordedName  || '',
+      'รหัสชุด':           data.batchId  || '',
       'สถานะ':             'ถูกต้อง',
     };
     sheet.appendRow(buildRow(headers, map));
@@ -218,6 +219,7 @@ function submitCredit(data) {
     'หมายเหตุ':                  data.note          || '',
     'ผู้บันทึก (Email)':         data.recordedBy    || '',
     'ชื่อผู้บันทึก':             data.recordedName  || '',
+    'รหัสชุด':                   data.batchId  || '',
     'สถานะ':                     'ถูกต้อง',
   };
   sheet.appendRow(buildRow(headers, map));
