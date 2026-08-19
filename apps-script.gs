@@ -152,10 +152,9 @@ function submitCreditBatch(data) {
       'บัตรประชาชน':       idCardUrl,
       'ภพ.20':             vatUrl,
       'อื่นๆ':             otherUrl,
-      'หมายเหตุ':          data.note          || '',
+      'หมายเหตุ':          (data.note || '') + (data.batchId ? '||' + data.batchId : ''),
       'ผู้บันทึก (Email)': data.recordedBy    || '',
       'ชื่อผู้บันทึก':     data.recordedName  || '',
-      'รหัสชุด':           data.batchId  || '',
       'สถานะ':             'ถูกต้อง',
     };
     sheet.appendRow(buildRow(headers, map));
@@ -216,10 +215,9 @@ function submitCredit(data) {
     'บัตรประชาชน':               idCardUrl,
     'ภพ.20':                     vatUrl,
     'อื่นๆ':                     otherUrl,
-    'หมายเหตุ':                  data.note          || '',
+    'หมายเหตุ':                  (data.note || '') + (data.batchId ? '||' + data.batchId : ''),
     'ผู้บันทึก (Email)':         data.recordedBy    || '',
     'ชื่อผู้บันทึก':             data.recordedName  || '',
-    'รหัสชุด':                   data.batchId  || '',
     'สถานะ':                     'ถูกต้อง',
   };
   sheet.appendRow(buildRow(headers, map));
