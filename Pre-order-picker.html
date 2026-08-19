@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rattana Pre-order Picker v4.35</title>
+<title>Rattana Pre-order Picker v4.36</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -399,7 +399,7 @@
     <button type="button" class="login-bypass" id="previewBypassBtn" onclick="bypassLogin()" style="display:none;margin-top:10px">🔓 เข้าโหมดพรีวิว (ทดสอบในเครื่อง — ไม่ผ่าน Google Login)</button>
     <div id="loginSpinner">⏳ กำลังเข้าสู่ระบบ…</div>
     <div id="loginError"></div>
-    <div class="login-ver">เวอร์ชัน v4.35</div>
+    <div class="login-ver">เวอร์ชัน v4.36</div>
   </div>
 </div>
 
@@ -416,7 +416,7 @@
         <button type="button" id="srcMenuSb" onclick="setOrderSrc('sb')"><span>🟣</span> ใบจอง จาก Supabase</button>
       </div>
     </div>
-    <div class="title">📦 Pre-order Picker <span class="ver">v4.35</span></div>
+    <div class="title">📦 Pre-order Picker <span class="ver">v4.36</span></div>
     <div class="spacer"></div>
     <div class="who" id="whoBox"></div>
     <a class="hub-btn" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">
@@ -2336,7 +2336,23 @@ async function markDoneRooLines(rooLines){
 async function markDoneOrderSheet(soLines, by){
   const ids=[...new Set((soLines||[]).filter(l=>l && l._src!=='roo').map(l=>l&&l.lineId).filter(Boolean))];
   if(!CONFIG.gasUrl || !ids.length) return null;
-  return _gasJson({action:'markDoneOrderSheet', lineIds:ids, by:String(by||'')}, 'ชีท Order');
+  /* ⭐ v4.36: แบ่งก้อนละ 300 lineId — เดิมยิงทีเดียวทั้งหมด (พันกว่าตัว) payload ใหญ่จน Apps Script ตีกลับ/redirect กิน body */
+  const CH=300, out={ok:true, rows:0, want:0, already:0, missing:[], chunks:0, failed:0};
+  for(let i=0;i<ids.length;i+=CH){
+    const j=await _gasJson({action:'markDoneOrderSheet', lineIds:ids.slice(i,i+CH), by:String(by||'')}, 'ชีท Order');
+    out.chunks++;
+    if(!j || !j.ok){ out.ok=false; out.failed++; continue; }
+    out.rows+=(+j.rows||0); out.want+=(+j.want||0); out.already+=(+j.already||0);
+    (j.missing||[]).forEach(m=>{ if(out.missing.length<30) out.missing.push(m); });
+  }
+  return out;
+}
+/* ⭐ v4.36 — กันชีทกับ Supabase ไม่ตรงกัน (gas-v23)
+   .gs อ่าน Supabase เองแล้วเขียนชีทเฉพาะแถวที่ยังว่าง — ยิงครั้งเดียว ล็อกเดียว ไม่ต้องส่ง lineId ไปเลย
+   ใช้เวลาจริงจาก Supabase → ประวัติคงเดิม ไม่เพี้ยน · แถวที่ชีทมีสถานะแล้ว/ยกเลิก ไม่แตะ */
+async function syncSheetFromSb(from, to){
+  if(!CONFIG.gasUrl) return null;
+  return _gasJson({action:'syncSheetFromSb', from:String(from||''), to:String(to||'')}, 'ซิงก์ชีท');
 }
 /* ยิง GAS แล้วอ่าน JSON · retry เผื่อ Apps Script คืนหน้า HTML ชั่วคราว (เจอบ่อยหลัง redeploy) */
 async function _gasJson(body, tag){
@@ -2345,6 +2361,13 @@ async function _gasJson(body, tag){
       const res=await fetch(CONFIG.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(body)});
       const txt=(await res.text()).trim();
       if(txt.startsWith('{')){ const j=JSON.parse(txt);
+        /* ⭐ v4.36: เดิม ok:false = คืนเลย ไม่ลองใหม่
+           แต่ .gs คืน {ok:false,'busy'} ตอน LockService ชน (แอดมินหลายคน export ไล่กัน)
+           → เขียนชีทหลุดเงียบ วัดจริง 17-19 ส.ค. หายไป 2,228 บรรทัด */
+        if(!j.ok && (j.busy || /busy/i.test(String(j.error||''))) && t<3){
+          console.warn('['+tag+'] .gs ติดล็อก (ครั้งที่ '+t+'/3) — รอแล้วยิงใหม่');
+          await new Promise(r=>setTimeout(r, 2500*t)); continue;
+        }
         if(!j.ok) console.warn('['+tag+'] เขียนไม่สำเร็จ', txt.slice(0,200));
         else if((j.missing||[]).length) console.warn('['+tag+'] หาแถวไม่เจอ', j.missing);
         return j; }
@@ -2420,6 +2443,17 @@ async function exportMarkDone(orderIds, expLines){
   else if(sb.needSetup) msg=' · ⏸ ยังไม่ตั้ง SB_URL/KEY ใน .gs';
   else msg=' · ❌ เขียน Supabase ไม่สำเร็จ — ดูแถบแดง กด "มาร์คซ้ำ"';
   toast(`📥 ย้ายไป "นำเข้าแล้ว" ${orderIds.length} บิล`+msg);
+  /* ⭐ v4.36 (Surat: "ข้อมูล 2 ที่ควรตรงกัน") — ด่านสุดท้าย: ให้ .gs อ่าน Supabase แล้วเติมชีทให้ครบเอง
+     ต้องรอให้ markDoneSbLines เขียน Supabase เสร็จก่อน (await Promise.all ข้างบนผ่านไปแล้ว)
+     ยิงครั้งเดียว ล็อกเดียว → ถึงก้อนไหนของ markDoneOrderSheet จะหลุด รอบนี้ก็ตามเก็บให้ครบ */
+  try{
+    const _ds=[...new Set((DATA.orders||[]).filter(o=>_idSet.has(o.orderId)).map(o=>toISO(o.date)).filter(Boolean))].sort();
+    if(_ds.length){
+      const sy=await syncSheetFromSb(_ds[0], _ds[_ds.length-1]);
+      if(sy && sy.ok && sy.wrote>0) toast(`📗 ซิงก์ชีท Order เพิ่ม ${sy.wrote} บรรทัด (ตอนเขียนรอบแรกตกหล่น)`);
+      else if(sy && !sy.ok) toast('⚠️ ซิงก์ชีท Order ไม่สำเร็จ — '+String(sy.error||'').slice(0,80));
+    }
+  }catch(e){ console.warn('syncSheetFromSb', e); }
   if(GAS_LINE_MARK===false && MODEL && (MODEL.apprHeld||[]).length)   // v4.00: ยังไม่ได้วาง patch .gs + รอบนี้มีบรรทัดที่ยังไม่อนุมัติ → เตือนว่าของอาจหาย
     toast('⚠️ .gs ยังไม่รองรับมาร์ครายบรรทัด — บรรทัดที่ยังไม่อนุมัติราคาอาจโดนมาร์คจัดแล้ว (วาง PATCH-picker-gas-markDoneLines.gs ก่อน)');
   render();   // v3.83: renderMarkFailBanner จะโชว์แถบแดงถ้ายังไม่ลง Supabase
