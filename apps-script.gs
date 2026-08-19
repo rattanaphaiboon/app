@@ -208,18 +208,17 @@ function submitCredit(data) {
     'วันที่ขอเครดิต':    data.creditDate    || '',
     'จำนวนวันเครดิต':   data.creditDays    || '',
     'วงเงิน (บาท)':      data.creditAmount  || '',
-    'สำเนาหนังสือรับรองบริษัท':  creditRequestUrl,
-    'เอกสารขอเครดิต':   creditDocUrl,
-    'บัตรประชาชน':       idCardUrl,
-    'ภพ.20':             vatUrl,
-    'อื่นๆ':             otherUrl,
-    'หมายเหตุ':          data.note          || '',
-    'ผู้บันทึก (Email)': data.recordedBy    || '',
-    'ชื่อผู้บันทึก':     data.recordedName  || '',
-    'สถานะ':             'ถูกต้อง',
+    'หนังสือขอเครดิต':           creditRequestUrl,
+    'สำเนาหนังสือรับรองบริษัท': creditDocUrl,
+    'บัตรประชาชน':               idCardUrl,
+    'ภพ.20':                     vatUrl,
+    'อื่นๆ':                     otherUrl,
+    'หมายเหตุ':                  data.note          || '',
+    'ผู้บันทึก (Email)':         data.recordedBy    || '',
+    'ชื่อผู้บันทึก':             data.recordedName  || '',
+    'สถานะ':                     'ถูกต้อง',
   };
   sheet.appendRow(buildRow(headers, map));
-
 
   return { success: true, creditDocUrl, idCardUrl, vatUrl };
 }
