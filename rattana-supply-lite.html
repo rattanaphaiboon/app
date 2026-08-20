@@ -536,7 +536,7 @@ body.dark .spinner-box{background:var(--card-bg)}
       <button class="nav-btn hidden nav-back" data-tab="move" onclick="switchTab('move')">
         <span class="nav-ic">🔄</span><span class="nav-lb">ความเคลื่อนไหว</span></button>
 
-      <div class="nav-foot">Supply Lite<br>v3.2</div>
+      <div class="nav-foot">Supply Lite<br>v3.3</div>
     </nav>
 
   <main class="content">
@@ -632,14 +632,38 @@ body.dark .spinner-box{background:var(--card-bg)}
           <div class="field"><label>ผู้เบิก</label><select class="input" id="pkUser" onchange="renderPick()"></select></div>
           <div class="field"><label>หมวดสินค้า</label><select class="input" id="pkCat" onchange="renderPick()"></select></div>
         </div>
-        <div class="rp-grid" style="margin-bottom:0;grid-template-columns:1fr">
-          <div class="field" style="margin-bottom:0">
-            <label>เจาะเฉพาะรหัส / ชื่อสินค้า</label>
-            <div style="display:flex;gap:8px">
-              <input class="input grow" id="pkItem" placeholder="🔍 พิมพ์รหัสหรือชื่อ เช่น A019 หรือ กระดาษ (เว้นว่าง = ทุกรายการ)"
-                     oninput="renderPick()" autocomplete="off">
-              <button class="btn btn-outline" onclick="pkReset()" style="flex-shrink:0">ล้างตัวกรอง</button>
+        <div class="field" style="margin-bottom:0">
+          <label>เจาะสินค้า — เลือกวิธีที่สะดวก</label>
+          <div class="chips" style="margin-bottom:9px">
+            <button class="chip on" data-pkmode="text"  onclick="setPkMode('text',this)">🔍 ค้นหา</button>
+            <button class="chip"    data-pkmode="multi" onclick="setPkMode('multi',this)">☑️ เลือกหลายรหัส</button>
+            <button class="chip"    data-pkmode="range" onclick="setPkMode('range',this)">↔️ ช่วงรหัส</button>
+            <button class="chip" onclick="pkReset()">🧹 ล้างตัวกรองทั้งหมด</button>
+          </div>
+
+          <div id="pkBoxText">
+            <input class="input" id="pkItem" placeholder="🔍 พิมพ์รหัสหรือชื่อ เช่น A019 หรือ กระดาษ (เว้นว่าง = ทุกรายการ)"
+                   oninput="renderPick()" autocomplete="off">
+          </div>
+
+          <div id="pkBoxMulti" class="hidden">
+            <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+              <input class="input grow" id="pkCodeSearch" style="min-width:150px"
+                     placeholder="🔍 กรองรายชื่อด้านล่าง" oninput="renderCodePicker()" autocomplete="off">
+              <button class="btn btn-outline" onclick="pkPickAllShown()">เลือกที่เห็นทั้งหมด</button>
+              <button class="btn btn-outline" onclick="pkClearPicked()">ล้างที่เลือก</button>
             </div>
+            <div id="pkPickedChips" class="chips"></div>
+            <div id="pkCodeList" class="pick-list"></div>
+          </div>
+
+          <div id="pkBoxRange" class="hidden">
+            <div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+              <select class="input" id="pkFromCode" onchange="renderPick()" style="flex:1;min-width:160px"></select>
+              <span class="txt-muted txt-bold">ถึง</span>
+              <select class="input" id="pkToCode" onchange="renderPick()" style="flex:1;min-width:160px"></select>
+            </div>
+            <div class="txt-sm txt-muted mt-8" id="pkRangeInfo"></div>
           </div>
         </div>
       </div></div>
@@ -829,7 +853,7 @@ body.dark .spinner-box{background:var(--card-bg)}
 
 <script>
 /* ══════════════════════════════════════════════════════════
-   Rattana Supply Lite — เบิกอุปกรณ์สำนักงาน  v3.2
+   Rattana Supply Lite — เบิกอุปกรณ์สำนักงาน  v3.3
    พนักงานคีย์ใบเบิก → HR อนุมัติ + ใส่วันที่ได้ของ → จ่ายของ
    ยังไม่ใส่ gasUrl = โหมดทดลอง (อุปกรณ์อ่านจากชีตจริง, ใบเบิกเก็บในเครื่อง)
    ══════════════════════════════════════════════════════════ */
@@ -2169,10 +2193,69 @@ function exportStock(){
 }
 
 /* ══════ 2. รายงานเบิก (เพื่อจัดของ) ══════ */
-function pkReset(){
-  ['pkFrom','pkTo','pkCenter','pkDept','pkUser','pkCat','pkItem'].forEach(id=>{ const e=$(id); if(e) e.value=''; });
-  $('pkStatus').value='open'; $('pkGroup').value='item';
+/* ── โหมดเจาะสินค้าในรายงานเบิก ──
+   text  = พิมพ์ค้นหา (รหัสหรือชื่อ)
+   multi = ติ๊กเลือกได้หลายรหัส
+   range = เลือกช่วง จากรหัส → ถึงรหัส
+   ช่วงรหัสตัดสินจาก "ลำดับในรายการที่เรียงแล้ว" ไม่ใช่เทียบตัวอักษรดิบ
+   เพราะรหัสมีทั้ง A004.1 / A80 / B006.2 เทียบตรง ๆ จะได้ผลแปลก ๆ */
+let pkMode = 'text';
+let pkPicked = new Set();
+let PK_CODES = [], PK_IDX = {};
+
+function pkAllCodes(){
+  const seen = new Map();   // code -> ชื่อสินค้า
+  ITEMS.forEach(i=>{ if(i.code) seen.set(i.code, i.name||''); });
+  REQS.forEach(r=>(r.lines||[]).forEach(l=>{ if(l.code && !seen.has(l.code)) seen.set(l.code, l.name||''); }));
+  return [...seen.entries()]
+    .sort((a,b)=>String(a[0]).localeCompare(String(b[0]),'en',{numeric:true}))
+    .map(([code,name])=>({code,name}));
+}
+function refreshCodeIndex(){
+  PK_CODES = pkAllCodes();
+  PK_IDX = {};
+  PK_CODES.forEach((c,i)=>PK_IDX[c.code]=i);
+}
+function setPkMode(m, btn){
+  pkMode = m;
+  btn.parentElement.querySelectorAll('.chip[data-pkmode]').forEach(c=>c.classList.toggle('on', c.dataset.pkmode===m));
+  $('pkBoxText').classList.toggle('hidden',  m!=='text');
+  $('pkBoxMulti').classList.toggle('hidden', m!=='multi');
+  $('pkBoxRange').classList.toggle('hidden', m!=='range');
   renderPick();
+}
+function renderCodePicker(){
+  const q = ($('pkCodeSearch').value||'').trim().toLowerCase();
+  const list = PK_CODES.filter(c=>!q || c.code.toLowerCase().includes(q) || String(c.name).toLowerCase().includes(q));
+  $('pkCodeList').innerHTML = list.length
+    ? list.slice(0,300).map(c=>`<div class="pick-row" onclick="pkTogglePick('${esc(c.code)}')">
+        <span style="display:inline-block;width:20px">${pkPicked.has(c.code)?'☑️':'⬜'}</span>
+        <b>${esc(c.code)}</b> <span class="txt-sm txt-muted">${esc(c.name)}</span></div>`).join('')
+    : `<div class="pick-row txt-muted">ไม่พบรหัสที่ค้นหา</div>`;
+  $('pkPickedChips').innerHTML = pkPicked.size
+    ? [...pkPicked].sort((a,b)=>a.localeCompare(b,'en',{numeric:true}))
+        .map(c=>`<button class="chip on" onclick="pkTogglePick('${esc(c)}')">${esc(c)} ✕</button>`).join('')
+    : `<span class="txt-sm txt-muted">ยังไม่ได้เลือกรหัส — ติ๊กจากรายการด้านล่าง (ไม่เลือก = ทุกรายการ)</span>`;
+}
+function pkTogglePick(code){
+  pkPicked.has(code) ? pkPicked.delete(code) : pkPicked.add(code);
+  renderCodePicker(); renderPick();
+}
+function pkPickAllShown(){
+  const q = ($('pkCodeSearch').value||'').trim().toLowerCase();
+  PK_CODES.filter(c=>!q || c.code.toLowerCase().includes(q) || String(c.name).toLowerCase().includes(q))
+          .forEach(c=>pkPicked.add(c.code));
+  renderCodePicker(); renderPick();
+}
+function pkClearPicked(){ pkPicked.clear(); renderCodePicker(); renderPick(); }
+
+function pkReset(){
+  ['pkFrom','pkTo','pkCenter','pkDept','pkUser','pkCat','pkItem','pkCodeSearch'].forEach(id=>{ const e=$(id); if(e) e.value=''; });
+  $('pkStatus').value='open'; $('pkGroup').value='item';
+  pkPicked.clear();
+  $('pkFromCode').value=''; $('pkToCode').value='';
+  const tb = document.querySelector('.chip[data-pkmode="text"]');
+  if(tb) setPkMode('text', tb); else renderPick();
 }
 /* หมวดของรายการในใบเบิก — ถ้าหาในคลังไม่เจอ (เช่นถูกลบไปแล้ว) ใช้อักษรแรกของรหัสแทน
    ซึ่งเป็นวิธีเดียวกับที่ชีตใช้แบ่งหมวดอยู่แล้ว */
@@ -2183,6 +2266,12 @@ function renderPickFilters(){
   fillSelect('pkDept',   [...new Set(REQS.map(r=>r.dept).filter(Boolean))].sort().map(d=>({k:d,lb:d})), 'ทุกแผนก');
   fillSelect('pkUser',   [...new Set(REQS.map(r=>r.name).filter(Boolean))].sort().map(n=>({k:n,lb:n})), 'ทุกคน');
   fillSelect('pkCat',    CATS.map(c=>({k:c.k, lb:`${c.ic} ${c.lb}`})), 'ทุกหมวด');
+
+  refreshCodeIndex();
+  const opts = PK_CODES.map(c=>({k:c.code, lb:`${c.code} — ${c.name}`.slice(0,60)}));
+  fillSelect('pkFromCode', opts, 'เริ่มจากรหัสแรกสุด');
+  fillSelect('pkToCode',   opts, 'ถึงรหัสสุดท้าย');
+  if(!$('pkBoxMulti').classList.contains('hidden')) renderCodePicker();
 }
 /* คลี่ใบเบิกเป็นรายบรรทัด แล้วค่อยกรอง — จำนวนที่ใช้จัดของ = ที่อนุมัติ ถ้ายังไม่อนุมัติใช้ที่ขอ */
 function pickLines(){
@@ -2190,6 +2279,9 @@ function pickLines(){
   const from = dayStart($('pkFrom').value), to = dayEnd($('pkTo').value);
   const ct = $('pkCenter').value, dp = $('pkDept').value, us = $('pkUser').value;
   const cat = $('pkCat').value, q = ($('pkItem').value||'').trim().toLowerCase();
+  /* ช่วงรหัส — แปลงเป็นลำดับในรายการที่เรียงแล้ว ว่างไว้ = ไม่จำกัดฝั่งนั้น */
+  const fi = pkMode==='range' && $('pkFromCode').value ? PK_IDX[$('pkFromCode').value] : -1;
+  const ti = pkMode==='range' && $('pkToCode').value   ? PK_IDX[$('pkToCode').value]   : -1;
   const out = [];
   REQS.forEach(r=>{
     if(st==='open'){ if(r.status!=='pending' && r.status!=='approved') return; }
@@ -2200,9 +2292,18 @@ function pickLines(){
     if(dp && r.dept!==dp) return;
     if(us && r.name!==us) return;
     (r.lines||[]).forEach(l=>{
-      /* กรองระดับรายการ — หมวด และ รหัส/ชื่อสินค้า */
+      /* กรองระดับรายการ — หมวด แล้วตามด้วยโหมดเจาะสินค้า */
       if(cat && catOfCode(l.code) !== cat) return;
-      if(q && !(String(l.code).toLowerCase().includes(q) || String(l.name).toLowerCase().includes(q))) return;
+      if(pkMode==='text'){
+        if(q && !(String(l.code).toLowerCase().includes(q) || String(l.name).toLowerCase().includes(q))) return;
+      }else if(pkMode==='multi'){
+        if(pkPicked.size && !pkPicked.has(l.code)) return;
+      }else if(pkMode==='range'){
+        const ix = PK_IDX[l.code];
+        if(ix === undefined) return;
+        if(fi >= 0 && ix < fi) return;
+        if(ti >= 0 && ix > ti) return;
+      }
       const want = r.status==='issued' ? toNum(l.issued)
                  : (toNum(l.approvedQty) || toNum(l.qty));
       out.push({docNo:r.docNo, createdAt:r.createdAt, status:r.status, center:r.center, dept:r.dept,
@@ -2223,6 +2324,14 @@ const PK_COLS = {
 function renderPick(){
   if(!isHR()) return;
   renderPickFilters();
+  /* บอกว่าช่วงที่เลือกครอบคลุมกี่รหัส จะได้รู้ว่าเลือกถูกช่วงไหม */
+  if(pkMode==='range'){
+    const f = $('pkFromCode').value, t = $('pkToCode').value;
+    const fi2 = f ? PK_IDX[f] : 0, ti2 = t ? PK_IDX[t] : PK_CODES.length-1;
+    $('pkRangeInfo').innerHTML = (fi2 > ti2)
+      ? `⚠️ <span class="txt-danger">รหัสเริ่มต้นอยู่หลังรหัสสิ้นสุด — สลับกันหรือเปล่า</span>`
+      : `ครอบคลุม <b>${nf(ti2-fi2+1)}</b> รหัส (${esc(PK_CODES[fi2]?.code||'-')} … ${esc(PK_CODES[ti2]?.code||'-')})`;
+  }
   const lines = pickLines();
   const g = $('pkGroup').value;
 
@@ -2297,7 +2406,11 @@ function printPick(){
     $('pkDept').value   ? 'แผนก: '+$('pkDept').value : '',
     $('pkUser').value   ? 'ผู้เบิก: '+$('pkUser').value : '',
     $('pkCat').value    ? 'หมวด: '+catOf($('pkCat').value).lb : '',
-    $('pkItem').value.trim() ? 'ค้นหา: '+$('pkItem').value.trim() : '',
+    pkMode==='text'  && $('pkItem').value.trim() ? 'ค้นหา: '+$('pkItem').value.trim() : '',
+    pkMode==='multi' && pkPicked.size ? `เฉพาะรหัส (${pkPicked.size}): ` +
+      [...pkPicked].sort((a,b)=>a.localeCompare(b,'en',{numeric:true})).join(', ') : '',
+    pkMode==='range' && ($('pkFromCode').value || $('pkToCode').value)
+      ? `ช่วงรหัส: ${$('pkFromCode').value||'ต้นสุด'} ถึง ${$('pkToCode').value||'ท้ายสุด'}` : '',
     $('pkFrom').value   ? 'จาก '+formatThaiDate($('pkFrom').value) : '',
     $('pkTo').value     ? 'ถึง '+formatThaiDate($('pkTo').value) : '',
   ].filter(Boolean).join(' · ');
