@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v4.20</title>
+<title>Rattana Online Order v4.21</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -669,7 +669,7 @@ body.dark .seg-tab.on{background:var(--gold);color:var(--navy);border-color:var(
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.20</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.21</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -1110,7 +1110,9 @@ function mapSpecial(r){ return { phone:digits(r['เบอร์']), code:clean(
   billGroup:clean(r['กลุ่มบิล']), splitEvery:numOr0(r['ตัดใบจอง']),
   /* ⭐ v4.17 — คอลัมน์ `สาขา` (ไม่มีก็ไม่พัง) — ชื่อร้านซ้ำกันหลายเบอร์ ใช้แยกว่าบิลนี้ของสาขาไหน
      รับชื่อหัวคอลัมน์ได้หลายแบบ กันคนกรอกตั้งชื่อไม่ตรง */
-  branch:clean(r['สาขา']||r['ชื่อสาขา']||r['หมายเหตุ']||r['สาขา/หมายเหตุ']) }; }
+  branch:clean(r['สาขา']||r['ชื่อสาขา']||r['หมายเหตุ']||r['สาขา/หมายเหตุ']),
+  /* ⭐ v4.21 — uid ของสาขา (คอลัมน์ User ID) → เข้าผ่าน LINE แล้วเข้าสาขาตัวเองได้เลย */
+  uid:clean(r['User ID']) }; }
 function specialHasCond(s){ return !!((s.catType&&s.catType.length)||(s.catBrand&&s.catBrand.length)||(s.catVendor&&s.catVendor.length)||s.credit); }
 /* ⭐ v3.98 — ร้านส่ง 1 เบอร์ มีได้ "กี่ชื่อก็ได้" (เดิมรองรับแค่ 2)
    บั๊กเดิม: `rows.find(s=>s.noInv)` เอาแถว N แค่ "ตัวแรก" → เบอร์ที่มี 3 ชื่อ ชื่อที่ 3 หายไปเงียบ ๆ
@@ -1126,6 +1128,52 @@ function specialByPhone(ph){ ph=digits(ph); if(!ph) return null; const rows=SPEC
   if(!sels.some(s=>s.code===inv.code)) sels=[inv].concat(sels);      // ให้ชื่อ default อยู่ในลิสต์เสมอ
   return { inv, noinv, sels, rows }; }
 function isSpecial(c){ return !!(c && c._special); }
+/* 🚨 v4.21 — ร้านส่งที่ดันมีชื่อในชีทลงทะเบียนปกติด้วย (รหัสร้านเดียวกัน)
+   เข้าผ่าน LINE / เบอร์ในชีทปกติ / session เก่า → กลายเป็นลูกค้าทั่วไป → ออเดอร์ลงผิดแท็บ
+   ตรวจจาก "รหัสร้าน" เพราะเป็นตัวเดียวที่ตรงกันแน่นอนทั้ง 2 ชีท */
+/* ⭐ v4.21 — หาร้านส่งจาก LINE uid (คอลัมน์ User ID ในชีทร้านทำราคาพิเศษ)
+   เติม uid ของแต่ละสาขาไว้ → เข้าผ่านไลน์แล้วเข้าสาขานั้นตรง ไม่ต้องเดา */
+function specialByUid(uid){
+  uid=clean(uid); if(!uid) return null;
+  const row=(SPECIAL_SHOPS||[]).find(s=>clean(s.uid)===uid); if(!row) return null;
+  const ph=digits(row.phone); if(!ph) return null;
+  const sp=specialByPhone(ph); return sp?makeSpecialCustomer(sp,ph):null;
+}
+function specialPhonesByCode(code){
+  code=clean(code); if(!code) return [];
+  const ph=(SPECIAL_SHOPS||[]).filter(s=>clean(s.code)===code).map(s=>digits(s.phone)).filter(Boolean);
+  return [...new Set(ph)];
+}
+/* คืน: customer ร้านส่งตัวใหม่ · 'ambiguous' = รหัสเดียวหลายสาขา เดาไม่ได้ · null = ไม่ใช่ร้านส่ง */
+function specialUpgradeFor(c){
+  try{
+    if(!c || isSpecial(c)) return null;
+    const ph=specialPhonesByCode(c.shopCode);
+    if(!ph.length) return null;
+    const own=digits(c.phone||'');
+    if(own && ph.indexOf(own)>=0){ const sp=specialByPhone(own); return sp?makeSpecialCustomer(sp,own):null; }   // เบอร์ตรงอยู่แล้ว
+    if(ph.length===1){ const sp=specialByPhone(ph[0]); return sp?makeSpecialCustomer(sp,ph[0]):null; }           // สาขาเดียว → สลับให้เลย
+    return 'ambiguous';                                                                                          // หลายสาขา → ต้องให้เข้าด้วยเบอร์สาขา
+  }catch(e){ return null; }
+}
+/* เรียกทุกครั้งหลังตั้ง currentCustomer จากชีทลูกค้าปกติ · คืน true = จัดการแล้ว (ห้ามไปต่อแบบร้านปกติ) */
+function applySpecialUpgrade(){
+  const up=specialUpgradeFor(currentCustomer);
+  if(!up) return false;
+  if(up==='ambiguous'){
+    const ph=specialPhonesByCode(currentCustomer.shopCode);
+    const nm=clean(currentCustomer.name||'ร้านนี้');
+    try{ localStorage.removeItem('rop_customer'); }catch(e){}
+    currentCustomer=null; clearCartState(); clearShopScopedData();
+    renderAll(); goShop();
+    showToast('🏬 '+nm+' เป็นร้านส่งและมีหลายสาขา — กรุณาเข้าด้วยเบอร์ของสาขา ('+ph.join(' / ')+')','warning');
+    try{ openModal('loginModal'); }catch(e){}
+    return true;
+  }
+  currentCustomer=up; saveSession(up);
+  try{ showToast('🏬 เข้าระบบเป็นร้านส่ง: '+clean(up.name||'')+(clean(up.branch)?(' สาขา '+clean(up.branch)):''),'info'); }catch(e){}
+  return false;   // เป็นร้านส่งแล้ว ไปต่อได้ตามปกติ
+}
 function makeSpecialCustomer(sp, ph){
   const id = sp.inv;   // ค่าเริ่มต้น = ชื่อ default (ไม่มี N/ไม่มีเงื่อนไข)
   return { _special:true, invoice:true, phone:digits(ph), uid:window._lineUid||'',
@@ -1536,6 +1584,7 @@ function refreshCurrentCustomer(){
   if(isSpecial(currentCustomer)) return;   // ร้านพิเศษไม่อยู่ใน CUSTOMERS อย่า reset ทับ
   const fresh=CUSTOMERS.find(c=>(currentCustomer.uid&&uidList(c).includes(clean(currentCustomer.uid)))||(currentCustomer.phone&&c.phone===currentCustomer.phone));
   if(fresh){ currentCustomer=fresh; saveSession(fresh); }
+  try{ applySpecialUpgrade(); }catch(e){}   /* v4.21: session เก่าที่เป็นลูกค้าทั่วไป แต่จริง ๆ เป็นร้านส่ง */
 }
 
 function getUrlUid(){
@@ -1578,9 +1627,15 @@ async function lineLogin(){
     await ensureLiff();
     if(!liff.isLoggedIn()){ hideSpinner(); liff.login(); return; } // redirect ไป LINE
     const p=await liff.getProfile(); window._lineProfile=p; const uid=clean(p.userId); window._lineUid=uid;
+    const spU=specialByUid(uid);                                   // v4.21: ร้านส่งที่ผูก uid ไว้รายสาขา → เข้าสาขานั้นเลย
+    if(spU){ currentCustomer=spU; saveSession(spU); hideSpinner(); closeModal('loginModal');
+      renderAll(); goShop(); pullCart(true); startCartSync(); preloadCartData();
+      showToast('ยินดีต้อนรับ (ร้านส่ง) '+clean(spU.name||'')+(clean(spU.branch)?(' สาขา '+clean(spU.branch)):''),'success'); return; }
     const hit=custByUid(uid);
     hideSpinner(); closeModal('loginModal');
-    if(hit){ currentCustomer=hit; saveSession(hit); renderAll(); goShop(); pullCart(true); startCartSync(); preloadCartData(); showToast('ยินดีต้อนรับ '+(hit.name||''),'success'); }
+    if(hit){ currentCustomer=hit; saveSession(hit);
+      if(applySpecialUpgrade()) return;                                     // v4.21: ร้านส่งหลายสาขา → ให้เข้าด้วยเบอร์สาขา
+      renderAll(); goShop(); pullCart(true); startCartSync(); preloadCartData(); showToast('ยินดีต้อนรับ '+(currentCustomer.name||''),'success'); }
     else { openModal('loginModal'); showToast('ยังไม่พบบัญชี LINE นี้ — ถ้าเคยลงทะเบียนแล้ว กรอกเบอร์เพื่อเชื่อมบัญชี หรือกดลงทะเบียนใหม่','info'); }
   }catch(e){ hideSpinner(); console.warn('LINE login error:',e); showToast('LINE: '+(e&&e.message?e.message:'เชื่อมต่อไม่สำเร็จ'),'error'); }
 }
@@ -1589,8 +1644,12 @@ async function resolveLogin(){
   if(uid) window._lineUid=uid;
   if(currentCustomer){ ensureUidLinked(currentCustomer); return; }   // มี session อยู่แล้ว → แค่ผูก uid ใหม่ถ้ามี
   if(uid){
+    const spU=specialByUid(uid);                                           // v4.21
+    if(spU){ currentCustomer=spU; saveSession(spU); showToast('ยินดีต้อนรับ (ร้านส่ง) '+clean(spU.name||''),'success'); return; }
     const hit=custByUid(uid);
-    if(hit){ currentCustomer=hit; saveSession(hit); showToast('ยินดีต้อนรับ '+(hit.name||''),'success'); }
+    if(hit){ currentCustomer=hit; saveSession(hit);
+      if(applySpecialUpgrade()) return;                                     // v4.21
+      showToast('ยินดีต้อนรับ '+(currentCustomer.name||''),'success'); }
   }
 }
 
@@ -3793,7 +3852,8 @@ async function loginByPhone(){
   // เครื่องนี้เพิ่งเข้าผ่านไลน์แต่ยังไม่ได้จับ uid → ลองดึงจาก LIFF ก่อน เพื่อผูกไลน์เครื่องที่ 2,3.. (เก็บช่อง "User ID เพิ่ม")
   if(!window._lineUid){ try{ const u=await tryLiff(); if(u) window._lineUid=u; }catch(e){} }
   currentCustomer=hit; ensureUidLinked(hit); saveSession(hit); closeModal('loginModal');
-  renderAll(); goShop(); pullCart(true); startCartSync(); preloadCartData(); showToast('ยินดีต้อนรับ '+(hit.name||''),'success');
+  if(applySpecialUpgrade()) return;                                         // v4.21
+  renderAll(); goShop(); pullCart(true); startCartSync(); preloadCartData(); showToast('ยินดีต้อนรับ '+(currentCustomer.name||''),'success');
 }
 async function linkUidToServer(phone,uid){
   if(!phone||!uid) return;
