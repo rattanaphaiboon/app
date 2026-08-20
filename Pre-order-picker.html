@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rattana Pre-order Picker v4.34</title>
+<title>Rattana Pre-order Picker v4.36</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -399,7 +399,7 @@
     <button type="button" class="login-bypass" id="previewBypassBtn" onclick="bypassLogin()" style="display:none;margin-top:10px">🔓 เข้าโหมดพรีวิว (ทดสอบในเครื่อง — ไม่ผ่าน Google Login)</button>
     <div id="loginSpinner">⏳ กำลังเข้าสู่ระบบ…</div>
     <div id="loginError"></div>
-    <div class="login-ver">เวอร์ชัน v4.34</div>
+    <div class="login-ver">เวอร์ชัน v4.36</div>
   </div>
 </div>
 
@@ -416,7 +416,7 @@
         <button type="button" id="srcMenuSb" onclick="setOrderSrc('sb')"><span>🟣</span> ใบจอง จาก Supabase</button>
       </div>
     </div>
-    <div class="title">📦 Pre-order Picker <span class="ver">v4.34</span></div>
+    <div class="title">📦 Pre-order Picker <span class="ver">v4.36</span></div>
     <div class="spacer"></div>
     <div class="who" id="whoBox"></div>
     <a class="hub-btn" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">
@@ -1640,6 +1640,7 @@ function enterApp(){
  * ของที่ต้องสร้างใหม่ทุกครั้งที่ DATA.orders เปลี่ยน (เดิมทำครั้งเดียวหลังเฟส 1):
  *   ① DONE (คนจัด/วัน/เวลา ที่โชว์ในปุ่ม ↩︎ คืน)  ② รายชื่อร้าน+สินค้าในช่องค้นหา  ③ dropdown ชื่อเซล */
 function rebuildFromOrders(){
+  try{ explineApply(); }catch(e){}   // v4.35: กู้สถานะ "จัดแล้ว" ของบรรทัดที่ export ไปแล้ว ก่อนสร้าง DONE (ต้องมาก่อน ไม่งั้น DONE ตกบิล)
   DONE = {}; DATA.orders.forEach(o=>{ if(o.done && o.orderId) DONE[o.orderId]={orderId:o.orderId, by:o.doneBy||'', date:o.doneDate||'', time:o.doneTime||''}; });
   try{
     const el=document.getElementById('storeList');
@@ -1667,6 +1668,7 @@ async function reload(){
     const [_users, , _orders] = await Promise.all([ loadUsers(), loadDocBooks(true), loadOrders() ]);   // v4.15: bust cache ชีทมาสเตอร์ทุกครั้งที่กด 🔄 โหลด (เพิ่ม D_CODE ในชีทแล้วต้องเห็นทันที)
     try{ await _debtP; }catch(e){}   // แท็บเล็ก (~430 แถว) มาก่อนออเดอร์เสมอ · พังก็ปล่อยผ่าน (ไม่บล็อกใคร)
     DATA.usersByCode = _users; DATA.orders = _orders;
+    try{ await _explineLoad(); }catch(e){}   // v4.35: ต้องมาก่อน rebuildFromOrders ไม่งั้นรอบแรกจะกู้สถานะไม่ทัน
     rebuildFromOrders();   // v4.10: DONE + รายชื่อร้าน/สินค้า + dropdown ชื่อเซล (ต้องสร้างใหม่ทุกครั้งที่ DATA.orders เปลี่ยน)
     /* v4.12: เลิก auto-ติ๊กบิลเมื่อวานตอนโหลด — เป็นต้นตอ "เลือก 120 / 47 บิล · นอกหน้านี้ 120"
      * ที่ Surat งงมา 3 รอบ · ตอนนี้ตะกร้ามีเฉพาะบิลที่แอดมินติ๊กเองเท่านั้น */
@@ -2334,7 +2336,23 @@ async function markDoneRooLines(rooLines){
 async function markDoneOrderSheet(soLines, by){
   const ids=[...new Set((soLines||[]).filter(l=>l && l._src!=='roo').map(l=>l&&l.lineId).filter(Boolean))];
   if(!CONFIG.gasUrl || !ids.length) return null;
-  return _gasJson({action:'markDoneOrderSheet', lineIds:ids, by:String(by||'')}, 'ชีท Order');
+  /* ⭐ v4.36: แบ่งก้อนละ 300 lineId — เดิมยิงทีเดียวทั้งหมด (พันกว่าตัว) payload ใหญ่จน Apps Script ตีกลับ/redirect กิน body */
+  const CH=300, out={ok:true, rows:0, want:0, already:0, missing:[], chunks:0, failed:0};
+  for(let i=0;i<ids.length;i+=CH){
+    const j=await _gasJson({action:'markDoneOrderSheet', lineIds:ids.slice(i,i+CH), by:String(by||'')}, 'ชีท Order');
+    out.chunks++;
+    if(!j || !j.ok){ out.ok=false; out.failed++; continue; }
+    out.rows+=(+j.rows||0); out.want+=(+j.want||0); out.already+=(+j.already||0);
+    (j.missing||[]).forEach(m=>{ if(out.missing.length<30) out.missing.push(m); });
+  }
+  return out;
+}
+/* ⭐ v4.36 — กันชีทกับ Supabase ไม่ตรงกัน (gas-v23)
+   .gs อ่าน Supabase เองแล้วเขียนชีทเฉพาะแถวที่ยังว่าง — ยิงครั้งเดียว ล็อกเดียว ไม่ต้องส่ง lineId ไปเลย
+   ใช้เวลาจริงจาก Supabase → ประวัติคงเดิม ไม่เพี้ยน · แถวที่ชีทมีสถานะแล้ว/ยกเลิก ไม่แตะ */
+async function syncSheetFromSb(from, to){
+  if(!CONFIG.gasUrl) return null;
+  return _gasJson({action:'syncSheetFromSb', from:String(from||''), to:String(to||'')}, 'ซิงก์ชีท');
 }
 /* ยิง GAS แล้วอ่าน JSON · retry เผื่อ Apps Script คืนหน้า HTML ชั่วคราว (เจอบ่อยหลัง redeploy) */
 async function _gasJson(body, tag){
@@ -2343,6 +2361,13 @@ async function _gasJson(body, tag){
       const res=await fetch(CONFIG.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(body)});
       const txt=(await res.text()).trim();
       if(txt.startsWith('{')){ const j=JSON.parse(txt);
+        /* ⭐ v4.36: เดิม ok:false = คืนเลย ไม่ลองใหม่
+           แต่ .gs คืน {ok:false,'busy'} ตอน LockService ชน (แอดมินหลายคน export ไล่กัน)
+           → เขียนชีทหลุดเงียบ วัดจริง 17-19 ส.ค. หายไป 2,228 บรรทัด */
+        if(!j.ok && (j.busy || /busy/i.test(String(j.error||''))) && t<3){
+          console.warn('['+tag+'] .gs ติดล็อก (ครั้งที่ '+t+'/3) — รอแล้วยิงใหม่');
+          await new Promise(r=>setTimeout(r, 2500*t)); continue;
+        }
         if(!j.ok) console.warn('['+tag+'] เขียนไม่สำเร็จ', txt.slice(0,200));
         else if((j.missing||[]).length) console.warn('['+tag+'] หาแถวไม่เจอ', j.missing);
         return j; }
@@ -2387,6 +2412,7 @@ async function exportMarkDone(orderIds, expLines){
     if(!_rooBills.has(o.orderId) && !_expKeys.has(lineKey(o))) continue;  // v4.00: บรรทัด sales_orders ที่ไม่ได้ export (เช่น รออนุมัติราคา) → ห้ามตีว่าจัดแล้ว (ของจะหาย)
     o.done=true; o.doneBy=by; o.doneDate=_today; o.doneTime=time;
   }
+  _explineAdd(_lines);              // ⭐ v4.35: จำ line_id ที่ออกไปจริง → รอบหน้าถ้า Sales App เขียนทับจนสถานะหาย ก็ยังรู้ว่าบรรทัดไหนจัดไปแล้ว
   _explogAdd(orderIds, storeMap);   // v3.83: จำว่า "export แล้ว" → reconcile ทุกครั้งที่โหลด (กันสถานะหายเงียบ)
   process(); render();
   // v3.83: เขียน Supabase + retry สูงสุด 3 ครั้ง (กัน mark ล้มเหลวเงียบ — "export ต้องลง จัดแล้ว เสมอ")
@@ -2417,6 +2443,17 @@ async function exportMarkDone(orderIds, expLines){
   else if(sb.needSetup) msg=' · ⏸ ยังไม่ตั้ง SB_URL/KEY ใน .gs';
   else msg=' · ❌ เขียน Supabase ไม่สำเร็จ — ดูแถบแดง กด "มาร์คซ้ำ"';
   toast(`📥 ย้ายไป "นำเข้าแล้ว" ${orderIds.length} บิล`+msg);
+  /* ⭐ v4.36 (Surat: "ข้อมูล 2 ที่ควรตรงกัน") — ด่านสุดท้าย: ให้ .gs อ่าน Supabase แล้วเติมชีทให้ครบเอง
+     ต้องรอให้ markDoneSbLines เขียน Supabase เสร็จก่อน (await Promise.all ข้างบนผ่านไปแล้ว)
+     ยิงครั้งเดียว ล็อกเดียว → ถึงก้อนไหนของ markDoneOrderSheet จะหลุด รอบนี้ก็ตามเก็บให้ครบ */
+  try{
+    const _ds=[...new Set((DATA.orders||[]).filter(o=>_idSet.has(o.orderId)).map(o=>toISO(o.date)).filter(Boolean))].sort();
+    if(_ds.length){
+      const sy=await syncSheetFromSb(_ds[0], _ds[_ds.length-1]);
+      if(sy && sy.ok && sy.wrote>0) toast(`📗 ซิงก์ชีท Order เพิ่ม ${sy.wrote} บรรทัด (ตอนเขียนรอบแรกตกหล่น)`);
+      else if(sy && !sy.ok) toast('⚠️ ซิงก์ชีท Order ไม่สำเร็จ — '+String(sy.error||'').slice(0,80));
+    }
+  }catch(e){ console.warn('syncSheetFromSb', e); }
   if(GAS_LINE_MARK===false && MODEL && (MODEL.apprHeld||[]).length)   // v4.00: ยังไม่ได้วาง patch .gs + รอบนี้มีบรรทัดที่ยังไม่อนุมัติ → เตือนว่าของอาจหาย
     toast('⚠️ .gs ยังไม่รองรับมาร์ครายบรรทัด — บรรทัดที่ยังไม่อนุมัติราคาอาจโดนมาร์คจัดแล้ว (วาง PATCH-picker-gas-markDoneLines.gs ก่อน)');
   render();   // v3.83: renderMarkFailBanner จะโชว์แถบแดงถ้ายังไม่ลง Supabase
@@ -2434,6 +2471,46 @@ function _explogAdd(orderIds, storeMap){
   _explogSave(m);
 }
 function _explogForget(orderIds){ const m=_explogLoad(); (orderIds||[]).forEach(id=>delete m[id]); _explogSave(m); }
+/* ⭐ v4.35 (Surat 2026-08-18: "ออเดอร์ที่ยังไม่มีสถานะ มันดันไปรวมกับอันที่จัดแล้ว แอดมินเลยหาออเดอร์ไม่เจอ")
+   ต้นเหตุ: Sales App เขียน Supabase ทับทั้งบิลเมื่อเซลเพิ่มของเข้าบิลเดิม → picking_status ของบรรทัดเก่าหายเกลี้ยง
+     เคสจริง ORD5057758 บจก.ยู่ฮวดปลาทอง: 35 บรรทัด 4 รอบสั่ง · 31 บรรทัดของ 08-17 ชีทว่า "จัดแล้ว 08:00" แต่ Supabase ว่าง
+   กฎ v3.87 (logDone && doneLines===0 = นำเข้าแล้ว) แยกไม่ออกระหว่าง "สถานะหาย" กับ "ของใหม่จริง"
+     → บรรทัดใหม่ที่ยังไม่เคยจัด โดนลากไปติดหน้า 📥 นำเข้าแล้ว แอดมินหาไม่เจอ
+   แก้: จำ "line_id ที่ export ไปจริง" (unique ยืนยันแล้ว 14,911/14,911) → โหลดกลับมาเติม o.done ให้บรรทัดเก่า
+     ⇒ บรรทัดเก่า = จัดแล้ว (กันเปิดบิลซ้ำ) · บรรทัดใหม่ = ยังไม่จัด → บิลกลับหน้า ☑️ เอง
+   ⚠️ เก็บใน IndexedDB ห้ามใช้ localStorage — origin นี้เต็มจริง (setItem โยน QuotaExceeded เงียบ ๆ) */
+const EXPLINE_KEY='pk_exportLines';
+let EXPLINE={}, EXPLINE_RESTORED=0;
+function lineUid(o){ return o ? (o.lineId ? String(o.lineId) : (o._rid!=null ? 'roo:'+o._rid : '')) : ''; }
+async function _explineLoad(){
+  try{ const m=await _pkIdbGet(EXPLINE_KEY); EXPLINE=(m && typeof m==='object') ? m : {}; }catch(e){ EXPLINE={}; }
+  const cut=Date.now()-EXPLOG_DAYS*86400000; let ch=false;
+  for(const k in EXPLINE){ if(!((+EXPLINE[k]||0)>cut)){ delete EXPLINE[k]; ch=true; } }   // ตัดของเก่า >14 วัน เท่า export log
+  if(ch) _pkIdbSet(EXPLINE_KEY, EXPLINE);
+  return EXPLINE;
+}
+function _explineAdd(lines){
+  const now=Date.now(); let n=0;
+  (lines||[]).forEach(l=>{ const k=lineUid(l); if(k){ EXPLINE[k]=now; n++; } });
+  if(n) _pkIdbSet(EXPLINE_KEY, EXPLINE);
+  return n;
+}
+function _explineForget(orderIds){   // ↩︎ คืนบิล = ต้องลืมบรรทัดของบิลนั้นด้วย ไม่งั้นคืนแล้วยังนับว่าจัดแล้ว
+  const set=new Set((orderIds||[]).filter(Boolean)); if(!set.size) return;
+  let ch=false;
+  for(const o of (DATA.orders||[])){ if(!set.has(o.orderId)) continue; const k=lineUid(o); if(k && EXPLINE[k]!=null){ delete EXPLINE[k]; ch=true; } }
+  if(ch) _pkIdbSet(EXPLINE_KEY, EXPLINE);
+}
+/* เติม done ให้บรรทัดที่ export ไปแล้วแต่สถานะใน Supabase หาย — เรียกทุกครั้งที่ DATA.orders เปลี่ยน */
+function explineApply(){
+  let n=0;
+  for(const o of (DATA.orders||[])){
+    if(o.done || /ยกเลิก/.test(String(o.cancel||''))) continue;   // ยกเลิกแล้วห้ามมาร์คจัดแล้ว (กติกา v4.29)
+    const k=lineUid(o); if(!k || EXPLINE[k]==null) continue;
+    o.done=true; o._doneLog=true; n++;
+  }
+  EXPLINE_RESTORED=n; return n;
+}
 /* v3.91: จำ "บิลที่แอดมินติ๊กสินค้าออกรายตัวตอน Export" → ใช้ตัดสินว่าบิลไหนควรขึ้นแท็บ 🧩 จัดบางส่วน
  * (บิลที่มีแถวจัดปนเพราะ bill_id ซ้ำ/รวมบิล ไม่ได้เกิดจากการติ๊ก → ไม่ต้องขึ้น) · เก็บ 14 วันเท่า export log */
 const PCUT_KEY='pk_partialCut';
@@ -2529,6 +2606,7 @@ function _restoreLocal(ids){
   const set=new Set(ids);
   ids.forEach(id=>{ delete DONE[id]; });
   for(const o of DATA.orders){ if(set.has(o.orderId)){ o.done=false; o.doneBy=''; o.doneDate=''; o.doneTime=''; } }
+  _explineForget(ids);  // v4.35: ลืม line_id ที่ export ไปด้วย ไม่งั้น explineApply จะเติม done กลับทุกรอบโหลด
   _explogForget(ids);   // คืนเอง = ไม่ใช่ "หลุด" → เอาออกจาก log (กัน banner เตือนผิด + กันบิลค้างหน้านำเข้าแล้ว)
   _pcutForget(ids);     // v3.91: คืนทั้งบิลแล้ว = ไม่ใช่ "จัดบางส่วน" อีกต่อไป
 }
@@ -3210,7 +3288,7 @@ function buildBills(){
     if(fWh!=='all' && shipWh(o)!==fWh) continue;
     if(fStore && !((o.store+' '+o.storeCode+' '+o.product+' '+o.barcode).toLowerCase().includes(fStore))) continue;
     if(!o.orderId) continue;
-    if(!bills[o.orderId]) bills[o.orderId]={orderId:o.orderId,date:o.date,time:o.time||'',salesman:o.salesman,salesmanName:o.name,store:o.store,storeCode:String(o.storeCode||'').trim(),wh:shipWh(o),lines:0,total:0,pendLines:0,pendTotal:0,doneLines:0,doneTotal:0,doneAny:DONE_ANY.has(o.orderId),logDone:!!LOG_DONE[o.orderId],partialCut:!!PCUT[o.orderId],acctLines:0,acctTotal:0,blockLines:0,creditLines:0,acctBuckets:{},debtState:'',debtRec:null,debtCredit:false,debtFinRec:null,priceHoldLines:0,stuckLines:0,stuckBy:'',stuckAt:'',dDate:'',pDate:'',keyTS:0,seq:Infinity,chan:chanOf(o,u),rooCode:rooCodeOf(o,u),shipMode:o.shipMode||''};   // v3.68: chan=หมวด · rooCode=รหัสเซล Supabase · v3.80: shipMode=รูปแบบการจัดส่ง (ROO) · v3.86: doneAny/dDate/pDate
+    if(!bills[o.orderId]) bills[o.orderId]={orderId:o.orderId,date:o.date,time:o.time||'',salesman:o.salesman,salesmanName:o.name,store:o.store,storeCode:String(o.storeCode||'').trim(),wh:shipWh(o),lines:0,total:0,pendLines:0,pendTotal:0,doneLines:0,doneTotal:0,logRestored:0,doneAny:DONE_ANY.has(o.orderId),logDone:!!LOG_DONE[o.orderId],partialCut:!!PCUT[o.orderId],acctLines:0,acctTotal:0,blockLines:0,creditLines:0,acctBuckets:{},debtState:'',debtRec:null,debtCredit:false,debtFinRec:null,priceHoldLines:0,stuckLines:0,stuckBy:'',stuckAt:'',dDate:'',pDate:'',keyTS:0,seq:Infinity,chan:chanOf(o,u),rooCode:rooCodeOf(o,u),shipMode:o.shipMode||''};   // v3.68: chan=หมวด · rooCode=รหัสเซล Supabase · v3.80: shipMode=รูปแบบการจัดส่ง (ROO) · v3.86: doneAny/dDate/pDate
     const b=bills[o.orderId]; const ts=keyTSof(o); const od=String(o.date||'');
     if(ts>=b.keyTS){ b.keyTS=ts; if(o.time) b.time=o.time; }
     if(o.seq<b.seq) b.seq=o.seq;
@@ -3231,7 +3309,7 @@ function buildBills(){
      * ถูกกันทิ้งทั้ง 2 ฝั่ง → doneLines=0 · pendLines=0 → บิลหลุดจากหน้า 📥 นำเข้าแล้ว ไปโผล่หน้า 🏦 บัญชี
      * = ของที่จัดไปแล้วแอดมินมองไม่เห็น และกดปุ่ม ↩︎ คืน ไม่ได้ */
     if(_bk && (ACCT_GATE_ON || rooBlocked(o) || priceHold(o)) && !o.done){ /* กั้นอยู่ — ไม่นับเข้าฝั่งไหน · v4.11: ROO ที่ไม่ใช่ "อนุมัติ" · v4.16: รออนุมัติราคา */ }
-    else if(o.done){ b.doneLines++; b.doneTotal+=o.total; if(od>b.dDate) b.dDate=od; } else { b.pendLines++; b.pendTotal+=o.total; if(od>b.pDate) b.pDate=od; }   // v3.84: นับแยกรายแถว จัดแล้ว/ยังไม่จัด (bill_id เดียวรวมบิลได้ → มีทั้ง 2) · v3.86: เก็บวันคีย์แยกฝั่งด้วย (บิลรวมมีหลายวัน → โชว์วันให้ตรงมุมมอง)
+    else if(o.done){ b.doneLines++; b.doneTotal+=o.total; if(o._doneLog) b.logRestored++; /* v4.35: logRestored = บรรทัดที่สถานะใน Supabase หาย แล้วกู้จาก line_id ที่ export ไป */ if(od>b.dDate) b.dDate=od; } else { b.pendLines++; b.pendTotal+=o.total; if(od>b.pDate) b.pDate=od; }   // v3.84: นับแยกรายแถว จัดแล้ว/ยังไม่จัด (bill_id เดียวรวมบิลได้ → มีทั้ง 2) · v3.86: เก็บวันคีย์แยกฝั่งด้วย (บิลรวมมีหลายวัน → โชว์วันให้ตรงมุมมอง)
   }
   /* v4.05: บิลที่ติดด่านขายเชื่อ → ยัดเข้าหัวข้อย่อยของแท็บ 🏦 บัญชี (บล็อกทั้งใบ ไม่แยกรายบรรทัด) */
   const out=Object.values(bills);
@@ -3330,7 +3408,9 @@ function renderBillSelect(){
     // v3.89: มุมมอง "จัดบางส่วน" โชว์จำนวนที่ "ยังเหลือต้องจัด" + ป้ายบอกว่าจัดไปแล้วกี่รายการ
     const newTag = (doneView==='pending' && b.doneLines>0 && b.pendLines>0)
       ? ` <span title="จัดไปแล้ว ${b.doneLines} จากทั้งหมด ${b.lines} รายการ — ที่โชว์คือส่วนที่ยังเหลือ" style="background:#dbeafe;color:#1e40af;border-radius:6px;padding:1px 5px;font-size:10px">จัดแล้ว ${b.doneLines}/${b.lines}</span>`
-        + (b.partialCut ? ` <span title="เกิดจากแอดมินติ๊กสินค้าออกเองตอน Export" style="background:#fee2e2;color:#b91c1c;border-radius:6px;padding:1px 5px;font-size:10px">✂️ ติ๊กออกเอง</span>` : ` <span title="ค้างเอง (เช่น รอบนั้นสถานะยังไม่ผ่าน จัดไม่ได้) — ตอนนี้จัดได้แล้ว" style="background:#fef3c7;color:#92400e;border-radius:6px;padding:1px 5px;font-size:10px">⏳ ค้างจากรอบก่อน</span>`)
+        + (b.partialCut ? ` <span title="เกิดจากแอดมินติ๊กสินค้าออกเองตอน Export" style="background:#fee2e2;color:#b91c1c;border-radius:6px;padding:1px 5px;font-size:10px">✂️ ติ๊กออกเอง</span>`
+           : (b.logRestored>0 ? ` <span title="บิลนี้ export ไปแล้ว ${b.logRestored} บรรทัด แล้วเซลเพิ่มสินค้าเข้ามาทีหลัง — ที่โชว์คือเฉพาะของใหม่ที่ยังไม่เคยจัด" style="background:#dcfce7;color:#166534;border-radius:6px;padding:1px 5px;font-size:10px">➕ เพิ่มหลัง Export</span>`
+              : ` <span title="ค้างเอง (เช่น รอบนั้นสถานะยังไม่ผ่าน จัดไม่ได้) — ตอนนี้จัดได้แล้ว" style="background:#fef3c7;color:#92400e;border-radius:6px;padding:1px 5px;font-size:10px">⏳ ค้างจากรอบก่อน</span>`))
       : ((doneView==='done' && !_lost && b.pendLines>0) ? ` <span title="มีรายการใหม่เข้ามาหลังนำเข้า (bill_id เดียวกัน)" style="background:#fde68a;color:#92400e;border-radius:6px;padding:1px 5px;font-size:10px">🆕 ${b.pendLines}</span>` : '');   // v3.86
     /* v3.93 (Surat): คอลัมน์ "วงเงิน" ท้ายสุด — บิลที่มีบรรทัด "เปิดในวงเงิน" ให้ช่องเป็นสีแดงสะดุดตา + ใส่วงเงินของร้าน (จับด้วยรหัสร้าน)
      * แอดมินจะได้เห็นทันทีว่าบิลนี้ต้องเปิดในวงเงิน แล้วดูเองว่าต้องตัดอะไรบ้าง (นำเข้าได้ตามปกติ) */

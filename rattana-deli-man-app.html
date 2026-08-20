@@ -915,7 +915,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.256';
+const APP_VERSION='3.262';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1368,8 +1368,8 @@ function checkSession(){
 }
 
 /* ========== DATA LOADING ========== */
-async function loadUsers(){
-  const rows=await fetchSheet(CFG.usersSheetId,CFG.usersSheetName);
+const USERS_CACHE_KEY='users_v3262';   // ★ v3.262: แคชรายชื่อผู้ใช้ 24 ชม. — เปิดแอปไม่ต้องรอชีทตอบก่อน (ดู bootApp)
+function applyUsersRows_(rows){
   state.users=rows;
   const supSet=new Set();
   rows.forEach(r=>{
@@ -1378,6 +1378,11 @@ async function loadUsers(){
   });
   state.supervisors=[...supSet];
   state.drivers=rows.filter(r=>cleanCell(r['แผนก'])==='คลังและขนส่ง'&&String(r['Status']||'').trim().toLowerCase()==='active');
+}
+async function loadUsers(){
+  const rows=await fetchSheet(CFG.usersSheetId,CFG.usersSheetName);
+  applyUsersRows_(rows);
+  setCachedSheet(USERS_CACHE_KEY,rows);   // ★ v3.262: boot ครั้งหน้าใช้แคชก่อน แล้วรีเฟรชเบื้องหลัง
 }
 
 /* v3.120: โหลดรหัสเซลล์จากไฟล์ SLMN (A=SLMN_CODE, B=SLMN_NAME, C=NICKNAME) → ชื่อเซลล์มาตรฐาน = SLMN_NAME
@@ -1951,7 +1956,12 @@ function updateTabBadges(){
       }
       supCount=pendJobs.length+pendCN+pendPallet;
     }
-    setBadge_('driverJob',mineActive);
+    // ★ v3.260: รวม "ร้านที่มีของคืนรอเก็บ" เข้าไปในเลขแท็บงานของฉัน — เฉพาะคนขับ
+    //   ออฟฟิศ (บัญชี/คลัง/หัวหน้า) ไม่ต้องมีเลข เพราะเห็นของทั้งคลัง เลขจะค้างแดงตลอดเวลา (ยืนยัน 2026-08-17)
+    //   ใช้ตัวเลขที่โหลดไว้แล้ว (_cncGroups) ไม่ยิงชีทเพิ่ม — paintCncTodo_ เป็นคนโหลดให้
+    let cncShops=0;
+    try{ if(typeof cncSeeAll_!=='function' || !cncSeeAll_()) cncShops=(_cncGroups||[]).length; }catch(e){}
+    setBadge_('driverJob',mineActive+cncShops);
     setBadge_('supPending',supCount);
   }catch(e){ console.warn('updateTabBadges failed',e); }
 }
@@ -3446,7 +3456,19 @@ function cnBatchKey_(r){
   return 't:'+String(r['วัน เวลา']||'').trim()+'|'+String(r['รวมรายการ']||'');
 }
 /* ===== ประวัติ CN: อ่านชีท CN กลับมา → แก้ไข/ลบได้ (v1.93) ===== */
+/* ★ v3.262: ชีท CN (~0.4MB) เคยถูกดึงใหม่ทุกครั้งที่เปิดหน้า/สลับแท็บ (รออนุมัติ · งานของฉัน · ฟอร์มบิล · ปิดงาน · ประวัติ)
+   → single-flight + memo 15 วิ: เรียกซ้อนกัน = รอตัวเดิม ไม่ยิงซ้ำ · ผลสดอายุ < 15 วิ = ใช้เลย
+   หลังเขียน CN ทุกชนิด memo ถูกล้างผ่าน cnMemoBust_ (ใน postSyncGAS_) → หน้าจอหลังบันทึกได้ของสดเสมอ */
+let _cnHistMemo={ts:0,n:null,inflight:null};
 async function loadCNHistory(){
+  if(Array.isArray(state.cnHistory)&&_cnHistMemo.ts&&(Date.now()-_cnHistMemo.ts)<15000) return _cnHistMemo.n;
+  if(_cnHistMemo.inflight) return _cnHistMemo.inflight;
+  _cnHistMemo.inflight=loadCNHistoryNow_()
+    .then(n=>{ if(n===null){ _cnHistMemo.inflight=null; } else { _cnHistMemo={ts:Date.now(),n:n,inflight:null}; } return n; })
+    .catch(e=>{ _cnHistMemo.inflight=null; throw e; });
+  return _cnHistMemo.inflight;
+}
+async function loadCNHistoryNow_(){
   let rows;
   try{ rows=await fetchSheet(CFG.jobsSheetId,'CN'); }catch(e){ return null; }
   const groups={};
@@ -3521,7 +3543,7 @@ async function loadCNHistory(){
    หมายเหตุ: ไม่ยัดเข้า state.cnHistory เพราะจะไปกระทบการคิดยอดหักในบิล (cnAmtForBill_) */
 async function loadCNSalePending_(){
   let rows;
-  try{ rows=await fetchSheet(CFG.customerSheetId,'CN-Sale-dman',{fresh:true}); }catch(e){ return null; }
+  try{ rows=await fetchCNSaleRows_(); }catch(e){ return null; }   // ★ v3.262: ผ่าน memo — boot ฝั่งคลังเคยดึงชีทเดียวกันนี้ซ้อน 2 รอบใน 2 วิ
   const seen=state._cnLineSeen||{};
   const groups={}, order=[];
   rows.forEach(r=>{
@@ -5062,15 +5084,85 @@ function renderMyJobsList(){
       <button class="btn btn-gold mt-12" onclick="switchTab('sec-driver-home')">→ บันทึกเที่ยวส่ง</button>
     </div></div>`:''}
     ${coRec}
+    <div class="card mt-12" id="cncTodoCard" style="display:none;border:1px solid var(--gold)">
+      <div class="card-head"><h3>📦 ของคืนที่ต้องเก็บวันนี้</h3><span class="txt-sm txt-muted" id="cncTodoCount"></span></div>
+      <div class="card-body" id="cncTodoList"></div>
+    </div>
     <div class="card mt-12" id="myCNCard" style="display:none">
       <div class="card-head"><h3>📜 CN ของฉัน (ยังไม่อนุมัติ)</h3><span class="txt-sm txt-muted" id="myCNCount"></span></div>
       <div class="card-body" id="myCNList"></div>
     </div>
   `;
   if(state.user.canCoRecord) paintCoRecList_();
+  paintCncTodo_();   // ★ v3.257: ของคืนที่ต้องเก็บ — เอาขึ้นหน้างานของฉัน (เดิมอยู่แต่ในเมนู "เก็บของคืน" คนขับไม่เห็น)
   // v3.100: CN ของฉัน — โชว์ในหน้างานของฉัน (โหลดครั้งเดียวถ้ายังไม่มี แล้ว paint)
   if(Array.isArray(state.cnHistory)) paintMyCN_();
   else loadCNHistory().then(()=>{ if(state.currentTab==='sec-driver-job') paintMyCN_(); }).catch(()=>{});
+}
+/* ★★ v3.257: "ของคืนที่ต้องเก็บ" — โผล่ในหน้างานของฉัน (เดิมอยู่แต่ในเมนู "เก็บของคืน")
+   ปัญหาที่เจอ 2026-08-17: มี CN รอเก็บค้าง 76 รายการ/44 ร้าน เก่าสุด 14 วัน
+   เพราะคนขับต้องเข้าเมนูแยกถึงจะเห็น → ไม่รู้ว่ามีของต้องเก็บ เลยไม่ได้กด
+   ใช้ข้อมูล/ตัวกรองชุดเดียวกับหน้าเก็บของคืน (cncLoadData_) — ไม่ได้เปลี่ยนกติกาว่าใครเห็นอะไร
+   โหลดชีท CN-Sale-dman ~0.4MB → กันยิงซ้ำด้วย _cncTodoAt (60 วิ) ไม่ให้หน้างานของฉันช้า */
+let _cncTodoAt=0;
+/* ★ v3.258: ใครที่ "เห็นงานคนอื่นได้" → เห็นของคืนที่ต้องเก็บของขนส่งทั้งหมด (ในคลังตัวเอง)
+   บัญชี/พัฒนาธุรกิจ (canCoRecord) · หัวหน้า/คลังที่อนุมัติได้ (canApprove)
+   คนกลุ่มนี้ไม่ได้ขับรถ จึงไม่มีใบคุมของตัวเอง → ถ้ากรองด้วยใบคุมจะไม่เห็นอะไรเลย */
+function cncSeeAll_(){ const u=state.user||{}; return !!(u.canCoRecord||u.canApprove); }
+function cncDaysWait_(s){
+  const t=Date.parse(String(s||'').replace(' ','T')); if(isNaN(t)) return 0;
+  return Math.max(0,Math.floor((Date.now()-t)/86400000));
+}
+/* ★ v3.259: กดร้านในการ์ด "ของคืนที่ต้องเก็บ" → ไปหน้าเก็บของคืน แล้วเลื่อนไปที่ร้านนั้นเลย
+   เดิม switchTab เฉยๆ ตกลงกลางหน้าที่มีหลายสิบร้าน ต้องไล่หาเอง */
+function cncGoShop_(code){
+  const key=String(code||'').replace(/[^A-Za-z0-9]/g,'_');
+  switchTab('sec-cncollect');
+  let tries=0;
+  const seek=()=>{
+    const el=document.getElementById('cncshop_'+key);
+    if(!el){ if(++tries<25) return setTimeout(seek,200); return; }
+    // behavior:auto (ไม่ใช่ smooth) — smooth ไม่ทำงานในบาง WebView/มือถือ แล้วกลายเป็นไม่เลื่อนเลย
+    el.scrollIntoView({behavior:'auto',block:'center'});
+    const b=el.style.boxShadow;
+    el.style.transition='box-shadow .25s'; el.style.boxShadow='0 0 0 3px var(--gold)';
+    setTimeout(()=>{ el.style.boxShadow=b||''; },3500);
+  };
+  setTimeout(seek,250);
+}
+async function paintCncTodo_(){
+  const card=document.getElementById('cncTodoCard'); if(!card) return;
+  if(!cncSeeAll_() && !listMyJobs().length) return;       // คนขับที่ยังไม่รับงาน = ไม่ต้องโหลด
+  try{
+    if(!_cncGroups.length || (Date.now()-_cncTodoAt)>60000){ await cncLoadData_(); _cncTodoAt=Date.now(); }
+  }catch(e){ return; }
+  if(!document.getElementById('cncTodoCard')) return;   // เปลี่ยนหน้าไปแล้วระหว่างโหลด
+  let groups=_cncGroups||[];   // ★ v3.258: let เพราะฝั่งออฟฟิศจะ sort ใหม่ด้านล่าง
+  const lines=groups.reduce((s,g)=>s+g.lines.length,0);
+  if(!lines){ card.style.display='none'; return; }
+  card.style.display='';
+  const cnt=document.getElementById('cncTodoCount'); if(cnt) cnt.textContent=groups.length+' ร้าน · '+lines+' รายการ';
+  const box=document.getElementById('cncTodoList'); if(!box) return;
+  // ★ v3.258: ฝั่งออฟฟิศ (เห็นงานคนอื่น) → เรียงค้างนานสุดขึ้นก่อน จะได้ไล่ตามถูกตัว
+  const seeAll=cncSeeAll_();
+  const ageOf=g=>Math.max.apply(null,g.lines.map(l=>cncDaysWait_(l.when)).concat([0]));
+  if(seeAll) groups=groups.slice().sort((a,b)=>ageOf(b)-ageOf(a));
+  const head=document.querySelector('#cncTodoCard .card-head h3');
+  if(head) head.textContent=seeAll?'📦 ของคืนที่ขนส่งต้องเก็บ (ทุกคนขับ)':'📦 ของคืนที่ต้องเก็บวันนี้';
+  box.innerHTML=
+    '<div class="txt-xs txt-muted" style="margin-bottom:8px">'
+    +(seeAll?'ของคืนที่เซลล์สั่งแล้วยังไม่ถูกเก็บ (คลังของคุณ) — เรียงค้างนานสุดก่อน'
+            :'เซลล์สั่งให้เก็บของคืนจากร้านพวกนี้ — กดเพื่อไปหน้าเก็บของคืน')+'</div>'
+    +groups.map(g=>{
+      const items=g.lines.slice(0,3).map(l=>esc(l.name)+' <span class="txt-muted">×'+l.qty+' '+esc(l.unit||'')+'</span>').join(' · ');
+      const more=g.lines.length>3?' <span class="txt-muted">+อีก '+(g.lines.length-3)+'</span>':'';
+      const _d=ageOf(g);
+      const _age=_d>=1?' <span class="badge '+(_d>=3?'badge-danger':'badge-info')+'">ค้าง '+_d+' วัน</span>':'';
+      return '<div onclick="cncGoShop_(\x27'+String(g.shopCode||'').replace(/'/g,'')+'\x27)" style="cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-left:3px solid var(--gold);border-radius:8px;margin-bottom:6px">'
+        +'<div class="txt-bold" style="font-size:13px">🏪 '+esc(g.shopName||g.shopCode)+' <span class="badge">'+g.lines.length+' รายการ</span>'+_age+'</div>'
+        +'<div class="txt-xs txt-muted" style="margin-top:3px">'+items+more+'</div></div>';
+    }).join('');
+  if(typeof updateTabBadges==='function') updateTabBadges();   // ★ v3.260: โหลดของคืนเสร็จ → อัปเลขบนแท็บทันที
 }
 /* v3.97: งานขนส่งที่ฝ่ายบัญชีช่วยบันทึกได้ = งานที่คนขับจับไปแล้ว (in_progress/rejected) ไม่ใช่ของบัญชีเอง */
 function coRecordJobs_(){
@@ -7972,7 +8064,13 @@ function scheduleOutboxRetry(){
 /* ★ v3.241: รหัสอ้างอิงต่อ 1 การกดบันทึก (idempotency key) — ส่งไปกับ create_cn_own
    ถ้าแอป timeout แล้วผู้ใช้กดใหม่ จะส่งรหัสเดิม → GAS ไม่สร้างใบซ้ำ */
 function newReqId_(){ return 'R'+Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
+/* ★ v3.262: เขียนอะไรที่เกี่ยวกับ CN/รับคืนสำเร็จ → ล้าง memo ชีท CN + CN-Sale-dman ให้การอ่านรอบถัดไปได้ของสด */
 async function postSyncGAS_(payload,timeoutMs){
+  const r=await postSyncGASRaw_(payload,timeoutMs);
+  try{ if(r&&r.ok&&/cn|return/i.test(String((payload||{}).action||''))) cnMemoBust_(); }catch(e){}
+  return r;
+}
+async function postSyncGASRaw_(payload,timeoutMs){
   const url=getAppsUrl();
   if(!url) return {ok:false,error:'ยังไม่ได้ตั้งค่า Apps Script URL'};
   const ctrl=('AbortController' in window)?new AbortController():null;
@@ -8128,9 +8226,9 @@ async function syncToSheets(job){
    ปลอดภัย: ชีทยังเป็นตัวจริง · เขียนยังผ่าน GAS→ชีท · ถ้า Supabase ล่ม/ช้า/สำเนาเก่า → ถอยไปอ่านชีทเอง
    ปิดสวิตช์: SB_ENABLED=false แล้ว deploy (หรือใส่อีเมลใน SB_PILOT_EMAILS เพื่อจำกัดเฉพาะคนทดลอง)
    ═══════════════════════════════════════════════════════════════ */
-const SB_ENABLED=false;             // ★ สวิตช์หลัก — v3.248 ปิดกลับ (มีรายงาน "ใบคุมไม่ขึ้น") กลับไปอ่านชีทเหมือนเดิมก่อน
+const SB_ENABLED=true;              // ★ สวิตช์หลัก — v3.262 เปิดกลับ: "ใบคุมไม่ขึ้น" (เหตุที่ปิดใน v3.248) พิสูจน์แล้วว่ามาจาก pruneLocalJobs_ ไม่ใช่ Supabase (แก้จบ v3.249)
                                     //   เปิดครั้งแรก 2026-08-14 v3.247 หลังเทียบสำเนา vs ชีทครบ 3,274 บิล (ขาด 0 · เกิน 0 · ต่างกัน 0 ช่อง)
-                                    //   ตารางฝั่ง Supabase + trigger 5 นาที ยังทำงานอยู่ (สำเนายังสด) เปิดกลับได้ทันทีเมื่อพร้อม
+                                    //   เช็ค 2026-08-18: สำเนายังซิงก์สดทุก 5 นาที · อ่านบิลคนขับ 95-115ms (ชีท ~650ms) · ล่ม/เก่าเกิน 15 นาที → ถอยอ่านชีทเองอัตโนมัติ
 const SB_URL='https://uytzsuwapwkqkougorvb.supabase.co';        // โปรเจกต์ Rattana Base (ตัวเดียวกับแอปเช็คเอาท์)
 const SB_ANON='sb_publishable_2iDqojkyM2pqJxQJfvnxyg_Y6WMQ6Q8';  // publishable key — เขียนไม่ได้ (ทดสอบแล้ว RLS ปฏิเสธ 42501)
 const SB_PILOT_EMAILS=[];           // [] = ทุกคนที่โหลดแบบ scope · ใส่อีเมลเพื่อจำกัดเฉพาะคนทดลอง
@@ -8623,10 +8721,23 @@ function cncGrandTotal_(){
 }
 /* ★ v3.218: แยกตัวโหลด/จัดกลุ่มข้อมูล CN ออกมา — ใช้ร่วมกันระหว่างหน้า "เก็บของคืน" กับ "รออนุมัติ" (คลัง)
    คืน true = สำเร็จ · เติมค่าให้ _cncGroups/_cncDone/_cncApprove */
+/* ★ v3.262: ชีท CN-Sale-dman (~0.3MB) เคยถูกดึงซ้ำหลายจุดติดๆ กัน (การ์ดของคืนหน้างานของฉัน · หน้าเก็บของคืน · กล่องรออนุมัติ · CN เซลล์สั่งเก็บ)
+   → รวมเป็นตัวโหลดเดียว: กำลังโหลดอยู่ = รอตัวเดิม ไม่ยิงซ้อน · ผลล่าสุดอายุ < 60 วิ = ใช้เลย
+   หลังบันทึก/อนุมัติ CN ทุกชนิด memo ถูกล้างใน postSyncGAS_ (cnMemoBust_) → หน้าจอหลังกดบันทึกได้ของสดเสมอ */
+let _cnSaleMemo={ts:0,rows:null,inflight:null};
+function cnMemoBust_(){ _cnSaleMemo={ts:0,rows:null,inflight:null}; _cnHistMemo={ts:0,n:null,inflight:null}; }
+async function fetchCNSaleRows_(){
+  if(_cnSaleMemo.rows&&(Date.now()-_cnSaleMemo.ts)<60000) return _cnSaleMemo.rows;
+  if(_cnSaleMemo.inflight) return _cnSaleMemo.inflight;
+  _cnSaleMemo.inflight=fetchSheet(CFG.customerSheetId,'CN-Sale-dman',{fresh:true})
+    .then(rows=>{ _cnSaleMemo={ts:Date.now(),rows:rows||[],inflight:null}; return _cnSaleMemo.rows; })
+    .catch(e=>{ _cnSaleMemo.inflight=null; throw e; });
+  return _cnSaleMemo.inflight;
+}
 async function cncLoadData_(){
   let rows=[];
-  // v3.188: อ่านจากชีทต้นทาง CN-Sale-dman ตรงๆ (เรียลไทม์) — customerSheetId = ไฟล์เดียวกับต้นทาง
-  try{ rows=await fetchSheet(CFG.customerSheetId,'CN-Sale-dman',{fresh:true}); }
+  // v3.188: อ่านจากชีทต้นทาง CN-Sale-dman ตรงๆ — ★ v3.262: ผ่าน memo กันดึงซ้ำ (ดู fetchCNSaleRows_ ข้างบน)
+  try{ rows=await fetchCNSaleRows_(); }
   catch(e){ return false; }
   const pMap={},pOrd=[],dMap={},dOrd=[],aMap={},aOrd=[];
   (rows||[]).forEach(r=>{
@@ -8661,13 +8772,17 @@ async function cncLoadData_(){
         name:String(r['ชื่อสินค้า']||'').trim(), barcode:String(r['บาร์โค้ด']||'').trim(),
         qty:parseFloat(r['จำนวน'])||0, unit:String(r['หน่วย']||'').trim(),
         reason:String(r['สาเหตุรับคืน']||'').trim(), price:parseFloat(r['ราคา'])||0,
-        seller:String(r['ชื่อเซลล์']||'').trim(), src:_src });
+        seller:String(r['ชื่อเซลล์']||'').trim(), src:_src,
+        when:cleanCell(r['วัน เวลา']) });   // ★ v3.258: ไว้คิด "ค้างกี่วัน"
     }
   });
   // v3.201: โชว์เฉพาะร้านที่อยู่ในใบคุมที่รับงานมา (ตรงเส้นทางที่ไปส่งจริง) — ร้านนอกใบคุมไม่ขึ้น
   const _myCodes=cncJobShopCodes_();
   // v3.214: ไม่ได้รับงาน = ไม่โชว์อะไรเลย (เดิม fallback โชว์ทุกร้าน — user สั่งให้ตัดออก)
-  _cncGroups=_myCodes.size?pOrd.map(k=>pMap[k]).filter(g=>_myCodes.has(String(g.shopCode||'').trim().toUpperCase())):[];
+  // ★ v3.258: คนที่เห็นงานคนอื่นได้ (บัญชี/พัฒนาธุรกิจ/หัวหน้า-คลัง) → เห็นของคืนที่ต้องเก็บทั้งหมดในคลังตัวเอง
+  //   ไม่ผูกกับใบคุมของตัวเอง เพราะคนกลุ่มนี้ไม่ได้ขับรถ แต่ต้องไล่ตามของที่ค้าง
+  _cncGroups=cncSeeAll_() ? pOrd.map(k=>pMap[k])
+    : (_myCodes.size?pOrd.map(k=>pMap[k]).filter(g=>_myCodes.has(String(g.shopCode||'').trim().toUpperCase())):[]);
   _cncDone=dOrd.map(k=>dMap[k]);
   _cncApprove=aOrd.map(k=>aMap[k]);
   if(_cncSelCode && !_cncGroups.some(g=>g.shopCode===_cncSelCode)) _cncSelCode='';   // ร้านที่เลือกไม่เหลือ → รีเซ็ต
@@ -8856,7 +8971,7 @@ function cncShopCardHtml_(gi){
           <button type="button" onclick="cncStep_(${gi},${li},1)" style="border:none;background:var(--row-alt);color:var(--gold-ink);width:36px;height:38px;font-size:20px;font-weight:800;cursor:pointer">+</button>
         </span>
       </div>`).join('');
-  return `<div class="card" style="margin-bottom:14px;overflow:hidden">
+  return `<div class="card" id="cncshop_${String(g.shopCode||'').replace(/[^A-Za-z0-9]/g,'_')}" style="margin-bottom:14px;overflow:hidden">
       <div style="background:#eef3fb;border-bottom:1px solid var(--border);padding:10px 12px;display:flex;align-items:center;gap:8px">
         <span style="font-size:17px">🏪</span>
         <span style="flex:1;min-width:0">
@@ -8992,7 +9107,7 @@ async function saveOwnCN_(){
   else showToast('บันทึกไม่สำเร็จ: '+((r&&r.error)||'ลองใหม่'),'error');
 }
 
-const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.252 (v3.252 เมนูกู้แถว "บันทึกเที่ยวส่ง" ที่หายไป จากข้อมูลบิลในชีท Cin (ผู้ส่งสินค้า→ชื่อคนขับ · ทะเบียนรถ · Warehouse · U_ADD→วันเวลาที่รับงาน) แก้อาการงานผี คนขับ/ทะเบียน "–" คลัง W1 โผล่ในกล่องช่วยบันทึก · รายงานก่อน–ถามยืนยันแล้วค่อยต่อท้าย ไม่แก้/ไม่ลบแถวเดิม | v3.250 Sync ใบคุมอัตโนมัติเพิ่มเป็น 5 รอบ/วัน: 0:00 · 8:00 · 9:00 · 15:00 · 21:00 (setupJadRotTriggers · เดิม 9/15/21) | v3.246 sbCell_ ต้องคืนข้อความเหมือน gviz เป๊ะ: ปัดเป็นวินาที (Sheets เก็บทศนิยมของวัน gviz ปัด แต่ formatDate ตัดทิ้ง = ต่าง 1 วิ 3,399 ช่อง) + เที่ยงคืน = คืนวันที่ล้วน ไม่เติม 00:00:00 (3,281 ช่อง) — เทียบครบ 3,268 บิลแล้ว | v3.244 ★ นำร่อง Supabase: มิเรอร์ชีท Cin+INPUT ขึ้นตาราง dman_bills/dman_jobs (jsonb ทั้งแถว ไม่ต้องแก้ตารางเวลาชีทเพิ่มคอลัมน์) ผ่าน sbSyncNow_/sbSyncTick + เมนู ⚡ + trigger 5 นาที · โหมด delta ใช้คอลัมน์ "แก้ไขเมื่อ" · ตั้งค่าใน Script properties SB_URL/SB_SERVICE_KEY (ลบ SB_URL = ปิดทันที) · ทางเขียนเดิมไม่ถูกแตะเลย ชีทยังเป็นตัวจริง 100% | v3.241 กัน CN ซ้ำจาก timeout: create_cn_own รับ reqId (idempotency) → เจอ reqId เดิมในชีท = ไม่สร้างใบใหม่ คืนใบเดิม + เขียนคอลัมน์ reqId ต่อท้าย CN-Sale-dman | v3.237 เมนูจัดการบิลซ้ำในชีท Cin แบบปลอดภัย: 🔍 ตรวจ (รายงานอย่างเดียว) + 🗑 ล้าง (ถามยืนยัน · ลบเฉพาะแถวเก่า เก็บแถวล่างสุด · deleteRows เป็นช่วง ไม่ clearContents) | v3.236 ★ ใส่ LockService ครอบ "บันทึกใบคุม/บิล" (เดิมเป็น action เดียวที่ไม่มีล็อก) — batchUpsertByHeader_ เป็น read-modify-write พอ 2 คำขอของใบคุมเดียวกันคาบเกี่ยวกัน ต่างฝ่ายอ่านชีทก่อนอีกฝ่ายเขียนเสร็จ → เห็นว่ายังไม่มีแถว → ต่อท้ายทั้งคู่ = บิลเบิ้ลบรรทัด | v3.234 เมนู "📤 มิเรอร์ CN เก่า (รออนุมัติ) → ชีท Sale App" (backfillReturnToSale_) ไล่ใบที่ยังไม่มี cnLineId ลง CN-Sale-dman ย้อนหลัง + เติม cnLineId กลับ | v3.233 "ลง 2 ที่": save_return (ฟอร์มรับคืนเดิม) มิเรอร์ลงชีท CN-Sale-dman ด้วย ผ่าน saleCNMirrorFromReturn_ (cnId ขึ้นต้น CNR · ที่มา=ขนส่ง · เก็บแล้ว/รออนุมัติ) + เขียน cnLineId กลับลงชีท CN ของ D-Man ให้จับคู่กัน · re-save/ลบ CN = ลบเฉพาะแถว CNR ของบิลนั้น ไม่แตะแถว Sales App · approve_cn มิเรอร์ผลอนุมัติด้วยเกณฑ์ "มี cnLineId" (ครอบคลุมทั้ง CNT/CNR) · cancel_job มาร์กแถวที่ถูกลบเป็นปฏิเสธฝั่ง Sale App | v3.229 action void_cn: คลัง "ไม่อนุมัติ" = ยกเลิก CN ใบนั้นทันที (สถานะคืน="ไม่อนุมัติ" · ล้างเลขที่เอกสาร CN/ภาพอนุมัติ) ต่างจาก reject_cn ที่ตีกลับให้คนขับแก้ · แถวขนส่งเก็บเองมิเรอร์ไป CN-Sale-dman เป็น "ปฏิเสธ" + เหตุผล "❌ ไม่อนุมัติ (ยกเลิก CN)" | v3.226 คลังอนุมัติ/ตีกลับ/ยกเลิกอนุมัติ CN จากหน้าอนุมัติ D-Man → มิเรอร์กลับชีทต้นทาง CN-Sale-dman (ไฟล์ Sale App) เฉพาะแถวขนส่งเก็บเอง จับด้วย cnLineId (เดิมลงแต่ชีท CN ของ D-Man ฝั่งเซลล์ไม่เห็นว่าอนุมัติแล้ว) + เมนู "🔁 ซิงก์ผลอนุมัติ CN" ไล่ย้อนหลัง | v3.224 คอลัมน์ ชื่อ-สกุล ลงชื่อจริงอย่างเดียว ตัดชื่อเล่นในวงเล็บออก (ให้ตรงรูปแบบ Sale App) | v3.223 undo_cn_collect เขียนคอลัมน์ "ยกเลิกการเก็บ" ในชีท CN-Sale-dman (วันเวลา+ชื่อคนกด) ให้ฝั่งเซลล์รู้ว่ายกเลิก · เก็บใหม่แล้วล้างข้อความออก | v3.221 create_cn_own ลงชีท 'CN' ของ D-Man ทันทีที่กดบันทึก (สถานะคืน="รออนุมัติ") ไม่ต้องรอคลังอนุมัติ · อนุมัติ/ปฏิเสธค่อยอัปเดตแถวเดิม (idempotent ตาม cnLineId) | v3.215 เก็บเองบังคับเลขที่บิล → ชีท CN D-Man เก็บ "เลขที่บิล DS" ด้วย · กันข้อมูลหาย: save_return + cancel_job(delCNForJobExcept_) ข้ามแถว ประเภทคืน="ขนส่งเก็บ" ไม่ลบ | v3.213 เลิกก๊อปชีท CN ลง CNSaleapp — แอปอ่าน CN-Sale-dman (ไฟล์ Sale App) ตรงๆ อยู่แล้ว · ย้าย "ตรวจซ้ำ" ไปเขียนคอลัมน์ท้ายชีทต้นทางเอง (markCNDupOnSource_ + เมนู/trigger 30 นาที · ลบ trigger ก๊อปเก่าให้) | v3.198 INPUT บันทึกเที่ยว: เขียนทีม (คนขับ/ผู้ช่วย/ทะเบียน/การส่ง) เฉพาะเมื่อ editTeam:true (assign/แก้ทีม) เท่านั้น → บันทึกบิล/ช่วยบันทึกไม่ทับทีม กันชื่อคนขับ↔ผู้ช่วยสลับ | v3.197 create_cn_own รับช่องเพิ่มจากฟอร์มเต็ม (ประเภทคืน/ประเภทบิล/เลขที่บิล DS/ชื่อเซลล์/ผิดพลาดจาก) → เก็บใน CN-Sale-dman · ชีท CN D-Man พาประเภทบิลมาด้วย เลขที่บิล DS คงว่างกันชน save_return | v3.196 create_cn_own cnId เติมสุ่ม 3 หลักต่อท้าย CNT+timestamp กันชนกันเองในมิลลิวินาทีเดียว | v3.195 create_cn_own → ตอนคลังอนุมัติเก็บ ลงชีท 'CN' ของ D-Man ด้วย (2 ชีท) · idempotent ตาม cnLineId · reject/undo = มาร์กแถว CN D-Man เป็น "ยกเลิก" ไม่ลบ · เฉพาะที่มา=ขนส่ง | v3.194 action create_cn_own: ขนส่งเก็บเอง (ไม่มีใบสั่งเซลล์) เพิ่มแถวลง CN-Sale-dman ที่มา=ขนส่ง+หมายเหตุ"ขนส่งเก็บ"+เก็บแล้ว/รออนุมัติ (append) | v3.191 undo_cn_collect reset ครบ: รวมเลขที่เอกสาร CN + ภาพอนุมัติ CN (AE/AF) | v3.190 อนุมัติ CN: กรอกเลขที่เอกสาร CN + ภาพอนุมัติ CN ตอนคลังอนุมัติ (เขียนคอลัมน์เดิม AE/AF เฉพาะเมื่อกรอก) | v3.189 action approve_cn_collect: คลังอนุมัติ/ปฏิเสธรอบเก็บ CN (สถานะอนุมัติเก็บ/รหัสรอบเก็บ) + save_cn_collect ใส่รหัสรอบเก็บ+รออนุมัติ + undo ล็อกที่อนุมัติแล้ว | v3.188 action undo_cn_collect: ยกเลิกการเก็บ—เคลียร์เฉพาะคอลัมน์ระบบตาม cnLineId ไม่ลบแถว/ไม่แตะข้อมูลเดิม | v3.183 action save_cn_collect: ขนส่งเก็บของคืน CN → เขียนกลับ CN-Sale-dman ตาม cnLineId + คอลัมน์ ภาพเก็บขนส่ง/เวลาเก็บ | v3.182 Status บิล: ขาดโดยไม่มีเงินจริง (มีแต่ CN/ลดหนี้หัก) → "ยังไม่ชำระ" | v3.181 Status จ่าย: ไม่มีเงินจริงแม้มี CN/ลดหนี้หัก → "ไม่ชำระ" ไม่ปล่อยว่าง | CN: คอลัมน์ cnId + ชื่อเซลล์=เซลล์สั่งคืน จาก cnRef | รวมช่องหักยอด: creditNote รวม CN+นอกCN, ลดหนี้=ส่วนนอกCN subset ไม่บวกซ้ำ + เหตุผลลดหนี้ ชีท Cin | เมนู Sync CN-Sale-dman → CNSaleapp + trigger 5 นาที + มาร์ก CN ซ้ำ เนื้อหาทั้งใบ | คอลัมน์ "วันเครดิต" ชีท Cin จาก b.creditDays, ไม่มีวัน=0 | ขอสินค้าเพิ่มขึ้นรถ: request_load + approve/reject/delete_load_req + ชีท "ขอสินค้าเพิ่ม" + Discord | v3.130 CN คืนเต็มบิล → คอลัมน์ "ใบลดหนี้" ชีท Cin | v3.124 cancel_job เก็บ CN คนอื่น | v3.122 fixCinSalesmanColumn | v3.120 SLMN | v3.90 แท็ก [CN: ...]) */
+const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.261 (v3.261 create_cn_own กันซ้ำชั้นที่ 2 แบบ "เนื้อหาเดียวกัน" (บิล+รายการ+ยอด ตรงเป๊ะ ในวันเดียวกัน) — reqId กันได้แค่กดส่งซ้ำของคำขอเดิม พอแอปค้างแล้วทำใหม่ตั้งแต่ต้นจะได้ reqId ใหม่แล้วเล็ดลอด | v3.252 เมนูกู้แถว "บันทึกเที่ยวส่ง" ที่หายไป จากข้อมูลบิลในชีท Cin (ผู้ส่งสินค้า→ชื่อคนขับ · ทะเบียนรถ · Warehouse · U_ADD→วันเวลาที่รับงาน) แก้อาการงานผี คนขับ/ทะเบียน "–" คลัง W1 โผล่ในกล่องช่วยบันทึก · รายงานก่อน–ถามยืนยันแล้วค่อยต่อท้าย ไม่แก้/ไม่ลบแถวเดิม | v3.250 Sync ใบคุมอัตโนมัติเพิ่มเป็น 5 รอบ/วัน: 0:00 · 8:00 · 9:00 · 15:00 · 21:00 (setupJadRotTriggers · เดิม 9/15/21) | v3.246 sbCell_ ต้องคืนข้อความเหมือน gviz เป๊ะ: ปัดเป็นวินาที (Sheets เก็บทศนิยมของวัน gviz ปัด แต่ formatDate ตัดทิ้ง = ต่าง 1 วิ 3,399 ช่อง) + เที่ยงคืน = คืนวันที่ล้วน ไม่เติม 00:00:00 (3,281 ช่อง) — เทียบครบ 3,268 บิลแล้ว | v3.244 ★ นำร่อง Supabase: มิเรอร์ชีท Cin+INPUT ขึ้นตาราง dman_bills/dman_jobs (jsonb ทั้งแถว ไม่ต้องแก้ตารางเวลาชีทเพิ่มคอลัมน์) ผ่าน sbSyncNow_/sbSyncTick + เมนู ⚡ + trigger 5 นาที · โหมด delta ใช้คอลัมน์ "แก้ไขเมื่อ" · ตั้งค่าใน Script properties SB_URL/SB_SERVICE_KEY (ลบ SB_URL = ปิดทันที) · ทางเขียนเดิมไม่ถูกแตะเลย ชีทยังเป็นตัวจริง 100% | v3.241 กัน CN ซ้ำจาก timeout: create_cn_own รับ reqId (idempotency) → เจอ reqId เดิมในชีท = ไม่สร้างใบใหม่ คืนใบเดิม + เขียนคอลัมน์ reqId ต่อท้าย CN-Sale-dman | v3.237 เมนูจัดการบิลซ้ำในชีท Cin แบบปลอดภัย: 🔍 ตรวจ (รายงานอย่างเดียว) + 🗑 ล้าง (ถามยืนยัน · ลบเฉพาะแถวเก่า เก็บแถวล่างสุด · deleteRows เป็นช่วง ไม่ clearContents) | v3.236 ★ ใส่ LockService ครอบ "บันทึกใบคุม/บิล" (เดิมเป็น action เดียวที่ไม่มีล็อก) — batchUpsertByHeader_ เป็น read-modify-write พอ 2 คำขอของใบคุมเดียวกันคาบเกี่ยวกัน ต่างฝ่ายอ่านชีทก่อนอีกฝ่ายเขียนเสร็จ → เห็นว่ายังไม่มีแถว → ต่อท้ายทั้งคู่ = บิลเบิ้ลบรรทัด | v3.234 เมนู "📤 มิเรอร์ CN เก่า (รออนุมัติ) → ชีท Sale App" (backfillReturnToSale_) ไล่ใบที่ยังไม่มี cnLineId ลง CN-Sale-dman ย้อนหลัง + เติม cnLineId กลับ | v3.233 "ลง 2 ที่": save_return (ฟอร์มรับคืนเดิม) มิเรอร์ลงชีท CN-Sale-dman ด้วย ผ่าน saleCNMirrorFromReturn_ (cnId ขึ้นต้น CNR · ที่มา=ขนส่ง · เก็บแล้ว/รออนุมัติ) + เขียน cnLineId กลับลงชีท CN ของ D-Man ให้จับคู่กัน · re-save/ลบ CN = ลบเฉพาะแถว CNR ของบิลนั้น ไม่แตะแถว Sales App · approve_cn มิเรอร์ผลอนุมัติด้วยเกณฑ์ "มี cnLineId" (ครอบคลุมทั้ง CNT/CNR) · cancel_job มาร์กแถวที่ถูกลบเป็นปฏิเสธฝั่ง Sale App | v3.229 action void_cn: คลัง "ไม่อนุมัติ" = ยกเลิก CN ใบนั้นทันที (สถานะคืน="ไม่อนุมัติ" · ล้างเลขที่เอกสาร CN/ภาพอนุมัติ) ต่างจาก reject_cn ที่ตีกลับให้คนขับแก้ · แถวขนส่งเก็บเองมิเรอร์ไป CN-Sale-dman เป็น "ปฏิเสธ" + เหตุผล "❌ ไม่อนุมัติ (ยกเลิก CN)" | v3.226 คลังอนุมัติ/ตีกลับ/ยกเลิกอนุมัติ CN จากหน้าอนุมัติ D-Man → มิเรอร์กลับชีทต้นทาง CN-Sale-dman (ไฟล์ Sale App) เฉพาะแถวขนส่งเก็บเอง จับด้วย cnLineId (เดิมลงแต่ชีท CN ของ D-Man ฝั่งเซลล์ไม่เห็นว่าอนุมัติแล้ว) + เมนู "🔁 ซิงก์ผลอนุมัติ CN" ไล่ย้อนหลัง | v3.224 คอลัมน์ ชื่อ-สกุล ลงชื่อจริงอย่างเดียว ตัดชื่อเล่นในวงเล็บออก (ให้ตรงรูปแบบ Sale App) | v3.223 undo_cn_collect เขียนคอลัมน์ "ยกเลิกการเก็บ" ในชีท CN-Sale-dman (วันเวลา+ชื่อคนกด) ให้ฝั่งเซลล์รู้ว่ายกเลิก · เก็บใหม่แล้วล้างข้อความออก | v3.221 create_cn_own ลงชีท 'CN' ของ D-Man ทันทีที่กดบันทึก (สถานะคืน="รออนุมัติ") ไม่ต้องรอคลังอนุมัติ · อนุมัติ/ปฏิเสธค่อยอัปเดตแถวเดิม (idempotent ตาม cnLineId) | v3.215 เก็บเองบังคับเลขที่บิล → ชีท CN D-Man เก็บ "เลขที่บิล DS" ด้วย · กันข้อมูลหาย: save_return + cancel_job(delCNForJobExcept_) ข้ามแถว ประเภทคืน="ขนส่งเก็บ" ไม่ลบ | v3.213 เลิกก๊อปชีท CN ลง CNSaleapp — แอปอ่าน CN-Sale-dman (ไฟล์ Sale App) ตรงๆ อยู่แล้ว · ย้าย "ตรวจซ้ำ" ไปเขียนคอลัมน์ท้ายชีทต้นทางเอง (markCNDupOnSource_ + เมนู/trigger 30 นาที · ลบ trigger ก๊อปเก่าให้) | v3.198 INPUT บันทึกเที่ยว: เขียนทีม (คนขับ/ผู้ช่วย/ทะเบียน/การส่ง) เฉพาะเมื่อ editTeam:true (assign/แก้ทีม) เท่านั้น → บันทึกบิล/ช่วยบันทึกไม่ทับทีม กันชื่อคนขับ↔ผู้ช่วยสลับ | v3.197 create_cn_own รับช่องเพิ่มจากฟอร์มเต็ม (ประเภทคืน/ประเภทบิล/เลขที่บิล DS/ชื่อเซลล์/ผิดพลาดจาก) → เก็บใน CN-Sale-dman · ชีท CN D-Man พาประเภทบิลมาด้วย เลขที่บิล DS คงว่างกันชน save_return | v3.196 create_cn_own cnId เติมสุ่ม 3 หลักต่อท้าย CNT+timestamp กันชนกันเองในมิลลิวินาทีเดียว | v3.195 create_cn_own → ตอนคลังอนุมัติเก็บ ลงชีท 'CN' ของ D-Man ด้วย (2 ชีท) · idempotent ตาม cnLineId · reject/undo = มาร์กแถว CN D-Man เป็น "ยกเลิก" ไม่ลบ · เฉพาะที่มา=ขนส่ง | v3.194 action create_cn_own: ขนส่งเก็บเอง (ไม่มีใบสั่งเซลล์) เพิ่มแถวลง CN-Sale-dman ที่มา=ขนส่ง+หมายเหตุ"ขนส่งเก็บ"+เก็บแล้ว/รออนุมัติ (append) | v3.191 undo_cn_collect reset ครบ: รวมเลขที่เอกสาร CN + ภาพอนุมัติ CN (AE/AF) | v3.190 อนุมัติ CN: กรอกเลขที่เอกสาร CN + ภาพอนุมัติ CN ตอนคลังอนุมัติ (เขียนคอลัมน์เดิม AE/AF เฉพาะเมื่อกรอก) | v3.189 action approve_cn_collect: คลังอนุมัติ/ปฏิเสธรอบเก็บ CN (สถานะอนุมัติเก็บ/รหัสรอบเก็บ) + save_cn_collect ใส่รหัสรอบเก็บ+รออนุมัติ + undo ล็อกที่อนุมัติแล้ว | v3.188 action undo_cn_collect: ยกเลิกการเก็บ—เคลียร์เฉพาะคอลัมน์ระบบตาม cnLineId ไม่ลบแถว/ไม่แตะข้อมูลเดิม | v3.183 action save_cn_collect: ขนส่งเก็บของคืน CN → เขียนกลับ CN-Sale-dman ตาม cnLineId + คอลัมน์ ภาพเก็บขนส่ง/เวลาเก็บ | v3.182 Status บิล: ขาดโดยไม่มีเงินจริง (มีแต่ CN/ลดหนี้หัก) → "ยังไม่ชำระ" | v3.181 Status จ่าย: ไม่มีเงินจริงแม้มี CN/ลดหนี้หัก → "ไม่ชำระ" ไม่ปล่อยว่าง | CN: คอลัมน์ cnId + ชื่อเซลล์=เซลล์สั่งคืน จาก cnRef | รวมช่องหักยอด: creditNote รวม CN+นอกCN, ลดหนี้=ส่วนนอกCN subset ไม่บวกซ้ำ + เหตุผลลดหนี้ ชีท Cin | เมนู Sync CN-Sale-dman → CNSaleapp + trigger 5 นาที + มาร์ก CN ซ้ำ เนื้อหาทั้งใบ | คอลัมน์ "วันเครดิต" ชีท Cin จาก b.creditDays, ไม่มีวัน=0 | ขอสินค้าเพิ่มขึ้นรถ: request_load + approve/reject/delete_load_req + ชีท "ขอสินค้าเพิ่ม" + Discord | v3.130 CN คืนเต็มบิล → คอลัมน์ "ใบลดหนี้" ชีท Cin | v3.124 cancel_job เก็บ CN คนอื่น | v3.122 fixCinSalesmanColumn | v3.120 SLMN | v3.90 แท็ก [CN: ...]) */
 const SHEET_INPUT='บันทึกเที่ยวส่ง';
 const SHEET_CIN='บันทึกบิลและการชำระ';
 const SHEET_CN='CN';
@@ -9044,7 +9159,7 @@ const HEADERS_CIN=['เลขใบคุม','Doc_Date','Doc_No','Customer_Code
 function doGet(e){
   let drive='unknown';
   try{ DriveApp.getRootFolder().getName(); drive='OK'; }catch(err){ drive='NOT_AUTHORIZED'; }
-  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.252',drive:drive}))
+  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.261',drive:drive}))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -9149,6 +9264,48 @@ function doPost(e){
               const _cId=_h0.indexOf('cnId');
               const _oldId=(_cId>=0)?String(sh.getRange(_i+2,_cId+1).getValue()||''):'';
               return ContentService.createTextOutput(JSON.stringify({ok:true,dup:true,cnId:_oldId,rows:0,note:'คำขอนี้บันทึกไปแล้ว — ใช้ใบเดิม ไม่สร้างซ้ำ'})).setMimeType(ContentService.MimeType.JSON);
+            }
+          }
+        }
+        /* ★★ v3.261: กันซ้ำชั้นที่ 2 — "เนื้อหาเดียวกัน" (reqId กันได้แค่การกดส่งซ้ำของคำขอเดิม)
+           เคสจริง 2026-08-18 (ซัน): แอปค้าง → ปิดเปิดใหม่ → ทำ CN ใหม่ตั้งแต่ต้น → ได้ reqId ใหม่ → เล็ดลอดเป็นใบที่ 2 ต้องลบมือ
+           เกณฑ์ = บิลเดียวกัน + รายการ (บาร์โค้ด:จำนวน:ราคา เรียงแล้ว) + ยอดรวม ตรงกันเป๊ะ + อยู่ในวันเดียวกัน
+           (แนวเดียวกับ markCNDupOnSource_ · จำกัดวันเดียวกันเพื่อไม่บล็อกการคืนของชุดเดิมซ้ำคนละวันซึ่งเป็นเรื่องปกติ) */
+        var _sigNew=(function(){
+          var a=items.map(function(it){ return String(it.barcode||it.name||'')+':'+(parseFloat(it.qty)||0)+':'+(parseFloat(it.price)||0); });
+          a.sort(); return a.join(',');
+        })();
+        var _totNew=items.reduce(function(s,it){ return s+(parseFloat(it.qty)||0)*(parseFloat(it.price)||0); },0);
+        var _docNew=String(data.docNo||data.billNo||'').trim();
+        if(sh.getLastRow()>1){
+          var _wS=Math.max(sh.getLastColumn(),1);
+          var _hS=sh.getRange(1,1,1,_wS).getValues()[0].map(function(x){ return String(x).trim(); });
+          var _iC=function(n){ return _hS.indexOf(n); };
+          var cS_id=_iC('cnId'), cS_doc=_iC('เลขที่บิล DS'), cS_bc=_iC('บาร์โค้ด'), cS_nm=_iC('ชื่อสินค้า'),
+              cS_q=_iC('จำนวน'), cS_p=_iC('ราคา'), cS_t=_iC('วัน เวลา'), cS_st=_iC('สถานะคืน'), cS_src=_iC('ที่มา');
+          if(cS_id>=0&&cS_doc>=0){
+            var _vals=sh.getRange(2,1,sh.getLastRow()-1,_wS).getValues();
+            var _dayNew=Utilities.formatDate(now,'Asia/Bangkok','yyyy-MM-dd');
+            var _grp={};
+            for(var _k=0;_k<_vals.length;_k++){
+              var _rw=_vals[_k];
+              if(String(_rw[cS_doc]||'').trim()!==_docNew) continue;
+              if(cS_src>=0 && String(_rw[cS_src]||'').indexOf('ขนส่ง')<0) continue;
+              var _tv=(cS_t>=0)?_rw[cS_t]:null;
+              if(!(_tv instanceof Date)) continue;
+              if(Utilities.formatDate(_tv,'Asia/Bangkok','yyyy-MM-dd')!==_dayNew) continue;
+              if(cS_st>=0 && String(_rw[cS_st]||'').indexOf('ไม่อนุมัติ')>=0) continue;   // ใบที่ถูกยกเลิกแล้ว ไม่นับ
+              var _gid=String(_rw[cS_id]||'').trim(); if(!_gid) continue;
+              if(!_grp[_gid]) _grp[_gid]=[];
+              _grp[_gid].push(String((cS_bc>=0?_rw[cS_bc]:'')||(cS_nm>=0?_rw[cS_nm]:'')||'')
+                +':'+(parseFloat(cS_q>=0?_rw[cS_q]:0)||0)+':'+(parseFloat(cS_p>=0?_rw[cS_p]:0)||0));
+            }
+            for(var _gk in _grp){
+              var _s=_grp[_gk].slice(); _s.sort();
+              if(_s.join(',')===_sigNew){
+                return ContentService.createTextOutput(JSON.stringify({ok:true,dup:true,cnId:_gk,rows:0,
+                  note:'มี CN ใบนี้อยู่แล้ว (บิล/รายการ/ยอด ตรงกันทั้งหมด ในวันเดียวกัน) — ใช้ใบเดิม'})).setMimeType(ContentService.MimeType.JSON);
+              }
             }
           }
         }
@@ -11548,16 +11705,33 @@ async function refreshData(){
 window.addEventListener('scroll',()=>{ const b=$('backToTop'); if(b) b.classList.toggle('show',window.scrollY>300); },{passive:true});   // v3.93: passive → ไม่บล็อกการเลื่อนบนมือถือ
 
 /* ========== BOOT ========== */
+/* v3.128 (แยกเป็นฟังก์ชัน v3.262): อัปเดตคลังของ user จากชีท Users — เรียกซ้ำหลังรีเฟรชรายชื่อเบื้องหลังได้ */
+function reDeriveMyWarehouse_(){
+  if(!(state.user&&state.user.email&&state.users.length)) return;
+  const _me=state.users.find(x=>normEmail(x['E-mail'])===normEmail(state.user.email));
+  if(_me){ state.user.warehouse=cleanCell(_me['W']||''); persistUser(); }
+}
 async function bootApp(){
   showSpinner('เข้าสู่ระบบ...');
   try{
     if(loadStore().dark) document.body.classList.add('dark');
-    if(!state.users.length){ await loadUsers(); }
-    // v3.128: re-derive คลังของ user จากชีท Users (กัน session เก่าที่ default W ว่าง → 'HQ' ค้าง → เห็นข้อมูลรวมทั้งที่ไม่ควร)
-    if(state.user&&state.user.email&&state.users.length){
-      const _me=state.users.find(x=>normEmail(x['E-mail'])===normEmail(state.user.email));
-      if(_me){ state.user.warehouse=cleanCell(_me['W']||''); persistUser(); }
+    // ★ v3.262: เปิดแอปให้ติดทันที — มีแคชรายชื่อผู้ใช้ = ใช้ก่อนเลย แล้วรีเฟรชเบื้องหลัง
+    //   เดิมทุกการเปิดแอปต้องรอชีท Users ตอบก่อนถึงเห็นหน้าจอ (เน็ตอืด = จอค้าง "เข้าสู่ระบบ..." สูงสุด 15 วิ
+    //   และถ้าโหลดล้ม bootApp โยน error → โดนเตะออกไปหน้า login ทั้งที่มี session = อาการ "เข้าแอปไม่ได้")
+    if(!state.users.length){
+      const _cu=getCachedSheet(USERS_CACHE_KEY,CACHE_TTL_LONG);
+      if(_cu&&_cu.length){
+        applyUsersRows_(_cu);
+        loadUsers().then(()=>reDeriveMyWarehouse_()).catch(()=>{});
+      } else {
+        try{ await loadUsers(); }
+        catch(e){
+          if(!(state.user&&state.user.email)) throw e;                  // ไม่มี session จริง → ไปหน้า login ตามเดิม
+          loadUsers().then(()=>reDeriveMyWarehouse_()).catch(()=>{});   // มี session → เข้าแอปก่อน รายชื่อตามมาทีหลัง
+        }
+      }
     }
+    reDeriveMyWarehouse_();   // v3.128: กัน session เก่าที่ default W ว่าง → 'HQ' ค้าง → เห็นข้อมูลรวมทั้งที่ไม่ควร
     // ★ แสดง UI ทันที (หน้าหลัก 5 การ์ดไม่ต้องใช้ข้อมูล)
     $('loginScreen').style.display='none';
     $('appScreen').style.display='flex';
@@ -11881,10 +12055,16 @@ let _updBannerShown=false;
 async function checkAppUpdate_(){
   try{
     if(_updBannerShown||document.hidden) return;
-    const r=await fetch(location.pathname+'?vcheck='+Date.now(),{cache:'no-store'});
+    // ★ v3.262: ขอแค่ 128KB แรกพอ (เลขเวอร์ชันอยู่ช่วง ~67KB) — เดิมโหลดทั้งไฟล์ ~1.2MB ทุก 10 นาทีทุกเครื่อง กินเน็ตมือถือฟรีๆ
+    const r=await fetch(location.pathname+'?vcheck='+Date.now(),{cache:'no-store',headers:{'Range':'bytes=0-131071'}});
     if(!r.ok) return;
-    const t=await r.text();
-    const m=t.match(/APP_VERSION\s*=\s*'([\d.]+)'/);
+    let t=await r.text();
+    let m=t.match(/APP_VERSION\s*=\s*'([\d.]+)'/);
+    if(!m&&r.status===206){   // เผื่ออนาคตตำแหน่งเวอร์ชันเลื่อนเกินช่วงที่ขอ → โหลดเต็มแบบเดิม
+      const r2=await fetch(location.pathname+'?vcheck='+Date.now(),{cache:'no-store'});
+      if(!r2.ok) return;
+      t=await r2.text(); m=t.match(/APP_VERSION\s*=\s*'([\d.]+)'/);
+    }
     if(!m||m[1]===APP_VERSION) return;
     // ★ v3.207: อัปเดตให้เอง ไม่ต้องกดอะไร — ถ้าปลอดภัย (ไม่มีข้อมูลค้างส่ง, ไม่ได้เปิดหน้าต่าง, ไม่ได้กรอกอยู่)
     const _ae=document.activeElement;
