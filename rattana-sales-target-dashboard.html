@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana ยอดขายเทียบเป้าหมาย v7.83</title>
+<title>Rattana ยอดขายเทียบเป้าหมาย v7.84</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -247,7 +247,7 @@ body.tab-plan .filter-bar{display:none!important}
 <div class="page" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v7.83</small>
+      <small>ยอดขายเทียบเป้าหมาย v7.84</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -480,6 +480,27 @@ async function loadFromSheetsDedup(sheetId, sheetName) {
   const res = await fetch(url);
   if (!res.ok) throw new Error('fetch failed: ' + sheetName);
   return parseCsvDedup(await res.text());
+}
+async function loadFromSheetsRaw(sheetId, sheetName) {
+  /* Returns array-of-arrays (no header row), bypasses duplicate-column issue */
+  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('fetch failed: ' + sheetName);
+  const text = await res.text();
+  const rows = []; let row = [], cell = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQ) { if (ch==='"'){ if(text[i+1]==='"'){cell+='"';i++;}else inQ=false; } else cell+=ch; }
+    else {
+      if (ch==='"') inQ=true;
+      else if (ch===',') { row.push(cell.trim()); cell=''; }
+      else if (ch==='\r') { /* skip */ }
+      else if (ch==='\n') { row.push(cell.trim()); rows.push(row); row=[]; cell=''; }
+      else cell+=ch;
+    }
+  }
+  if (cell.length||row.length) { row.push(cell.trim()); rows.push(row); }
+  return rows.slice(1).filter(r=>r.some(c=>c)); // strip header, skip blank rows
 }
 
 const TTL = 5*60*1000;
@@ -865,7 +886,7 @@ async function loadData(showSpin) {
       loadFromSheets(OUTLET_SHEET_ID, SUP_SHEET_NAME),
       loadFromSheets(OUTLET_SHEET_ID, W1_SHEET_NAME),
     ]);
-    const planRaw    = await loadFromSheetsDedup(OUTLET_SHEET_ID, PLAN_SHEET_NAME).catch(()=>[]);
+    const planRaw    = await loadFromSheetsRaw(OUTLET_SHEET_ID, PLAN_SHEET_NAME).catch(()=>[]);
     state.planRaw = planRaw;
     const rspRaw     = await loadFromSheets(OUTLET_SHEET_ID, RSP_SHEET_NAME).catch(()=>[]);
     const rspPlikRaw   = await loadFromSheets(OUTLET_SHEET_ID, RSP_PLIK_SHEET_NAME).catch(()=>[]);
@@ -2880,10 +2901,11 @@ function buildPlanBpSales(bpRaw) {
   return map;
 }
 
-function buildPlanHalf(cats, suffix, sheetRows) {
-  const kVal = 'จำนวน' + suffix;
-  const kPct = '%' + suffix;
-  const kCat = 'Cat' + suffix;
+function buildPlanHalf(cats, colOffset, sheetRows) {
+  /* colOffset=0 (left) or 5 (right); sheetRows = array-of-arrays */
+  const iVal = colOffset + 2;  // จำนวน column index
+  const iPct = colOffset + 4;  // % column index
+  const iCat = colOffset;      // Cat column index
 
   let h = `<table class="plan-tbl"><thead><tr>
     <th colspan="2">Cat / หัวข้อ</th><th>จำนวน</th><th>หน่วย</th><th>%</th>
@@ -2891,11 +2913,11 @@ function buildPlanHalf(cats, suffix, sheetRows) {
 
   cats.forEach((cat, ci) => {
     const base = ci * 8;
-    const block = Array.from({length:8}, (_,k) => sheetRows[base+k] || {});
-    const targetNum = parseFloat(String(block[0]?.[kVal]||'').replace(/,/g,'')) || 0;
+    const block = Array.from({length:8}, (_,k) => sheetRows[base+k] || []);
+    const targetNum = parseFloat(String(block[0]?.[iVal]||'').replace(/,/g,'')) || 0;
 
-    /* Compute cat cell groups from sheet cat column */
-    const catCol = block.map(r => (r[kCat]||'').trim());
+    /* Compute cat cell groups from Cat column */
+    const catCol = block.map(r => String(r[iCat]||'').trim());
     const groups = [];
     catCol.forEach((v, i) => {
       if (v) groups.push({idx:i, span:0, val:v});
@@ -2906,8 +2928,8 @@ function buildPlanHalf(cats, suffix, sheetRows) {
     }
 
     PLAN_LABELS.forEach((label, i) => {
-      const raw = block[i]?.[kVal] || '';
-      const pctRaw = block[i]?.[kPct] || '';
+      const raw = block[i]?.[iVal] || '';
+      const pctRaw = block[i]?.[iPct] || '';
       const numVal = parseFloat(String(raw).replace(/,/g,'')) || 0;
       const pctDisp = pctRaw || (targetNum && numVal ? (numVal/targetNum*100).toFixed(2)+'%' : '');
       const pColor = i===0 ? '#333' : planPctColor(numVal, targetNum);
@@ -2942,10 +2964,10 @@ async function renderPlan() {
 
   let sheetRows = [];
   try {
-    const raw = (state.planRaw && state.planRaw.length > 1)
+    const raw = (state.planRaw && state.planRaw.length > 0)
       ? state.planRaw
-      : await loadFromSheetsDedup(OUTLET_SHEET_ID, PLAN_SHEET_NAME);
-    sheetRows = raw; // parseCsvDedup already strips header row
+      : await loadFromSheetsRaw(OUTLET_SHEET_ID, PLAN_SHEET_NAME);
+    sheetRows = raw;
   } catch(e) { /* show structure with empty values */ }
 
   el.innerHTML = `
@@ -2955,8 +2977,8 @@ async function renderPlan() {
         <button class="btn btn-outline btn-sm" style="margin-left:12px" onclick="state.planRaw=null;renderPlan()">⟳ รีเฟรช</button>
       </div>
       <div class="plan-layout">
-        <div class="plan-half">${buildPlanHalf(PLAN_STRUCT.L, '', sheetRows)}</div>
-        <div class="plan-half">${buildPlanHalf(PLAN_STRUCT.R, '_2', sheetRows)}</div>
+        <div class="plan-half">${buildPlanHalf(PLAN_STRUCT.L, 0, sheetRows)}</div>
+        <div class="plan-half">${buildPlanHalf(PLAN_STRUCT.R, 5, sheetRows)}</div>
       </div>
     </div>`;
 }
