@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.22</title>
+<title>HR Rattana v5.23</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -360,7 +360,7 @@ body.dark .home-today-date { color:var(--gold) }
 .approve-card {
   display:flex;align-items:center;gap:8px;
   background:#e9eff9;border:1px solid #c5d3ec;
-  border-radius:12px;padding:9px 8px 9px 11px;margin-bottom:10px;cursor:pointer
+  border-radius:12px;padding:9px 8px 9px 11px;margin:12px 0 10px;cursor:pointer
 }
 .approve-card .apc-ico { width:26px;height:26px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:13px }
 .approve-card .apc-mid { flex:1;min-width:0 }
@@ -3504,7 +3504,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.22';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.23';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -7802,7 +7802,7 @@ function showPage(p) {
   if (p === 'shift') renderShiftPage();
   if (p === 'manpower') renderManpowerPage();
   if (p === 'reports') renderReportsPage();
-  if (p === 'home') { renderHomeTodayCard(); renderHomeFeed(); checkIncompletePairs(); updateApproveAlert(); }
+  if (p === 'home') { renderHomeTodayCard(); renderHomeFeed(); checkIncompletePairs(); primeApproveAlertFromCache_(); updateApproveAlert(); }
   if (p === 'docs') renderDocsPage();
   if (p === 'changeoffday') renderChangeOffdayPage();
   if (p === 'overtime') renderOvertimeList();
@@ -8540,6 +8540,11 @@ function initApp() {
   // v9.8: prefetch รายชื่อเข้า cache ล่วงหน้า — เปิดฟอร์มแรกก็ขึ้นทันที ไม่ต้องรอ API
   setTimeout(() => { try { getOfficeRef_().catch(()=>{}); resolveMyTeam().catch(()=>{}); retryFaceSync_(); } catch(_) {} }, 1200);
 
+  // v12.23: ของที่ไม่พึ่งคิว sync ชีทหลัก — ยิงขนานทันที หน้าแรกขึ้นไว ไม่ต้องรอทีละอัน
+  primeApproveAlertFromCache_();                          // เลขรออนุมัติล่าสุดจากแคชเครื่อง โชว์ก่อนเลย
+  renderHomeFeed();                                        // ฟีด = 3 API อิสระ ไม่เกี่ยวกับโหลดชีทหลัก
+  if (currentUser.role === 'hr') updateApproveAlert();     // HR ไม่ใช้ allUsers — ดึงเลขจริงได้ทันที
+
   // Setup tab inputs (HR/admin only — employee ไม่เห็น)
   if (currentUser.role === 'hr') {
     const radEl = document.getElementById('cfgRadius'); if (radEl) radEl.value = settings.radius;
@@ -8589,10 +8594,9 @@ function initApp() {
     fillKioskBranches();
     renderTodayStatus();
     evaluateAction();   // refresh ปุ่ม "เข้างาน/ออกงาน" ตาม logs ใหม่
-    renderHomeTodayCard();  // v2.0: อัพเดท today card ด้วย
-    renderHomeFeed();       // v2.0: โหลด news feed
+    renderHomeTodayCard();  // v2.0: อัพเดท today card ด้วย (ฟีดยิงขนานไปแล้วตั้งแต่ initApp — v12.23)
     checkScanPairAlert();   // v12.0: เตือนลืมสแกนเข้า/ออก (เมื่อวาน+วันนี้) หลัง logs ตรงกับชีทแล้ว
-    updateApproveAlert();   // v12.21: การ์ดเอกสารรออนุมัติ (หัวหน้า/HR)
+    updateApproveAlert();   // v12.21/23: รอบนี้ allUsers พร้อมแล้ว — หัวหน้า (ไม่ใช่ HR) ได้เลขจริงตรงนี้
   }, 200);
 
   // Update time + button state every second (only when home tab active)
@@ -10466,25 +10470,41 @@ async function loadApprovals() {
 let _pendingApprove = null;   // { count, byCat } | null = ไม่มีสิทธิ์/ยังไม่รู้
 let _approveAlertAt = 0;      // เวลาดึงล่าสุด — no-arg เรียกซ้ำใน 60 วิ จะวาดจากแคชแทนยิง API
 
+let _approveAlertBusy = false;
 async function updateApproveAlert(preItems) {
   try {
     if (!currentUser || !canApprove()) { _pendingApprove = null; renderApproveAlert_(); return; }
     let items = preItems;
     if (!items) {
+      if (_approveAlertBusy) return;   // มีรอบดึงค้างอยู่ — ไม่ยิงซ้อน
       if (Date.now() - _approveAlertAt < 60000) { renderApproveAlert_(); return; }
-      _approveAlertAt = Date.now();
-      const res = await callAppsScript('getPendingAll', { supervisorId: currentUser.empId });
-      const all = res.items || [];
-      const team = await resolveMyTeam();
-      items = team.isHR ? all : all.filter(it => inMyTeam(team, it.empId, it.name));
-    } else {
-      _approveAlertAt = Date.now();
+      _approveAlertBusy = true;
+      try {
+        const res = await callAppsScript('getPendingAll', { supervisorId: currentUser.empId });
+        const all = res.items || [];
+        const team = await resolveMyTeam();
+        // v12.23: หัวหน้าที่ทีมว่างเพราะ allUsers ยังไม่โหลด (วินาทีแรกหลังเปิดแอป) — อย่าเพิ่งสรุปว่า 0 รอรอบถัดไป
+        if (!team.isHR && !team.members.length && !(allUsers && allUsers.length)) return;
+        items = team.isHR ? all : all.filter(it => inMyTeam(team, it.empId, it.name));
+      } finally { _approveAlertBusy = false; }
     }
+    _approveAlertAt = Date.now();
     const byCat = {};
     items.forEach(it => { const c = APPROVE_SHEET_LABEL[it.sheet] || it.sheet || 'อื่นๆ'; byCat[c] = (byCat[c] || 0) + 1; });
     _pendingApprove = { count: items.length, byCat: byCat };
+    try { localStorage.setItem(approveCacheKey_(), JSON.stringify({ count: items.length, byCat: byCat })); } catch (_) {}
     renderApproveAlert_();
   } catch (e) { console.warn('[approveAlert]', e); }
+}
+
+/* v12.23: แคชเลขล่าสุดไว้ในเครื่อง — เปิดแอปมาโชว์ทันที ไม่ต้องรอ API แล้วค่อยอัปเดตตามของจริง */
+function approveCacheKey_() { return 'approveCardCache_' + (currentUser ? currentUser.empId : ''); }
+function primeApproveAlertFromCache_() {
+  try {
+    if (!currentUser || !canApprove() || _pendingApprove) return;
+    const c = JSON.parse(localStorage.getItem(approveCacheKey_()) || 'null');
+    if (c && typeof c.count === 'number') { _pendingApprove = { count: c.count, byCat: c.byCat || {} }; renderApproveAlert_(); }
+  } catch (_) {}
 }
 
 /* v12.22: กด ✕ = ซ่อนการ์ดทั้งวัน (จำต่อคนต่อเครื่อง) — แต่ถ้ามีเอกสาร"ใหม่"เพิ่มจากตอนกดปิด การ์ดเด้งกลับ
