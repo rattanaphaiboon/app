@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.34</title>
+<title>HR Rattana v5.35</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3578,7 +3578,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.34';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.35';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -5200,6 +5200,7 @@ async function startEmpCamera() {
     if (!got) throw new Error('NoFrame');
 
     setEmpOverlay(false);
+    _empCamBusy = false;   // v12.35: กล้องพร้อมแล้ว — งานที่เหลือ (จับหน้า/โหลดโมเดล) ไม่ใช่การเปิดกล้อง อย่าให้โหมด QR ต้องรอ
     startEmpMatching();                        // v12.15: เริ่มลูปก่อน — ลูปจะรอ/ลองโหลดโมเดลเอง
     if (!faceapiReady) await loadFaceModels();
   } catch (e) {
@@ -5914,16 +5915,13 @@ async function startQRScanMode() {
   const btn = document.getElementById('btnQRScan');
   if (btn) btn.textContent = '⏳ เล็งกล้องหลังไปที่ QR ประจำจุด...';
   try {
-    // v12.34: กดจากหน้าเลือกวิธี = กล้องหน้าอาจยังเปิดไม่เสร็จ (เกิน 0.7 วิที่เคยเดาไว้) — รอให้พร้อมก่อนค่อยสลับกล้องหลัง
-    // เดิมเด้งยกเลิกเงียบๆ → ผู้ใช้ค้างอยู่กับกล้องหน้า "เหมือนเดิม"
+    // v12.35: รอเฉพาะกล้องที่ "กำลังเปิดค้างอยู่" ให้เสร็จก่อน (กันขอกล้องชนกัน) — ไม่รอโมเดลใบหน้า
+    // จากนั้น _qrSetCam_(true) เปิด/สลับเป็นกล้องหลังเองตรงๆ ไม่ว่าจะมีกล้องหน้าเปิดอยู่หรือไม่
     const t0 = Date.now();
-    let kicked = false;
-    while ((!empStream || _empCamBusy) && _qrScanning && Date.now() - t0 < 15000) {
-      if (!empStream && !_empCamBusy && !kicked) { kicked = true; startEmpCamera(); }   // กล้องไม่ได้เปิดอยู่เลย → เปิดให้
-      await new Promise(r => setTimeout(r, 300));
+    while (_empCamBusy && _qrScanning && Date.now() - t0 < 15000) {
+      await new Promise(r => setTimeout(r, 250));
     }
     if (!_qrScanning) return;   // ถูกยกเลิก/ปิดจอระหว่างรอ
-    if (!empStream) throw new Error('เปิดกล้องไม่สำเร็จ — ลองกดสแกน QR อีกครั้ง');
     if ('BarcodeDetector' in window && !_qrDetector) {
       try { _qrDetector = new BarcodeDetector({ formats: ['qr_code'] }); } catch (_) { _qrDetector = null; }
     }
@@ -5939,6 +5937,7 @@ async function startQRScanMode() {
     if (chkFace) chkFace.textContent = '📷 กำลังใช้กล้องหลังสแกน QR...';
     await _qrSetCam_(true);
     if (!_qrScanning) return;   // ถูกยกเลิกระหว่างสลับกล้อง
+    setEmpOverlay(false);       // v12.35: เข้าทาง QR ตรงๆ — เอาม่าน "กล้องปิด" ที่อาจค้างจากรอบก่อนออก
     if (_qrInterval) clearInterval(_qrInterval);
     _qrInterval = setInterval(_qrTick_, 600);
   } catch (e) {
@@ -8912,12 +8911,10 @@ function closeMethodChooser() {
 }
 function chooseMethodFace() { closeMethodChooser(); startCheckinScan_(); }
 function chooseMethodQR() {
-  // v12.32: ผู้ใช้เลือก QR = เข้าโหมด QR เสมอ — เดิมบล็อกเมื่อ "โมเดลโหลดได้" ทั้งที่จับหน้าคนจริงอาจไม่ผ่าน
-  // (เคสจริง: พนักงานสแกนหน้าไม่ผ่าน กด QR แล้วโดนเด้งกลับไปหน้าที่ใช้ไม่ได้) — รูป+GPS ยังเก็บครบ, ระบบประทับ qr:จุด ให้ HR ตรวจย้อนได้
+  // v12.32/35: ผู้ใช้เลือก QR = เข้าโหมด QR ตรงๆ — จอสแกนเปิดด้วย "กล้องหลัง" ทันที ไม่แวะกล้องหน้า/ไม่รอโมเดลใบหน้า
+  // (รูป+GPS ยังเก็บครบ — สแกน QR ติดแล้วระบบสลับกลับกล้องหน้าให้ถ่ายรูปคนตอนกดบันทึก)
   closeMethodChooser();
-  startCheckinScan_();
-  // v12.34: startQRScanMode รอกล้องพร้อมเองแล้ว — หน่วงแค่ให้จอสแกนเปิดก่อนพอ
-  setTimeout(() => { try { startQRScanMode(); } catch (_) {} }, 300);
+  startCheckinScan_('qr');
 }
 function chooseMethodGo(p) { closeMethodChooser(); showPage(p); }
 function chooseMethodPrint() { closeMethodChooser(); openQRPrint(); }
@@ -8936,7 +8933,7 @@ async function startCheckinFlow() {
   openMethodChooser();   // v12.26: ขึ้นหน้าเลือกวิธีก่อนเสมอ — ปุ่มกลางค่อยเข้าจอสแกนจริง
 }
 
-async function startCheckinScan_() {
+async function startCheckinScan_(mode) {
   // v12.0: เพิ่งสแกนไปไม่ถึง SCAN_GAP_MIN นาที — ไม่ต้องเปิดกล้องเลย แจ้งทันทีว่าสแกนแล้ว
   const gapStart = (currentUser && currentUser.empId) ? scanGapInfo_(currentUser.empId) : null;
   if (gapStart) { showScanGapModal_(gapStart); return; }
@@ -8956,6 +8953,13 @@ async function startCheckinScan_() {
 
   overlay.style.display = 'block';
   document.body.style.overflow = 'hidden';
+
+  // v12.35: เข้าทางปุ่ม "สแกน QR ประจำจุด" — เปิดกล้องหลังตรงๆ ไม่เปิดกล้องหน้า/ไม่รอโมเดลใบหน้าเลย
+  if (mode === 'qr') {
+    setTimeout(() => getGps(), 300);
+    startQRScanMode();
+    return;
+  }
 
   // v7.2: เปิดกล้อง + GPS ก่อน แล้วค่อยโหลดโมเดล (กันโมเดลโหลดช้าแล้วกล้องไม่ติด)
   startEmpCamera();
