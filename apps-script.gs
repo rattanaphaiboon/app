@@ -50,13 +50,24 @@ function getOrCreateFolder(parentFolder, name) {
 }
 
 function getRootFolder() {
+  const props = PropertiesService.getScriptProperties();
+  const cached = props.getProperty('ROOT_FOLDER_ID');
+  if (cached) { try { return DriveApp.getFolderById(cached); } catch(e) {} }
   const it = DriveApp.getFoldersByName(FOLDER_NAME);
-  return it.hasNext() ? it.next() : DriveApp.createFolder(FOLDER_NAME);
+  const folder = it.hasNext() ? it.next() : DriveApp.createFolder(FOLDER_NAME);
+  props.setProperty('ROOT_FOLDER_ID', folder.getId());
+  return folder;
 }
 
 // คืน folder สำหรับแต่ละประเภทเอกสาร
 function getFolderForType(type, root) {
-  return getOrCreateFolder(root, FOLDER_NAMES[type] || type);
+  const props = PropertiesService.getScriptProperties();
+  const key = 'FOLDER_' + type;
+  const cached = props.getProperty(key);
+  if (cached) { try { return DriveApp.getFolderById(cached); } catch(e) {} }
+  const folder = getOrCreateFolder(root, FOLDER_NAMES[type] || type);
+  props.setProperty(key, folder.getId());
+  return folder;
 }
 
 // สร้าง label ชื่อไฟล์: "ชื่อร้านค้า วัน/เดือน/ปี"
