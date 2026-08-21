@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v4.24</title>
+<title>Rattana Online Order v4.26</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -689,7 +689,7 @@ body.head-mode .bn-badge{display:none!important}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.24</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.26</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -3896,54 +3896,50 @@ async function qShopCap(rule, shopCode){
 function qMatchesClause(col, bcs){
   return col+" matches '"+bcs.map(b=>String(b).replace(/[^0-9A-Za-z]/g,'')).join('|')+"'";
 }
-function qSumCases(t, bcMap, cBc, cUnit, cQty){
-  let cs=0;
-  t.rows.forEach(r=>{
-    const p=bcMap[qBc(r[cBc])] || bcMap[qBc(r[cBc]).replace(/^0+/,'')];
-    if(!p) return;
-    cs += qToCases(p, qUnitLabel(r[cUnit]), r[cQty]);
-  });
-  return cs;
-}
+/* 🐛 v4.25 — รหัสร้านในชีทออเดอร์เป็นคอลัมน์ "ตัวเลข" (ROO order = number · QuotaShopCap = text)
+   where H = "2222222222" จึงคืน 0 แถว **เงียบ ๆ ไม่ error** -> ยอดที่ร้านใช้ไปเป็น 0 ตลอด
+   = ซื้อ 1 ลัง ยืนยัน เปิดบิลใหม่ ซื้อได้อีก 1 ลัง วนไม่จบ (เจอจริง 20/08 ร้าน mnsv ซื้อ 3 ลังแล้วป้ายยังบอกได้อีก 1)
+   แก้: ไม่กรองรหัสร้านในคิวรี่แล้ว -> group by รหัสร้าน แล้วเทียบเองแบบ string (กันทั้ง number/text/0 นำหน้า)
+   ผลพลอยได้: ได้ทั้ง "ก้อนรวม" และ "ยอดร้านนี้" จากคิวรี่เดียว -> คำขอลดจาก 8 เหลือ 4 ต่อ 1 แถวโควต้า */
+function qCode(v){ return String(v==null?'':v).trim().replace(/\.0+$/,''); }
 async function qUsedFor(rule, bcs, bcMap, shopCode, draftOid){
   const today=qToday(), tISO=today.replace(/\//g,'-');
   const from=rule.from||'2000/01/01', to=rule.to||'2999/12/31';
   const mBill=qMatchesClause('H',bcs), mOrd=qMatchesClause('J',bcs);
-  const shopQ=shopCode?String(shopCode).replace(/"/g,''):'';
-  /* DS_DC : DI_DATE เป็น TEXT (เช็คแล้ว) เทียบ string ตรง ๆ ได้ */
-  const q=[
-    ['bill','pool', QCFG.erpSheet,{sheet:'DS_DC'},
-      'select H,J,sum(K) where ('+mBill+') and A >= "'+from+'" and A <= "'+to+'" group by H,J', 0,1,2],
-    ['bill','shop', QCFG.erpSheet,{sheet:'DS_DC'},
-      shopQ?('select H,J,sum(K) where ('+mBill+') and A >= "'+from+'" and A <= "'+to+'" and C = "'+shopQ+'" group by H,J'):'', 0,1,2],
-    /* Order ของ Sales App : "วัน" เป็น TEXT (เช็คแล้ว) */
-    ['sale','pool', QCFG.salesSheet,{sheet:'Order'},
-      'select J,N,sum(M) where ('+mOrd+') and A = "'+today+'" and (L is null or L = "") group by J,N', 0,1,2],
-    ['sale','shop', QCFG.salesSheet,{sheet:'Order'},
-      shopQ?('select J,N,sum(M) where ('+mOrd+') and A = "'+today+'" and (L is null or L = "") and H = "'+shopQ+'" group by J,N'):'', 0,1,2]
+  const rooJob=gid=>({ src:'roo', sheet:CFG.regSheetId, ref:{gid:gid},
+    /* "วัน" ของแท็บ ROO เป็น type date (ต่างจาก DS_DC/Sales ที่เป็น text) -> ต้องใช้ date literal
+       ตัดบิลร่างของตัวเองออก กันหักซ้ำกับตะกร้าในเครื่อง */
+    tq:'select H,J,N,sum(M) where ('+mOrd+') and A >= date "'+tISO+'" and (L is null or L = "")'
+       +' and (U = "รออนุมัติ" or U = "อนุมัติ")'
+       +(draftOid?(' and Q != "'+String(draftOid).replace(/"/g,'')+'"'):'')+' group by H,J,N' });
+  const jobs=[
+    { src:'bill', sheet:QCFG.erpSheet, ref:{sheet:'DS_DC'},
+      tq:'select C,H,J,sum(K) where ('+mBill+') and A >= "'+from+'" and A <= "'+to+'" group by C,H,J' },
+    { src:'sale', sheet:QCFG.salesSheet, ref:{sheet:'Order'},
+      tq:'select H,J,N,sum(M) where ('+mOrd+') and A = "'+today+'" and (L is null or L = "") group by H,J,N' },
+    rooJob(QCFG.rooOrderGid), rooJob(QCFG.rooSpecialGid)
   ];
-  /* แท็บออเดอร์ของ ROO เอง (2 แท็บ) - "วัน" เป็น type date ต้องใช้ date literal ไม่ใช่ string
-     ตัดแถวบิลร่างของตัวเองออก (Q != draft) กันหักซ้ำกับตะกร้าในเครื่อง */
-  [QCFG.rooOrderGid, QCFG.rooSpecialGid].forEach(gid=>{
-    const base='select J,N,sum(M) where ('+mOrd+') and A >= date "'+tISO+'" and (L is null or L = "")'
-      + ' and (U = "รออนุมัติ" or U = "อนุมัติ")' + (draftOid?(' and Q != "'+String(draftOid).replace(/"/g,'')+'"'):'');
-    q.push(['roo','pool', CFG.regSheetId,{gid:gid}, base+' group by J,N', 0,1,2]);
-    q.push(['roo','shop', CFG.regSheetId,{gid:gid}, shopQ?(base+' and H = "'+shopQ+'" group by J,N'):'', 0,1,2]);
-  });
-  const res=await Promise.all(q.map(async x=>{
-    if(!x[4]) return { src:x[0], lv:x[1], cs:0, skip:true };
+  const want=qCode(shopCode);
+  const res=await Promise.all(jobs.map(async j=>{
     try{
-      const t=await qGviz(x[2],x[3],x[4]);
-      return { src:x[0], lv:x[1], cs:qSumCases(t,bcMap,x[5],x[6],x[7]) };
-    }catch(e){ console.warn('[quota] '+x[0]+'/'+x[1]+' ล้ม:',e&&e.message); return { src:x[0], lv:x[1], err:String(e&&e.message||e) }; }
+      const t=await qGviz(j.sheet, j.ref, j.tq);
+      let pool=0, shop=0;
+      t.rows.forEach(r=>{
+        const p=bcMap[qBc(r[1])] || bcMap[qBc(r[1]).replace(/^0+/,'')];
+        if(!p) return;
+        const cs=qToCases(p, qUnitLabel(r[2]), r[3]);
+        pool+=cs;
+        if(want && qCode(r[0])===want) shop+=cs;
+      });
+      return { src:j.src, pool, shop, rows:t.rows.length };
+    }catch(e){ console.warn('[quota] '+j.src+' ล้ม:',e&&e.message); return { src:j.src, err:String(e&&e.message||e) }; }
   }));
   const bad=res.filter(r=>r.err);
-  const sum=lv=>res.filter(r=>r.lv===lv&&!r.err).reduce((a,b)=>a+(b.cs||0),0);
-  return { ok:!bad.length, err:bad.map(b=>b.src).join(','), pool:sum('pool'), shop:sum('shop'),
-           detail:{ bill:res.filter(r=>r.src==='bill'&&r.lv==='shop').reduce((a,b)=>a+(b.cs||0),0),
-                    today:res.filter(r=>r.src!=='bill'&&r.lv==='shop').reduce((a,b)=>a+(b.cs||0),0) } };
+  const sum=(k,f)=>res.filter(r=>!r.err&&(!f||f(r))).reduce((a,b)=>a+(b[k]||0),0);
+  return { ok:!bad.length, err:bad.map(b=>b.src).join(','),
+    pool:sum('pool'), shop:sum('shop'),
+    detail:{ bill:sum('shop',r=>r.src==='bill'), today:sum('shop',r=>r.src!=='bill') } };
 }
-
 /* ── โหลดสถานะโควต้าทั้งหมด (เรียกหลังล็อกอิน + หลังยืนยันออเดอร์) ── */
 async function quotaBoot(force){
   /* กำลังโหลดอยู่: force = รอตัวเดิมจบก่อนแล้วค่อยดึงใหม่ (เดิมถูกทิ้งเงียบ) */
@@ -4179,7 +4175,8 @@ async function loadSummary(opts){
   if(!currentCustomer){ if(_sumActive()) box.innerHTML='<div class="sum-empty">🔒 กรุณาเข้าสู่ระบบก่อนดูสรุปออเดอร์</div>'; return; }
   const key=_custKey();
   if(_sumShop!==key){ _sumData=null; _sumTs=0; _sumShop=key; }              // เปลี่ยนร้าน → ทิ้งของร้านเก่า
-  if(!opts.force && _sumData && Date.now()-_sumTs<60000){ if(_sumActive()) renderSummary(); return; }
+  if(!opts.force && _sumData && Date.now()-_sumTs<30000){ if(_sumActive()) renderSummary(); return; }
+  /* v4.26: หลังกดยืนยันออเดอร์ ให้ดึงใหม่เสมอ (ของที่เพิ่งสั่งย้ายจาก "ยังไม่ยืนยัน" ไป "ยืนยันแล้ว") */
   /* 🔒 v3.79 fix 2 จุดที่เพิ่งพลาดใน v3.78:
      ① เดิม `if(_sumInflight) return` ไม่ดูว่าเป็นคำขอ "ของร้านไหน" → สลับร้านตอนคำขอร้านเก่ายังค้าง
         = ร้านใหม่ไม่ได้ยิงคำขอของตัวเอง แล้วผลของร้านเก่ากลับมาเขียนทับ → เห็นบิล/ยอดเงินของร้านอื่น
@@ -4190,10 +4187,15 @@ async function loadSummary(opts){
   const g=++_sumGen, k0=key;
   const p=(async()=>{
     try{
-      const r=await jsonpGet({ action:'getOrders', shop:clean(currentCustomer.name||''), uid:clean(currentCustomer.uid||''), code:clean(currentCustomer.shopCode||'') }, 20000);
+      /* 📋 v4.26 — เดิมใช้ action=getOrders ซึ่งหลังบ้านอ่านแค่แท็บ `order`
+         -> ร้านส่งทุกร้านเปิดแท็บนี้มาเจอว่างเปล่ามาตลอด (ร่ำรวยนิรันดร์มีบิลจริง 11 ใบ แต่ขึ้น 0)
+         shopOrders สแกนทั้ง 2 แท็บ + คืน "ยังไม่ยืนยัน" มาด้วย */
+      const r=await jsonpGet({ action:'shopOrders', shop:clean(currentCustomer.name||''),
+        uid:clean(currentCustomer.uid||''), code:clean(currentCustomer.shopCode||''),
+        special:isSpecial(currentCustomer)?'1':'', branch:clean(currentCustomer.branch||'') }, 25000);
       if(g!==_sumGen || _sumShop!==k0 || _custKey()!==k0) return;           // มีคำขอใหม่กว่า/สลับร้านแล้ว → ทิ้งผลนี้ ห้ามเขียนทับ
       if(r===null){ if(_sumActive() && !_sumData) box.innerHTML='<div class="sum-empty">⚠️ โหลดช้าหรือไม่สำเร็จ<br><button class="btn btn-outline btn-sm" style="margin-top:10px" onclick="loadSummary({force:true})">🔄 ลองใหม่</button></div>'; return; }
-      _sumData=(r&&r.ok&&Array.isArray(r.days))?r.days:[]; _sumTs=Date.now();
+      _sumData=(r&&r.ok)?{ pending:(r.pending||[]), days:(r.days||[]) }:{ pending:[], days:[] }; _sumTs=Date.now();
       if(_sumActive()) renderSummary();
     }catch(e){ if(g===_sumGen && _sumActive() && !_sumData) box.innerHTML='<div class="sum-empty">โหลดไม่สำเร็จ<br><button class="btn btn-outline btn-sm" style="margin-top:10px" onclick="loadSummary({force:true})">🔄 ลองใหม่</button></div>'; }
     finally{ if(_sumInflight===p){ _sumInflight=null; _sumInflightKey=''; } }
@@ -4232,13 +4234,14 @@ async function loadHeadSummary(opts){
   finally{ _headBusy=false; }
 }
 function headPick(i){ const b=(i<0?'':(_headBrs[i]||'')); _headBranch=(_headBranch===b)?'':b; renderHeadSummary(); }
-function headBillCard(b, pend){
+function headBillCard(b, pend, showBranch){
+  if(showBranch===undefined) showBranch=true;
   const iid='hb'+(pend?'p':'a')+String(b.orderId).replace(/\W/g,'');
   const items=(b.items||[]).map((it,ii)=>`<div class="sum-it"><span class="nm">${ii+1}. ${esc(it.name)} <em>×${it.qty} ${esc(unitWord(it.unit,it.unit))}</em></span><b>${it.gift?'ฟรี':baht(it.total)}</b></div>`).join('');
   return `<div class="sum-card${pend?' pend':''}" onclick="toggleSumBill('${iid}',this)">
       <div class="sum-ic">${pend?'🟡':'🧾'}</div>
       <div class="sum-mid"><div class="sum-oid">ออเดอร์ #…${esc(String(b.orderId).slice(-4))}</div>
-        <div class="sum-sub"><span class="hd-b">${esc(b.branch)}</span> · ${b.count} รายการ</div></div>
+        <div class="sum-sub">${showBranch&&b.branch?`<span class="hd-b">${esc(b.branch)}</span> · `:''}${b.count} รายการ</div></div>
       <div class="sum-right"><div class="sum-tm">${esc(b.time)} น.</div><div class="sum-amt">${baht(b.total)}</div></div>
       <span class="sum-chev">▾</span>
     </div><div class="sum-items" id="${iid}">${items}</div>`;
@@ -4313,21 +4316,31 @@ function renderSummary(){
   const box=document.getElementById('summaryBody'); if(!box) return;
   // 🔒 v3.79 ด่านสุดท้าย: ข้อมูลที่ถืออยู่ต้องเป็นของร้านที่ล็อกอินอยู่จริงเท่านั้น
   if(!currentCustomer || (_sumShop && _sumShop!==_custKey())){ box.innerHTML='<div class="sum-load">⏳ กำลังโหลดสรุปออเดอร์…</div>'; return; }
-  const days=_sumData||[];
-  if(!days.length){ box.innerHTML='<div class="sum-empty">📋 ยังไม่มีออเดอร์ใน 14 วันล่าสุด</div>'; return; }
-  box.innerHTML=days.map(d=>{
-    const cards=d.bills.map(b=>{
-      const iid='sit_'+String(b.orderId).replace(/\W/g,'');
-      const items=b.items.map((it,ii)=>`<div class="sum-it"><span class="nm">${ii+1}. ${esc(it.name)} <em>×${it.qty} ${esc(unitWord(it.unit,it.unit))}</em></span><b>${it.gift?'ฟรี':baht(it.total)}</b></div>`).join('');
-      return `<div class="sum-card" onclick="toggleSumBill('${iid}',this)">
-          <div class="sum-ic">🧾</div>
-          <div class="sum-mid"><div class="sum-oid">ออเดอร์ #…${esc(String(b.orderId).slice(-4))}</div><div class="sum-sub">${b.count} รายการ</div></div>
-          <div class="sum-right"><div class="sum-tm">${esc(b.time)} น.</div><div class="sum-amt">${baht(b.total)}</div></div>
-          <span class="sum-chev">▾</span>
-        </div><div class="sum-items" id="${iid}">${items}</div>`;
-    }).join('');
-    return `<div class="sum-dhead"><div class="sum-date">📅 ${esc(sumDateLabel(d.date))}</div><div class="sum-dtot">${d.billCount} บิล · รวม <b>${baht(d.dayTotal)}</b></div></div>${cards}`;
-  }).join('');
+  const d=_sumData||{};
+  const pend=Array.isArray(d.pending)?d.pending:[];
+  const days=Array.isArray(d.days)?d.days:(Array.isArray(d)?d:[]);      /* รองรับรูปแบบเก่า (แค่ days) */
+  if(!pend.length && !days.length){ box.innerHTML='<div class="sum-empty">📋 ยังไม่มีออเดอร์ใน 14 วันล่าสุด</div>'; return; }
+
+  const sumP=pend.reduce((t,b)=>t+(b.total||0),0);
+  const sumC=days.reduce((t,dd)=>t+(dd.dayTotal||0),0);
+  let h='';
+  h+=`<div class="hd-tot"><span>รวม 14 วัน</span><b>${baht(sumP+sumC)}</b></div>`;
+
+  /* 🟡 ยังไม่ยืนยัน = ตะกร้าที่ใช้ร่วมทุกเครื่องของร้านนี้ (ยังไม่ได้กดสั่ง) */
+  if(pend.length){
+    h+=`<div class="hd-sec"><h3>🟡 ยังไม่ยืนยัน (${pend.length} ใบ · ${baht(sumP)})</h3>
+        <button class="btn btn-outline btn-sm" onclick="loadSummary({force:true})">🔄 รีเฟรช</button></div>`;
+    h+='<div class="hd-note">รายการพวกนี้<b>ยังไม่ถูกสั่ง</b> — ไปที่แท็บ 🛒 ตะกร้า แล้วกดยืนยันเพื่อสั่งจริง</div>';
+    h+=pend.map(b=>headBillCard(b,true,false)).join('');
+  }
+
+  /* ✅ ยืนยันแล้ว 14 วัน */
+  h+=`<div class="hd-sec"><h3>✅ ยืนยันแล้ว${sumC?(' ('+baht(sumC)+')'):''}</h3><span class="sum-hint">ย้อนหลัง 14 วัน</span></div>`;
+  if(!days.length) h+='<div class="sum-empty" style="padding:20px 12px">ยังไม่มีบิลที่ยืนยันใน 14 วันล่าสุด</div>';
+  else h+=days.map(dd=>`<div class="sum-dhead"><div class="sum-date">📅 ${esc(sumDateLabel(dd.date))}</div><div class="sum-dtot">${dd.billCount} บิล · รวม <b>${baht(dd.dayTotal)}</b></div></div>`
+      + dd.bills.map(b=>headBillCard(b,false,false)).join('')).join('');
+
+  box.innerHTML=h;
 }
 function toggleSumBill(id, card){ const p=document.getElementById(id); if(!p) return; const open=p.classList.toggle('open'); card.classList.toggle('open', open); }
 
@@ -4704,7 +4717,11 @@ async function submitOrder(force){
   /* ⭐ v4.23 ด่านสุดท้ายของโควต้า — ตรวจซ้ำทั้งใบเสมอ ห้ามเชื่อตัวเลขที่โหลดไว้
      ตะกร้าใช้ร่วมทุกเครื่อง + ค้างข้ามวันได้ → ยอดที่ใช้ไปอาจขยับหลังจากที่กดใส่ตะกร้า */
   try{
-    if(QUOTA.loaded && Date.now()-QUOTA.ts>120000) await quotaBoot(true);   // ค้างเกิน 2 นาที = ดึงยอดใหม่ก่อน
+    /* 🐛 v4.25: เดิมถ้าโควต้ายังโหลดไม่เสร็จ (15-20 วิแรก) ด่านสุดท้ายเห็น QUOTA.st ว่าง = ปล่อยผ่านทั้งใบ
+       ลูกค้าที่เปิดแอปแล้วกดสั่งเร็ว ๆ จึงข้ามโควต้าได้ทั้งบิล -> รอโหลดให้เสร็จก่อนตัดสิน
+       (โหลดไม่ได้จริง ๆ QUOTA.loaded ยังเป็น false -> quotaFinalCheck คืน [] = ปล่อยผ่านตามกฎ fail-open เหมือนเดิม) */
+    if(!QUOTA.loaded) await quotaBoot(true);
+    else if(Date.now()-QUOTA.ts>120000) await quotaBoot(true);   // ค้างเกิน 2 นาที = ดึงยอดใหม่ก่อน
     const _qb=quotaFinalCheck();
     if(_qb.length){
       const _hard=_qb.filter(x=>x.lock);

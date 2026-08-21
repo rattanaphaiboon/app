@@ -915,7 +915,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.263';
+const APP_VERSION='3.265';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -5985,6 +5985,114 @@ async function fetchIssuedCN_(code){
     state.issuedCN[code]=Object.values(byCn);
   }catch(e){ console.warn('IS CN fetch failed:',e); state.issuedCN[code]=state.issuedCN[code]||[]; }
 }
+/* ★ v3.264: CN ที่ "เซลล์สั่งเก็บ" ของร้านนี้ (ชีท CN-Sale-dman — ก้อนเดียวกับหน้าเก็บของคืน ผ่าน memo v3.262)
+   → โผล่ในกล่องเลือกหักยอดคู่กับใบ IS · ติ๊กแล้วเก็บ cnId ลง creditNoteRef → แท็ก [CN:] → กันเลือกซ้ำข้ามบิลด้วย usedCN เดิมทั้งระบบ
+   กติกา: เฉพาะใบเซลล์สั่งที่มาร์ค "ขนส่งเก็บ" (ของขนส่งเก็บเอง ที่มา=ขนส่ง ไปทาง CN ในแอป/cnAmtForBill_ อยู่แล้ว — ตัดออกกันนับซ้ำ)
+         + เซลล์อนุมัติคืนแล้ว + การเก็บไม่ถูกปฏิเสธ · ยอดใช้ "จำนวนเก็บจริง" ถ้ามี (เก็บไม่ครบ = หักตามจริง) */
+async function fetchSaleCN_(code){
+  code=String(code||'').trim(); if(!code) return;
+  if(!state.saleCN) state.saleCN={};
+  if(state.saleCN[code]) return;
+  try{
+    const rows=await fetchCNSaleRows_();
+    const by={},ord=[];
+    (rows||[]).forEach(r=>{
+      if(String(r['รหัสร้าน']||'').trim()!==code) return;
+      const line=String(r['cnLineId']||'').trim(); if(!line) return;
+      if(cleanCell(r['ที่มา']).indexOf('ขนส่ง')>=0) return;
+      if(String(r['หมายเหตุการคืน']||'').indexOf('ขนส่งเก็บ')<0) return;
+      if(!cncApproved_(r['อนุมัติคืน'])) return;
+      if(cleanCell(r['สถานะอนุมัติเก็บ']).indexOf('ปฏิเสธ')>=0) return;
+      const key=String(r['cnId']||'').trim()||('L'+line);
+      // เก็บแล้ว = ใช้จำนวนเก็บจริงเสมอ (แม้เป็น 0 — เก็บไม่ได้เลยต้องหัก 0) · ยังไม่เก็บ = โชว์ยอดตามที่เซลล์สั่งไว้ก่อน
+      const _fq=cleanCell(r['จำนวนเก็บจริง']);
+      const _coll=!!String(r['สถานะเก็บ']||'').trim();
+      const qty=(_coll&&_fq!=='')?(parseFloat(_fq)||0):(parseFloat(r['จำนวน'])||0);
+      const price=parseFloat(r['ราคา'])||0;
+      if(!by[key]){ by[key]={cnDoc:key,_sale:true,wh:String(r['คลัง']||'').trim(),seller:String(r['ชื่อเซลล์']||'').trim(),collected:'',reason:String(r['สาเหตุรับคืน']||'').trim(),amount:0,items:[]}; ord.push(key); }
+      by[key].amount+=qty*price;
+      if(_coll) by[key].collected='เก็บแล้ว';
+      const nm=String(r['ชื่อสินค้า']||'').trim();
+      if(nm) by[key].items.push({line:line,sku:nm,qty:qty,price:price,amount:qty*price,unit:String(r['หน่วย']||'').trim()});
+    });
+    state.saleCN[code]=ord.map(k=>by[k]).filter(c=>c.amount>0.005);
+  }catch(e){ console.warn('sale CN fetch failed:',e); state.saleCN[code]=state.saleCN[code]||[]; }
+}
+/* v3.264: ลิสต์ CN ที่เลือกหักยอดได้ = ใบ IS ที่ออกแล้ว + ใบเซลล์สั่งเก็บ — ใช้ร่วมกันทั้งตอนแสดง/ติ๊ก/ตรวจตอนบันทึก */
+function _cnPickList_(code){
+  return ((state.issuedCN||{})[code]||[]).concat((state.saleCN||{})[code]||[]);
+}
+/* ★ v3.264: "เก็บ + หักยอด" จบในป๊อปอัปเดียวจากหน้าบิล (ผู้ใช้ขอแบบเข้าใจง่าย ทำง่าย 2026-08-20)
+   ยิง save_cn_collect ตัวเดียวกับหน้าเก็บของคืนเป๊ะ (จำนวนเก็บ = ตามที่เซลล์สั่ง · รูปบังคับตามกติกา v3.212)
+   สำเร็จแล้วติ๊กหักยอดใบพวกนั้นให้เองทันที · เก็บได้ไม่ครบ = ลิงก์ไปหน้าเก็บของคืนเพื่อแก้จำนวน (ทางเดิม) */
+let _cncQuick={photo:'',idx:-1,code:''};
+function cncQuickOpen_(idx){
+  const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
+  const b=j.bills[idx]; if(!b) return;
+  const pend=((state.saleCN||{})[b.code]||[]).filter(c=>c._sale&&!c.collected);
+  if(!pend.length){ showToast('ไม่มีใบที่รอเก็บแล้ว','info'); applyIssuedCN_(idx); return; }
+  _cncQuick={photo:'',idx:idx,code:b.code};
+  const items=pend.flatMap(c=>c.items);
+  const total=pend.reduce((s,c)=>s+c.amount,0);
+  const ov=document.createElement('div'); ov.className='confirm-overlay'; ov.id='cncQuickOv';
+  ov.innerHTML=`<div class="confirm-box" style="text-align:left;max-width:370px">
+    <div class="confirm-icon">📦</div>
+    <div class="confirm-title">เก็บของคืน + หักยอด</div>
+    <div class="txt-sm" style="margin:4px 0 10px">
+      ${items.map(it=>`<div style="padding:5px 0;border-bottom:1px solid var(--border)">• ${esc(it.sku)} <b>× ${it.qty}</b>${it.unit?' '+esc(it.unit):''}</div>`).join('')}
+      <div style="padding-top:7px">รวมหักยอด <b class="txt-gold">${fmt(total)} ฿</b> · ${pend.length} ใบ</div>
+    </div>
+    <div class="row gap-8">
+      <label class="btn btn-outline btn-sm" style="flex:1;cursor:pointer">📷 กล้อง<span class="req">*</span><input type="file" accept="image/*" capture="environment" hidden onchange="cncQuickPhoto_(event)"></label>
+      <label class="btn btn-outline btn-sm" style="flex:1;cursor:pointer">🖼 อัลบั้ม<input type="file" accept="image/*" hidden onchange="cncQuickPhoto_(event)"></label>
+    </div>
+    <div class="photo-preview" id="cncQuickPv" style="margin-top:8px"></div>
+    <div class="confirm-actions" style="margin-top:10px">
+      <button type="button" class="btn btn-outline" onclick="cncQuickClose_()">ยกเลิก</button>
+      <button type="button" class="btn btn-gold" id="cncQuickGo" onclick="cncQuickSave_()">✓ เก็บครบ + หักยอด</button>
+    </div>
+    <div class="txt-xs txt-muted txt-center" style="margin-top:9px;text-decoration:underline;cursor:pointer" onclick="cncQuickClose_();cncGoShop_('${esc(b.code)}')">เก็บได้ไม่ครบ/แก้จำนวน → ไปหน้าเก็บของคืน</div>
+  </div>`;
+  document.body.appendChild(ov);
+  ov.onclick=e=>{ if(e.target===ov) cncQuickClose_(); };
+}
+function cncQuickClose_(){ const ov=$('cncQuickOv'); if(ov) ov.remove(); }
+function cncQuickPhoto_(ev){
+  const f=ev.target.files[0]; if(!f) return;
+  const reader=new FileReader();
+  reader.onload=e=>{ const img=new Image(); img.onload=()=>{
+    const max=1280; let w=img.width,h=img.height; if(w>max||h>max){ const r=Math.min(max/w,max/h); w*=r; h*=r; }
+    const c=document.createElement('canvas'); c.width=w; c.height=h; c.getContext('2d').drawImage(img,0,0,w,h);
+    _cncQuick.photo=c.toDataURL('image/jpeg',0.78);
+    const pv=$('cncQuickPv'); if(pv) pv.innerHTML=`<div class="photo-thumb"><img src="${_cncQuick.photo}"><button class="photo-del" onclick="_cncQuick.photo='';$('cncQuickPv').innerHTML=''">×</button></div>`;
+  }; img.src=e.target.result; };
+  reader.readAsDataURL(f);
+}
+async function cncQuickSave_(){
+  const idx=_cncQuick.idx, code=_cncQuick.code;
+  const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
+  const b=j.bills[idx]; if(!b||b.code!==code) return;
+  if(!_cncQuick.photo){ showToast('แนบรูปของที่เก็บมาก่อน 📷 (หลักฐานการรับของ)','warning'); return; }
+  const full=((state.saleCN||{})[code]||[]).slice();
+  const pend=full.filter(c=>c._sale&&!c.collected);
+  if(!pend.length){ cncQuickClose_(); return; }
+  const lines=pend.flatMap(c=>c.items.filter(it=>it.line&&it.qty>0).map(it=>({cnLineId:it.line,qtyCollect:it.qty})));
+  if(!lines.length){ showToast('ไม่พบรายการที่เก็บได้','warning'); return; }
+  const btn=$('cncQuickGo'); if(btn){ btn.disabled=true; btn.textContent='⏳ กำลังบันทึก...'; }
+  const cust=state.customers.find(c=>c.code===code)||{};
+  const wh=pend[0].wh||j.warehouse||'';
+  const driver=(typeof currentUserName_==='function')?currentUserName_():((state.user||{}).nickname||'');
+  const r=await postSyncGAS_({action:'save_cn_collect',shopCode:code,shopName:b.name||cust.name||'',warehouse:wh,driver:driver,note:'เก็บจากหน้าบิล (เก็บครบตามสั่ง)',photo:_cncQuick.photo,lines:lines},30000);
+  if(!(r&&r.ok)){ if(btn){ btn.disabled=false; btn.textContent='✓ เก็บครบ + หักยอด'; } showToast('บันทึกเก็บไม่สำเร็จ: '+((r&&r.error)||'ลองใหม่อีกครั้ง'),'error'); return; }
+  // สำเร็จ — postSyncGAS_ เพิ่งล้าง state.saleCN (cnMemoBust_) → ใส่สำเนาที่มาร์ค "เก็บแล้ว" กลับ ให้ติ๊ก/แสดงผลได้ทันทีไม่ต้องรอชีท
+  const pendSet={}; pend.forEach(c=>pendSet[c.cnDoc]=1);
+  if(!state.saleCN) state.saleCN={};
+  state.saleCN[code]=full.map(c=>pendSet[c.cnDoc]?Object.assign({},c,{collected:'เก็บแล้ว'}):c);
+  cncQuickClose_();
+  pend.forEach(c=>{ try{ toggleIssuedCN_(idx,c.cnDoc,true); }catch(e){} });
+  showToast('✓ เก็บของแล้ว '+lines.length+' รายการ + หักยอด '+fmt(pend.reduce((s,c)=>s+c.amount,0))+' ฿','success');
+  applyIssuedCN_(idx);
+}
 /* v3.157: CN (IS) ใบนี้ "ถูกใช้ในบิลอื่น" แล้วหรือยัง — อ่านจากชีทบันทึกบิลและการชำระ (state.usedCN)
    + เผื่อบิลอื่นในเซสชันนี้ที่เพิ่งเลือก/บันทึก (state.jobs) — ยกเว้นบิลปัจจุบันเอง (curDoc) */
 function cnUsedElsewhere_(cnDoc,curDoc){
@@ -6011,8 +6119,9 @@ function applyIssuedCN_(idx){
   const render=()=>{
     if(_billIdx!==idx) return;
     const el=$('issuedCnBox'); if(!el) return;
-    const list=(state.issuedCN||{})[b.code];   // v3.157: key = รหัสร้าน
-    if(!Array.isArray(list)){ el.innerHTML='<div class="txt-xs txt-muted" style="margin-top:4px">⏳ ตรวจใบรับคืนที่ออกแล้ว…</div>'; return; }
+    const _isArr=(state.issuedCN||{})[b.code], _saleArr=(state.saleCN||{})[b.code];   // v3.157: key = รหัสร้าน · v3.264: + เซลล์สั่งเก็บ
+    if(!Array.isArray(_isArr)&&!Array.isArray(_saleArr)){ el.innerHTML='<div class="txt-xs txt-muted" style="margin-top:4px">⏳ ตรวจใบรับคืนที่ออกแล้ว…</div>'; return; }
+    const list=(_isArr||[]).concat(_saleArr||[]);
     // v3.92: โหลดจากชีท (มีเลข CN ในหมายเหตุ แต่ยังไม่มี _cnPicked) → ติ๊กให้ตามเลข CN เดิม (ไม่แตะยอดรวม)
     if((!b.payment._cnPicked||!Object.keys(b.payment._cnPicked).length) && b.payment.creditNoteRef){
       const pk={}; String(b.payment.creditNoteRef).split(',').forEach(x=>{ x=x.trim(); if(x) pk[x]=true; });
@@ -6028,25 +6137,34 @@ function applyIssuedCN_(idx){
     const _cnAmt=cnAmtForBill_(b.doc);   // ★ v3.229: ตัดใบที่คลัง "ไม่อนุมัติ" ออกจากยอดที่ถือว่ามีเอกสาร
     const appCN=_cnAmt.ok;
     const manual=Math.max(0,(parseFloat(b.payment.creditNote)||0)-isSum-appCN);                      // ยอดไม่มีเอกสารจริงๆ (พิมพ์เอง)
+    const pendSale=vis.filter(c=>c._sale&&!c.collected);   // ★ v3.264: ใบเซลล์สั่งเก็บที่ยังไม่เก็บ → ปุ่มเดียว "เก็บ+หักยอด"
     el.innerHTML=`<div style="padding:10px 12px;border-radius:10px;border:1px solid var(--gold);background:var(--gold-soft)">
-      <div class="txt-sm txt-bold mb-8">📄 ใบรับคืนที่ออกแล้วของร้านนี้${ro?'':' — แตะเลือกเพื่อหักยอด (รวมกับที่พิมพ์เอง)'}</div>
-      ${vis.map(c=>`<label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--border);cursor:${ro?'default':'pointer'}">
-        <input type="checkbox" ${picked[c.cnDoc]?'checked':''} ${ro?'disabled':''} onchange="toggleIssuedCN_(${idx},'${esc(c.cnDoc).replace(/'/g,"\\'")}',this.checked)" style="width:20px;height:20px;margin-top:2px;flex:none">
+      <div class="txt-sm txt-bold mb-8">📄 ใบรับคืนของร้านนี้ (ออกแล้ว + เซลล์สั่งเก็บ)${ro?'':' — แตะเลือกใบ = ระบบบวกยอดเข้าช่องหักยอดให้เอง'}</div>
+      ${vis.map(c=>{const lock=c._sale&&!c.collected&&!ro; return `<label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--border);cursor:${(ro||lock)?'default':'pointer'}${lock?';opacity:.72':''}">
+        ${lock?`<span style="width:20px;flex:none;text-align:center;margin-top:2px">🔒</span>`:`<input type="checkbox" ${picked[c.cnDoc]?'checked':''} ${ro?'disabled':''} onchange="toggleIssuedCN_(${idx},'${esc(c.cnDoc).replace(/'/g,"\\'")}',this.checked)" style="width:20px;height:20px;margin-top:2px;flex:none">`}
         <div style="flex:1;min-width:0">
-          <div class="txt-sm"><b>${esc(c.cnDoc)}</b> · <span class="txt-gold txt-bold">${fmt(c.amount)} ฿</span></div>
-          <div class="txt-xs txt-muted" style="white-space:normal">${esc(c.reason||'-')} · ${c.items.length} รายการ</div>
-        </div></label>`).join('')}
-      ${(parseFloat(b.payment.creditNote)>0.005)?`<div class="txt-xs" style="border-top:1px solid var(--border);padding-top:7px;margin-top:2px">รวมหักยอด <b class="txt-gold">${fmt(b.payment.creditNote)} ฿</b> = ${isSum>0.005?('ใบรับคืนที่ออกแล้ว '+fmt(isSum)+' + '):''}${appCN>0.005?('<b style="color:var(--success)">CN ที่ทำในแอป '+fmt(appCN)+'</b>'+(manual>0.005?' + ':'')):''}${manual>0.005?('<b class="txt-danger">นอก CN '+fmt(manual)+'</b> (ต้องระบุเหตุผล)'):(appCN>0.005||isSum>0.005?' ✓ มีเอกสารครบ':'')}</div>`:''}
+          <div class="txt-sm"><b>${esc(c.cnDoc)}</b> · <span class="txt-gold txt-bold">${fmt(c.amount)} ฿</span>${c._sale?` <span class="badge badge-gold" style="font-size:11px">🛒 เซลล์สั่งเก็บ${c.collected?' · เก็บแล้ว':''}</span>`:''}</div>
+          <div class="txt-xs txt-muted" style="white-space:normal">${esc(c.reason||'-')}${c._sale&&c.seller?' · เซลล์ '+esc(c.seller):''} · ${c.items.length} รายการ</div>
+        </div></label>`;}).join('')}
+      ${(pendSale.length&&!ro)?`<div style="border-top:1px solid var(--border);padding-top:9px;margin-top:2px">
+        <button type="button" class="btn btn-gold" style="width:100%" onclick="cncQuickOpen_(${idx})">📦 เก็บของคืน + หักยอด (${pendSale.length} ใบ · ${fmt(pendSale.reduce((s,c)=>s+c.amount,0))} ฿)</button>
+        <div class="txt-xs txt-muted txt-center" style="margin-top:5px">ถ่ายรูปของที่เก็บ 1 รูป → ระบบกดเก็บให้ + ติ๊กหักยอดให้เลย</div>
+      </div>`:''}
+      ${(parseFloat(b.payment.creditNote)>0.005)?`<div class="txt-xs" style="border-top:1px solid var(--border);padding-top:7px;margin-top:2px">รวมหักยอด <b class="txt-gold">${fmt(b.payment.creditNote)} ฿</b> = ${isSum>0.005?('ใบรับคืน/เซลล์สั่งเก็บ '+fmt(isSum)+' + '):''}${appCN>0.005?('<b style="color:var(--success)">CN ที่ทำในแอป '+fmt(appCN)+'</b>'+(manual>0.005?' + ':'')):''}${manual>0.005?('<b class="txt-danger">นอก CN '+fmt(manual)+'</b> (ต้องระบุเหตุผล)'):(appCN>0.005||isSum>0.005?' ✓ มีเอกสารครบ':'')}</div>`:''}
     </div>`;
   };
-  if((state.issuedCN||{})[b.code]) render();
-  else { render(); fetchIssuedCN_(b.code).then(render).catch(render); }
+  render();
+  if(!((state.issuedCN||{})[b.code])) fetchIssuedCN_(b.code).then(render).catch(render);
+  if(!((state.saleCN||{})[b.code])) fetchSaleCN_(b.code).then(render).catch(render);   // ★ v3.264: เซลล์สั่งเก็บ โหลดขนานกัน มาถึงก่อน-หลังก็เติมเอง
 }
 function toggleIssuedCN_(idx,cnDoc,checked){
   const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
   const b=j.bills[idx]; if(!b) return;
   if(j.status==='approved') return;
-  const list=(state.issuedCN||{})[b.code]||[];   // v3.157: key = รหัสร้าน
+  const list=_cnPickList_(b.code);   // v3.157: key = รหัสร้าน · v3.264: รวมใบเซลล์สั่งเก็บ
+  // ★ v3.264: ใบเซลล์สั่งเก็บที่ยังไม่กดเก็บของ = ห้ามติ๊กหัก (ต้องกดเก็บก่อน ยอดถึงจะตรงจำนวนเก็บจริง) — กันหลุดจาก UI ค้าง
+  { const _ent=list.find(c=>c.cnDoc===cnDoc);
+    if(_ent&&_ent._sale&&!_ent.collected){ showToast('ใบนี้ยังไม่ได้กดเก็บของคืน — ไปกดเก็บก่อนถึงจะเลือกหักได้','warning'); applyIssuedCN_(idx); return; } }
   if(!b.payment._cnPicked) b.payment._cnPicked={};
   // v3.92: รวมยอด 2 แบบ — คงส่วน "ไม่มีเอกสาร" (พิมพ์เอง) ไว้ แล้วบวก/ลบเฉพาะส่วน "มีเอกสาร" (IS) ที่ติ๊ก
   const oldIS=list.filter(c=>b.payment._cnPicked[c.cnDoc]).reduce((s,c)=>s+(parseFloat(c.amount)||0),0);   // ยอด IS ก่อนเปลี่ยน
@@ -6492,13 +6610,28 @@ async function _saveBillInner_(idx,saveBtn){
   if(!(parseFloat(p.transfer2)>0)) p.transfer2Date='';
   // v1.75: ถ้าไม่ได้เลือกจ่ายรวม → ล้าง combinedRef ให้เป็นช่องว่าง
   if(!types.includes('combined')) p.combinedRef='';
+  // ★ v3.264: ร้านนี้มีของคืนที่ "เซลล์สั่งเก็บ" ค้างอยู่ → เด้งถามตอนบันทึกบิล (จังหวะที่คนขับอยู่หน้าร้านพอดี)
+  //   ★ v3.265: ถามเฉพาะเมื่อ "มียอดในช่องหักยอด" (= ร้านกำลังหักเงินจริง แต่ยังไม่กดเก็บ — เสี่ยงลงเป็นนอก CN ผิดช่อง)
+  //   ช่องหักยอดว่าง = ร้านจ่ายเต็ม ไม่ได้หักรอบนี้ → ปล่อยผ่าน (user สั่ง 2026-08-20) · ใบค้างยังโชว์ให้ออฟฟิศไล่ในการ์ดของคืน (v3.258)
+  //   ไม่บล็อกถาวร เพราะบางเคสของคืนไม่พร้อม/เซลล์สั่งผิด
+  if(!(state.user&&state.user.canCoRecord) && parseFloat(p.creditNote)>0.005){   // บัญชีช่วยบันทึกทีหลัง ไม่ต้องถาม · ไม่มียอดหัก ไม่ต้องถาม
+    if(!((state.saleCN||{})[b.code])){ try{ await fetchSaleCN_(b.code); }catch(e){} }
+    const _pendSale=((state.saleCN||{})[b.code]||[]).filter(c=>!c.collected);
+    if(_pendSale.length){
+      const _amt=_pendSale.reduce((s,c)=>s+(parseFloat(c.amount)||0),0);
+      const _go=await showConfirm('ร้านนี้มีของคืนที่เซลล์สั่งเก็บ '+_pendSale.length+' ใบ (รวม '+fmt(_amt)+' ฿) ยังไม่ได้เก็บ\n\nถ่ายรูปของที่เก็บ 1 รูป ระบบจะกดเก็บ + หักยอดให้เลย',
+        {title:'📦 มีของคืนต้องเก็บที่ร้านนี้',okLabel:'📦 เก็บ + หักยอดเลย',cancelLabel:'บันทึกบิลต่อ (ยังไม่เก็บ)',icon:'📦'});
+      if(_go){ _restoreSaveBtn_(saveBtn); cncQuickOpen_(idx); return; }
+    }
+  }
   // v3.106: บล็อกถ้ามี "ใบลดหนี้" ที่ไม่มี CN รองรับ (คนขับต้องทำ CN หรือเลือก CN จากระบบ IS ก่อน) — กันหักยอดปิดบิลโดยไม่มีหลักฐาน
   const cnAmt=parseFloat(p.creditNote)||0;
   if(cnAmt>0.005){
     if(!Array.isArray(state.cnHistory)){ try{ await loadCNHistory(); }catch(e){} }          // CN ในแอป
     const refs=String(p.creditNoteRef||'').split(',').map(s=>s.trim()).filter(Boolean);
     if(refs.length&&!((state.issuedCN||{})[b.code])){ try{ await fetchIssuedCN_(b.code); }catch(e){} }   // v3.157: CN จากระบบ IS (key=รหัสร้าน)
-    const isList=(state.issuedCN||{})[b.code]||[];
+    if(refs.length&&!((state.saleCN||{})[b.code])){ try{ await fetchSaleCN_(b.code); }catch(e){} }       // ★ v3.264: + ใบเซลล์สั่งเก็บ
+    const isList=_cnPickList_(b.code);
     const isBacked=refs.length?isList.filter(c=>refs.includes(c.cnDoc)).reduce((s,c)=>s+(parseFloat(c.amount)||0),0):0;
     const _cnb=cnAmtForBill_(b.doc);   // ★ v3.229: {ok, voided} — ใบที่คลัง "ไม่อนุมัติ" ไม่นับเป็นเอกสารแล้ว
     const cnBacked=_cnb.ok;
@@ -8714,7 +8847,7 @@ function cncGrandTotal_(){
    → รวมเป็นตัวโหลดเดียว: กำลังโหลดอยู่ = รอตัวเดิม ไม่ยิงซ้อน · ผลล่าสุดอายุ < 60 วิ = ใช้เลย
    หลังบันทึก/อนุมัติ CN ทุกชนิด memo ถูกล้างใน postSyncGAS_ (cnMemoBust_) → หน้าจอหลังกดบันทึกได้ของสดเสมอ */
 let _cnSaleMemo={ts:0,rows:null,inflight:null};
-function cnMemoBust_(){ _cnSaleMemo={ts:0,rows:null,inflight:null}; _cnHistMemo={ts:0,n:null,inflight:null}; }
+function cnMemoBust_(){ _cnSaleMemo={ts:0,rows:null,inflight:null}; _cnHistMemo={ts:0,n:null,inflight:null}; state.saleCN={}; }   // v3.264: ล้างลิสต์เซลล์สั่งเก็บรายร้านด้วย — กดเก็บเสร็จกลับมาบิล ติ๊กได้ทันที
 async function fetchCNSaleRows_(){
   if(_cnSaleMemo.rows&&(Date.now()-_cnSaleMemo.ts)<60000) return _cnSaleMemo.rows;
   if(_cnSaleMemo.inflight) return _cnSaleMemo.inflight;
