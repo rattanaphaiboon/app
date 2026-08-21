@@ -586,7 +586,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.60</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.61</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -941,6 +941,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
     .jr-futb{font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;background:#DBEAFE;color:#1D4ED8;border:1px solid #93C5FD;white-space:nowrap;flex-shrink:0} /* v9.0: ป้ายใบจองนัดส่งล่วงหน้า (วันที่หลังวันนี้) */
     .jr-dibadge{font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;background:#F1F5F9;color:#475569;border:1px solid #CBD5E1;white-space:nowrap;flex-shrink:0} /* v9.56: ป้ายวันที่บิล (ร้านเดียวกันแยกตามวัน) */
     .jr-dsb{font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;background:#DCFCE7;color:#15803D;border:1px solid #86EFAC;white-space:nowrap;flex-shrink:0} /* v9.60: ป้ายบิลใบส่ง DS_DC วันนี้ */
+    .jr-dsmm{font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;background:#FDE2E2;color:#C62828;border:1px solid #F1B5B5;white-space:nowrap;flex-shrink:0} /* v9.61: ใบส่งชื่อไม่ตรงใบจอง */
     .jr-dbadge.on{background:rgba(21,128,61,.14);color:#15803D}
     .jr-brow.jr-other{opacity:.72;cursor:pointer}
     .jr-brow.jr-insel{opacity:1;border-color:transparent;font-weight:600}
@@ -2200,19 +2201,26 @@ async function loadData(){
       });
       console.log(`🗂️ v8.55/9.19 กรองใบจองที่ส่งแล้ว: ตัด ${before-bills.length}/${before} บิล BK/BV (DS_DC อ้าง ${dsDcRefSet.size} เลขที่ · เว้นบิลย้อนหลัง ≤${BOOKING_KEEP_DAYS}วัน ${keptRecent})`+(dropped.length?` — ${dropped.slice(0,8).join(', ')}${dropped.length>8?' ...':''}`:''));
     })();
-    // ══ v9.60: กัน DS_DC วันนี้ "ซ้ำ" กับใบจองที่รอดในพูล (หลังกรองใบส่งแล้ว) — ตัด DS_DC ที่ซ้ำ (คงใบจองไว้ · ไม่ทำให้ queue ที่จัดไว้หลุด) ══
-    //   → DS_DC เพิ่มเฉพาะ "งานวันนี้ที่ไม่มีใบจองในพูล" (ใบจองถูกตัดว่าส่งแล้ว/เก่า หรือ ใบส่งตรงไม่มีใบจอง) — เป็นงานที่ยังไม่ได้จัด
+    // ══ v9.60/61: กัน DS_DC วันนี้ "ซ้ำ" ใบจองที่รอดในพูล (หลังกรองใบส่งแล้ว) — คงใบจองไว้ (queue ไม่หลุด) ══
+    //   ตัด DS_DC เฉพาะที่ "อ้างใบจองในพูล + ชื่อร้านตรงกัน" (ซ้ำจริง) · v9.61: ถ้า "ชื่อร้านไม่ตรงใบจอง" → คงไว้ + ป้ายเตือน (จับเคสส่งผิดร้าน/อ้างผิดใบ)
+    //   → DS_DC ที่ไม่มีใบจองในพูล = งานใหม่ · ที่ชื่อไม่ตรง = เตือน · โชว์ทั้งคู่ให้จัดรถ/ตรวจได้
     (function dedupDsDcToday(){
       if(!dsDcTodayRows||!dsDcTodayRows.length)return;
       const norm=s=>(s||'').toString().replace(/\s+/g,'').toUpperCase();
-      const bookingInPool=new Set(bills.filter(b=>!b.isDsDc).map(b=>norm(b.ref)));   // ใบจอง BK/BV ที่รอดในพูล
+      const bkByRef={}; bills.forEach(b=>{if(!b.isDsDc)bkByRef[norm(b.ref)]=b;});   // ใบจอง BK/BV ที่รอดในพูล
       const dsToBk={}; dsDcTodayRows.forEach(r=>{const ds=r['DI_REF'],bk=_parseBkRef(r['DI_REMARK']); if(ds&&bk&&!dsToBk[ds])dsToBk[ds]=norm(bk);});
-      const before=bills.length, dropped=[]; let kept=0;
+      const before=bills.length, dropped=[]; let mismatch=0;
       bills=bills.filter(b=>{
-        if(b.isDsDc){ kept++; const bk=dsToBk[b.ref]; if(bk&&bookingInPool.has(bk)){ dropped.push(b.ref); delete billMap[b.ref]; kept--; return false; } }
+        if(b.isDsDc){ const bk=dsToBk[b.ref]; const bkBill=bk?bkByRef[bk]:null;
+          if(bkBill){
+            if(norm(bkBill.arName)===norm(b.arName)){ dropped.push(b.ref); delete billMap[b.ref]; return false; } // ชื่อตรง = ซ้ำ → ตัด
+            b.dsdcMismatchBk=bkBill.arName; mismatch++; // v9.61: ชื่อไม่ตรงใบจองที่อ้าง → คงไว้ + เตือน
+          }
+        }
         return true;
       });
-      console.log(`📤 v9.60 DS_DC วันนี้: เพิ่มเข้าพูล ${kept} ใบ · ตัดที่ซ้ำใบจอง ${before-bills.length} ใบ`+(dropped.length?` (${dropped.slice(0,6).join(', ')}${dropped.length>6?' ...':''})`:''));
+      const kept=bills.filter(x=>x.isDsDc).length;
+      console.log(`📤 v9.60/61 DS_DC วันนี้: ในพูล ${kept} ใบ (ชื่อไม่ตรงใบจอง ${mismatch}) · ตัดซ้ำชื่อตรง ${before-bills.length} ใบ`+(dropped.length?` (${dropped.slice(0,5).join(', ')}${dropped.length>5?' ...':''})`:''));
     })();
     // v8.43: กันพิกัดเพี้ยน — นอกกรอบไทย หรือไกลจากคลังเกิน 300 กม. → ถือว่าไม่มี GPS (กันแผนที่ทะลุ)
     (function(){
@@ -9047,6 +9055,8 @@ function _jrStoreMeta(store){
 }
 // v9.60: หน่วยนี้มีบิลใบส่ง DS_DC (วันนี้) ไหม → โชว์ป้าย 📤 ใบส่ง
 function _jrUnitDsDc(u){ return !!(u&&u.bills&&u.bills.some(r=>billMap[r]&&billMap[r].isDsDc)); }
+// v9.61: หน่วยนี้มีใบส่ง DS_DC ที่ "ชื่อร้านไม่ตรงใบจองที่อ้าง" ไหม → คืนชื่อใบจอง (โชว์ป้ายเตือน)
+function _jrUnitDsMismatch(u){ if(!u||!u.bills)return null; for(const r of u.bills){const b=billMap[r]; if(b&&b.dsdcMismatchBk)return b.dsdcMismatchBk;} return null; }
 // v8.88: ร้านนี้มีใบจองที่ถูกดึงกลับมารอจัดไหม (ใบส่ง 1-3 วันก่อน ที่ไม่ได้ส่ง/ไม่พบในบันทึกบิล)
 function _jrReturnInfo(store){
   if(!_dsdcReturned||!_dsdcReturned.size||!store||!store.bills)return null;
@@ -9125,10 +9135,11 @@ function jrRenderBills(){
     const zone=g?g.zoneName.split(' · ')[0]:(u.district||u.province||'');
     const diB=(u.diDate&&_multiDay(u.name))?`<span class="jr-dibadge" title="วันที่บิล ${u.diDate}">🧾 ${_mgFmtDIDate(u.diDate)}</span>`:'';
     const dsB=_jrUnitDsDc(u)?`<span class="jr-dsb" title="บิลใบส่ง DS_DC วันนี้ (ไม่ใช่ใบจอง)">📤 ใบส่ง</span>`:''; // v9.60
+    const mmB=(()=>{const bk=_jrUnitDsMismatch(u);return bk?`<span class="jr-dsmm" title="ใบส่งนี้ชื่อร้านไม่ตรงกับใบจองที่อ้างถึง: ${bk}">⚠️ ชื่อไม่ตรงใบจอง</span>`:'';})(); // v9.61
     return `<div class="jr-brow ${g?'used':''} ${sel?'jr-insel':''}"${sel?` style="box-shadow:inset 3px 0 0 ${selCol};background:${selCol}1a"`:''} draggable="true" ondragstart="jrDragStart(event,${u.uid})" onclick="jrClickBill(${u.uid})" title="ลากไปใส่กลุ่ม · คลิก=แผนที่+วันจัดส่ง">
       ${sel?`<span class="jr-selnum" style="background:${selCol}">${selOrder[u.uid]||'•'}</span>`:`<span class="jr-bdot" style="background:${dot}"></span>`}
       <div class="jr-bbody">
-        <div class="jr-btop"><span class="jr-bname">${u.name}</span>${dsB}${diB}${(()=>{const fd=_jrFutureDate(u);return fd?`<span class="jr-futb" title="ใบจองนัดส่งล่วงหน้า ${fd.toLocaleDateString('th-TH')}">📅 ${fd.getDate()}/${fd.getMonth()+1}</span>`:'';})()}<span class="jr-dbadge on">${_mgDayShort(u.days)}</span></div>
+        <div class="jr-btop"><span class="jr-bname">${u.name}</span>${dsB}${mmB}${diB}${(()=>{const fd=_jrFutureDate(u);return fd?`<span class="jr-futb" title="ใบจองนัดส่งล่วงหน้า ${fd.toLocaleDateString('th-TH')}">📅 ${fd.getDate()}/${fd.getMonth()+1}</span>`:'';})()}<span class="jr-dbadge on">${_mgDayShort(u.days)}</span></div>
         <div class="jr-bmeta">
           ${ret?`<span class="jr-retb" title="ดึงกลับมารอจัด — ${ret.reason} (ใบส่ง DS_DC ${ret.ref})">⚠️ ${ret.reason}</span>`:''}
           ${(!ret&&!g&&_jrIsPreRetail(u))?`<span class="jr-retail-b" title="พรีปลีก (ไม่ใช่เซลล์พรีส่ง & ≤1ตัน) — ไม่จัดรถอัตโนมัติ · ลากเข้ากลุ่มเองได้">🛒 ปลีก</span>`:''}
@@ -9144,10 +9155,11 @@ function jrRenderBills(){
     (()=>{const ret=_jrReturnInfo(s), m=_jrStoreMeta(s), zone=s.district||s.province||'';
     const diB=(s.diDate&&_otherNameDays[s.name]&&_otherNameDays[s.name].size>1)?`<span class="jr-dibadge" title="วันที่บิล ${s.diDate}">🧾 ${_mgFmtDIDate(s.diDate)}</span>`:'';
     const dsB=_jrUnitDsDc(s)?`<span class="jr-dsb" title="บิลใบส่ง DS_DC วันนี้ (ไม่ใช่ใบจอง)">📤 ใบส่ง</span>`:''; // v9.60
+    const mmB=(()=>{const bk=_jrUnitDsMismatch(s);return bk?`<span class="jr-dsmm" title="ใบส่งนี้ชื่อร้านไม่ตรงกับใบจองที่อ้างถึง: ${bk}">⚠️ ชื่อไม่ตรงใบจอง</span>`:'';})(); // v9.61
     return `<div class="jr-brow jr-other" draggable="true" ondragstart="jrDragStart(event,${s.uid})" onclick="jrOtherClick(${s.uid})" title="วันจัดส่ง ${s.days} — ลากเข้ากลุ่มได้">
       <span class="jr-bdot" style="background:${s.lat!=null?'#94a3b8':'#C62828'}"></span>
       <div class="jr-bbody">
-        <div class="jr-btop"><span class="jr-bname">${s.name}</span>${dsB}${diB}${(()=>{const fd=_jrFutureDate(s);return fd?`<span class="jr-futb" title="ใบจองนัดส่งล่วงหน้า ${fd.toLocaleDateString('th-TH')}">📅 ${fd.getDate()}/${fd.getMonth()+1}</span>`:'';})()}<span class="jr-dbadge">${_mgDayShort(s.days)}</span></div>
+        <div class="jr-btop"><span class="jr-bname">${s.name}</span>${dsB}${mmB}${diB}${(()=>{const fd=_jrFutureDate(s);return fd?`<span class="jr-futb" title="ใบจองนัดส่งล่วงหน้า ${fd.toLocaleDateString('th-TH')}">📅 ${fd.getDate()}/${fd.getMonth()+1}</span>`:'';})()}<span class="jr-dbadge">${_mgDayShort(s.days)}</span></div>
         <div class="jr-bmeta">
           ${ret?`<span class="jr-retb" title="ดึงกลับมารอจัด — ${ret.reason} (ใบส่ง DS_DC ${ret.ref})">⚠️ ${ret.reason}</span>`:''}
           ${(ret||m.doc)?`<span class="jr-bdoc" title="${ret?`ใบส่ง DS_DC ที่ตรวจ ${ret.ref}`:`เลขที่เอกสาร${m.n>1?` (${m.n} ใบ)`:''}`}">📄 ${ret?ret.ref:m.doc}</span>`:''}
