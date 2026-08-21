@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Scorecard v1.6</title>
+<title>Rattana Scorecard v1.7</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 <style>
@@ -193,7 +193,7 @@ body.dark .spinner-box{background:var(--card-bg)}
 
 <header>
   <span class="logo-text">RATTANA <span>SCORECARD</span></span>
-  <span class="ver-badge">v1.6</span>
+  <span class="ver-badge">v1.7</span>
   <div style="flex:1"></div>
   <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌓</button>
   <a href="https://rattanaphaiboon.github.io/app/rattana-hub.html" class="hub-btn" title="กลับ Hub"><span class="hub-btn-icon"></span><span class="hub-btn-text">Hub</span></a>
@@ -390,7 +390,7 @@ body.dark .spinner-box{background:var(--card-bg)}
 </div><!-- /content -->
 
 <footer style="text-align:center;padding:16px;color:var(--muted);font-size:12px;padding-bottom:max(16px,env(safe-area-inset-bottom))">
-  Rattana Scorecard v1.6 · บริษัท รัตนไพบูลย์ สเตชั่น จำกัด · ข้อมูลประมวลผลในเครื่อง ไม่มีการอัปโหลดขึ้นเซิร์ฟเวอร์
+  Rattana Scorecard v1.7 · บริษัท รัตนไพบูลย์ สเตชั่น จำกัด · ข้อมูลประมวลผลในเครื่อง ไม่มีการอัปโหลดขึ้นเซิร์ฟเวอร์
 </footer>
 </div><!-- /page -->
 
@@ -450,6 +450,8 @@ const state={
   lateDetail:{},     // id -> [{y,m,d,inMin,start,lateMin,penMin}]
   absentCount:{},    // 'id|ym' -> n (ขาดงานที่คำนวณได้)
   absentDetail:{},   // id -> [{y,m,d}]
+  absentSrc:{},      // id -> 'master' | 'scan'  (ที่มาของกรอบวันจ้างงาน)
+  master:{},         // id -> {startNum,quitNum,start,quit,pos,branch,klang} จากชีต Q-U
   suggest:{},        // id -> 'HH:MM,HH:MM'
   docFiles:0, timeFiles:0, docRows:0, timeRows:0, skippedStatus:0,
   unknownTypes:{},
@@ -572,6 +574,9 @@ async function loadBoard(force){
     board.rows=boardFromCsv(text);
     board.loadedAt=Date.now();
     if(!board.rows.length)throw new Error('ไม่พบข้อมูลในชีต');
+    /* ดึง เริ่มงาน/ลาออก มาใช้เป็นกรอบคำนวณขาดงาน แล้วคิดใหม่ถ้าโหลดไฟล์ไว้แล้ว */
+    buildMasterFromBoard();
+    if(state.timeRows){computeAbsent();if(!$('tab-summary').classList.contains('hidden'))renderSummary();}
     $('boardLoading').classList.add('hidden');
     $('boardMain').classList.remove('hidden');
     buildBoardFilters();
@@ -991,16 +996,33 @@ function recalcLate(){
 
 /* ================= ABSENT (ตามระเบียบบริษัท) =================
    ขาดงาน = วันที่ไม่มีสแกนนิ้วเลย และไม่มีเอกสารอนุมัติใด ๆ ครอบวันนั้น
-   นับเฉพาะช่วงสแกนแรก..สแกนสุดท้ายของพนักงานแต่ละคน (กันนับก่อนเข้างาน/หลังลาออก) */
+   กรอบวันที่นับ = ช่วงจ้างงานจริง (เริ่มงาน..ลาออก จากชีต) — ถ้าไม่มีข้อมูลในชีต
+   จะถอยไปใช้ช่วงสแกนแรก..สแกนสุดท้ายแทน */
+const dnumOf=s=>{const d=parseDMY(s);return d?d.y*10000+d.m*100+d.d:null;};
+function buildMasterFromBoard(){
+  const m={};
+  for(const r of board.rows){
+    if(!r.id)continue;
+    m[r.id]={start:r.start,quit:r.quit,startNum:dnumOf(r.start),quitNum:dnumOf(r.quit),
+             pos:r.pos,branch:r.branch,klang:r.klang};
+  }
+  state.master=m;
+}
 function computeAbsent(){
-  state.absentCount={};state.absentDetail={};
+  state.absentCount={};state.absentDetail={};state.absentSrc={};
   for(const id in state.noScanList){
     const w=state.scanWindow[id];
-    if(!w)continue;
+    const m=state.master[id];
+    let lo,hi,src;
+    if(m&&m.startNum){lo=m.startNum;hi=m.quitNum||null;src='master';}
+    else if(w){lo=w.min;hi=w.max;src='scan';}
+    else continue;
+    state.absentSrc[id]=src;
     const cover=state.docCover[id];
     for(const nd of state.noScanList[id]){
       const dnum=nd.y*10000+nd.m*100+nd.d;
-      if(dnum<w.min||dnum>w.max)continue;
+      if(dnum<lo)continue;
+      if(hi&&dnum>hi)continue;
       if(cover&&cover.has(nd.y+'-'+nd.m+'-'+nd.d))continue;
       const k=id+'|'+ymKey(nd.y,nd.m);
       state.absentCount[k]=(state.absentCount[k]||0)+1;
@@ -1080,10 +1102,15 @@ function renderSummary(){
     <div class="stat-card danger"><div class="s-label">ขาดงานรวม</div><div class="s-value">${fmtNum(sumAbsent)}</div><div class="s-sub">วัน (ไม่สแกน + ไม่มีเอกสารครอบ)</div></div>`;
 
   const unk=Object.keys(state.unknownTypes);
+  const srcVals=Object.values(state.absentSrc);
+  const nMaster=srcVals.filter(v=>v==='master').length,nScan=srcVals.filter(v=>v==='scan').length;
+  const srcNote=nMaster
+    ? `ใช้วันจ้างงานจากชีต ${nMaster} คน${nScan?` · อีก ${nScan} คนไม่มีในชีต ใช้ช่วงสแกนแทน`:''}`
+    : 'ยังไม่ได้โหลดข้อมูลจากชีต — ใช้ช่วงสแกนแรก–สุดท้ายแทน';
   $('summaryNote').innerHTML=
     `นับเฉพาะเอกสารสถานะ <b>อนุมัติ</b> (ข้าม ${state.skippedStatus} รายการ) · คอลัมน์ลา = จำนวน<b>วัน</b>, ปรับปรุงเวลา/เปลี่ยนวันหยุด/สาย = จำนวน<b>ครั้ง</b> · `+
     `<b>สาย</b> = เข้าช้ากว่าเวลากะ (จับกะอัตโนมัติจากสแกนเข้า-ออกเทียบตารางกะบริษัท 9 ชม.) · <b>นาทีสาย</b> = เฉพาะที่เกิน 15 นาที ปัดขึ้นบล็อก 30 นาที · <b>หัก 20฿</b> = ครั้งที่ 4 ขึ้นไปในเดือน · `+
-    `<b>ขาดงาน</b> = วันที่ไม่มีสแกนเลยและไม่มีเอกสาร (สลับวันหยุด/ใบลา/เพิ่มเวลา) ครอบ นับเฉพาะช่วงสแกนแรก–สแกนสุดท้ายของแต่ละคน — คลิกตัวเลขดูรายวัน, กรอกทับได้ในช่อง ✏️ · `+
+    `<b>ขาดงาน</b> = วันที่ไม่มีสแกนเลยและไม่มีเอกสาร (สลับวันหยุด/ใบลา/เพิ่มเวลา) ครอบ · นับเฉพาะช่วงจ้างงานจริง <b>เริ่มงาน–ลาออก</b> จากชีต (${srcNote}) — คลิกตัวเลขดูรายวัน, กรอกทับได้ในช่อง ✏️ · `+
     `<b>วันทำงาน</b> = จำนวนวันที่มาทำงานจริง (มีสแกนนิ้วอย่างน้อย 1 ครั้งในวันนั้น) ไม่รวมวันลา/วันหยุด/ขาดงาน`+
     (unk.length?` · <span class="txt-danger">ประเภทที่ไม่รู้จัก (ไม่ได้นับ): ${esc(unk.join(', '))}</span>`:'');
 
@@ -1153,15 +1180,19 @@ function showAbsentDetail(id,ym){
   const e=state.emp[id]||{name:''};
   const list=(state.absentDetail[id]||[]).filter(x=>!ym||ymKey(x.y,x.m)===ym).sort((a,b)=>a.y-b.y||a.m-b.m||a.d-b.d);
   $('lateModalTitle').textContent=`ขาดงาน: ${e.name} (${id}) ${ym?'· '+THAI_MONTHS[+ym.slice(5,7)]:''}`;
-  const w=state.scanWindow[id];
-  const wTxt=w?`${String(w.min%100).padStart(2,'0')}/${String(Math.floor(w.min/100)%100).padStart(2,'0')}/${Math.floor(w.min/10000)+543} – ${String(w.max%100).padStart(2,'0')}/${String(Math.floor(w.max/100)%100).padStart(2,'0')}/${Math.floor(w.max/10000)+543}`:'-';
+  const m=state.master[id],w=state.scanWindow[id];
+  const beTxt=s=>{const d=parseDMY(s);return d?`${String(d.d).padStart(2,'0')}/${String(d.m).padStart(2,'0')}/${d.y+543}`:'-';};
+  const dnumTxt=n=>`${String(n%100).padStart(2,'0')}/${String(Math.floor(n/100)%100).padStart(2,'0')}/${Math.floor(n/10000)+543}`;
+  const wTxt=(state.absentSrc[id]==='master'&&m)
+    ? `เริ่มงาน ${beTxt(m.start)}${m.quit?` – ลาออก ${beTxt(m.quit)}`:' – ปัจจุบัน'} (จากชีต)`
+    : (w?`${dnumTxt(w.min)} – ${dnumTxt(w.max)} (ประมาณจากวันสแกน)`:'-');
   $('lateModalBody').innerHTML=(list.length?`
     <table class="tbl" style="min-width:0">
       <thead><tr><th>#</th><th>วันที่ขาดงาน</th></tr></thead>
       <tbody>${list.map((x,i)=>`<tr><td class="num">${i+1}</td>
         <td>${String(x.d).padStart(2,'0')}/${String(x.m).padStart(2,'0')}/${x.y+543}</td></tr>`).join('')}</tbody>
     </table>`:'<p class="txt-muted">ไม่มีรายการ</p>')+
-    `<p class="txt-sm txt-muted mt-8">เกณฑ์: ไม่มีสแกนนิ้วทั้งวัน และไม่มีเอกสารอนุมัติ (สลับวันหยุด/ใบลา/เพิ่มเวลา) ครอบวันนั้น · นับเฉพาะช่วงทำงาน ${wTxt} · ถ้าไม่ถูกต้อง กรอกทับได้ในช่อง ✏️ ของคอลัมน์ขาดงาน</p>`;
+    `<p class="txt-sm txt-muted mt-8">เกณฑ์: ไม่มีสแกนนิ้วทั้งวัน และไม่มีเอกสารอนุมัติ (สลับวันหยุด/ใบลา/เพิ่มเวลา) ครอบวันนั้น · ช่วงที่นับ: ${esc(wTxt)} · ถ้าไม่ถูกต้อง กรอกทับได้ในช่อง ✏️ ของคอลัมน์ขาดงาน</p>`;
   $('lateModal').classList.add('open');
 }
 function closeModal(){$('lateModal').classList.remove('open');}
@@ -1268,7 +1299,7 @@ function renderUploadSummary(){
 }
 function resetAll(){
   if(!confirm('ล้างข้อมูลไฟล์ที่อ่านมาทั้งหมด? (ค่าตั้งเวลากะและขาดงานที่กรอกไว้จะยังอยู่)'))return;
-  for(const k of['emp','scans','scanDays','noScanDays','noScanList','scanWindow','docCover','docAgg','docMonths','presentMonths','lateCount','lateMinutes','lateDetail','absentCount','absentDetail','suggest','unknownTypes'])state[k]={};
+  for(const k of['emp','scans','scanDays','noScanDays','noScanList','scanWindow','docCover','docAgg','docMonths','presentMonths','lateCount','lateMinutes','lateDetail','absentCount','absentDetail','absentSrc','suggest','unknownTypes'])state[k]={};
   state.docFiles=state.timeFiles=state.docRows=state.timeRows=state.skippedStatus=0;
   refreshBadges();renderUploadSummary();buildFilters();renderSummary();renderLateCfg();
   showToast('ล้างข้อมูลแล้ว','info');
