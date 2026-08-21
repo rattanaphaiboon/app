@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.32</title>
+<title>HR Rattana v5.33</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -694,6 +694,7 @@ body.dark .login-title { color:var(--text); }
 .camera-wrap.success { border-color:var(--success); box-shadow:0 0 0 4px rgba(46,204,113,.3); }
 .camera-wrap.error { border-color:var(--danger); box-shadow:0 0 0 4px rgba(231,76,60,.3); }
 .cam-video { width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+.cam-video.qr-backcam { transform:none; }   /* v12.33: โหมด QR ใช้กล้องหลัง — ภาพไม่ต้องกลับซ้ายขวา */
 .cam-canvas { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; transform:scaleX(-1); }
 .cam-overlay {
   position:absolute; inset:0; display:flex; flex-direction:column;
@@ -3577,7 +3578,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.32';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.33';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -5174,6 +5175,8 @@ async function startEmpCamera() {
   if (_empCamBusy) return;
   _empCamBusy = true;
   const v = document.getElementById('empVideo');
+  _qrCamBack = false;                                  // v12.33: เปิดกล้องหน้าใหม่ = ล้างสถานะกล้องหลังของโหมด QR
+  if (v) v.classList.remove('qr-backcam');
   try {
     setEmpOverlay(true, 'กำลังเปิดกล้อง...');
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('NoMediaDevices');
@@ -5887,12 +5890,30 @@ function _loadScript_(src) {
     document.head.appendChild(s);
   });
 }
+/* v12.33: โหมด QR ต้องใช้กล้องหลัง (เดิมใช้กล้องหน้าตัวเดียวกับสแกนหน้า — เล็ง QR บนผนังไม่ได้จริง)
+   สแกนติดแล้วสลับกลับกล้องหน้าอัตโนมัติ เพราะรูปยืนยันตอนกดบันทึกต้องเป็นหน้าคน */
+let _qrCamBack = false;
+async function _qrSetCam_(back) {
+  const v = document.getElementById('empVideo');
+  if (!v || !navigator.mediaDevices) return;
+  if (empStream) { try { empStream.getTracks().forEach(t => t.stop()); } catch (_) {} empStream = null; }
+  const gum = c => navigator.mediaDevices.getUserMedia(c);
+  try {
+    empStream = await camTimeout_(gum({ audio:false, video:{ facingMode: back ? { ideal:'environment' } : 'user', width:{ideal:640}, height:{ideal:640} } }), 12000);
+  } catch (e1) {
+    empStream = await camTimeout_(gum({ audio:false, video:true }), 12000);
+  }
+  v.srcObject = empStream;
+  v.play().catch(() => {});
+  _qrCamBack = back;
+  v.classList.toggle('qr-backcam', back);
+}
 async function startQRScanMode() {
   if (_qrScanning) return;
   if (!empStream) { toast('เปิดกล้องก่อน แล้วกด "สแกน QR" อีกครั้ง', 'warning'); startEmpCamera(); return; }
   _qrScanning = true;
   const btn = document.getElementById('btnQRScan');
-  if (btn) btn.textContent = '⏳ เล็งกล้องไปที่ QR ประจำจุด...';
+  if (btn) btn.textContent = '⏳ เล็งกล้องหลังไปที่ QR ประจำจุด...';
   try {
     if ('BarcodeDetector' in window && !_qrDetector) {
       try { _qrDetector = new BarcodeDetector({ formats: ['qr_code'] }); } catch (_) { _qrDetector = null; }
@@ -5903,6 +5924,12 @@ async function startQRScanMode() {
         .catch(() => _loadScript_('https://unpkg.com/jsqr@1.4.0/dist/jsQR.js'));
     }
     if (!_qrDetector && typeof jsQR === 'undefined') throw new Error('เครื่องนี้ไม่รองรับตัวอ่าน QR');
+    // v12.33: พักลูปจับหน้า (กล้องหลังไม่มีหน้าให้จับ กันสถานะสับสน) แล้วสลับกล้องหลัง
+    if (empMatchInterval) { clearInterval(empMatchInterval); empMatchInterval = null; }
+    const chkFace = document.getElementById('chkFace');
+    if (chkFace) chkFace.textContent = '📷 กำลังใช้กล้องหลังสแกน QR...';
+    await _qrSetCam_(true);
+    if (!_qrScanning) return;   // ถูกยกเลิกระหว่างสลับกล้อง
     if (_qrInterval) clearInterval(_qrInterval);
     _qrInterval = setInterval(_qrTick_, 600);
   } catch (e) {
@@ -5910,11 +5937,15 @@ async function startQRScanMode() {
     toast('❌ ' + (e.message || 'เปิดตัวอ่าน QR ไม่ได้'), 'error');
   }
 }
-function stopQRScanMode() {
+function stopQRScanMode(skipCamRevert) {
   _qrScanning = false;
   if (_qrInterval) { clearInterval(_qrInterval); _qrInterval = null; }
   const btn = document.getElementById('btnQRScan');
   if (btn) btn.textContent = '📷 สแกน QR ประจำจุด (ใช้แทนใบหน้า)';
+  // v12.33: กลับกล้องหน้า + จับหน้าต่อ — ยกเว้นตอนปิดจอสแกนทั้งจอ (กล้องกำลังถูกปิดอยู่แล้ว)
+  if (_qrCamBack && !skipCamRevert) {
+    _qrSetCam_(false).then(() => { try { startEmpMatching(); } catch (_) {} }).catch(() => {});
+  }
 }
 async function _qrTick_() {
   const v = document.getElementById('empVideo');
@@ -8927,7 +8958,7 @@ async function startCheckinScan_() {
 }
 
 function cancelCheckinFlow() {
-  stopQRScanMode();   // v12.19: ปิดจอสแกน = หยุดลูปอ่าน QR ด้วย
+  stopQRScanMode(true);   // v12.19/33: ปิดจอสแกน = หยุดลูปอ่าน QR ด้วย (true = ไม่ต้องสลับกล้องกลับ เพราะกำลังปิดกล้องอยู่แล้ว)
   stopEmpCamera();
   const overlay = document.getElementById('homeActiveScreen');
   if (overlay) overlay.style.display = 'none';
