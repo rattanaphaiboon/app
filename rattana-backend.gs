@@ -1,6 +1,111 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v5.6 — QR ต้องตรงจุดที่ยืนอยู่จริง (คู่แอป v12.37 · ต้อง Deploy New version):
+ *         อุดช่องโหว่: เดิมสแกน QR ของ "จุดอื่น" ก็ผ่าน (เช่น อยู่ HQ สแกน QR ของ W2)
+ *         → actionCheckin เทียบพิกัด GPS ที่ส่งมากับพิกัดของจุดใน QR ต้องอยู่ในรัศมี
+ *         (+เผื่อคลาดเคลื่อน 80 ม.) ไม่งั้นปฏิเสธ · ฝั่งแอป v12.37 กันไว้อีกชั้นตั้งแต่ตอนสแกน
+ * v5.5 — QR ประจำจุดสแกน (คู่แอป v12.19 · ต้อง Deploy New version):
+ *         หลักฐานสำรองเมื่อ "ระบบใบหน้าไม่พร้อม" — HR พิมพ์ QR ติดไว้แต่ละจุด
+ *         พนักงานสแกน QR = พิสูจน์ว่าอยู่หน้างานจริง (รูปถ่าย+GPS ยังเก็บตามปกติ)
+ *         ► ขั้นตอน: วางไฟล์ → รัน setupLocationQR() 1 ครั้ง (สร้าง secret ใน Locations
+ *           คอลัมน์ G) → Deploy New version → ในแอป (HR): ตั้งค่า → พิมพ์ QR ประจำจุดสแกน
+ *         · QR = "RTQR|รหัสจุด|secret" · secret อยู่เฉพาะชีท (getLocations ส่งแค่ธง qr)
+ *         · actionCheckin ตรวจ qrToken ตรงกับจุดจริงก่อนบันทึก · scannedBy = "qr:จุด"
+ * v5.4 — แก้ SyntaxError: Identifier 'QUOTA_TAB' has already been declared
+ *         (v5.3 ตั้งชื่อชนกับ QUOTA_TAB='โควต้ากะ' ของระบบจัดกะ ~บรรทัด 3475)
+ *         → เปลี่ยนของโควต้าลาเป็น LQ_TAB / LQ_COLS
+ * v5.3 — แท็บ "โควต้าลา" ให้ HR กรอกโควต้ารายคนเอง (คู่แอป v12.14):
+ *         ► รัน setupLeaveQuota() 1 ครั้งจาก editor (ไม่ต้อง Deploy ก็สร้างแท็บได้
+ *           แต่ต้อง Deploy New version เพื่อให้ระบบ "อ่าน" ค่าที่กรอกไปใช้จริง)
+ *         โครง: รหัส|ชื่อ|คลัง|วันเริ่มงาน|โควต้าอัตโนมัติ(อ้างอิง)|ลากิจ|ป่วยมีใบ|
+ *               ป่วยไม่มีใบ|พักร้อน|กิจไม่รับค่าจ้าง|ลาคลอด|หมายเหตุ
+ *         กติกาช่องสีเหลือง: เว้นว่าง = ใช้ค่าอัตโนมัติตามอายุงาน · ตัวเลข = ใช้ตัวเลขนั้น
+ *         (เช่น พักร้อนยกยอดใส่ยอดรวม) · "ไม่จำกัด" = ไม่จำกัด
+ *         รันซ้ำได้: ค่าที่กรอกไม่หาย เติมพนักงานใหม่ + รีเฟรชคอลัมน์ข้อมูล/ค่าอ้างอิง
+ * v5.2 — โควต้าล็อกแข็ง (surat เคาะ · คู่แอป v12.13 · ต้อง Deploy New version):
+ *         เกินโควต้า = ยื่นไม่ได้ (QUOTA_HARD_BLOCK=true) + ข้อความแนะนำประเภทที่ยังเหลือ
+ *         (เฉพาะ กิจ/พักร้อน/กิจไม่รับค่าจ้าง) · ยกเว้น HR ยื่นแทนได้ (ติดธง ⚠เกินโควต้า)
+ * v5.1 — ระบบโควต้าลาครบวงจร (คู่แอป v12.12 · ต้อง Deploy New version):
+ *         (1) พนักงาน PTT ใช้หน้าโควต้าได้แล้ว — วันเริ่มงานจากทะเบียน PTT คอลัมน์ "เข้า"
+ *         (2) เพิ่มโควต้าลาคลอด 98 วันตามกฎหมาย (นับใช้ไปจากลาคลอดทั้งสองแบบ)
+ *         (3) ด่านโควต้าตอนยื่น (soft): เกินยังยื่นได้ แต่รายละเอียดถูกประทับ "⚠เกินโควต้า"
+ *             ให้ผู้อนุมัติ/ชีทเห็นชัด · สวิตช์ QUOTA_HARD_BLOCK=true = ห้ามยื่นเมื่อเกิน
+ *         (4) getLeaveQuota ตอบ startSource บอกที่มาวันเริ่มงาน (Users/ทะเบียน PTT)
+ * v5.0 — การลาApp = แหล่งความจริงเดียวของฝั่ง "อ่าน" (ต้อง Deploy New version):
+ *         getMyLeaves + โควต้าวันลา อ่านจากชีทการลาApp โดยตรง (แปลงประเภทไทย→โค้ดให้แอป)
+ *         — เดิมอ่านแท็บ log ภายในที่เขียนคู่ตอนยื่น: HR ลบแถวในชีทแล้วรายการค้างในแอป
+ *         และสถานะใน log ไม่เคยถูกอัปเดตตอนอนุมัติ → หน้าโควต้านับวันลาที่ใช้ได้ 0 ตลอด (บั๊กแฝง)
+ *         แท็บ log ยังเขียนต่อเป็นประวัติสำรอง แต่ไม่ถูกใช้อ่านแล้ว (ยังไม่ migrate = อ่านแบบเดิม)
+ * v4.9 — รอบเก็บบั๊ก (คู่แอป v12.10):
+ *         (1) รูปแนบฟอร์มลา (ใบรับรองแพทย์) เคยถูกทิ้งเงียบ — ฟอร์มส่งชื่อ attachment
+ *             แต่รับแค่ photo → รับทั้งคู่แล้ว (ลง Supabase requests/ + ลิงก์คอลัมน์ O)
+ *         (2) เติมสแกนย้อนหลัง (v4.8): สร้างเวลาแบบระบุ +07:00 ตรงๆ — เดิมพึ่ง timezone
+ *             โปรเจกต์สคริปต์ ถ้าไม่ใช่ Bangkok เวลาจะเพี้ยน 7 ชม.
+ *         (3) สรุปวัน คอลัมน์ "เวลาที่ใช้ลา" โชว์ชั่วโมงของวันนั้น (cap 8) —
+ *             เดิมโชว์ยอดรวมทั้งใบ (ลา 3 วันขึ้น 24 ทุกวัน)
+ * v4.8 — ปิดวงจร "แก้เวลาย้อนหลัง" (ต้อง Deploy New version):
+ *         อนุมัติคำขอแก้เวลาใน การลาApp → ระบบแตก "เข้า/ออก HH:MM" + วันที่ จากคำขอ
+ *         แล้วเติมสแกน retroactive (ป้าย "ย้อน", scannedBy=timeadjust:ผู้อนุมัติ)
+ *         ลง CheckinLog + Supabase ทันที → คิดสรุป/สรุปวัน/ลงเวลาAuto ขยับเองอัตโนมัติ
+ *         (เดิมอนุมัติแล้วได้แค่ตราประทับ — เวลาไม่เข้าระบบ วันนั้นค้างเป็นผิด/ขาด;
+ *          ท่อเก่า applyTimeAdjust เขียนลง "ลงเวลาApp" ที่เลิกใช้ + ทางส่งคำขอเดิมแอปเลิกเรียก)
+ *         idempotent: วันเดียว-ชนิดเดียว เติมได้ครั้งเดียว (แก้เพิ่มให้ HR ลบแถวในชีทเอง)
+ * v4.7 — ลาครึ่งวัน/รายชั่วโมง คิดเศษวันตามชั่วโมงจริง ÷ 8 (surat เคาะ):
+ *         สรุปวัน เพิ่มคอลัมน์ K (ซ่อน) = ชม.ลาอนุมัติ/วัน (cap 8) + สถานะใหม่
+ *         "ทำงาน (ลาบางส่วน)" (มีสแกนครบคู่ ไม่เช็ค 9 ชม.) / "ผิด (ลาบางส่วน)" / "ลา"
+ *         ลงเวลาAuto: ช่องลา = Σชม./8 · แรง = เต็มวัน + (1−ชม.ลา/8) · ขาดคิดเศษเช่นกัน
+ *         ► วางแล้วรัน setupDailySummary + setupMonthlyAuto (ไม่ต้อง Deploy)
+ * v4.6 — ลาคลอดครบวงจร (คู่แอป v12.9): typeLabel โค้ดดิบ maternity_paid/unpaid
+ *         จากแอปเก่า → แปลงเป็น "ลาคลอด (รับ/ไม่รับค่าจ้าง)" ก่อนลงชีท
+ *         + ลงเวลาAuto ช่อง "ลาไม่รับค่าจ้าง" ไม่นับลาคลอดซ้ำ (เข้าช่องลาคลอดช่องเดียว)
+ * v4.5 — แท็บ "ลงเวลาAuto" (setupMonthlyAuto — รันจาก editor ไม่ต้อง Deploy):
+ *         สรุปยอดรายคนจาก สรุปวัน ตามโครงชีทนับมือ HR: ชื่อ|รหัส|คลัง|แรงที่ทำงาน|
+ *         ป่วยมีบพ.|กิจรับค่าจ้าง|ลาคลอด|พักร้อน|ป่วยไม่มีใบ|ขาดงาน|ลาไม่รับค่าจ้าง|
+ *         สลับวันหยุด|รวมวัน|แรงที่ทำงาน — ขาดงาน = "ผิด" ที่ไม่มีใบลา,
+ *         อาทิตย์/นักขัตฯ ไม่นับ, ช่วงวันที่ตาม B1/D1 ของ สรุปวัน
+ * v4.4 — เติมช่องที่เคยว่างในการลาApp:
+ *         · ชื่อเล่น — ไล่หา ฟอร์ม → ชีท Users → "ทะเบียน PTT คอลัมน์ H ชื่อเล่น" (เพิ่มใน pttMap_)
+ *         · จำนวนชั่วโมง — ฟอร์มไม่ส่ง (เปลี่ยนวันหยุด ฯลฯ) = 8 ชม./วัน × จำนวนวัน อัตโนมัติ
+ *           ยกเว้น "แก้เวลาย้อนหลัง" ตั้งใจเว้นว่าง (ไม่ใช่การใช้ชั่วโมงลา)
+ * v4.3 — ชีทการลาApp โครงคอลัมน์ใหม่ (คำขอ 3 แบบลงชีทเดียว หัวเดียวกัน):
+ *         วันที่ | รหัสพนักงาน | ชื่อ-นามสกุล | ชื่อเล่น | คลัง | ประเภทเอกสาร | ขอโดย |
+ *         ขอวันที่(timestamp) | สถานะ | ผู้อนุมัติ | อนุมัติเมื่อ | รายละเอียด | จำนวนชั่วโมง
+ *         (+ ถึงวันที่, รูปแนบ ต่อท้าย — ลาหลายวัน/รูป) · คลัง จาก User slip คอลัมน์ D
+ *         ► ขั้นตอน: วางไฟล์ → Deploy New version ก่อน → รัน migrateLeaveSheet() ครั้งเดียว
+ *           (ของเก่าย้ายให้ครบ เก็บสำรองที่ "การลาApp เดิม") → รัน setupDailySummary อัปสูตรลา
+ *         · โค้ดรู้จักทั้งสองโครง (เช็คหัว E="คลัง") — ยังไม่ migrate ก็ไม่พัง
+ *         · approveAny ประทับ "อนุมัติเมื่อ" (K) อัตโนมัติตอนอนุมัติ/ปฏิเสธ
+ * v4.2 — submitLeaveApp รับ p.photo (รูปแนบจากฟอร์ม เช่น เปลี่ยนวันหยุด v12.8):
+ *         อัปขึ้น Supabase Storage ใต้ requests/{empId}/... แล้วเขียน "ลิงก์เปิดรูป"
+ *         (ผ่านประตู photoView + PHOTO_KEY) ลงคอลัมน์ S "รูปแนบ" ของชีทการลาApp
+ *         — backend เก่าไม่พัง แค่ไม่เก็บรูป (ฟิลด์ถูกเมิน)
+ * v4.1 — getCheckinLog รับพารามิเตอร์ month ('MM/yyyy') ดึงสแกนทั้งเดือนของพนักงาน
+ *         ในคำขอเดียว — ให้ปฏิทิน "ดูประวัติ" ในแอป (v12.5) ระบายสีวันจากข้อมูลระบบ
+ *         (แอปมี fallback ใช้กับ backend เก่าได้ แต่เดือนย้อนหลังอาจไม่ครบ — วางตัวนี้แล้วครบ)
+ * v4.0 — กะดึกดู "รายวันจากตารางจัดกะ" (สโตร์สลับกะได้ ไม่ฟิกซ์ตัวคน):
+ *         วันไหนแท็บจัดกะลงกะเวลาเข้า ≥ 18:00 ให้ใคร → วันนั้นของคนนั้นนับวันแบบ
+ *         เที่ยงถึงเที่ยง (เข้า 21:50 + ออก 08:01 วันรุ่งขึ้น = แถวเดียว ทำงานเต็มวัน)
+ *         เทียบด้วย ชื่อ-สกุล (TRIM) + วันที่เริ่มกะ · จัดกะกะดึกต้องลงวันที่ = วันเริ่มกะเย็น
+ * v3.9 — (ยังใช้ได้เป็นตัวเสริม) User slip คอลัมน์ F "กะ" = "ดึก" สำหรับคนกะดึกตายตัว
+ *         — คนที่สลับกะไปมา "อย่าใส่" ให้ระบบดูจากจัดกะรายวันแทน
+ * v3.8 — "สรุปวัน": สแกนขาเดียว หรือกดซ้ำติดกัน (ช่วงแรก→สุดท้าย ≤ 5 นาที) —
+ *         เวลาโชว์เฉพาะช่อง IN (OUT เว้นว่าง) + สถานะ "ผิด (ไม่ครบคู่)" เสมอ
+ *         (เดิมเวลาเดียวกันโชว์ทั้ง IN-OUT อ่านสับสน / กดซ้ำใน 1 นาทีขึ้น "ผิด" เฉยๆ)
+ * v3.7 — คอลัมน์ "คลัง" (User slip คอลัมน์ D: HQ/W1-W4) เข้าระบบ:
+ *         login ส่ง khlang มากับ user + แท็บ "สรุปวัน" เพิ่มคอลัมน์ J "คลัง"
+ *         (VLOOKUP รหัสพนักงาน → User slip) ให้กรอง/จับข้อมูลตามคลังได้
+ * v3.6 — เกณฑ์สถานะ "สรุปวัน": ยึดช่วงสแกนแรก→สุดท้าย (สแกนเกินไม่ถือว่าผิด)
+ *         ≥2 สแกน: ช่วง ≥9 ชม. = ทำงานเต็มวัน / ไม่ถึง = ผิด · สแกนเดียว = ผิด (ไม่ครบคู่)
+ * v3.4 — setupDailySummary(): สร้างรายงาน "สรุปวัน" อัตโนมัติ (แท็บ+สูตร+สี ครบ
+ *         ในคลิกเดียว — แทน ลงเวลาApp ที่เลิกใช้) Run ครั้งเดียวจาก editor
+ * v3.3 — เลิกเขียนชีท "ลงเวลาApp" (สวิตช์ WRITE_ATT_SHEET=false — ตรรกะช่อง IN/OUT
+ *         ไม่เข้ากับกะจริง ข้อมูลเพี้ยน; HR เขียนสูตรเองจาก CheckinLog ดิบแทน)
+ *         คู่กับแอป v12.1: แถบเตือน "ไม่ครบคู่" ย้ายมาคำนวณจาก log ในเครื่อง
+ * v3.2 — รวมร่าง 2 สาย (เลข v3.1 ชนกันจากคนละแชต):
+ *         (ก) จากสายนี้: ด่านกันซ้ำ "ทุกชนิด" 60 นาที + retroactive ยกเว้น (คู่แอป v12.0)
+ *         (ข) จากอีกสาย: checkin_log บน Supabase เก็บ retroactive/reason ครบเท่าชีท
+ *             (ต้องรัน SQL เพิ่มคอลัมน์ + view หัวคอลัมน์ตามชีทก่อน)
  * v3.1 — ด่านกันสแกนซ้ำขยายเป็น "ทุกชนิด" ภายใน 60 นาที (สาขาเดียวกัน) — คู่กับแอป v12.0
  *         เดิมกันเฉพาะชนิดเดิม แต่แอปสลับ เข้า→ออก อัตโนมัติตอนพนักงานสแกนซ้ำ
  *         (เข้า 07:40 → กดซ้ำ 07:50 กลายเป็น "ออก") เลยหลุดด่าน = เข้า-ออกซ้อนตอนเช้า
@@ -168,6 +273,7 @@ function handle(e, method) {
       case 'getFaceData':          return actionGetFaceData(user);
       case 'getSettings':          return actionGetSettings(user);
       case 'getLocations':         return actionGetLocations(user);
+      case 'getLocationQR':        return jsonOut(getLocationQR(p, user));   // v5.5: HR พิมพ์ QR ประจำจุด
       case 'getPersonalLocations': return actionGetPersonalLocations(p, user);
       case 'getCheckinLog':        return actionGetCheckinLog(p, user);
       case 'getAttendance':        return actionGetAttendance(p, user);
@@ -581,7 +687,9 @@ function pttMap_() {
         if (String(r[9]).trim() !== 'อยู่') return;
         const id = String(r[2] || '').trim(); if (!id) return;
         m[id] = { saka: String(r[0]).trim(), khlang: String(r[1]).trim(), position: String(r[20] || '').trim(),
-                  name: String(r[6] || '').trim() };   // v2.1: ใช้เป็น fallback ตอน check-in
+                  name: String(r[6] || '').trim(),      // v2.1: ใช้เป็น fallback ตอน check-in
+                  nickname: String(r[7] || '').trim(),   // v4.4: ชื่อเล่น (ทะเบียน PTT คอลัมน์ H)
+                  startDate: String(r[12] || '').trim() }; // v5.1: วันเริ่มงาน (คอลัมน์ "เข้า") — คิดโควต้าลา
       });
       break;
     }
@@ -680,6 +788,35 @@ function actionCheckin(p, user) {
   }
   if (!target) return jsonOut({ ok:false, error:'ไม่พบพนักงาน ' + empId });
 
+  // v5.5: ตรวจหลักฐาน QR ประจำจุด (เมื่อแอปส่งมา — ใช้แทนใบหน้าตอนระบบใบหน้าไม่พร้อม)
+  if (p.qrToken) {
+    const locSh = getTab(T.LOC);
+    const ld = locSh ? locSh.getDataRange().getValues() : [];
+    let qrRow = -1;
+    for (let i = 1; i < ld.length; i++) {
+      if (String(ld[i][0]).trim() === String(p.qrLoc || '').trim() &&
+          String(ld[i][6] || '').trim() !== '' &&
+          String(ld[i][6]).trim() === String(p.qrToken).trim()) { qrRow = i; break; }
+    }
+    if (qrRow < 0) return jsonOut({ ok:false, error:'QR ไม่ถูกต้อง — สแกน QR ประจำจุดที่ติดไว้ที่สาขาเท่านั้น' });
+    // v5.6: QR ต้องเป็นของจุดที่ผู้สแกน "ยืนอยู่จริง" — เทียบพิกัดที่ส่งมากับพิกัดของจุดนั้นในชีท
+    // (อุดช่องโหว่: อยู่ HQ แต่สแกน QR ของ W2 เดิมผ่านได้)
+    const qlat = parseFloat(ld[qrRow][2]) || 0, qlng = parseFloat(ld[qrRow][3]) || 0;
+    const qrad = parseFloat(ld[qrRow][4]) || 100;
+    const plat = parseFloat(p.lat) || 0, plng = parseFloat(p.lng) || 0;
+    if (!plat || !plng) return jsonOut({ ok:false, error:'ไม่มีพิกัด GPS แนบมา — เปิด GPS แล้วสแกนใหม่' });
+    if (qlat && qlng) {
+      const R = 6371000, toRad = d => d * Math.PI / 180;
+      const dLat = toRad(qlat - plat), dLng = toRad(qlng - plng);
+      const a = Math.pow(Math.sin(dLat / 2), 2) +
+                Math.cos(toRad(plat)) * Math.cos(toRad(qlat)) * Math.pow(Math.sin(dLng / 2), 2);
+      const dist = 2 * R * Math.asin(Math.sqrt(a));
+      if (dist > qrad + 80) {   // +80 ม. เผื่อ GPS คลาดเคลื่อน
+        return jsonOut({ ok:false, error:'QR "' + p.qrLoc + '" เป็นของจุดอื่น (ห่างจากคุณ ' + Math.round(dist) + ' ม.) — ใช้ QR ของจุดที่คุณอยู่เท่านั้น' });
+      }
+    }
+  }
+
   const bu = p.bu || target.department || '';
   const branch = p.branch || target.branch || '';
   const now = new Date();
@@ -722,14 +859,16 @@ function actionCheckin(p, user) {
                 scan_at: origWhen.toISOString(), type: type,
                 branch: branch, lat: sbNum_(p.lat), lng: sbNum_(p.lng),
                 distance: sbNum_(p.distance), face_dist: sbNum_(p.faceDist),
-                scanned_by: p.scannedBy || 'self'
+                scanned_by: p.scannedBy || 'self',
+                retroactive: p.retroactive ? 'Y' : '',           // v3.2
+                reason: (p.retroactive && p.reason) || ''
               };
               if (ph) row.photo_path = ph;
               sbUpsert_('checkin_log', row, 'client_id');
             } catch (e) {}
           }
           // v2.7: รอบแรกอาจลงแถว log แล้วแต่ ลงเวลาApp พลาด (exception กลางทาง) — upsert ซ้ำเป็น idempotent ซ่อมให้
-          try { upsertAttendance({ empId: empId, name: target.name, dateStr: dateStr, timeStr: timeStr, type: type, branch: branch, bu: bu, note: '' }); } catch (e) {}
+          if (WRITE_ATT_SHEET) { try { upsertAttendance({ empId: empId, name: target.name, dateStr: dateStr, timeStr: timeStr, type: type, branch: branch, bu: bu, note: '' }); } catch (e) {} }
           return jsonOut({ ok:true, dup:true, msg:'มีอยู่แล้ว', photoSaved: dupPhotoSaved });
         }
       }
@@ -763,7 +902,7 @@ function actionCheckin(p, user) {
         }
         const hhmm = Utilities.formatDate(new Date(ts), tz, 'HH:mm');
         // v2.7: กันเคสแถว log ลงแล้วแต่ ลงเวลาApp พลาดรอบก่อน — upsert ซ้ำได้ (idempotent) ให้ตารางวันตามทัน
-        try { upsertAttendance({ empId: empId, name: target.name, dateStr: dateStr, timeStr: Utilities.formatDate(new Date(ts), tz, 'HH:mm:ss'), type: type, branch: branch, bu: bu, note: '' }); } catch (e) {}
+        if (WRITE_ATT_SHEET) { try { upsertAttendance({ empId: empId, name: target.name, dateStr: dateStr, timeStr: Utilities.formatDate(new Date(ts), tz, 'HH:mm:ss'), type: type, branch: branch, bu: bu, note: '' }); } catch (e) {} }
         return jsonOut({ ok:true, dup:true, guard:true,
           msg:'สแกน' + (type === 'out' ? 'ออก' : 'เข้า') + 'ไปแล้วเมื่อ ' + hhmm + ' — ไม่บันทึกซ้ำ' });
       }
@@ -782,7 +921,9 @@ function actionCheckin(p, user) {
       scan_at: when.toISOString(), type: type,
       branch: branch, lat: sbNum_(p.lat), lng: sbNum_(p.lng),
       distance: sbNum_(p.distance), face_dist: sbNum_(p.faceDist),
-      scanned_by: p.scannedBy || 'self', photo_path: photoPath
+      scanned_by: p.scannedBy || 'self', photo_path: photoPath,
+      retroactive: p.retroactive ? 'Y' : '',                    // v3.2: ให้ครบเท่าชีท (view checkin_log_th)
+      reason: (p.retroactive && p.reason) || ''
     }, 'client_id');
   }
   // ช่อง photo ในชีท: ถ้าใช้ Supabase = เก็บ path (สั้น) · ถ้ายังไม่ตั้ง = เก็บ base64 เดิม (backward compat)
@@ -797,15 +938,231 @@ function actionCheckin(p, user) {
     photoCell, user.email, cid,   // O=photo(path) · Q(17)=clientId
   ]);
 
-  const res = upsertAttendance({
+  // v3.3: เลิกเขียนชีท "ลงเวลาApp" — ตรรกะช่อง IN/OUT ไม่เข้ากับกะจริง ข้อมูลเพี้ยน
+  // HR ทำสูตรเองจาก CheckinLog (ดิบ ถูกต้อง) แทน · เปิดกลับได้ด้วยสวิตช์เดียว
+  const res = WRITE_ATT_SHEET ? upsertAttendance({
     empId, name: target.name, dateStr, timeStr,
     type: type, branch, bu,
     note: p.retroactive ? ('ย้อนหลัง: ' + (p.reason || '-')) : '',
-  });
+  }) : { status: '', slot: '' };
 
   // v2.3: บอก client ตรงๆ ว่ารูปขึ้น Storage จริงไหม — จะได้ไม่พลาดเงียบ (หน้า audit ขึ้น "ไม่มีรูป")
   return jsonOut({ ok:true, msg:'บันทึกแล้ว', status:res.status, slot:res.slot,
     photoSaved: (useSB && p.photo) ? !!photoPath : null });
+}
+
+/* v3.3: สวิตช์ชีท "ลงเวลาApp" — false = หยุดเขียน (HR เขียนสูตรเองจาก CheckinLog) */
+const WRITE_ATT_SHEET = false;
+
+/* ============================================================
+   v3.4: สร้างรายงาน "สรุปวัน" อัตโนมัติ — Run ฟังก์ชันนี้ครั้งเดียวจาก editor
+   ได้: แท็บ "สรุปวัน" (ทุกคน×ทุกวัน + IN/OUT + สถานะสี + การลา + วันหยุด)
+        + แท็บ "คิดสรุป" (ตัวคำนวณ ซ่อนไว้) + แท็บ "Holidays" (ถ้ายังไม่มี)
+   เปลี่ยนช่วงรายงานได้เองที่ B1 (เริ่ม) / D1 (จบ) ในแท็บ "สรุปวัน"
+   ============================================================ */
+function setupDailySummary() {
+  const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
+
+  // Holidays — สร้างเปล่าไว้ให้เติมวันนักขัตฤกษ์ (A=วันที่ B=ชื่อวันหยุด)
+  let hol = ss.getSheetByName('Holidays');
+  if (!hol) {
+    hol = ss.insertSheet('Holidays');
+    hol.getRange(1, 1, 1, 2).setValues([['วันที่', 'ชื่อวันหยุด']])
+      .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+  }
+
+  // ── แท็บคำนวณ (ซ่อน) ──
+  // v4.0: กะดึกข้ามคืน "รายวันตามตารางจัดกะ" (สโตร์สลับกะได้ ไม่ฟิกซ์ตัวคน):
+  //   วันไหนแท็บ "จัดกะ" ลงกะให้คนนั้น (ชื่อ-สกุล+วันที่) โดยเวลาเข้า ≥ 18:00 → วันนั้นนับแบบ
+  //   "เที่ยงถึงเที่ยง" (สแกนก่อนเที่ยงของเช้าวันถัดไปนับเป็นกะเมื่อวานเย็น)
+  //   → เข้า 21:50 + ออก 08:01 วันรุ่งขึ้น จับคู่อยู่แถวเดียว "ของวันที่" = วันเริ่มกะ
+  //   เสริม: User slip คอลัมน์ F = "ดึก" ยังใช้ได้สำหรับคนกะดึกตายตัว (อย่าใส่ให้คนสลับกะ)
+  //   เงื่อนไขให้จับคู่ถูก: จัดกะของกะดึกต้องลง "วันที่" เป็นวันเริ่มกะตอนเย็น และชื่อสะกดตรงกับในระบบ
+  let calc = ss.getSheetByName('คิดสรุป');
+  if (!calc) calc = ss.insertSheet('คิดสรุป'); else calc.clear();
+  calc.getRange('A1').setFormula(
+    `=LET(nid, IFERROR(FILTER('User slip'!B2:B&"", TRIM('User slip'!F2:F)="ดึก"), {"__none__"}), nkey, IFERROR(FILTER(TRIM('จัดกะ'!C2:C)&"|"&IFERROR(INT(IFERROR(DATEVALUE('จัดกะ'!G2:G), 'จัดกะ'!G2:G)), -1), (TRIM('จัดกะ'!C2:C)<>"") * (IFERROR(TIMEVALUE('จัดกะ'!D2:D), IF(ISNUMBER('จัดกะ'!D2:D), MOD('จัดกะ'!D2:D, 1), 0)) >= 0.75)), {"__none__"}), adj, ARRAYFORMULA(((ISNUMBER(MATCH(TRIM(CheckinLog!C2:C)&"|"&INT(CheckinLog!A2:A-0.5), nkey, 0)) + ISNUMBER(MATCH(CheckinLog!B2:B&"", nid, 0))) > 0) * 0.5), src, FILTER({INT(CheckinLog!A2:A - adj)&"|"&CheckinLog!B2:B, CheckinLog!A2:A - INT(CheckinLog!A2:A - adj)}, CheckinLog!A2:A<>""), QUERY(src, "select Col1, min(Col2), max(Col2), count(Col2) group by Col1 label Col1 '', min(Col2) '', max(Col2) '', count(Col2) ''", 0))`
+  );
+  try { calc.hideSheet(); } catch (e) {}
+
+  // ── แท็บรายงาน ──
+  let rp = ss.getSheetByName('สรุปวัน');
+  if (!rp) rp = ss.insertSheet('สรุปวัน'); else { rp.clear(); rp.setConditionalFormatRules([]); }
+  const now = new Date();
+  rp.getRange('A1').setValue('ตั้งแต่');
+  rp.getRange('B1').setValue(new Date(now.getFullYear(), now.getMonth(), 1)).setNumberFormat('dd/MM/yyyy');
+  rp.getRange('C1').setValue('ถึง');
+  rp.getRange('D1').setValue(now).setNumberFormat('dd/MM/yyyy');
+  rp.getRange('A3:J3').setValues([[
+    'รหัสพนักงาน', 'ชื่อ-นามสกุล', 'ของวันที่', 'IN', 'OUT',
+    'สถานะการลงเวลา', 'ประเภทการลา', 'เวลาที่ใช้ลา', 'วันหยุด', 'คลัง'
+  ]]).setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+  rp.setFrozenRows(3);
+
+  rp.getRange('A4').setFormula(
+    `=LET(ppl, SORT(UNIQUE(FILTER({CheckinLog!B2:B&"", CheckinLog!C2:C&""}, CheckinLog!A2:A<>""))), nP, ROWS(ppl), nD, D1-B1+1, ids, INDEX(ppl,,1), nms, INDEX(ppl,,2), {FLATTEN(MAKEARRAY(nP, nD, LAMBDA(r,c, INDEX(ids, r)))), FLATTEN(MAKEARRAY(nP, nD, LAMBDA(r,c, INDEX(nms, r)))), FLATTEN(MAKEARRAY(nP, nD, LAMBDA(r,c, B$1+c-1)))})`
+  );
+  rp.getRange('D4').setFormula(
+    `=ARRAYFORMULA(IF(A4:A="",, IFERROR(VLOOKUP(INT(C4:C)&"|"&A4:A, คิดสรุป!A:D, 2, FALSE), "")))`
+  );
+  // v3.8: สแกนขาเดียว/กดซ้ำติดกัน (ช่วงแรก→สุดท้าย ≤ 5 นาที) → OUT เว้นว่าง โชว์เฉพาะ IN
+  rp.getRange('E4').setFormula(
+    `=ARRAYFORMULA(IF(A4:A="",, LET(tin, IFERROR(VLOOKUP(INT(C4:C)&"|"&A4:A, คิดสรุป!A:D, 2, FALSE), 0), tout, IFERROR(VLOOKUP(INT(C4:C)&"|"&A4:A, คิดสรุป!A:D, 3, FALSE), 0), IF((tout-tin)<=5/1440, "", tout))))`
+  );
+  // v3.6: ยึดช่วง "สแกนแรก→สุดท้าย" เป็นหลัก (สแกนเกินกลางวันไม่ถือว่าผิด):
+  //   ≥2 สแกน: ช่วง ≥ 9 ชม. = ทำงานเต็มวัน / ไม่ถึง = ผิด
+  // v3.8: ขาเดียว "หรือ" กดซ้ำติดกัน (ช่วง ≤ 5 นาที = จุดเดียวโดยพฤตินัย) = ผิด (ไม่ครบคู่)
+  // v4.7: ลาบางส่วน (0 < ชม.ลา K < 8) — มีสแกนครบคู่ = "ทำงาน (ลาบางส่วน)" (ไม่เช็ค 9 ชม.
+  //   เพราะวันนั้นได้รับอนุญาตให้อยู่ไม่ครบ) · ไม่มาสแกนเลย = "ผิด (ลาบางส่วน)"
+  //   ลาเต็มวัน (K ≥ 8) + ไม่มีสแกน = "ลา"
+  rp.getRange('F4').setFormula(
+    `=ARRAYFORMULA(IF(A4:A="",, LET(cnt, IFERROR(VLOOKUP(INT(C4:C)&"|"&A4:A, คิดสรุป!A:D, 4, FALSE), 0), tin, IFERROR(VLOOKUP(INT(C4:C)&"|"&A4:A, คิดสรุป!A:D, 2, FALSE), 0), tout, IFERROR(VLOOKUP(INT(C4:C)&"|"&A4:A, คิดสรุป!A:D, 3, FALSE), 0), hol, IFERROR(VLOOKUP(INT(C4:C), Holidays!A:B, 2, FALSE), ""), lh, IF(ISNUMBER(K4:K), K4:K, 0), IF(WEEKDAY(C4:C)=1, "วันอาทิตย์", IF(hol<>"", "วันนักขัตฯ", IF(cnt=0, IF(lh>=8, "ลา", IF(lh>0, "ผิด (ลาบางส่วน)", "ผิด")), IF((tout-tin)<=5/1440, "ผิด (ไม่ครบคู่)", IF((lh>0)*(lh<8), "ทำงาน (ลาบางส่วน)", IF((tout-tin)>=9/24, "ทำงานเต็มวัน", "ผิด")))))))))`
+  );
+  // v4.3: การลาApp โครงใหม่ — A วันที่, N ถึงวันที่, F ประเภทเอกสาร, I สถานะ, M จำนวนชั่วโมง
+  rp.getRange('G4').setFormula(
+    `=MAP(A4:A, C4:C, LAMBDA(id, d, IF(id="",, IFERROR(TEXTJOIN(", ", 1, FILTER('การลาApp'!F2:F, 'การลาApp'!B2:B&""=id, IFERROR(DATEVALUE('การลาApp'!A2:A), 'การลาApp'!A2:A)<=d, IFERROR(DATEVALUE('การลาApp'!N2:N), 'การลาApp'!N2:N)>=d, ISNUMBER(SEARCH("อนุมัติ", 'การลาApp'!I2:I&"")) + ('การลาApp'!I2:I="approved"))), ""))))`
+  );
+  // v4.9: โชว์ชั่วโมงลาของ "วันนั้น" (cap 8 จากคอลัมน์ K) — เดิมโชว์ยอดรวมทั้งใบ (ลา 3 วันขึ้น 24 ทุกวัน)
+  rp.getRange('H4').setFormula(
+    `=ARRAYFORMULA(IF(A4:A="",, IF(ISNUMBER(K4:K)*(K4:K>0), K4:K, "")))`
+  );
+  rp.getRange('I4').setFormula(
+    `=ARRAYFORMULA(IF(A4:A="",, IF(WEEKDAY(C4:C)=1, "วันอาทิตย์", IFERROR(VLOOKUP(INT(C4:C), Holidays!A:B, 2, FALSE), ""))))`
+  );
+  // v3.7: คลัง จาก User slip คอลัมน์ D — เทียบเป็นข้อความทั้งคู่ (รหัสในชีทเป็นเลข, ใน A เป็นข้อความ)
+  // และช่อง D ที่ว่างให้ได้ "" ไม่ใช่ 0
+  rp.getRange('J4').setFormula(
+    `=ARRAYFORMULA(IF(A4:A="",, IFERROR(VLOOKUP(A4:A&"", {'User slip'!B2:B&"", 'User slip'!D2:D&""}, 2, FALSE), "")))`
+  );
+  // v4.7: K (ซ่อน) = ชั่วโมงลาอนุมัติของวันนั้น (cap 8) — ใช้คิดสถานะลาบางส่วน + เศษวันใน ลงเวลาAuto
+  rp.getRange('K3').setValue('ชม.ลา').setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+  rp.getRange('K4').setFormula(
+    `=MAP(A4:A, C4:C, LAMBDA(id, d, IF(id="",, LET(s, IFERROR(SUM(FILTER('การลาApp'!M2:M, 'การลาApp'!B2:B&""=id, IFERROR(DATEVALUE('การลาApp'!A2:A), 'การลาApp'!A2:A)<=d, IFERROR(DATEVALUE('การลาApp'!N2:N), 'การลาApp'!N2:N)>=d, ISNUMBER(SEARCH("อนุมัติ", 'การลาApp'!I2:I&"")) + ('การลาApp'!I2:I="approved"))), 0), MIN(8, N(s))))))`
+  );
+  try { rp.hideColumns(11); } catch (e) {}
+
+  rp.getRange('C4:C').setNumberFormat('dd/MM/yyyy');
+  rp.getRange('D4:E').setNumberFormat('HH:mm');
+
+  // สีสถานะ (เหมือน HumanSoft)
+  const mk = (txt, color) => SpreadsheetApp.newConditionalFormatRule()
+    .whenTextContains(txt).setBackground(color)
+    .setRanges([rp.getRange('F4:F')]).build();
+  // v4.7: ลำดับสำคัญ — "ผิด (ลาบางส่วน)" ให้เข้ากติกา "ผิด" (แดง), "ลา" เพียวๆ อยู่ท้ายสุด
+  rp.setConditionalFormatRules([
+    mk('ทำงานเต็มวัน', '#c9f5ee'),
+    mk('ทำงาน (ลาบางส่วน)', '#b8e6cf'),
+    mk('ผิด', '#f8c7c4'),
+    mk('วันอาทิตย์', '#fff2a8'),
+    mk('วันนักขัตฯ', '#c8f7c5'),
+    mk('ลา', '#cfe2f3'),
+  ]);
+
+  ss.setActiveSheet(rp);
+  Logger.log('✅ สร้างแท็บ "สรุปวัน" เรียบร้อย — เปลี่ยนช่วงวันที่ได้ที่ B1/D1');
+}
+
+/* v4.5: แท็บ "ลงเวลาAuto" — สรุปยอดรายคนจากแท็บ สรุปวัน (โครงเดียวกับชีทนับมือของ HR)
+   ตัวเลขวิ่งตามช่วงวันที่ B1/D1 ของ สรุปวัน · รัน setupMonthlyAuto() จาก editor (รันซ้ำ = ล้างสร้างใหม่) */
+function setupMonthlyAuto() {
+  const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
+  let sh = ss.getSheetByName('ลงเวลาAuto');
+  if (!sh) sh = ss.insertSheet('ลงเวลาAuto'); else sh.clear();
+
+  sh.getRange(1, 1, 1, 14).setValues([[
+    'ชื่อสกุล', 'รหัส พนง.', 'คลัง', 'จำนวนแรงที่ทำงาน', 'ป่วยมีบพ.', 'กิจรับค่าจ้าง',
+    'ลาคลอด ญ/ช', 'พักร้อน', 'ป่วยไม่มีใบแพทย์', 'ขาดงาน', 'ลาไม่รับค่าจ้าง',
+    'สลับวันหยุด', 'รวมวัน', 'จำนวนแรงที่ทำงาน',
+  ]]).setFontWeight('bold').setHorizontalAlignment('center').setWrap(true);
+  // สีหัวคอลัมน์ตามชีทนับมือ
+  const paint = (col, bg, fc) => sh.getRange(1, col).setBackground(bg).setFontColor(fc || '#000000');
+  paint(1, '#f6b26b'); paint(2, '#f6b26b'); paint(3, '#f6b26b');
+  paint(4, '#d9ead3'); paint(5, '#93c47d'); paint(6, '#d9ead3'); paint(7, '#ffff00');
+  paint(8, '#d9ead3'); paint(9, '#d9d2e9'); paint(10, '#990000', '#ffffff');
+  paint(11, '#990000', '#ffffff'); paint(12, '#7030a0', '#ffffff');
+  paint(13, '#4472c4', '#ffffff'); paint(14, '#d9ead3');
+  sh.setFrozenRows(1);
+  sh.getRange('A1').setNote(
+    'สรุปอัตโนมัติจากแท็บ "สรุปวัน" — ช่วงวันที่ตามช่อง B1/D1 ของ สรุปวัน\n' +
+    'แนะนำตั้ง "ถึง" (D1) เป็นเมื่อวาน กันวันนี้ถูกนับขาดก่อนพนักงานสแกนออก\n' +
+    'ขาดงาน = วันสถานะ "ผิด" ที่ไม่มีใบลา · วันอาทิตย์/นักขัตฯ ไม่ถูกนับในทุกช่อง');
+
+  // รายชื่อ (เรียงตามชื่อ) — ชื่อ | รหัส | คลัง จาก สรุปวัน
+  sh.getRange('A2').setFormula(
+    `=SORT(UNIQUE(FILTER({สรุปวัน!B4:B&"", สรุปวัน!A4:A&"", สรุปวัน!J4:J&""}, สรุปวัน!A4:A<>"")))`
+  );
+  // v4.7: คิด "เศษวัน" ตามชั่วโมงจริง ÷ 8 (surat เคาะ 14/08) — ใช้คอลัมน์ K (ชม.ลา) ของ สรุปวัน
+  //   ช่องลา = Σ(ชม.ลา)/8 ต่อประเภท · ศูนย์เว้นว่าง · ปัด 2 ตำแหน่ง
+  const noHol = `สรุปวัน!F4:F, "<>วันอาทิตย์", สรุปวัน!F4:F, "<>วันนักขัตฯ"`;
+  // เก็บค่าจริงไม่ปัดเศษ (กัน 0.63+0.38=1.01) — การแสดงผล 2 ตำแหน่งใช้ number format แทน
+  const leaveSum = (crit) =>
+    `=ARRAYFORMULA(IF(B2:B="",, LET(s, SUMIFS(สรุปวัน!K4:K, สรุปวัน!A4:A, B2:B&"", ${crit})/8, IF(s=0,,s))))`;
+  // D แรง = วันเต็ม + เศษที่เหลือของวัน "ทำงาน (ลาบางส่วน)" (1 − ชม.ลา/8)
+  sh.getRange('D2').setFormula(
+    `=ARRAYFORMULA(IF(B2:B="",, LET(full, COUNTIFS(สรุปวัน!A4:A, B2:B&"", สรุปวัน!F4:F, "ทำงานเต็มวัน"), pc, COUNTIFS(สรุปวัน!A4:A, B2:B&"", สรุปวัน!F4:F, "ทำงาน (ลาบางส่วน)"), ph, SUMIFS(สรุปวัน!K4:K, สรุปวัน!A4:A, B2:B&"", สรุปวัน!F4:F, "ทำงาน (ลาบางส่วน)"), full + pc - ph/8)))`
+  );
+  sh.getRange('E2').setFormula(leaveSum(`สรุปวัน!G4:G, "*ป่วย*", สรุปวัน!G4:G, "<>*ไม่มีใบ*", ${noHol}`));
+  sh.getRange('F2').setFormula(leaveSum(`สรุปวัน!G4:G, "*กิจ*", สรุปวัน!G4:G, "<>*ไม่รับค่าจ้าง*", ${noHol}`));
+  sh.getRange('G2').setFormula(leaveSum(`สรุปวัน!G4:G, "*คลอด*", ${noHol}`));
+  sh.getRange('H2').setFormula(leaveSum(`สรุปวัน!G4:G, "*พักร้อน*", ${noHol}`));
+  sh.getRange('I2').setFormula(leaveSum(`สรุปวัน!G4:G, "*ไม่มีใบ*", ${noHol}`));
+  // J ขาด = "ผิด" ที่ไม่มีใบลา (เต็มวัน) + เศษที่ขาดของ "ผิด (ลาบางส่วน)" (ลาแล้วส่วนที่เหลือไม่มาสแกน)
+  sh.getRange('J2').setFormula(
+    `=ARRAYFORMULA(IF(B2:B="",, LET(a, COUNTIFS(สรุปวัน!A4:A, B2:B&"", สรุปวัน!F4:F, "ผิด*", สรุปวัน!G4:G, "="), pc, COUNTIFS(สรุปวัน!A4:A, B2:B&"", สรุปวัน!F4:F, "ผิด (ลาบางส่วน)"), ph, SUMIFS(สรุปวัน!K4:K, สรุปวัน!A4:A, B2:B&"", สรุปวัน!F4:F, "ผิด (ลาบางส่วน)"), s, a + pc - ph/8, IF(s=0,,s))))`
+  );
+  // v4.6: กันนับซ้ำ — "ลาคลอด (ไม่รับค่าจ้าง)" ต้องเข้าช่องลาคลอดช่องเดียว
+  sh.getRange('K2').setFormula(leaveSum(`สรุปวัน!G4:G, "*ไม่รับค่าจ้าง*", สรุปวัน!G4:G, "<>*คลอด*", ${noHol}`));
+  sh.getRange('L2').setFormula(leaveSum(`สรุปวัน!G4:G, "*เปลี่ยนวันหยุด*", ${noHol}`));
+  sh.getRange('M2').setFormula(
+    `=ARRAYFORMULA(IF(B2:B="",, D2:D+E2:E+F2:F+G2:G+H2:H+I2:I+J2:J+K2:K+L2:L))`
+  );
+  sh.getRange('N2').setFormula(`=ARRAYFORMULA(IF(B2:B="",, D2:D))`);
+  sh.getRange('D2:N').setHorizontalAlignment('center').setNumberFormat('0.##');   // v4.7: เศษวันโชว์ 2 ตำแหน่ง เลขเต็มโชว์เลขเต็ม
+  ss.setActiveSheet(sh);
+  Logger.log('✅ สร้างแท็บ "ลงเวลาAuto" เรียบร้อย — ตัวเลขวิ่งตามช่วงวันที่ของ สรุปวัน (B1/D1)');
+}
+
+/* v4.3: ย้ายชีทการลาApp ไปโครงคอลัมน์ใหม่ — รันครั้งเดียวจาก editor "หลัง Deploy v4.3 แล้ว"
+   ของเก่าถูกเก็บที่แท็บ "การลาApp เดิม" + แถวเก่าถูกย้ายเข้าโครงใหม่ให้ครบ */
+function migrateLeaveSheet() {
+  const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
+  const old = ss.getSheetByName('การลาApp');
+  if (old && leaveSheetIsNew_(old)) { Logger.log('การลาApp เป็นโครงใหม่อยู่แล้ว — ไม่ต้องย้าย'); return; }
+  if (ss.getSheetByName('การลาApp เดิม')) { Logger.log('⚠ มีแท็บ "การลาApp เดิม" อยู่แล้ว — ยกเลิก กันย้ายซ้ำ'); return; }
+  if (old) old.setName('การลาApp เดิม');
+  const sh = ss.insertSheet('การลาApp');
+  sh.getRange(1, 1, 1, 15).setValues([LEAVE_HEADERS_V2])
+    .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+  sh.setFrozenRows(1);
+  if (old) {
+    const data = old.getDataRange().getValues();
+    const rows = [];
+    for (let i = 1; i < data.length; i++) {
+      const r = data[i];
+      if (String(r[1] || '').trim() === '') continue;
+      const st = String(r[9] || '');
+      const decided = /อนุมัติ|approved|rejected|ปฏิเสธ/i.test(st);
+      rows.push([
+        r[15] || r[0],                        // A วันที่ ← เริ่มวันลา (P) — ไม่มีก็ใช้วันที่ขอ
+        r[1], r[2],                           // B C
+        r[3] || ((pttMap_()[String(r[1]).trim()] || {}).nickname) || '',   // D ชื่อเล่น (v4.4: เติมจากทะเบียน PTT ถ้าว่าง)
+        khlangOf_(r[1]),                      // E คลัง (เติมจาก User slip ปัจจุบัน)
+        r[6],                                 // F ประเภทเอกสาร ← ประเภท (G)
+        r[7],                                 // G ขอโดย (H)
+        r[11] || r[8] || r[0],                // H ขอวันที่ ← อัพเดทเมื่อ (L) / ขอวันที่ (I)
+        st,                                   // I สถานะ (J)
+        r[10],                                // J ผู้อนุมัติ (K)
+        decided ? (r[11] || '') : '',         // K อนุมัติเมื่อ — เฉพาะรายการที่ตัดสินแล้ว
+        r[12],                                // L รายละเอียด (M)
+        r[13],                                // M จำนวนชั่วโมง (N)
+        r[16] || r[15] || '',                 // N ถึงวันที่ ← สิ้นสุดวันลา (Q) / เริ่ม (P)
+        r.length > 18 ? (r[18] || '') : '',   // O รูปแนบ (S)
+      ]);
+    }
+    if (rows.length) sh.getRange(2, 1, rows.length, 15).setValues(rows);
+    Logger.log('ย้าย ' + rows.length + ' แถวจากโครงเก่าเรียบร้อย');
+  }
+  Logger.log('✅ การลาApp โครงใหม่พร้อมใช้ — ของเก่าเก็บไว้ที่แท็บ "การลาApp เดิม" · อย่าลืมรัน setupDailySummary อัปสูตรคอลัมน์ลา');
 }
 
 function upsertAttendance(d) {
@@ -1082,6 +1439,33 @@ function actionGetFaceData(user) {
    LEAVE
    ============================================================ */
 
+/* v4.3: โครงคอลัมน์ใหม่ของชีทการลาApp (surat เคาะ 14/08) — คำขอทั้ง 3 แบบ
+   (ขอลางาน / เปลี่ยนวันหยุด / แก้เวลาย้อนหลัง) ลงชีทเดียวหัวเดียวกัน
+   + "ถึงวันที่" (ลาหลายวัน) และ "รูปแนบ" ต่อท้าย */
+const LEAVE_HEADERS_V2 = [
+  'วันที่','รหัสพนักงาน','ชื่อ-นามสกุล','ชื่อเล่น','คลัง',
+  'ประเภทเอกสาร','ขอโดย','ขอวันที่','สถานะ','ผู้อนุมัติ',
+  'อนุมัติเมื่อ','รายละเอียด','จำนวนชั่วโมง','ถึงวันที่','รูปแนบ',
+];
+function leaveSheetIsNew_(sh) {
+  try { return String(sh.getRange(1, 5).getValue()).trim() === 'คลัง'; } catch (e) { return false; }
+}
+/* คลัง จาก User slip คอลัมน์ D — แคชต่อ execution */
+let _slipKhlangCache = null;
+function khlangOf_(empId) {
+  try {
+    if (!_slipKhlangCache) {
+      _slipKhlangCache = {};
+      const sh = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName('User slip');
+      if (sh) sh.getDataRange().getValues().slice(1).forEach(r => {
+        const id = String(r[1] || '').trim();
+        if (id && !(id in _slipKhlangCache)) _slipKhlangCache[id] = String(r[3] || '').trim();
+      });
+    }
+    return _slipKhlangCache[String(empId).trim()] || '';
+  } catch (e) { return ''; }
+}
+
 function actionSubmitLeaveApp(p, user) {
   const empId = String(p.empId || user.empId);
   if (empId !== user.empId && !isSupervisor(user)) {
@@ -1092,11 +1476,8 @@ function actionSubmitLeaveApp(p, user) {
   let sh = ss.getSheetByName('การลาApp');
   if (!sh) {
     sh = ss.insertSheet('การลาApp');
-    sh.getRange(1,1,1,18).setValues([[
-      'วันที่','รหัสพนักงาน','ชื่อ-นามสกุล','ชื่อเล่น','ตำแหน่ง','สำนักงานสาขา',
-      'ประเภท','ขอโดย','ขอวันที่','สถานะ','ผู้อนุมัติ','อัพเดทเมื่อ',
-      'รายละเอียด','ชั่วโมง','ย้อนหลัง/ล่วงหน้า','เริ่มวันลา','สิ้นสุดวันลา','ชื่อ+วันที่',
-    ]]).setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+    sh.getRange(1, 1, 1, 15).setValues([LEAVE_HEADERS_V2])
+      .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
     sh.setFrozenRows(1);
   }
 
@@ -1108,35 +1489,130 @@ function actionSubmitLeaveApp(p, user) {
   const endDate     = String(p.endDate || startDate);
   const nameDate    = `${cleanName_(target.name)} ${startDate}`;
 
-  sh.appendRow([
-    requestDate,
-    empId,
-    cleanName_(target.name),
-    p.nickname || target.nickname || '',
-    '',
-    target.branch || '',
-    p.typeLabel || p.type || '',
-    cleanName_(user.name || ''),
-    requestDate,
-    'pending',
-    '',
-    updateTime,
-    p.reason || '',
-    p.hours || '',
-    '',
-    startDate,
-    endDate,
-    nameDate,
-  ]);
+  // v4.2: รูปแนบจากฟอร์ม (เช่น เปลี่ยนวันหยุด/ใบรับรองแพทย์) → Supabase Storage ใต้ requests/
+  // (cron ลบรูป 60 วันไม่แตะ — มันลบเฉพาะ path ใน checkin_log) + ลิงก์เปิดรูปผ่าน photoView ลงคอลัมน์ S
+  let photoLink = '';
+  // v4.9: ฟอร์มลาส่งรูปแนบมาในชื่อ "attachment" (ใบรับรองแพทย์) — เดิมถูกทิ้งเงียบเพราะรับแค่ photo
+  const photoData = String(p.photo || p.attachment || '');
+  if (photoData.indexOf('base64,') > 0 && sbReady_()) {
+    try {
+      const pPath = 'requests/' + empId + '/' + Utilities.formatDate(now, tz, 'yyyyMMdd') + '/LA' + Date.now() + '.jpg';
+      if (sbUploadPhoto_(photoData, pPath)) {
+        const pk = PropertiesService.getScriptProperties().getProperty('PHOTO_KEY') || '';
+        photoLink = pk
+          ? (ScriptApp.getService().getUrl() + '?action=photoView&k=' + pk + '&p=' + encodeURIComponent(pPath))
+          : pPath;
+      }
+    } catch (e) { console.error('leave photo upload', e); }
+  }
+  // v4.6: แอปเวอร์ชันเก่าส่ง typeLabel ลาคลอดเป็นโค้ดดิบ (ลืม map ฝั่งแอป) — แปลงเป็นไทยก่อนลงชีท
+  const LEAVE_LABEL_FIX = { maternity_paid: 'ลาคลอด (รับค่าจ้าง)', maternity_unpaid: 'ลาคลอด (ไม่รับค่าจ้าง)' };
+  let typeLabelVal = String(p.typeLabel || p.type || '');
+  if (LEAVE_LABEL_FIX[typeLabelVal]) typeLabelVal = LEAVE_LABEL_FIX[typeLabelVal];
+
+  // v4.4: ชื่อเล่น — ไล่จาก ฟอร์ม → ชีท Users → ทะเบียน PTT (คอลัมน์ H)
+  const nickVal = p.nickname || target.nickname || ((pttMap_()[empId] || {}).nickname) || '';
+  // v4.4: จำนวนชั่วโมง — ฟอร์มไม่ส่งมา (เช่น เปลี่ยนวันหยุด) = 8 ชม./วัน × จำนวนวัน
+  //       ยกเว้น แก้เวลาย้อนหลัง (ไม่ใช่การใช้ชั่วโมงลา) เว้นว่างไว้
+  let hoursVal = (p.hours !== undefined && p.hours !== null && String(p.hours) !== '') ? p.hours : '';
+  if (hoursVal === '' && String(p.type || '') !== 'time_adjust') {
+    let days = 1;
+    try {
+      const sd = parseDDMMYYYY(startDate), ed = parseDDMMYYYY(endDate);
+      if (sd && ed) days = Math.max(1, Math.round((ed - sd) / 86400000) + 1);
+    } catch (e) {}
+    hoursVal = 8 * days;
+  }
+
+  // v5.2: ด่านโควต้าแบบล็อกแข็ง (surat เคาะ) — เกินโควต้า = ยื่นไม่ได้ + แนะนำประเภทที่ยังเหลือ
+  //       ข้อยกเว้น: HR ยื่นแทนได้แม้เกิน (เคสพิเศษ) — แถวจะติดธง "⚠เกินโควต้า" ให้เห็น
+  const QUOTA_HARD_BLOCK = true;
+  let overQuota = false;
+  try {
+    const qKey = { personal:'personal', sick_with_cert:'sickWithCert', sick_no_cert:'sickNoCert',
+                   vacation:'vacation', unpaid_personal:'unpaidPersonal',
+                   maternity_paid:'maternity', maternity_unpaid:'maternity' }[String(p.type || '')];
+    if (qKey) {
+      const q = leaveQuotaFor_(empId);
+      if (q && q.remaining[qKey] != null) {
+        const reqDays = Math.round(((parseFloat(hoursVal) || 0) / 8) * 100) / 100;
+        if (reqDays > q.remaining[qKey]) {
+          overQuota = true;
+          if (QUOTA_HARD_BLOCK && !isHR(user)) {
+            // แนะนำเฉพาะ กิจ/พักร้อน/กิจไม่รับค่าจ้าง — ไม่ชวนใช้ลาป่วย/ลาคลอดแทน
+            const NAMES = { personal:'ลากิจ', vacation:'ลาพักร้อน', unpaidPersonal:'ลากิจไม่รับค่าจ้าง' };
+            const alts = [];
+            Object.keys(NAMES).forEach(k => {
+              if (k === qKey) return;
+              const rv = q.remaining[k];
+              if (rv == null) alts.push(NAMES[k] + ' (ไม่จำกัด)');
+              else if (rv >= reqDays) alts.push(NAMES[k] + ' (เหลือ ' + rv + ' วัน)');
+            });
+            return jsonOut({ ok:false, error:'ยื่นไม่ได้ — เกินโควต้า: ประเภทนี้เหลือ ' + q.remaining[qKey] + ' วัน (ขอ ' + reqDays + ' วัน)' + (alts.length ? ' · ใช้แทนได้: ' + alts.join(' · ') : '') });
+          }
+        }
+      }
+    }
+  } catch (e) {}
+  const reasonVal = (overQuota ? '⚠เกินโควต้า · ' : '') + (p.reason || '');
+
+  if (leaveSheetIsNew_(sh)) {
+    // v4.3: โครงใหม่ 15 คอลัมน์ — อนุมัติเมื่อ (K) เว้นว่าง รอประทับตอน approveAny
+    sh.appendRow([
+      startDate,                              // A วันที่ (วันที่มีผล: วันเริ่มลา/วันที่ขอเปลี่ยน/วันที่แก้เวลา)
+      empId,                                  // B รหัสพนักงาน
+      cleanName_(target.name),                // C ชื่อ-นามสกุล
+      nickVal,                                // D ชื่อเล่น
+      khlangOf_(empId),                       // E คลัง
+      typeLabelVal,                           // F ประเภทเอกสาร
+      cleanName_(user.name || ''),            // G ขอโดย
+      updateTime,                             // H ขอวันที่ (timestamp)
+      'pending',                              // I สถานะ
+      '',                                     // J ผู้อนุมัติ
+      '',                                     // K อนุมัติเมื่อ
+      reasonVal,                              // L รายละเอียด (v5.1: มีธงเกินโควต้านำหน้าเมื่อเกิน)
+      hoursVal,                               // M จำนวนชั่วโมง
+      endDate,                                // N ถึงวันที่
+      photoLink,                              // O รูปแนบ
+    ]);
+  } else {
+    // ยังไม่รัน migrateLeaveSheet() — เขียนโครงเก่า 18+1 คอลัมน์ตามเดิม กันแถวเพี้ยน
+    try {
+      if (photoLink && String(sh.getRange(1, 19).getValue() || '') === '') {
+        sh.getRange(1, 19).setValue('รูปแนบ').setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+      }
+    } catch (e) {}
+    sh.appendRow([
+      requestDate,
+      empId,
+      cleanName_(target.name),
+      nickVal,
+      '',
+      target.branch || '',
+      typeLabelVal,
+      cleanName_(user.name || ''),
+      requestDate,
+      'pending',
+      '',
+      updateTime,
+      reasonVal,
+      hoursVal,
+      '',
+      startDate,
+      endDate,
+      nameDate,
+      photoLink,
+    ]);
+  }
 
   const lvSh = getOrCreateTab(T.LEAVE);
   const id   = 'LV' + Date.now();
   lvSh.appendRow([
     id, now, empId, cleanName_(target.name),
-    p.type || '', p.typeLabel || '',
+    p.type || '', typeLabelVal,
     startDate, endDate,
-    parseFloat(p.hours) || 8, p.unit || 'full_day',
-    p.reason || '', '',
+    parseFloat(hoursVal) || 8, p.unit || 'full_day',   // v4.4: ใช้ค่าเดียวกับการลาApp
+    reasonVal, '',
     'pending', '', '', '', user.email,
   ]);
 
@@ -1164,9 +1640,49 @@ function actionSubmitLeave(p, user) {
   return jsonOut({ ok:true, msg:'ยื่นคำขอลาแล้ว', id });
 }
 
+/* v5.0: การลาApp เก็บ typeLabel ภาษาไทย — แปลงกลับเป็นโค้ดให้แอปกรองประเภทได้ */
+function leaveCodeFromLabel_(lb) {
+  lb = String(lb || '');
+  if (lb.indexOf('เปลี่ยนวันหยุด') >= 0) return 'change_offday';
+  if (lb.indexOf('แก้เวลา') >= 0) return 'time_adjust';
+  if (lb.indexOf('คลอด') >= 0) return lb.indexOf('ไม่รับ') >= 0 ? 'maternity_unpaid' : 'maternity_paid';
+  if (lb.indexOf('พักร้อน') >= 0) return 'vacation';
+  if (lb.indexOf('ไม่มีใบ') >= 0) return 'sick_no_cert';
+  if (lb.indexOf('ป่วย') >= 0) return 'sick_with_cert';
+  if (lb.indexOf('เพิ่มชั่วโมง') >= 0) return 'extra_hours';
+  if (lb.indexOf('OT') >= 0 || lb.indexOf('ล่วงเวลา') >= 0) return lb.indexOf('หยุด') >= 0 ? 'ot_holiday' : 'ot_normal';
+  if (lb.indexOf('ไม่รับค่าจ้าง') >= 0) return 'unpaid_personal';
+  if (lb.indexOf('กิจ') >= 0) return 'personal';
+  return lb || 'other';
+}
+
 function actionGetMyLeaves(p, user) {
   const empId = String(p.empId || user.empId);
   if (!canSeeUser(user, empId)) return jsonOut({ ok:false, error:'ไม่มีสิทธิ์' });
+  // v5.0: อ่านจาก "การลาApp" ที่เดียว (source of truth) — HR ลบ/แก้/อนุมัติในชีทแล้วแอปเห็นตรงกันทันที
+  // (เดิมอ่านแท็บ log ภายในที่เขียนคู่ตอนยื่น — ลบในชีทแล้วรายการค้างในแอป และสถานะอนุมัติไม่อัปเดต)
+  const la = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName('การลาApp');
+  if (la && leaveSheetIsNew_(la)) {
+    const data = la.getDataRange().getValues();
+    const out = [];
+    for (let i = 1; i < data.length; i++) {
+      const r = data[i];
+      if (String(r[1] || '').trim() !== empId) continue;
+      out.push({
+        id: 'LA' + (i + 1), submittedAt: r[7],
+        empId: empId, name: r[2],
+        type: leaveCodeFromLabel_(r[5]), typeLabel: r[5],
+        startDate: formatDate(r[0]), endDate: formatDate(r[13]),
+        hours: r[12], unit: '',
+        reason: r[11], attachment: r[14] || '',
+        status: r[8], approver: r[9],
+        approvedAt: r[10], approveNote: '',
+      });
+    }
+    out.reverse();   // ใหม่สุดก่อน
+    return jsonOut({ ok:true, leaves: out });
+  }
+  // ยังไม่ migrate — อ่านแท็บ log เดิมตามเดิม
   const sh = getOrCreateTab(T.LEAVE);
   const data = sh.getDataRange().getValues();
   const out = [];
@@ -1213,32 +1729,85 @@ function getApprovedLeaveForDate(empId, dateStr) {
   return null;
 }
 
-function actionGetLeaveQuota(p, user) {
-  const empId = String(p.empId || user.empId);
-  if (!canSeeUser(user, empId)) return jsonOut({ ok:false, error:'ไม่มีสิทธิ์' });
-  const target = findUserByEmpId(empId);
-  if (!target) return jsonOut({ ok:false, error:'ไม่พบพนักงาน' });
-
-  const sd = (target.startDate instanceof Date) ? target.startDate : new Date(target.startDate);
-  if (!sd || isNaN(sd.getTime())) {
-    return jsonOut({ ok:false, error:'ไม่มีวันเริ่มงานใน Users Sheet — แจ้ง HR' });
+/* ==================== โควต้าลา ====================
+   v5.3: ค่าอัตโนมัติตามอายุงาน (ค่าตั้งต้นกลาง) — HR ปรับรายคนได้ที่แท็บ "โควต้าลา" */
+function autoQuotaByTenure_(sd, now) {
+  const probationEnd = new Date(sd); probationEnd.setMonth(probationEnd.getMonth() + 3);
+  const oneYear      = new Date(sd); oneYear.setFullYear(oneYear.getFullYear() + 1);
+  if (now < probationEnd) {
+    return { stage:'probation', stageLabel:'ทดลองงาน (0-3 เดือนแรก)',
+             personal:0, sickWithCert:0, sickNoCert:0, vacation:0, unpaidPersonal:3 };
   }
+  if (now < oneYear) {
+    return { stage:'passed', stageLabel:'ผ่านงาน (ยังไม่ครบ 1 ปี)',
+             personal:3, sickWithCert:30, sickNoCert:12, vacation:0, unpaidPersonal:null };
+  }
+  return { stage:'fullYear', stageLabel:'ครบ 1 ปีขึ้นไป',
+           personal:6, sickWithCert:30, sickNoCert:12, vacation:6, unpaidPersonal:null };
+}
+
+/* v5.3: อ่านโควต้าที่ HR กรอกเองจากแท็บ "โควต้าลา"
+   เว้นว่าง = ใช้ค่าอัตโนมัติ · ตัวเลข = ใช้ตัวเลขนั้น · "ไม่จำกัด"/"-" = ไม่จำกัด */
+const LQ_TAB = 'โควต้าลา';        // v5.4: ชื่อ QUOTA_TAB ถูกใช้แล้วโดยโควต้ากะ (บรรทัด ~3475)
+const LQ_COLS = [   // ลำดับคอลัมน์ F..K ในแท็บ
+  { key:'personal',       head:'ลากิจ' },
+  { key:'sickWithCert',   head:'ลาป่วย (มีใบ)' },
+  { key:'sickNoCert',     head:'ลาป่วย (ไม่มีใบ)' },
+  { key:'vacation',       head:'ลาพักร้อน' },
+  { key:'unpaidPersonal', head:'ลากิจไม่รับค่าจ้าง' },
+  { key:'maternity',      head:'ลาคลอด' },
+];
+let _quotaOverrideCache = null;
+function quotaOverrideMap_() {
+  if (_quotaOverrideCache) return _quotaOverrideCache;
+  const m = {};
+  try {
+    const sh = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName(LQ_TAB);
+    if (sh) {
+      const data = sh.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        const id = String(data[i][0] || '').trim();
+        if (!id) continue;
+        const o = {};
+        LQ_COLS.forEach((c, j) => {
+          const raw = data[i][5 + j];
+          const s = String(raw == null ? '' : raw).trim();
+          if (s === '') return;                                   // เว้นว่าง = ใช้ค่าอัตโนมัติ
+          if (/ไม่จำกัด|^-$|^∞$/.test(s)) { o[c.key] = null; return; }   // ไม่จำกัด
+          const n = parseFloat(s.replace(/,/g, ''));
+          if (!isNaN(n)) o[c.key] = n;
+        });
+        if (Object.keys(o).length) m[id] = o;
+      }
+    }
+  } catch (e) { console.error('quotaOverrideMap_', e); }
+  _quotaOverrideCache = m;
+  return m;
+}
+
+/* v5.1: แกนคำนวณโควต้า — คืน null ถ้าหาวันเริ่มงานไม่ได้ (ใช้ทั้งหน้าโควต้าและด่านตอนยื่นลา)
+   วันเริ่มงาน: RATTANA จากชีท Users · PTT จากทะเบียน PTT (คอลัมน์ "เข้า") */
+function leaveQuotaFor_(empId) {
+  const target = findUserByEmpId(empId);
+  let sd = null, startSource = 'Users';
+  if (target && target.startDate) {
+    const d0 = (target.startDate instanceof Date) ? target.startDate : new Date(target.startDate);
+    if (d0 && !isNaN(d0.getTime())) sd = d0;
+  }
+  if (!sd) {
+    const pt = pttMap_()[String(empId).trim()];
+    if (pt && pt.startDate) {
+      const d1 = parseDDMMYYYY(pt.startDate);
+      if (d1) { sd = d1; startSource = 'ทะเบียน PTT'; }
+    }
+  }
+  if (!sd) return null;
 
   const now = new Date();
   const probationEnd = new Date(sd); probationEnd.setMonth(probationEnd.getMonth() + 3);
   const oneYear      = new Date(sd); oneYear.setFullYear(oneYear.getFullYear() + 1);
 
-  let quota;
-  if (now < probationEnd) {
-    quota = { stage:'probation', stageLabel:'ทดลองงาน (0-3 เดือนแรก)',
-              personal:0, sickWithCert:0, sickNoCert:0, vacation:0, unpaidPersonal:3 };
-  } else if (now < oneYear) {
-    quota = { stage:'passed', stageLabel:'ผ่านงาน (ยังไม่ครบ 1 ปี)',
-              personal:3, sickWithCert:30, sickNoCert:12, vacation:0, unpaidPersonal:null };
-  } else {
-    quota = { stage:'fullYear', stageLabel:'ครบ 1 ปีขึ้นไป',
-              personal:6, sickWithCert:30, sickNoCert:12, vacation:6, unpaidPersonal:null };
-  }
+  const quota = autoQuotaByTenure_(sd, now);
 
   let cycleStart;
   if (now < probationEnd)      cycleStart = sd;
@@ -1252,25 +1821,141 @@ function actionGetLeaveQuota(p, user) {
     }
   }
   const used = countUsedLeave(empId, cycleStart, now);
+  quota.maternity = 98;   // v5.1: ลาคลอดตามกฎหมาย 98 วัน (ทุกช่วงอายุงาน)
 
-  return jsonOut({
-    ok:true,
-    startDate: sd, probationEnd, oneYear,
+  // v5.3: ทับด้วยค่าที่ HR กรอกเองในแท็บ "โควต้าลา" (เฉพาะช่องที่กรอก)
+  const ov = quotaOverrideMap_()[String(empId).trim()];
+  let overridden = [];
+  if (ov) {
+    Object.keys(ov).forEach(k => {
+      if (quota[k] !== ov[k]) overridden.push(k);
+      quota[k] = ov[k];
+    });
+    if (overridden.length) quota.stageLabel += ' · HR ปรับโควต้าเอง';
+  }
+
+  return {
+    startDate: sd, startSource: startSource, probationEnd, oneYear, overridden,
     cycleStart, cycleEnd: new Date(cycleStart.getFullYear()+1, cycleStart.getMonth(), cycleStart.getDate()),
     quota, used,
+    // v5.3: null = ไม่จำกัด (ทุกประเภทตั้งเป็นไม่จำกัดได้ ถ้า HR กรอก "ไม่จำกัด")
     remaining: {
-      personal:        Math.max(0, quota.personal - used.personal),
-      sickWithCert:    Math.max(0, quota.sickWithCert - used.sickWithCert),
-      sickNoCert:      Math.max(0, quota.sickNoCert - used.sickNoCert),
-      vacation:        Math.max(0, quota.vacation - used.vacation),
-      unpaidPersonal:  quota.unpaidPersonal == null ? null : Math.max(0, quota.unpaidPersonal - used.unpaidPersonal),
+      personal:        quotaRemain_(quota.personal,       used.personal),
+      sickWithCert:    quotaRemain_(quota.sickWithCert,   used.sickWithCert),
+      sickNoCert:      quotaRemain_(quota.sickNoCert,     used.sickNoCert),
+      vacation:        quotaRemain_(quota.vacation,       used.vacation),
+      unpaidPersonal:  quotaRemain_(quota.unpaidPersonal, used.unpaidPersonal),
+      maternity:       quotaRemain_(quota.maternity,      used.maternity),
     },
+  };
+}
+
+/* v5.3: ตัวติดตั้งแท็บ "โควต้าลา" ให้ HR กรอกเอง — รันจาก editor (ไม่ต้อง Deploy)
+   รันซ้ำได้ปลอดภัย: ค่าที่ HR กรอกไว้ไม่หาย · เติมพนักงานใหม่ · รีเฟรชคอลัมน์ข้อมูล/ค่าอ้างอิง */
+function setupLeaveQuota() {
+  const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
+  let sh = ss.getSheetByName(LQ_TAB);
+  const HEAD = ['รหัสพนักงาน', 'ชื่อ-นามสกุล', 'คลัง', 'วันเริ่มงาน', 'โควต้าอัตโนมัติ (อ้างอิง)']
+    .concat(LQ_COLS.map(c => c.head)).concat(['หมายเหตุ']);
+  const NCOL = HEAD.length;   // 12
+  if (!sh) sh = ss.insertSheet(LQ_TAB);
+
+  // ── รวบรวมพนักงานที่ยังทำงานอยู่ (RATTANA จากชีท Users + PTT จากทะเบียน) ──
+  const now = new Date();
+  const people = {};
+  try {
+    usersData_().slice(1).forEach(r => {
+      if (String(r[U_COL.status] || '').trim().toLowerCase() !== 'active') return;
+      const id = String(r[U_COL.empId] || '').trim(); if (!id) return;
+      people[id] = { id: id, name: cleanName_(r[U_COL.name]), start: r[U_COL.startDate] };
+    });
+  } catch (e) {}
+  const pm = pttMap_();
+  Object.keys(pm).forEach(id => {
+    if (people[id]) return;
+    people[id] = { id: id, name: pm[id].name, start: pm[id].startDate, khlang: pm[id].khlang };
   });
+
+  const infoOf = (p) => {
+    const sd = (p.start instanceof Date) ? p.start : parseDDMMYYYY(String(p.start || '').trim());
+    let ref = '— ไม่มีวันเริ่มงาน —';
+    if (sd && !isNaN(sd.getTime())) {
+      const q = autoQuotaByTenure_(sd, now);
+      const nz = (v) => v == null ? 'ไม่จำกัด' : v;
+      ref = q.stageLabel + ' · กิจ ' + nz(q.personal) + ' · ป่วย ' + nz(q.sickWithCert) + '/' + nz(q.sickNoCert) +
+            ' · พักร้อน ' + nz(q.vacation) + ' · กิจไม่รับค่าจ้าง ' + nz(q.unpaidPersonal) + ' · คลอด 98';
+    }
+    return [p.name || '', khlangOf_(p.id) || p.khlang || '', sd ? formatDate(sd) : '', ref];
+  };
+
+  // ── มีแท็บอยู่แล้ว: รีเฟรชข้อมูล + เติมคนใหม่ (ไม่แตะค่าที่กรอก) ──
+  const existing = sh.getLastRow() > 1 ? sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues() : [];
+  const seen = {};
+  existing.forEach((r, i) => {
+    const id = String(r[0] || '').trim();
+    if (!id) return;
+    seen[id] = true;
+    if (people[id]) sh.getRange(i + 2, 2, 1, 4).setValues([infoOf(people[id])]);
+  });
+
+  sh.getRange(1, 1, 1, NCOL).setValues([HEAD])
+    .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+  sh.setFrozenRows(1);
+
+  const add = Object.keys(people).filter(id => !seen[id]).sort()
+    .map(id => [id].concat(infoOf(people[id])).concat(['', '', '', '', '', '', '']));
+  if (add.length) sh.getRange(sh.getLastRow() + 1, 1, add.length, NCOL).setValues(add);
+
+  // ── หน้าตา + คำอธิบาย ──
+  sh.getRange(1, 6, sh.getMaxRows(), LQ_COLS.length).setHorizontalAlignment('center');
+  sh.getRange(2, 6, Math.max(1, sh.getLastRow() - 1), LQ_COLS.length)
+    .setBackground('#fff8e1').setNote('เว้นว่าง = ใช้โควต้าอัตโนมัติตามอายุงาน\nใส่ตัวเลข = ใช้ตัวเลขนี้แทน (เช่น พักร้อนยกยอด ใส่ยอดรวม)\nใส่ "ไม่จำกัด" = ไม่จำกัดจำนวนวัน');
+  sh.setColumnWidth(2, 190); sh.setColumnWidth(5, 430); sh.setColumnWidth(NCOL, 220);
+  try { sh.autoResizeColumns(1, 1); } catch (e) {}
+  ss.setActiveSheet(sh);
+  Logger.log('✅ แท็บ "' + LQ_TAB + '" พร้อมใช้ · พนักงานทั้งหมด ' + Object.keys(people).length +
+             ' คน (เพิ่มใหม่รอบนี้ ' + add.length + ') — กรอกเฉพาะช่องสีเหลืองของคนที่ต้องการปรับ');
+}
+
+function quotaRemain_(q, u) {
+  if (q == null) return null;                       // ไม่จำกัด
+  return Math.max(0, (parseFloat(q) || 0) - (parseFloat(u) || 0));
+}
+
+function actionGetLeaveQuota(p, user) {
+  const empId = String(p.empId || user.empId);
+  if (!canSeeUser(user, empId)) return jsonOut({ ok:false, error:'ไม่มีสิทธิ์' });
+  const q = leaveQuotaFor_(empId);
+  if (!q) return jsonOut({ ok:false, error:'ไม่พบวันเริ่มงาน (ชีท Users / ทะเบียน PTT) — แจ้ง HR' });
+  return jsonOut(Object.assign({ ok:true }, q));
 }
 
 function countUsedLeave(empId, from, to) {
+  const c = { personal:0, sickWithCert:0, sickNoCert:0, vacation:0, unpaidPersonal:0, maternity:0 };
+  // v5.0: นับจาก การลาApp — approveAny อนุมัติที่ชีทนี้ (แท็บ log เดิมสถานะค้าง pending ตลอด
+  // ทำให้หน้าโควต้าเคยนับวันลาที่ใช้ไปได้ 0 เสมอ)
+  const la = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName('การลาApp');
+  if (la && leaveSheetIsNew_(la)) {
+    const data = la.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      const r = data[i];
+      if (String(r[1] || '').trim() !== String(empId)) continue;
+      if (String(r[8] || '').toLowerCase() !== 'approved') continue;
+      const sd = r[0] instanceof Date ? r[0] : parseDDMMYYYY(formatDate(r[0]));
+      if (!sd || isNaN(sd.getTime())) continue;
+      if (sd < from || sd > to) continue;
+      const days = (parseFloat(r[12]) || 0) / 8;
+      const t = leaveCodeFromLabel_(r[5]);
+      if (t === 'personal') c.personal += days;
+      else if (t === 'sick_with_cert') c.sickWithCert += days;
+      else if (t === 'sick_no_cert')   c.sickNoCert += days;
+      else if (t === 'vacation')       c.vacation += days;
+      else if (t === 'unpaid_personal') c.unpaidPersonal += days;
+      else if (t === 'maternity_paid' || t === 'maternity_unpaid') c.maternity += days;   // v5.1
+    }
+    return c;
+  }
   const sh = getTab(T.LEAVE);
-  const c = { personal:0, sickWithCert:0, sickNoCert:0, vacation:0, unpaidPersonal:0 };
   if (!sh) return c;
   const data = sh.getDataRange().getValues();
   for (let i = 1; i < data.length; i++) {
@@ -1288,6 +1973,7 @@ function countUsedLeave(empId, from, to) {
     else if (t === 'sick' || t === 'sick_no_cert')        c.sickNoCert += days;
     else if (t === 'vacation')                            c.vacation += days;
     else if (t === 'unpaid_personal' || t === 'unpaid')   c.unpaidPersonal += days;
+    else if (t === 'maternity_paid' || t === 'maternity_unpaid') c.maternity += days;   // v5.1
   }
   return c;
 }
@@ -1455,6 +2141,7 @@ function recomputeAttendanceRange(empId, sd, ed) {
 }
 
 function applyTimeAdjust(taRow) {
+  if (!WRITE_ATT_SHEET) return;   // v3.3: เลิกเขียน ลงเวลาApp — TimeAdjustLog ยังบันทึกคำขอครบเหมือนเดิม
   const empId   = String(taRow[2]);
   const name    = taRow[3];
   const dateStr = formatDate(taRow[4]);
@@ -1521,9 +2208,49 @@ function actionGetLocations(user) {
       lat: parseFloat(data[i][2]) || 0, lng: parseFloat(data[i][3]) || 0,
       radius: parseFloat(data[i][4]) || 50,
       active: String(data[i][5] || 'Y').toUpperCase() !== 'N',
+      qr: String(data[i][6] || '').trim() !== '',   // v5.5: จุดนี้มี QR ประจำจุดแล้ว (ส่งแค่ธง — ไม่ส่ง secret)
     });
   }
   return jsonOut({ ok:true, locations: out });
+}
+
+/* ==================== v5.5: QR ประจำจุดสแกน ====================
+   หลักฐานสำรองเมื่อระบบใบหน้าไม่พร้อม: HR พิมพ์ QR ไปติดแต่ละจุด
+   QR = "RTQR|<code>|<secret>" · secret เก็บใน Locations คอลัมน์ G เท่านั้น (ไม่ออกไปกับ getLocations) */
+function setupLocationQR() {
+  const sh = getOrCreateTab(T.LOC);
+  const data = sh.getDataRange().getValues();
+  sh.getRange(1, 7).setValue('QR Secret').setFontWeight('bold');
+  const rnd = () => {
+    const CH = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+    let s = '';
+    for (let i = 0; i < 12; i++) s += CH.charAt(Math.floor(Math.random() * CH.length));
+    return s;
+  };
+  let made = 0;
+  for (let i = 1; i < data.length; i++) {
+    if (!data[i][0]) continue;
+    if (String(data[i][6] || '').trim() !== '') continue;   // มีแล้ว — ไม่ทับ (QR ที่พิมพ์ไปแล้วยังใช้ได้)
+    sh.getRange(i + 1, 7).setValue(rnd());
+    made++;
+  }
+  Logger.log('✅ QR Secret พร้อม (สร้างใหม่ ' + made + ' จุด) — พิมพ์ QR ได้ที่แอป: ตั้งค่า → พิมพ์ QR ประจำจุดสแกน');
+}
+
+/* HR/ผู้จัดการ ดึงข้อมูลไปพิมพ์ QR (ต้องผ่านสิทธิ์ — secret ไม่หลุดถึงพนักงานทั่วไป) */
+function getLocationQR(p, user) {
+  if (!isHR(user) && !isManager(user)) return { ok:false, error:'เฉพาะผู้จัดการ/HR' };
+  const sh = getTab(T.LOC);
+  if (!sh) return { ok:true, rows: [] };
+  const data = sh.getDataRange().getValues();
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    if (!data[i][0]) continue;
+    const token = String(data[i][6] || '').trim();
+    if (!token) continue;
+    rows.push({ code: String(data[i][0]), name: String(data[i][1] || ''), token: token });
+  }
+  return { ok:true, rows };
 }
 
 function actionSaveLocation(p, user) {
@@ -1697,6 +2424,7 @@ function actionGetCheckinLog(p, user) {
     if (!canSeeUser(user, empId)) continue;
     if (p.empId && empId !== String(p.empId)) continue;
     if (p.date && formatDate(r[3]) !== p.date) continue;
+    if (p.month && formatDate(r[3]).slice(3) !== String(p.month)) continue;   // v4.1: 'MM/yyyy' ทั้งเดือน (ปฏิทินแอป)
     out.push({
       timestamp: r[0], empId, name: r[2], date: formatDate(r[3]),
       time: r[4] instanceof Date
@@ -2157,7 +2885,8 @@ function actionGetMyFoodOrders(p, user) {
 }
 
 const APPROVE_CFG = {
-  'การลาApp':   { status: 9,  approver: 10, name: 2, info: [6, 12] },
+  // v4.3: โครงใหม่ — I สถานะ, J ผู้อนุมัติ, K อนุมัติเมื่อ (stampAt), F ประเภทเอกสาร, L รายละเอียด
+  'การลาApp':   { status: 8,  approver: 9, stampAt: 10, name: 2, info: [5, 11] },
   'ขอตกเบิก':   { status: 9,  approver: 10, name: 2, info: [6, 12] },
   'อุปกรณ์App': { status: 14, approver: null, name: 2, info: [4, 5, 7] },
   'เอกสารApp':  { status: 6,  approver: 7,  name: 2, info: [4, 5] },
@@ -2197,9 +2926,13 @@ function getPendingAll(p, user) {
       } catch(_) {}
     }
     Object.keys(APPROVE_CFG).forEach(name => {
-      const cfg = APPROVE_CFG[name];
+      let cfg = APPROVE_CFG[name];
       const sh = ss.getSheetByName(name);
       if (!sh) return;
+      // v4.3: การลาApp ที่ยังไม่ migrate → ใช้ index โครงเก่า
+      if (name === 'การลาApp' && !leaveSheetIsNew_(sh)) {
+        cfg = { status: 9, approver: 10, name: 2, info: [6, 12] };
+      }
       const data = sh.getDataRange().getValues();
       for (let i = 1; i < data.length; i++) {
         const r = data[i];
@@ -2222,14 +2955,27 @@ function approveAny(p, user) {
   try {
     // v2.7: เดิมไม่เช็คสิทธิ์เลย — พนักงานยิง API ตรงอนุมัติคำขอตัวเองได้
     if (!isSupervisor(user) && !isHR(user)) return { ok: false, error: 'ไม่มีสิทธิ์อนุมัติ' };
-    const cfg = APPROVE_CFG[p.sheet];
+    let cfg = APPROVE_CFG[p.sheet];
     if (!cfg) return { ok: false, error: 'unknown sheet' };
     const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
     const sh = ss.getSheetByName(p.sheet);
     if (!sh) return { ok: false, error: 'no sheet' };
+    // v4.3: การลาApp ที่ยังไม่ migrate → ใช้ index โครงเก่า
+    if (p.sheet === 'การลาApp' && !leaveSheetIsNew_(sh)) {
+      cfg = { status: 9, approver: 10, name: 2, info: [6, 12] };
+    }
     const row = parseInt(p.row, 10);
     const status = p.decision === 'approved' ? 'approved' : 'rejected';
     sh.getRange(row, cfg.status + 1).setValue(status);
+    // v4.3: ประทับเวลา "อนุมัติเมื่อ" (เฉพาะชีทที่ประกาศ stampAt)
+    if (cfg.stampAt != null) {
+      sh.getRange(row, cfg.stampAt + 1).setValue(Utilities.formatDate(new Date(), 'Asia/Bangkok', 'dd/MM/yyyy HH:mm:ss'));
+    }
+    // v4.8: อนุมัติ "แก้เวลาย้อนหลัง" → เติมสแกน retroactive ลง CheckinLog + Supabase จริง
+    // (เดิมได้แค่ตราประทับ — เวลาไม่เข้าระบบ สรุปวัน/ลงเวลาAuto ไม่ขยับ)
+    if (p.sheet === 'การลาApp' && status === 'approved') {
+      try { applyLeaveAppTimeAdjust_(sh, row, user); } catch (e) { console.error('applyLeaveAppTimeAdjust_', e); }
+    }
     if (cfg.approver != null) {
       const who = p.approverName || (user && user.name) || 'อนุมัติ';
       sh.getRange(row, cfg.approver + 1).setValue(who);
@@ -2245,6 +2991,54 @@ function approveAny(p, user) {
     }
     return { ok: true };
   } catch(e) { return { ok: false, error: e.message }; }
+}
+
+/* v4.8: แตกคำขอ "แก้เวลาย้อนหลัง" (การลาApp) ที่เพิ่งอนุมัติ → สแกนย้อนหลังเข้าระบบ
+   รายละเอียดต้องมีรูปแบบ "เข้า HH:MM" หรือ "ออก HH:MM" (ฟอร์มแอปสร้างให้อยู่แล้ว)
+   idempotent ด้วย clientId TA-<รหัส>-<วันที่>-<ชนิด> — วันเดียวชนิดเดียวเติมได้ครั้งเดียว */
+function applyLeaveAppTimeAdjust_(sh, rowNum, approver) {
+  const isNew = leaveSheetIsNew_(sh);
+  const r = sh.getRange(rowNum, 1, 1, isNew ? 15 : 19).getValues()[0];
+  const typeLabel = String((isNew ? r[5] : r[6]) || '');
+  if (typeLabel.indexOf('แก้เวลา') < 0) return;
+  const empId = String(r[1] || '').trim();
+  const name = String(r[2] || '');
+  const dateStr = formatDate(isNew ? r[0] : r[15]);
+  const detail = String((isNew ? r[11] : r[12]) || '');
+  const m = detail.match(/(เข้า|ออก)\s*(\d{1,2}):(\d{2})/);
+  const dp = String(dateStr).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m || !dp || !empId) return;
+  const type = m[1] === 'ออก' ? 'out' : 'in';
+  // v4.9: สร้าง instant เวลาไทยด้วย +07:00 ตรงๆ — ไม่พึ่ง timezone ของโปรเจกต์สคริปต์ (กันเวลาเพี้ยน 7 ชม.)
+  const pad2 = (n) => ('0' + n).slice(-2);
+  const d = new Date(dp[3] + '-' + pad2(dp[2]) + '-' + pad2(dp[1]) + 'T' + pad2(m[2]) + ':' + m[3] + ':00+07:00');
+  if (isNaN(d.getTime())) return;
+  const timeStr = pad2(m[2]) + ':' + m[3] + ':00';
+  const cid = 'TA-' + empId + '-' + dateStr.replace(/\//g, '') + '-' + type;
+  const logSh = getOrCreateTab(T.LOG);
+  try { if (logSh.createTextFinder(cid).matchEntireCell(true).findNext()) return; } catch (e) {}
+  const target = findUserByEmpId(empId) || {};
+  const branch = target.branch || ((pttMap_()[empId] || {}).saka) || '';
+  const who = 'timeadjust:' + ((approver && approver.empId) || '');
+  if (sbReady_()) {
+    try {
+      sbUpsert_('checkin_log', {
+        client_id: cid, emp_id: empId, name: name,
+        scan_at: d.toISOString(), type: type,
+        branch: branch, lat: null, lng: null, distance: null, face_dist: null,
+        scanned_by: who, photo_path: '',
+        retroactive: 'Y', reason: detail,
+      }, 'client_id');
+    } catch (e) { console.error('sb timeadjust', e); }
+  }
+  logSh.appendRow([
+    d, empId, name, dateStr, timeStr,
+    type, branch,
+    '', '', '', '',
+    who, 'Y',
+    detail,
+    '', (approver && approver.email) || '', cid,
+  ]);
 }
 
 function actionSubmitWelfare(p, user) {
@@ -2368,7 +3162,8 @@ function actionLoginByUser(p) {
                 : 'ไม่พบสิทธิ์เข้าใช้งาน — โปรดติดต่อ HR' };
             }
           }
-          const userObj = Object.assign({ empId:uname, username:uname, name:String(r[0]||'') }, lookupEmpInfo(uname));
+          // v3.7: คลัง จาก User slip คอลัมน์ D (HQ/W1-W4)
+          const userObj = Object.assign({ empId:uname, username:uname, name:String(r[0]||''), khlang:String(r[3]||'').trim() }, lookupEmpInfo(uname));
           try {
             const pttSS = SpreadsheetApp.openById('1lnIVDnPe1g8UYwAAtbE1bddWsq_sAGiVWmbnuBr5VBM');
             const pttSh = pttSS.getSheetByName('ข้อมูลพนักงาน PTT') || pttSS.getSheets()[0];
@@ -2408,7 +3203,7 @@ function sheetSessionUser(username) {
       if (user === uname) {
         const status = String(r[4] || '').trim().toLowerCase();
         if (status && status !== 'active' && status !== 'ใช้งาน') return null;
-        return Object.assign({ empId: user, name: String(r[0] || ''), email: '' }, lookupEmpInfo(user));
+        return Object.assign({ empId: user, name: String(r[0] || ''), email: '', khlang: String(r[3] || '').trim() }, lookupEmpInfo(user));
       }
     }
     return null;
