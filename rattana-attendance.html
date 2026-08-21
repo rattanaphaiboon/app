@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.30</title>
+<title>HR Rattana v5.31</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3577,7 +3577,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.30';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.31';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -10572,54 +10572,78 @@ async function teamPickList_(fallbackList) {
   return fallbackList || [];
 }
 
+/* v12.31: หน้าอนุมัติแบบโชว์ทันที — วาดจากแคชก่อน แล้วรีเฟรชของจริงเบื้องหลัง (ไม่ต้องนั่งรอ "กำลังโหลด") */
+let _approvalsLoadPromise = null;   // รอบดึงของสดที่ค้างอยู่ — admDecide รอตัวนี้ก่อนบันทึก กันชี้แถวผิด
+function approvalsCacheKey_() { return 'approvalsCache_' + (currentUser ? currentUser.empId : ''); }
+
 async function loadApprovals() {
+  const el = document.getElementById('approvalsList');
+  if (!el) return;
+  // 1) มีของเก่า (ในหน่วยความจำ หรือแคชเครื่อง) → วาดทันที + ป้าย ⏳ ว่ากำลังอัปเดต
+  if (!_approvalItems.length) {
+    let cached = null;
+    try { cached = JSON.parse(localStorage.getItem(approvalsCacheKey_()) || 'null'); } catch (_) {}
+    if (Array.isArray(cached) && cached.length) _approvalItems = cached;
+  }
+  if (_approvalItems.length) renderApprovalsList_(true);
+  else el.innerHTML = '<div class="text-sm text-muted">กำลังโหลด...</div>';
+
+  // 2) ดึงของจริงเบื้องหลัง แล้ววาดทับ (คงตำแหน่งเลื่อนเดิม)
+  if (_approvalsLoadPromise) return _approvalsLoadPromise;   // มีรอบค้างอยู่ — ไม่ยิงซ้อน
+  _approvalsLoadPromise = (async () => {
+    try {
+      const res = await callAppsScript('getPendingAll', { supervisorId: currentUser.empId });
+      const all = res.items || [];
+      // เฉพาะ HR เห็นทั้งหมด — หัวหน้ากรองเป็นทีมตัวเองเสมอ
+      const team = await resolveMyTeam();
+      const items = team.isHR ? all : all.filter(it => inMyTeam(team, it.empId, it.name));
+      _approvalItems = items;
+      try { localStorage.setItem(approvalsCacheKey_(), JSON.stringify(items)); } catch (_) {}
+      updateApproveAlert(items);   // v12.21: sync การ์ดหน้าแรก+ป้ายเมนู — เลขตรงกันเสมอ
+      const y = window.scrollY;
+      renderApprovalsList_(false);
+      window.scrollTo(0, y);
+    } catch (e) {
+      if (!_approvalItems.length) el.innerHTML = `<div class="alert alert-warn">โหลดไม่ได้: ${e.message}</div>`;
+      else toast('รีเฟรชรายการไม่สำเร็จ — แสดงข้อมูลรอบก่อน', 'warning');
+    } finally { _approvalsLoadPromise = null; }
+  })();
+  return _approvalsLoadPromise;
+}
+
+function renderApprovalsList_(stale) {
   const el = document.getElementById('approvalsList');
   const kpi = document.getElementById('approvalsKpi');
   if (!el) return;
-  el.innerHTML = '<div class="text-sm text-muted">กำลังโหลด...</div>';
-  try {
-    const res = await callAppsScript('getPendingAll', { supervisorId: currentUser.empId });
-    const all = res.items || [];
-
-    // เฉพาะ HR เห็นทั้งหมด — หัวหน้ากรองเป็นทีมตัวเองเสมอ
-    const team = await resolveMyTeam();
-    const isHR = team.isHR;
-    const items = isHR ? all : all.filter(it => inMyTeam(team, it.empId, it.name));
-    _approvalItems = items;
-    updateApproveAlert(items);   // v12.21: sync การ์ดหน้าแรก+ป้ายเมนู — เลขตรงกับหน้านี้เสมอ (รวมหลังกดอนุมัติ)
-
-    if (kpi) {
-      kpi.innerHTML = `<div class="kpi"><div class="num">${items.length}</div><div class="label">รออนุมัติ${isHR ? '' : ' · ลูกทีม'}</div></div>`;
-    }
-    if (!items.length) {
-      el.innerHTML = '<div class="empty"><div class="ico">✓</div>ไม่มีคำขอรอ</div>';
-      return;
-    }
-
-    // ── แบ่งเป็นหมวดหมู่ตามประเภทคำขอ ──
-    const groups = {};
-    items.forEach((it, idx) => {
-      const cat = APPROVE_SHEET_LABEL[it.sheet] || it.sheet || 'อื่นๆ';
-      (groups[cat] = groups[cat] || []).push({ it, idx });
-    });
-
-    el.innerHTML = Object.keys(groups).map(cat => {
-      const rows = groups[cat].map(({ it, idx }) =>
-        `<div class="list-item" onclick="openApprovalDetail(${idx})" style="cursor:pointer">
-          <div class="info">
-            <div class="title">${it.name || '-'}</div>
-            <div class="sub">${formatUserDate(it.date)} · ${it.info || ''}</div>
-          </div>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:.4"><polyline points="9 18 15 12 9 6"/></svg>
-        </div>`).join('');
-      return `<div style="display:flex;align-items:center;gap:8px;margin:16px 0 8px;font-size:13.5px;font-weight:800;color:var(--text)">
-          <span>${cat}</span>
-          <span style="font-size:11.5px;font-weight:700;color:var(--muted)">(${groups[cat].length})</span>
-        </div>${rows}`;
-    }).join('');
-  } catch (e) {
-    el.innerHTML = `<div class="alert alert-warn">โหลดไม่ได้: ${e.message}</div>`;
+  const items = _approvalItems;
+  const isHR = !!(currentUser && currentUser.role === 'hr');
+  if (kpi) {
+    kpi.innerHTML = `<div class="kpi"><div class="num">${items.length}</div><div class="label">รออนุมัติ${isHR ? '' : ' · ลูกทีม'}${stale ? ' · ⏳ กำลังอัปเดต' : ''}</div></div>`;
   }
+  if (!items.length) {
+    el.innerHTML = '<div class="empty"><div class="ico">✓</div>ไม่มีคำขอรอ</div>';
+    return;
+  }
+  // ── แบ่งเป็นหมวดหมู่ตามประเภทคำขอ ──
+  const groups = {};
+  items.forEach((it, idx) => {
+    const cat = APPROVE_SHEET_LABEL[it.sheet] || it.sheet || 'อื่นๆ';
+    (groups[cat] = groups[cat] || []).push({ it, idx });
+  });
+  el.innerHTML = Object.keys(groups).map(cat => {
+    const rows = groups[cat].map(({ it, idx }) =>
+      `<div class="list-item" onclick="openApprovalDetail(${idx})" style="cursor:pointer">
+        <div class="info">
+          <div class="title">${it.name || '-'}</div>
+          <div class="sub">${formatUserDate(it.date)} · ${it.info || ''}</div>
+        </div>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:.4"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>`).join('');
+    return `<div style="display:flex;align-items:center;gap:8px;margin:16px 0 8px;font-size:13.5px;font-weight:800;color:var(--text)">
+        <span>${cat}</span>
+        <span style="font-size:11.5px;font-weight:700;color:var(--muted)">(${groups[cat].length})</span>
+      </div>${rows}`;
+  }).join('');
 }
 
 /* ── v12.21: การ์ด "เอกสารรออนุมัติ" หน้าแรก + ป้ายเลขเมนู + จุดแดงปุ่มเมนู (หัวหน้า/HR) ──
@@ -10643,6 +10667,13 @@ async function updateApproveAlert(preItems) {
         // v12.23: หัวหน้าที่ทีมว่างเพราะ allUsers ยังไม่โหลด (วินาทีแรกหลังเปิดแอป) — อย่าเพิ่งสรุปว่า 0 รอรอบถัดไป
         if (!team.isHR && !team.members.length && !(allUsers && allUsers.length)) return;
         items = team.isHR ? all : all.filter(it => inMyTeam(team, it.empId, it.name));
+        // v12.31: แชร์ผลให้หน้าอนุมัติด้วย — เปิดหน้าครั้งแรกก็มีข้อมูลรอแล้ว ไม่ต้องดึงซ้ำ
+        _approvalItems = items;
+        try { localStorage.setItem(approvalsCacheKey_(), JSON.stringify(items)); } catch (_) {}
+        try {
+          const pg = document.getElementById('page-approvals');
+          if (pg && pg.classList.contains('active')) { const y = window.scrollY; renderApprovalsList_(false); window.scrollTo(0, y); }
+        } catch (_) {}
       } finally { _approveAlertBusy = false; }
     }
     _approveAlertAt = Date.now();
@@ -10766,10 +10797,27 @@ async function admDecide(decision) {
   }
   try {
     showSpinner('กำลังบันทึก...');
-    await callAppsScript('approveAny', { sheet: _admCurrent.sheet, row: _admCurrent.row, decision, note, approverName: currentUser.name });
+    // v12.31: ถ้ารายการที่เปิดมาจากแคชและกำลังรีเฟรชอยู่ → รอของสดก่อน (เลขแถวในชีทอาจขยับถ้ามีคนลบแถวมือ)
+    if (_approvalsLoadPromise) { try { await _approvalsLoadPromise; } catch (_) {} }
+    const cur = _admCurrent;
+    const fresh = _approvalItems.find(it => it.sheet === cur.sheet && it.row === cur.row &&
+      String(it.empId) === String(cur.empId) && String(it.info || '') === String(cur.info || ''));
+    if (!fresh) {
+      toast('รายการนี้เพิ่งมีการเปลี่ยนแปลง — โหลดรายการล่าสุดแล้ว เลือกใหม่อีกครั้ง', 'warning');
+      closeApprovalDetail();
+      loadApprovals();
+      return;
+    }
+    await callAppsScript('approveAny', { sheet: cur.sheet, row: cur.row, decision, note, approverName: currentUser.name });
     toast(decision === 'approved' ? '✓ อนุมัติแล้ว' : '✗ ปฏิเสธแล้ว', 'success');
     closeApprovalDetail();
-    loadApprovals();
+    // v12.31: ตัดรายการที่จัดการแล้วออกจากจอเลย — ไม่ดึงใหม่ทั้งหน้า (เร็วขึ้นมาก) + อยู่ตำแหน่งเลื่อนเดิม ไม่เด้งขึ้นบน
+    _approvalItems = _approvalItems.filter(it => it !== fresh);
+    try { localStorage.setItem(approvalsCacheKey_(), JSON.stringify(_approvalItems)); } catch (_) {}
+    const y = window.scrollY;
+    renderApprovalsList_(false);
+    window.scrollTo(0, y);
+    updateApproveAlert(_approvalItems);   // การ์ดหน้าแรก+ป้ายเมนูลดเลขทันที
   } catch(e) { toast('❌ ' + e.message, 'error'); }
   finally { hideSpinner(); }
 }
