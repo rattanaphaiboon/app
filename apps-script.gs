@@ -342,6 +342,11 @@ function flagRecord(data) {
       if (data.receivedDate) {
         sheet.getRange(i + 1, receivedCol + 1).setValue('รับแล้ว');
       }
+      // ล้าง เอกสารแก้ไขแล้ว เมื่อสถานะเปลี่ยน (button จะกลับไปล็อคในรอบใหม่)
+      let fixedCol2 = headers.indexOf('เอกสารแก้ไขแล้ว');
+      if (fixedCol2 !== -1) {
+        sheet.getRange(i + 1, fixedCol2 + 1).setValue('');
+      }
       return { success: true };
     }
   }
@@ -395,7 +400,16 @@ function updateDocFiles(data) {
     }
   });
 
-  return { success: true, ...result };
+  // mark that docs were fixed (used to unlock เอกสารถูกต้อง button cross-device)
+  let fixedCol = headers.indexOf('เอกสารแก้ไขแล้ว');
+  if (fixedCol === -1) {
+    fixedCol = sheet.getLastColumn();
+    sheet.getRange(1, fixedCol + 1).setValue('เอกสารแก้ไขแล้ว');
+    sheet.getRange(1, fixedCol + 1).setBackground('#0d1b3e').setFontColor('#c9a84c').setFontWeight('bold');
+  }
+  sheet.getRange(rowIndex + 1, fixedCol + 1).setValue('yes');
+
+  return { success: true, docFixed: true, ...result };
 }
 
 // ── Backfill สถานะ "ถูกต้อง" ให้ทุก row ที่ยังว่างอยู่ ────
