@@ -83,7 +83,7 @@ function uploadFile(fileData, folder, label) {
     file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
     return 'https://drive.google.com/file/d/' + file.getId() + '/view';
   } catch(e) {
-    Logger.log('Upload error: ' + e);
+    Logger.log('Upload error [' + label + ']: ' + e);
     return '';
   }
 }
@@ -99,9 +99,13 @@ function uploadFiles(filesArray, folder, label) {
 }
 
 // ── Build a row array matched to the sheet's actual header ───
+function normalizeHeader(h) {
+  return String(h).replace(/[\n\r\t]/g, '').trim();
+}
+
 function buildRow(headers, map) {
   return headers.map(h => {
-    const key = String(h).trim();
+    const key = normalizeHeader(h);
     return map.hasOwnProperty(key) ? map[key] : '';
   });
 }
@@ -137,7 +141,7 @@ function submitCreditBatch(data) {
   }
 
   const today       = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd');
-  const headers     = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+  const headers     = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => normalizeHeader(h));
   const shopCredits = data.shopCredits || shopNames.map(n => ({ name: n, bplusCode: '', days: data.creditDays||'', amount: data.creditAmount||0, note: data.note||'' }));
 
   shopCredits.forEach(function(sc) {
@@ -147,22 +151,24 @@ function submitCreditBatch(data) {
       'ชื่อร้านค้า':                 sc.name,
       'รหัสบีพลัส':                  bplusCode,
       'วันที่ขอเครดิต':              data.creditDate   || '',
-      'จำนวนวันเครดิต':             sc.days           || '',
+      'จำนวนวันเครดิต':             (sc.days !== '' && sc.days != null) ? sc.days : 0,
       'วงเงิน (บาท)':                sc.amount         || 0,
       'หนังสือขอเครดิต':             creditRequestUrl,
       'สำเนาหนังสือรับรองบริษัท':   creditDocUrl,
       'บัตรประชาชน':                 idCardUrl,
       'ภพ.20':                       vatUrl,
       'อื่นๆ':                       otherUrl,
-      'หมายเหตุ':                    (sc.note || '') + (data.batchId ? '||' + data.batchId : ''),
-      'ผู้บันทึก (Email)':           data.recordedBy   || '',
+      'หมายเหตุ':                    sc.note || '',
+      'ผู้บันทึก (Email)':           (data.recordedBy || '') + (data.batchId ? '||' + data.batchId : ''),
       'ชื่อผู้บันทึก':               data.recordedName || '',
-      'สถานะ':                       'ถูกต้อง',
+      'สถานะ':                       'รอตรวจ',
     };
     sheet.appendRow(buildRow(headers, map));
   });
 
-  return { success: true, creditDocUrl, idCardUrl, vatUrl, creditRequestUrl, otherUrl };
+  const hasCreditDocInput = !!(data.files && data.files.creditDoc && (Array.isArray(data.files.creditDoc) ? data.files.creditDoc.length > 0 : true));
+  Logger.log('creditDoc received=' + hasCreditDocInput + ' url=' + creditDocUrl);
+  return { success: true, creditDocUrl, idCardUrl, vatUrl, creditRequestUrl, otherUrl, hasCreditDocInput };
 }
 
 // ── Main submit handler ───────────────────────────────────
@@ -204,23 +210,23 @@ function submitCredit(data) {
 
   const today = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd');
   const bplusCode = data.bplusCode || lookupBplus(ss, data.shopName);
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => normalizeHeader(h));
   const map = {
     'วันที่บันทึก':      today,
     'ชื่อร้านค้า':       data.shopName,
     'รหัสบีพลัส':        bplusCode,
     'วันที่ขอเครดิต':    data.creditDate    || '',
-    'จำนวนวันเครดิต':   data.creditDays    || '',
+    'จำนวนวันเครดิต':   (data.creditDays !== '' && data.creditDays != null) ? data.creditDays : 0,
     'วงเงิน (บาท)':      data.creditAmount  || 0,
     'หนังสือขอเครดิต':           creditRequestUrl,
     'สำเนาหนังสือรับรองบริษัท': creditDocUrl,
     'บัตรประชาชน':               idCardUrl,
     'ภพ.20':                     vatUrl,
     'อื่นๆ':                     otherUrl,
-    'หมายเหตุ':                  (data.note || '') + (data.batchId ? '||' + data.batchId : ''),
-    'ผู้บันทึก (Email)':         data.recordedBy    || '',
+    'หมายเหตุ':                  data.note || '',
+    'ผู้บันทึก (Email)':         (data.recordedBy || '') + (data.batchId ? '||' + data.batchId : ''),
     'ชื่อผู้บันทึก':             data.recordedName  || '',
-    'สถานะ':                     'ถูกต้อง',
+    'สถานะ':                     'รอตรวจ',
   };
   sheet.appendRow(buildRow(headers, map));
 
@@ -311,9 +317,15 @@ function flagRecord(data) {
         String(allVals[i][1] || '').trim() === targetShop) {
       // เขียนสถานะ
       sheet.getRange(i + 1, statusCol + 1).setValue(data.status || '');
-      // เขียน note ลง column หมายเหตุ (ถ้ามี)
-      if (noteCol !== -1 && data.note) {
-        sheet.getRange(i + 1, noteCol + 1).setValue(data.note);
+      // เขียน note ลง column หมายเหตุสถานะ (ไม่ใช่คอลัม L หมายเหตุ)
+      if (data.note) {
+        let flagNoteCol = headers.indexOf('หมายเหตุสถานะ');
+        if (flagNoteCol === -1) {
+          flagNoteCol = headers.length;
+          sheet.getRange(1, flagNoteCol + 1).setValue('หมายเหตุสถานะ');
+          sheet.getRange(1, flagNoteCol + 1).setBackground('#0d1b3e').setFontColor('#c9a84c').setFontWeight('bold');
+        }
+        sheet.getRange(i + 1, flagNoteCol + 1).setValue(data.note);
       }
       // เขียน "รับแล้ว" ลง column สถานะการรับเอกสาร (ถ้า status = ถูกต้อง)
       if (data.receivedDate) {
@@ -334,10 +346,18 @@ function updateDocFiles(data) {
   const allVals = sheet.getDataRange().getValues();
   const headers = allVals[0].map(h => String(h).trim());
 
+  function normDate(v) {
+    if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Bangkok', 'yyyy-MM-dd');
+    const d = new Date(v);
+    if (!isNaN(d.getTime())) return Utilities.formatDate(d, 'Asia/Bangkok', 'yyyy-MM-dd');
+    return String(v || '').trim();
+  }
+  const targetDate = normDate(data.recordDate || '');
+  const targetShop = String(data.shopName || '').trim();
   let rowIndex = -1;
   for (let i = 1; i < allVals.length; i++) {
-    if (String(allVals[i][1]) === String(data.shopName) &&
-        String(allVals[i][0]) === String(data.recordDate)) {
+    if (normDate(allVals[i][0]) === targetDate &&
+        String(allVals[i][1] || '').trim() === targetShop) {
       rowIndex = i; break;
     }
   }
@@ -395,6 +415,59 @@ function backfillStatus() {
     }
   }
   Logger.log('เติม "ถูกต้อง" ให้ ' + filled + ' แถว (ข้ามแถวที่มีค่าอยู่แล้ว)');
+}
+
+// ── ล้าง ||batchId ออกจากคอลัม หมายเหตุ (รันครั้งเดียว) ──
+function cleanNoteColumn() {
+  const ss    = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(REC_SHEET_NAME);
+  if (!sheet) { Logger.log('ไม่พบชีต'); return; }
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => normalizeHeader(h));
+  const noteCol = headers.indexOf('หมายเหตุ');
+  if (noteCol === -1) { Logger.log('ไม่พบคอลัม หมายเหตุ'); return; }
+
+  const lastRow = sheet.getLastRow();
+  const range   = sheet.getRange(2, noteCol + 1, lastRow - 1, 1);
+  const values  = range.getValues();
+  let count = 0;
+  values.forEach((row, i) => {
+    const clean = String(row[0] || '').replace(/\|\|[a-z0-9]+$/, '').trim();
+    if (clean !== String(row[0] || '')) { values[i][0] = clean; count++; }
+  });
+  range.setValues(values);
+  Logger.log('ล้างแล้ว ' + count + ' แถว');
+}
+
+// ── รีเซ็ตสถานะทุก record ที่ยังไม่ได้รับเป็น 'รอตรวจ' (รันครั้งเดียว) ──
+function resetStatusToReview() {
+  const ss    = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(REC_SHEET_NAME);
+  if (!sheet) { Logger.log('ไม่พบชีต'); return; }
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => normalizeHeader(h));
+  const statusCol   = headers.indexOf('สถานะ');
+  const receivedCol = headers.indexOf('สถานะการรับเอกสาร');
+  if (statusCol === -1) { Logger.log('ไม่พบคอลัม สถานะ'); return; }
+
+  const lastRow = sheet.getLastRow();
+  const statusRange = sheet.getRange(2, statusCol + 1, lastRow - 1, 1);
+  const statusVals  = statusRange.getValues();
+  const receivedVals = receivedCol !== -1
+    ? sheet.getRange(2, receivedCol + 1, lastRow - 1, 1).getValues()
+    : statusVals.map(() => ['']);
+
+  let count = 0;
+  statusVals.forEach((row, i) => {
+    const st  = String(row[0] || '').trim();
+    const rec = String(receivedVals[i][0] || '').trim();
+    if (st === 'ถูกต้อง' && rec !== 'รับแล้ว') {
+      statusVals[i][0] = 'รอตรวจ';
+      count++;
+    }
+  });
+  statusRange.setValues(statusVals);
+  Logger.log('รีเซ็ตแล้ว ' + count + ' แถว → รอตรวจ');
 }
 
 // ── Test (รันใน Apps Script Editor เพื่อทดสอบ) ──────────
