@@ -244,7 +244,7 @@ input[type=number] { -moz-appearance: textfield; }
     <h1>Sales Input</h1>
     <div class="sub" id="dateDisplay"></div>
   </div>
-  <span class="ver-badge">v4.4.0</span>
+  <span class="ver-badge">v4.9.0</span>
   <button class="btn btn-ghost" onclick="clearAll()">ล้าง</button>
   <button class="btn btn-primary" onclick="saveAll()">บันทึก</button>
 </header>
@@ -344,12 +344,13 @@ function renderSection(cat) {
            value="${val!==''?Number(val).toLocaleString():''}" placeholder="—"
            oninput="onInput(this)" onfocus="onFocusNum(this)" onblur="onBlurNum(this)">`;
 
+    const noPctSuffix = row.key === 'plan_buy';
     const pctBox = row.calc
       ? `<div class="pct-box calc-box"><span class="pct-input" style="display:block;padding:8px 4px 8px 10px;text-align:right">${pct!==null?pct:'—'}</span><span class="pct-suffix">%</span></div>`
       : `<div class="pct-box"><input class="pct-input" type="number" min="0" step="1"
            data-cat="${cat.id}" data-key="pct_${row.key}"
            value="${pct!==null?pct:''}" placeholder="—"
-           oninput="onPctInput(this)"><span class="pct-suffix">%</span></div>`;
+           oninput="onPctInput(this)">${noPctSuffix?'':'<span class="pct-suffix">%</span>'}</div>`;
 
     return `<tr data-row="${row.key}" style="background:${cat.tint};border-bottom:1px solid ${cat.sep}">
       <td><span class="row-label${row.calc?' calc':''}">${row.label}</span></td>
@@ -447,6 +448,8 @@ const FETCH_STOCK = {
   'spirits-white': { sheetId: PDDT_SHEET_ID, sheet: 'PDDT', col: 'BC', val: 'สุราขาว', sumCol: 'BN', sumLabel: 'STOCK W1' },
   'spirits-color': { sheetId: PDDT_SHEET_ID, sheet: 'PDDT', col: 'BC', val: 'สุราสี',  sumCol: 'BN', sumLabel: 'STOCK W1' },
   'tea':           { sheetId: PDDT_SHEET_ID, sheet: 'PDDT', col: 'BA', val: 'F&N',     sumCols: ['BN','BO','BP','BQ'], sumLabels: ['STOCK W1','STOCK W2','STOCK W3','STOCK W4'] },
+  'rice':          { sheetId: PDDT_SHEET_ID, sheet: 'PDDT', col: 'BD', val: 'ข้าวตราฉัตร', weightCol: 'DS', sumCols: ['BN','BO','BP','BQ'], divisor: 1000 },
+  'dairy':         { sheetId: PDDT_SHEET_ID, sheet: 'PDDT', col: 'BF', val: 'บจก. แดรี่ พลัส', sumCols: ['BN','BO','BP','BQ'], sumLabels: ['STOCK W1','STOCK W2','STOCK W3','STOCK W4'] },
 };
 
 // FETCH_BOUGHT: ดึงข้อมูล "ซื้อแล้ว" จาก sheet IB กรองเดือนปัจจุบัน
@@ -594,8 +597,10 @@ async function fetchCatStock(catId) {
   if (!cfg) return;
   try {
     const sumColsArr = cfg.sumCols || [cfg.sumCol];
-    const sumLabelsArr = cfg.sumLabels || [cfg.sumLabel||cfg.sumCol];
-    const tq = `select ${cfg.col},${sumColsArr.join(',')} where ${cfg.col}='${cfg.val}'`;
+    const selectCols = cfg.weightCol
+      ? [cfg.col, cfg.weightCol, ...sumColsArr]
+      : [cfg.col, ...sumColsArr];
+    const tq = `select ${selectCols.join(',')} where ${cfg.col}='${cfg.val}'`;
     const table = await new Promise((resolve, reject) => {
       const seq = ++_gvizSeq;
       const cb = 'gvcb_' + seq;
@@ -609,14 +614,29 @@ async function fetchCatStock(catId) {
       s.onerror = () => { clearTimeout(timer); delete window[cb]; reject(new Error('load failed')); };
       document.head.appendChild(s);
     });
-    const sumIdxs = sumLabelsArr.map(lbl => table.cols.findIndex(c => (c.label||c.id) === lbl || c.id === sumColsArr[sumLabelsArr.indexOf(lbl)]));
     let total = 0;
-    for (const row of table.rows) {
-      if (!row.c) continue;
-      for (const idx of sumIdxs) {
-        if (idx >= 0 && row.c[idx] && row.c[idx].v != null) total += Number(row.c[idx].v) || 0;
+    if (cfg.weightCol) {
+      const wIdx = table.cols.findIndex(c => c.id === cfg.weightCol);
+      const stockIdxs = sumColsArr.map(sc => table.cols.findIndex(c => c.id === sc));
+      for (const row of table.rows) {
+        if (!row.c) continue;
+        const w = row.c[wIdx] ? Number(row.c[wIdx].v) || 0 : 0;
+        for (const idx of stockIdxs) {
+          if (idx >= 0 && row.c[idx] && row.c[idx].v != null)
+            total += w * (Number(row.c[idx].v) || 0);
+        }
+      }
+    } else {
+      const sumLabelsArr = cfg.sumLabels || [cfg.sumLabel||cfg.sumCol];
+      const sumIdxs = sumLabelsArr.map(lbl => table.cols.findIndex(c => (c.label||c.id) === lbl || c.id === sumColsArr[sumLabelsArr.indexOf(lbl)]));
+      for (const row of table.rows) {
+        if (!row.c) continue;
+        for (const idx of sumIdxs) {
+          if (idx >= 0 && row.c[idx] && row.c[idx].v != null) total += Number(row.c[idx].v) || 0;
+        }
       }
     }
+    if (cfg.divisor) total = total / cfg.divisor;
     state[catId].stock_cur = total;
     const inp = document.querySelector(`[data-cat="${catId}"][data-key="stock_cur"]`);
     if (inp) inp.value = total.toLocaleString();
