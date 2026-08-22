@@ -933,7 +933,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.280';
+const APP_VERSION='3.281';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -7420,6 +7420,22 @@ async function submitForApproval(){
   const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
   if(j.bills.some(b=>b.status==='pending')){ showToast('ยังมีบิลค้างอยู่','warning'); return; }
   if(j._submitting) return;
+  /* ★★ v3.281: ปิดงานได้ต่อเมื่อทุกรายการของใบคุมนี้ "ถึงชีทแล้ว" หรือ "ยืนยันเข้าระบบสำรองแล้ว"
+     (กติกาที่ user เลือก: ออฟไลน์บันทึกได้ แต่ปิดงานไม่ได้จนกว่ายืนยันครบ — กันเคสข้อมูลอยู่แค่ในมือถือแล้วหาย) */
+  {
+    let _pend=sbPendingForJob_(j.id);
+    if(_pend.length){
+      showToast('กำลังยืนยันข้อมูลเข้าระบบ…','info');
+      await Promise.all(_pend.map(x=>sbBackupItem_(x,true)));   // force = รอผลจริง ไม่โดนตัวกันยิงซ้อนข้าม
+      flushOutbox();
+      _pend=sbPendingForJob_(j.id);
+    }
+    if(_pend.length){
+      showToast(`❌ ปิดงานยังไม่ได้ — มี ${_pend.length} รายการยังไม่ยืนยันเข้าระบบ (สัญญาณอ่อน)\nข้อมูลอยู่ในเครื่องครบ หาสัญญาณแล้วกด "ส่งหัวหน้าอนุมัติ" อีกครั้ง`,'error');
+      updateOutboxBadge();
+      return;
+    }
+  }
   const _ret=await askReturnCounts_(j);   // ★ v3.277: ยืนยันจำนวนคืนก่อนปิดงาน (กดยกเลิก = ไม่ปิดงาน)
   if(!_ret) return;
   j.ret=_ret; persistJobs();
@@ -7431,6 +7447,8 @@ async function submitForApproval(){
   j._notifiedSubmit=0;        // v3.41: reset ให้ยิงแจ้งเตือนรอบนี้ได้ (การส่งใหม่)
   persistJobs();
   showToast('ส่งหัวหน้าอนุมัติแล้ว ✓','success');
+  // ★ v3.281: สำเนา "การปิดงาน" ขึ้นกล่องสำรองด้วย (เดิม syncToSheets เป็น no-cors อ่านผลไม่ได้ ถ้าหายกลางทางไม่มีใครรู้)
+  sbInboxPut_('submit',j.id,'',{action:'save_job',jobId:j.id,status:'pending_approval',submittedAt:j.submittedAt,ret:j.ret||null,warehouse:j.warehouse||''});
   // POST ไป Apps Script (ถ้ามี URL)
   await syncToSheets(j).catch(e=>console.warn('sync:',e));
   notifyApprovalDiscord(j);   // v1.94: เด้งแจ้ง Discord แยกตามคลัง
@@ -8530,23 +8548,37 @@ function outboxOldestAgeMs_(){
 }
 function updateOutboxBadge(){
   const el=$('outboxBadge'); if(!el) return;
-  const n=outboxCount();
+  const box=loadOutbox();
+  const n=box.length;
   if(!n){ el.style.display='none'; el.style.background=''; el.style.color=''; _outboxWarnedAt=0; return; }
   el.style.display='inline-block';
   const age=outboxOldestAgeMs_();
-  if(age>=OUTBOX_WARN_MS){
-    const mins=Math.floor(age/60000);
+  /* ★ v3.281: แยก 2 ระดับ — "ยังไม่ถึงเซิร์ฟเวอร์เลย" (อยู่แค่ในเครื่อง = อันตรายจริง โชว์แดงเร็ว)
+     กับ "สำรองบนเซิร์ฟเวอร์แล้ว แค่รอเข้าชีท" (ปลอดภัยแล้ว โชว์เบาๆ ให้หายห่วง) */
+  const sbPend=box.filter(x=>!x.sbOk);
+  const sbAge=sbPend.length?Math.max.apply(null,sbPend.map(x=>Date.now()-(x.ts||Date.now()))):0;
+  if(sbPend.length&&sbAge>25000){
+    const m2=Math.floor(sbAge/60000);
     el.style.background='#e74c3c'; el.style.color='#fff';
-    el.textContent=`⚠️ ยังไม่เข้าระบบ ${n} รายการ (ค้าง ${mins} นาที)`;
+    el.textContent=`⚠️ ${sbPend.length} รายการยังไม่เข้าระบบ${m2?` (ค้าง ${m2} นาที)`:''} — หาสัญญาณ`;
     if(Date.now()-_outboxWarnedAt>OUTBOX_WARN_MS){
       _outboxWarnedAt=Date.now();
       try{ if(navigator.vibrate) navigator.vibrate([120,60,120]); }catch(e){}
-      showToast(`⚠️ มีข้อมูล ${n} รายการยังไม่เข้าระบบ (ค้าง ${mins} นาที) — หาสัญญาณแล้วกด ↻`,'error');
-      flushOutbox();   // ลองส่งใหม่ทันที
+      showToast(`⚠️ มีข้อมูล ${sbPend.length} รายการยังไม่เข้าระบบ — ข้อมูลอยู่ในเครื่องครบ หาสัญญาณแล้วกด ↻`,'error');
+      flushOutbox();
+    }
+  } else if(age>=OUTBOX_WARN_MS){
+    const mins=Math.floor(age/60000);
+    el.style.background='#e74c3c'; el.style.color='#fff';
+    el.textContent=`⚠️ รอเข้าชีท ${n} (ค้าง ${mins} นาที)${sbPend.length?'':' · สำรองบนระบบแล้ว ✓'}`;
+    if(Date.now()-_outboxWarnedAt>OUTBOX_WARN_MS){
+      _outboxWarnedAt=Date.now();
+      flushOutbox();   // ลองส่งใหม่ทันที (สำรองแล้ว ไม่ต้องสั่น/เด้งเตือนน่ากลัว)
     }
   } else {
     el.style.background=''; el.style.color='';
-    el.textContent=_flushing?('⏳ กำลังเข้าชีท '+n):('⏳ รอเข้าชีท '+n);
+    const tail=(!sbPend.length)?' · สำรอง ✓':'';
+    el.textContent=(_flushing?('⏳ กำลังเข้าชีท '+n):('⏳ รอเข้าชีท '+n))+tail;
   }
 }
 setInterval(()=>{ try{ if(!document.hidden) updateOutboxBadge(); }catch(e){} },30000);   // v3.203: เช็คคิวค้างทุก 30 วิ
@@ -8564,9 +8596,67 @@ setInterval(()=>{ try{ if(!document.hidden) updateOutboxBadge(); }catch(e){} },3
     }).catch(()=>{});
   }catch(e){}
 })();
+/* ★★ v3.281: กล่องรับสำรอง (Supabase dman_inbox) — "เก็บเฉพาะข้อมูลที่กดใหม่หลังอัปเดตนี้" (user 2026-08-22)
+   ทุกรายการที่เข้าคิว = หย่อนสำเนาขึ้นกล่องบนเซิร์ฟเวอร์ทันที แล้วรอ "ใบยืนยันจริง" ({id,saved_at} ตรงกับที่ส่ง)
+   → ต่อให้มือถือพัง/พื้นที่เต็ม/คิว GAS ตัน ข้อมูลก็ถึงเซิร์ฟเวอร์แล้วตั้งแต่วินาทีที่กด
+   ประตูเดียว: RPC dman_inbox_put (เพิ่ม/ทับตาม id เท่านั้น · ส่งซ้ำไม่เบิ้ล) — คีย์ในแอปอ่าน/แก้/ลบตารางตรงๆ ไม่ได้ (RLS ไม่มี policy · ทดสอบแล้ว 401)
+   กติกาที่ user เลือก: ออฟไลน์ยังบันทึกได้ แต่ "ปิดงานไม่ได้" จนกว่าทุกรายการของใบคุมจะยืนยันครบ */
+const SB_INBOX=true;
+function deviceId_(){ try{ let d=localStorage.getItem('dman_device_id')||''; if(!d){ d='D'+Date.now().toString(36)+Math.random().toString(36).slice(2,8); localStorage.setItem('dman_device_id',d); } return d; }catch(e){ return ''; } }
+async function sbInboxPut_(kind,jobId,docNo,payload,timeoutMs){
+  try{
+    if(!SB_INBOX||!SB_URL||!SB_ANON) return '';
+    if(navigator.onLine===false) return '';
+    const id=String(kind)+'|'+String(jobId||'')+'|'+String(docNo||'');
+    const ctrl=('AbortController' in window)?new AbortController():null;
+    const to=setTimeout(()=>{ if(ctrl) ctrl.abort(); },timeoutMs||20000);
+    const r=await fetch(SB_URL+'/rest/v1/rpc/dman_inbox_put',{method:'POST',
+      headers:{apikey:SB_ANON,Authorization:'Bearer '+SB_ANON,'Content-Type':'application/json'},
+      body:JSON.stringify({p_id:id,p_kind:String(kind),p_job:String(jobId||''),p_doc:String(docNo||''),
+        p_driver:currentUserName_()||'',p_device:deviceId_(),p_ver:APP_VERSION,p_payload:payload||{}}),
+      signal:ctrl?ctrl.signal:undefined});
+    clearTimeout(to);
+    if(!r.ok) return '';
+    const j=await r.json().catch(()=>null);
+    return (j&&j.id===id)?id:'';   // ยืนยันจริง = เซิร์ฟเวอร์ตอบ id เดิมกลับมา (คอมมิตแล้วเท่านั้นถึงตอบ)
+  }catch(e){ return ''; }
+}
+/* id ในกล่อง = kind|ใบคุม|ประเภท → "1 ใบคุมมีอย่างมาก 3 แถว" (รับงาน · บิลทั้งชุด · ปิดงาน) ส่งซ้ำ=ทับด้วยของล่าสุด
+   จงใจไม่ใส่เลขบิลใน id — ทุกการบันทึกบิลส่ง "บิลทั้งหมดของใบคุม" มาอยู่แล้ว แถวเดียวจึงถือของครบ+ใหม่สุดเสมอ
+   (ถ้าแยก id ตามเลขบิล จะเกิดแถวเก่าชุดย่อยค้าง แล้วตอนกวาดลงชีทอาจเอาของเก่าทับของใหม่) */
+function sbDocsOf_(p){ try{ return (p&&Array.isArray(p.bills)&&p.bills.length)?'bills':''; }catch(e){ return ''; } }
+function sbIdOf_(p){ p=p||{}; return String(p.action||'save_job')+'|'+String(p.jobId||'')+'|'+sbDocsOf_(p); }
+/* สำรองของในคิว 1 รายการ — ยืนยันแล้วมาร์ค sbOk ติดตัวรายการ (รายการหลุดคิวไปแล้ว = เข้าชีทแล้ว ไม่ต้องมาร์ค)
+   _sbInflight กันยิงรายการเดียวกันซ้อนกัน (queueSync กับ flush sweep เรียกพร้อมกันได้ — โหลดคิวคนละก้อน ธง _sbBusy บนตัว object ไม่พอ) */
+const _sbInflight=new Set();
+async function sbBackupItem_(item,force){
+  const k=item?sbIdOf_(item.payload):'';   // กันซ้อนด้วย "id ในกล่อง" — id เดียวกันห้ามยิงพร้อมกัน (กันของเก่าไปถึงทีหลังแล้วทับของใหม่)
+  try{
+    if(!item||item.sbOk) return;
+    if(!force&&_sbInflight.has(k)) return;   // force=เกตปิดงาน: ต้องได้คำตอบจริงเดี๋ยวนี้ ยิงซ้ำได้ (id เดิม เซิร์ฟเวอร์ไม่เบิ้ล)
+    _sbInflight.add(k);
+    const p=item.payload||{};
+    const ok=await sbInboxPut_((p.action||'save_job'),p.jobId||'',sbDocsOf_(p),p);
+    _sbInflight.delete(k);
+    if(!ok) return;
+    const cur=loadOutbox();
+    const i=cur.findIndex(x=>x.ts===item.ts&&x.ky===item.ky);
+    if(i>=0){ cur[i].sbOk=true; saveOutbox(cur); }
+    updateOutboxBadge();
+  }catch(e){ _sbInflight.delete(k); }
+}
+function sbPendingForJob_(jobId){
+  const k=normJobId(jobId||'');
+  return loadOutbox().filter(x=>!x.sbOk&&normJobId((x.payload&&x.payload.jobId)||'')===k);
+}
 function queueSync(payload,label){
   const box=loadOutbox();
-  box.push({ky:label||(payload.jobId+'|'+((payload.bills&&payload.bills.map(b=>b.doc).join(','))||payload.action||'')),payload,tries:0,ts:Date.now()});
+  const _it={ky:label||(payload.jobId+'|'+((payload.bills&&payload.bills.map(b=>b.doc).join(','))||payload.action||'')),payload,tries:0,ts:Date.now()};
+  // ★ v3.281: รายการเก่าในคิวที่มี "id กล่องสำรอง" เดียวกัน = ข้อมูลมันอยู่ครบในก้อนใหม่นี้แล้ว
+  //   → ปลดธงสำรองของอันเก่า (sbOk=true) เหลืออันใหม่อันเดียวที่ต้องยืนยัน — กันยิงแข่งกันแล้วของเก่าทับของใหม่
+  //   (คิวส่งเข้าชีท GAS ยังส่งครบทุกรายการตามลำดับเหมือนเดิม ไม่เกี่ยวกัน)
+  try{ const _id=sbIdOf_(payload); box.forEach(x=>{ if(!x.sbOk&&sbIdOf_(x.payload)===_id) x.sbOk=true; }); }catch(e){}
+  box.push(_it);
   /* ★★ v3.279: เขียนคิวลงเครื่องไม่สำเร็จ (พื้นที่เต็ม) = เดิม "หายเงียบ" ทั้งรายการ ไม่มีใครรู้
      เคสจริง TSW1/011416 (22 ส.ค.): ชีทบันทึกเที่ยวส่งไม่มีชื่อคนขับ/ทะเบียน/รูปตู้ แต่บิลเข้าครบ
      — เพราะ "รับใบคุม" เดินผ่านคิว ส่วน "บันทึกบิล/ปิดงาน" ยิงตรง ไม่ผ่านคิว
@@ -8581,6 +8671,7 @@ function queueSync(payload,label){
     return;
   }
   updateOutboxBadge();
+  sbBackupItem_(_it);   // ★ v3.281: หย่อนสำเนาขึ้นกล่องสำรองทันที (ไม่รอ GAS)
   flushOutbox();
 }
 let _flushing=false, _flushRetryTimer=null;
@@ -8589,6 +8680,7 @@ async function flushOutbox(force){
   if(!getAppsUrl()) return;
   let box=loadOutbox();
   if(!box.length){ updateOutboxBadge(); return; }
+  try{ box.filter(x=>!x.sbOk).slice(0,10).forEach(x=>sbBackupItem_(x)); }catch(e){}   // ★ v3.281: ทุกรอบ flush = ไล่สำรองรายการที่ยังไม่ยืนยันด้วย (ไม่รอหัวคิว GAS)
   _flushing=true; updateOutboxBadge();
   try{
     while(true){
@@ -10697,7 +10789,15 @@ function doPost(e){
     /* ★ v3.280: เรียกเฉพาะตอน "จำเป็นจริง" — ปกติชื่อคนขับ/ทะเบียนมีอยู่แล้ว ไม่ต้องแตะชีทเพิ่มเลย */
     var _needHeal=(blank_('ชื่อคนขับ')&&!inObj['ชื่อคนขับ'])||(blank_('ทะเบียน')&&!inObj['ทะเบียน']);
     var _healed=_needHeal?healTeamFromCin_(ss,data.jobId):0;
-    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.279',healed:_healed}))
+    /* ★ v3.281: Supabase เป็นตัวกลาง — ข้อมูลก้อนนี้ลงชีทเรียบร้อย → มาร์คสำเนาในกล่อง dman_inbox ว่า "ถึงชีทแล้ว"
+       (sheet_ok=true) ให้ตาข่าย inboxSweep_ ไม่หยิบมาลงซ้ำ · ★ ไม่ลบแถวใดๆ (user 2026-08-22: "เดี๋ยวลบเอง") */
+    try{
+      var _docsKey=(Array.isArray(data.bills)&&data.bills.length)?'bills':'';
+      var _inboxIds=[String(data.action||'save_job')+'|'+String(data.jobId)+'|'+_docsKey];
+      if(data.submittedAt) _inboxIds.push('submit|'+String(data.jobId)+'|');
+      sbInboxMarkDone_(_inboxIds);
+    }catch(e){}
+    return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.281',healed:_healed}))
       .setMimeType(ContentService.MimeType.JSON);
     } finally { _saveLock.releaseLock(); }   // ★ v3.236: ปลดล็อกเสมอ (แม้ error)
   }catch(err){
@@ -12275,7 +12375,48 @@ function sbSyncNow_(days,full){
   p.setProperty('SB_LAST_SYNC',String(Date.now()));
   return {ok:true, bills:b.up, deleted:b.del, jobs:j, mode:(since?'delta':'full'), ms:(Date.now()-t0)};
 }
-function sbSyncTick(){ try{ sbSyncNow_(21,false); }catch(e){ console.error('sbSyncTick: '+e); } }
+function sbSyncTick(){ try{ sbSyncNow_(21,false); }catch(e){ console.error('sbSyncTick: '+e); } try{ inboxSweep_(); }catch(e){ console.error('inboxSweep: '+e); } }
+/* ═══ ★ v3.281: Supabase เป็น "ตัวกลาง" — มือถือหย่อนข้อมูลเข้ากล่อง dman_inbox (รอใบยืนยันจริง) แล้วชีทรับจากกล่อง ═══
+   ทางปกติ: มือถือยังส่งตรงถึงชีทเองในไม่กี่วิเหมือนเดิม (สำเร็จแล้ว save_job มาร์คแถวในกล่องว่า sheet_ok=true)
+   ตาข่าย: แถวไหนยังไม่ถึงชีท (sheet_ok=false — มือถือพัง/คิวตัน/แอปถูกลบ/ปิดเครื่อง) → trigger 5 นาทีลงชีทให้เอง
+   ★ ห้ามลบแถวใดๆ ในกล่อง (user 2026-08-22: "เดี๋ยวลบเอง") — มาร์ค sheet_ok อย่างเดียว ให้กรองลบเองได้ง่าย */
+function sbPatch_(path,body){
+  if(!sbOn_()) return;
+  var c=sbCfg_();
+  UrlFetchApp.fetch(c.url+'/rest/v1/'+path,{method:'patch',contentType:'application/json',
+    headers:{apikey:c.key,Authorization:'Bearer '+c.key,Prefer:'return=minimal'},
+    payload:JSON.stringify(body),muteHttpExceptions:true});
+}
+function sbInboxMarkDone_(ids){
+  try{
+    if(!sbOn_()||!ids||!ids.length) return;
+    var list=ids.map(function(x){ return SB_Q+String(x).split(SB_Q).join('')+SB_Q; }).join(',');
+    sbPatch_('dman_inbox?id=in.('+encodeURIComponent(list)+')',{sheet_ok:true,synced_at:new Date().toISOString()});
+  }catch(e){}
+}
+function inboxSweep_(){
+  if(!sbOn_()) return 0;
+  var rows=sbGetJson_('dman_inbox?select=id,job_id,payload&sheet_ok=eq.false&order=created_at.asc&limit=40');
+  if(!rows||!rows.length) return 0;
+  var n=0;
+  for(var i=0;i<rows.length;i++){
+    var r=rows[i]||{};
+    try{
+      var p=r.payload;
+      // รับเฉพาะ payload งาน save_job ที่มีเลขใบคุมจริง — แถวทดสอบ/ขยะ = มาร์คข้าม ไม่วนกลับมาอีก (ไม่ลบ)
+      if(!p||!p.jobId||String(p.action||'save_job')!=='save_job'){ sbInboxMarkDone_([r.id]); continue; }
+      var res=doPost({postData:{contents:JSON.stringify(p)}});   // เดินทางเดียวกับมือถือส่งตรงเป๊ะ (ล็อก/กติกา set-once/มาร์คเสร็จ ครบ)
+      var out={}; try{ out=JSON.parse(res.getContent()); }catch(e2){}
+      if(out&&out.ok){ n++; sbInboxMarkDone_([r.id]); }
+    }catch(e){}
+  }
+  return n;
+}
+function inboxSweepUI(){
+  var ui=SpreadsheetApp.getUi();
+  try{ var n=inboxSweep_(); ui.alert('✓ กวาดกล่องสำรอง dman_inbox แล้ว\\nลงชีทให้ '+n+' รายการ'); }
+  catch(e){ ui.alert('❌ กวาดไม่สำเร็จ\\n\\n'+e); }
+}
 function sbSyncNowUI(){
   var ui=SpreadsheetApp.getUi();
   try{
@@ -12310,6 +12451,7 @@ function onOpen(){
       .addSeparator()
       .addItem('⚡ ซิงก์ขึ้น Supabase (ตอนนี้)','sbSyncNowUI')                 // ★ v3.244 นำร่อง
       .addItem('⚡ กวาดใหม่ทั้งช่วง 21 วัน → Supabase','sbSyncFullUI')        // ★ v3.244
+      .addItem('📥 กวาดกล่องสำรอง dman_inbox → ลงชีท (ตอนนี้)','inboxSweepUI')   // ★ v3.281 Supabase ตัวกลาง
       .addItem('⏰ ตั้งซิงก์ Supabase อัตโนมัติ (ทุก 5 นาที)','sbSetupTrigger') // ★ v3.244
       .addItem('⏹ หยุดซิงก์ Supabase','sbStopTrigger')                        // ★ v3.244
       .addSeparator()
