@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v4.31</title>
+<title>Rattana Online Order v4.32</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -691,7 +691,7 @@ body.head-mode .bn-badge{display:none!important}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.31</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.32</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -1538,6 +1538,7 @@ const PROMO_FIELD={
 function loadCart(){ try{return JSON.parse(localStorage.getItem('rop_cart'))||{};}catch{return{}} }
 let _cartDirtyUntil=0;   // เพิ่งแก้ตะกร้าในเครื่องนี้ → อย่าเพิ่งทับด้วยของเซิร์ฟเวอร์ จนกว่าจะ sync ขึ้นเสร็จ
 let _lastCartChange=0;   // เวลาแก้ตะกร้าครั้งล่าสุด (ใช้กันล้างตะกร้าทั้งที่ sync ยังไปไม่ถึงชีท)
+let _srvSeenOid='';      /* v4.32: orderId ล่าสุดที่ "เคยเห็นบนชีทจริง" — ล้างตะกร้าได้เฉพาะ draft ที่เคยขึ้นชีทแล้ว */
 function saveCart(){ lsSet('rop_cart',JSON.stringify(cart)); _cartDirtyUntil=Date.now()+5000; _lastCartChange=Date.now(); syncOrderSoon(); }   // ซิงค์ตะกร้าร่วมผ่านสถานะ "รออนุมัติ" ในชีท order (เลิกใช้แท็บ "ตะกร้า" แล้ว)
 
 /* ===================== SHARED CART (ซิงค์ข้ามเครื่องผ่านสถานะ "รออนุมัติ" ในชีท order) =====================
@@ -1561,6 +1562,7 @@ function cartItemFromRow(row){
 /* ดึง "ตะกร้าร่วม" = รายการรออนุมัติของร้าน จากชีท order (JSONP) */
 function pullCart(force){
   if(isHead(currentCustomer)) return;      /* v4.22: หัวร้านไม่มีตะกร้า ห้ามดึงตะกร้าสาขามาปน */
+  if(_orderInFlight) return;               /* 🐛 v4.32: ห้ามดึง/ล้างตะกร้าระหว่างลูกค้ากำลังกดยืนยัน (เคยล้างกลางคัน → ส่งบิล 0 รายการ) */
   const shop=cartShopKey(); if(!shop) return;
   if(!CFG.GAS_URL||CFG.GAS_URL.startsWith('PASTE')) return;
   if(!force && Date.now()<_cartDirtyUntil) return;   // กำลังแก้ในเครื่องนี้ → ข้ามรอบนี้
@@ -1571,6 +1573,7 @@ function pullCart(force){
       if(r.orderId && items.length){
         window._emptyPulls=0;                           // เซิร์ฟเวอร์มีของ → รีเซ็ตตัวนับล้างตะกร้า (v3.75)
         _setDraftOid(r.orderId);                        // ใช้ orderId ร่วมทุกเครื่อง → กันออเดอร์เบิ้ล (v3.93: จำในหน่วยความจำ+IDB ด้วย)
+        _srvSeenOid=String(r.orderId);                  /* v4.32: draft นี้อยู่บนชีทจริง — ต่อไปถ้าชีทว่างค่อยล้างได้ */
         const obj={}; items.forEach(row=>{ const it=cartItemFromRow(row); if(it){ if(obj[it.key]) obj[it.key].qty+=it.qty; else obj[it.key]=it; } });
         const sig=o=>Object.keys(o).sort().map(k=>k+'#'+o[k].qty).join('|');   // ลายเซ็นตะกร้า (key+จำนวน)
         const changed=sig(obj)!==sig(cart);
@@ -1583,8 +1586,13 @@ function pullCart(force){
            — เดิมล้างทันทีรอบเดียว: ช่วงเช้าคนเยอะ Apps Script ชนลิมิต → draft sync หายเงียบ (no-cors มองไม่เห็น 429)
            → poll ถัดไปเจอชีทว่าง → ตะกร้าลูกค้าโดนล้างทิ้งทั้งที่ยังไม่เคยขึ้นชีท (ของหายถาวร) */
         window._emptyPulls=(window._emptyPulls||0)+1;
-        if(window._emptyPulls>=2 && Date.now()-_lastCartChange>30000){
-          window._emptyPulls=0;
+        if(_srvSeenOid!==draftOrderId()){
+          /* 🐛 v4.32 — draft ใบนี้ "ไม่เคยขึ้นชีทเลย" (sync ล้มเงียบตอน Apps Script หนัก) → ห้ามล้าง!
+             เดิมเงื่อนไข 2 รอบ+30 วิ ยังหลุด: ลูกค้าเลือกของเสร็จแล้วพักมือเกิน 30 วิ = ตะกร้าหายทั้งเครื่อง
+             ("ออเดอร์หาย/ยอดเด้ง 0" เคสจริงร้านภาคิน 21/08) → ดันขึ้นชีทใหม่แทนการลบทิ้ง */
+          if(window._emptyPulls>=2){ window._emptyPulls=0; try{ syncOrderNow(); }catch(e){} }
+        } else if(window._emptyPulls>=2 && Date.now()-_lastCartChange>30000){
+          window._emptyPulls=0; _srvSeenOid='';
           cart={}; resetDraft(); lsSet('rop_cart','{}');  // ไม่มีรออนุมัติแล้ว (อนุมัติ/ส่งแล้ว) → เคลียร์ทุกเครื่อง
           renderCartBadge(); if(document.getElementById('viewCart').classList.contains('active')) renderCart(); renderProducts();
         }
@@ -4976,6 +4984,10 @@ function dealLockViolation(){
   return false;
 }
 async function submitOrder(force){
+  /* 🐛 v4.32 — กันกดยืนยัน "ซ้อน" (ที่มาของสรุปไลน์เบิ้ล 21/08: ปรีชาวิลล่า x3 · ภาคิน x2)
+     เดิมไม่มีตัวกัน + ช่วงรอตรวจโควต้า 15-20 วิ จอเงียบ → ลูกค้ากดซ้ำ = ยิงออเดอร์ 2 ชุดขนาน
+     หลังบ้านเขียนชีทไม่เบิ้ล (update-in-place) แต่ต่างคนต่างส่งสรุปไลน์/Discord */
+  if(_submitBusy) return;
   if(!Object.keys(cart).length){ showToast('ตะกร้าว่าง','warning'); return; }
   if(!currentCustomer){ showToast('กรุณาเข้าสู่ระบบก่อนสั่งซื้อ','warning'); openModal('loginModal'); return; }
   // ⭐ v3.92: ด่านสุดท้าย — ห้ามส่งเหล้าข้ามเขตเข้าบิลเด็ดขาด (ถ้าเจอ = เอาออกแล้วให้ลูกค้าดูตะกร้าอีกรอบก่อน)
@@ -4987,14 +4999,20 @@ async function submitOrder(force){
   if(dealLockViolation()){ renderCart(); return; }
   const selItems=selectedItems();
   if(!selItems.length){ showToast('กรุณาติ๊กเลือกสินค้าที่จะสั่งก่อน','warning'); return; }   // ไม่ติ๊กสักชิ้น → ไม่ให้สั่ง
+  /* v4.32: ครอบตั้งแต่ตรวจโควต้าจนจบ — _orderInFlight ทำ 2 หน้าที่: เตือนก่อนปิดหน้า + สั่ง pullCart
+     ห้ามแตะตะกร้าระหว่างยืนยัน (เดิมครอบแค่ช่วงส่ง เหลือช่องว่าง 15-20 วิ ให้ตะกร้าโดนล้าง/ทับกลางคัน) */
+  _submitBusy=true; _orderInFlight=true;
+  try{
   /* ⭐ v4.23 ด่านสุดท้ายของโควต้า — ตรวจซ้ำทั้งใบเสมอ ห้ามเชื่อตัวเลขที่โหลดไว้
      ตะกร้าใช้ร่วมทุกเครื่อง + ค้างข้ามวันได้ → ยอดที่ใช้ไปอาจขยับหลังจากที่กดใส่ตะกร้า */
   try{
     /* 🐛 v4.25: เดิมถ้าโควต้ายังโหลดไม่เสร็จ (15-20 วิแรก) ด่านสุดท้ายเห็น QUOTA.st ว่าง = ปล่อยผ่านทั้งใบ
        ลูกค้าที่เปิดแอปแล้วกดสั่งเร็ว ๆ จึงข้ามโควต้าได้ทั้งบิล -> รอโหลดให้เสร็จก่อนตัดสิน
        (โหลดไม่ได้จริง ๆ QUOTA.loaded ยังเป็น false -> quotaFinalCheck คืน [] = ปล่อยผ่านตามกฎ fail-open เหมือนเดิม) */
-    if(!QUOTA.loaded) await quotaBoot(true);
-    else if(Date.now()-QUOTA.ts>120000) await quotaBoot(true);   // ค้างเกิน 2 นาที = ดึงยอดใหม่ก่อน
+    if(!QUOTA.loaded || Date.now()-QUOTA.ts>120000){
+      showSpinner('กำลังตรวจสอบโควต้าสินค้า...');   /* v4.32: เดิมช่วงนี้จอเงียบ 15-20 วิ ลูกค้านึกว่าค้างเลยกดซ้ำ */
+      try{ await quotaBoot(true); } finally{ hideSpinner(); }
+    }
     const _qb=quotaFinalCheck();
     if(_qb.length){
       const _hard=_qb.filter(x=>x.lock);
@@ -5020,15 +5038,21 @@ async function submitOrder(force){
   await refreshSpecialShops();   // v3.82: ร้านส่ง — เอาเงื่อนไข/ชื่อร้านล่าสุดจากชีท ก่อนแยกชื่อต่อชิ้น
   // ติ๊ก=อนุมัติ / ไม่ติ๊ก=ไม่อนุมัติ (ยกเลิกจากบิลนี้) → ที่เหลือค้างในตะกร้าไป re-draft เป็นออเดอร์ใหม่ ; หน่วย=หน่วยละเอียดตามบาร์โค้ด
   const payload=Object.assign({ action:'order', orderId, note, deliver:deliverMode, total:selectedTotal(), items:buildOrderItems('อนุมัติ', true, true) }, orderMeta());
+  /* 🐛 v4.32 — ด่านสุดท้ายกัน "บิลว่าง/บิลแหว่ง" (เคสจริง 21/08 ร้านภาคิน: สรุป 0 รายการ 0 บาท)
+     ตะกร้าถูกแก้/ล้างระหว่างรอ (เครื่องอื่น · sync) → รายการที่ติ๊กไว้หายไปจาก payload = ห้ามส่ง */
+  const _lost=selKeys.filter(k=>!cart[k]);
+  if(_lost.length || !payload.items.some(i=>String(i.status||'')==='อนุมัติ')){
+    showToast('ตะกร้ามีการเปลี่ยนแปลงระหว่างยืนยัน กรุณาตรวจสอบรายการแล้วกดส่งอีกครั้งค่ะ','warning');
+    goCart(); renderCart(); return;
+  }
   // v3.90: บิลใหญ่บอกให้ลูกค้ารู้ว่าต้องรอ — ไม่งั้นเห็นหมุนนานแล้วนึกว่าค้าง ปิดแอป/กดซ้ำ
   showSpinner(selItems.length>60 ? ('กำลังส่งออเดอร์ '+selItems.length+' รายการ...\nบิลใหญ่ใช้เวลาสักครู่ อย่าเพิ่งปิดหน้านี้นะคะ') : 'กำลังส่งออเดอร์...');
-  _orderInFlight=true;                       // กันผู้ใช้ปิดหน้าระหว่างส่ง (beforeunload เตือน)
   let ok=false;
   try{
     if(isSpecial(currentCustomer)) ok=await sendAndConfirmSpecial(payload, orderId);   // ร้านส่ง: verify จากชีท "Order ร้านส่ง" (backward-safe — .gs เก่าไม่พัง)
     else ok=await sendAndConfirm(payload, orderId);
   }
-  finally{ _orderInFlight=false; hideSpinner(); }
+  finally{ hideSpinner(); }
   if(ok){
     selKeys.forEach(k=>delete cart[k]);       // เอาเฉพาะชิ้นที่สั่ง (ติ๊ก) ออกจากตะกร้า ; ที่ไม่ติ๊กค้างเป็น "รออนุมัติ" ในบิลเดิม
     cartUnsel.clear(); saveUnsel();           // ที่เหลือกลับมาติ๊กอัตโนมัติ (พร้อมสั่งรอบหน้า)
@@ -5048,6 +5072,7 @@ async function submitOrder(force){
     // ❗ ยังยืนยันไม่ได้ (เน็ตไม่ดี) → ไม่ล้างตะกร้า ออเดอร์ยังอยู่ในตะกร้าลูกค้า ให้กดส่งใหม่เอง (ไม่ส่งอัตโนมัติ)
     showToast('เน็ตไม่เสถียร ⚠️ ออเดอร์ยังอยู่ในตะกร้า กรุณากดส่งใหม่อีกครั้ง','warning');
   }
+  } finally{ _submitBusy=false; _orderInFlight=false; }   /* v4.32: ปลดล็อกทุกทางออก (บล็อก/dialog/สำเร็จ/ล้ม) */
 }
 /* เตือน "ใกล้ได้ของแถม" ตอนกดสั่งซื้อ → เลือกซื้อเพิ่ม หรือ ยืนยันสั่งเลย */
 /* 🔒 v4.16 — ของในตะกร้าที่เป็นรัตนล็อกดีล แต่ยังไม่ครบ SKU (คิดราคาปกติอยู่)
@@ -5119,6 +5144,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
    ตะกร้า = "ใบเสร็จ" อยู่แล้ว (persist ใน localStorage + ชีทสถานะรออนุมัติ ทุกเครื่องเห็นตรงกัน)
    ส่งไม่ผ่าน → ไม่ล้างตะกร้า / ส่งซ้ำ → sendAndConfirm เช็ค approved ก่อน + backend กันซ้ำ (idempotent) */
 let _orderInFlight=false;
+let _submitBusy=false;   /* v4.32: กันกดยืนยันซ้อน (สรุปไลน์เบิ้ล) */
 window.addEventListener('beforeunload',e=>{ if(_orderInFlight){ e.preventDefault(); e.returnValue='กำลังส่งออเดอร์อยู่ — อย่าเพิ่งปิดหน้านี้'; return e.returnValue; } });
 window.addEventListener('online',()=>{ try{ showToast('🌐 กลับมาออนไลน์แล้ว','info'); pullCart(true); }catch(e){} });   // เน็ตกลับ → ซิงค์ตะกร้า/สถานะทันที
 /* แถบค้นหา (ค้นหา/กล้อง/หมวดหมู่) sticky ใต้ header — วัดความสูง header (เปลี่ยนตาม safe-area/จอ) → ตั้ง --header-h */
