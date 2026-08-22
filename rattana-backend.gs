@@ -1,6 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v5.8 — ปุ่ม "ยกเลิกคำขอ" ให้พนักงาน (คู่แอป v12.39 · ต้อง Deploy New version):
+ *         cancelMyLeave — ยกเลิกคำขอของตัวเองในการลาApp ได้เฉพาะสถานะยังรอ (pending)
+ *         เปลี่ยนสถานะเป็น 'cancelled' ไม่ลบแถว (เก็บประวัติ + ไม่นับโควต้า/สรุปวัน/แท็บอนุมัติ)
+ *         กันแถวขยับด้วยการเทียบเวลา "ขอวันที่" · HR ยกเลิกแทนพนักงานได้
  * v5.7 — หน้าอนุมัติมีแท็บ รออนุมัติ/อนุมัติ/ไม่อนุมัติ (คู่แอป v12.38 · ต้อง Deploy New version):
  *         getPendingAll รับ p.withDone=1 → ส่งรายการที่อนุมัติ/ไม่อนุมัติแล้วมาด้วย
  *         (จำกัดท้ายสุด 60 รายการ/ชีท กัน payload บวม) ทุกรายการมี field status + approver
@@ -224,7 +228,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'5.7', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'5.8', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -278,6 +282,7 @@ function handle(e, method) {
       case 'getSettings':          return actionGetSettings(user);
       case 'getLocations':         return actionGetLocations(user);
       case 'getLocationQR':        return jsonOut(getLocationQR(p, user));   // v5.5: HR พิมพ์ QR ประจำจุด
+      case 'cancelMyLeave':        return jsonOut(cancelMyLeave(p, user));   // v5.8: พนักงานยกเลิกคำขอตัวเอง
       case 'getPersonalLocations': return actionGetPersonalLocations(p, user);
       case 'getCheckinLog':        return actionGetCheckinLog(p, user);
       case 'getAttendance':        return actionGetAttendance(p, user);
@@ -2963,6 +2968,36 @@ function getPendingAll(p, user) {
     });
     return { ok: true, items: items };
   } catch(e) { return { ok: false, error: e.message }; }
+}
+
+/* v5.8: พนักงานยกเลิกคำขอของตัวเอง (การลาApp — ครอบ ขอลา/เปลี่ยนวันหยุด/แก้เวลาย้อนหลัง)
+   ได้เฉพาะสถานะยังรอ · ไม่ลบแถว แค่เปลี่ยนสถานะ cancelled (โควต้า/สรุปวัน/แท็บนับเฉพาะ approved อยู่แล้ว) */
+function cancelMyLeave(p, user) {
+  try {
+    const la = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName('การลาApp');
+    if (!la || !leaveSheetIsNew_(la)) return { ok:false, error:'ชีทการลาApp ยังไม่พร้อม' };
+    const row = parseInt(p.row, 10) || 0;
+    if (row < 2 || row > la.getLastRow()) return { ok:false, error:'ไม่พบรายการ' };
+    const r = la.getRange(row, 1, 1, 15).getValues()[0];
+    const rowEmp = String(r[1] || '').trim();
+    if (rowEmp !== String(user.empId || '').trim() && !isHR(user)) {
+      return { ok:false, error:'ยกเลิกได้เฉพาะคำขอของตัวเอง' };
+    }
+    // กันแถวขยับ (เคย HR ลบแถวมือแล้วเลขแถวเลื่อน): เทียบเวลา "ขอวันที่" ที่แอปเห็นตอนโหลด
+    if (p.submittedAt) {
+      const sheetTs = (r[7] instanceof Date) ? r[7].getTime() : new Date(r[7]).getTime();
+      const cliTs = new Date(p.submittedAt).getTime();
+      if (!sheetTs || !cliTs || Math.abs(sheetTs - cliTs) > 60000) {
+        return { ok:false, error:'รายการนี้มีการเปลี่ยนแปลง — ปิด-เปิดหน้าใหม่แล้วลองอีกครั้ง' };
+      }
+    }
+    const st = String(r[8] || '').toLowerCase().trim();
+    if (st && st !== 'pending') return { ok:false, error:'คำขอนี้ถูกพิจารณาไปแล้ว — ยกเลิกไม่ได้ (ติดต่อหัวหน้า/HR)' };
+    la.getRange(row, 9).setValue('cancelled');
+    la.getRange(row, 10).setValue('ยกเลิกโดย ' + (user.name || rowEmp));
+    la.getRange(row, 11).setValue(new Date());
+    return { ok:true };
+  } catch (e) { return { ok:false, error:e.message }; }
 }
 
 function approveAny(p, user) {
