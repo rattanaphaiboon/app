@@ -223,7 +223,8 @@ function handle(e, method) {
     const action = p.action || '';
 
     if (action === 'ping') {
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', time:new Date().toISOString(), clientId:CFG.clientId });
+      // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'5.7', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
