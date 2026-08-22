@@ -451,7 +451,8 @@ async function loadPromos() {
     if (!map.has(key)) map.set(key, []);
     map.get(key).push(val);
   };
-  lm.forEach(p => {
+  lm.forEach((p, i) => {
+    p._id = i;  // stable id ต่อโปร (ใช้ group ใน bill aggregate)
     const method = String(p['วิธีวัด']||'').trim().toUpperCase();
     const nameKey = normalizeName(p['ชื่อ']);
     if (method === 'PRODUCT NAME') push(idxProd, nameKey, p);
@@ -466,27 +467,46 @@ async function loadPromos() {
   return lm;
 }
 
-// รวมยอด expected ต่อบิลต่อ SKU ของแถม แล้วเทียบกับ actual (Q_FREE รวม) — แบบ pool
+// map เก็บ bill → promoId → totalQty (สำหรับ tier check)
+let billPromoTotal = new Map();
+
+// รวมยอดต่อบิล — สำคัญ: CAT BRAND/SIZE/GROUP promos รวมยอดจาก SKU ต่างๆ ในบิลก่อนคิด tier
 function computeBillGiftSummary() {
   billGiftSummary = new Map();
+  billPromoTotal  = new Map();
+
+  // Pass 1: รวมยอด TRD_QTY ต่อ (bill, promoId) จากทุกบรรทัดที่ match
   lastMonthData.forEach(r => {
     const gifts = r._gifts || [];
     if (!gifts.length) return;
     const bill = r.DI_REF; if (!bill) return;
-    if (!billGiftSummary.has(bill)) billGiftSummary.set(bill, new Map());
-    const map = billGiftSummary.get(bill);
     const lineQty = parseFloat(r.TRD_QTY) || 0;
+    if (lineQty <= 0) return;
+    if (!billPromoTotal.has(bill)) billPromoTotal.set(bill, new Map());
+    const pmap = billPromoTotal.get(bill);
     gifts.forEach(pm => {
-      const giftKey = normalizeName(pm['แถมสินค้า']);
-      const pmQty = numFrom(pm['จำนวน']);
-      const pmGiftEA = numFrom(pm['จำนวนแถมEA']);
-      const bundles = pmQty > 0 ? Math.floor(lineQty / pmQty) : 1;
-      const expected = bundles * pmGiftEA;
-      if (!map.has(giftKey)) map.set(giftKey, { expected: 0, actual: 0 });
-      map.get(giftKey).expected += expected;
+      pmap.set(pm._id, (pmap.get(pm._id)||0) + lineQty);
     });
   });
-  // เติม actual จาก billFreeMap
+
+  // Pass 2: คิด tier ต่อ (bill, promo) — เข้าเงื่อนไขก็ถึงแค่ครั้งเดียว
+  billPromoTotal.forEach((pmap, bill) => {
+    if (!billGiftSummary.has(bill)) billGiftSummary.set(bill, new Map());
+    const skuMap = billGiftSummary.get(bill);
+    pmap.forEach((totalQty, pmId) => {
+      const pm = promos[pmId];
+      if (!pm) return;
+      const pmQty = numFrom(pm['จำนวน']);
+      const pmGiftEA = numFrom(pm['จำนวนแถมEA']);
+      const bundles = pmQty > 0 ? Math.floor(totalQty / pmQty) : 1;
+      const expected = bundles * pmGiftEA;
+      const giftKey = normalizeName(pm['แถมสินค้า']);
+      if (!skuMap.has(giftKey)) skuMap.set(giftKey, { expected: 0, actual: 0 });
+      skuMap.get(giftKey).expected += expected;
+    });
+  });
+
+  // Pass 3: เติม actual จาก billFreeMap
   billGiftSummary.forEach((skuMap, bill) => {
     const freeMap = billFreeMap.get(bill);
     if (!freeMap) return;
@@ -547,21 +567,24 @@ function statusOf(expected, actual) {
   return 'ok';
 }
 
-// สำหรับแต่ละโปรที่ match — ใช้ยอดรวมทั้งบิลเทียบกับ actual รวมทั้งบิล (แบบ pool)
+// สำหรับแต่ละโปรที่ match — คำนวณ tier แบบ bill-pool (รวมยอดจากทุก SKU ที่ตรง CAT ในบิลเดียว)
 function computeGiftVerification(row, pm) {
   const pmQty = numFrom(pm['จำนวน']);
   const pmGiftEA = numFrom(pm['จำนวนแถมEA']);
   const lineQty = parseFloat(row.TRD_QTY) || 0;
-  const bundles = pmQty > 0 ? Math.floor(lineQty / pmQty) : 1;
-  const lineExpected = bundles * pmGiftEA;
+  const totalPromoQty = billPromoTotal.get(row.DI_REF)?.get(pm._id) || lineQty;  // ยอดรวมทั้งบิลของโปรตัวนี้
+  const bundles = pmQty > 0 ? Math.floor(totalPromoQty / pmQty) : 1;
+  const lineExpected = bundles * pmGiftEA;   // ยอด expected ต่อโปรตัวนี้ (bill-level, คิดครั้งเดียว)
   const giftKey = normalizeName(pm['แถมสินค้า']);
   const billAgg = billGiftSummary.get(row.DI_REF)?.get(giftKey);
-  const billExpected = billAgg?.expected || lineExpected;
+  const billExpected = billAgg?.expected || lineExpected;  // รวม expected จากทุกโปรที่ให้ SKU แถมเดียวกัน
   const billActual   = billAgg?.actual   || 0;
   return {
     bundles,
-    lineExpected,           // ยอดที่บรรทัดนี้คำนวณเดี่ยวๆ (informational)
-    expected: billExpected, // ยอดรวมทั้งบิลของ SKU แถมนี้
+    lineQty,                // ยอดที่บรรทัดนี้มีส่วนร่วมใน tier pool (CS)
+    totalPromoQty,          // ยอดรวมทั้งบิลของโปรตัวนี้ (สำหรับ tier)
+    lineExpected,           // expected จากโปรตัวนี้ (bill-level)
+    expected: billExpected, // expected รวมทั้ง SKU แถมนี้ (จากทุกโปรในบิล)
     actual:   billActual,   // ยอดจริงรวมทั้งบิล
     diff:     billActual - billExpected,
     status:   statusOf(billExpected, billActual),
@@ -584,6 +607,9 @@ function lineOverallStatus(row) {
 
 // Given a DS_DC line row, return list of matching promotions (should get gift)
 function findPromosForLine(r) {
+  const lineQty = parseFloat(r.TRD_QTY) || 0;
+  if (lineQty <= 0) return [];  // free line ไม่นับเป็นบรรทัดที่ซื้อ
+
   const p = pddtMap.get(normalizeName(r.SKU_NAME)) || {};
   const candidates = [
     ...(promosByProduct.get(normalizeName(r.SKU_NAME)) || []),
@@ -594,7 +620,6 @@ function findPromosForLine(r) {
   if (!candidates.length) return [];
 
   const lineUnit  = extractUnit(r.TRD_UTQNAME);      // "CS" / "PA" / "EA"
-  const lineQty   = parseFloat(r.TRD_QTY)  || 0;
   const linePrice = parseFloat(r.TRD_U_PRC) || 0;
   const diDate    = parseDate(r.DI_DATE);
   const lineWh    = String(r.WL_CODE||'').trim().toUpperCase();
@@ -642,9 +667,8 @@ function findPromosForLine(r) {
     const pmUnit = String(pm['รูปแบบขาย']||'').trim().toUpperCase();
     if (pmUnit && pmUnit !== lineUnit) return false;
 
-    // จำนวน: if promo specifies a min qty, line qty must be >= that
-    const pmQty = numFrom(pm['จำนวน']);
-    if (pmQty > 0 && lineQty < pmQty) return false;
+    // จำนวน: เช็คระดับ bill (aggregate) ใน computeBillGiftSummary — line เดี่ยวไม่ต้องผ่านเกณฑ์นี้
+    // เพราะ CAT BRAND promo ต้องรวมยอดจาก SKU ต่างๆ ที่ brand เดียวกันทั้งบิล
 
     // ราคาขายกำหนด: อาจเป็นตัวเลข (ราคาขั้นต่ำ) หรือรหัสราคา (S03, CC00, ฯลฯ) — ราคาบิลต้อง ≥ ราคาที่กำหนด
     const priceCode = String(pm['ราคาขายกำหนด']||'').trim().toUpperCase();
@@ -1147,13 +1171,14 @@ function renderTable() {
         const statusHtml = s.text
           ? `<span style="color:${s.color};font-weight:700">${s.icon} ${s.text}</span>`
           : '';
-        // ถ้ายอดบรรทัดนี้ต่างจากยอดรวมทั้งบิล = มีบรรทัดอื่นในบิลก็ต้องได้แถมของเดียวกันด้วย (share pool)
-        const contribNote = v.lineExpected !== v.expected
-          ? ` <span class="txt-muted">(บรรทัดนี้ +${fmtInt(v.lineExpected)})</span>`
+        // แสดงยอดรวม tier pool (จาก brand/size ทั้งบิล) และส่วนร่วมของบรรทัดนี้
+        const unit = extractUnit(r.TRD_UTQNAME) || '';
+        const poolNote = v.totalPromoQty !== v.lineQty
+          ? ` <span class="txt-muted">· รวมบิล ${fmtInt(v.totalPromoQty)}${unit} (บรรทัดนี้ +${fmtInt(v.lineQty)}${unit})</span>`
           : '';
         return `<div style="margin-top:4px;padding-left:6px;border-left:2px solid ${s.color}">
-          <div class="txt-muted" style="font-size:10px">${esc(method)}${perBundle?` • ทุก ${perBundle} แถม ${pmGiftEA} EA × ${v.bundles} ชุด`:''}</div>
-          <div style="font-size:12px"><span style="color:var(--success);font-weight:600">🎁 ${esc(gift)}</span> ควรได้ <span style="font-weight:700">×${fmtInt(v.expected)} EA</span>${contribNote}</div>
+          <div class="txt-muted" style="font-size:10px">${esc(method)}${perBundle?` • ทุก ${perBundle} แถม ${pmGiftEA} EA × ${v.bundles} ชุด${poolNote}`:''}</div>
+          <div style="font-size:12px"><span style="color:var(--success);font-weight:600">🎁 ${esc(gift)}</span> ควรได้ <span style="font-weight:700">×${fmtInt(v.expected)} EA</span></div>
           <div style="font-size:12px;margin-top:1px">แถมจริง <span style="font-weight:700">×${fmtInt(v.actual)} EA</span> · ${statusHtml}</div>
         </div>`;
       }).join('');
