@@ -1,6 +1,9 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v5.7 — หน้าอนุมัติมีแท็บ รออนุมัติ/อนุมัติ/ไม่อนุมัติ (คู่แอป v12.38 · ต้อง Deploy New version):
+ *         getPendingAll รับ p.withDone=1 → ส่งรายการที่อนุมัติ/ไม่อนุมัติแล้วมาด้วย
+ *         (จำกัดท้ายสุด 60 รายการ/ชีท กัน payload บวม) ทุกรายการมี field status + approver
  * v5.6 — QR ต้องตรงจุดที่ยืนอยู่จริง (คู่แอป v12.37 · ต้อง Deploy New version):
  *         อุดช่องโหว่: เดิมสแกน QR ของ "จุดอื่น" ก็ผ่าน (เช่น อยู่ HQ สแกน QR ของ W2)
  *         → actionCheckin เทียบพิกัด GPS ที่ส่งมากับพิกัดของจุดใน QR ต้องอยู่ในรัศมี
@@ -2934,18 +2937,28 @@ function getPendingAll(p, user) {
         cfg = { status: 9, approver: 10, name: 2, info: [6, 12] };
       }
       const data = sh.getDataRange().getValues();
+      const doneRows = [];   // v5.7: ประวัติที่ตัดสินแล้ว — เก็บแยกเพื่อจำกัดจำนวนท้ายสุด
       for (let i = 1; i < data.length; i++) {
         const r = data[i];
-        const st = String(r[cfg.status] || '').toLowerCase();
-        if (st && st !== 'pending') continue;
+        const raw = String(r[cfg.status] || '').toLowerCase().trim();
+        const stKey = (!raw || raw === 'pending') ? 'pending'
+                    : (raw.indexOf('approve') === 0 ? 'approved'
+                    : (raw.indexOf('reject') === 0 ? 'rejected' : 'other'));
+        if (stKey !== 'pending' && !p.withDone) continue;
+        if (stKey === 'other') continue;   // สถานะแปลกๆ ที่กรอกมือ — ไม่เอาเข้าแท็บ
         if (teamEmpIds.size > 0 && !teamEmpIds.has(String(r[1]).trim())) continue;
         const info = cfg.info.map(ci => String(r[ci] || '')).filter(Boolean).join(' · ');
-        items.push({
+        const it = {
           sheet: name, row: i + 1,
           date: r[0], empId: r[1],
           name: String(r[cfg.name] || ''), info: info,
-        });
+          status: stKey,
+          approver: (cfg.approver != null) ? String(r[cfg.approver] || '') : '',
+        };
+        if (stKey === 'pending') items.push(it);
+        else doneRows.push(it);
       }
+      doneRows.slice(-60).forEach(it => items.push(it));   // v5.7: ประวัติเอาท้ายสุด 60 รายการ/ชีท
     });
     return { ok: true, items: items };
   } catch(e) { return { ok: false, error: e.message }; }
