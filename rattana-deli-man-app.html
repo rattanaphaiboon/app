@@ -933,7 +933,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.279';
+const APP_VERSION='3.280';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -8595,7 +8595,10 @@ async function flushOutbox(force){
       box=loadOutbox();
       if(!box.length) break;
       const item=box[0];
-      const r=await postSyncGAS_(item.payload).catch(e=>({ok:false,error:String((e&&e.message)||e)}));
+      /* ★ v3.280: timeout คิว 15→45 วิ — บันทึกบิลที่มีรูปสลิปใช้เวลาหลายสิบวินาที พอ 15 วิตัดทิ้ง
+         ฝั่ง GAS ยังเขียนต่อจนจบ แต่แอปนับว่าล้ม แล้ววนส่งซ้ำงานเดิม = คิวตันทั้งเครื่อง
+         อาการที่ผู้ใช้เห็น: "กดบันทึกแล้วไม่ลงชีท" ทั้งที่ชีทเขียนได้ (เข้าทีหลังเป็นก้อน เวลาเดียวกันหมด) */
+      const r=await postSyncGAS_(item.payload,45000).catch(e=>({ok:false,error:String((e&&e.message)||e)}));
       const cur=loadOutbox();
       const i=cur.findIndex(x=>x.ts===item.ts&&x.ky===item.ky);
       if(r.ok){
@@ -10691,7 +10694,9 @@ function doPost(e){
 
     /* ★★ v3.279: ด่านสุดท้าย — ชื่อคนขับ/ทะเบียน ยังว่างอยู่ไหม? เติมจากชีทบิลให้ (ผู้ส่งสินค้า/ทะเบียนรถ)
        ครอบคลุมแม้เครื่องที่กดอนุมัติจะไม่มีข้อมูลทีมในมือ — แถวที่พังไปแล้วซ่อมตัวเองตอนอนุมัติปิดงาน */
-    var _healed=healTeamFromCin_(ss,data.jobId);
+    /* ★ v3.280: เรียกเฉพาะตอน "จำเป็นจริง" — ปกติชื่อคนขับ/ทะเบียนมีอยู่แล้ว ไม่ต้องแตะชีทเพิ่มเลย */
+    var _needHeal=(blank_('ชื่อคนขับ')&&!inObj['ชื่อคนขับ'])||(blank_('ทะเบียน')&&!inObj['ทะเบียน']);
+    var _healed=_needHeal?healTeamFromCin_(ss,data.jobId):0;
     return ContentService.createTextOutput(JSON.stringify({ok:true,version:'3.279',healed:_healed}))
       .setMimeType(ContentService.MimeType.JSON);
     } finally { _saveLock.releaseLock(); }   // ★ v3.236: ปลดล็อกเสมอ (แม้ error)
@@ -10791,14 +10796,20 @@ function upsertByHeader_(sh,keyNames,keyVals,obj){
 }
 /* ★ v3.279: อ่านค่าปัจจุบันของ 1 แถว (คืนเป็น {ชื่อคอลัมน์: ค่า}) — ใช้ถามว่า "ช่องนี้ยังว่างอยู่ไหม" ก่อนเติมซ่อม */
 function rowValsByHeader_(sh,keyName,keyVal){
+  /* ★ v3.280: อ่านเฉพาะ "คอลัมน์คีย์" หาแถวก่อน แล้วค่อยอ่านแถวนั้นแถวเดียว
+     (เดิม getDataRange().getValues() ทั้งชีททุกครั้ง — save_job เรียก 2 รอบ ทำบันทึกบิลช้าขึ้นจน
+      คิวฝั่งแอป timeout 15 วิ แล้ววนส่งซ้ำไม่จบ = "กดบันทึกแล้วไม่ลงชีท" ทั้งที่ชีทเขียนได้ปกติ) */
   const hmap=headerMap_(sh);
   const kc=hmap[keyName]?hmap[keyName][0]:-1;
   if(kc<0) return null;
-  const data=sh.getDataRange().getValues();
-  for(var i=1;i<data.length;i++){
-    if(String(data[i][kc]).trim()===String(keyVal).trim()){
+  const lr=sh.getLastRow(); if(lr<2) return null;
+  const keys=sh.getRange(2,kc+1,lr-1,1).getValues();
+  const want=String(keyVal).trim();
+  for(var i=0;i<keys.length;i++){
+    if(String(keys[i][0]).trim()===want){
+      const row=sh.getRange(i+2,1,1,sh.getLastColumn()).getValues()[0];
       var o={};
-      Object.keys(hmap).forEach(function(h){ o[h]=data[i][hmap[h][0]]; });
+      Object.keys(hmap).forEach(function(h){ o[h]=row[hmap[h][0]]; });
       return o;
     }
   }
