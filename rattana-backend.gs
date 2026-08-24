@@ -1,6 +1,12 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v5.9 — กันคำขอลงซ้ำ (คู่แอป v12.40 · ต้อง Deploy New version):
+ *         ต้นเหตุ: แอป retry อัตโนมัติ 3 ครั้งเมื่อ Apps Script ตอบช้า/ตอบ HTML
+ *         แต่ฝั่งเซิร์ฟเวอร์เขียนแถวไปแล้ว → 1 การกด = ได้สูงสุด 3 แถว (ห่างกัน ~30 วิ)
+ *         แก้: actionSubmitLeaveApp รับ p.reqId (รหัสกำกับคำขอ คงเดิมทุก retry) เก็บคอลัมน์ P
+ *              เจอ reqId ซ้ำ = ไม่เขียนซ้ำ ตอบ ok · สำรอง: แถวเหมือนกันเป๊ะภายใน 5 นาที = ข้าม
+ *              + LockService กัน 2 คำขอชนกัน · cleanDuplicateLeaveRows() ล้างแถวซ้ำเก่า (รันครั้งเดียว)
  * v5.8 — ปุ่ม "ยกเลิกคำขอ" ให้พนักงาน (คู่แอป v12.39 · ต้อง Deploy New version):
  *         cancelMyLeave — ยกเลิกคำขอของตัวเองในการลาApp ได้เฉพาะสถานะยังรอ (pending)
  *         เปลี่ยนสถานะเป็น 'cancelled' ไม่ลบแถว (เก็บประวัติ + ไม่นับโควต้า/สรุปวัน/แท็บอนุมัติ)
@@ -228,7 +234,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'5.8', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'5.9', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -1498,6 +1504,39 @@ function actionSubmitLeaveApp(p, user) {
   const endDate     = String(p.endDate || startDate);
   const nameDate    = `${cleanName_(target.name)} ${startDate}`;
 
+  // ── v5.9: กันคำขอลงซ้ำ ──────────────────────────────────────────────
+  // แอป retry เองเมื่อเซิร์ฟเวอร์ตอบช้า/ตอบ HTML ทั้งที่แถวถูกเขียนไปแล้ว → เดิมได้ 2-3 แถวต่อการกด 1 ครั้ง
+  // ล็อกก่อน เพื่อให้ "ตรวจซ้ำ → เขียน" เป็นก้อนเดียว (retry รอบสองจะเห็นแถวของรอบแรกเสมอ)
+  let _lk = null;
+  try { _lk = LockService.getScriptLock(); _lk.waitLock(20000); } catch (e) { _lk = null; }
+  try {
+  const reqId = String(p.reqId || '').trim();
+  if (leaveSheetIsNew_(sh) && sh.getLastRow() > 1) {
+    const lastRow = sh.getLastRow();
+    // 1) reqId เดิม (คงที่ทุก retry) — เจอแล้ว = เขียนไปแล้ว ไม่ต้องเขียนซ้ำ
+    if (reqId) {
+      const ids = sh.getRange(2, 16, lastRow - 1, 1).getValues();
+      for (let i = 0; i < ids.length; i++) {
+        if (String(ids[i][0] || '').trim() === reqId) return jsonOut({ ok:true, dup:true, row:i + 2 });
+      }
+    }
+    // 2) สำรอง (แอปเวอร์ชันเก่าไม่ส่ง reqId / ผู้ใช้กดซ้ำเอง): แถวเหมือนกันเป๊ะ + ยื่นห่างไม่เกิน 5 นาที
+    const scanFrom = Math.max(2, lastRow - 39);
+    const recent = sh.getRange(scanFrom, 1, lastRow - scanFrom + 1, 14).getValues();
+    const rsn = String(p.reason || '');
+    for (let i = recent.length - 1; i >= 0; i--) {
+      const r = recent[i];
+      if (String(r[1] || '').trim() !== empId) continue;
+      if (String(r[0] || '').trim() !== startDate) continue;
+      if (String(r[5] || '').trim() !== String(p.typeLabel || p.type || '').trim()) continue;
+      if (String(r[11] || '').replace('⚠เกินโควต้า · ', '').trim() !== rsn.trim()) continue;
+      const prev = parseDDMMYYYYHHmm_(String(r[7] || ''));
+      if (prev && (now.getTime() - prev.getTime()) <= 5 * 60 * 1000) {
+        return jsonOut({ ok:true, dup:true, row:scanFrom + i });
+      }
+    }
+  }
+
   // v4.2: รูปแนบจากฟอร์ม (เช่น เปลี่ยนวันหยุด/ใบรับรองแพทย์) → Supabase Storage ใต้ requests/
   // (cron ลบรูป 60 วันไม่แตะ — มันลบเฉพาะ path ใน checkin_log) + ลิงก์เปิดรูปผ่าน photoView ลงคอลัมน์ S
   let photoLink = '';
@@ -1584,6 +1623,15 @@ function actionSubmitLeaveApp(p, user) {
       endDate,                                // N ถึงวันที่
       photoLink,                              // O รูปแนบ
     ]);
+    // v5.9: ประทับรหัสกำกับคำขอไว้คอลัมน์ P — retry รอบถัดไปเห็นแล้วไม่เขียนซ้ำ
+    if (reqId) {
+      try {
+        if (String(sh.getRange(1, 16).getValue() || '') === '') {
+          sh.getRange(1, 16).setValue('reqId').setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+        }
+        sh.getRange(sh.getLastRow(), 16).setValue(reqId);
+      } catch (e) {}
+    }
   } else {
     // ยังไม่รัน migrateLeaveSheet() — เขียนโครงเก่า 18+1 คอลัมน์ตามเดิม กันแถวเพี้ยน
     try {
@@ -1626,6 +1674,48 @@ function actionSubmitLeaveApp(p, user) {
   ]);
 
   return jsonOut({ ok:true, msg:'ยื่นคำขอแล้ว', id });
+  } finally { if (_lk) { try { _lk.releaseLock(); } catch (e) {} } }   // v5.9
+}
+
+/* v5.9: แปลง "dd/MM/yyyy HH:mm:ss" (คอลัมน์ H) เป็น Date — ใช้ตรวจคำขอซ้ำภายใน 5 นาที */
+function parseDDMMYYYYHHmm_(s) {
+  const m = String(s || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) return null;
+  const d = new Date(+m[3], +m[2] - 1, +m[1], +m[4], +m[5], +(m[6] || 0));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/* v5.9: ล้างคำขอซ้ำที่ลงไปแล้ว (รันครั้งเดียวจาก editor)
+   ซ้ำ = รหัสพนักงาน+วันที่+ประเภท+รายละเอียด เหมือนกัน และยื่นห่างกันไม่เกิน 5 นาที
+   เก็บใบแรกไว้ · ใบซ้ำเปลี่ยนสถานะเป็น cancelled (ไม่ลบแถว — ตรวจย้อนได้) เฉพาะใบที่ยัง pending */
+function cleanDuplicateLeaveRows() {
+  const sh = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName('การลาApp');
+  if (!sh || !leaveSheetIsNew_(sh)) throw new Error('ไม่พบชีทการลาApp (โครงใหม่)');
+  const last = sh.getLastRow();
+  if (last < 3) return 'ไม่มีข้อมูลพอให้ตรวจ';
+  const data = sh.getRange(2, 1, last - 1, 14).getValues();
+  const seen = {}, dupRows = [];
+  for (let i = 0; i < data.length; i++) {
+    const r = data[i];
+    if (!String(r[1] || '').trim()) continue;
+    const key = [String(r[1]).trim(), String(r[0]).trim(), String(r[5]).trim(), String(r[11]).trim()].join('|');
+    const ts = parseDDMMYYYYHHmm_(String(r[7] || ''));
+    const prev = seen[key];
+    if (prev && ts && prev.ts && Math.abs(ts.getTime() - prev.ts.getTime()) <= 5 * 60 * 1000) {
+      if (String(r[8] || '').toLowerCase().trim() === 'pending') dupRows.push(i + 2);
+      continue;   // ยึดใบแรกเป็นหลัก ไม่เลื่อน anchor
+    }
+    seen[key] = { ts: ts, row: i + 2 };
+  }
+  dupRows.forEach(rw => {
+    sh.getRange(rw, 9).setValue('cancelled');
+    sh.getRange(rw, 10).setValue('ระบบ: คำขอซ้ำ');
+    sh.getRange(rw, 11).setValue(new Date());
+  });
+  const msg = 'ยกเลิกคำขอซ้ำ ' + dupRows.length + ' แถว' + (dupRows.length ? ' (แถว ' + dupRows.join(', ') + ')' : '');
+  Logger.log(msg);
+  try { SpreadsheetApp.getActiveSpreadsheet().toast(msg, 'ล้างคำขอซ้ำ', 10); } catch (e) {}
+  return msg;
 }
 
 function actionSubmitLeave(p, user) {
