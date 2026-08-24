@@ -1,7 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v6.3 — โควต้าลา: อ่านคอลัมน์ตาม "ชื่อหัวคอลัมน์" ไม่ใช่ตำแหน่ง (ต้อง Deploy New version):
+ * v6.4 — เพิ่ม "ลาฝึกอบรม" + ตัวปรับลาคลอดเป็น 98 วัน (คู่แอป v12.45 · ต้อง Deploy New version):
+ *         ลาฝึกอบรม: ฟอร์มยื่น → ชีท → ตัวนับ → หน้าโควต้า ครบวงจร (ค่าเริ่มต้น = ไม่จำกัด กรอกจำกัดได้ในแท็บโควต้าลา)
+ *         ► รัน fixMaternityQuota98() 1 ครั้ง — ปรับคอลัมน์ลาคลอดในแท็บให้รวมกันได้ 98 วัน
+ * v6.3 — โควต้าลา: อ่านคอลัมน์ตาม "ชื่อหัวคอลัมน์" ไม่ใช่ตำแหน่ง:
  *         HR จัดเรียง/เพิ่มคอลัมน์เองได้ (ลาคลอด+ลาคลอดไม่รับค่าจ้าง รวมเป็นเพดานเดียว)
  *         + รับวันเริ่มงานที่ HR พิมพ์เองในคอลัมน์ D (คนที่ Users/PTT ไม่มีวันเริ่มงาน เดิมโควต้าไม่ทำงานเลย)
  *         + setupLeaveQuota ไม่เขียนทับหัวคอลัมน์ที่ HR จัดไว้ และไม่ลบวันเริ่มงานที่พิมพ์เอง
@@ -249,7 +252,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.3', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.4', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -1643,7 +1646,8 @@ function actionSubmitLeaveApp(p, user) {
   try {
     const qKey = { personal:'personal', sick_with_cert:'sickWithCert', sick_no_cert:'sickNoCert',
                    vacation:'vacation', unpaid_personal:'unpaidPersonal',
-                   maternity_paid:'maternity', maternity_unpaid:'maternity' }[String(p.type || '')];
+                   maternity_paid:'maternity', maternity_unpaid:'maternity',
+                   training:'training' }[String(p.type || '')];   // v6.4
     if (qKey) {
       const q = leaveQuotaFor_(empId);
       if (q && q.remaining[qKey] != null) {
@@ -1808,6 +1812,7 @@ function leaveCodeFromLabel_(lb) {
   lb = String(lb || '');
   if (lb.indexOf('เปลี่ยนวันหยุด') >= 0) return 'change_offday';
   if (lb.indexOf('แก้เวลา') >= 0) return 'time_adjust';
+  if (lb.indexOf('ฝึกอบรม') >= 0 || lb.indexOf('อบรม') >= 0) return 'training';   // v6.4
   if (lb.indexOf('คลอด') >= 0) return lb.indexOf('ไม่รับ') >= 0 ? 'maternity_unpaid' : 'maternity_paid';
   if (lb.indexOf('พักร้อน') >= 0) return 'vacation';
   if (lb.indexOf('ไม่มีใบ') >= 0) return 'sick_no_cert';
@@ -1899,14 +1904,14 @@ function autoQuotaByTenure_(sd, now) {
   const oneYear      = new Date(sd); oneYear.setFullYear(oneYear.getFullYear() + 1);
   if (now < probationEnd) {
     return { stage:'probation', stageLabel:'ทดลองงาน (0-3 เดือนแรก)',
-             personal:0, sickWithCert:0, sickNoCert:0, vacation:0, unpaidPersonal:3 };
+             personal:0, sickWithCert:0, sickNoCert:0, vacation:0, unpaidPersonal:3, training:null };
   }
   if (now < oneYear) {
     return { stage:'passed', stageLabel:'ผ่านงาน (ยังไม่ครบ 1 ปี)',
-             personal:3, sickWithCert:30, sickNoCert:12, vacation:0, unpaidPersonal:null };
+             personal:3, sickWithCert:30, sickNoCert:12, vacation:0, unpaidPersonal:null, training:null };
   }
   return { stage:'fullYear', stageLabel:'ครบ 1 ปีขึ้นไป',
-           personal:6, sickWithCert:30, sickNoCert:12, vacation:6, unpaidPersonal:null };
+           personal:6, sickWithCert:30, sickNoCert:12, vacation:6, unpaidPersonal:null, training:null };
 }
 
 /* v5.3: อ่านโควต้าที่ HR กรอกเองจากแท็บ "โควต้าลา"
@@ -1919,6 +1924,7 @@ const LQ_COLS = [   // ลำดับคอลัมน์ F..K ในแท็
   { key:'vacation',       head:'ลาพักร้อน' },
   { key:'unpaidPersonal', head:'ลากิจไม่รับค่าจ้าง' },
   { key:'maternity',      head:'ลาคลอด' },
+  { key:'training',       head:'ลาฝึกอบรม' },   // v6.4
 ];
 /* v6.3: อ่านคอลัมน์โควต้าตาม "ชื่อหัวคอลัมน์" ไม่ใช่ตำแหน่ง
    — HR จัดเรียง/เพิ่มคอลัมน์เองได้ (เช่นแยก ลาคลอด กับ ลาคลอดไม่รับค่าจ้าง, เพิ่ม ลาฝึกอบรม)
@@ -1929,7 +1935,8 @@ function lqHeaderMap_(head) {
     if (i < 5) return;                                   // A–E = ข้อมูลอ้างอิง ไม่ใช่ช่องกรอก
     const s = String(h || '').replace(/\s+/g, '');
     if (!s || /หมายเหตุ/.test(s)) return;
-    if (/คลอด/.test(s))        map[i] = 'maternity';     // ลาคลอด + ลาคลอดไม่รับค่าจ้าง = รวมเป็นเพดานเดียว
+    if (/ฝึกอบรม|อบรม/.test(s)) map[i] = 'training';      // v6.4: ลาเพื่อฝึกอบรม/พัฒนาความรู้
+    else if (/คลอด/.test(s))   map[i] = 'maternity';     // ลาคลอด + ลาคลอดไม่รับค่าจ้าง = รวมเป็นเพดานเดียว
     else if (/ป่วย/.test(s))   map[i] = /ไม่มีใบ|ไม่มีบ|ไม่มี/.test(s) ? 'sickNoCert' : 'sickWithCert';
     else if (/พักร้อน/.test(s)) map[i] = 'vacation';
     else if (/กิจ/.test(s))    map[i] = /ไม่รับค่าจ้าง|ไม่จ่าย/.test(s) ? 'unpaidPersonal' : 'personal';
@@ -2061,6 +2068,7 @@ function leaveQuotaFor_(empId) {
       vacation:        quotaRemain_(quota.vacation,       used.vacation),
       unpaidPersonal:  quotaRemain_(quota.unpaidPersonal, used.unpaidPersonal),
       maternity:       quotaRemain_(quota.maternity,      used.maternity),
+      training:        quotaRemain_(quota.training,       used.training),   // v6.4
     },
   };
 }
@@ -2098,7 +2106,7 @@ function setupLeaveQuota() {
       const q = autoQuotaByTenure_(sd, now);
       const nz = (v) => v == null ? 'ไม่จำกัด' : v;
       ref = q.stageLabel + ' · กิจ ' + nz(q.personal) + ' · ป่วย ' + nz(q.sickWithCert) + '/' + nz(q.sickNoCert) +
-            ' · พักร้อน ' + nz(q.vacation) + ' · กิจไม่รับค่าจ้าง ' + nz(q.unpaidPersonal) + ' · คลอด 98';
+            ' · พักร้อน ' + nz(q.vacation) + ' · กิจไม่รับค่าจ้าง ' + nz(q.unpaidPersonal) + ' · คลอด 98 · ฝึกอบรม ' + nz(q.training);
     }
     return [p.name || '', khlangOf_(p.id) || p.khlang || '', sd ? formatDate(sd) : '', ref];
   };
@@ -2159,6 +2167,41 @@ function setupLeaveQuota() {
              ' คน (เพิ่มใหม่รอบนี้ ' + add.length + ') — กรอกเฉพาะช่องสีเหลืองของคนที่ต้องการปรับ');
 }
 
+/* v6.4: ปรับลาคลอดในแท็บโควต้าลาให้รวมกันได้ 98 วันตามกฎหมาย (รันครั้งเดียวจาก editor)
+   คอลัมน์ "ลาคลอด" (รับค่าจ้าง) คงไว้ตามที่ HR กรอก · คอลัมน์ "ลาคลอดไม่รับค่าจ้าง" ปรับให้ผลรวม = 98
+   แถวที่ยังไม่ได้กรอกลาคลอด = ไม่แตะ (ใช้ค่าอัตโนมัติ 98 อยู่แล้ว) */
+function fixMaternityQuota98() {
+  const sh = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName(LQ_TAB);
+  if (!sh || sh.getLastRow() < 2) throw new Error('ไม่พบแท็บ "' + LQ_TAB + '"');
+  const lastC = Math.max(sh.getLastColumn(), 6);
+  const head  = sh.getRange(1, 1, 1, lastC).getValues()[0];
+  const hmap  = lqHeaderMap_(head);
+  const matCols = Object.keys(hmap).filter(i => hmap[i] === 'maternity').map(Number);
+  if (!matCols.length) throw new Error('ไม่พบคอลัมน์ลาคลอดในแท็บนี้');
+  // คอลัมน์ "ไม่รับค่าจ้าง" = ตัวปรับยอด · ถ้ามีคอลัมน์เดียวก็ปรับคอลัมน์นั้นเป็น 98
+  const unpaidCol = matCols.find(i => /ไม่รับค่าจ้าง|ไม่จ่าย/.test(String(head[i]).replace(/\s+/g, '')));
+  const adjCol = (unpaidCol != null) ? unpaidCol : matCols[0];
+  const rows = sh.getRange(2, 1, sh.getLastRow() - 1, lastC).getValues();
+  let changed = 0;
+  rows.forEach((r, i) => {
+    const vals = matCols.map(c => String(r[c] == null ? '' : r[c]).trim());
+    if (vals.every(v => v === '')) return;                          // ยังไม่กรอก = ปล่อยใช้อัตโนมัติ 98
+    if (vals.some(v => /ไม่จำกัด|^-$|^∞$/.test(v))) return;          // ตั้งไม่จำกัดไว้ = เคารพค่าเดิม
+    const others = matCols.filter(c => c !== adjCol)
+      .reduce((s, c) => s + (parseFloat(String(r[c]).replace(/,/g, '')) || 0), 0);
+    const need = 98 - others;
+    if (need < 0) return;                                            // กรอกเกิน 98 ในช่องอื่นแล้ว — ไม่แตะ ให้ HR ดูเอง
+    const cur = parseFloat(String(r[adjCol]).replace(/,/g, ''));
+    if (cur === need) return;
+    sh.getRange(i + 2, adjCol + 1).setValue(need);
+    changed++;
+  });
+  const msg = 'ปรับลาคลอดให้รวม 98 วัน · แก้ไป ' + changed + ' แถว (คอลัมน์ "' + head[adjCol] + '")';
+  Logger.log(msg);
+  try { SpreadsheetApp.getActiveSpreadsheet().toast(msg, 'ลาคลอด 98 วัน', 8); } catch (e) {}
+  return msg;
+}
+
 function quotaRemain_(q, u) {
   if (q == null) return null;                       // ไม่จำกัด
   return Math.max(0, (parseFloat(q) || 0) - (parseFloat(u) || 0));
@@ -2173,7 +2216,7 @@ function actionGetLeaveQuota(p, user) {
 }
 
 function countUsedLeave(empId, from, to) {
-  const c = { personal:0, sickWithCert:0, sickNoCert:0, vacation:0, unpaidPersonal:0, maternity:0 };
+  const c = { personal:0, sickWithCert:0, sickNoCert:0, vacation:0, unpaidPersonal:0, maternity:0, training:0 };
   // v5.0: นับจาก การลาApp — approveAny อนุมัติที่ชีทนี้ (แท็บ log เดิมสถานะค้าง pending ตลอด
   // ทำให้หน้าโควต้าเคยนับวันลาที่ใช้ไปได้ 0 เสมอ)
   const la = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName('การลาApp');
@@ -2194,6 +2237,7 @@ function countUsedLeave(empId, from, to) {
       else if (t === 'vacation')       c.vacation += days;
       else if (t === 'unpaid_personal') c.unpaidPersonal += days;
       else if (t === 'maternity_paid' || t === 'maternity_unpaid') c.maternity += days;   // v5.1
+      else if (t === 'training')       c.training += days;   // v6.4
     }
     return c;
   }
