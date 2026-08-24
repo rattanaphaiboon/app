@@ -4,7 +4,7 @@
  * v6.3 — โควต้าลา: อ่านคอลัมน์ตาม "ชื่อหัวคอลัมน์" ไม่ใช่ตำแหน่ง (ต้อง Deploy New version):
  *         HR จัดเรียง/เพิ่มคอลัมน์เองได้ (ลาคลอด+ลาคลอดไม่รับค่าจ้าง รวมเป็นเพดานเดียว)
  *         + รับวันเริ่มงานที่ HR พิมพ์เองในคอลัมน์ D (คนที่ Users/PTT ไม่มีวันเริ่มงาน เดิมโควต้าไม่ทำงานเลย)
- *         + setupLeaveQuota ไม่ลบวันเริ่มงานที่ HR พิมพ์เอง
+ *         + setupLeaveQuota ไม่เขียนทับหัวคอลัมน์ที่ HR จัดไว้ และไม่ลบวันเริ่มงานที่พิมพ์เอง
  * v6.2 — ตารางผู้อนุมัติเฉพาะของแอปนี้ (คู่แอป v12.43):
  *         แท็บ "ผู้อนุมัติเฉพาะ" ในชีทแอป — กำหนดผู้อนุมัติรายคนโดยไม่แตะชีท Users (แอปอื่นใช้ร่วม)
  *         ► รัน setupApproverOverride() 1 ครั้ง (สร้างแท็บ + ใส่ จิรวรรณ พวงแก้ว → ธนภรณ์ รัตนไพบูลย์)
@@ -2124,19 +2124,35 @@ function setupLeaveQuota() {
     sh.getRange(i + 2, 2, 1, 4).setValues([info]);
   });
 
-  sh.getRange(1, 1, 1, NCOL).setValues([HEAD])
-    .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+  // v6.3: ★ ไม่เขียนทับหัวคอลัมน์ที่มีอยู่แล้ว — HR จัดเรียง/เพิ่มคอลัมน์เองไว้ (โค้ดอ่านตามชื่อหัว)
+  //        เขียนหัวเฉพาะตอนแท็บยังว่าง (สร้างใหม่ครั้งแรก) เท่านั้น
+  const wide    = Math.max(NCOL, sh.getLastColumn());
+  const headRow = sh.getLastRow() >= 1 ? sh.getRange(1, 1, 1, wide).getValues()[0] : [];
+  const hasHead = headRow.some(h => String(h || '').trim() !== '');
+  if (!hasHead) {
+    sh.getRange(1, 1, 1, NCOL).setValues([HEAD])
+      .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+  }
   sh.setFrozenRows(1);
 
+  const width = hasHead ? wide : NCOL;
   const add = Object.keys(people).filter(id => !seen[id]).sort()
-    .map(id => [id].concat(infoOf(people[id])).concat(['', '', '', '', '', '', '']));
-  if (add.length) sh.getRange(sh.getLastRow() + 1, 1, add.length, NCOL).setValues(add);
+    .map(id => {
+      const row = [id].concat(infoOf(people[id]));           // A–E
+      while (row.length < width) row.push('');               // ที่เหลือเว้นว่าง = ใช้โควต้าอัตโนมัติ
+      return row;
+    });
+  if (add.length) sh.getRange(sh.getLastRow() + 1, 1, add.length, width).setValues(add);
 
-  // ── หน้าตา + คำอธิบาย ──
-  sh.getRange(1, 6, sh.getMaxRows(), LQ_COLS.length).setHorizontalAlignment('center');
-  sh.getRange(2, 6, Math.max(1, sh.getLastRow() - 1), LQ_COLS.length)
-    .setBackground('#fff8e1').setNote('เว้นว่าง = ใช้โควต้าอัตโนมัติตามอายุงาน\nใส่ตัวเลข = ใช้ตัวเลขนี้แทน (เช่น พักร้อนยกยอด ใส่ยอดรวม)\nใส่ "ไม่จำกัด" = ไม่จำกัดจำนวนวัน');
-  sh.setColumnWidth(2, 190); sh.setColumnWidth(5, 430); sh.setColumnWidth(NCOL, 220);
+  // ── หน้าตา + คำอธิบาย (ระบายเฉพาะคอลัมน์โควต้าที่ระบบอ่านออกจากหัวจริง) ──
+  const qCols = Object.keys(hasHead ? lqHeaderMap_(headRow) : lqHeaderMap_(HEAD)).map(Number);
+  const lastR = Math.max(1, sh.getLastRow() - 1);
+  qCols.forEach(ci => {
+    sh.getRange(1, ci + 1, sh.getMaxRows(), 1).setHorizontalAlignment('center');
+    sh.getRange(2, ci + 1, lastR, 1).setBackground('#fff8e1')
+      .setNote('เว้นว่าง = ใช้โควต้าอัตโนมัติตามอายุงาน\nใส่ตัวเลข = ใช้ตัวเลขนี้แทน (เช่น พักร้อนยกยอด ใส่ยอดรวม)\nใส่ "ไม่จำกัด" = ไม่จำกัดจำนวนวัน');
+  });
+  sh.setColumnWidth(2, 190); sh.setColumnWidth(5, 430);
   try { sh.autoResizeColumns(1, 1); } catch (e) {}
   ss.setActiveSheet(sh);
   Logger.log('✅ แท็บ "' + LQ_TAB + '" พร้อมใช้ · พนักงานทั้งหมด ' + Object.keys(people).length +
