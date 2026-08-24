@@ -1,7 +1,11 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v6.1 — ห้ามอนุมัติคำขอของตัวเอง (คู่แอป v12.42 · ต้อง Deploy New version):
+ * v6.2 — ตารางผู้อนุมัติเฉพาะของแอปนี้ (คู่แอป v12.43 · ต้อง Deploy New version):
+ *         แท็บ "ผู้อนุมัติเฉพาะ" ในชีทแอป — กำหนดผู้อนุมัติรายคนโดยไม่แตะชีท Users (แอปอื่นใช้ร่วม)
+ *         ► รัน setupApproverOverride() 1 ครั้ง (สร้างแท็บ + ใส่ จิรวรรณ พวงแก้ว → ธนภรณ์ รัตนไพบูลย์)
+ *         คำขอของคนที่มีชื่อในตาราง = เข้าคิวผู้อนุมัติคนนั้นเท่านั้น (HR ยังเห็นทุกใบ)
+ * v6.1 — ห้ามอนุมัติคำขอของตัวเอง (คู่แอป v12.42):
  *         getPendingAll ตัดแถวที่ empId = ผู้ขอเอง — คำขอของหัวหน้าเด้งไปหาหัวหน้าของเขา
  *         (จิรวรรณ เห็นคำขอตัวเองในคิวตัวเอง เพราะทีม PTT รวมตัวเธอ) · คนอื่นที่มีสิทธิ์ยังเห็นครบ
  * v6.0 — กันคำขอลงซ้ำ "ทุกหัวข้อ" (คู่แอป v12.41):
@@ -241,7 +245,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.1', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.2', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3053,11 +3057,63 @@ const APPROVE_CFG = {
   'ขอกำลังคนApp':   { status: 7, approver: 8, name: 2, info: [4, 5] },
 };
 
+/* ── v6.2: ตารางผู้อนุมัติเฉพาะของแอปนี้ (ไม่แตะชีท Users ที่แอปอื่นใช้ร่วม) ──
+   แท็บ "ผู้อนุมัติเฉพาะ" ในชีท HR Rattana App 2 · HR แก้เองได้ในชีท
+   ว่าง = ใช้ "ชื่อหัวหน้างาน" จาก Users ตามเดิม · มีชื่อ = คำขอของคนนั้นเข้าคิวคนนี้เท่านั้น */
+const APPROVER_TAB  = 'ผู้อนุมัติเฉพาะ';
+const APPROVER_SEED = [
+  // รหัสพนักงาน, ชื่อพนักงาน, ชื่อผู้อนุมัติ (พิมพ์ให้ตรงชื่อในระบบ), หมายเหตุ
+  ['11202', 'จิรวรรณ พวงแก้ว', 'ธนภรณ์ รัตนไพบูลย์', 'surat แจ้ง 24/08/2026 — ไม่แก้ชีท Users เพราะกระทบแอปอื่น'],
+];
+function normNameTh_(s) { return String(s || '').replace(/\s+/g, ' ').trim(); }
+let _ovrMapCache = null;
+function approverOverrideMap_() {
+  if (_ovrMapCache) return _ovrMapCache;
+  const map = {};
+  try {
+    const sh = getTab(APPROVER_TAB);
+    if (sh && sh.getLastRow() > 1) {
+      const d = sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues();
+      d.forEach(r => {
+        const id = String(r[0] || '').trim(), nm = normNameTh_(r[2]);
+        if (id && nm) map[id] = nm;
+      });
+    }
+  } catch (e) {}
+  _ovrMapCache = map;
+  return map;
+}
+/* รันครั้งเดียวจาก editor — สร้างแท็บ + ใส่รายการที่ตกลงกันไว้ (รันซ้ำได้ ไม่ทับของที่มีอยู่) */
+function setupApproverOverride() {
+  const ss = getSS();
+  let sh = ss.getSheetByName(APPROVER_TAB);
+  if (!sh) {
+    sh = ss.insertSheet(APPROVER_TAB);
+    sh.getRange(1, 1, 1, 4).setValues([['รหัสพนักงาน', 'ชื่อพนักงาน', 'ชื่อผู้อนุมัติ', 'หมายเหตุ']])
+      .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+    sh.setFrozenRows(1);
+    sh.setColumnWidths(1, 4, 180);
+  }
+  const have = {};
+  if (sh.getLastRow() > 1) {
+    sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues().forEach(r => { have[String(r[0] || '').trim()] = true; });
+  }
+  let added = 0;
+  APPROVER_SEED.forEach(row => { if (!have[String(row[0]).trim()]) { sh.appendRow(row); added++; } });
+  const msg = 'แท็บ "' + APPROVER_TAB + '" พร้อมใช้งาน · เพิ่มรายการใหม่ ' + added + ' รายการ';
+  Logger.log(msg);
+  try { ss.toast(msg, 'ผู้อนุมัติเฉพาะ', 8); } catch (e) {}
+  return msg;
+}
+
 function getPendingAll(p, user) {
   try {
     const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
     const items = [];
     const teamEmpIds = new Set();
+    let mySupName = '';                          // v6.2: ชื่อของ "ผู้เปิดหน้าอนุมัติ" (ใช้เทียบกับตารางผู้อนุมัติเฉพาะ)
+    const ovrMap = approverOverrideMap_();       // v6.2: {รหัสพนักงาน: ชื่อผู้อนุมัติเฉพาะ}
+    const iAmHR = isHR(user);
     if (p.supervisorId) {
       try {
         const uSS  = SpreadsheetApp.openById(CFG.usersSheetId);
@@ -3077,8 +3133,15 @@ function getPendingAll(p, user) {
                 teamEmpIds.add(String(uData[i][2]).trim());
             }
           }
+          mySupName = supName;
         }
       } catch(_) {}
+      // ชื่อจาก session (เผื่อผู้อนุมัติไม่มีแถวในชีท Users เช่นบัญชี PTT)
+      if (!mySupName) mySupName = cleanName_(String(user.name || ''));
+      // v6.2: คนที่ถูกกำหนดให้ "เรา" เป็นผู้อนุมัติเฉพาะ → ใส่เข้าทีมที่เราเห็น
+      Object.keys(ovrMap).forEach(id => {
+        if (normNameTh_(ovrMap[id]) === normNameTh_(mySupName)) teamEmpIds.add(String(id).trim());
+      });
     }
     Object.keys(APPROVE_CFG).forEach(name => {
       let cfg = APPROVE_CFG[name];
@@ -3099,6 +3162,10 @@ function getPendingAll(p, user) {
         if (stKey !== 'pending' && !p.withDone) continue;
         if (stKey === 'other') continue;   // สถานะแปลกๆ ที่กรอกมือ — ไม่เอาเข้าแท็บ
         if (teamEmpIds.size > 0 && !teamEmpIds.has(String(r[1]).trim())) continue;
+        // v6.2: คนที่มี "ผู้อนุมัติเฉพาะ" — คำขอไปเข้าคิวของคนนั้นเท่านั้น (HR ยังเห็นทุกใบตามปกติ)
+        const ovrName = ovrMap[String(r[1]).trim()] || '';
+        const assigned = !!(ovrName && normNameTh_(ovrName) === normNameTh_(mySupName));
+        if (ovrName && !assigned && !iAmHR) continue;
         // v6.1: ห้ามเห็น/อนุมัติคำขอของตัวเอง — ต้องให้หัวหน้าของคนนั้นอนุมัติ
         // (เคสจริง: จิรวรรณ หัวหน้า PTT เห็นคำขอเปลี่ยนวันหยุดของตัวเองในคิวตัวเอง เพราะทีม PTT รวมตัวเธอด้วย)
         // คนอื่นที่มีสิทธิ์อนุมัติ (หัวหน้าของเธอ / HR) ยังเห็นตามปกติ — ไม่มีคำขอตกหล่น
@@ -3110,6 +3177,7 @@ function getPendingAll(p, user) {
           name: String(r[cfg.name] || ''), info: info,
           status: stKey,
           approver: (cfg.approver != null) ? String(r[cfg.approver] || '') : '',
+          assigned: assigned,   // v6.2: ใบนี้ถูกกำหนดให้เราเป็นผู้อนุมัติเฉพาะ (แอปข้ามการกรองทีม)
         };
         if (stKey === 'pending') items.push(it);
         else doneRows.push(it);
