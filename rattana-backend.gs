@@ -1,7 +1,11 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v5.9 — กันคำขอลงซ้ำ (คู่แอป v12.40 · ต้อง Deploy New version):
+ * v6.0 — กันคำขอลงซ้ำ "ทุกหัวข้อ" (คู่แอป v12.41 · ต้อง Deploy New version):
+ *         ด่านที่ router: reqId ซ้ำ = ไม่ทำซ้ำ ตอบ ok (ทะเบียนแท็บซ่อน _reqLog)
+ *         ครอบ ลา/เปลี่ยนวันหยุด/แก้เวลา/ขอเอกสาร/อุปกรณ์/เบิกเงิน/สั่งข้าว/สวัสดิการ/ใบเตือน/
+ *         โอนย้าย-ผ่านทดลอง-ปรับเงินเดือน-ขอกำลังคน/สั่งของ/จัดกะ/แก้เวลารายวัน
+ * v5.9 — กันคำขอลงซ้ำ เฉพาะกลุ่มลา (คู่แอป v12.40):
  *         ต้นเหตุ: แอป retry อัตโนมัติ 3 ครั้งเมื่อ Apps Script ตอบช้า/ตอบ HTML
  *         แต่ฝั่งเซิร์ฟเวอร์เขียนแถวไปแล้ว → 1 การกด = ได้สูงสุด 3 แถว (ห่างกัน ~30 วิ)
  *         แก้: actionSubmitLeaveApp รับ p.reqId (รหัสกำกับคำขอ คงเดิมทุก retry) เก็บคอลัมน์ P
@@ -234,7 +238,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'5.9', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.0', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -275,6 +279,13 @@ function handle(e, method) {
       if (!user) return jsonOut({ ok:false, error:'Unauthorized — invalid idToken or user not active' });
     }
 
+    // ── v6.0: ด่านกันคำขอซ้ำระดับ router — ครอบ "ทุกหัวข้อ" ที่เขียนข้อมูล ──
+    // (v5.9 กันเฉพาะกลุ่มลา/เปลี่ยนวันหยุด/แก้เวลา · หัวข้ออื่น เช่น ขอเอกสาร/อุปกรณ์/เบิกเงิน/
+    //  สั่งข้าว/สวัสดิการ/ใบเตือน ยังซ้ำได้เมื่อแอป retry ตอนเซิร์ฟเวอร์ตอบช้า)
+    if (p.reqId && REQ_DEDUPE_ACTIONS[action] && reqSeen_(String(p.reqId))) {
+      return jsonOut({ ok:true, dup:true, msg:'คำขอนี้บันทึกไว้แล้ว (ส่งซ้ำ)' });
+    }
+    const _out = (function () {
     switch (action) {
       case 'checkin':              return actionCheckin(p, user);
       case 'registerFace':         return actionRegisterFace(p, user);
@@ -342,9 +353,51 @@ function handle(e, method) {
       default:
         return jsonOut({ ok:false, error:'Unknown action: ' + action });
     }
+    })();
+    // v6.0: บันทึกรหัสกำกับคำขอ "หลังทำสำเร็จ" เท่านั้น — ล้มเหลวแล้ว retry ต้องยังส่งใหม่ได้
+    if (p.reqId && REQ_DEDUPE_ACTIONS[action]) {
+      try {
+        if (String(_out.getContent()).indexOf('"ok":true') >= 0) reqMark_(String(p.reqId), action, user);
+      } catch (e) {}
+    }
+    return _out;
   } catch (err) {
     return jsonOut({ ok:false, error:String(err), stack:err && err.stack });
   }
+}
+
+/* ── v6.0: ทะเบียนรหัสกำกับคำขอ (แท็บซ่อน _reqLog) — กันคำขอลงซ้ำทุกหัวข้อ ──
+   แอปสร้าง reqId ครั้งเดียวต่อการกด 1 ครั้ง แล้วติดไปกับทุก retry
+   เจอ reqId เดิม = คำขอนั้นบันทึกสำเร็จไปแล้ว → ตอบ ok โดยไม่เขียนซ้ำ */
+const REQ_DEDUPE_ACTIONS = {
+  submitLeaveApp:1, submitLeave:1, submitTimeAdjust:1, submitOfficeEquip:1, submitDocRequest:1,
+  submitReimburse:1, submitFoodOrder:1, submitWelfare:1, submitWarning:1, submitHrApp:1,
+  submitSalaryAdjust:1, submitAmazonOrder:1, submitShift:1, saveDayFix:1,
+};
+function reqLogTab_() {
+  let sh = getTab('_reqLog');
+  if (!sh) {
+    sh = getOrCreateTab('_reqLog', ['reqId', 'action', 'empId', 'เมื่อ']);
+    try { sh.hideSheet(); } catch (e) {}
+  }
+  return sh;
+}
+function reqSeen_(reqId) {
+  try {
+    const sh = reqLogTab_();
+    if (sh.getLastRow() < 2) return false;
+    const hit = sh.getRange(2, 1, sh.getLastRow() - 1, 1).createTextFinder(reqId).matchEntireCell(true).findNext();
+    return !!hit;
+  } catch (e) { return false; }
+}
+function reqMark_(reqId, action, user) {
+  try {
+    const sh = reqLogTab_();
+    sh.appendRow([reqId, action, String((user && user.empId) || ''), new Date()]);
+    // เก็บย้อนหลังพอประมาณ — เกิน 3000 แถวตัดหัวทิ้ง 1000 (reqId เก่ากว่านั้นไม่มีทาง retry แล้ว)
+    const last = sh.getLastRow();
+    if (last > 3000) sh.deleteRows(2, 1000);
+  } catch (e) {}
 }
 
 function jsonOut(obj) {
