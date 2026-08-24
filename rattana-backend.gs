@@ -1,7 +1,11 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v6.2 — ตารางผู้อนุมัติเฉพาะของแอปนี้ (คู่แอป v12.43 · ต้อง Deploy New version):
+ * v6.3 — โควต้าลา: อ่านคอลัมน์ตาม "ชื่อหัวคอลัมน์" ไม่ใช่ตำแหน่ง (ต้อง Deploy New version):
+ *         HR จัดเรียง/เพิ่มคอลัมน์เองได้ (ลาคลอด+ลาคลอดไม่รับค่าจ้าง รวมเป็นเพดานเดียว)
+ *         + รับวันเริ่มงานที่ HR พิมพ์เองในคอลัมน์ D (คนที่ Users/PTT ไม่มีวันเริ่มงาน เดิมโควต้าไม่ทำงานเลย)
+ *         + setupLeaveQuota ไม่ลบวันเริ่มงานที่ HR พิมพ์เอง
+ * v6.2 — ตารางผู้อนุมัติเฉพาะของแอปนี้ (คู่แอป v12.43):
  *         แท็บ "ผู้อนุมัติเฉพาะ" ในชีทแอป — กำหนดผู้อนุมัติรายคนโดยไม่แตะชีท Users (แอปอื่นใช้ร่วม)
  *         ► รัน setupApproverOverride() 1 ครั้ง (สร้างแท็บ + ใส่ จิรวรรณ พวงแก้ว → ธนภรณ์ รัตนไพบูลย์)
  *         คำขอของคนที่มีชื่อในตาราง = เข้าคิวผู้อนุมัติคนนั้นเท่านั้น (HR ยังเห็นทุกใบ)
@@ -245,7 +249,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.2', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.3', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -1916,6 +1920,23 @@ const LQ_COLS = [   // ลำดับคอลัมน์ F..K ในแท็
   { key:'unpaidPersonal', head:'ลากิจไม่รับค่าจ้าง' },
   { key:'maternity',      head:'ลาคลอด' },
 ];
+/* v6.3: อ่านคอลัมน์โควต้าตาม "ชื่อหัวคอลัมน์" ไม่ใช่ตำแหน่ง
+   — HR จัดเรียง/เพิ่มคอลัมน์เองได้ (เช่นแยก ลาคลอด กับ ลาคลอดไม่รับค่าจ้าง, เพิ่ม ลาฝึกอบรม)
+   — เดิมอ่านตายตัว F..K พอ HR สลับคอลัมน์ ตัวเลขเข้าผิดประเภททั้งแถว */
+function lqHeaderMap_(head) {
+  const map = {};
+  (head || []).forEach((h, i) => {
+    if (i < 5) return;                                   // A–E = ข้อมูลอ้างอิง ไม่ใช่ช่องกรอก
+    const s = String(h || '').replace(/\s+/g, '');
+    if (!s || /หมายเหตุ/.test(s)) return;
+    if (/คลอด/.test(s))        map[i] = 'maternity';     // ลาคลอด + ลาคลอดไม่รับค่าจ้าง = รวมเป็นเพดานเดียว
+    else if (/ป่วย/.test(s))   map[i] = /ไม่มีใบ|ไม่มีบ|ไม่มี/.test(s) ? 'sickNoCert' : 'sickWithCert';
+    else if (/พักร้อน/.test(s)) map[i] = 'vacation';
+    else if (/กิจ/.test(s))    map[i] = /ไม่รับค่าจ้าง|ไม่จ่าย/.test(s) ? 'unpaidPersonal' : 'personal';
+    // คอลัมน์อื่นที่ระบบยังไม่รองรับ (เช่น ลาฝึกอบรม/ลาบวช) — ข้ามไป ไม่กระทบของเดิม
+  });
+  return map;
+}
 let _quotaOverrideCache = null;
 function quotaOverrideMap_() {
   if (_quotaOverrideCache) return _quotaOverrideCache;
@@ -1924,23 +1945,53 @@ function quotaOverrideMap_() {
     const sh = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName(LQ_TAB);
     if (sh) {
       const data = sh.getDataRange().getValues();
+      const hmap = lqHeaderMap_(data[0] || []);
+      const cols = Object.keys(hmap);
       for (let i = 1; i < data.length; i++) {
         const id = String(data[i][0] || '').trim();
         if (!id) continue;
-        const o = {};
-        LQ_COLS.forEach((c, j) => {
-          const raw = data[i][5 + j];
+        const acc = {};                                   // key → [ค่าที่กรอกไว้] (null = ไม่จำกัด)
+        const push = (key, raw) => {
           const s = String(raw == null ? '' : raw).trim();
-          if (s === '') return;                                   // เว้นว่าง = ใช้ค่าอัตโนมัติ
-          if (/ไม่จำกัด|^-$|^∞$/.test(s)) { o[c.key] = null; return; }   // ไม่จำกัด
+          if (s === '') return;                           // เว้นว่าง = ใช้ค่าอัตโนมัติ
+          if (/ไม่จำกัด|^-$|^∞$/.test(s)) { (acc[key] = acc[key] || []).push(null); return; }
           const n = parseFloat(s.replace(/,/g, ''));
-          if (!isNaN(n)) o[c.key] = n;
+          if (!isNaN(n)) (acc[key] = acc[key] || []).push(n);
+        };
+        if (cols.length) cols.forEach(idx => push(hmap[idx], data[i][idx]));
+        else LQ_COLS.forEach((c, j) => push(c.key, data[i][5 + j]));   // สำรอง: หัวตารางอ่านไม่ออก → ใช้ตำแหน่งเดิม
+        const o = {};
+        Object.keys(acc).forEach(k => {
+          const arr = acc[k];
+          o[k] = arr.some(v => v === null) ? null : arr.reduce((a, b) => a + b, 0);   // หลายคอลัมน์ประเภทเดียวกัน = รวมกัน
         });
         if (Object.keys(o).length) m[id] = o;
       }
     }
   } catch (e) { console.error('quotaOverrideMap_', e); }
   _quotaOverrideCache = m;
+  return m;
+}
+
+/* v6.3: วันเริ่มงานที่ HR พิมพ์เองในแท็บโควต้าลา (คอลัมน์ D)
+   — ใช้เมื่อชีท Users/ทะเบียน PTT ไม่มีวันเริ่มงาน (เดิมคนกลุ่มนี้ไม่มีโควต้าเลย) */
+let _lqStartCache = null;
+function lqStartDateMap_() {
+  if (_lqStartCache) return _lqStartCache;
+  const m = {};
+  try {
+    const sh = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName(LQ_TAB);
+    if (sh && sh.getLastRow() > 1) {
+      const d = sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues();
+      d.forEach(r => {
+        const id = String(r[0] || '').trim();
+        if (!id || !r[3]) return;
+        const sd = (r[3] instanceof Date) ? r[3] : parseDDMMYYYY(String(r[3]).trim());
+        if (sd && !isNaN(sd.getTime())) m[id] = sd;
+      });
+    }
+  } catch (e) {}
+  _lqStartCache = m;
   return m;
 }
 
@@ -1959,6 +2010,11 @@ function leaveQuotaFor_(empId) {
       const d1 = parseDDMMYYYY(pt.startDate);
       if (d1) { sd = d1; startSource = 'ทะเบียน PTT'; }
     }
+  }
+  if (!sd) {
+    // v6.3: HR พิมพ์วันเริ่มงานเองในแท็บโควต้าลา (คอลัมน์ D) — กันเคสไม่มีวันเริ่มงานแล้วโควต้าไม่ทำงานทั้งคน
+    const d2 = lqStartDateMap_()[String(empId).trim()];
+    if (d2) { sd = d2; startSource = 'แท็บโควต้าลา'; }
   }
   if (!sd) return null;
 
@@ -2054,7 +2110,18 @@ function setupLeaveQuota() {
     const id = String(r[0] || '').trim();
     if (!id) return;
     seen[id] = true;
-    if (people[id]) sh.getRange(i + 2, 2, 1, 4).setValues([infoOf(people[id])]);
+    if (!people[id]) return;
+    const info = infoOf(people[id]);
+    // v6.3: ระบบไม่มีวันเริ่มงาน แต่ HR พิมพ์ไว้เองในคอลัมน์ D → เก็บของ HR ไว้ + คิดโควต้าอ้างอิงจากวันนั้น
+    if (!info[2]) {
+      const cur = sh.getRange(i + 2, 4).getValue();
+      const sdM = (cur instanceof Date) ? cur : parseDDMMYYYY(String(cur || '').trim());
+      if (sdM && !isNaN(sdM.getTime())) {
+        info[2] = formatDate(sdM);
+        info[3] = infoOf({ id: id, name: people[id].name, start: sdM })[3] + ' · วันเริ่มงานจากแท็บนี้';
+      }
+    }
+    sh.getRange(i + 2, 2, 1, 4).setValues([info]);
   });
 
   sh.getRange(1, 1, 1, NCOL).setValues([HEAD])
