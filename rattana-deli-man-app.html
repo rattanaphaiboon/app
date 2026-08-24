@@ -933,7 +933,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.287';
+const APP_VERSION='3.288';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1154,6 +1154,26 @@ async function fetchSheet(sheetId,sheetName,opts){
 }
 
 /* ===== Sheet cache ใน localStorage — v2.53: แยก TTL ตามความถี่การเปลี่ยน ===== */
+/* ★★ v3.288: หา "ตัวอักษรคอลัมน์" (A,B,…,AE) จากชื่อหัวคอลัมน์จริงในชีท — คิวรี่ gviz อ้างได้แค่ตัวอักษร
+   พอมีคนแทรก/ย้ายคอลัมน์ ตัวอักษรจะเลื่อน แล้วคิวรี่ไปกรองผิดคอลัมน์แบบเงียบๆ (ไม่ error แต่ข้อมูลหาย)
+   เคสจริง 24 ส.ค.: แทรก "ร้านค้า" ที่ E → วันเวลาที่รับงาน AD→AE → ใบคุมที่ยังไม่อนุมัติหายหมด
+   แคชผลไว้ 24 ชม. · หาไม่เจอคืน '' = ให้ผู้เรียกดึงทั้งแผ่นแทน (ช้ากว่าแต่ไม่ผิด) */
+const COLMAP_KEY='dman_colmap_v1';
+function colLetterOfIndex_(i){ let s='',n=i+1; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=Math.floor((n-1)/26); } return s; }
+async function sheetColLetter_(sheetId,sheetName,header){
+  const key=sheetName+'|'+header;
+  try{ const m=JSON.parse(localStorage.getItem(COLMAP_KEY)||'{}');
+       if(m[key]&&m[key].c&&(Date.now()-(m[key].ts||0))<86400000) return m[key].c; }catch(e){}
+  try{
+    const rows=await fetchSheet(sheetId,sheetName,{fresh:true,tq:'select * limit 1'});
+    const i=Object.keys((rows||[])[0]||{}).indexOf(header);
+    if(i<0) return '';
+    const c=colLetterOfIndex_(i);
+    try{ const m=JSON.parse(localStorage.getItem(COLMAP_KEY)||'{}'); m[key]={c:c,ts:Date.now()};
+         localStorage.setItem(COLMAP_KEY,JSON.stringify(m)); }catch(e){}
+    return c;
+  }catch(e){ return ''; }
+}
 const SHEET_CACHE_TTL=5*60*1000;          // default 5 นาที
 const CACHE_TTL_LONG=24*60*60*1000;       // 24 ชม. — ลูกค้า/สินค้า/รายละเอียดบิล (ไม่ค่อยเปลี่ยน)
 const CACHE_TTL_SYNC=30*1000;             // 30 วิ — งานอนุมัติ (ต้อง fresh บ่อย แต่ throttle กันโหลดถี่)
@@ -9082,8 +9102,28 @@ async function loadJobsFromSheet(){
     const _p2=n=>String(n).padStart(2,'0');
     const _cutD=new Date(Date.now()-21*86400000);
     const _cutStr=`${_cutD.getFullYear()}-${_p2(_cutD.getMonth()+1)}-${_p2(_cutD.getDate())} 00:00:00`;
-    const _cinFull=()=>fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',{fresh:true,tq:`select * where K >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];});
-    const _inputAll=()=>fetchSheet(CFG.jobsSheetId,'บันทึกเที่ยวส่ง',{fresh:true,tq:`select * where AD >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];});
+    /* ★ v3.288: ชีทบิลใหญ่ (หลายพันแถว) ยังต้องกรองฝั่งชีทอยู่ แต่หา "ตัวอักษรคอลัมน์" จากชื่อหัวคอลัมน์จริงก่อน
+       (แคช 24 ชม. · หาไม่เจอ = ดึงทั้งแผ่น ช้าแต่ไม่ผิด) — กันอาการเดียวกับที่ INPUT เจอ ถ้าวันหลังมีคนแทรกคอลัมน์ในชีทบิล */
+    const _cinFull=async()=>{
+      const L=await sheetColLetter_(CFG.jobsSheetId,'บันทึกบิลและการชำระ','U_ADD');
+      const o={fresh:true}; if(L) o.tq=`select * where ${L} >= datetime '${_cutStr}'`;
+      return fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',o).catch(()=>{fetchOK=false;return[];});
+    };
+    /* ★★ v3.288: เลิกกรองด้วย "ตัวอักษรคอลัมน์" ในคิวรี่ — เปราะมาก แค่มีคนแทรกคอลัมน์ในชีทก็พังเงียบ
+       เคสจริง 24 ส.ค.: แทรกคอลัมน์ "ร้านค้า" ที่ E → วันเวลาที่รับงาน เลื่อน AD→AE
+       คิวรี่ where AD จึงกลายเป็นกรอง "วันเวลาอนุมัติ" → ใบคุมที่ยังไม่อนุมัติหายจากผลลัพธ์ทั้งหมด (419 จาก 437 แถว)
+       แถว INPUT ไม่มา → งานถูกประกอบจากชีทบิลอย่างเดียว → คนขับ/ทะเบียนขึ้น "-" ในกล่องช่วยบันทึก
+       ตอนนี้: ดึงทั้งชีทแล้วกรองฝั่งแอปด้วย "ชื่อหัวคอลัมน์" (ย้ายคอลัมน์กี่ครั้งก็ไม่พัง)
+       ชีทนี้เล็ก (ไม่กี่ร้อยแถว หลัง user อาร์ไคฟ์ของเก่า) — ต้นทุนดึงทั้งแผ่นไม่ต่างกัน */
+    const _cutMs=_cutD.getTime();
+    const _inputAll=()=>fetchSheet(CFG.jobsSheetId,'บันทึกเที่ยวส่ง',{fresh:true})
+      .then(rows=>(rows||[]).filter(r=>{
+        const v=cleanCell(r['วันเวลาที่รับงาน']);
+        if(!v) return true;                       // ยังไม่มีเวลารับงาน (เที่ยวพิเศษ/แถวกำลังสร้าง) = เก็บไว้ ไม่ตัดทิ้ง
+        const t=new Date(v).getTime();
+        return isNaN(t)||t>=_cutMs;               // อ่านวันที่ไม่ออก = เก็บไว้ (ปลอดภัยกว่าตัดทิ้ง)
+      }))
+      .catch(()=>{fetchOK=false;return[];});
     let cinRows,inputRows,scopeIds=null,_usedCNRows=null;
     if(jobScopeDriverOnly_()){
       // ★ v3.242: คนขับ — ยิงพร้อมกัน 3 อย่าง: INPUT (เบา) + บิลของใบคุมที่จำไว้รอบก่อน + ดัชนี CN ที่ใช้แล้ว
