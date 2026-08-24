@@ -546,7 +546,7 @@ body.dark .spinner-box{background:var(--card-bg)}
       <button class="nav-btn hidden nav-back" data-tab="move" onclick="switchTab('move')">
         <span class="nav-ic">🔄</span><span class="nav-lb">ความเคลื่อนไหว</span></button>
 
-      <div class="nav-foot">Supply Lite<br>v3.7</div>
+      <div class="nav-foot">Supply Lite<br>v3.8</div>
     </nav>
 
   <main class="content">
@@ -891,12 +891,12 @@ body.dark .spinner-box{background:var(--card-bg)}
 
 <script>
 /* ══════════════════════════════════════════════════════════
-   Rattana Supply Lite — เบิกอุปกรณ์สำนักงาน  v3.7
+   Rattana Supply Lite — เบิกอุปกรณ์สำนักงาน  v3.8
    พนักงานคีย์ใบเบิก → HR อนุมัติ + ใส่วันที่ได้ของ → จ่ายของ
    ยังไม่ใส่ gasUrl = โหมดทดลอง (อุปกรณ์อ่านจากชีตจริง, ใบเบิกเก็บในเครื่อง)
    ══════════════════════════════════════════════════════════ */
 const CONFIG = {
-  /* ⬇️ URL ของ Apps Script Web App (rattana-supply-apps-script-v3.9.gs)
+  /* ⬇️ URL ของ Apps Script Web App (rattana-supply-apps-script-v4.0.gs)
      ถ้าเปลี่ยน deployment ใหม่จนได้ URL ใหม่ ให้มาแก้บรรทัดนี้ */
   gasUrl  : 'https://script.google.com/macros/s/AKfycbxU-06OcA9UlYaV6AOBGwm8W6tJj4vswkoSdKJdacQ0Vt-ulmNBxDdNXoRXSj2YD4wY/exec',
   /* ชีตอุปกรณ์ — ใช้ตอนโหมดทดลองเท่านั้น */
@@ -1385,8 +1385,20 @@ async function demoApi(action,p){
   if(action==='sendBackRequest'){
     if(!isHR()) throw new Error('คุณไม่มีสิทธิ์ตีกลับใบเบิก');
     const r=find(p.docNo);
-    if(r.status!=='approved' && r.status!=='pending') throw new Error('ตีกลับได้เฉพาะใบที่ยังไม่จ่ายของ');
+    if(r.status!=='approved' && r.status!=='pending' && r.status!=='issued')
+      throw new Error('ตีกลับได้เฉพาะใบที่ยังไม่ปิด');
     if(!p.reason) throw new Error('กรุณาบอกว่าให้พนักงานแก้อะไร');
+    /* จ่ายของไปแล้วต้องคืนสต็อกก่อน */
+    if(r.status==='issued'){
+      r.lines.forEach(l=>{
+        const q = toNum(l.issued); if(!q) return;
+        const it = itemOf(l.code);
+        if(it){ const before=toNum(it.stock); it.stock=before+q;
+                demoMove(db,'คืนสต็อก (ตีกลับ)',r.docNo,l.code,q,before,it.stock); }
+        l.issued = 0;
+      });
+      r.issuer=''; r.issuedAt='';
+    }
     r.status='pending'; r.approver=''; r.approvedAt=''; r.readyDate='';
     r.hrNote='ตีกลับให้แก้ไข: '+p.reason;
     r.sentBackAt=new Date().toISOString();
@@ -1992,9 +2004,10 @@ function reqActions(r,mode){
       <button class="btn btn-outline btn-sm" onclick="openEditReq('${esc(r.docNo)}')">✏️ แก้รายการ</button>
       <button class="btn btn-outline btn-sm" onclick="openApprove('${esc(r.docNo)}')">📅 แก้วันนัด</button>
       <button class="btn btn-outline btn-sm" onclick="openSendBack('${esc(r.docNo)}')">↩️ ตีกลับให้แก้</button>`;
-    /* จ่ายของแล้วแต่ผู้เบิกยังไม่กดยืนยัน — HR ปิดใบเองได้ ไม่ให้ค้างคาตลอด */
+    /* จ่ายของแล้วแต่ผู้เบิกยังไม่กดยืนยัน — ปิดใบเอง หรือตีกลับ (คืนสต็อกให้อัตโนมัติ) */
     if(r.status==='issued') return `
-      <button class="btn btn-success btn-sm" onclick="askClose('${esc(r.docNo)}')">✔️ เสร็จสิ้น</button>`;
+      <button class="btn btn-success btn-sm" onclick="askClose('${esc(r.docNo)}')">✔️ เสร็จสิ้น</button>
+      <button class="btn btn-outline btn-sm" onclick="openSendBack('${esc(r.docNo)}')">↩️ ตีกลับให้แก้</button>`;
     return '';
   }
   /* HR จ่ายของแล้ว รอเจ้าของใบตรวจรับ — ปุ่มนี้สำคัญสุดบนการ์ด */
@@ -2183,12 +2196,18 @@ async function doConfirmReceive(){
 /* HR ตีกลับให้พนักงานแก้ — ใบกลับไปเป็นรออนุมัติ และเริ่มนับ 3 วันใหม่ */
 function openSendBack(no){
   const r = REQS.find(x=>x.docNo===no); if(!r) return;
+  const issued = r.status==='issued';
+  const qty = (r.lines||[]).reduce((s,l)=>s+toNum(l.issued),0);
   askConfirm('↩️ ตีกลับให้พนักงานแก้ไข',
     `<div class="hr-note" style="margin:0 0 13px"><b>${esc(no)}</b> · ${esc(r.name||'-')} ·
        ${esc(r.dept||'-')} · ${nf((r.lines||[]).length)} รายการ</div>
+     ${issued ? `<div class="notice" style="margin-bottom:13px"><span>📦</span><div>
+        ใบนี้<b>จ่ายของไปแล้ว</b> — ระบบจะ<b>คืนสต็อกให้อัตโนมัติ ${nf(qty)} ชิ้น</b>
+        และบันทึกการคืนไว้ในรายงานความเคลื่อนไหว<br>
+        <span class="txt-danger">ถ้าของออกจากคลังไปแล้วจริง อย่าลืมตามของกลับมาด้วย</span></div></div>` : ''}
      <div class="field"><label>บอกพนักงานว่าให้แก้อะไร *</label>
-       <textarea class="input" id="sbReason" placeholder="เช่น หมึกรีฟิลขอ 15 เกินโควต้า ปรับเหลือ 10 แล้วส่งกลับมาใหม่"></textarea></div>
-     <div class="txt-sm txt-muted">ใบจะกลับไปเป็น <b>"รออนุมัติ"</b> · วันนัดรับของถูกล้าง ·
+       <textarea class="input" id="sbReason" placeholder="เช่น ทิชชูของยังไม่เข้า ตัดรายการนี้ออกก่อน แล้วส่งกลับมาใหม่"></textarea></div>
+     <div class="txt-sm txt-muted">ใบจะกลับไปเป็น <b>"รออนุมัติ"</b> · ล้างวันนัดรับ${issued?' และผู้จ่ายของ':''} ·
        พนักงานแก้ไขได้อีก ${EDIT_DAYS} วันนับจากวันนี้</div>`,
     'ตีกลับให้แก้','btn-danger',
     async ()=>{
