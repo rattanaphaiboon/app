@@ -1,7 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v6.0 — กันคำขอลงซ้ำ "ทุกหัวข้อ" (คู่แอป v12.41 · ต้อง Deploy New version):
+ * v6.1 — ห้ามอนุมัติคำขอของตัวเอง (คู่แอป v12.42 · ต้อง Deploy New version):
+ *         getPendingAll ตัดแถวที่ empId = ผู้ขอเอง — คำขอของหัวหน้าเด้งไปหาหัวหน้าของเขา
+ *         (จิรวรรณ เห็นคำขอตัวเองในคิวตัวเอง เพราะทีม PTT รวมตัวเธอ) · คนอื่นที่มีสิทธิ์ยังเห็นครบ
+ * v6.0 — กันคำขอลงซ้ำ "ทุกหัวข้อ" (คู่แอป v12.41):
  *         ด่านที่ router: reqId ซ้ำ = ไม่ทำซ้ำ ตอบ ok (ทะเบียนแท็บซ่อน _reqLog)
  *         ครอบ ลา/เปลี่ยนวันหยุด/แก้เวลา/ขอเอกสาร/อุปกรณ์/เบิกเงิน/สั่งข้าว/สวัสดิการ/ใบเตือน/
  *         โอนย้าย-ผ่านทดลอง-ปรับเงินเดือน-ขอกำลังคน/สั่งของ/จัดกะ/แก้เวลารายวัน
@@ -238,7 +241,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.0', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.1', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3096,6 +3099,10 @@ function getPendingAll(p, user) {
         if (stKey !== 'pending' && !p.withDone) continue;
         if (stKey === 'other') continue;   // สถานะแปลกๆ ที่กรอกมือ — ไม่เอาเข้าแท็บ
         if (teamEmpIds.size > 0 && !teamEmpIds.has(String(r[1]).trim())) continue;
+        // v6.1: ห้ามเห็น/อนุมัติคำขอของตัวเอง — ต้องให้หัวหน้าของคนนั้นอนุมัติ
+        // (เคสจริง: จิรวรรณ หัวหน้า PTT เห็นคำขอเปลี่ยนวันหยุดของตัวเองในคิวตัวเอง เพราะทีม PTT รวมตัวเธอด้วย)
+        // คนอื่นที่มีสิทธิ์อนุมัติ (หัวหน้าของเธอ / HR) ยังเห็นตามปกติ — ไม่มีคำขอตกหล่น
+        if (p.supervisorId && String(r[1]).trim() === String(p.supervisorId).trim()) continue;
         const info = cfg.info.map(ci => String(r[ci] || '')).filter(Boolean).join(' · ');
         const it = {
           sheet: name, row: i + 1,
