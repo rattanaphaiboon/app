@@ -1,7 +1,11 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v6.4 — เพิ่ม "ลาฝึกอบรม" + ตัวปรับลาคลอดเป็น 98 วัน (คู่แอป v12.45 · ต้อง Deploy New version):
+ * v6.5 — ตัวตรวจโควต้า auditLeaveQuota() (รันจาก editor · ไม่ต้อง Deploy ก็ได้):
+ *         ได้แท็บ "ตรวจโควต้า" เทียบรายคน: เพดาน / ใช้ไปแล้ว / คงเหลือ / ที่มาของเพดาน
+ *         + อ่านชีทการลาApp ครั้งเดียวต่อการรัน (เร็วขึ้นมากเวลาคิดโควต้าหลายคน)
+ *         หมายเหตุกติกา (surat เคาะ 24/08): ลาคร่อมวันหยุด = นับทุกวันตามปฏิทิน (ไม่ข้ามเสาร์-อาทิตย์)
+ * v6.4 — เพิ่ม "ลาฝึกอบรม" + ตัวปรับลาคลอดเป็น 98 วัน (คู่แอป v12.45):
  *         ลาฝึกอบรม: ฟอร์มยื่น → ชีท → ตัวนับ → หน้าโควต้า ครบวงจร (ค่าเริ่มต้น = ไม่จำกัด กรอกจำกัดได้ในแท็บโควต้าลา)
  *         ► รัน fixMaternityQuota98() 1 ครั้ง — ปรับคอลัมน์ลาคลอดในแท็บให้รวมกันได้ 98 วัน
  * v6.3 — โควต้าลา: อ่านคอลัมน์ตาม "ชื่อหัวคอลัมน์" ไม่ใช่ตำแหน่ง:
@@ -252,7 +256,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.4', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.5', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -2202,6 +2206,60 @@ function fixMaternityQuota98() {
   return msg;
 }
 
+/* v6.5: ตัวตรวจโควต้า — รันจาก editor แล้วได้แท็บ "ตรวจโควต้า" เทียบรายคน
+   โควต้า(เพดาน) / ใช้ไปแล้ว(นับจากใบที่อนุมัติในแอป) / คงเหลือ / ที่มาของเพดาน
+   ใช้ตรวจว่า "ตัดโควต้าตรงจริง" · แถวที่ยังไม่มีการใช้และไม่ได้ตั้งค่าเอง จะไม่แสดง (ลดความรก) */
+function auditLeaveQuota() {
+  const ss = getSS();
+  const src = ss.getSheetByName(LQ_TAB);
+  if (!src || src.getLastRow() < 2) throw new Error('ไม่พบแท็บ "' + LQ_TAB + '"');
+  const ids = src.getRange(2, 1, src.getLastRow() - 1, 2).getValues();
+  const ovr = quotaOverrideMap_();
+  const TYPES = [
+    ['personal', 'ลากิจ'], ['unpaidPersonal', 'ลากิจไม่รับค่าจ้าง'],
+    ['sickWithCert', 'ลาป่วย (มีใบ)'], ['sickNoCert', 'ลาป่วย (ไม่มีใบ)'],
+    ['vacation', 'ลาพักร้อน'], ['maternity', 'ลาคลอด'], ['training', 'ลาฝึกอบรม'],
+  ];
+  const out = [];
+  ids.forEach(row => {
+    const id = String(row[0] || '').trim();
+    if (!id) return;
+    let q = null;
+    try { q = leaveQuotaFor_(id); } catch (e) {}
+    if (!q) { out.push([id, String(row[1] || ''), '— ไม่มีวันเริ่มงาน —', '', '', '', '', '']); return; }
+    const o = ovr[id] || {};
+    const cyc = formatDate(q.cycleStart) + ' – ' + formatDate(q.cycleEnd);
+    TYPES.forEach(([k, label]) => {
+      const used = Math.round((q.used[k] || 0) * 100) / 100;
+      const cap  = q.quota[k];
+      const rem  = q.remaining[k];
+      if (!used && !(k in o)) return;                      // ไม่เคยใช้ + ไม่ได้ตั้งเอง = ไม่ต้องโชว์
+      out.push([id, String(row[1] || ''), q.stageLabel, cyc, label,
+                cap == null ? 'ไม่จำกัด' : cap, used,
+                rem == null ? 'ไม่จำกัด' : Math.round(rem * 100) / 100,
+                (k in o) ? 'กรอกในชีท' : 'อัตโนมัติตามอายุงาน']);
+    });
+  });
+  const HEAD = ['รหัสพนักงาน', 'ชื่อ-นามสกุล', 'ช่วงอายุงาน', 'รอบโควต้า', 'ประเภทลา',
+                'โควต้า (เพดาน)', 'ใช้ไปแล้ว', 'คงเหลือ', 'ที่มาของเพดาน'];
+  let sh = ss.getSheetByName('ตรวจโควต้า');
+  if (!sh) sh = ss.insertSheet('ตรวจโควต้า');
+  sh.clear();
+  sh.getRange(1, 1, 1, HEAD.length).setValues([HEAD])
+    .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+  sh.setFrozenRows(1);
+  if (out.length) sh.getRange(2, 1, out.length, HEAD.length).setValues(out.map(r => {
+    while (r.length < HEAD.length) r.push('');
+    return r;
+  }));
+  sh.setColumnWidth(2, 190); sh.setColumnWidth(3, 190); sh.setColumnWidth(4, 190); sh.setColumnWidth(5, 150);
+  ss.setActiveSheet(sh);
+  const msg = 'ตรวจโควต้าเสร็จ · ' + out.length + ' รายการ (เฉพาะคนที่มีการใช้ หรือ HR ตั้งค่าเอง)';
+  Logger.log(msg);
+  try { ss.toast(msg, 'ตรวจโควต้า', 10); } catch (e) {}
+  return msg;
+}
+
 function quotaRemain_(q, u) {
   if (q == null) return null;                       // ไม่จำกัด
   return Math.max(0, (parseFloat(q) || 0) - (parseFloat(u) || 0));
@@ -2215,13 +2273,20 @@ function actionGetLeaveQuota(p, user) {
   return jsonOut(Object.assign({ ok:true }, q));
 }
 
+/* v6.5: อ่านชีทการลาApp ครั้งเดียวต่อการรัน — เดิมทุกครั้งที่คิดโควต้าเปิดชีทใหม่ (ตัวตรวจ 100 คน = เปิด 100 รอบ) */
+let _leaveRowsCache = null;
+function leaveRowsAll_() {
+  if (_leaveRowsCache) return _leaveRowsCache;
+  const la = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName('การลาApp');
+  _leaveRowsCache = (la && leaveSheetIsNew_(la)) ? la.getDataRange().getValues() : [];
+  return _leaveRowsCache;
+}
 function countUsedLeave(empId, from, to) {
   const c = { personal:0, sickWithCert:0, sickNoCert:0, vacation:0, unpaidPersonal:0, maternity:0, training:0 };
   // v5.0: นับจาก การลาApp — approveAny อนุมัติที่ชีทนี้ (แท็บ log เดิมสถานะค้าง pending ตลอด
   // ทำให้หน้าโควต้าเคยนับวันลาที่ใช้ไปได้ 0 เสมอ)
-  const la = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName('การลาApp');
-  if (la && leaveSheetIsNew_(la)) {
-    const data = la.getDataRange().getValues();
+  if (leaveRowsAll_().length) {
+    const data = leaveRowsAll_();
     for (let i = 1; i < data.length; i++) {
       const r = data[i];
       if (String(r[1] || '').trim() !== String(empId)) continue;
