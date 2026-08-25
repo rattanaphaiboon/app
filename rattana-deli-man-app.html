@@ -933,7 +933,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.288';
+const APP_VERSION='3.289';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -4876,9 +4876,48 @@ function renderDriverHome(){
     });
   });
   refreshHelperSlots_();
+  pickupDraftRestore_();   // ★ v3.289: กู้ของที่กรอกค้างไว้ (เผื่อแอปถูกปิด/รีโหลดกลางคัน)
   previewPickupBills();
   pickupUpdateCheck_();   // ★ v3.274: เครื่องที่ค้างเวอร์ชันเก่า → บังคับอัปเดตก่อนรับใบคุมใบใหม่
 }
+/* ★★ v3.289: จำร่าง "หน้ารับใบคุม" ไว้ในเครื่อง — กรอกค้างแล้วแอปดับ/ถูกปิด/รีโหลด กลับมากรอกต่อได้
+   (พี่ศร 24 ส.ค.: กรอกไม่เสร็จแล้วเด้งออก ข้อมูลหายหมด) · ไม่เก็บรูป base64 กันพื้นที่เครื่องเต็ม (บทเรียน v3.279) */
+const PICKUP_DRAFT_KEY='dman_pickup_draft_v1';
+function pickupDraftSave_(){
+  try{
+    if(state.currentTab!=='sec-driver-home') return;
+    const d={job:ddValue('ddJob'),plate:ddValue('ddPlate'),driver:ddValue('ddDriver'),
+      helpers:HELPER_SLOTS.map(n=>ddValue('ddHelper'+n)),
+      extra:(($('helperExtra')||{}).value||''),
+      crates:(($('pickupCrates')||{}).value||''),tanks:(($('pickupTanks')||{}).value||''),pallet:(($('pickupPallet')||{}).value||''),
+      photo:(String(_pickupPhoto||'').indexOf('http')===0?_pickupPhoto:''),ts:Date.now()};
+    const filled=d.job||d.plate||d.photo||d.extra.trim()||d.crates||d.tanks||d.pallet||d.helpers.some(Boolean);
+    if(filled) localStorage.setItem(PICKUP_DRAFT_KEY,JSON.stringify(d));
+    else localStorage.removeItem(PICKUP_DRAFT_KEY);
+  }catch(e){}
+}
+function pickupDraftClear_(){ try{ localStorage.removeItem(PICKUP_DRAFT_KEY); }catch(e){} }
+function pickupDraftRestore_(){
+  try{
+    const raw=localStorage.getItem(PICKUP_DRAFT_KEY); if(!raw) return;
+    const d=JSON.parse(raw)||{};
+    if(!d.ts||(Date.now()-d.ts)>12*3600000){ pickupDraftClear_(); return; }   // ร่างเก่าเกิน 12 ชม. = ทิ้ง
+    let n=0;
+    if(d.job&&(state.jobs||[]).some(j=>j.id===d.job)){ ddPick('ddJob',d.job,d.job); n++; }   // ใบคุมต้องยังว่างอยู่จริง
+    if(d.plate){ ddPick('ddPlate',d.plate,d.plate); n++; }
+    if(d.driver){ ddPick('ddDriver',d.driver,d.driver); }
+    (d.helpers||[]).forEach((v,i)=>{ if(v){ ddPick('ddHelper'+HELPER_SLOTS[i],v,v); n++; } });
+    if(d.extra&&$('helperExtra')) $('helperExtra').value=d.extra;
+    if(d.crates&&$('pickupCrates')) $('pickupCrates').value=d.crates;
+    if(d.tanks&&$('pickupTanks'))  $('pickupTanks').value=d.tanks;
+    if(d.pallet&&$('pickupPallet')) $('pickupPallet').value=d.pallet;
+    if(d.photo){ _pickupPhoto=d.photo; paintLoadPhoto_(); n++; }
+    refreshHelperSlots_();
+    if(n) showToast('กู้ข้อมูลที่กรอกค้างไว้ให้แล้ว — ตรวจอีกครั้งก่อนกดรับงาน','info');
+  }catch(e){}
+}
+setInterval(()=>{ try{ if(!document.hidden) pickupDraftSave_(); }catch(e){} },2500);
+document.addEventListener('visibilitychange',()=>{ try{ if(document.hidden) pickupDraftSave_(); }catch(e){} });
 
 /* ★★ v3.274: บังคับอัปเดตตอนเปิดหน้า "รับงาน" (user แจ้ง 2026-08-22 — ยังมีคนรับใบคุมได้โดยไม่มีรูปตู้)
    ต้นเหตุ: ตัวเช็คอัปเดตอัตโนมัติ (ทุก 10 นาที) จะรีโหลดให้ "เฉพาะตอนปลอดภัย" คือ ไม่มีของค้างส่ง +
@@ -4890,7 +4929,7 @@ let _pickupUpdAt=0;
 async function pickupUpdateCheck_(){
   try{
     if(Date.now()-_pickupUpdAt<180000) return;                       // เช็คถี่สุดทุก 3 นาที
-    if(_pickupPhoto||ddValue('ddJob')||ddValue('ddPlate')) return;    // เริ่มกรอกแล้ว = ไม่รีโหลด (กันของที่กรอกหาย)
+    if(appBusyForm_()) return;    // ★ v3.289: เริ่มกรอกแล้ว = ไม่รีโหลด (เดิมเช็คแค่ รูป/ใบคุม/ทะเบียน — ผู้ช่วย/ลัง/ถัง/พาเลท หลุด)
     _pickupUpdAt=Date.now();
     const r=await fetch(location.pathname+'?vpick='+Date.now(),{cache:'no-store',headers:{'Range':'bytes=0-131071'}});
     if(!r.ok) return;
@@ -5014,6 +5053,7 @@ function previewPickupBills(){
 }
 
 function resetPickupForm(){
+  pickupDraftClear_();   // ★ v3.289: กดล้างข้อมูล = ทิ้งร่างด้วย
   renderDriverHome();
   showToast('ล้างข้อมูลแล้ว','info');
 }
@@ -5254,6 +5294,7 @@ async function confirmPickup(){   // v3.43: async — งานส่งซ้�
   const _rAssign=await postSyncGAS_(_assign,30000).catch(()=>({ok:false,error:'ส่งไม่ผ่าน'}));
   if(!_rAssign||!_rAssign.ok) queueSync(_assign,'assign|'+j.id);   // ส่งไม่ผ่าน → เข้าคิว (มีแบดจ์เตือน + ลองส่งใหม่เองทุก 15 วิ)
   _pickupPhoto='';   // ★ v3.270: ใบถัดไปเริ่มใหม่ (กันรูปใบเก่าติดไปกับใบคุมถัดไป)
+  pickupDraftClear_();   // ★ v3.289: รับงานสำเร็จแล้ว ล้างร่างทิ้ง
   if(_rAssign&&_rAssign.ok) showToast(`รับงาน ${j.id} เรียบร้อย ✓ เข้าชีทแล้ว`,'success');
   else showToast(`รับงาน ${j.id} แล้ว — แต่ยังส่งเข้าชีทไม่ได้ (${(_rAssign&&_rAssign.error)||'-'}) ระบบจะส่งให้อัตโนมัติ ⏳ อย่าเพิ่งปิดแอป`,'warning');
   switchTab('sec-driver-job');
@@ -13071,6 +13112,28 @@ async function openDiag_(){
    (เปิดจากหน้าจอโฮมค้างไว้เป็นวันๆ ไม่เคยโหลดใหม่) → ทำให้ "แก้แล้วแต่ยังเป็นเหมือนเดิม"
    เช็คทุก 10 นาที + ตอนกลับเข้าแอป · เจอเวอร์ชันใหม่ → เด้งแถบให้กดอัปเดต (โหลดใหม่ทั้งหน้า) */
 let _updBannerShown=false;
+/* ★★ v3.289: "กำลังกรอกฟอร์มอยู่ไหม" — ห้ามรีโหลดอัตโนมัติทับของที่ยังกรอกไม่เสร็จ
+   เคสจริง 24 ส.ค. (พี่ศร): กรอกหน้ารับใบคุมค้างไว้ → แอปเด้งออก ข้อมูลที่กรอกหายหมด
+   ต้นเหตุ: safeAuto เดิมเช็ค "กำลังพิมพ์" จาก document.activeElement เป็น INPUT/TEXTAREA/SELECT
+   แต่ฟอร์มนี้ใช้ dropdown ที่ทำเองจาก <div> (กติกา Zebra) → activeElement ไม่ใช่ 3 ชนิดนั้น
+   ระบบเลยคิดว่า "ว่างอยู่ รีโหลดได้" แล้ว location.replace ทิ้งทุกอย่าง
+   ตัวจุดชนวนหลัก = ถ่ายรูปตู้ (แอปถูกพักไปกล้อง) พอกลับมา visibilitychange ยิงเช็คเวอร์ชันทันที */
+function appBusyForm_(){
+  try{
+    if(document.querySelector('.dd-panel.open')) return true;   // กำลังเปิดรายการเลือกอยู่
+    if(state.currentTab==='sec-driver-home'){                   // หน้ารับใบคุม — แตะช่องไหนไปแล้วก็ถือว่ากำลังกรอก
+      if(_pickupPhoto) return true;
+      if(ddValue('ddJob')||ddValue('ddPlate')) return true;      // (ไม่นับ ddDriver เพราะเติมชื่อตัวเองให้อยู่แล้ว)
+      if(HELPER_SLOTS.some(n=>ddValue('ddHelper'+n))) return true;
+      const ex=$('helperExtra'); if(ex&&String(ex.value||'').trim()) return true;
+      if(_ctVal_('pickupCrates')||_ctVal_('pickupTanks')||_ctVal_('pickupPallet')) return true;
+    }
+    if(state.currentTab==='sec-transfer'){                      // ฟอร์มเที่ยวพิเศษ
+      if(ddValue('ddTransJob')||transferState.jobId||transferState.item||transferState.qty||transferState.destination) return true;
+    }
+  }catch(e){}
+  return false;
+}
 async function checkAppUpdate_(){
   try{
     if(_updBannerShown||document.hidden) return;
@@ -13090,6 +13153,7 @@ async function checkAppUpdate_(){
     const safeAuto = outboxCount()===0
       && !document.querySelector('.modal-overlay.open')
       && !(_ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(_ae.tagName))
+      && !appBusyForm_()          // ★ v3.289: มีของกรอกค้างในฟอร์ม (dropdown ที่ทำเอง/รูป/จำนวน) = ห้ามรีโหลดทับ
       && state.currentTab!=='sec-bill-form' && state.currentTab!=='sec-returns';
     if(safeAuto){ location.replace(location.pathname+'?v='+m[1]); return; }
     _updBannerShown=true;
