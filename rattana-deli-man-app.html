@@ -645,6 +645,23 @@ body.dark .banner-gold{color:var(--gold-light)}
     </div>
 
     <!-- ★ v3.278: เช็คทรัพย์สินกลับคลัง (โหมดคลัง) — ยืนยัน พาเลท/ลังน้ำ/ถัง ที่คนขับคืน -->
+    <!-- ★ v3.291: ACCOUNT — ตรวจรูปสินค้าในตู้ (ผ่าน/ไม่ผ่าน) -->
+    <div class="section" id="sec-loadphoto">
+      <div class="card card-gold">
+        <div class="card-head">
+          <h3>📷 ตรวจรูปสินค้าในตู้</h3>
+          <div class="row gap-8">
+            <button class="btn btn-outline btn-sm" onclick="renderLoadPhotoCheck()">🔄 รีเฟรช</button>
+            <button class="btn btn-outline btn-sm" onclick="switchTab('sec-home')">↩ กลับหน้าหลัก</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="txt-xs txt-muted">ดูรูปที่ขนส่งถ่ายตอนรับใบคุม แล้วกด <b class="txt-ok">ผ่าน</b> หรือ <b class="txt-danger">ไม่ผ่าน</b> — ผลลงชีทบันทึกเที่ยวส่ง</div>
+        </div>
+      </div>
+      <div id="loadPhotoBody"></div>
+    </div>
+
     <div class="section" id="sec-assets">
       <div class="card card-gold">
         <div class="card-head">
@@ -933,7 +950,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.290';
+const APP_VERSION='3.291';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -2039,6 +2056,7 @@ function renderCurrent(){
   else if(id==='sec-cncollect') renderCNCollect();   // v3.183
   else if(id==='sec-loadreq') renderLoadReqPending();   // v3.148
   else if(id==='sec-assets') renderAssets();   // ★ v3.278
+  else if(id==='sec-loadphoto') renderLoadPhotoCheck();   // ★ v3.291
   else if(id==='sec-returns'){ returnState._ownMode=!!state._openOwnReturn; state._openOwnReturn=false; renderReturn(); }   // v3.197: own-mode set/reset จุดเดียว (รับคืนปกติ = false เสมอ)
   else if(id==='sec-reports') renderReports();
   else if(id==='sec-customers') renderCustomers();
@@ -2069,6 +2087,7 @@ const HOME_MODULES=[
   {id:'customers',  icon:'🏪', label:'ข้อมูลร้านค้า',     sub:'ค้นหา · พิกัด · ผู้ดูแล',        target:'sec-customers',   ready:true, groups:['driver','warehouse']},   // v3.167: ตัดออกจากโหมดบัญชี
   {id:'loadreq',     icon:'📥', label:'ขอสินค้าเพิ่มขึ้นรถ', sub:'อนุมัติคำขอสินค้าของคนขับ',    target:'sec-loadreq',     ready:true, groups:['warehouse']},   // v3.148 · v3.167: ตัดออกจากบัญชี · v3.169: ตัด cn-missing ทิ้ง
   {id:'assets',     icon:'📦', label:'เช็คทรัพย์สินกลับคลัง', sub:'ยืนยัน พาเลท · ลังน้ำ · ถัง ที่คนขับคืน', target:'sec-assets', ready:true, groups:['warehouse']},   // ★ v3.278
+  {id:'loadphoto',  icon:'📷', label:'ตรวจรูปสินค้าในตู้', sub:'ดูรูปที่ขนส่งแนบ · ผ่าน/ไม่ผ่าน',  target:'sec-loadphoto',   ready:true, groups:['account']},   // ★ v3.291
   {id:'pallet',     icon:'🧺', label:'ค่าพาเลท',          sub:'ใครกรอกค่าพาเลทบ้าง · กดอนุมัติ',  target:'sec-pallet',      ready:true, groups:['account']},   // v3.168
   {id:'reports',    icon:'📊', label:'รายงาน',           sub:'สรุปยอด · ดาวน์โหลด',             target:'sec-reports',     ready:true, groups:['account']},
 ];
@@ -8278,6 +8297,74 @@ function assetJobs_(){
 }
 function assetJobById_(id){ return (state.jobs||[]).find(j=>normJobId(j.id)===normJobId(id)); }
 const _AS_KIND=[{k:'crates',ic:'🧃',lb:'ลังน้ำ'},{k:'tanks',ic:'🛢',lb:'ถัง'},{k:'pallet',ic:'🧱',lb:'พาเลท'}];
+/* ═══ ★★ v3.291: ตรวจรูปสินค้าในตู้ (โหมดบัญชี) — ดูรูปที่ขนส่งถ่ายตอนรับใบคุม แล้วกดผ่าน/ไม่ผ่าน ═══
+   ผลลงชีทบันทึกเที่ยวส่ง 3 คอลัมน์: ผลตรวจรูปตู้ / ผู้ตรวจรูปตู้ / วันเวลาตรวจรูปตู้ */
+let _lpView='wait';   // wait = รอตรวจ · done = ตรวจแล้ว
+function lpChecked_(j){ return !!(j&&j.photoChk&&j.photoChk.result); }
+function lpJobs_(){
+  const cut=Date.now()-21*86400000;
+  return (state.jobs||[]).filter(j=>{
+    if(!j||!j.id||!cleanCell(j.loadPhoto)) return false;        // ไม่มีรูป = ไม่ต้องตรวจ
+    if(!whPass_(j.warehouse)) return false;
+    const t=Math.max(+j.startedAt||0,+j.submittedAt||0);
+    if(t&&t<cut) return false;                                   // เก่ากว่า 21 วัน ไม่ต้องโชว์
+    return _lpView==='done'?lpChecked_(j):!lpChecked_(j);
+  }).sort((a,b)=>(b.startedAt||0)-(a.startedAt||0));
+}
+function lpThumb_(u,w){
+  const m=String(u||'').match(/drive\.google\.com\/file\/d\/([^/]+)/);
+  return m?('https://drive.google.com/thumbnail?id='+m[1]+'&sz=w'+(w||900)):u;
+}
+function renderLoadPhotoCheck(){
+  const box=$('loadPhotoBody'); if(!box) return;
+  if((parseInt((state.user||{}).userRole)||0)<3){ box.innerHTML='<div class="card"><div class="card-body txt-center txt-muted p-16">เมนูนี้สำหรับฝ่ายบัญชี</div></div>'; return; }
+  const list=lpJobs_();
+  const nWait=(state.jobs||[]).filter(j=>j&&cleanCell(j.loadPhoto)&&whPass_(j.warehouse)&&!lpChecked_(j)).length;
+  const tab=(v,l)=>`<button type="button" class="btn btn-sm ${_lpView===v?'btn-gold':'btn-outline'}" style="padding:5px 14px" onclick="_lpView='${v}';renderLoadPhotoCheck()">${esc(l)}</button>`;
+  const head=whFilterBar_('renderLoadPhotoCheck')
+    +`<div class="row gap-8" style="margin-bottom:10px">${tab('wait','⏳ รอตรวจ '+nWait)}${tab('done','✓ ตรวจแล้ว')}</div>`;
+  if(!list.length){ box.innerHTML=head+`<div class="card"><div class="card-body txt-center txt-muted p-16">${_lpView==='wait'?'ตรวจครบแล้ว ไม่มีรูปค้าง 🎉':'ยังไม่มีใบที่ตรวจแล้ว'}</div></div>`; return; }
+  box.innerHTML=head+list.map(j=>{
+    const drv=cleanCell((j.team&&j.team.driver)||j.driver||'-');
+    const plate=cleanCell(j.plate||(j.team&&j.team.plate)||'-');
+    const c=j.photoChk||{}, pass=String(c.result||'')==='ผ่าน';
+    const url=cleanCell(j.loadPhoto);
+    return `<div class="card" style="margin-bottom:10px;border-left:3px solid ${lpChecked_(j)?(pass?'var(--success)':'var(--danger)'):'var(--gold)'}">
+      <div class="card-body">
+        <div class="row" style="justify-content:space-between;align-items:flex-start;gap:6px">
+          <div style="min-width:0">
+            <div class="txt-bold">${esc(j.id)}</div>
+            <div class="txt-xs txt-muted">🧑 ${esc(drv)} · 🚗 ${esc(plate)} · 🏭 ${esc(j.warehouse||'-')}</div>
+          </div>
+          ${lpChecked_(j)?`<span class="badge ${pass?'badge-ok':'badge-danger'}">${pass?'✓ ผ่าน':'✕ ไม่ผ่าน'}</span>`:'<span class="badge badge-warn">⏳ รอตรวจ</span>'}
+        </div>
+        <a href="${esc(url)}" target="_blank" rel="noopener" style="display:block;margin-top:8px">
+          <img src="${esc(lpThumb_(url,900))}" alt="รูปสินค้าในตู้ ${esc(j.id)}" loading="lazy"
+               style="width:100%;max-height:340px;object-fit:contain;background:var(--row-alt);border-radius:10px;border:1px solid var(--border)">
+        </a>
+        <div class="txt-xs txt-muted" style="margin-top:4px">แตะรูปเพื่อดูเต็มใน Drive</div>
+        ${lpChecked_(j)
+          ? `<div class="txt-xs txt-muted" style="margin-top:8px">ตรวจโดย ${esc(c.by||'-')} · ${esc(c.at||'-')}
+               <button class="btn btn-outline btn-sm" style="margin-left:8px;padding:3px 10px" onclick="lpSave_('${esc(j.id)}','')">↩ ยกเลิกผล</button></div>`
+          : `<div class="row gap-8" style="margin-top:10px">
+               <button class="btn btn-gold" style="flex:1" onclick="lpSave_('${esc(j.id)}','ผ่าน')">✓ ผ่าน</button>
+               <button class="btn btn-outline" style="flex:1;color:var(--danger);border-color:var(--danger)" onclick="lpSave_('${esc(j.id)}','ไม่ผ่าน')">✕ ไม่ผ่าน</button>
+             </div>`}
+      </div></div>`;
+  }).join('');
+}
+async function lpSave_(id,result){
+  const j=(state.jobs||[]).find(x=>x.id===id); if(!j) return;
+  const by=(typeof currentUserName_==='function')?currentUserName_():((state.user||{}).displayName||'');
+  const at=(typeof assetTimeStr_==='function')?assetTimeStr_(Date.now()):'';
+  showToast(result?('กำลังบันทึกผล '+result+'…'):'กำลังยกเลิกผล…','info');
+  const r=await postSyncGAS_({action:'check_load_photo',jobId:j.id,result:result,by:result?by:'',at:result?at:''},30000);
+  if(!(r&&r.ok)){ showToast('บันทึกไม่สำเร็จ: '+((r&&r.error)||'ลองใหม่'),'error'); return; }
+  j.photoChk=result?{result:result,by:by,at:at}:null;
+  persistJobs();
+  showToast(result?(j.id+' → '+result+' ✓'):(j.id+' ยกเลิกผลแล้ว'),'success');
+  renderLoadPhotoCheck();
+}
 function renderAssets(){
   const box=$('assetsBody'); if(!box) return;
   if(!(state.user||{}).canApproveCN&&(parseInt((state.user||{}).userRole)||0)<3){ box.innerHTML='<div class="card"><div class="card-body txt-center txt-muted p-16">เมนูนี้สำหรับฝ่ายคลัง</div></div>'; return; }
@@ -9375,6 +9462,11 @@ async function loadJobsFromSheet(){
           ? Object.assign(_asObj_(inRow,'พาเลทคืนจริง(คลัง)','ลังน้ำคืนจริง(คลัง)','ถังคืนจริง(คลัง)')||{},
               {by:cleanCell(inRow['ผู้เช็คทรัพย์สิน']),at:cleanCell(inRow['วันเวลาเช็คทรัพย์สิน'])})
           : null,
+        // ★ v3.291: รูปสินค้าในตู้ + ผลตรวจของฝ่ายบัญชี
+        loadPhoto:cleanCell(inRow['รูปสินค้าในตู้']),
+        photoChk:cleanCell(inRow['ผลตรวจรูปตู้'])
+          ? {result:cleanCell(inRow['ผลตรวจรูปตู้']),by:cleanCell(inRow['ผู้ตรวจรูปตู้']),at:cleanCell(inRow['วันเวลาตรวจรูปตู้'])}
+          : null,
         _fromSheet:true,
       };
     });
@@ -9496,6 +9588,8 @@ async function syncJobsFromSheet(opts){
       if(!sj.load&&local.load) sj.load=local.load;
       if(!sj.ret&&local.ret) sj.ret=local.ret;
       if(!sj.assets&&local.assets) sj.assets=local.assets;
+      if(!sj.photoChk&&local.photoChk) sj.photoChk=local.photoChk;   // ★ v3.291: ผลตรวจรูปที่เพิ่งกดแต่ชีทยังไม่ทัน
+      if(!sj.loadPhoto&&local.loadPhoto) sj.loadPhoto=local.loadPhoto;
       // เก็บ id เดิมที่ user เห็นบนแอป (ไม่เอา id ที่โดน Sheets เปลี่ยน)
       sj.id=local.id;
       // v3.30: gviz ทำทะเบียนตัวอักษร (บฉ1693) หายเมื่อคอลัมน์ปนเลข → ถ้าชีทคืนว่างแต่ local มี ให้คงไว้
@@ -10025,7 +10119,8 @@ const HEADERS_INPUT=['🔒 Row ID','วันเวลาปิดงาน','�
   'สรุปส่งพิเศษ','สรุปหมายเหตุขน','สรุปจำนวนขนกลับ','คลัง',
   'เช็คพาเลทคืน','เช็คลังน้ำคืน','เช็คถังคืน',
   'ผู้อนุมัติปิดงาน','วันเวลาอนุมัติ','ถังนำไป','วันเวลาที่รับงาน','รูปสินค้าในตู้',
-  'พาเลทคืนจริง(คลัง)','ลังน้ำคืนจริง(คลัง)','ถังคืนจริง(คลัง)','ผู้เช็คทรัพย์สิน','วันเวลาเช็คทรัพย์สิน'];   // ★ v3.278: คลังเช็คทรัพย์สินกลับคลัง
+  'พาเลทคืนจริง(คลัง)','ลังน้ำคืนจริง(คลัง)','ถังคืนจริง(คลัง)','ผู้เช็คทรัพย์สิน','วันเวลาเช็คทรัพย์สิน',
+  'ผลตรวจรูปตู้','ผู้ตรวจรูปตู้','วันเวลาตรวจรูปตู้'];   // ★ v3.291: บัญชีตรวจรูปสินค้าในตู้   // ★ v3.278: คลังเช็คทรัพย์สินกลับคลัง
 
 const HEADERS_CIN=['เลขใบคุม','Doc_Date','Doc_No','Customer_Code','Customer_Name',
   'Salesman_Code','Salesman_Name','ทะเบียนรถ','TotalBaht','วัน+เวลา ที่ส่งสินค้า',
@@ -10109,6 +10204,26 @@ function doPost(e){
         try{ sbInboxMarkDone_(['save_transfer|'+jobIdT+'|']); }catch(e){}
         return ContentService.createTextOutput(JSON.stringify({ok:true,transfer:jobIdT})).setMimeType(ContentService.MimeType.JSON);
       } finally { lockT.releaseLock(); }
+    }
+
+    /* ★★ v3.291: ฝ่ายบัญชีตรวจรูปสินค้าในตู้ → ผ่าน/ไม่ผ่าน (result ว่าง = ยกเลิกผล กลับไปรอตรวจ)
+       เขียนเฉพาะ 3 คอลัมน์ผลตรวจ ไม่แตะข้อมูลอื่นของแถวเลย */
+    if(data.action==='check_load_photo'){
+      const lockP=LockService.getScriptLock(); lockP.waitLock(30000);
+      try{
+        const inShP=ensureSheet_(ss,SHEET_INPUT,HEADERS_INPUT);
+        ensureHeaders_(inShP,['ผลตรวจรูปตู้','ผู้ตรวจรูปตู้','วันเวลาตรวจรูปตู้']);
+        const n=updateRowsByHeader_(ss,SHEET_INPUT,['🔒 Row ID'],[String(data.jobId)],{
+          'ผลตรวจรูปตู้':String(data.result||''),
+          'ผู้ตรวจรูปตู้':String(data.result?(data.by||''):''),
+          'วันเวลาตรวจรูปตู้':data.result?(data.at?String(data.at):new Date()):''
+        });
+        return ContentService.createTextOutput(JSON.stringify({ok:true,updated:n}))
+          .setMimeType(ContentService.MimeType.JSON);
+      }catch(err){
+        return ContentService.createTextOutput(JSON.stringify({ok:false,error:String(err)}))
+          .setMimeType(ContentService.MimeType.JSON);
+      }finally{ lockP.releaseLock(); }
     }
 
     if(data.action==='check_assets'){
@@ -10789,7 +10904,7 @@ function doPost(e){
     _saveLock.waitLock(120000);   // รอได้นาน เพราะบันทึกบิลที่มีรูปสลิปใช้เวลาหลายสิบวินาที
     try{
     const inSh=ensureSheet_(ss,SHEET_INPUT,HEADERS_INPUT);
-    ensureHeaders_(inSh,['ร้านค้า','รูปสินค้าในตู้','พาเลทคืนจริง(คลัง)','ลังน้ำคืนจริง(คลัง)','ถังคืนจริง(คลัง)','ผู้เช็คทรัพย์สิน','วันเวลาเช็คทรัพย์สิน']);   // ★ v3.270/3.278: คอลัมน์ใหม่ต่อท้าย (ชีทเดิมไม่มี — ensureSheet_ ไม่เติมให้)
+    ensureHeaders_(inSh,['ร้านค้า','รูปสินค้าในตู้','พาเลทคืนจริง(คลัง)','ลังน้ำคืนจริง(คลัง)','ถังคืนจริง(คลัง)','ผู้เช็คทรัพย์สิน','วันเวลาเช็คทรัพย์สิน','ผลตรวจรูปตู้','ผู้ตรวจรูปตู้','วันเวลาตรวจรูปตู้']);   // ★ v3.270/3.278: คอลัมน์ใหม่ต่อท้าย (ชีทเดิมไม่มี — ensureSheet_ ไม่เติมให้)
     const cinSh=ensureSheet_(ss,SHEET_CIN,HEADERS_CIN);
     const team=data.team||{};
     const sp=data.special||{};
