@@ -669,6 +669,7 @@
     <button class="tab-btn" id="tabDashboard" onclick="setMode('dashboard')">📊 แดชบอร์ด</button>
     <button class="tab-btn" id="tabHistory" onclick="setMode('history')">📜 ประวัติ</button>
     <button class="tab-btn" id="tabPutaway" onclick="setMode('putaway')">📍 จุดวาง</button>
+    <button class="tab-btn" id="tabScrap" onclick="setMode('scrap')">🧮 นับเศษ</button>
     <button class="tab-btn" id="tabSummary" onclick="setMode('summary')" style="display:none">สรุปผล</button>
   </div>
 
@@ -781,6 +782,45 @@
     </div>
 
   </div><!-- /modeCount -->
+
+  <!-- ══════════ นับเศษ (SCRAP) MODE ══════════ -->
+  <div id="modeScrap" style="display:none">
+    <!-- Barcode dock -->
+    <div class="bc-dock">
+      <div class="bc-input bc-wrap">
+        <span style="color:var(--muted);font-size:18px">🔍</span>
+        <input type="text" id="scrapInput" inputmode="text" autocomplete="off"
+               oninput="onScrapInput(this)" placeholder="สแกน / พิมพ์บาร์โค้ด (นับเศษ)">
+        <button class="bc-clear" id="scrapClear" onclick="clearScrapInput()" title="ล้าง" type="button" style="display:none">✕</button>
+        <button class="bc-go" onclick="scrapScan()" title="เพิ่ม" type="button">→</button>
+      </div>
+    </div>
+
+    <!-- Warehouse picker -->
+    <div class="wh-bar mt-8">
+      <span class="wh-bar-l">คลัง</span>
+      <select id="scrapWh" class="input input-compact wh-bar-sel" onchange="onScrapWhChange()"></select>
+    </div>
+
+    <!-- Counter (attribution) -->
+    <div class="wh-bar mt-8">
+      <span class="wh-bar-l">ผู้นับ</span>
+      <span id="scrapCounter" style="flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">—</span>
+    </div>
+
+    <!-- pending entry card -->
+    <div id="scrapPending"></div>
+
+    <!-- accumulated scrap list -->
+    <div class="livebar mt-10" id="scrapListCard" style="display:none">
+      <div class="livebar-head">
+        <div style="font-size:14px;font-weight:700">รายการนับเศษ <span class="dsk-n" id="scrapN">0</span></div>
+        <button class="lnk-clear" onclick="clearScrap()" type="button">🗑 ล้างทั้งหมด</button>
+      </div>
+      <div id="scrapList"></div>
+      <button class="btn btn-primary btn-block" style="margin-top:12px" onclick="saveScrapToSheet()" type="button">📤 ส่งทั้งหมดลงชีท</button>
+    </div>
+  </div><!-- /modeScrap -->
 
   <!-- ══════════ SUMMARY — ป็อปอัป (เปิดจากปุ่มลอย "สรุป & บันทึก" ไม่ต้องเลื่อนหาด้านล่าง) ══════════ -->
   <div class="modal-overlay" id="summaryModal">
@@ -907,7 +947,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.58';
+const APP_VERSION = 'v4.59';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -997,6 +1037,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('countInput').addEventListener('keydown', e => {
     if (e.key === 'Enter') countScan();
+  });
+  document.getElementById('scrapInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') scrapScan();
   });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
@@ -2201,10 +2244,12 @@ function setMode(mode) {
   document.getElementById('modeDashboard').style.display = mode==='dashboard' ? 'block' : 'none';
   document.getElementById('modeHistory').style.display   = mode==='history'   ? 'block' : 'none';
   document.getElementById('modePutaway').style.display   = mode==='putaway'   ? 'block' : 'none';
+  document.getElementById('modeScrap').style.display     = mode==='scrap'     ? 'block' : 'none';
   document.getElementById('tabCount').classList.toggle('active', mode==='count');
   document.getElementById('tabDashboard').classList.toggle('active', mode==='dashboard');
   document.getElementById('tabHistory').classList.toggle('active', mode==='history');
   document.getElementById('tabPutaway').classList.toggle('active', mode==='putaway');
+  document.getElementById('tabScrap').classList.toggle('active', mode==='scrap');
   // ชื่อแอปคงที่ "Check Stock" ทุกแท็บ (แท็บที่เลือกดูได้จากแถบแท็บด้านล่างอยู่แล้ว)
   // เวอร์ชันย้ายไปบรรทัดรอง (hd-sub) เพราะ badge ในหัวข้อโดน overflow:hidden ตัดหาย
   document.getElementById('hdTitle').textContent = 'Check Stock';
@@ -2224,6 +2269,8 @@ function setMode(mode) {
     loadHistory(true);
   } else if (mode==='putaway') {
     initPutawayMode();
+  } else if (mode==='scrap') {
+    initScrapMode();
   } else {
     setTimeout(() => document.getElementById('barcodeInput').focus(), 60);
   }
@@ -3766,6 +3813,177 @@ async function saveCountToSheet() {
   } finally {
     hideSpinner();
   }
+}
+
+// ══════════ นับเศษ (SCRAP) MODE ══════════
+// นับอิสระ: ยิงบาร์ไหนก็นับตามบาร์นั้น เก็บ ชื่อ/บาร์/หน่วย/จำนวน/วันหมดอายุ/คลัง
+// สะสมเป็นรายการก่อน → กดส่งทั้งหมดลงชีท (แท็บ "นับเศษ" ผ่าน GAS action=saveScrap)
+let scrapItems = [];      // [{id,barcode,name,unit,qty,expiry,warehouse,counter,ts}]
+let scrapPending = null;  // {barcode, product, unit, name, found}
+const SCRAP_STORE = 'stock_scrap_v1';
+function loadScrap()      { try { scrapItems = JSON.parse(localStorage.getItem(SCRAP_STORE)) || []; } catch { scrapItems = []; } }
+function saveScrapLocal() { try { localStorage.setItem(SCRAP_STORE, JSON.stringify(scrapItems)); } catch {} }
+
+function initScrapMode() {
+  const sel = document.getElementById('scrapWh');
+  if (!sel.options.length) {
+    sel.innerHTML = visibleWh.length
+      ? visibleWh.map(w => `<option value="${w}">${w} · ${WH_NAMES[w]||w}</option>`).join('')
+      : '<option>— ไม่มีคลัง —</option>';
+  }
+  loadScrap();
+  document.getElementById('scrapCounter').textContent = counterDisplayName() || '— (เลือกผู้นับในแท็บนับสต็อก)';
+  renderScrapList();
+  setTimeout(() => document.getElementById('scrapInput').focus(), 60);
+}
+function onScrapInput(inp)  { document.getElementById('scrapClear').style.display = inp.value ? 'flex' : 'none'; }
+function clearScrapInput()  { const i = document.getElementById('scrapInput'); i.value = ''; document.getElementById('scrapClear').style.display = 'none'; i.focus(); }
+function onScrapWhChange()  { /* สแกนถัดไปจะใช้คลังใหม่อัตโนมัติ (รายการเก่าคงคลังเดิม) */ }
+
+// ยิ่ง/พิมพ์บาร์โค้ด → หาในแคตตาล็อก เจอ=เติมชื่อ/หน่วยให้ · ไม่เจอ=ฟอร์มกรอกเอง
+function scrapScan(code) {
+  const inp = document.getElementById('scrapInput');
+  const raw = (code || inp.value).trim();
+  if (!raw) { inp.focus(); return; }
+  const found = barcodeIndex[raw];
+  if (found) {
+    scrapPending = { barcode: raw, product: found.product, unit: found.unit,
+      name: found.product['PRODUCT NAME'] || '', found: true };
+  } else {
+    const looksCode = /^[A-Za-z0-9]{3,}$/.test(raw);   // เป็นรหัส → ใส่ช่องบาร์ · เป็นชื่อ → ใส่ช่องชื่อ
+    scrapPending = { barcode: looksCode ? raw : '', unit: 'EA',
+      name: looksCode ? '' : raw, product: null, found: false };
+  }
+  inp.value = '';
+  document.getElementById('scrapClear').style.display = 'none';
+  renderScrapPending();
+  if (navigator.vibrate) navigator.vibrate(60);
+}
+
+function renderScrapPending() {
+  const el = document.getElementById('scrapPending');
+  if (!scrapPending) { el.innerHTML = ''; return; }
+  const sp = scrapPending;
+  const lbl = 'font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px';
+  const unitOpts = ['CS','BP','PA','EA'].map(u => `<option value="${u}"${u===sp.unit?' selected':''}>${u}</option>`).join('');
+  const nameBlock = sp.found
+    ? `<div class="pb-name">${sp.name}${sp.product && sp.product._sku ? skuSuffix(sp.product._sku) : ''}</div>
+       <div class="pb-sub">บาร์โค้ด ${sp.barcode || '—'}${sp.product && sp.product._code ? ' · รหัส '+sp.product._code : ''}</div>`
+    : `<div style="font-size:12px;color:var(--warning);font-weight:700;margin-bottom:6px">⚠️ ไม่พบในแคตตาล็อก — กรอกเอง</div>
+       <div class="field"><label style="${lbl}">ชื่อสินค้า *</label>
+         <input type="text" id="scrapName" class="input input-compact" style="margin-top:4px" value="${(sp.name||'').replace(/"/g,'&quot;')}" placeholder="พิมพ์ชื่อสินค้า" autocomplete="off"></div>
+       <div class="field" style="margin-top:6px"><label style="${lbl}">บาร์โค้ด (ถ้ามี)</label>
+         <input type="text" id="scrapBarcode" class="input input-compact" style="margin-top:4px" value="${(sp.barcode||'').replace(/"/g,'&quot;')}" placeholder="บาร์โค้ด" autocomplete="off" inputmode="text"></div>`;
+  el.innerHTML = `<div class="pb-overlay" onclick="if(event.target===this)cancelScrap()"><div class="pb-card">
+    <div class="pb-flag">▸ นับเศษ · ใส่จำนวน</div>
+    <div style="margin:6px 0 2px">${nameBlock}</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+      <div class="field" style="flex:0 0 92px"><label style="${lbl}">หน่วย</label>
+        <select id="scrapUnit" class="input input-compact" style="margin-top:4px">${unitOpts}</select></div>
+      <div class="field" style="flex:1"><label style="${lbl}">จำนวน</label>
+        <input id="scrapQty" class="pb-qty" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="5" value="1"
+               autocomplete="off" onfocus="this.select()" onkeydown="if(event.key==='Enter'){event.preventDefault();confirmScrap();}"></div>
+    </div>
+    <div class="field" style="margin-top:10px">
+      <label style="${lbl}">📅 วันหมดอายุ (ไม่บังคับ)</label>
+      <input type="date" id="scrapExp" class="input input-compact" style="margin-top:4px" value="${sp.expiry||''}">
+    </div>
+    <button class="btn btn-primary btn-block" style="margin-top:14px" onclick="confirmScrap()" type="button">✓ เพิ่มเข้ารายการ</button>
+    <button class="btn btn-outline btn-block" style="margin-top:8px" onclick="cancelScrap()" type="button">ยกเลิก</button>
+  </div></div>`;
+  // เจอ → โฟกัสช่องจำนวน (เด้งคีย์บอร์ดตัวเลข) · ไม่เจอ → โฟกัสช่องชื่อให้พิมพ์ก่อน
+  setTimeout(() => {
+    if (sp.found) { const q = document.getElementById('scrapQty'); if (q) { q.focus(); q.select(); } }
+    else { const n = document.getElementById('scrapName'); if (n) n.focus(); }
+  }, 40);
+}
+
+function cancelScrap() {
+  scrapPending = null;
+  document.getElementById('scrapPending').innerHTML = '';
+  document.getElementById('scrapInput').focus();
+}
+
+function confirmScrap() {
+  if (!scrapPending) return;
+  const sp = scrapPending;
+  const unit = document.getElementById('scrapUnit').value || 'EA';
+  const qty  = parseInt(document.getElementById('scrapQty').value) || 0;
+  if (qty <= 0) { showToast('ใส่จำนวนก่อน', 'warning'); return; }
+  let name = sp.name, barcode = sp.barcode;
+  if (!sp.found) {
+    name    = (document.getElementById('scrapName').value || '').trim();
+    barcode = (document.getElementById('scrapBarcode').value || '').trim();
+    if (!name) { showToast('พิมพ์ชื่อสินค้าก่อน', 'warning'); document.getElementById('scrapName').focus(); return; }
+  }
+  const exp = document.getElementById('scrapExp').value || '';   // YYYY-MM-DD
+  const wh  = document.getElementById('scrapWh').value || '';
+  scrapItems.unshift({
+    id: 's' + Date.now() + '_' + Math.floor(Math.random()*1000),
+    barcode, name, unit, qty, expiry: exp,
+    warehouse: wh, counter: counterDisplayName(), ts: new Date().toISOString(),
+  });
+  saveScrapLocal();
+  scrapPending = null;
+  document.getElementById('scrapPending').innerHTML = '';
+  renderScrapList();
+  showToast(`+${qty} ${unit} · ${name}`, 'success');
+  document.getElementById('scrapInput').focus();
+}
+
+function renderScrapList() {
+  const card = document.getElementById('scrapListCard');
+  const list = document.getElementById('scrapList');
+  document.getElementById('scrapN').textContent = scrapItems.length;
+  if (!scrapItems.length) { card.style.display = 'none'; list.innerHTML = ''; return; }
+  card.style.display = 'block';
+  list.innerHTML = scrapItems.map(it => `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;padding:9px 0;border-bottom:1px solid var(--border)">
+      <div style="min-width:0;flex:1">
+        <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis">${it.name || '—'}</div>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:2px">
+          <b style="color:var(--navy-mid);font-size:13px">${it.qty} ${it.unit}</b>${it.barcode ? ' · '+it.barcode : ''} · ${it.warehouse}${it.expiry ? ' · 📅 '+formatThaiDate(it.expiry) : ''}
+        </div>
+      </div>
+      <button class="lnk-clear" style="flex:none" onclick="deleteScrapItem('${it.id}')" type="button">🗑</button>
+    </div>`).join('');
+}
+function deleteScrapItem(id) { scrapItems = scrapItems.filter(x => x.id !== id); saveScrapLocal(); renderScrapList(); }
+function clearScrap() {
+  if (!scrapItems.length) return;
+  if (!confirm('ล้างรายการนับเศษทั้งหมด?')) return;
+  scrapItems = []; saveScrapLocal(); renderScrapList();
+  showToast('ล้างรายการนับเศษแล้ว', 'info');
+}
+
+// ส่งทั้งหมดลงชีท — แยกส่งตามคลัง (สเปรดชีตแยกต่อคลัง) ผ่าน GAS action=saveScrap
+async function saveScrapToSheet() {
+  if (!scrapItems.length) { showToast('ยังไม่มีรายการนับเศษ', 'warning'); return; }
+  const byWh = {};
+  scrapItems.forEach(it => { (byWh[it.warehouse] = byWh[it.warehouse] || []).push(it); });
+  showSpinner('กำลังส่งนับเศษลงชีท...');
+  try {
+    for (const wh of Object.keys(byWh)) {
+      const payload = {
+        action: 'saveScrap',
+        warehouse: wh,
+        empId: counterDisplayEmpId(),
+        counterName: counterDisplayName(),
+        email: currentUser?.email || '',
+        savedAt: new Date().toISOString(),
+        rows: byWh[wh].map(it => ({
+          barcode: it.barcode || '', name: it.name || '', unit: it.unit || '',
+          qty: it.qty || 0, expiryDate: it.expiry || '', countedAt: it.ts || '',
+        })),
+      };
+      await fetch(COUNT_SAVE_URL, { method:'POST', mode:'no-cors',
+        headers:{ 'Content-Type':'text/plain;charset=utf-8' }, body: JSON.stringify(payload) });
+    }
+    scrapItems = []; saveScrapLocal(); renderScrapList();
+    showToast('ส่งนับเศษลงชีทแล้ว ✓', 'success');
+  } catch (e) {
+    showToast('ส่งไม่สำเร็จ: ' + e, 'error');
+  } finally { hideSpinner(); }
 }
 
 // ════════════ HISTORY MODE ════════════
