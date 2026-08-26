@@ -799,7 +799,7 @@ body.dark .spinner-box{background:var(--card-bg)}
         </div>
       </div>
 
-      <div class="nav-foot">เบิกอุปกรณ์<br>v7.8</div>
+      <div class="nav-foot">เบิกอุปกรณ์<br>v7.9</div>
     </nav>
 
   <main class="content">
@@ -1021,6 +1021,9 @@ body.dark .spinner-box{background:var(--card-bg)}
         <button class="btn btn-gold grow" onclick="openRecv()">＋ สร้างใบรับเข้า</button>
         <button class="btn btn-outline" onclick="exportRecv()">⤓ CSV</button>
       </div>
+      <div class="notice"><span>📥</span><div>บันทึกรับเข้าแล้ว <b>ของเข้าคลังทันที</b> —
+        แต่ต้องให้ <b id="rcApprName">ผู้อนุมัติ</b> กดอนุมัติก่อน ถึงจะปริ้นใบรับเข้าได้<br>
+        ใบที่ยังไม่อนุมัติ <b>แก้ไขได้</b> (ระบบปรับส่วนต่างสต็อกให้เอง) · มีปุ่มส่งไลน์ขออนุมัติ</div></div>
       <div id="recvList"></div>
     </section>
 
@@ -1426,7 +1429,7 @@ body.dark .spinner-box{background:var(--card-bg)}
 
 <script>
 /* ══════════════════════════════════════════════════════════
-   เบิกอุปกรณ์สำนักงาน · รัตนไพบูลย์  v7.8
+   เบิกอุปกรณ์สำนักงาน · รัตนไพบูลย์  v7.9
    พนักงานคีย์ใบเบิก → HR อนุมัติ + ใส่วันที่ได้ของ → จ่ายของ
    ยังไม่ใส่ gasUrl = โหมดทดลอง (อุปกรณ์อ่านจากชีตจริง, ใบเบิกเก็บในเครื่อง)
    ══════════════════════════════════════════════════════════ */
@@ -2206,6 +2209,7 @@ function switchTab(tab){
   if(tab==='win')   loadWins(false);
   if(tab==='home')  renderHome();
   if(tab==='shop' && !picLoaded) loadPics(false).then(()=>renderShop());
+  if(tab==='recv') loadPO(false);      /* ขอชื่อ+สิทธิ์ผู้อนุมัติมาใช้ในหน้ารับเข้า */
   if(tab==='po'){ loadPO(false);
     Promise.all([loadBP(false), loadPar(false)]).then(()=>{ if(poLoaded) renderPO(); }); }
 }
@@ -3574,14 +3578,242 @@ async function saveRecv(){
   }catch(e){ showToast(e.message||String(e),'error'); }
   finally{ btn.disabled=false; hideSpinner(); }
 }
+
+/* ══════ ใบรับเข้า: แก้ไข · ขออนุมัติ · ปริ้น ══════
+   ของเข้าคลังตั้งแต่ตอนกดบันทึกแล้ว (ของมาถึงจริง) — การอนุมัติคุมแค่การออกเอกสาร
+   แก้ใบได้ตอนยังไม่อนุมัติ ระบบจะปรับส่วนต่างสต็อกให้เอง */
+const RECV_ST = {
+  pending : {lb:'⏳ รออนุมัติ',  cls:'badge-warn'},
+  approved: {lb:'✅ อนุมัติแล้ว', cls:'badge-ok'},
+  rejected: {lb:'✖ ไม่อนุมัติ',  cls:'badge-danger'},
+};
+const recvSt     = r => RECV_ST[r.status] || RECV_ST.pending;
+const recvCanEdit = r => (r.status||'pending') !== 'approved';
+let recvEdit = null;      /* {docNo, lines:[...]} */
+
+function startRecvEdit(no){
+  const r = RECVS.find(x=>x.docNo===no); if(!r) return;
+  if(!recvCanEdit(r)){ showToast('ใบนี้อนุมัติแล้ว แก้ไม่ได้ — ให้ผู้อนุมัติกดยกเลิกการอนุมัติก่อน','warning'); return; }
+  recvEdit = { docNo:no, vendor:r.vendor||'', invoice:r.invoice||'', note:r.note||'',
+               lines:(r.lines||[]).map(l=>({...l, qty:toNum(l.qty), price:toNum(l.price)})) };
+  renderRecv();
+  setTimeout(()=>$('recvEditBox')?.scrollIntoView({behavior:'smooth', block:'center'}), 150);
+}
+function cancelRecvEdit(){ recvEdit = null; renderRecv(); }
+const reLine = c => recvEdit?.lines.find(l=>l.code===c);
+function reSetQty(c,v){ const l=reLine(c); if(l){ l.qty=Math.max(0,parseInt(v)||0); renderRecv(); } }
+function reSetPrice(c,v){ const l=reLine(c); if(l){ l.price=Math.max(0,parseFloat(v)||0); renderRecv(); } }
+function reDrop(c){
+  if(!recvEdit) return;
+  recvEdit.lines = recvEdit.lines.filter(l=>l.code!==c);
+  renderRecv(); showToast('ลบออกจากใบแล้ว — สต็อกจะถูกหักคืนตอนบันทึก','info');
+}
+function reRenderPick(){
+  const box=$('rePickList'); if(!box) return;
+  const q=($('rePick')?.value||'').trim().toLowerCase();
+  if(!q){ box.innerHTML=''; return; }
+  const have=new Set((recvEdit?.lines||[]).map(l=>l.code));
+  const hit=ITEMS.filter(i=>i.active && !have.has(i.code))
+    .filter(i=>i.code.toLowerCase().includes(q)||String(i.name).toLowerCase().includes(q)).slice(0,8);
+  box.innerHTML = hit.length ? hit.map(i=>`
+    <div class="pick-row" onclick="reAdd('${esc(i.code)}')">
+      <b>${esc(i.code)}</b> ${esc(i.name)} <span class="txt-sm txt-muted">เหลือ ${nf(i.stock)}</span></div>`).join('')
+    : `<div class="pick-row txt-muted">ไม่พบ (หรืออยู่ในใบแล้ว)</div>`;
+}
+function reAdd(code){
+  const i=itemOf(code); if(!i||!recvEdit) return;
+  recvEdit.lines.push({code:i.code, name:i.name, unit:i.unit||'', qty:1, price:toNum(i.price)});
+  $('rePick').value=''; reRenderPick(); renderRecv();
+  showToast(`เพิ่ม ${i.name} — ปรับจำนวนได้`,'success');
+}
+async function saveRecvEdit(){
+  if(!recvEdit) return;
+  const ok = recvEdit.lines.filter(l=>toNum(l.qty)>0);
+  if(!ok.length){ showToast('ต้องเหลืออย่างน้อย 1 รายการ','warning'); return; }
+  const r = RECVS.find(x=>x.docNo===recvEdit.docNo) || {};
+  const oldQ = {}; (r.lines||[]).forEach(l=>oldQ[l.code]=toNum(l.qty));
+  const diff = [];
+  ok.forEach(l=>{ const d=toNum(l.qty)-(oldQ[l.code]||0); if(d) diff.push(`${l.name} ${d>0?'+':''}${nf(d)}`); delete oldQ[l.code]; });
+  Object.keys(oldQ).forEach(c=>{ if(oldQ[c]) diff.push(`${c} −${nf(oldQ[c])} (ลบออก)`); });
+
+  askConfirm('💾 บันทึกการแก้ไขใบรับเข้า',
+    `<b>${esc(recvEdit.docNo)}</b> · เหลือ ${nf(ok.length)} รายการ
+     ${diff.length ? `<div class="notice mt-12"><span>📦</span><div><b>สต็อกจะถูกปรับตามส่วนต่าง</b><br>
+       <span class="txt-sm">${diff.slice(0,8).map(esc).join(' · ')}${diff.length>8?` ...และอีก ${diff.length-8}`:''}</span></div></div>`
+      : '<div class="txt-sm txt-muted mt-8">จำนวนไม่เปลี่ยน — สต็อกคงเดิม</div>'}`,
+    'บันทึก','btn-gold',
+    async ()=>{
+      showSpinner('กำลังบันทึก...');
+      try{
+        await apiWrite('updateRecv',{docNo:recvEdit.docNo, lines:ok,
+          vendor:recvEdit.vendor, invoice:recvEdit.invoice, note:recvEdit.note});
+        recvEdit=null; closeModal('mdAct');
+        await loadData();
+        showToast('บันทึกการแก้ไขแล้ว ✓ สต็อกปรับให้ตรงแล้ว','success');
+      }catch(e){ showToast(e.message||String(e),'error'); }
+      finally{ hideSpinner(); }
+    });
+}
+/* ── ผู้อนุมัติ ── */
+function approveRecv(no, act){
+  if(!isPoApprover()){ showToast(`อนุมัติใบรับเข้าได้เฉพาะ ${poApproverName} เท่านั้น`,'warning'); return; }
+  const r = RECVS.find(x=>x.docNo===no); if(!r) return;
+  const qty=(r.lines||[]).reduce((s,l)=>s+toNum(l.qty),0);
+  const amt=(r.lines||[]).reduce((s,l)=>s+toNum(l.qty)*toNum(l.price),0);
+  const T = {approveRecv:['✅ อนุมัติใบรับเข้า','อนุมัติ','btn-gold'],
+             rejectRecv:['✖ ไม่อนุมัติใบรับเข้า','ไม่อนุมัติ','btn-danger'],
+             unapproveRecv:['↺ ยกเลิกการอนุมัติ','ยกเลิกการอนุมัติ','btn-danger']}[act];
+  askConfirm(T[0],
+    `<b>${esc(no)}</b> · ${nf((r.lines||[]).length)} รายการ · ${nf(qty)} ชิ้น · <b>${nf(amt,2)} ฿</b>
+     <div class="txt-sm txt-muted mt-8">ผู้ขาย ${esc(r.vendor||'-')} · ใบเสร็จ ${esc(r.invoice||'-')} ·
+       บันทึกโดย ${esc(r.name||'-')}</div>
+     ${act==='approveRecv'?`<div class="txt-sm txt-muted mt-8">อนุมัติแล้วจะปริ้นใบรับเข้าได้ และใบจะถูกล็อกแก้ไม่ได้</div>`:''}
+     ${act==='unapproveRecv'?`<div class="txt-sm txt-muted mt-8">ใบจะกลับเป็น "รออนุมัติ" และแก้ไขได้อีกครั้ง</div>`:''}
+     <div class="field mt-12"><label>หมายเหตุ${act==='rejectRecv'?' — เหตุผล':' (ถ้ามี)'}</label>
+       <input class="input" id="rcNote" placeholder="" autocomplete="off"></div>`,
+    T[1], T[2],
+    async ()=>{
+      showSpinner('กำลังบันทึก...');
+      try{
+        await apiWrite(act,{docNo:no, note:($('rcNote')?.value||'').trim()});
+        closeModal('mdAct'); await loadData();
+        showToast('บันทึกแล้ว ✓','success');
+      }catch(e){ showToast(e.message||String(e),'error'); }
+      finally{ hideSpinner(); }
+    });
+}
+/* ── ส่งไลน์ขออนุมัติ ── */
+function notifyRecv(no){
+  const r = RECVS.find(x=>x.docNo===no); if(!r) return;
+  const qty=(r.lines||[]).reduce((s,l)=>s+toNum(l.qty),0);
+  const amt=(r.lines||[]).reduce((s,l)=>s+toNum(l.qty)*toNum(l.price),0);
+  const top=(r.lines||[]).slice().sort((a,b)=>toNum(b.qty)*toNum(b.price)-toNum(a.qty)*toNum(a.price))
+    .slice(0,8).map(l=>`· ${l.name} ${nf(l.qty)} ${l.unit||''} = ${nf(toNum(l.qty)*toNum(l.price),2)} บ.`).join('\n');
+  ntDoc=null;
+  $('ntWho').innerHTML = `<b>ใบรับเข้า ${esc(no)}</b> · ${nf((r.lines||[]).length)} รายการ · ${nf(amt,2)} ฿<br>
+    ส่งถึง <b>${esc(poApproverName)}</b> <span class="txt-sm txt-muted">${esc(poApprover)}</span>`;
+  $('ntText').value =
+    `📥 ขออนุมัติการรับเข้าอุปกรณ์ค่ะ\n\n`+
+    `เลขที่ ${no}\n`+
+    `วันที่รับของ ${formatThaiDate(r.recvDate||r.createdAt)}\n`+
+    `ผู้ขาย ${r.vendor||'-'}\n`+
+    `เลขที่ใบเสร็จ ${r.invoice||'-'}\n`+
+    `ผู้บันทึก ${r.name||'-'}\n`+
+    `จำนวน ${nf((r.lines||[]).length)} รายการ · ${nf(qty)} ชิ้น\n`+
+    `ยอดรวม ${nf(amt,2)} บาท\n`+
+    (r.note?`หมายเหตุ ${r.note}\n`:'')+
+    `\nรายการหลัก\n${top}${(r.lines||[]).length>8?`\n· ...และอีก ${nf((r.lines||[]).length-8)} รายการ`:''}\n`+
+    `\nรบกวนเข้าไปกดอนุมัติที่เมนู "รับเข้า" ด้วยนะคะ 🙏\n\n`+
+    `👉 ${APP_URL}`;
+  $('btnShare').style.display = navigator.share ? '' : 'none';
+  openModal('mdNotify');
+}
+/* ── ปริ้นใบรับเข้า — เฉพาะใบที่อนุมัติแล้ว ── */
+function printRecv(no){
+  const r = RECVS.find(x=>x.docNo===no);
+  if(!r){ showToast('ไม่พบใบรับเข้านี้','warning'); return; }
+  if((r.status||'pending')!=='approved'){
+    showToast(`ใบนี้ยังไม่ได้รับอนุมัติ — ต้องให้ ${poApproverName} อนุมัติก่อนถึงจะปริ้นได้`,'warning'); return;
+  }
+  const lines=r.lines||[];
+  const qty=lines.reduce((s,l)=>s+toNum(l.qty),0);
+  const amt=lines.reduce((s,l)=>s+toNum(l.qty)*toNum(l.price),0);
+  const dots='.............../.............../...............';
+  $('printArea').innerHTML = `
+  <div class="pr-doc po-doc">
+    <div class="po-round"><b>เลขที่</b><div class="v">${esc(no)}</div>
+      <div class="mn">${formatThaiDate(r.recvDate||r.createdAt)}</div></div>
+    <div class="po-title">ใบรับเข้าอุปกรณ์สำนักงาน</div>
+    <div class="po-co">${esc(PO_COMPANY)}</div>
+    <div class="po-sub">ผู้ขาย ${esc(r.vendor||'-')} · เลขที่ใบเสร็จ ${esc(r.invoice||'-')} ·
+      คลัง ${esc(centerOf(r.center))} · ผู้บันทึก ${esc(r.name||'-')}</div>
+    <table class="po-tbl">
+      <thead><tr>
+        <th style="width:24px">ที่</th><th style="width:58px">รหัส</th><th>ชื่อสินค้า</th>
+        <th style="width:46px">หน่วย</th><th style="width:52px">จำนวนรับ</th>
+        <th style="width:60px">ราคา/หน่วย</th><th style="width:72px">รวมเงิน</th><th style="width:56px">ตรวจรับ</th>
+      </tr></thead>
+      <tbody>${lines.map((l,i)=>`<tr>
+        <td class="n">${i+1}</td><td class="c">${esc(l.code)}</td><td class="nm">${esc(l.name)}</td>
+        <td class="c">${esc(l.unit||'')}</td><td class="n"><b>${nf(l.qty)}</b></td>
+        <td class="n">${nf(l.price,2)}</td><td class="n">${nf(toNum(l.qty)*toNum(l.price),2)}</td>
+        <td class="c"></td></tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="4" style="text-align:right">รวม ${nf(lines.length)} รายการ</td>
+        <td class="n">${nf(qty)}</td><td></td><td class="n">${nf(amt,2)}</td><td></td></tr></tfoot>
+    </table>
+    ${r.note?`<div class="pr-note-box"><b>หมายเหตุ:</b> ${esc(r.note)}</div>`:''}
+    <div class="pr-note-box">✓ ${esc(r.appBy||poApproverName)} อนุมัติการรับเข้าแล้วเมื่อ
+      ${formatThaiDateTime(r.appAt)}${r.appNote?` — ${esc(r.appNote)}`:''}</div>
+    <div class="po-foot">
+      <div class="po-qr">${qrSvg(`${APP_URL}?rc=${encodeURIComponent(no)}`, 96)}
+        <div class="qr-cap">สแกนเพื่อเปิดแอป<br>ดูใบนี้ในระบบ</div></div>
+      <div class="po-sign2">
+        <div><div class="who">( ${esc(r.name||'')} )</div>
+          <div class="role">ผู้รับของ / บันทึกเข้าระบบ</div><div class="dt">${dots}</div></div>
+        <div><div class="who">( ${esc(r.appBy||poApproverName)} )</div>
+          <div class="role">ตรวจสอบและอนุมัติการรับเข้า</div>
+          <div class="dt">${r.appAt?formatThaiDate(r.appAt):dots}</div></div>
+      </div>
+    </div>
+  </div>`;
+  window.print();
+}
+/* ตารางแก้ไขใบรับเข้า */
+function recvEditTable(){
+  const L=recvEdit.lines;
+  const qty=L.reduce((s,l)=>s+toNum(l.qty),0);
+  const amt=L.reduce((s,l)=>s+toNum(l.qty)*toNum(l.price),0);
+  return `<div id="recvEditBox" class="board-card mb-12">
+    <div class="board-title">✏️ แก้ไขใบรับเข้า ${esc(recvEdit.docNo)}
+      <span class="txt-sm txt-muted">แก้จำนวน/ราคา · ลบ · เพิ่มรายการ — สต็อกจะปรับตามส่วนต่างให้เอง</span></div>
+    <div class="rp-grid">
+      <div class="field"><label>ผู้ขาย</label>
+        <input class="input" value="${esc(recvEdit.vendor)}" onchange="recvEdit.vendor=this.value"></div>
+      <div class="field"><label>เลขที่ใบเสร็จ</label>
+        <input class="input" value="${esc(recvEdit.invoice)}" onchange="recvEdit.invoice=this.value"></div>
+    </div>
+    <div class="field"><label>หมายเหตุ</label>
+      <input class="input" value="${esc(recvEdit.note)}" onchange="recvEdit.note=this.value"></div>
+    <div class="tbl-wrap" style="max-height:none">
+      <table class="tbl"><thead><tr>
+        <th>รหัส</th><th>ชื่อสินค้า</th><th class="num" style="width:92px">จำนวนรับ</th>
+        <th class="num" style="width:100px">ราคา/หน่วย</th><th class="num">รวมเงิน</th><th style="width:50px"></th>
+      </tr></thead><tbody>
+      ${L.map(l=>`<tr>
+        <td class="code">${esc(l.code)}</td>
+        <td>${esc(l.name)}<div class="txt-sm txt-muted">${esc(l.unit||'')}</div></td>
+        <td class="num"><input class="input input-cell" type="number" min="0" inputmode="numeric"
+              value="${toNum(l.qty)}" onchange="reSetQty('${esc(l.code)}',this.value)" onfocus="this.select()"></td>
+        <td class="num"><input class="input input-cell" type="number" min="0" step="0.01" inputmode="decimal"
+              value="${toNum(l.price)}" onchange="reSetPrice('${esc(l.code)}',this.value)" onfocus="this.select()"></td>
+        <td class="num">${nf(toNum(l.qty)*toNum(l.price),2)}</td>
+        <td><button class="btn btn-outline btn-sm" onclick="reDrop('${esc(l.code)}')">🗑</button></td>
+      </tr>`).join('')}
+      </tbody>
+      <tfoot><tr><td colspan="2">รวม ${nf(L.length)} รายการ</td>
+        <td class="num">${nf(qty)}</td><td></td><td class="num">${nf(amt,2)} ฿</td><td></td></tr></tfoot>
+      </table>
+    </div>
+    <div class="field mt-12" style="margin-bottom:8px"><label>เพิ่มรายการเข้าใบ</label>
+      <input class="input" id="rePick" placeholder="🔍 พิมพ์ชื่อหรือรหัสอุปกรณ์..." oninput="reRenderPick()" autocomplete="off">
+      <div id="rePickList" class="pick-list"></div></div>
+    <div class="act-bar" style="margin-bottom:0">
+      <button class="btn btn-gold" onclick="saveRecvEdit()">💾 บันทึกการแก้ไข</button>
+      <button class="btn btn-outline" onclick="cancelRecvEdit()">ยกเลิก</button>
+    </div>
+  </div>`;
+}
 function renderRecv(){
   if(!isHR()) return;
+  const an = $('rcApprName'); if(an) an.textContent = poApproverName;
   $('recvList').innerHTML = RECVS.length ? RECVS.map(r=>{
     const qty = (r.lines||[]).reduce((s,l)=>s+toNum(l.qty),0);
     const amt = (r.lines||[]).reduce((s,l)=>s+toNum(l.qty)*toNum(l.price),0);
+    const st = recvSt(r), me = isPoApprover(), pend = (r.status||'pending')==='pending';
     return `<div class="req-card hl-issued">
       <div class="req-head"><span class="req-no">${esc(r.docNo)}</span>
-        <span class="badge badge-ok">📥 รับเข้าแล้ว</span></div>
+        <span class="badge badge-ok">📥 รับเข้าแล้ว</span>
+        <span class="badge ${st.cls}">${st.lb}</span></div>
       <div class="req-meta">
         <span>📍 ${esc(centerOf(r.center))}</span>
         <span>🗓 ${formatThaiDate(r.recvDate||r.createdAt)}</span>
@@ -3590,10 +3822,20 @@ function renderRecv(){
         <span>👤 ${esc(r.name||'-')}</span>
       </div>
       ${r.note?`<div class="hr-note">📝 ${esc(r.note)}</div>`:''}
-      <div class="req-foot">
+      ${r.appBy?`<div class="hr-note">${r.status==='approved'?'✅':'✖'} ${esc(r.appBy)} ·
+        ${formatThaiDateTime(r.appAt)}${r.appNote?` — ${esc(r.appNote)}`:''}</div>`:''}
+      <div class="req-foot" style="flex-wrap:wrap;gap:6px">
         <button class="btn btn-outline btn-sm" onclick="toggleLines('rv-${esc(r.docNo)}')">
           📋 ${nf((r.lines||[]).length)} รายการ · ${nf(qty)} ชิ้น · ${nf(amt,2)} ฿ ▾</button>
+        ${r.status==='approved'
+          ? `<button class="btn btn-gold btn-sm" onclick="printRecv('${esc(r.docNo)}')">🖨 ปริ้นใบรับเข้า</button>
+             ${me?`<button class="btn btn-outline btn-sm" onclick="approveRecv('${esc(r.docNo)}','unapproveRecv')">↺ ยกเลิกอนุมัติ</button>`:''}`
+          : `${recvCanEdit(r)?`<button class="btn btn-outline btn-sm" onclick="startRecvEdit('${esc(r.docNo)}')">✏️ แก้ไข</button>`:''}
+             <button class="btn btn-outline btn-sm" onclick="notifyRecv('${esc(r.docNo)}')">💬 ส่งไลน์ขออนุมัติ</button>
+             ${me?`<button class="btn btn-gold btn-sm" onclick="approveRecv('${esc(r.docNo)}','approveRecv')">✓ อนุมัติ</button>
+                   <button class="btn btn-outline btn-sm" onclick="approveRecv('${esc(r.docNo)}','rejectRecv')">✖ ไม่อนุมัติ</button>`:''}`}
       </div>
+      ${recvEdit && recvEdit.docNo===r.docNo ? recvEditTable() : ''}
       <div class="lines" id="ln-rv-${esc(r.docNo)}">
         ${(r.lines||[]).map(l=>`<div class="line-row">
           <div class="line-nm">${esc(l.name)}<div class="txt-sm txt-muted">${esc(l.code)}</div></div>
