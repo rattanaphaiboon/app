@@ -933,7 +933,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.287';
+const APP_VERSION='3.290';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1154,6 +1154,26 @@ async function fetchSheet(sheetId,sheetName,opts){
 }
 
 /* ===== Sheet cache ใน localStorage — v2.53: แยก TTL ตามความถี่การเปลี่ยน ===== */
+/* ★★ v3.288: หา "ตัวอักษรคอลัมน์" (A,B,…,AE) จากชื่อหัวคอลัมน์จริงในชีท — คิวรี่ gviz อ้างได้แค่ตัวอักษร
+   พอมีคนแทรก/ย้ายคอลัมน์ ตัวอักษรจะเลื่อน แล้วคิวรี่ไปกรองผิดคอลัมน์แบบเงียบๆ (ไม่ error แต่ข้อมูลหาย)
+   เคสจริง 24 ส.ค.: แทรก "ร้านค้า" ที่ E → วันเวลาที่รับงาน AD→AE → ใบคุมที่ยังไม่อนุมัติหายหมด
+   แคชผลไว้ 24 ชม. · หาไม่เจอคืน '' = ให้ผู้เรียกดึงทั้งแผ่นแทน (ช้ากว่าแต่ไม่ผิด) */
+const COLMAP_KEY='dman_colmap_v1';
+function colLetterOfIndex_(i){ let s='',n=i+1; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=Math.floor((n-1)/26); } return s; }
+async function sheetColLetter_(sheetId,sheetName,header){
+  const key=sheetName+'|'+header;
+  try{ const m=JSON.parse(localStorage.getItem(COLMAP_KEY)||'{}');
+       if(m[key]&&m[key].c&&(Date.now()-(m[key].ts||0))<86400000) return m[key].c; }catch(e){}
+  try{
+    const rows=await fetchSheet(sheetId,sheetName,{fresh:true,tq:'select * limit 1'});
+    const i=Object.keys((rows||[])[0]||{}).indexOf(header);
+    if(i<0) return '';
+    const c=colLetterOfIndex_(i);
+    try{ const m=JSON.parse(localStorage.getItem(COLMAP_KEY)||'{}'); m[key]={c:c,ts:Date.now()};
+         localStorage.setItem(COLMAP_KEY,JSON.stringify(m)); }catch(e){}
+    return c;
+  }catch(e){ return ''; }
+}
 const SHEET_CACHE_TTL=5*60*1000;          // default 5 นาที
 const CACHE_TTL_LONG=24*60*60*1000;       // 24 ชม. — ลูกค้า/สินค้า/รายละเอียดบิล (ไม่ค่อยเปลี่ยน)
 const CACHE_TTL_SYNC=30*1000;             // 30 วิ — งานอนุมัติ (ต้อง fresh บ่อย แต่ throttle กันโหลดถี่)
@@ -1288,8 +1308,19 @@ function pruneLocalJobs_(){
     const now=Date.now(), cut14=now-14*86400000, cut2=now-2*86400000;
     const before=(state.jobs||[]).length;
     const tOf=j=>Math.max(+j.startedAt||0,+j.submittedAt||0,+j.approvedAt||0,+j.rejectedAt||0,+j.createdAt||0);
+    /* ★★ v3.290: ล้าง "งานผี" ที่ค้างในเครื่องจากรอบก่อน — ใบคุมที่ถูกลบออกจากชีทแล้วแต่บิลยังอยู่
+       ลายเซ็น: ไม่มีทั้งชื่อคนขับและทะเบียน + ไม่เคยมีเวลารับงาน + ยังเป็น "กำลังส่ง"
+       (งานจริงต้องมีชื่อคนขับเสมอ ตั้งแต่ v3.272 บังคับตอนรับงาน) */
+    const _ghost=j=>{
+      if(!j||(j.status||'')!=='in_progress') return false;
+      const t=j.team||{};
+      return !String(t.driver||j.driver||'').trim() && !String(t.plate||j.plate||'').trim() && !(+j.startedAt);
+    };
+    const _ghosts=(state.jobs||[]).filter(_ghost).length;
+    if(_ghosts) console.log('[jobs] ล้างงานผีค้างในเครื่อง',_ghosts,'ใบ');
     let keep=(state.jobs||[]).filter(j=>{
       if(!j||!j.id) return false;
+      if(_ghost(j)) return false;   // ★ v3.290
       const st=j.status||'';
       if(st==='in_progress'||st==='pending_approval'||st==='rejected') return true;   // ยังไม่จบ = เก็บเสมอ (ห้ามหาย)
       if(st==='available') return tOf(j)===0||tOf(j)>=cut2;                            // งานว่าง เก็บ 2 วัน
@@ -4856,9 +4887,48 @@ function renderDriverHome(){
     });
   });
   refreshHelperSlots_();
+  pickupDraftRestore_();   // ★ v3.289: กู้ของที่กรอกค้างไว้ (เผื่อแอปถูกปิด/รีโหลดกลางคัน)
   previewPickupBills();
   pickupUpdateCheck_();   // ★ v3.274: เครื่องที่ค้างเวอร์ชันเก่า → บังคับอัปเดตก่อนรับใบคุมใบใหม่
 }
+/* ★★ v3.289: จำร่าง "หน้ารับใบคุม" ไว้ในเครื่อง — กรอกค้างแล้วแอปดับ/ถูกปิด/รีโหลด กลับมากรอกต่อได้
+   (พี่ศร 24 ส.ค.: กรอกไม่เสร็จแล้วเด้งออก ข้อมูลหายหมด) · ไม่เก็บรูป base64 กันพื้นที่เครื่องเต็ม (บทเรียน v3.279) */
+const PICKUP_DRAFT_KEY='dman_pickup_draft_v1';
+function pickupDraftSave_(){
+  try{
+    if(state.currentTab!=='sec-driver-home') return;
+    const d={job:ddValue('ddJob'),plate:ddValue('ddPlate'),driver:ddValue('ddDriver'),
+      helpers:HELPER_SLOTS.map(n=>ddValue('ddHelper'+n)),
+      extra:(($('helperExtra')||{}).value||''),
+      crates:(($('pickupCrates')||{}).value||''),tanks:(($('pickupTanks')||{}).value||''),pallet:(($('pickupPallet')||{}).value||''),
+      photo:(String(_pickupPhoto||'').indexOf('http')===0?_pickupPhoto:''),ts:Date.now()};
+    const filled=d.job||d.plate||d.photo||d.extra.trim()||d.crates||d.tanks||d.pallet||d.helpers.some(Boolean);
+    if(filled) localStorage.setItem(PICKUP_DRAFT_KEY,JSON.stringify(d));
+    else localStorage.removeItem(PICKUP_DRAFT_KEY);
+  }catch(e){}
+}
+function pickupDraftClear_(){ try{ localStorage.removeItem(PICKUP_DRAFT_KEY); }catch(e){} }
+function pickupDraftRestore_(){
+  try{
+    const raw=localStorage.getItem(PICKUP_DRAFT_KEY); if(!raw) return;
+    const d=JSON.parse(raw)||{};
+    if(!d.ts||(Date.now()-d.ts)>12*3600000){ pickupDraftClear_(); return; }   // ร่างเก่าเกิน 12 ชม. = ทิ้ง
+    let n=0;
+    if(d.job&&(state.jobs||[]).some(j=>j.id===d.job)){ ddPick('ddJob',d.job,d.job); n++; }   // ใบคุมต้องยังว่างอยู่จริง
+    if(d.plate){ ddPick('ddPlate',d.plate,d.plate); n++; }
+    if(d.driver){ ddPick('ddDriver',d.driver,d.driver); }
+    (d.helpers||[]).forEach((v,i)=>{ if(v){ ddPick('ddHelper'+HELPER_SLOTS[i],v,v); n++; } });
+    if(d.extra&&$('helperExtra')) $('helperExtra').value=d.extra;
+    if(d.crates&&$('pickupCrates')) $('pickupCrates').value=d.crates;
+    if(d.tanks&&$('pickupTanks'))  $('pickupTanks').value=d.tanks;
+    if(d.pallet&&$('pickupPallet')) $('pickupPallet').value=d.pallet;
+    if(d.photo){ _pickupPhoto=d.photo; paintLoadPhoto_(); n++; }
+    refreshHelperSlots_();
+    if(n) showToast('กู้ข้อมูลที่กรอกค้างไว้ให้แล้ว — ตรวจอีกครั้งก่อนกดรับงาน','info');
+  }catch(e){}
+}
+setInterval(()=>{ try{ if(!document.hidden) pickupDraftSave_(); }catch(e){} },2500);
+document.addEventListener('visibilitychange',()=>{ try{ if(document.hidden) pickupDraftSave_(); }catch(e){} });
 
 /* ★★ v3.274: บังคับอัปเดตตอนเปิดหน้า "รับงาน" (user แจ้ง 2026-08-22 — ยังมีคนรับใบคุมได้โดยไม่มีรูปตู้)
    ต้นเหตุ: ตัวเช็คอัปเดตอัตโนมัติ (ทุก 10 นาที) จะรีโหลดให้ "เฉพาะตอนปลอดภัย" คือ ไม่มีของค้างส่ง +
@@ -4870,7 +4940,7 @@ let _pickupUpdAt=0;
 async function pickupUpdateCheck_(){
   try{
     if(Date.now()-_pickupUpdAt<180000) return;                       // เช็คถี่สุดทุก 3 นาที
-    if(_pickupPhoto||ddValue('ddJob')||ddValue('ddPlate')) return;    // เริ่มกรอกแล้ว = ไม่รีโหลด (กันของที่กรอกหาย)
+    if(appBusyForm_()) return;    // ★ v3.289: เริ่มกรอกแล้ว = ไม่รีโหลด (เดิมเช็คแค่ รูป/ใบคุม/ทะเบียน — ผู้ช่วย/ลัง/ถัง/พาเลท หลุด)
     _pickupUpdAt=Date.now();
     const r=await fetch(location.pathname+'?vpick='+Date.now(),{cache:'no-store',headers:{'Range':'bytes=0-131071'}});
     if(!r.ok) return;
@@ -4994,6 +5064,7 @@ function previewPickupBills(){
 }
 
 function resetPickupForm(){
+  pickupDraftClear_();   // ★ v3.289: กดล้างข้อมูล = ทิ้งร่างด้วย
   renderDriverHome();
   showToast('ล้างข้อมูลแล้ว','info');
 }
@@ -5234,6 +5305,7 @@ async function confirmPickup(){   // v3.43: async — งานส่งซ้�
   const _rAssign=await postSyncGAS_(_assign,30000).catch(()=>({ok:false,error:'ส่งไม่ผ่าน'}));
   if(!_rAssign||!_rAssign.ok) queueSync(_assign,'assign|'+j.id);   // ส่งไม่ผ่าน → เข้าคิว (มีแบดจ์เตือน + ลองส่งใหม่เองทุก 15 วิ)
   _pickupPhoto='';   // ★ v3.270: ใบถัดไปเริ่มใหม่ (กันรูปใบเก่าติดไปกับใบคุมถัดไป)
+  pickupDraftClear_();   // ★ v3.289: รับงานสำเร็จแล้ว ล้างร่างทิ้ง
   if(_rAssign&&_rAssign.ok) showToast(`รับงาน ${j.id} เรียบร้อย ✓ เข้าชีทแล้ว`,'success');
   else showToast(`รับงาน ${j.id} แล้ว — แต่ยังส่งเข้าชีทไม่ได้ (${(_rAssign&&_rAssign.error)||'-'}) ระบบจะส่งให้อัตโนมัติ ⏳ อย่าเพิ่งปิดแอป`,'warning');
   switchTab('sec-driver-job');
@@ -9082,8 +9154,28 @@ async function loadJobsFromSheet(){
     const _p2=n=>String(n).padStart(2,'0');
     const _cutD=new Date(Date.now()-21*86400000);
     const _cutStr=`${_cutD.getFullYear()}-${_p2(_cutD.getMonth()+1)}-${_p2(_cutD.getDate())} 00:00:00`;
-    const _cinFull=()=>fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',{fresh:true,tq:`select * where K >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];});
-    const _inputAll=()=>fetchSheet(CFG.jobsSheetId,'บันทึกเที่ยวส่ง',{fresh:true,tq:`select * where AD >= datetime '${_cutStr}'`}).catch(()=>{fetchOK=false;return[];});
+    /* ★ v3.288: ชีทบิลใหญ่ (หลายพันแถว) ยังต้องกรองฝั่งชีทอยู่ แต่หา "ตัวอักษรคอลัมน์" จากชื่อหัวคอลัมน์จริงก่อน
+       (แคช 24 ชม. · หาไม่เจอ = ดึงทั้งแผ่น ช้าแต่ไม่ผิด) — กันอาการเดียวกับที่ INPUT เจอ ถ้าวันหลังมีคนแทรกคอลัมน์ในชีทบิล */
+    const _cinFull=async()=>{
+      const L=await sheetColLetter_(CFG.jobsSheetId,'บันทึกบิลและการชำระ','U_ADD');
+      const o={fresh:true}; if(L) o.tq=`select * where ${L} >= datetime '${_cutStr}'`;
+      return fetchSheet(CFG.jobsSheetId,'บันทึกบิลและการชำระ',o).catch(()=>{fetchOK=false;return[];});
+    };
+    /* ★★ v3.288: เลิกกรองด้วย "ตัวอักษรคอลัมน์" ในคิวรี่ — เปราะมาก แค่มีคนแทรกคอลัมน์ในชีทก็พังเงียบ
+       เคสจริง 24 ส.ค.: แทรกคอลัมน์ "ร้านค้า" ที่ E → วันเวลาที่รับงาน เลื่อน AD→AE
+       คิวรี่ where AD จึงกลายเป็นกรอง "วันเวลาอนุมัติ" → ใบคุมที่ยังไม่อนุมัติหายจากผลลัพธ์ทั้งหมด (419 จาก 437 แถว)
+       แถว INPUT ไม่มา → งานถูกประกอบจากชีทบิลอย่างเดียว → คนขับ/ทะเบียนขึ้น "-" ในกล่องช่วยบันทึก
+       ตอนนี้: ดึงทั้งชีทแล้วกรองฝั่งแอปด้วย "ชื่อหัวคอลัมน์" (ย้ายคอลัมน์กี่ครั้งก็ไม่พัง)
+       ชีทนี้เล็ก (ไม่กี่ร้อยแถว หลัง user อาร์ไคฟ์ของเก่า) — ต้นทุนดึงทั้งแผ่นไม่ต่างกัน */
+    const _cutMs=_cutD.getTime();
+    const _inputAll=()=>fetchSheet(CFG.jobsSheetId,'บันทึกเที่ยวส่ง',{fresh:true})
+      .then(rows=>(rows||[]).filter(r=>{
+        const v=cleanCell(r['วันเวลาที่รับงาน']);
+        if(!v) return true;                       // ยังไม่มีเวลารับงาน (เที่ยวพิเศษ/แถวกำลังสร้าง) = เก็บไว้ ไม่ตัดทิ้ง
+        const t=new Date(v).getTime();
+        return isNaN(t)||t>=_cutMs;               // อ่านวันที่ไม่ออก = เก็บไว้ (ปลอดภัยกว่าตัดทิ้ง)
+      }))
+      .catch(()=>{fetchOK=false;return[];});
     let cinRows,inputRows,scopeIds=null,_usedCNRows=null;
     if(jobScopeDriverOnly_()){
       // ★ v3.242: คนขับ — ยิงพร้อมกัน 3 อย่าง: INPUT (เบา) + บิลของใบคุมที่จำไว้รอบก่อน + ดัชนี CN ที่ใช้แล้ว
@@ -9148,6 +9240,27 @@ async function loadJobsFromSheet(){
     });
 
     let allJobIds=new Set([...Object.keys(inputByJob),...Object.keys(billsByJob)]);
+    /* ★★ v3.290: กัน "งานผี" จากใบคุมที่ถูกลบออกจากชีทบันทึกเที่ยวส่งแล้ว แต่บิลยังอยู่ในชีทบิล
+       เคสจริง 24 ส.ค.: user อาร์ไคฟ์แถวเก่าออก (437→347) → ใบคุม 10-11 ส.ค. ไม่มีแถว INPUT แล้ว
+       แต่บิลยังอยู่ในหน้าต่าง 21 วัน → แอปประกอบงานจากบิลล้วน = คนขับ/ทะเบียน "-" สถานะ "กำลังส่ง"
+       ท่วมกล่องช่วยบันทึก (อาการเดียวกับ "งานผี" v3.252)
+       กติกา: ไม่มีแถว INPUT ให้เก็บไว้เฉพาะ "ของใหม่จริง" (บิลล่าสุดไม่เกิน 48 ชม.) = เคสแถว INPUT
+       ยังเขียนไม่ทัน · เก่ากว่านั้น = ถูกอาร์ไคฟ์ไปแล้ว ข้ามทิ้ง (งานในเครื่องตัวเองไม่กระทบ merge แยกกัน) */
+    {
+      const _fresh=Date.now()-48*3600000;
+      const _drop=[];
+      allJobIds.forEach(jid=>{
+        if(inputByJob[jid]) return;                       // มีแถวใบคุมจริง = เก็บ
+        const rows=billsByJob[jid]||[];
+        const newest=rows.reduce((mx,r)=>{
+          const t=new Date(cleanCell(r['U_ADD'])||cleanCell(r['วัน+เวลา ที่ส่งสินค้า'])||0).getTime();
+          return isNaN(t)?mx:Math.max(mx,t);
+        },0);
+        if(newest&&newest<_fresh) _drop.push(jid);        // อ่านเวลาไม่ได้เลย = ไม่ตัด (ปลอดภัยไว้ก่อน)
+      });
+      _drop.forEach(jid=>allJobIds.delete(jid));
+      if(_drop.length) console.log('[jobs] ข้ามใบคุมที่ถูกลบออกจากชีทแล้ว',_drop.length,'ใบ');
+    }
     if(scopeIds){
       // v3.242: โหมด scope — เอาเฉพาะใบคุมของตัวเอง (เดิมงานของ "ทุกคน" ใน 21 วันถูกยัดลง state.jobs/localStorage ทุกเครื่อง)
       const _sc=new Set(scopeIds.map(normJobId));
@@ -13031,6 +13144,28 @@ async function openDiag_(){
    (เปิดจากหน้าจอโฮมค้างไว้เป็นวันๆ ไม่เคยโหลดใหม่) → ทำให้ "แก้แล้วแต่ยังเป็นเหมือนเดิม"
    เช็คทุก 10 นาที + ตอนกลับเข้าแอป · เจอเวอร์ชันใหม่ → เด้งแถบให้กดอัปเดต (โหลดใหม่ทั้งหน้า) */
 let _updBannerShown=false;
+/* ★★ v3.289: "กำลังกรอกฟอร์มอยู่ไหม" — ห้ามรีโหลดอัตโนมัติทับของที่ยังกรอกไม่เสร็จ
+   เคสจริง 24 ส.ค. (พี่ศร): กรอกหน้ารับใบคุมค้างไว้ → แอปเด้งออก ข้อมูลที่กรอกหายหมด
+   ต้นเหตุ: safeAuto เดิมเช็ค "กำลังพิมพ์" จาก document.activeElement เป็น INPUT/TEXTAREA/SELECT
+   แต่ฟอร์มนี้ใช้ dropdown ที่ทำเองจาก <div> (กติกา Zebra) → activeElement ไม่ใช่ 3 ชนิดนั้น
+   ระบบเลยคิดว่า "ว่างอยู่ รีโหลดได้" แล้ว location.replace ทิ้งทุกอย่าง
+   ตัวจุดชนวนหลัก = ถ่ายรูปตู้ (แอปถูกพักไปกล้อง) พอกลับมา visibilitychange ยิงเช็คเวอร์ชันทันที */
+function appBusyForm_(){
+  try{
+    if(document.querySelector('.dd-panel.open')) return true;   // กำลังเปิดรายการเลือกอยู่
+    if(state.currentTab==='sec-driver-home'){                   // หน้ารับใบคุม — แตะช่องไหนไปแล้วก็ถือว่ากำลังกรอก
+      if(_pickupPhoto) return true;
+      if(ddValue('ddJob')||ddValue('ddPlate')) return true;      // (ไม่นับ ddDriver เพราะเติมชื่อตัวเองให้อยู่แล้ว)
+      if(HELPER_SLOTS.some(n=>ddValue('ddHelper'+n))) return true;
+      const ex=$('helperExtra'); if(ex&&String(ex.value||'').trim()) return true;
+      if(_ctVal_('pickupCrates')||_ctVal_('pickupTanks')||_ctVal_('pickupPallet')) return true;
+    }
+    if(state.currentTab==='sec-transfer'){                      // ฟอร์มเที่ยวพิเศษ
+      if(ddValue('ddTransJob')||transferState.jobId||transferState.item||transferState.qty||transferState.destination) return true;
+    }
+  }catch(e){}
+  return false;
+}
 async function checkAppUpdate_(){
   try{
     if(_updBannerShown||document.hidden) return;
@@ -13050,6 +13185,7 @@ async function checkAppUpdate_(){
     const safeAuto = outboxCount()===0
       && !document.querySelector('.modal-overlay.open')
       && !(_ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(_ae.tagName))
+      && !appBusyForm_()          // ★ v3.289: มีของกรอกค้างในฟอร์ม (dropdown ที่ทำเอง/รูป/จำนวน) = ห้ามรีโหลดทับ
       && state.currentTab!=='sec-bill-form' && state.currentTab!=='sec-returns';
     if(safeAuto){ location.replace(location.pathname+'?v='+m[1]); return; }
     _updBannerShown=true;
