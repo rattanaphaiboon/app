@@ -1,7 +1,11 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v6.7 — นำเข้าโควต้าจากรายงาน HumanSoft ปี 2026 (รันจาก editor · ไม่ต้อง Deploy):
+ * v6.8 — แก้ "ตัดโควต้าซ้ำ" ตอนนำเข้าจาก HumanSoft (รันจาก editor · ไม่ต้อง Deploy):
+ *         ใบลาที่บันทึกในแอปแล้ว HumanSoft ก็นับไปแล้ว → เขียนยอดคงเหลือตรงๆ = หักซ้ำ
+ *         (พิชชาพร ลากิจเหลือ 4 แทนที่จะเป็น 5) → เขียน "คงเหลือ + วันที่แอปจะหักเอง" แทน
+ *         ► รัน importQuotaHumanSoft2026() ซ้ำได้เลย ค่าจะถูกตั้งใหม่ให้ถูกต้อง
+ * v6.7 — นำเข้าโควต้าจากรายงาน HumanSoft ปี 2026 (รันจาก editor):
  *         ► importQuotaHumanSoft2026() — เขียน "ยอดคงเหลือ" ลงแท็บโควต้าลา 38 คน
  *         ตัวเลขจากไฟล์ "รายงานโควตาการลาประจำปี 2026" (ณ 26/08/2026) · ลาคลอดรวม 98 วัน
  * v6.6 — แก้ "ไม่พบวันเริ่มงาน" ของพนักงาน PTT (ต้อง Deploy New version):
@@ -264,7 +268,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.7', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.8', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -2341,12 +2345,26 @@ function importQuotaHumanSoft2026() {
   HS_QUOTA_2026.forEach(q => {
     const row = rowOf[String(q[0]).trim()];
     if (!row) { missing.push(q[0]); return; }
-    const put = (col, val) => { if (col != null && val !== '') sh.getRange(row, col + 1).setValue(val); };
-    put(colOf.personal, q[1]); put(colOf.unpaidPersonal, q[2]);
-    put(colOf.sickWithCert, q[3]); put(colOf.sickNoCert, q[4]);
-    if (matPaid != null && matUnpaid != null) { put(matPaid, q[5]); put(matUnpaid, q[6]); }
-    else if (matCols.length === 1) put(matCols[0], q[5] + q[6]);
-    put(colOf.vacation, q[7]); put(colOf.training, q[8]);
+    // v6.8: กันตัดซ้ำ — ใบลาที่ "บันทึกในแอปแล้ว" ในรอบปีนี้ HumanSoft ก็นับไปแล้วเหมือนกัน
+    // ถ้าเขียนยอดคงเหลือของ HumanSoft ตรงๆ แอปจะหักวันเดิมซ้ำอีกรอบ (เคสพิชชาพร: ลากิจเหลือ 4 แทนที่จะเป็น 5)
+    // จึงเขียน "ยอดคงเหลือ + วันที่แอปจะหักเอง" → ผลลัพธ์สุดท้ายบนหน้าจอตรงกับ HumanSoft พอดี
+    let u = { personal:0, unpaidPersonal:0, sickWithCert:0, sickNoCert:0, vacation:0, maternity:0, training:0 };
+    try { const qq = leaveQuotaFor_(String(q[0]).trim()); if (qq && qq.used) u = qq.used; } catch (e) {}
+    const rnd = v => Math.round(v * 100) / 100;
+    const put = (col, val, key) => {
+      if (col == null || val === '') return;
+      sh.getRange(row, col + 1).setValue(rnd((parseFloat(val) || 0) + (key ? (u[key] || 0) : 0)));
+    };
+    put(colOf.personal, q[1], 'personal');            put(colOf.unpaidPersonal, q[2], 'unpaidPersonal');
+    put(colOf.sickWithCert, q[3], 'sickWithCert');    put(colOf.sickNoCert, q[4], 'sickNoCert');
+    // ลาคลอด: บวกวันที่แอปหักไว้เข้าไปที่ยอดรวม แล้วแตกเป็น 45 + ส่วนที่เหลือ
+    if (q[5] + q[6] > 0) {
+      const total = rnd(q[5] + q[6] + (u.maternity || 0));
+      const paid = Math.min(45, total), unpaid = rnd(total - paid);
+      if (matPaid != null && matUnpaid != null) { put(matPaid, paid); put(matUnpaid, unpaid); }
+      else if (matCols.length === 1) put(matCols[0], total);
+    } else if (matPaid != null && matUnpaid != null) { put(matPaid, 0); put(matUnpaid, 0); }
+    put(colOf.vacation, q[7], 'vacation');            put(colOf.training, q[8], 'training');
     done++;
   });
   const msg = 'นำเข้าโควต้าจากรายงาน HumanSoft 2026 · สำเร็จ ' + done + ' คน' +
