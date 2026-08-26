@@ -1,7 +1,12 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v6.5 — ตัวตรวจโควต้า auditLeaveQuota() (รันจาก editor · ไม่ต้อง Deploy ก็ได้):
+ * v6.6 — แก้ "ไม่พบวันเริ่มงาน" ของพนักงาน PTT (ต้อง Deploy New version):
+ *         ทะเบียน PTT ทำด้วย IMPORTRANGE/QUERY → ช่อง "เข้า" เป็นวันที่จริง (Date)
+ *         pttMap_ เดิมใช้ String(Date) ได้ "Fri Dec 27 2019..." → parseDDMMYYYY อ่านไม่ออก
+ *         = PTT ที่ไม่มีแถวในชีท Users ทุกคน โควต้าลาไม่ทำงาน (หน้าโควต้าขึ้น "แจ้ง HR")
+ *         แก้: pttMap_ ใช้ formatDate() + parseDDMMYYYY รองรับ yyyy-MM-dd
+ * v6.5 — ตัวตรวจโควต้า auditLeaveQuota() (รันจาก editor):
  *         ได้แท็บ "ตรวจโควต้า" เทียบรายคน: เพดาน / ใช้ไปแล้ว / คงเหลือ / ที่มาของเพดาน
  *         + อ่านชีทการลาApp ครั้งเดียวต่อการรัน (เร็วขึ้นมากเวลาคิดโควต้าหลายคน)
  *         หมายเหตุกติกา (surat เคาะ 24/08): ลาคร่อมวันหยุด = นับทุกวันตามปฏิทิน (ไม่ข้ามเสาร์-อาทิตย์)
@@ -256,7 +261,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.5', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.6', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -775,7 +780,10 @@ function pttMap_() {
         m[id] = { saka: String(r[0]).trim(), khlang: String(r[1]).trim(), position: String(r[20] || '').trim(),
                   name: String(r[6] || '').trim(),      // v2.1: ใช้เป็น fallback ตอน check-in
                   nickname: String(r[7] || '').trim(),   // v4.4: ชื่อเล่น (ทะเบียน PTT คอลัมน์ H)
-                  startDate: String(r[12] || '').trim() }; // v5.1: วันเริ่มงาน (คอลัมน์ "เข้า") — คิดโควต้าลา
+                  // v6.6: ทะเบียน PTT สร้างด้วย IMPORTRANGE/QUERY → ช่อง "เข้า" เป็น Date จริง
+                  // เดิม String(Date) ได้ "Fri Dec 27 2019 00:00:00 GMT+0700" → parseDDMMYYYY อ่านไม่ออก
+                  // = พนักงาน PTT ที่ไม่มีแถวในชีท Users ทุกคน "ไม่พบวันเริ่มงาน" → โควต้าลาไม่ทำงานเลย
+                  startDate: formatDate(r[12]) };          // v5.1: วันเริ่มงาน (คอลัมน์ "เข้า") — คิดโควต้าลา
       });
       break;
     }
@@ -1403,6 +1411,9 @@ function formatDate(v) {
 function parseDDMMYYYY(s) {
   if (!s) return null;
   if (s instanceof Date) return s;
+  // v6.6: รองรับ yyyy-MM-dd ด้วย (ข้อมูลที่ผ่าน IMPORTRANGE/QUERY บางทีมาเป็นรูปแบบนี้)
+  const iso = String(s).trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) return new Date(+iso[1], +iso[2] - 1, +iso[3]);
   const m = String(s).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (!m) return null;
   let y = parseInt(m[3], 10);
