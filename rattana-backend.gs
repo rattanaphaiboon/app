@@ -1,7 +1,12 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v6.9 — แท็บตรวจโควต้า: คอลัมน์ "ช่วงอายุงาน" เคยว่าง (อ้างฟิลด์ผิด q.stageLabel → q.quota.stageLabel)
+ * v7.0 — แยก "ยอดที่ใช้ก่อนย้ายมาใช้แอป" ออกจากเพดาน (รันจาก editor · ไม่ต้อง Deploy ก็ได้):
+ *         เดิมยัด "คงเหลือ" ลงช่องเพดาน → หน้าจอโชว์เพี้ยน (พิชชาพร พักร้อน 2/1 แทน 6/5)
+ *         ตอนนี้: แท็บโควต้าลา = สิทธิเต็มจริง · แท็บใหม่ "ใช้ก่อนใช้แอป" = วันที่ HumanSoft นับไว้แล้ว
+ *         ใช้ไป = แท็บนั้น + ใบลาในแอป · คงเหลือ = เพดาน − ใช้ไป (ตรงกับ HumanSoft ทุกช่อง)
+ *         ► รัน importQuotaHumanSoft2026() ซ้ำอีกครั้ง (สร้างแท็บ+ตั้งค่าให้เอง)
+ * v6.9 — แท็บตรวจโควต้า: คอลัมน์ "ช่วงอายุงาน" เคยว่าง (อ้างฟิลด์ผิด)
  * v6.8 — แก้ "ตัดโควต้าซ้ำ" ตอนนำเข้าจาก HumanSoft (รันจาก editor):
  *         ใบลาที่บันทึกในแอปแล้ว HumanSoft ก็นับไปแล้ว → เขียนยอดคงเหลือตรงๆ = หักซ้ำ
  *         (พิชชาพร ลากิจเหลือ 4 แทนที่จะเป็น 5) → เขียน "คงเหลือ + วันที่แอปจะหักเอง" แทน
@@ -269,7 +274,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.9', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.0', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -2003,6 +2008,64 @@ function quotaOverrideMap_() {
   return m;
 }
 
+/* ── v7.0: แท็บ "ใช้ก่อนใช้แอป" — วันลาที่ใช้ไปแล้วก่อนย้ายมาใช้แอป (จาก HumanSoft/กระดาษ) ──
+   เดิมยัด "ยอดคงเหลือ" ลงช่องเพดานในแท็บโควต้าลา → หน้าจอโชว์เพดานเพี้ยน
+   (พิชชาพร พักร้อนขึ้น 2/1 ทั้งที่จริงคือ 6 ใช้ไป 5) — แยกออกมาเป็นแท็บนี้แทน
+   เพดาน = สิทธิเต็มจริง · ใช้ไป = (แท็บนี้) + (ใบลาที่อนุมัติในแอป) · คงเหลือ = เพดาน − ใช้ไป */
+const CARRY_TAB = 'ใช้ก่อนใช้แอป';
+let _carryCache = null;
+function carriedUsedMap_() {
+  if (_carryCache) return _carryCache;
+  const m = {};
+  try {
+    const sh = getTab(CARRY_TAB);
+    if (sh && sh.getLastRow() > 1) {
+      const data = sh.getDataRange().getValues();
+      const hmap = lqHeaderMap_(data[0] || []);
+      for (let i = 1; i < data.length; i++) {
+        const id = String(data[i][0] || '').trim();
+        if (!id) continue;
+        const o = {};
+        Object.keys(hmap).forEach(idx => {
+          const n = parseFloat(String(data[i][idx] == null ? '' : data[i][idx]).replace(/,/g, ''));
+          if (!isNaN(n) && n) o[hmap[idx]] = (o[hmap[idx]] || 0) + n;
+        });
+        if (Object.keys(o).length) m[id] = o;
+      }
+    }
+  } catch (e) {}
+  _carryCache = m;
+  return m;
+}
+/* สร้างแท็บ (หัวคอลัมน์เหมือนแท็บโควต้าลา เพื่อให้ HR อ่านคู่กันง่าย) — รันซ้ำได้ ไม่ทับค่าที่กรอก */
+function setupCarryOver() {
+  const ss = getSS();
+  const lq = ss.getSheetByName(LQ_TAB);
+  if (!lq || lq.getLastRow() < 2) throw new Error('ไม่พบแท็บ "' + LQ_TAB + '" — รัน setupLeaveQuota ก่อน');
+  const lqHead = lq.getRange(1, 1, 1, Math.max(lq.getLastColumn(), 6)).getValues()[0];
+  let sh = ss.getSheetByName(CARRY_TAB);
+  if (!sh) {
+    sh = ss.insertSheet(CARRY_TAB);
+    sh.getRange(1, 1, 1, lqHead.length).setValues([lqHead])
+      .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+    sh.setFrozenRows(1);
+    sh.setColumnWidth(2, 190); sh.setColumnWidth(5, 300);
+    try { sh.getRange(1, 5).setValue('หมายเหตุ (ยอดที่ใช้ไปก่อนย้ายมาใช้แอป)'); } catch (e) {}
+  }
+  // เติมรายชื่อจากแท็บโควต้าลาให้ครบ (ไม่ทับค่าที่กรอกไว้)
+  const have = {};
+  if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues()
+    .forEach(r => { const id = String(r[0] || '').trim(); if (id) have[id] = true; });
+  const src = lq.getRange(2, 1, lq.getLastRow() - 1, 2).getValues();
+  const add = src.filter(r => String(r[0] || '').trim() && !have[String(r[0]).trim()])
+                 .map(r => [String(r[0]).trim(), String(r[1] || '')]);
+  if (add.length) sh.getRange(sh.getLastRow() + 1, 1, add.length, 2).setValues(add);
+  const msg = 'แท็บ "' + CARRY_TAB + '" พร้อมใช้ · เพิ่มรายชื่อใหม่ ' + add.length + ' คน';
+  Logger.log(msg);
+  try { ss.toast(msg, CARRY_TAB, 8); } catch (e) {}
+  return msg;
+}
+
 /* v6.3: วันเริ่มงานที่ HR พิมพ์เองในแท็บโควต้าลา (คอลัมน์ D)
    — ใช้เมื่อชีท Users/ทะเบียน PTT ไม่มีวันเริ่มงาน (เดิมคนกลุ่มนี้ไม่มีโควต้าเลย) */
 let _lqStartCache = null;
@@ -2066,6 +2129,9 @@ function leaveQuotaFor_(empId) {
     }
   }
   const used = countUsedLeave(empId, cycleStart, now);
+  // v7.0: บวกวันลาที่ใช้ไปก่อนย้ายมาใช้แอป (แท็บ "ใช้ก่อนใช้แอป") — ทำให้ยอด "ใช้ไป" ตรงกับ HumanSoft
+  const carried = carriedUsedMap_()[String(empId).trim()] || {};
+  Object.keys(carried).forEach(k => { if (used[k] !== undefined) used[k] += (parseFloat(carried[k]) || 0); });
   quota.maternity = 98;   // v5.1: ลาคลอดตามกฎหมาย 98 วัน (ทุกช่วงอายุงาน)
 
   // v5.3: ทับด้วยค่าที่ HR กรอกเองในแท็บ "โควต้าลา" (เฉพาะช่องที่กรอก)
@@ -2245,22 +2311,24 @@ function auditLeaveQuota() {
     if (!id) return;
     let q = null;
     try { q = leaveQuotaFor_(id); } catch (e) {}
-    if (!q) { out.push([id, String(row[1] || ''), '— ไม่มีวันเริ่มงาน —', '', '', '', '', '']); return; }
+    if (!q) { out.push([id, String(row[1] || ''), '— ไม่มีวันเริ่มงาน —']); return; }
     const o = ovr[id] || {};
+    const carry = carriedUsedMap_()[id] || {};   // v7.0: วันที่ใช้ก่อนย้ายมาใช้แอป
     const cyc = formatDate(q.cycleStart) + ' – ' + formatDate(q.cycleEnd);
     TYPES.forEach(([k, label]) => {
       const used = Math.round((q.used[k] || 0) * 100) / 100;
       const cap  = q.quota[k];
       const rem  = q.remaining[k];
       if (!used && !(k in o)) return;                      // ไม่เคยใช้ + ไม่ได้ตั้งเอง = ไม่ต้องโชว์
+      const before = Math.round(((carry[k] || 0)) * 100) / 100;      // v7.0: ใช้ก่อนย้ายมาใช้แอป
       out.push([id, String(row[1] || ''), (q.quota.stageLabel || ''), cyc, label,
-                cap == null ? 'ไม่จำกัด' : cap, used,
+                cap == null ? 'ไม่จำกัด' : cap, before || '', Math.round((used - before) * 100) / 100, used,
                 rem == null ? 'ไม่จำกัด' : Math.round(rem * 100) / 100,
                 (k in o) ? 'กรอกในชีท' : 'อัตโนมัติตามอายุงาน']);
     });
   });
   const HEAD = ['รหัสพนักงาน', 'ชื่อ-นามสกุล', 'ช่วงอายุงาน', 'รอบโควต้า', 'ประเภทลา',
-                'โควต้า (เพดาน)', 'ใช้ไปแล้ว', 'คงเหลือ', 'ที่มาของเพดาน'];
+                'โควต้า (เพดาน)', 'ใช้ก่อนใช้แอป', 'ใช้ในแอป', 'ใช้ไปรวม', 'คงเหลือ', 'ที่มาของเพดาน'];
   let sh = ss.getSheetByName('ตรวจโควต้า');
   if (!sh) sh = ss.insertSheet('ตรวจโควต้า');
   sh.clear();
@@ -2279,97 +2347,123 @@ function auditLeaveQuota() {
   return msg;
 }
 
-/* ── v6.7: นำเข้าโควต้าคงเหลือจากรายงาน HumanSoft "โควตาการลาประจำปี 2026" (ข้อมูล ณ 26/08/2026) ──
-   ตัวเลข = "ยอดคงเหลือ" (โควต้า − ที่ใช้ไปแล้วใน HumanSoft) ตรงกับกติกาที่ HR กรอกอยู่เดิม
-   · ลาคลอด: รวม 45+53 = 98 วันตามกฎหมาย (คนที่ HumanSoft ไม่ให้สิทธิ = 0/0 → บล็อกไว้)
-   · ช่องว่าง '' = ไม่เขียนทับ ปล่อยใช้โควต้าอัตโนมัติตามอายุงาน
-   · เขียนตาม "ชื่อหัวคอลัมน์" ไม่ใช่ตำแหน่ง — HR สลับคอลัมน์ได้ตามใจ
-   ► รันครั้งเดียวจาก editor: importQuotaHumanSoft2026()  (รันซ้ำได้ ค่าจะถูกตั้งใหม่ตามรายงานเดิม) */
+/* ── v7.0: นำเข้าจากรายงาน HumanSoft "โควตาการลาประจำปี 2026" (ข้อมูล ณ 26/08/2026) ──
+   เขียน 2 ที่: แท็บโควต้าลา = "สิทธิเต็ม" · แท็บใช้ก่อนใช้แอป = "วันที่ใช้ไปแล้วแต่ไม่ได้อยู่ในแอป"
+   (= ที่ HumanSoft นับ − ที่แอปนับได้เอง) → หน้าจอโชว์ เพดาน/ใช้ไป/คงเหลือ ตรงกับ HumanSoft ทุกช่อง
+   ► รัน importQuotaHumanSoft2026() · รันซ้ำได้ ค่าถูกตั้งใหม่จากรายงานเดิมทุกครั้ง */
 const HS_QUOTA_2026 = [
-  // [รหัส, ลากิจ, ลากิจไม่รับค่าจ้าง, ลาป่วยมีใบ, ลาป่วยไม่มีใบ, ลาคลอด, ลาคลอดไม่รับค่าจ้าง, ลาพักร้อน, ลาฝึกอบรม]
-  ['11202', 6, '', 13, '', 45, 53, 3.5, 30],  // จิรวรรณ พวงแก้ว
-  ['11203', 6, '', 30, '', 45, 53, 3, 30],  // รวิวรรณ เสือประดิษฐ์
-  ['11304', 6, '', 30, '', 0, 0, 3, 30],  // สงัด หนอคำ
-  ['11310', 6, '', 30, '', 0, 0, 2, 30],  // เทอดศักดิ์ หลำเจริญ
-  ['11346', 6, '', 30, '', 0, 0, 3, 30],  // สมพงษ์ จันทรมณี
-  ['11373', 6, '', 30, '', 0, 0, 3, 30],  // ปราเมศ มาหา
-  ['12011', 5, '', 30, '', 45, 53, 0, 30],  // ดุจเดือน จิ๋วโคราช
-  ['12023', 5, '', 30, '', 45, 53, 1, 30],  // พิชชาพร ภู่สกุล
-  ['12024', 6, '', 30, '', 45, 53, 2, 30],  // พิมพ์ชนก พราหมณ์รักษา
-  ['13026', 6, '', 29, '', 45, 53, 3, 30],  // วาสนา หลุยใจบุญ
-  ['13100', 6, '', 30, '', 45, 53, 2, 30],  // ฤทัยวัล สังข์โกมล
-  ['13111', 6, '', 29, '', 45, 53, 2, 30],  // ปาริชาติ วิริยะพันธ์
-  ['13116', 6, '', 30, '', 45, 53, 3, 30],  // นีรชา คงแก้ว
-  ['650008', 6, '', 30, '', 45, 53, 4.25, 30],  // อรวรรณ อยู่กำเนิด
-  ['650020', 6, '', 28, '', 45, 53, 2.25, 30],  // ศิวณา สวัสดิ์วงษ์
-  ['650022', 6, '', 30, '', 45, 53, 2, 30],  // ฐิตารีย์ หนูเปีย
-  ['650029', 6, '', 30, '', 0, 0, 2, 30],  // เอกลักษณ์ แซ่ทั้ม
-  ['650080', 6, '', 28, '', 45, 53, 2, 30],  // ภัสสร เสือเจริญ
-  ['65131', 6, '', 30, '', 45, 53, 2, 30],  // CHIT SNOW OO
-  ['660023', 6, '', 30, '', 45, 53, 3, 30],  // ระพี สัมพันธารักษ์
-  ['660034', 6, '', 30, '', 0, 0, 3, 30],  // ปกรณ์ พิมเกิด
-  ['660044', 6, '', 30, '', 45, 53, 3, 30],  // นภัสสร เสาวสาร
-  ['660057', 6, '', 30, '', 45, 53, 1, 30],  // สมพร ไชยเขตต์
-  ['660058', 6, '', 30, '', 45, 53, 2, 30],  // สุธิดา เฮงนิรันดร์
-  ['660067', 6, '', 30, '', 45, 53, 0, 30],  // วลัย สกุลแพทย์
-  ['660071', 6, '', 30, '', 45, 53, 1, 30],  // กชกร รักสนอง
-  ['660073', 6, '', 30, '', 45, 53, 1, 30],  // กัญญารัตน์ สัมพันธารักษ์
-  ['660084', 6, '', 30, '', 0, 0, 2, 30],  // ภูฉาย บุญพุ่ม
-  ['670003', '', '', 30, '', 45, 53, 1, 30],  // ภคพร นาคอนุเคราะห์
-  ['670026', 6, '', 30, '', 45, 53, 3, 30],  // สุดารัตน์ กิจจามาตรกุล
-  ['670030', '', '', 30, '', 45, 53, 3, 30],  // ทิพวัลย์ เสือสมิง
-  ['680009', 4, '', '', '', 45, 44.05, 1, ''],  // อนุสรา ขันทอง
-  ['680012', '', 2, '', '', 0, 0, '', ''],  // ทรงพร จอมผา
-  ['680016', '', '', '', '', 0, 0, 3, ''],  // อำพร ฉันทพจน์
-  ['680021', '', '', '', '', 45, 53, '', ''],  // อรุณทิพย์ รอดสุธา
-  ['680032', '', '', 30, '', 45, 53, '', ''],  // ชลธิชา วิมลสถาพร
-  ['690015', '', '', '', '', 0, 0, '', 2],  // อารีรัฐ เสือเจริญ
-  ['690027', '', 6, '', '', 0, 0, '', ''],  // สายจิต เจนกล้า
+  // [รหัส, กิจ:สิทธิ,ใช้, กิจไม่รับ:สิทธิ,ใช้, ป่วยมีใบ:สิทธิ,ใช้, ป่วยไม่มีใบ:สิทธิ,ใช้,
+  //        คลอด:สิทธิ,ใช้, พักร้อน:สิทธิ,ใช้, ฝึกอบรม:สิทธิ,ใช้]   ('' = HumanSoft ไม่ได้ตั้งโควต้า → ไม่เขียนทับ)
+  ['11202', 6,0, '',0, 30,17, '',0, 98,0, 6,2.5, 30,0],  // จิรวรรณ พวงแก้ว
+  ['11203', 6,0, '',0, 30,0, '',0, 98,0, 6,3, 30,0],  // รวิวรรณ เสือประดิษฐ์
+  ['11304', 6,0, '',0, 30,0, '',0, 0,0, 6,3, 30,0],  // สงัด หนอคำ
+  ['11310', 6,0, '',0, 30,0, '',0, 0,0, 6,4, 30,0],  // เทอดศักดิ์ หลำเจริญ
+  ['11346', 6,0, '',0, 30,0, '',0, 0,0, 6,3, 30,0],  // สมพงษ์ จันทรมณี
+  ['11373', 6,0, '',0, 30,0, '',0, 0,0, 6,3, 30,0],  // ปราเมศ มาหา
+  ['12011', 6,1, '',0, 30,0, '',0, 98,0, 6,6, 30,0],  // ดุจเดือน จิ๋วโคราช
+  ['12023', 6,1, '',0, 30,0, '',0, 98,0, 6,5, 30,0],  // พิชชาพร ภู่สกุล
+  ['12024', 6,0, '',0, 30,0, '',0, 98,0, 6,4, 30,0],  // พิมพ์ชนก พราหมณ์รักษา
+  ['13026', 6,0, '',0, 30,1, '',0, 98,0, 6,3, 30,0],  // วาสนา หลุยใจบุญ
+  ['13100', 6,0, '',0, 30,0, '',0, 98,0, 6,4, 30,0],  // ฤทัยวัล สังข์โกมล
+  ['13111', 6,0, '',0, 30,1, '',0, 98,0, 6,4, 30,0],  // ปาริชาติ วิริยะพันธ์
+  ['13116', 6,0, '',0, 30,0, '',0, 98,0, 6,3, 30,0],  // นีรชา คงแก้ว
+  ['650008', 6,0, '',0, 30,0, '',0, 98,0, 6,1.75, 30,0],  // อรวรรณ อยู่กำเนิด
+  ['650020', 6,0, '',0, 30,2, '',0, 98,0, 6,3.75, 30,0],  // ศิวณา สวัสดิ์วงษ์
+  ['650022', 6,0, '',0, 30,0, '',0, 98,0, 6,4, 30,0],  // ฐิตารีย์ หนูเปีย
+  ['650029', 6,0, '',0, 30,0, '',0, 0,0, 6,4, 30,0],  // เอกลักษณ์ แซ่ทั้ม
+  ['650080', 6,0, '',0, 30,2, '',0, 98,0, 6,4, 30,0],  // ภัสสร เสือเจริญ
+  ['65131', 6,0, '',0, 30,0, '',0, 98,0, 6,4, 30,0],  // CHIT SNOW OO
+  ['660023', 6,0, '',0, 30,0, '',0, 98,0, 6,3, 30,0],  // ระพี สัมพันธารักษ์
+  ['660034', 6,0, '',0, 30,0, '',0, 0,0, 6,3, 30,0],  // ปกรณ์ พิมเกิด
+  ['660044', 6,0, '',0, 30,0, '',0, 98,0, 6,3, 30,0],  // นภัสสร เสาวสาร
+  ['660057', 6,0, '',0, 30,0, '',0, 98,0, 6,5, 30,0],  // สมพร ไชยเขตต์
+  ['660058', 6,0, '',0, 30,0, '',0, 98,0, 6,4, 30,0],  // สุธิดา เฮงนิรันดร์
+  ['660067', 6,0, '',0, 30,0, '',0, 98,0, 6,6, 30,0],  // วลัย สกุลแพทย์
+  ['660071', 6,0, '',0, 30,0, '',0, 98,0, 6,5, 30,0],  // กชกร รักสนอง
+  ['660073', 6,0, '',0, 30,0, '',0, 98,0, 6,5, 30,0],  // กัญญารัตน์ สัมพันธารักษ์
+  ['660084', 6,0, '',0, 30,0, '',0, 0,0, 6,4, 30,0],  // ภูฉาย บุญพุ่ม
+  ['670003', '',0, '',0, 30,0, '',0, 98,0, 6,5, 30,0],  // ภคพร นาคอนุเคราะห์
+  ['670026', 6,0, '',0, 30,0, '',0, 98,0, 6,3, 30,0],  // สุดารัตน์ กิจจามาตรกุล
+  ['670030', '',0, '',0, 30,0, '',0, 98,0, 6,3, 30,0],  // ทิพวัลย์ เสือสมิง
+  ['680009', 6,2, '',0, '',0, '',0, 98,8.95, 4,3, '',0],  // อนุสรา ขันทอง
+  ['680012', '',0, 3,1, '',0, '',0, 0,0, '',0, '',0],  // ทรงพร จอมผา
+  ['680016', '',0, '',0, '',0, '',0, 0,0, 4,1, '',0],  // อำพร ฉันทพจน์
+  ['680021', '',0, '',0, '',0, '',0, 98,0, '',0, '',0],  // อรุณทิพย์ รอดสุธา
+  ['680032', '',0, '',0, 30,0, '',0, 98,0, '',0, '',0],  // ชลธิชา วิมลสถาพร
+  ['690015', '',0, '',0, '',0, '',0, 0,0, '',0, 3,1],  // อารีรัฐ เสือเจริญ
+  ['690027', '',0, 6,0, '',0, '',0, 0,0, '',0, '',0],  // สายจิต เจนกล้า
 ];
+const HS_KEYS = ['personal', 'unpaidPersonal', 'sickWithCert', 'sickNoCert', 'maternity', 'vacation', 'training'];
 function importQuotaHumanSoft2026() {
   const ss = getSS();
-  const sh = ss.getSheetByName(LQ_TAB);
-  if (!sh || sh.getLastRow() < 2) throw new Error('ไม่พบแท็บ "' + LQ_TAB + '" — รัน setupLeaveQuota ก่อน');
-  const lastC = Math.max(sh.getLastColumn(), 6);
-  const head  = sh.getRange(1, 1, 1, lastC).getValues()[0];
-  const hmap  = lqHeaderMap_(head);
-  // คอลัมน์ลาคลอด: แยก "รับค่าจ้าง" กับ "ไม่รับค่าจ้าง" (ถ้ามีคอลัมน์เดียวจะรวมเป็นก้อนเดียว)
-  const matCols = Object.keys(hmap).filter(i => hmap[i] === 'maternity').map(Number);
-  const matUnpaid = matCols.find(i => /ไม่รับค่าจ้าง|ไม่จ่าย/.test(String(head[i]).replace(/\s+/g, '')));
-  const matPaid   = matCols.find(i => i !== matUnpaid);
-  const colOf = { personal:null, unpaidPersonal:null, sickWithCert:null, sickNoCert:null, vacation:null, training:null };
-  Object.keys(hmap).forEach(i => { if (colOf.hasOwnProperty(hmap[i]) && colOf[hmap[i]] === null) colOf[hmap[i]] = Number(i); });
-  const ids = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues();
-  const rowOf = {};
-  ids.forEach((r, i) => { const id = String(r[0] || '').trim(); if (id) rowOf[id] = i + 2; });
+  const lq = ss.getSheetByName(LQ_TAB);
+  if (!lq || lq.getLastRow() < 2) throw new Error('ไม่พบแท็บ "' + LQ_TAB + '" — รัน setupLeaveQuota ก่อน');
+  setupCarryOver();                     // สร้าง/เติมรายชื่อแท็บ "ใช้ก่อนใช้แอป" ให้ครบก่อน
+  _carryCache = null; _quotaOverrideCache = null;
+  const cy = ss.getSheetByName(CARRY_TAB);
+
+  const colsOf = (sh) => {
+    const head = sh.getRange(1, 1, 1, Math.max(sh.getLastColumn(), 6)).getValues()[0];
+    const hmap = lqHeaderMap_(head);
+    const mat  = Object.keys(hmap).filter(i => hmap[i] === 'maternity').map(Number);
+    const c = { matPaid: null, matUnpaid: null };
+    HS_KEYS.forEach(k => { if (k !== 'maternity') c[k] = null; });
+    Object.keys(hmap).forEach(i => { const k = hmap[i]; if (k !== 'maternity' && c[k] === null) c[k] = Number(i); });
+    c.matUnpaid = mat.find(i => /ไม่รับค่าจ้าง|ไม่จ่าย/.test(String(head[i]).replace(/\s+/g, '')));
+    c.matPaid   = mat.find(i => i !== c.matUnpaid);
+    c.matAll    = mat;
+    return c;
+  };
+  const cQ = colsOf(lq), cC = colsOf(cy);
+  const rowsOf = (sh) => {
+    const o = {};
+    if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues()
+      .forEach((r, i) => { const id = String(r[0] || '').trim(); if (id) o[id] = i + 2; });
+    return o;
+  };
+  const rQ = rowsOf(lq), rC = rowsOf(cy);
+  const rnd = v => Math.round(v * 100) / 100;
+
   let done = 0; const missing = [];
-  HS_QUOTA_2026.forEach(q => {
-    const row = rowOf[String(q[0]).trim()];
-    if (!row) { missing.push(q[0]); return; }
-    // v6.8: กันตัดซ้ำ — ใบลาที่ "บันทึกในแอปแล้ว" ในรอบปีนี้ HumanSoft ก็นับไปแล้วเหมือนกัน
-    // ถ้าเขียนยอดคงเหลือของ HumanSoft ตรงๆ แอปจะหักวันเดิมซ้ำอีกรอบ (เคสพิชชาพร: ลากิจเหลือ 4 แทนที่จะเป็น 5)
-    // จึงเขียน "ยอดคงเหลือ + วันที่แอปจะหักเอง" → ผลลัพธ์สุดท้ายบนหน้าจอตรงกับ HumanSoft พอดี
-    let u = { personal:0, unpaidPersonal:0, sickWithCert:0, sickNoCert:0, vacation:0, maternity:0, training:0 };
-    try { const qq = leaveQuotaFor_(String(q[0]).trim()); if (qq && qq.used) u = qq.used; } catch (e) {}
-    const rnd = v => Math.round(v * 100) / 100;
-    const put = (col, val, key) => {
-      if (col == null || val === '') return;
-      sh.getRange(row, col + 1).setValue(rnd((parseFloat(val) || 0) + (key ? (u[key] || 0) : 0)));
-    };
-    put(colOf.personal, q[1], 'personal');            put(colOf.unpaidPersonal, q[2], 'unpaidPersonal');
-    put(colOf.sickWithCert, q[3], 'sickWithCert');    put(colOf.sickNoCert, q[4], 'sickNoCert');
-    // ลาคลอด: บวกวันที่แอปหักไว้เข้าไปที่ยอดรวม แล้วแตกเป็น 45 + ส่วนที่เหลือ
-    if (q[5] + q[6] > 0) {
-      const total = rnd(q[5] + q[6] + (u.maternity || 0));
-      const paid = Math.min(45, total), unpaid = rnd(total - paid);
-      if (matPaid != null && matUnpaid != null) { put(matPaid, paid); put(matUnpaid, unpaid); }
-      else if (matCols.length === 1) put(matCols[0], total);
-    } else if (matPaid != null && matUnpaid != null) { put(matPaid, 0); put(matUnpaid, 0); }
-    put(colOf.vacation, q[7], 'vacation');            put(colOf.training, q[8], 'training');
+  HS_QUOTA_2026.forEach(d => {
+    const id = String(d[0]).trim();
+    if (!rQ[id]) { missing.push(id); return; }
+    // วันลาที่ "แอปนับได้เอง" ในรอบปีนี้ — ต้องหักออก ไม่งั้นนับซ้ำกับที่ HumanSoft นับไว้
+    let app = {};
+    try { const qq = leaveQuotaFor_(id); if (qq && qq.used) app = qq.used; } catch (e) {}
+    const carriedBefore = carriedUsedMap_()[id] || {};
+    HS_KEYS.forEach((key, n) => {
+      const cap = d[1 + n * 2], usedHS = parseFloat(d[2 + n * 2]) || 0;
+      // แอปนับได้เท่าไหร่ (หักส่วนที่มาจากแท็บใช้ก่อนใช้แอปรอบก่อนออก กันบวกซ้ำตอนรันซ้ำ)
+      const appOnly = Math.max(0, (parseFloat(app[key]) || 0) - (parseFloat(carriedBefore[key]) || 0));
+      const before  = rnd(Math.max(0, usedHS - appOnly));
+      if (key === 'maternity') {
+        if (cap !== '' && cap > 0) {
+          const paid = Math.min(45, cap), unpaid = rnd(cap - paid);
+          if (cQ.matPaid != null && cQ.matUnpaid != null) {
+            lq.getRange(rQ[id], cQ.matPaid + 1).setValue(paid);
+            lq.getRange(rQ[id], cQ.matUnpaid + 1).setValue(unpaid);
+          } else if (cQ.matAll.length === 1) lq.getRange(rQ[id], cQ.matAll[0] + 1).setValue(cap);
+        } else if (cQ.matPaid != null && cQ.matUnpaid != null) {
+          lq.getRange(rQ[id], cQ.matPaid + 1).setValue(0);
+          lq.getRange(rQ[id], cQ.matUnpaid + 1).setValue(0);
+        }
+        if (rC[id] && cC.matPaid != null) lq.getRange(1, 1);   // no-op guard
+        if (rC[id]) {
+          const cc = (cC.matPaid != null) ? cC.matPaid : (cC.matAll.length ? cC.matAll[0] : null);
+          if (cc != null) cy.getRange(rC[id], cc + 1).setValue(before || '');
+          if (cC.matUnpaid != null) cy.getRange(rC[id], cC.matUnpaid + 1).setValue('');
+        }
+        return;
+      }
+      if (cap !== '' && cQ[key] != null) lq.getRange(rQ[id], cQ[key] + 1).setValue(cap);
+      if (rC[id] && cC[key] != null) cy.getRange(rC[id], cC[key] + 1).setValue(before || '');
+    });
     done++;
   });
-  const msg = 'นำเข้าโควต้าจากรายงาน HumanSoft 2026 · สำเร็จ ' + done + ' คน' +
-              (missing.length ? ' · ไม่พบรหัสในแท็บ: ' + missing.join(', ') : '');
+  _carryCache = null; _quotaOverrideCache = null;
+  const msg = 'นำเข้าโควต้า HumanSoft 2026 · สำเร็จ ' + done + ' คน (เขียนสิทธิเต็มในแท็บโควต้าลา + วันที่ใช้ก่อนใช้แอปในแท็บ "' +
+              CARRY_TAB + '")' + (missing.length ? ' · ไม่พบรหัส: ' + missing.join(', ') : '');
   Logger.log(msg);
   try { ss.toast(msg, 'นำเข้าโควต้า', 12); } catch (e) {}
   return msg;
