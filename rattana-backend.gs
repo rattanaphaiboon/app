@@ -1,7 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v6.8 — แก้ "ตัดโควต้าซ้ำ" ตอนนำเข้าจาก HumanSoft (รันจาก editor · ไม่ต้อง Deploy):
+ * v6.9 — แท็บตรวจโควต้า: คอลัมน์ "ช่วงอายุงาน" เคยว่าง (อ้างฟิลด์ผิด q.stageLabel → q.quota.stageLabel)
+ * v6.8 — แก้ "ตัดโควต้าซ้ำ" ตอนนำเข้าจาก HumanSoft (รันจาก editor):
  *         ใบลาที่บันทึกในแอปแล้ว HumanSoft ก็นับไปแล้ว → เขียนยอดคงเหลือตรงๆ = หักซ้ำ
  *         (พิชชาพร ลากิจเหลือ 4 แทนที่จะเป็น 5) → เขียน "คงเหลือ + วันที่แอปจะหักเอง" แทน
  *         ► รัน importQuotaHumanSoft2026() ซ้ำได้เลย ค่าจะถูกตั้งใหม่ให้ถูกต้อง
@@ -268,7 +269,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.8', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'6.9', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -2252,7 +2253,7 @@ function auditLeaveQuota() {
       const cap  = q.quota[k];
       const rem  = q.remaining[k];
       if (!used && !(k in o)) return;                      // ไม่เคยใช้ + ไม่ได้ตั้งเอง = ไม่ต้องโชว์
-      out.push([id, String(row[1] || ''), q.stageLabel, cyc, label,
+      out.push([id, String(row[1] || ''), (q.quota.stageLabel || ''), cyc, label,
                 cap == null ? 'ไม่จำกัด' : cap, used,
                 rem == null ? 'ไม่จำกัด' : Math.round(rem * 100) / 100,
                 (k in o) ? 'กรอกในชีท' : 'อัตโนมัติตามอายุงาน']);
