@@ -1,7 +1,11 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v7.1 — ขอตกเบิก: เลิกเติมช่อง "จำนวนเงิน" (คอลัมน์ T) ให้ HR กรอกเอง (ต้อง Deploy New version)
+ * v7.2 — ขอตกเบิก: คิดยอด "จำนวนเงิน" ใหม่ตามกติกา (ต้อง Deploy New version):
+ *         ปรับปรุงเวลา = ค่าแรงรายวัน + เบี้ยเลี้ยงต่อวัน · ลาย้อนหลัง = รายวันอย่างเดียว
+ *         ปัดเศษตามหลักคณิตศาสตร์ · หาคอลัมน์จากชื่อหัวในชีท Slip/Slip PTT (สลับคอลัมน์ได้)
+ *         หาไม่เจอ = ปล่อยว่างให้ HR กรอกเอง (ไม่ใส่เลขมั่ว)
+ * v7.1 — ขอตกเบิก: เลิกเติมช่อง "จำนวนเงิน" (ยกเลิกแล้วด้วย v7.2)
  *         + ตัดการอ่านค่าแรงต่อวันจากชีท Slip ออก (ไม่แตะข้อมูลเงินเดือนโดยไม่จำเป็น)
  * v7.0 — แยก "ยอดที่ใช้ก่อนย้ายมาใช้แอป" ออกจากเพดาน (รันจาก editor):
  *         เดิมยัด "คงเหลือ" ลงช่องเพดาน → หน้าจอโชว์เพี้ยน (พิชชาพร พักร้อน 2/1 แทน 6/5)
@@ -276,7 +280,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.1', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.2', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3233,6 +3237,48 @@ function actionGetMyDocRequests(p, user) {
   } catch(e) { return { ok: false, error: e.message }; }
 }
 
+/* ── v7.2: คิดยอดตกเบิกจากชีทเงินเดือน ──────────────────────────────────
+   ยอด = ค่าแรงรายวัน (+ เบี้ยเลี้ยงต่อวัน เฉพาะ "ปรับปรุงเวลา") แล้วปัดเศษตามหลักคณิตศาสตร์
+   หาคอลัมน์จาก "ชื่อหัวคอลัมน์" ก่อนเสมอ — ชีทสลับคอลัมน์แล้วยังทำงานถูก
+   หาไม่เจอ/ไม่มีข้อมูล = คืน '' (ปล่อยว่างให้ HR กรอกเอง ดีกว่าใส่เลขมั่ว) */
+function reimburseAmount_(empId, includeAllowance) {
+  const id = String(empId || '').trim();
+  if (!id) return '';
+  const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
+  const num = v => { const n = parseFloat(String(v == null ? '' : v).replace(/,/g, '')); return isNaN(n) ? 0 : n; };
+
+  const pick = (sheetName, idIdxFallback, dailyIdxFallback, allowIdxFallback) => {
+    const sh = ss.getSheetByName(sheetName);
+    if (!sh || sh.getLastRow() < 2) return null;
+    const data = sh.getDataRange().getValues();
+    const head = data[0].map(h => String(h || '').replace(/\s+/g, ''));
+    const findCol = (re, fallback) => {
+      const i = head.findIndex(h => re.test(h));
+      return i >= 0 ? i : fallback;
+    };
+    const idCol    = findCol(/^รหัสพนักงาน/, idIdxFallback);
+    const dailyCol = findCol(/ค่าแรงต่อวัน|ค่าจ้างต่อวัน|รายวัน/, dailyIdxFallback);
+    // เบี้ยเลี้ยง "ต่อวัน" — ชีท Slip ใช้หัว "สูตรเบี้ยเลี้ยง" (คอลัมน์ V) ไม่ใช่ยอดรวมทั้งงวด
+    let allowCol = head.findIndex(h => /เบี้ยเลี้ยง/.test(h) && /สูตร|ต่อวัน|\/วัน/.test(h));
+    if (allowCol < 0 && allowIdxFallback != null && /เบี้ยเลี้ยง/.test(head[allowIdxFallback] || '')) allowCol = allowIdxFallback;
+    if (dailyCol == null || dailyCol < 0 || idCol == null || idCol < 0) return null;
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][idCol]).trim() !== id) continue;
+      const daily = num(data[i][dailyCol]);
+      if (!daily) continue;                       // แถวไม่มีค่าแรง → ลองแถว/ชีทถัดไป
+      const allow = (allowCol >= 0) ? num(data[i][allowCol]) : 0;
+      return { daily: daily, allow: allow };
+    }
+    return null;
+  };
+
+  // RATTANA = ชีท "Slip" (รหัสคอลัมน์ P=15, สูตรเบี้ยเลี้ยง V=21) · PTT = ชีท "Slip PTT" (รหัส E=4)
+  const hit = pick('Slip', 15, null, 21) || pick('Slip PTT', 4, null, 21);
+  if (!hit) return '';
+  const total = hit.daily + (includeAllowance ? hit.allow : 0);
+  return Math.round(total);                       // ปัดตามหลักคณิตศาสตร์ (.5 ขึ้น)
+}
+
 function actionSubmitReimburse(p, user) {
   try {
     const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
@@ -3260,8 +3306,12 @@ function actionSubmitReimburse(p, user) {
       f.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
       attachUrl  = f.getDownloadUrl();
     }
-    // v7.1: เลิกเติมช่อง "จำนวนเงิน" (คอลัมน์ T) — HR กรอกเอง (surat สั่ง 26/08)
-    //       ตัดการอ่านค่าแรงต่อวันจากชีท Slip ออกด้วย (ไม่ต้องแตะข้อมูลเงินเดือนโดยไม่จำเป็น)
+    // v7.2 (surat สั่งใหม่ 27/08): เติมช่อง "จำนวนเงิน" (คอลัมน์ T) ให้อีกครั้ง ตามกติกา
+    //   · ปรับปรุงเวลา  = ค่าแรงรายวัน + เบี้ยเลี้ยงต่อวัน (เช่น 400 + 100 = 500)
+    //   · ลาย้อนหลัง    = ค่าแรงรายวันอย่างเดียว (ไม่บวกเบี้ยเลี้ยงทุกกรณี)
+    //   · ปัดเศษตามหลักคณิตศาสตร์ (383.33 → 383 · 471.67 → 472)
+    const _withAllow = String(p.type || '') !== 'reimburse_leave';
+    const _amount = reimburseAmount_(p.empId, _withAllow);
     const _rowData = [
       nowDate,                             // A วันที่
       p.empId,                             // B รหัสพนักงาน
@@ -3282,7 +3332,7 @@ function actionSubmitReimburse(p, user) {
       p.approvePeriod || '',               // Q งวดที่ขออนุมัติจ่าย
       `${_cn} ${p.deductDate || ''}`,      // R
       attachUrl,                           // S แนบเอกสาร
-      // T จำนวนเงิน — ไม่เขียน ปล่อยให้ HR กรอกเอง (v7.1)
+      _amount,                             // T จำนวนเงิน (v7.2 — รายวัน [+ เบี้ยเลี้ยง] ปัดเศษแล้ว)
     ];
     const _colB = sh.getRange(2, 2, Math.max(sh.getMaxRows() - 1, 1), 1).getValues();
     let _lastIdx = -1;
