@@ -1,7 +1,9 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v7.0 — แยก "ยอดที่ใช้ก่อนย้ายมาใช้แอป" ออกจากเพดาน (รันจาก editor · ไม่ต้อง Deploy ก็ได้):
+ * v7.1 — ขอตกเบิก: เลิกเติมช่อง "จำนวนเงิน" (คอลัมน์ T) ให้ HR กรอกเอง (ต้อง Deploy New version)
+ *         + ตัดการอ่านค่าแรงต่อวันจากชีท Slip ออก (ไม่แตะข้อมูลเงินเดือนโดยไม่จำเป็น)
+ * v7.0 — แยก "ยอดที่ใช้ก่อนย้ายมาใช้แอป" ออกจากเพดาน (รันจาก editor):
  *         เดิมยัด "คงเหลือ" ลงช่องเพดาน → หน้าจอโชว์เพี้ยน (พิชชาพร พักร้อน 2/1 แทน 6/5)
  *         ตอนนี้: แท็บโควต้าลา = สิทธิเต็มจริง · แท็บใหม่ "ใช้ก่อนใช้แอป" = วันที่ HumanSoft นับไว้แล้ว
  *         ใช้ไป = แท็บนั้น + ใบลาในแอป · คงเหลือ = เพดาน − ใช้ไป (ตรงกับ HumanSoft ทุกช่อง)
@@ -274,7 +276,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.0', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.1', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3258,24 +3260,8 @@ function actionSubmitReimburse(p, user) {
       f.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
       attachUrl  = f.getDownloadUrl();
     }
-    let dailyWage = '';
-    try {
-      const slipSh = ss.getSheetByName('Slip');
-      if (slipSh) {
-        const slipData = slipSh.getDataRange().getValues();
-        const header   = slipData[0].map(h => String(h).trim());
-        const wageCol  = header.indexOf('ค่าแรงต่อวัน');
-        const empCol   = header.indexOf('รหัสพนักงาน');
-        if (wageCol > -1 && empCol > -1) {
-          for (let i = 1; i < slipData.length; i++) {
-            if (String(slipData[i][empCol]).trim() === String(p.empId).trim()) {
-              dailyWage = slipData[i][wageCol];
-              break;
-            }
-          }
-        }
-      }
-    } catch(_) {}
+    // v7.1: เลิกเติมช่อง "จำนวนเงิน" (คอลัมน์ T) — HR กรอกเอง (surat สั่ง 26/08)
+    //       ตัดการอ่านค่าแรงต่อวันจากชีท Slip ออกด้วย (ไม่ต้องแตะข้อมูลเงินเดือนโดยไม่จำเป็น)
     const _rowData = [
       nowDate,                             // A วันที่
       p.empId,                             // B รหัสพนักงาน
@@ -3296,7 +3282,7 @@ function actionSubmitReimburse(p, user) {
       p.approvePeriod || '',               // Q งวดที่ขออนุมัติจ่าย
       `${_cn} ${p.deductDate || ''}`,      // R
       attachUrl,                           // S แนบเอกสาร
-      dailyWage,                           // T จำนวนเงิน (รายวัน)
+      // T จำนวนเงิน — ไม่เขียน ปล่อยให้ HR กรอกเอง (v7.1)
     ];
     const _colB = sh.getRange(2, 2, Math.max(sh.getMaxRows() - 1, 1), 1).getValues();
     let _lastIdx = -1;
