@@ -868,8 +868,12 @@
   <div id="modeHistory" style="display:none">
     <div class="card mt-8">
       <div class="card-head">
-        <h3>📜 ประวัติการเช็คสต็อก</h3>
-        <button class="btn btn-outline btn-sm" onclick="loadHistory(true)">↻ รีเฟรช</button>
+        <h3 id="histTitle">📜 ประวัติการเช็คสต็อก</h3>
+        <button class="btn btn-outline btn-sm" onclick="reloadHistory()">↻ รีเฟรช</button>
+      </div>
+      <div class="hist-chips" style="padding:10px 12px 2px">
+        <button id="histKindCount" class="hist-chip active" onclick="setHistoryKind('count')" type="button">📋 เช็คสต็อก</button>
+        <button id="histKindScrap" class="hist-chip" onclick="setHistoryKind('scrap')" type="button">🧮 เช็คเศษ</button>
       </div>
       <div id="historyWhChips" class="hist-chips" style="display:none"></div>
       <div class="card-body" style="padding:8px 0" id="historyBody">
@@ -947,7 +951,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.60';
+const APP_VERSION = 'v4.61';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -1077,7 +1081,7 @@ function stopDraftPoll() { if (draftPollTimer) { clearInterval(draftPollTimer); 
 // Re-sync everything that depends on the network the moment focus returns.
 function refreshEverything() {
   if (!currentUser) return;
-  if (currentMode === 'history') { historyLoaded = false; loadHistory(true); }
+  if (currentMode === 'history') { reloadHistory(); }
   if (currentMode === 'count')   { fetchAndUpdate(); if (countSession) enterDraftSync(countSession.warehouse); }
   if (currentMode === 'summary') { fetchAndUpdate(); renderSummary(); }
 }
@@ -2266,7 +2270,7 @@ function setMode(mode) {
   } else if (mode==='dashboard') {
     loadDashboard();
   } else if (mode==='history') {
-    loadHistory(true);
+    reloadHistory();
   } else if (mode==='putaway') {
     initPutawayMode();
   } else if (mode==='scrap') {
@@ -4058,7 +4062,7 @@ const DASH_PAGE_SIZE = 15;
 let dashCkPage = 1, dashUnchkPage = 1, dashHistPage = 1;
 function dashCkGoPage(n) { dashCkPage = n; renderDashCheckers(); }
 function dashUnchkGoPage(n) { dashUnchkPage = n; renderDashUnchecked(); }
-function dashHistGoPage(n) { dashHistPage = n; renderDashHistory(); }
+function dashHistGoPage(n) { dashHistPage = n; historyKind === 'scrap' ? renderScrapHistList() : renderDashHistory(); }
 function pagerHtml(page, total, size, cb) {
   const pages = Math.max(1, Math.ceil(total/size));
   if (pages <= 1) return '';
@@ -4650,6 +4654,113 @@ async function loadHistory(force) {
   }
 }
 
+// ══════════ ประวัติ: สลับ 2 ชิป (เช็คสต็อก / เช็คเศษ) ══════════
+let historyKind = 'count';   // 'count' | 'scrap'
+function reloadHistory() {
+  if (historyKind === 'scrap') loadScrapHistory(true);
+  else { historyLoaded = false; loadHistory(true); }
+}
+function setHistoryKind(kind) {
+  if (historyKind === kind) return;
+  historyKind = kind;
+  const cB = document.getElementById('histKindCount'), sB = document.getElementById('histKindScrap');
+  if (cB) cB.classList.toggle('active', kind === 'count');
+  if (sB) sB.classList.toggle('active', kind === 'scrap');
+  const t = document.getElementById('histTitle');
+  if (t) t.textContent = kind === 'scrap' ? '🧮 ประวัติการเช็คเศษ' : '📜 ประวัติการเช็คสต็อก';
+  historyWhFilter = 'ALL';
+  const chips = document.getElementById('historyWhChips'); if (chips) { chips.innerHTML = ''; chips.style.display = 'none'; }
+  if (kind === 'scrap') loadScrapHistory(false);
+  else { if (historyCache) renderHistory(historyCache); else loadHistory(false); }
+}
+
+// ── ประวัติเช็คเศษ (นับเศษ) — อ่านจาก GAS action=scraphistory ──
+let scrapHistCache = null, scrapHistFetching = null;
+async function loadScrapHistory(force) {
+  const body = document.getElementById('historyBody');
+  if (!COUNT_SAVE_URL) { body.innerHTML = '<div class="txt-center txt-muted" style="padding:24px 16px">ยังไม่ได้ตั้งค่า Google Sheet</div>'; return; }
+  if (scrapHistCache && !force) { renderScrapHistory(scrapHistCache); return; }
+  if (!scrapHistCache) body.innerHTML = '<div class="txt-center txt-muted" style="padding:24px 16px">⏳ กำลังโหลด...</div>';
+  try {
+    if (!scrapHistFetching) scrapHistFetching = fetch(COUNT_SAVE_URL + '?action=scraphistory', { cache: 'no-store' }).then(r => r.json());
+    const json = await scrapHistFetching; scrapHistFetching = null;
+    scrapHistCache = (json && json.rows) || [];
+    if (historyKind === 'scrap') renderScrapHistory(scrapHistCache);
+  } catch (e) {
+    scrapHistFetching = null;
+    if (historyKind === 'scrap') body.innerHTML = `<div class="txt-center" style="padding:24px 16px;color:var(--danger);font-size:13px">โหลดประวัติเช็คเศษไม่สำเร็จ: ${e.message||e}</div>`;
+  }
+}
+// จัดกลุ่มนับเศษเป็นเซสชัน (วัน+คลัง+ผู้นับ) — เกณฑ์การมองเห็นเหมือนประวัติเช็คสต็อก
+function groupScrapSessions(rows) {
+  const allowedWh = new Set(visibleWh);
+  const seeAll = currentUser && currentUser.role >= ALL_WAREHOUSE_ROLE;
+  const myEmp = String(currentUser?.empId || '').trim(), myEmail = String(currentUser?.email || '').toLowerCase(), myName = String(currentUser?.name || '').trim();
+  const isMine = r => { if (seeAll) return true; const e = String(r.empId||'').trim(); if (e && myEmp && e === myEmp) return true; const n = String(r.counterName||'').trim(); if (n && (n === myName || n.toLowerCase() === myEmail)) return true; return false; };
+  const filtered = (rows || []).filter(r => allowedWh.has(String(r.warehouse).toUpperCase()) && isMine(r));
+  const dayOf = iso => String(iso || '').slice(0, 10);
+  const map = new Map();
+  filtered.forEach(r => {
+    const day = dayOf(r.savedAt);
+    const key = `${day}__${r.warehouse}__${r.empId || r.counterName}`;
+    if (!map.has(key)) map.set(key, { savedAt: r.savedAt, warehouse: r.warehouse, empId: r.empId, counterName: r.counterName, items: [] });
+    else { const g = map.get(key); if ((r.savedAt||'') > (g.savedAt||'')) g.savedAt = r.savedAt; }
+    map.get(key).items.push(r);
+  });
+  return [...map.values()].sort((a, b) => (b.savedAt||'').localeCompare(a.savedAt||''));
+}
+function renderScrapHistory(rows) {
+  const allSessions = groupScrapSessions(rows || []);
+  renderHistoryChips(allSessions);
+  const sessions = historyWhFilter === 'ALL' ? allSessions : allSessions.filter(s => String(s.warehouse||'').toUpperCase() === historyWhFilter);
+  const body = document.getElementById('historyBody');
+  if (!sessions.length) { body.innerHTML = '<div class="txt-center txt-muted" style="padding:24px 16px;font-size:13px">ยังไม่มีประวัติเช็คเศษ — ไปที่แท็บ 🧮 นับเศษ แล้วส่งข้อมูล</div>'; return; }
+  dashHistPage = 1;
+  body._sessions = sessions; window._histSessions = sessions;
+  body.innerHTML = `<div id="dashHistList"></div><div id="dashHistPager"></div>`;
+  renderScrapHistList();
+}
+function renderScrapHistList() {
+  const listEl = document.getElementById('dashHistList'), pagerEl = document.getElementById('dashHistPager');
+  const sessions = window._histSessions || [];
+  if (!listEl) return;
+  const start = (dashHistPage-1) * DASH_PAGE_SIZE;
+  const page = sessions.slice(start, start + DASH_PAGE_SIZE);
+  listEl.innerHTML = page.map((s, i) => {
+    const idx = start + i;
+    const who = s.counterName || s.empId || '-';
+    const totQty = s.items.reduce((a, it) => a + (+it.qty || 0), 0);
+    return `
+      <div class="hist-row" data-idx="${idx}">
+        <div style="flex:1;min-width:0">
+          <div class="hist-date">${formatThaiDate(s.savedAt)}</div>
+          <div class="hist-meta">${s.warehouse} · ${WH_NAMES[s.warehouse]||''} · ${who} · ${s.items.length} รายการ</div>
+        </div>
+        <div class="hist-counts"><span class="hc hc-ok">${totQty} หน่วย</span></div>
+        <span style="color:var(--muted);font-size:18px">›</span>
+      </div>`;
+  }).join('');
+  if (pagerEl) pagerEl.innerHTML = pagerHtml(dashHistPage, sessions.length, DASH_PAGE_SIZE, 'dashHistGoPage');
+}
+function openScrapHistDetail(idx) {
+  const body = document.getElementById('historyBody');
+  const sessions = (body && body._sessions) || window._histSessions || [];
+  const s = sessions[idx];
+  if (!s) return;
+  document.getElementById('histModalTitle').textContent = `${formatThaiDate(s.savedAt)} · ${s.warehouse} · ${s.counterName||s.empId||'-'} · นับเศษ`;
+  const items = [...s.items].sort((a, b) => String(b.countedAt||b.savedAt||'').localeCompare(String(a.countedAt||a.savedAt||'')));
+  const rowsHtml = items.map(it => `
+    <div style="display:flex;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--border)">
+      <div style="min-width:0;flex:1">
+        <div style="font-weight:600;font-size:13px">${it.name||'—'}</div>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:2px">${it.barcode ? it.barcode : ''}${it.expiryDate ? (it.barcode?' · ':'')+'📅 '+formatThaiDate(it.expiryDate) : ''}</div>
+      </div>
+      <div style="flex:none;font-weight:800;color:var(--navy-mid)">${it.qty} ${it.unit}</div>
+    </div>`).join('');
+  document.getElementById('histModalBody').innerHTML = `<div style="font-size:12px;color:var(--muted);margin-bottom:8px">รวม ${items.length} รายการ</div>${rowsHtml}`;
+  document.getElementById('histModal').classList.add('open');
+}
+
 // Group rows by (savedAt + warehouse + counter) into one "session" per save
 function groupSessions(rows) {
   // Visibility rules — same model as the count tab:
@@ -4693,7 +4804,8 @@ function groupSessions(rows) {
 let historyWhFilter = 'ALL';
 function setHistoryWhFilter(wh) {
   historyWhFilter = wh;
-  renderHistory(historyCache || []);
+  if (historyKind === 'scrap') renderScrapHistory(scrapHistCache || []);
+  else renderHistory(historyCache || []);
 }
 function renderHistoryChips(allSessions) {
   const chipBox = document.getElementById('historyWhChips');
@@ -4766,7 +4878,7 @@ document.addEventListener('click', function (e) {
   if (!row) return;
   const idx = parseInt(row.dataset.idx, 10);
   if (!isFinite(idx)) return;
-  try { openHistDetail(idx); }
+  try { historyKind === 'scrap' ? openScrapHistDetail(idx) : openHistDetail(idx); }
   catch (err) {
     console.error('openHistDetail failed:', err);
     showToast('เปิดรายละเอียดไม่สำเร็จ: ' + (err.message || err), 'error');
