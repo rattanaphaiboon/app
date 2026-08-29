@@ -1,7 +1,9 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v7.3 — กติกาหักโควต้าลาแบบขั้นบันได (คู่แอป v12.48 · ต้อง Deploy New version):
+ * v7.4 — หน้าอนุมัติเห็น "ลาตั้งแต่–ถึง กี่วัน" (คู่แอป v12.50 · ต้อง Deploy New version):
+ *         getPendingAll ส่ง endDate (คอลัมน์ N) + hours (M) + quotaDays มาด้วยสำหรับใบลา
+ * v7.3 — กติกาหักโควต้าลาแบบขั้นบันได (คู่แอป v12.48):
  *         ลาวันเดียว ไม่เกิน 4 ชม. = หัก 0.5 วัน · เกิน 4 ชม. = หัก 1 วัน · ลาหลายวัน = ตามจำนวนวัน
  *         (เดิมหารชั่วโมง÷8 เช่น ลา 2 ชม. หักแค่ 0.25) · คอลัมน์ M ยังเก็บชั่วโมงจริงเหมือนเดิม
  * v7.2 — ขอตกเบิก: คิดยอด "จำนวนเงิน" ใหม่ตามกติกา:
@@ -283,7 +285,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.3', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.4', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3638,6 +3640,12 @@ function getPendingAll(p, user) {
           approver: (cfg.approver != null) ? String(r[cfg.approver] || '') : '',
           assigned: assigned,   // v6.2: ใบนี้ถูกกำหนดให้เราเป็นผู้อนุมัติเฉพาะ (แอปข้ามการกรองทีม)
         };
+        // v7.4: ส่งช่วงวันลา + ชั่วโมง มาด้วย เพื่อให้หน้าอนุมัติโชว์ "ลาตั้งแต่–ถึง กี่วัน"
+        if (name === 'การลาApp' && leaveSheetIsNew_(sh)) {
+          it.endDate  = r[13] || r[0];                              // N ถึงวันที่
+          it.hours    = r[12];                                      // M จำนวนชั่วโมง
+          it.quotaDays = leaveQuotaDays_(r[12], r[0], r[13]);        // จำนวนวันที่หักโควต้าจริง
+        }
         if (stKey === 'pending') items.push(it);
         else doneRows.push(it);
       }
