@@ -1,7 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v7.2 — ขอตกเบิก: คิดยอด "จำนวนเงิน" ใหม่ตามกติกา (ต้อง Deploy New version):
+ * v7.3 — กติกาหักโควต้าลาแบบขั้นบันได (คู่แอป v12.48 · ต้อง Deploy New version):
+ *         ลาวันเดียว ไม่เกิน 4 ชม. = หัก 0.5 วัน · เกิน 4 ชม. = หัก 1 วัน · ลาหลายวัน = ตามจำนวนวัน
+ *         (เดิมหารชั่วโมง÷8 เช่น ลา 2 ชม. หักแค่ 0.25) · คอลัมน์ M ยังเก็บชั่วโมงจริงเหมือนเดิม
+ * v7.2 — ขอตกเบิก: คิดยอด "จำนวนเงิน" ใหม่ตามกติกา:
  *         ปรับปรุงเวลา = ค่าแรงรายวัน + เบี้ยเลี้ยงต่อวัน · ลาย้อนหลัง = รายวันอย่างเดียว
  *         ปัดเศษตามหลักคณิตศาสตร์ · หาคอลัมน์จากชื่อหัวในชีท Slip/Slip PTT (สลับคอลัมน์ได้)
  *         หาไม่เจอ = ปล่อยว่างให้ HR กรอกเอง (ไม่ใส่เลขมั่ว)
@@ -280,7 +283,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.2', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.3', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -1685,7 +1688,7 @@ function actionSubmitLeaveApp(p, user) {
     if (qKey) {
       const q = leaveQuotaFor_(empId);
       if (q && q.remaining[qKey] != null) {
-        const reqDays = Math.round(((parseFloat(hoursVal) || 0) / 8) * 100) / 100;
+        const reqDays = leaveQuotaDays_(hoursVal, startDate, endDate);   // v7.3: ขั้นบันได 0.5 / 1 วัน
         if (reqDays > q.remaining[qKey]) {
           overQuota = true;
           if (QUOTA_HARD_BLOCK && !isHR(user)) {
@@ -2496,6 +2499,25 @@ function leaveRowsAll_() {
   _leaveRowsCache = (la && leaveSheetIsNew_(la)) ? la.getDataRange().getValues() : [];
   return _leaveRowsCache;
 }
+/* ── v7.3: กติกาหักโควต้า (surat เคาะ 27/08) ──────────────────────────
+   ลาไม่เต็มวัน: ไม่เกิน 4 ชม. = หัก 0.5 วัน · เกิน 4 ชม. = หัก 1 วัน
+   (เช่น 08:00–10:00 = 0.5 · 08:00–15:00 = 1) · ลาหลายวัน = นับตามจำนวนวันจริง
+   หมายเหตุ: คอลัมน์ M ในชีทยังเก็บ "ชั่วโมงจริง" ตามเดิม (สรุปวันใช้คิดลาบางส่วน) */
+function leaveQuotaDays_(hours, startDate, endDate) {
+  const h = parseFloat(hours) || 0;
+  if (h <= 0) return 0;
+  let days = 1;
+  try {
+    const sd = (startDate instanceof Date) ? startDate : parseDDMMYYYY(formatDate(startDate));
+    const ed = (endDate instanceof Date)   ? endDate   : parseDDMMYYYY(formatDate(endDate || startDate));
+    if (sd && ed && !isNaN(sd.getTime()) && !isNaN(ed.getTime())) {
+      days = Math.max(1, Math.round((ed - sd) / 86400000) + 1);
+    }
+  } catch (e) {}
+  if (days > 1) return days;              // ลาข้ามวัน = นับเป็นวันเต็มตามจำนวนวัน
+  return h <= 4 ? 0.5 : 1;                // ลาวันเดียว = ครึ่งวัน หรือ เต็มวัน
+}
+
 function countUsedLeave(empId, from, to) {
   const c = { personal:0, sickWithCert:0, sickNoCert:0, vacation:0, unpaidPersonal:0, maternity:0, training:0 };
   // v5.0: นับจาก การลาApp — approveAny อนุมัติที่ชีทนี้ (แท็บ log เดิมสถานะค้าง pending ตลอด
@@ -2509,7 +2531,7 @@ function countUsedLeave(empId, from, to) {
       const sd = r[0] instanceof Date ? r[0] : parseDDMMYYYY(formatDate(r[0]));
       if (!sd || isNaN(sd.getTime())) continue;
       if (sd < from || sd > to) continue;
-      const days = (parseFloat(r[12]) || 0) / 8;
+      const days = leaveQuotaDays_(r[12], r[0], r[13]);   // v7.3: ≤4 ชม.=0.5 · >4 ชม.=1 · หลายวัน=ตามวัน
       const t = leaveCodeFromLabel_(r[5]);
       if (t === 'personal') c.personal += days;
       else if (t === 'sick_with_cert') c.sickWithCert += days;
