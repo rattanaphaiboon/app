@@ -950,7 +950,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.294';
+const APP_VERSION='3.295';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -5024,8 +5024,45 @@ const CRATE_TANK_RULES=[
    นับเฉพาะหน่วยที่เป็น (CS) — (EA)/(PA) คือของแยกชิ้น ไม่ใช่ลัง */
 const CIG_BRANDS=['เอสเอ็มเอส','แอล&เอ็ม','สกอร์','กรองทิพย์','กรุงทอง','สายฝน','วอนเดอร์เอส','เพลออฟ'];
 const NOT_RICE=['แป้ง','ข้าวเกรียบ','ข้าวโพด','จมูกข้าว','รำข้าว','รสข้าว','รวงข้าว','ซอยตัด','โจ๊ก','ข้าวต้ม','น้ำมัน','ml.','มล.','ขนม'];
+/* ★★ v3.295: ใช้คอลัมน์ "CAT TYPE" ในชีทสินค้าเป็นตัวตัดสินหมวด (user ชี้แหล่งให้ 2026-08-29)
+   แม่นกว่าเดาจากชื่อมาก — เทียบกันแล้วกฎเดาชื่อพลาด 38 รายการ เช่น
+   · ยาเส้น / ใบจาก / ยาตั้งไก่ = บุหรี่ (ไม่มีชื่อยี่ห้อในลิสต์)
+   · ตงฮั้ว หอมมะลิ 14กก. / ฉัตร ชากังราว ทอง = ข้าว (ชื่อไม่มีคำว่า "ข้าว" เลย)
+   · มิตรผลทรายแดงเคลือบคาราเมล = น้ำตาล (ไม่มีคำว่า "น้ำตาล")
+   และนับเกิน 4 รายการ (ข้าวคั่วทรงเครื่อง · หม้อหุงข้าว)
+   หมายเหตุ: gviz กรอง where ด้วยคำไทยไม่ติด → ต้องดึง 2 คอลัมน์ทั้งชีท (~1.8MB) แล้วคัดในแอป
+   เก็บเฉพาะ 3 หมวดที่ใช้ (~308 ชื่อ ≈ 15KB) แคช 7 วันใน IndexedDB — ดาวน์โหลดจริงอย่างมากสัปดาห์ละครั้ง
+   ยังไม่โหลดเสร็จ = ใช้กฎเดาชื่อไปก่อน (ไม่ค้างรอ) */
+const CATTYPE_CACHE_KEY='cattype_v3295';
+const CAT_WANT={'ข้าว':'rice','น้ำตาล':'sugar','บุหรี่':'cig'};
+let _catMap=null, _catLoading=null;
+async function ensureCatMap_(){
+  if(_catMap) return _catMap;
+  if(_catLoading) return _catLoading;
+  _catLoading=(async()=>{
+    try{
+      const c=await idbGet_(CATTYPE_CACHE_KEY);
+      if(c&&c.ts&&c.map&&(Date.now()-c.ts)<7*86400000){ _catMap=c.map; return _catMap; }
+    }catch(e){}
+    try{
+      const rows=await fetchSheet(CFG.productsSheetId,CFG.productsSheetName,{tq:'select A,BB'});
+      const m={};
+      (rows||[]).forEach(r=>{
+        const nm=cleanCell(r['PRODUCT NAME']||''); const k=CAT_WANT[cleanCell(r['CAT TYPE']||'')];
+        if(nm&&k) m[nm]=k;
+      });
+      if(Object.keys(m).length){ _catMap=m; try{ await idbSet_(CATTYPE_CACHE_KEY,{ts:Date.now(),map:m}); }catch(e){} }
+    }catch(e){ console.warn('CAT TYPE load failed:',e); }
+    _catLoading=null;
+    return _catMap;
+  })();
+  return _catLoading;
+}
 function skuCategory_(sku){
-  const s=String(sku||'');
+  const s=cleanCell(String(sku||'')).trim();   // ★ v3.295: normalize ให้ตรงกับคีย์ในแมป (cleanCell ยุบช่องว่างซ้อน)
+  if(_catMap&&_catMap[s]) return _catMap[s];      // ★ แหล่งจริงจากชีท
+  if(_catMap) return 'other';                      // โหลดแมปแล้วแต่ไม่อยู่ใน 3 หมวด = อื่นๆ (เชื่อชีท ไม่เดาต่อ)
+  // ยังโหลดแมปไม่เสร็จ → เดาจากชื่อไปก่อน
   if(CIG_BRANDS.some(b=>s.indexOf(b)>=0)) return 'cig';
   if(s.indexOf('น้ำตาลทราย')>=0) return 'sugar';
   if(s.indexOf('ข้าว')>=0 && !NOT_RICE.some(x=>s.indexOf(x)>=0)) return 'rice';
@@ -5071,11 +5108,14 @@ function _ctVal_(id){ const v=parseFloat((($(id)||{}).value)||''); return (v>0)?
 async function fillCratesTanks_(job){
   if(!job||!$('pickupCrates')) return;
   const docs=(job.bills||[]).map(b=>b.doc).filter(Boolean);
+  ensureCatMap_();   // ★ v3.295: โหลดแมปหมวดสินค้าคู่ขนาน (แคช 7 วัน — ปกติได้จากแคชทันที)
   if(docs.some(d=>!billItems_(d).length)){
     const n0=$('crateTankNote'); if(n0) n0.textContent='⏳ กำลังอ่านรายการสินค้าในใบคุม…';
     try{ await ensureBillDetailsForDocs_(docs); }catch(e){}
     if(ddValue('ddJob')!==job.id) return;   // เปลี่ยนใบคุมไปแล้วระหว่างโหลด
   }
+  if(!_catMap){ try{ await ensureCatMap_(); }catch(e){} }   // ★ v3.295: ต้องมีแมปหมวดก่อนนับ (แม้รายการสินค้ามีอยู่แล้ว)
+  if(ddValue('ddJob')!==job.id) return;
   const c=countCratesTanks_(job);
   const ec=$('pickupCrates'), et=$('pickupTanks'), note=$('crateTankNote');   // ต้องอ่านใหม่ — ฟอร์มอาจ re-render ระหว่างรอโหลด
   if(!ec||!et) return;
