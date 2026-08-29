@@ -1,7 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v7.4 — หน้าอนุมัติเห็น "ลาตั้งแต่–ถึง กี่วัน" (คู่แอป v12.50 · ต้อง Deploy New version):
+ * v7.5 — ตรวจบั๊กทั้งระบบ (คู่แอป v12.51 · ต้อง Deploy New version):
+ *         · ทางถอย T.LEAVE ยังคิดโควต้าแบบ ชม.÷8 — เปลี่ยนมาใช้ leaveQuotaDays_ ให้ตรงกติกาเดียวกัน
+ *         · reimburseAmount_ หาคอลัมน์ "ค่าแรงต่อวัน" แบบชื่อเป๊ะก่อน (กันโดนคอลัมน์อื่นที่มีคำว่ารายวัน)
+ * v7.4 — หน้าอนุมัติเห็น "ลาตั้งแต่–ถึง กี่วัน" (คู่แอป v12.50):
  *         getPendingAll ส่ง endDate (คอลัมน์ N) + hours (M) + quotaDays มาด้วยสำหรับใบลา
  * v7.3 — กติกาหักโควต้าลาแบบขั้นบันได (คู่แอป v12.48):
  *         ลาวันเดียว ไม่เกิน 4 ชม. = หัก 0.5 วัน · เกิน 4 ชม. = หัก 1 วัน · ลาหลายวัน = ตามจำนวนวัน
@@ -285,7 +288,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.4', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.5', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -2556,7 +2559,7 @@ function countUsedLeave(empId, from, to) {
     if (!sd || isNaN(sd.getTime())) continue;
     if (sd < from || sd > to) continue;
     const hours = parseFloat(r[8]) || 0;
-    const days = hours / 8;
+    const days = leaveQuotaDays_(hours, r[6], r[7]);   // v7.5: กติกาเดียวกับชีทใหม่ (ขั้นบันได 0.5/1)
     const t = String(r[4] || '');
     if (t === 'personal') c.personal += days;
     else if (t === 'sick_with_cert' || t === 'sick_cert') c.sickWithCert += days;
@@ -3281,7 +3284,9 @@ function reimburseAmount_(empId, includeAllowance) {
       return i >= 0 ? i : fallback;
     };
     const idCol    = findCol(/^รหัสพนักงาน/, idIdxFallback);
-    const dailyCol = findCol(/ค่าแรงต่อวัน|ค่าจ้างต่อวัน|รายวัน/, dailyIdxFallback);
+    // v7.5: ชื่อเป๊ะก่อน แล้วค่อยเดา — กันไปโดนคอลัมน์อื่นที่บังเอิญมีคำว่า "รายวัน"
+    let dailyCol = head.indexOf('ค่าแรงต่อวัน');
+    if (dailyCol < 0) dailyCol = findCol(/ค่าแรงต่อวัน|ค่าจ้างต่อวัน|^รายวัน|เรทรายวัน/, dailyIdxFallback);
     // เบี้ยเลี้ยง "ต่อวัน" — ชีท Slip ใช้หัว "สูตรเบี้ยเลี้ยง" (คอลัมน์ V) ไม่ใช่ยอดรวมทั้งงวด
     let allowCol = head.findIndex(h => /เบี้ยเลี้ยง/.test(h) && /สูตร|ต่อวัน|\/วัน/.test(h));
     if (allowCol < 0 && allowIdxFallback != null && /เบี้ยเลี้ยง/.test(head[allowIdxFallback] || '')) allowCol = allowIdxFallback;
