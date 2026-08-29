@@ -950,7 +950,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.292';
+const APP_VERSION='3.293';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -5015,6 +5015,39 @@ const CRATE_TANK_RULES=[
   {kind:'tank',  unit:'ถัง', match:s=>s.indexOf('แบะแซ')>=0},                              // แบะแซ 24 กก. · ถังx1(CS) = 1 ถัง
   {kind:'tank',  unit:'ถัง', match:s=>s.indexOf('เบียร์สดถัง')>=0},                          // ช้าง เบียร์สดถัง 30ล. · ถังx1(CS) = 1 ถัง
 ];
+/* ★★ v3.293: นับจำนวน CS ต่อหมวดสินค้าในใบคุม → ลงชีท (user 2026-08-26)
+   กฎแยกหมวดตรวจกับชื่อสินค้าจริงในชีท DS_DC ทั้งหมด 3,401 รายการแล้ว:
+   · บุหรี่ = ชื่อยี่ห้อ (ไม่มีคำว่า "บุหรี่" ในชื่อสินค้าเลย) — 8 ยี่ห้อครอบคลุมทุกรายการที่เจอ
+   · น้ำตาล = "น้ำตาลทราย" (ไม่ใช่แค่ "น้ำตาล" ไม่งั้นติด งาดำน้ำตาลน้อย / รสน้ำตาลและเนย / น้ำตาล0%)
+   · ข้าว = มีคำว่า "ข้าว" แต่ตัดของที่ไม่ใช่ข้าวสารออก (แป้งข้าวเจ้า · ข้าวเกรียบ · จมูกข้าว ·
+     น้ำมันรำข้าว · รวงข้าว(เหล้า) · ...ml. (เครื่องดื่ม) ฯลฯ)
+   นับเฉพาะหน่วยที่เป็น (CS) — (EA)/(PA) คือของแยกชิ้น ไม่ใช่ลัง */
+const CIG_BRANDS=['เอสเอ็มเอส','แอล&เอ็ม','สกอร์','กรองทิพย์','กรุงทอง','สายฝน','วอนเดอร์เอส','เพลออฟ'];
+const NOT_RICE=['แป้ง','ข้าวเกรียบ','ข้าวโพด','จมูกข้าว','รำข้าว','รสข้าว','รวงข้าว','ซอยตัด','โจ๊ก','ข้าวต้ม','น้ำมัน','ml.','มล.','ขนม'];
+function skuCategory_(sku){
+  const s=String(sku||'');
+  if(CIG_BRANDS.some(b=>s.indexOf(b)>=0)) return 'cig';
+  if(s.indexOf('น้ำตาลทราย')>=0) return 'sugar';
+  if(s.indexOf('ข้าว')>=0 && !NOT_RICE.some(x=>s.indexOf(x)>=0)) return 'rice';
+  return 'other';
+}
+function countCatCS_(job){
+  const c={rice:0,sugar:0,cig:0,other:0};
+  (job&&job.bills||[]).forEach(b=>{
+    billItems_(b.doc).forEach(it=>{
+      if(String(it.unit||'').indexOf('(CS)')<0) return;     // นับเฉพาะลัง/หีบ (CS)
+      const q=parseFloat(it.qty)||0; if(!(q>0)) return;
+      c[skuCategory_(it.sku)]+=q;
+    });
+  });
+  const r=n=>Math.round(n*100)/100;
+  return {rice:r(c.rice),sugar:r(c.sugar),cig:r(c.cig),other:r(c.other),total:r(c.rice+c.sugar+c.cig+c.other)};
+}
+function catCsPayload_(job){
+  const c=countCatCS_(job);
+  if(!c.total) return {};                                   // ยังไม่ได้โหลดรายการสินค้า = ไม่ส่ง (setIf_ ฝั่ง GAS จะข้าม ไม่เขียนทับด้วย 0)
+  return {csRice:c.rice||'',csSugar:c.sugar||'',csCig:c.cig||'',csOther:c.other||'',csTotal:c.total||''};
+}
 function countCratesTanks_(job){
   let crates=0,tanks=0; const hit=[];
   (job&&job.bills||[]).forEach(b=>{
@@ -5051,6 +5084,7 @@ async function fillCratesTanks_(job){
   if(note) note.textContent=(c.crates||c.tanks)
     ? 'นับจากใบคุม: '+c.hit.join(' · ')
     : 'ใบคุมนี้ไม่มีลังน้ำ/ถัง — ถ้านำไปเองใส่เลขได้';
+  paintCatCs_(job);   // ★ v3.293: รายการสินค้าโหลดครบแล้ว → อัปเดตบรรทัดสรุป CS
 }
 function previewPickupBills(){
   const jid=ddValue('ddJob');
@@ -5078,8 +5112,19 @@ function previewPickupBills(){
       <span>รวมทั้งหมด ${j.bills.length} บิล</span>
       <span class="num">${fmt(total)} ฿</span>
     </div>
+    <div id="catCsNote" class="txt-xs txt-muted" style="margin-top:6px"></div>
   `;
+  paintCatCs_(j);   // ★ v3.293: สรุปจำนวน CS แยกหมวด (เติมเมื่อโหลดรายการสินค้าเสร็จ)
   btn.disabled=false;
+}
+/* ★ v3.293: บรรทัดสรุป CS แยกหมวด ใต้ยอดรวมบิล — คนขับ/คลังเห็นตัวเลขเดียวกับที่จะลงชีท */
+function paintCatCs_(job){
+  const el=$('catCsNote'); if(!el) return;
+  const c=countCatCS_(job);
+  if(!c.total){ el.textContent='⏳ กำลังอ่านรายการสินค้าเพื่อนับจำนวนลัง…'; return; }
+  const part=[['🍚 ข้าว',c.rice],['🧂 น้ำตาล',c.sugar],['🚬 บุหรี่',c.cig],['📦 อื่นๆ',c.other]]
+    .filter(x=>x[1]>0).map(x=>x[0]+' '+fmtQty_(x[1])).join(' · ');
+  el.innerHTML='📦 รวม <b>'+fmtQty_(c.total)+' CS</b>'+(part?' — '+part:'');
 }
 
 function resetPickupForm(){
@@ -5315,6 +5360,7 @@ async function confirmPickup(){   // v3.43: async — งานส่งซ้�
     cratesOut:_ctVal_('pickupCrates'), tankOut:_ctVal_('pickupTanks'),   // ★ v3.275: ลังน้ำ/ถัง → คอลัมน์ ลังนำไป/ถังนำไป (GAS รองรับอยู่แล้ว)
     palletLoaded:_ctVal_('pickupPallet'),   // ★ v3.276: พาเลท → คอลัมน์ จำนวนพาเลทนำขึ้นรถ (ขนส่งใส่เอง ไม่บังคับ)
     shops:jobShopNames_(j),   // ★ v3.287: ชื่อร้านในใบคุม คั่นด้วย ,
+    ...catCsPayload_(j),   // ★ v3.293: จำนวน CS แยกหมวด ข้าว/น้ำตาล/บุหรี่/อื่นๆ
     warehouse:j.warehouse||'W1',special:j.special||null,startedAt:j.startedAt,editTeam:true};
   /* ★★★ v3.279: ส่งตรงเข้าชีทก่อน "แล้วรอผลจริง" — ไม่ผ่านค่อยเข้าคิว
      เดิม: เข้าคิวอย่างเดียวแล้วขึ้น "รับงานเรียบร้อย ✓" ทันที ทั้งที่ยังไม่รู้ว่าเข้าชีทไหม
@@ -9071,6 +9117,7 @@ async function syncToSheets(job){
     newStaff:newStaffPayload_(job),   // v3.65: พนง.ใหม่ — ไม่รู้ค่า = ไม่ส่งคีย์ (GAS คงค่าเดิม)
     warehouse:job.warehouse||'W1',
     shops:jobShopNames_(job),   // ★ v3.287
+    ...catCsPayload_(job),   // ★ v3.293
     special:job.special||null,
     // ★ v3.277: จำนวนที่นำกลับ (ยืนยันตอนปิดงาน) → คอลัมน์ เช็คพาเลทคืน/เช็คลังน้ำคืน/เช็คถังคืน
     palletReturn:(job.ret&&job.ret.pallet!=='' &&job.ret.pallet!==undefined)?job.ret.pallet:'',
@@ -10121,7 +10168,8 @@ const HEADERS_INPUT=['🔒 Row ID','วันเวลาปิดงาน','�
   'เช็คพาเลทคืน','เช็คลังน้ำคืน','เช็คถังคืน',
   'ผู้อนุมัติปิดงาน','วันเวลาอนุมัติ','ถังนำไป','วันเวลาที่รับงาน','รูปสินค้าในตู้',
   'พาเลทคืนจริง(คลัง)','ลังน้ำคืนจริง(คลัง)','ถังคืนจริง(คลัง)','ผู้เช็คทรัพย์สิน','วันเวลาเช็คทรัพย์สิน',
-  'ผลตรวจรูปตู้','ผู้ตรวจรูปตู้','วันเวลาตรวจรูปตู้'];   // ★ v3.291: บัญชีตรวจรูปสินค้าในตู้   // ★ v3.278: คลังเช็คทรัพย์สินกลับคลัง
+  'ผลตรวจรูปตู้','ผู้ตรวจรูปตู้','วันเวลาตรวจรูปตู้',
+  'ข้าว(CS)','น้ำตาล(CS)','บุหรี่(CS)','อื่นๆ(CS)','รวม(CS)'];   // ★ v3.291 ตรวจรูป · v3.293 จำนวน CS แยกหมวด   // ★ v3.278: คลังเช็คทรัพย์สินกลับคลัง
 
 const HEADERS_CIN=['เลขใบคุม','Doc_Date','Doc_No','Customer_Code','Customer_Name',
   'Salesman_Code','Salesman_Name','ทะเบียนรถ','TotalBaht','วัน+เวลา ที่ส่งสินค้า',
@@ -10905,7 +10953,7 @@ function doPost(e){
     _saveLock.waitLock(120000);   // รอได้นาน เพราะบันทึกบิลที่มีรูปสลิปใช้เวลาหลายสิบวินาที
     try{
     const inSh=ensureSheet_(ss,SHEET_INPUT,HEADERS_INPUT);
-    ensureHeaders_(inSh,['ร้านค้า','รูปสินค้าในตู้','พาเลทคืนจริง(คลัง)','ลังน้ำคืนจริง(คลัง)','ถังคืนจริง(คลัง)','ผู้เช็คทรัพย์สิน','วันเวลาเช็คทรัพย์สิน','ผลตรวจรูปตู้','ผู้ตรวจรูปตู้','วันเวลาตรวจรูปตู้']);   // ★ v3.270/3.278: คอลัมน์ใหม่ต่อท้าย (ชีทเดิมไม่มี — ensureSheet_ ไม่เติมให้)
+    ensureHeaders_(inSh,['ข้าว(CS)','น้ำตาล(CS)','บุหรี่(CS)','อื่นๆ(CS)','รวม(CS)','ร้านค้า','รูปสินค้าในตู้','พาเลทคืนจริง(คลัง)','ลังน้ำคืนจริง(คลัง)','ถังคืนจริง(คลัง)','ผู้เช็คทรัพย์สิน','วันเวลาเช็คทรัพย์สิน','ผลตรวจรูปตู้','ผู้ตรวจรูปตู้','วันเวลาตรวจรูปตู้']);   // ★ v3.270/3.278: คอลัมน์ใหม่ต่อท้าย (ชีทเดิมไม่มี — ensureSheet_ ไม่เติมให้)
     const cinSh=ensureSheet_(ss,SHEET_CIN,HEADERS_CIN);
     const team=data.team||{};
     const sp=data.special||{};
@@ -10970,6 +11018,8 @@ function doPost(e){
     setIf_('สรุปจำนวนขนกลับ',sp.qty);
     setIf_('คลัง',data.warehouse);
     setIf_('ร้านค้า',data.shops);   // ★ v3.287: ชื่อร้านทุกร้านในใบคุม คั่นด้วย , (แอปส่งรายชื่อครบทุกครั้ง จึงทับของเดิมได้)
+    setIf_('ข้าว(CS)',data.csRice); setIf_('น้ำตาล(CS)',data.csSugar); setIf_('บุหรี่(CS)',data.csCig);   // ★ v3.293
+    setIf_('อื่นๆ(CS)',data.csOther); setIf_('รวม(CS)',data.csTotal);
     setIf_('เช็คพาเลทคืน',data.palletReturn);
     setIf_('เช็คลังน้ำคืน',data.crateWaterReturn);
     setIf_('เช็คถังคืน',data.tankReturn);
