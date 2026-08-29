@@ -586,7 +586,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.75</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.77</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -7839,6 +7839,39 @@ function _lineDriverGroups(rows){
     if(!g[k]){g[k]=[]; order.push(k);} g[k].push(r); });
   return order.map((k,gi)=>({driverText:k, trucks:g[k], col:TRUCK_COLORS[gi%TRUCK_COLORS.length]}));
 }
+// v9.76: จำนวนลังที่ต้องส่งต่อร้าน — รวมจาก billMap[ref].skus
+//   ⚠ ห้ามใช้ skus[x].cs ตรงๆ (เป็น TRD_QTY+FREE หน่วยปนข้าม UTQ) ต้องคิดจาก ea ÷ จำนวนต่อลัง เหมือนหน้าเช็คสต็อก
+function _csOfRefs(refs){
+  let cs=0,pc=0,miss=0;
+  (refs||[]).forEach(ref=>{
+    const b=(typeof billMap!=='undefined')&&billMap[ref];
+    if(!b||!b.skus){miss++;return;} // บิลเกินกรอบ ORDER_DAYS ไม่มีรายละเอียด SKU
+    Object.keys(b.skus).forEach(sku=>{
+      const qc=((typeof products!=='undefined'&&products[sku])||{}).qtyPerCS||0;
+      const ea=Math.round((b.skus[sku]||{}).ea||0);
+      if(qc>0){cs+=Math.floor(ea/qc);pc+=ea%qc;} else pc+=ea; // ไม่รู้ขนาดลัง → นับเป็นชิ้น ไม่เดาเป็นลัง
+    });
+  });
+  return {cs,pc,miss};
+}
+// ป้ายสั้น: เอาลังเป็นหลัก (เศษไปอยู่ใน tooltip) — กันตัวหนังสือยาวในลิสต์ร้าน
+function _csLabel(refs){
+  const r=_csOfRefs(refs);
+  if(r.cs>0)return r.cs.toLocaleString('en-US')+' ลัง';
+  if(r.pc>0)return r.pc.toLocaleString('en-US')+' ชิ้น';
+  return '';
+}
+// ป้ายลังท้ายชื่อร้านในหน้ารถทั้งหมด (flex-shrink:0 กันโดนชื่อร้านยาวๆ ตัดหาย)
+function _csCarBadge(ref){
+  const c=_csLabel([ref]); if(!c)return '';
+  return `<span style="flex-shrink:0;font-size:9.5px;font-weight:700;color:#5B7794" title="${_csTitle([ref])}">${c}</span>`;
+}
+function _csTitle(refs){
+  const r=_csOfRefs(refs);
+  if(!r.cs&&!r.pc)return r.miss?'ไม่มีรายละเอียดสินค้า (บิลเกินกรอบที่โหลด)':'';
+  return 'ต้องส่ง '+(r.cs?r.cs.toLocaleString('en-US')+' ลัง':'')+(r.cs&&r.pc?' ':'')+(r.pc?r.pc+' ชิ้น':'')
+    +(r.miss?` · อีก ${r.miss} บิลไม่มีรายละเอียด`:'');
+}
 // แหล่ง 1: queue สด
 function _lineSummaryData(){
   const _work={}; bills.forEach(b=>{const p=queue[b.ref]; if(p)_work[p]=(_work[p]||0)+1;});
@@ -7850,9 +7883,10 @@ function _lineSummaryData(){
     [1,2,3].forEach(tr=>{
       const tb=orderedTripBills(t.plate,tr);
       if(!tb.length)return;
-      const seen=new Set(), stores=[];
-      tb.forEach(b=>{const nm=(b.arName||b.ref||'').trim(); if(!seen.has(nm)){seen.add(nm);stores.push(nm);} allStores.add(nm);});
-      trips.push({tr, stores, w:tb.reduce((s,b)=>s+(b.totalW||0),0), v:tb.reduce((s,b)=>s+(b.totalV||0),0), a:tb.reduce((s,b)=>s+(b.totalAmt||0),0)}); // v9.68: +ยอดเงิน
+      const seen=new Map(), stores=[];
+      tb.forEach(b=>{const nm=(b.arName||b.ref||'').trim(); if(!seen.has(nm)){seen.set(nm,[]);stores.push(nm);} seen.get(nm).push(b.ref); allStores.add(nm);});
+      const scs=stores.map(nm=>_csLabel(seen.get(nm))), sct=stores.map(nm=>_csTitle(seen.get(nm))); // v9.76: ลังต่อร้าน
+      trips.push({tr, stores, scs, sct, w:tb.reduce((s,b)=>s+(b.totalW||0),0), v:tb.reduce((s,b)=>s+(b.totalV||0),0), a:tb.reduce((s,b)=>s+(b.totalAmt||0),0)}); // v9.68: +ยอดเงิน
       totTrips++;
     });
     return _lineSumRow(t.e||'🚛', t.nick, t.plate, t.type, getDriverDisplay(t)||'—', TRUCK_COLORS[i%TRUCK_COLORS.length], trips, t.maxW||0, t.maxV||0);
@@ -7883,9 +7917,10 @@ function _lineSummaryDataSaved(){
     [1,2,3].forEach(tr=>{
       const rs=recs.filter(r=>(r.trip||1)===tr); if(!rs.length)return;
       rs.sort((a,b)=>((a.seq||9999)-(b.seq||9999)));
-      const seen=new Set(), stores=[];
-      rs.forEach(r=>{const nm=(r.arName||r.ref||'').trim(); if(!seen.has(nm)){seen.add(nm);stores.push(nm);} allStores.add(nm);});
-      trips.push({tr, stores, w:rs.reduce((s,r)=>s+(r.weight||0),0), v:rs.reduce((s,r)=>s+(r.volume||0),0), a:rs.reduce((s,r)=>s+(r.amount||0),0)}); // v9.68: +ยอดเงิน
+      const seen=new Map(), stores=[];
+      rs.forEach(r=>{const nm=(r.arName||r.ref||'').trim(); if(!seen.has(nm)){seen.set(nm,[]);stores.push(nm);} seen.get(nm).push(r.ref); allStores.add(nm);});
+      const scs=stores.map(nm=>_csLabel(seen.get(nm))), sct=stores.map(nm=>_csTitle(seen.get(nm))); // v9.76: ลังต่อร้าน (บิลเกินกรอบโหลด = ไม่มีป้าย)
+      trips.push({tr, stores, scs, sct, w:rs.reduce((s,r)=>s+(r.weight||0),0), v:rs.reduce((s,r)=>s+(r.volume||0),0), a:rs.reduce((s,r)=>s+(r.amount||0),0)}); // v9.68: +ยอดเงิน
       totTrips++;
     });
     const ci=idxOf(plate); return _lineSumRow(e, nick, plate, type, driverText, TRUCK_COLORS[((ci%TRUCK_COLORS.length)+TRUCK_COLORS.length)%TRUCK_COLORS.length], trips, t0.maxW||0, t0.maxV||0);
@@ -7952,7 +7987,8 @@ function _lineSummaryCardHtml(){
           <span style="font-size:9.5px;color:#5B6B7D;background:#F0F3F7;padding:1px 6px;border-radius:5px;margin-left:auto;white-space:nowrap">${r.trips.length} เที่ยว</span>
         </div>${(_lineSumShowAmt&&_tAmt)?`<div style="font-size:10.5px;font-weight:700;color:#15803D;margin-top:2px">💰 รวมทั้งคัน ฿${fmtN(Math.round(_tAmt))}</div>`:''}`;
       r.trips.forEach(tp=>{
-        const inl=tp.stores.map((s,j)=>`<span><span style="color:#9BAAB8">${j+1}.</span> ${s}</span>`).join('<span style="color:#C7D0DA"> · </span>');
+        const _stCs=tp.stores.map((s,j)=>{const c=(tp.scs||[])[j];return c?(s+'<span style="color:#7A8798;font-weight:600" title="'+(((tp.sct||[])[j])||'')+'"> · '+c+'</span>'):s;}); // v9.76: จำนวนลังต่อท้ายชื่อร้าน
+        const inl=_stCs.map((s,j)=>`<span><span style="color:#9BAAB8">${j+1}.</span> ${s}</span>`).join('<span style="color:#C7D0DA"> · </span>');
         // v9.46 กรอบสถานะ · v9.52 บาร์ · v9.53: น้ำหนัก+ปริมาตรใช้เกณฑ์ % เดียวกัน · สถานะรวม(กรอบ/ป้าย)=อันที่ % สูงกว่า
         // v9.73: หน้าบันทึกหักของที่คัน+เที่ยวนี้จะไม่ได้ออกก่อน (_lineSumLoss=null → เหมือนเดิมทุกอย่าง)
         const _ls=(_lineSumLoss&&_lineSumLoss[r.plate+'||'+tp.tr])||{lostW:0,lostV:0,items:[]};
@@ -8037,7 +8073,7 @@ function _lineSummaryText(){
         const st=(r.maxW>0||r.maxV>0)?_tripStatus(Math.max(r.maxW>0?wp:0, r.maxV>0?vp:0)):null; // v9.53: สถานะ = อันที่ % สูงกว่า
         const cap=st?` · ⚖${fmtKg(tp.w)}/${fmtKg(r.maxW)} ${wp}% · 📦${fmtM3(tp.v||0)}/${fmtM3(r.maxV)} ${vp}% ${st.label}`:` · ${fmtKg(tp.w)}`;
         out+=`${TE[tp.tr]} เที่ยว ${tp.tr} (${tp.stores.length} ร้าน${cap}):\n`;
-        tp.stores.forEach((s,j)=>{ out+=`  ${j+1}. ${s}\n`; });
+        tp.stores.forEach((s,j)=>{ const c=(tp.scs||[])[j]; out+=`  ${j+1}. ${s}${c?` · ${c}`:''}\n`; }); // v9.76: ลังต่อท้ายชื่อร้าน
       });
     });
   });
@@ -8393,7 +8429,7 @@ function renderCarsView(){
       const _wpAft=t.maxW>0?Math.round(Math.max(0,tw-_ls.lostW)/t.maxW*100):twp;
       const st=_tripStatus(_wpAft), _code=_rs[t.plate+'|'+tr]||'';
       const tAmt=tb.reduce((s,b)=>s+(b.totalAmt||0),0); _carAmt+=tAmt; // v9.68: ยอดเงินต่อเที่ยว
-      const rows=tb.map((b,j)=>`<div style="display:flex;align-items:center;gap:5px;padding:3px 4px;${j?'border-top:1px solid #EEF1F6':''};font-size:11px"><span style="color:#A0ABBB;min-width:14px;font-size:10px">${j+1}.</span><div style="flex:1;min-width:0"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500">${b.arName}</div><div style="font-size:9px;color:#9BAAB8">${b.province||'—'}${b.lat&&b.lng?` <span style="font-family:monospace;color:#B8C6D9">${b.lat.toFixed(4)},${b.lng.toFixed(4)}</span>`:'<span style="color:#FCA5A5"> ⚠ ไม่มี GPS</span>'}</div></div><div style="text-align:right;flex-shrink:0;font-size:9.5px;line-height:1.3;font-variant-numeric:tabular-nums;padding-left:4px"><div style="font-weight:700;color:#1A5FA5">⚖ ${fmtKg(b.totalW||0)}</div><div style="color:#6B7A90">📦 ${fmtM3(b.totalV||0)}</div></div></div>`).join('');
+      const rows=tb.map((b,j)=>`<div style="display:flex;align-items:center;gap:5px;padding:3px 4px;${j?'border-top:1px solid #EEF1F6':''};font-size:11px"><span style="color:#A0ABBB;min-width:14px;font-size:10px">${j+1}.</span><div style="flex:1;min-width:0"><div style="display:flex;align-items:baseline;gap:5px"><div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500">${b.arName}</div>${_csCarBadge(b.ref)}</div><div style="font-size:9px;color:#9BAAB8">${b.province||'—'}${b.lat&&b.lng?` <span style="font-family:monospace;color:#B8C6D9">${b.lat.toFixed(4)},${b.lng.toFixed(4)}</span>`:'<span style="color:#FCA5A5"> ⚠ ไม่มี GPS</span>'}</div></div><div style="text-align:right;flex-shrink:0;font-size:9.5px;line-height:1.3;font-variant-numeric:tabular-nums;padding-left:4px"><div style="font-weight:700;color:#1A5FA5">⚖ ${fmtKg(b.totalW||0)}</div><div style="color:#6B7A90">📦 ${fmtM3(b.totalV||0)}</div></div></div>`).join('');
       return `<div style="border:${st.emph?'2.5px':'2px'} solid ${st.col};border-radius:11px;padding:9px 10px;margin-bottom:10px;${st.tint?`background:${st.tint};`:''}">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:8px">
           <span style="font-size:12px;font-weight:700;color:#42506a">${_TE[tr]} เที่ยว ${tr} · ${tb.length} บิล${_code?` <span style="background:#EEF1F6;color:#42506a;padding:0 5px;border-radius:4px;font-size:10px">${_code}</span>`:''} · <span style="color:#15803D">💰 ฿${fmtN(Math.round(tAmt))}</span></span>
@@ -9722,8 +9758,18 @@ function jrDrawMap(){
         m.bindTooltip(u.name,{permanent:true,direction:'right',offset:[9,0],className:'route-label',opacity:.92}); // v8.84: ชื่อร้านบนแผนที่
         _jrLayers.push(m);});
       // เลขกลุ่ม + จำนวนจุด ตรงกลาง (คลิกเลือกกลุ่ม)
-      const badge=L.marker([cLat,cLng],{icon:L.divIcon({className:'',html:`<div style="min-width:30px;height:30px;padding:0 6px;border-radius:15px;background:${col};color:#fff;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;box-shadow:0 2px 6px rgba(0,0,0,.4);margin-left:-15px;margin-top:-15px">${idx+1}·${gps.length}</div>`,iconSize:[30,30],iconAnchor:[15,15]}),zIndexOffset:600});
-      badge.on('click',()=>jrSelGroup(g.id)); badge.addTo(_jrMap); _jrLayers.push(badge);
+      // v9.77: ป้ายกลุ่ม (30px) เคยทับหมุดร้าน (14px) จนกดร้านไม่ได้ ตอน centroid ตรงกับตำแหน่งร้านพอดี
+      //   เกิดกับกลุ่มจุดเดียว และกลุ่มที่ทุกจุดพิกัดซ้ำกัน (ร้านเดียวกันคนละวัน)
+      const _nearD=Math.min.apply(null,gps.map(u=>haversine(cLat,cLng,u.lat,u.lng)));
+      const _ovl=_nearD<0.05; // ห่างจากหมุดใกล้สุดไม่ถึง 50 ม. = ทับกัน → ยกป้ายขึ้นเหนือหมุด
+      const badge=L.marker([cLat,cLng],{icon:L.divIcon({className:'',html:`<div style="min-width:30px;height:30px;padding:0 6px;border-radius:15px;background:${col};color:#fff;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;box-shadow:0 2px 6px rgba(0,0,0,.4);margin-left:-15px;margin-top:-15px">${idx+1}·${gps.length}</div>`,iconSize:[30,30],iconAnchor:_ovl?[15,48]:[15,15]}),zIndexOffset:600});
+      if(gps.length===1&&typeof jrPinMenuU==='function'){
+        // กลุ่มจุดเดียว ป้าย=ร้านนั้นอยู่แล้ว → ให้เปิดเมนูร้าน (ในเมนูมีปุ่ม "เลือกกลุ่ม · ดูเส้นทาง" อยู่ ไม่เสียอะไร)
+        badge.bindPopup(jrPinMenuU(g,gps[0]),{maxWidth:250,minWidth:190});
+      } else {
+        badge.on('click',()=>jrSelGroup(g.id));
+      }
+      badge.addTo(_jrMap); _jrLayers.push(badge);
     });
   }
   const wEl=document.getElementById('jrWarn');
