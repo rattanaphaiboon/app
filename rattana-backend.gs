@@ -1,7 +1,9 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v7.7 — วันหยุดที่ "มีสแกน" = นับเป็นวันทำงาน (surat เคาะ · ต้องรัน setupDailySummary ใหม่):
+ * v7.8 — ตรวจสแกนซ้ำ: auditDuplicateScans() → แท็บ "ตรวจสแกนซ้ำ" (รันจาก editor)
+ *         บอกสาเหตุรายคู่จาก clientId: เหมือนกัน=ตัวกันซ้ำไม่ทำงาน · ต่างกัน=ส่งคนละครั้ง · ว่าง=แถวเก่า
+ * v7.7 — วันหยุดที่ "มีสแกน" = นับเป็นวันทำงาน (ต้องรัน setupDailySummary ใหม่):
  *         ไม่มีสแกน → วันอาทิตย์/วันนักขัตฯ ตามเดิม · มีสแกน ≥9 ชม. → "ทำงานเต็มวัน" (นับแรงปกติ)
  *         มาแต่ไม่ครบเกณฑ์ → "ทำงานวันหยุด" · สแกนขาเดียว → "ไม่ครบคู่ (วันหยุด)" — ทั้งคู่ไม่นับขาด
  *         คอลัมน์ I ยังโชว์ชื่อวันหยุด → HR กรองคิดค่าทำงานวันหยุดได้
@@ -295,7 +297,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.7', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.8', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -2956,6 +2958,63 @@ function actionGetHolidays(user) {
 /* v7.6: ตรวจแท็บ Holidays ว่าใช้งานได้จริง (รันจาก editor)
    สูตรในสรุปวันใช้ VLOOKUP(INT(วันที่), Holidays!A:B, 2) → คอลัมน์ A ต้องเป็น "วันที่จริง" ไม่ใช่ข้อความ
    ถ้าเป็นข้อความ ระบบจะหาไม่เจอเงียบๆ = วันหยุดไม่ถูกนำไปคิดเลย */
+/* ── v7.8: ตรวจสแกนซ้ำใน CheckinLog (รันจาก editor) ────────────────────
+   ซ้ำ = คนเดียวกัน ชนิดเดียวกัน (เข้า/ออก) ห่างกันไม่เกิน 2 นาที
+   รายงานลง แท็บ "ตรวจสแกนซ้ำ" พร้อม clientId ของแต่ละแถว เพื่อชี้ว่าเกิดจากอะไร:
+     · clientId เหมือนกัน  → ตัวกันซ้ำฝั่งเซิร์ฟเวอร์ไม่ทำงาน (บั๊กระบบ)
+     · clientId ต่างกัน    → แอปส่งคนละครั้ง (กดซ้ำ/หลายเครื่อง/แอปเวอร์ชันเก่า)
+     · ไม่มี clientId       → แถวเก่าก่อนมีระบบกันซ้ำ หรือมาจากทางอื่น (kiosk/ย้อนหลัง)  */
+function auditDuplicateScans(daysBack) {
+  const ss = getSS();
+  const sh = getTab(T.LOG);
+  if (!sh || sh.getLastRow() < 2) throw new Error('ไม่พบข้อมูลใน ' + T.LOG);
+  const back = parseInt(daysBack, 10) || 60;
+  const since = new Date(Date.now() - back * 86400000);
+  const last = sh.getLastRow();
+  const data = sh.getRange(2, 1, last - 1, 17).getValues();
+  const rows = [];
+  data.forEach((r, i) => {
+    const t = (r[0] instanceof Date) ? r[0] : new Date(r[0]);
+    if (!t || isNaN(t.getTime()) || t < since) return;
+    rows.push({ row: i + 2, ts: t, empId: String(r[1] || '').trim(), name: String(r[2] || ''),
+                date: String(r[3] || ''), time: String(r[4] || ''),
+                type: String(r[5] || '').toLowerCase() === 'out' ? 'out' : 'in',
+                by: String(r[11] || ''), retro: String(r[12] || ''), cid: String(r[16] || '') });
+  });
+  rows.sort((a, b) => a.empId.localeCompare(b.empId) || a.ts - b.ts);
+  const out = [];
+  let dupRows = 0, sameCid = 0, diffCid = 0, noCid = 0;
+  for (let i = 1; i < rows.length; i++) {
+    const a = rows[i - 1], b = rows[i];
+    if (a.empId !== b.empId || a.type !== b.type) continue;
+    if (Math.abs(b.ts - a.ts) > 2 * 60 * 1000) continue;
+    dupRows++;
+    let cause;
+    if (!a.cid || !b.cid) { cause = 'ไม่มี clientId (แถวเก่า/ทางอื่น)'; noCid++; }
+    else if (a.cid === b.cid) { cause = '⚠ clientId เหมือนกัน — ตัวกันซ้ำไม่ทำงาน'; sameCid++; }
+    else { cause = 'clientId ต่างกัน — ส่งมาคนละครั้ง'; diffCid++; }
+    out.push([b.empId, b.name, b.date, a.time + ' / ' + b.time, b.type === 'in' ? 'เข้า' : 'ออก',
+              'แถว ' + a.row + ' , ' + b.row, a.cid || '(ว่าง)', b.cid || '(ว่าง)',
+              (b.by || '') + (b.retro ? ' · ย้อนหลัง' : ''), cause]);
+  }
+  const HEAD = ['รหัสพนักงาน', 'ชื่อ', 'วันที่', 'เวลา (คู่ที่ซ้ำ)', 'ชนิด', 'แถวในชีท',
+                'clientId แถวแรก', 'clientId แถวซ้ำ', 'ช่องทาง', 'สาเหตุ'];
+  let rp = ss.getSheetByName('ตรวจสแกนซ้ำ');
+  if (!rp) rp = ss.insertSheet('ตรวจสแกนซ้ำ');
+  rp.clear();
+  rp.getRange(1, 1, 1, HEAD.length).setValues([HEAD])
+    .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+  rp.setFrozenRows(1);
+  if (out.length) rp.getRange(2, 1, out.length, HEAD.length).setValues(out);
+  rp.setColumnWidth(2, 170); rp.setColumnWidth(7, 150); rp.setColumnWidth(8, 150); rp.setColumnWidth(10, 260);
+  ss.setActiveSheet(rp);
+  const msg = 'ตรวจย้อนหลัง ' + back + ' วัน · พบสแกนซ้ำ ' + dupRows + ' คู่ · ' +
+              'clientId เหมือนกัน ' + sameCid + ' (บั๊กระบบ) · ต่างกัน ' + diffCid + ' (ส่งคนละครั้ง) · ไม่มี clientId ' + noCid;
+  Logger.log(msg);
+  try { ss.toast(msg, 'ตรวจสแกนซ้ำ', 15); } catch (e) {}
+  return msg;
+}
+
 function checkHolidays() {
   const sh = getTab(T.HOL);
   if (!sh) return '❌ ไม่พบแท็บ Holidays';
