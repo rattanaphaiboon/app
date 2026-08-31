@@ -1,6 +1,11 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v8.3 — เซิร์ฟเวอร์ตัดสิน เข้า/ออก เอง (คู่แอป v12.54 · ★ ต้อง Deploy New version):
+ *         เดิมเชื่อค่าที่แอปส่ง ซึ่งแอปเดาจาก log ในเครื่อง → ว่างได้ (เปลี่ยนเครื่อง/ล้างแคช/
+ *         กดก่อน sync กลับมา/จอสแกนลูกทีมตั้งโหมดค้างที่ "เข้า") = ได้ เข้า ซ้อน เข้า ทั้งวัน
+ *         แก้: autoInOut_() อ่านสแกนล่าสุดของคนนั้นในวันเดียวกันจากชีท แล้วสลับให้ถูก (ทำในล็อก)
+ *         ยกเว้นเมื่อผู้ใช้กดเลือกเอง (typeForced) หรือส่งซ้ำของเก่าที่ค้างออฟไลน์
  * v8.2 — auditLeaveDates() / fixLeaveDatesApply() — วันที่ในชีทการลาApp หน้าตาไม่เหมือนกัน
  *         (คนแก้เซลล์เองในชีท) · ที่กลายเป็น "ข้อความ" ทำสูตรลา+โควต้าตกหล่นเงียบๆ
  * v8.1 — systemHealthCheck() ตรวจสุขภาพระบบรวบยอด (รันจาก editor · อ่านอย่างเดียว)
@@ -308,7 +313,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.1', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.3', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -915,6 +920,32 @@ function initSheets() {
    CHECKIN
    ============================================================ */
 
+/* v8.3: "สแกนครั้งนี้ควรเป็น เข้า หรือ ออก" — ดูจากสแกนล่าสุดของคนนี้ในวันเดียวกันจากชีท
+   (แหล่งจริง ไม่ใช่ log ในเครื่องของแอปที่ว่างได้) · ไม่มีสแกนวันนี้เลย = 'in'
+   อ่านย้อนจากท้ายชีท 800 แถวพอ — ทั้งบริษัทสแกนวันหนึ่งไม่ถึงเท่านี้ */
+function autoInOut_(logSh, empId, when) {
+  const last = logSh.getLastRow();
+  if (last < 2) return 'in';
+  const tz = 'Asia/Bangkok';
+  const day = Utilities.formatDate(when, tz, 'yyyy-MM-dd');
+  const from = Math.max(2, last - 799);
+  const d = logSh.getRange(from, 1, last - from + 1, 6).getValues();
+  const id = String(empId).trim();
+  const limit = when.getTime() + 120000;      // แถวที่เวลาใหม่กว่าสแกนนี้ ไม่นับ (กันเคสส่งย้อนหลัง)
+  let lastType = null, lastMs = -1;
+  for (let i = 0; i < d.length; i++) {
+    if (String(d[i][1] || '').trim() !== id) continue;
+    const ts = (d[i][0] instanceof Date) ? d[i][0] : new Date(d[i][0]);
+    if (!ts || isNaN(ts.getTime())) continue;
+    const ms = ts.getTime();
+    if (ms > limit) continue;
+    if (Utilities.formatDate(ts, tz, 'yyyy-MM-dd') !== day) continue;
+    if (ms >= lastMs) { lastMs = ms; lastType = String(d[i][5] || '').trim().toLowerCase() === 'out' ? 'out' : 'in'; }
+  }
+  if (lastType === null) return 'in';         // ยังไม่มีสแกนวันนี้
+  return lastType === 'in' ? 'out' : 'in';
+}
+
 function actionCheckin(p, user) {
   const empId = String(p.empId || user.empId);
   if (empId !== user.empId && !isSupervisor(user)) {
@@ -969,7 +1000,15 @@ function actionCheckin(p, user) {
   const timeStr = Utilities.formatDate(when, tz, 'HH:mm:ss');
 
   // v2.0/v2.7: normalize type ครั้งเดียว ใช้ทุกที่ — รับ 'OUT'/'Out' ด้วย (เดิมกลายเป็น in เงียบๆ)
-  const type = (String(p.type || '').trim().toLowerCase() === 'out') ? 'out' : 'in';
+  let type = (String(p.type || '').trim().toLowerCase() === 'out') ? 'out' : 'in';
+  // ── v8.3: เซิร์ฟเวอร์เป็นคนตัดสิน เข้า/ออก (ตัดสินจริงในล็อกด้านล่าง) ──────────────
+  // เดิมเชื่อค่าที่แอปส่งมาล้วนๆ ซึ่งแอปเดาจาก log ในเครื่อง → ว่างได้หลายทาง:
+  //   · เปลี่ยนเครื่อง/ล้างแคช/ล็อกอินใหม่  · กดสแกนก่อน syncLogsFromSheet จะกลับมา
+  //   · จอสแกนลูกทีม (kiosk) ที่หัวหน้าตั้งโหมดค้างไว้ที่ "เข้า" ทั้งวัน
+  // ผลคือได้ "เข้า" ซ้อน "เข้า" → วันนั้นไม่มีเวลาออก ขึ้น "ลงเวลาไม่ครบ"
+  const typeForced = (String(p.typeForced || '') === '1' || p.typeForced === true);   // ผู้ใช้กดเลือกเอง = ยึดตามนั้น
+  const typeReplay = !!p.clientTs && Math.abs(now.getTime() - when.getTime()) > 10 * 60000;  // ส่งซ้ำของเก่าที่ค้างออฟไลน์
+  let typeFixed = false;
 
   const logSh = getOrCreateTab(T.LOG);
   // ── v7.9: ล็อกก่อนตรวจซ้ำ+เขียน (surat เจอ 103 คู่ที่ clientId เหมือนกัน = ตัวกันซ้ำไม่ทำงาน) ──
@@ -978,6 +1017,13 @@ function actionCheckin(p, user) {
   let _ckLock = null;
   try { _ckLock = LockService.getScriptLock(); _ckLock.waitLock(25000); } catch (e) { _ckLock = null; }
   try {
+  // v8.3: ตัดสิน เข้า/ออก จากชีทจริง — ทำในล็อก คำขอที่วิ่งพร้อมกันจึงไม่เห็นสถานะเก่า
+  if (!typeForced && !typeReplay) {
+    try {
+      const auto = autoInOut_(logSh, empId, when);
+      if (auto && auto !== type) { type = auto; typeFixed = true; }
+    } catch (e) { console.error('autoInOut_', e); }
+  }
   // v8.7: กันบันทึกซ้ำ — ถ้า clientId นี้เคยลงแล้ว ข้าม (idempotent re-sync)
   const cid = String(p.clientId || '').trim();
   if (cid) {
@@ -1097,6 +1143,7 @@ function actionCheckin(p, user) {
 
   // v2.3: บอก client ตรงๆ ว่ารูปขึ้น Storage จริงไหม — จะได้ไม่พลาดเงียบ (หน้า audit ขึ้น "ไม่มีรูป")
   return jsonOut({ ok:true, msg:'บันทึกแล้ว', status:res.status, slot:res.slot,
+    type: type, typeFixed: typeFixed,   // v8.3: แอปเอาไปแก้ log ในเครื่องให้ตรงกับที่ลงชีทจริง
     photoSaved: (useSB && p.photo) ? !!photoPath : null });
   } finally { if (_ckLock) { try { _ckLock.releaseLock(); } catch (e) {} } }   // v7.9
 }
@@ -4836,5 +4883,85 @@ function leaveDateTool_(apply) {
   const msg = L.join('\n');
   Logger.log(msg);
   try { getSS().toast(apply ? 'แก้วันที่เรียบร้อย' : 'ตรวจเสร็จ — ดูผลใน "บันทึกการดำเนินการ"', 'รูปแบบวันที่การลาApp', 10); } catch (e) {}
+  return msg;
+}
+
+/* ── v8.3: ตรวจ/ซ่อม "เข้า-ออก" ที่จับคู่ไม่ครบในอดีต ───────────────────────────
+   ต้นเหตุเดิม (แก้ที่ actionCheckin แล้ว): แอปเป็นคนเดาชนิด → log ในเครื่องว่างเมื่อไหร่ก็เดา "เข้า"
+   → ได้ เข้า+เข้า ในวันเดียว ไม่มีเวลาออก → หน้าประวัติขึ้น "ลงเวลาไม่ครบ" ทั้งที่คนสแกนครบ 2 ครั้ง
+   ► auditInOutPairs() ดูเฉยๆ · fixInOutPairsApply() ซ่อมจริง
+   ซ่อมเฉพาะเคสที่ชัดเจน: วันนั้นมี 2 สแกน เป็น "เข้า" ทั้งคู่ และห่างกัน ≥ 4 ชม. → ตัวหลังเป็น "ออก"
+   เคสอื่น (สแกน 3 ครั้งขึ้นไป / ห่างกันน้อย / มีแต่ออก) รายงานอย่างเดียว ไม่แตะ — ต้องดูเป็นราย ๆ */
+function auditInOutPairs()    { return inOutPairs_(90, false); }
+function fixInOutPairsApply() { return inOutPairs_(90, true); }
+
+function inOutPairs_(daysBack, apply) {
+  const sh = getTab(T.LOG);
+  if (!sh || sh.getLastRow() < 2) throw new Error('ไม่พบข้อมูลใน ' + T.LOG);
+  const tz = 'Asia/Bangkok';
+  const since = new Date(Date.now() - (parseInt(daysBack, 10) || 90) * 86400000);
+  const last = sh.getLastRow();
+  const d = sh.getRange(2, 1, last - 1, 6).getValues();
+
+  const days = {};   // empId|yyyy-MM-dd → [{row, ms, type, name}]
+  d.forEach((r, i) => {
+    const ts = (r[0] instanceof Date) ? r[0] : new Date(r[0]);
+    if (!ts || isNaN(ts.getTime()) || ts < since) return;
+    const id = String(r[1] || '').trim();
+    if (!id) return;
+    const k = id + '|' + Utilities.formatDate(ts, tz, 'yyyy-MM-dd');
+    (days[k] = days[k] || []).push({
+      row: i + 2, ms: ts.getTime(), name: String(r[2] || '').trim(),
+      type: String(r[5] || '').trim().toLowerCase() === 'out' ? 'out' : 'in',
+    });
+  });
+
+  const fixes = [], review = [];
+  Object.keys(days).forEach(k => {
+    const list = days[k].sort((a, b) => a.ms - b.ms);
+    const ins = list.filter(x => x.type === 'in').length;
+    const outs = list.length - ins;
+    // ปกติ: สลับ เข้า-ออก-เข้า-ออก … เริ่มด้วยเข้า
+    let okPattern = list[0].type === 'in';
+    for (let i = 1; i < list.length && okPattern; i++) if (list[i].type === list[i - 1].type) okPattern = false;
+    if (okPattern) return;
+
+    const id = k.split('|')[0], day = k.split('|')[1];
+    const hh = ms => Utilities.formatDate(new Date(ms), tz, 'HH:mm');
+    const label = day + ' · ' + id + ' ' + (list[0].name || '') + ' · ' +
+                  list.map(x => (x.type === 'in' ? 'เข้า' : 'ออก') + ' ' + hh(x.ms)).join(' → ');
+
+    if (list.length === 2 && ins === 2 && outs === 0 && (list[1].ms - list[0].ms) >= 4 * 3600000) {
+      fixes.push({ row: list[1].row, label: label });
+    } else {
+      review.push(label);
+    }
+  });
+
+  const L = ['── ตรวจคู่ เข้า-ออก ย้อนหลัง ' + (parseInt(daysBack, 10) || 90) + ' วัน ' + (apply ? '(ซ่อมจริง)' : '(ดูเฉยๆ)') + ' ──'];
+  L.push('');
+  L.push('▸ ซ่อมได้เอง (เข้า+เข้า ห่าง ≥ 4 ชม. → ตัวหลังเป็น "ออก"): ' + fixes.length + ' วัน');
+  fixes.slice(0, 25).forEach(f => L.push('   ' + f.label + (apply ? '  → แก้เป็น ออก แล้ว' : '')));
+  if (fixes.length > 25) L.push('   … และอีก ' + (fixes.length - 25) + ' วัน');
+  L.push('');
+  L.push('▸ ต้องดูเอง (รูปแบบไม่ชัด ระบบไม่แตะ): ' + review.length + ' วัน');
+  review.slice(0, 25).forEach(x => L.push('   ' + x));
+  if (review.length > 25) L.push('   … และอีก ' + (review.length - 25) + ' วัน');
+
+  if (apply && fixes.length) {
+    fixes.forEach(f => sh.getRange(f.row, 6).setValue('out'));
+    L.push('');
+    L.push('✅ ซ่อมแล้ว ' + fixes.length + ' แถว — เปิดหน้าประวัติในแอปดูได้เลย');
+  } else if (!apply && fixes.length) {
+    L.push('');
+    L.push('► รัน fixInOutPairsApply() เพื่อซ่อมจริง');
+  } else if (!fixes.length && !review.length) {
+    L.push('');
+    L.push('✅ เข้า-ออก จับคู่ครบทุกวัน ไม่มีอะไรต้องแก้');
+  }
+
+  const msg = L.join('\n');
+  Logger.log(msg);
+  try { getSS().toast((apply ? 'ซ่อม ' + fixes.length + ' แถว' : 'ซ่อมได้ ' + fixes.length + ' · ต้องดูเอง ' + review.length) + ' — ดูผลใน "บันทึกการดำเนินการ"', 'คู่ เข้า-ออก', 12); } catch (e) {}
   return msg;
 }
