@@ -1,7 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v7.9 — แก้ต้นเหตุสแกนลงซ้ำ (คู่แอป v12.53 · ต้อง Deploy New version):
+ * v8.0 — cleanDuplicateScans ลบเป็นก้อน (แถวติดกันรวบครั้งเดียว) — 730 แถวเรียกทีละแถวเสี่ยงหมดเวลา
+ * v7.9 — แก้ต้นเหตุสแกนลงซ้ำ (คู่แอป v12.53 · ★ ต้อง Deploy New version ถึงจะหยุดซ้ำ):
  *         actionCheckin ไม่เคยมีล็อก → แอป retry ขณะคำขอแรกยังทำงานค้าง = สองคำขอวิ่งพร้อมกัน
  *         ทั้งคู่อ่านชีทก่อนอีกฝั่งเขียน → ด่านกันซ้ำ+ด่าน 60 นาที มองไม่เห็นกัน → ได้ 2-4 แถวเวลาเดียว
  *         แก้: ครอบด้วย LockService(25 วิ) ตั้งแต่ตรวจซ้ำจนเขียนเสร็จ + เทียบ clientId แบบตัดช่องว่าง/รองรับค่าเก่าที่เป็นตัวเลข
@@ -302,7 +303,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.9', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.0', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3058,7 +3059,17 @@ function cleanDuplicateScans(daysBack, apply) {
     del.push((!a.photo && b.photo) ? a.row : b.row);
   }
   const uniq = [...new Set(del)].sort((x, y) => y - x);   // ลบจากล่างขึ้นบน
-  if (apply === true) uniq.forEach(rw => sh.deleteRow(rw));
+  // v8.0: ลบเป็นก้อน (แถวติดกันรวบเป็นครั้งเดียว) — 730 แถวเรียกทีละแถวช้าและเสี่ยงหมดเวลา 6 นาที
+  if (apply === true) {
+    let i = 0;
+    while (i < uniq.length) {
+      let j = i;
+      while (j + 1 < uniq.length && uniq[j + 1] === uniq[j] - 1) j++;   // uniq เรียงมาก→น้อย
+      const start = uniq[j], count = j - i + 1;
+      sh.deleteRows(start, count);
+      i = j + 1;
+    }
+  }
   const msg = (apply === true ? '🧹 ลบแถวซ้ำแล้ว ' : '🔎 โหมดดูเฉยๆ — พบแถวที่จะลบ ') + uniq.length + ' แถว' +
               ' (ย้อนหลัง ' + back + ' วัน)' + (apply === true ? '' : ' · ลบจริงให้รัน cleanDuplicateScans(60, true)');
   Logger.log(msg);
