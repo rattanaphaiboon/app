@@ -380,7 +380,7 @@ var CONFIG = {
   // Web app URL จาก Apps Script (ลงท้าย /exec) — เปลี่ยนเมื่อ deploy เป็น "New deployment" เท่านั้น
   // (Manage deployments → Edit → New version จะได้ URL เดิม ไม่ต้องแก้ตรงนี้)
   GAS_URL: 'https://script.google.com/macros/s/AKfycbzokHBVjKg4a0o4bI5ogk0UWF6i5NieveY_LIIW_h3D7y9mqo5ZczVlqT3_Wvr0oJo/exec',
-  APP_VERSION: '1.3.0'
+  APP_VERSION: '1.3.1'
 };
 var DEMO = CONFIG.GAS_URL.indexOf('PASTE_YOUR') >= 0;
 
@@ -405,6 +405,7 @@ var S = {
   ntType: null,      // ประเภทเหตุการณ์ที่เลือกในฟอร์ม
   ntMins: null,      // เวลาที่ใช้จัดการ (นาที)
   rec: null,         // ตัวรับเสียงพูด (SpeechRecognition)
+  timersOn: false,   // กัน init() ซ้ำแล้วตัวจับเวลาซ้อน
   reportNight: null,
   reportSite: null,   // สาขาที่กำลังดูในหน้ารายงาน (หัวหน้าสลับดูได้)
   reportCells: {},
@@ -681,7 +682,7 @@ function renderHome(){
     var d=st.done[p.no];
     b.className='pt'+(d?' done':(p.no===nearest&&cur?' next':''));
     var stTxt;
-    if(d){ stTxt='ถ่ายแล้ว '+d.time+' น.'+(d.src==='q'?' · 📤 รอส่ง':(d.area==='นอก'?' · ⚠ นอกพื้นที่':' · ในพื้นที่')); }
+    if(d){ stTxt='ถ่ายแล้ว '+d.time+' น.'+(d.src==='q'?' · 📤 รอส่ง':(d.area==='นอก'?' · ⚠ นอกพื้นที่':(d.area==='ใน'?' · ในพื้นที่':' · ⚠ ยังไม่ปักหมุดจุด'))); }
     else if(p.no===nearest&&cur){ stTxt=(S.pos&&p.lat!==null)?'📍 ใกล้คุณที่สุด — แตะเพื่อถ่ายรูป':'แตะเพื่อถ่ายรูป'; }
     else { stTxt='ยังไม่ตรวจรอบนี้'; }
     b.innerHTML='<div class="no">'+(d?'✓':p.no)+'</div><div class="body"><div class="nm">จุด '+p.no+' · '+p.name+'</div><div class="st">'+stTxt+'</div></div>';
@@ -701,13 +702,18 @@ function renderHome(){
   renderRoundStrip();
   updateQueueChip();
 }
-/** หา cid ของการถ่ายรูปจุดนั้นในรอบปัจจุบัน (ไว้แนบหมายเหตุย้อนหลัง) */
+/** หา cid ของการถ่ายรูปจุดนั้น "ในรอบปัจจุบัน" (ไว้แนบหมายเหตุย้อนหลัง) */
 function cidForPoint(pointNo){
-  var cur=roundOf(nowEff()); if(!cur) return null;
-  // คิวที่ยังไม่ส่งมาก่อน (ใหม่สุด) แล้วค่อยดูของที่ส่งขึ้นชีทแล้ว
+  var now=nowEff(), cur=roundOf(now); if(!cur) return null;
+  var nightIso=nightOf(now);
+  // คิวที่ยังไม่ส่งมาก่อน (ใหม่สุด) — ต้องเป็นรอบ/คืนเดียวกัน ไม่งั้นจะแนบหมายเหตุผิดรายการ
   for(var i=S.queue.length-1;i>=0;i--){
     var q=S.queue[i];
-    if(q.action==='checkin' && q.site===S.site && Number(q.pointNo)===Number(pointNo)) return q.cid;
+    if(q.action!=='checkin' || q.site!==S.site || Number(q.pointNo)!==Number(pointNo)) continue;
+    var d=new Date(new Date(q.clientTime).getTime()+S.offset);
+    if(nightOf(d)!==nightIso) continue;
+    var qr=roundOf(d);
+    if(qr && qr.no===cur.no) return q.cid;
   }
   for(var j=S.night.length-1;j>=0;j--){
     var r=S.night[j];
@@ -1034,6 +1040,14 @@ function renderReport(){
     $('rpGrid').innerHTML='<div style="padding:22px;text-align:center" class="txt-muted">โหลดไม่ได้: '+err.message+'<br><button class="sbtn gold" style="margin-top:10px" onclick="renderReport()">ลองใหม่</button></div>';
   });
 }
+/** แปลง 'HH:MM' เป็นตัวเลขเรียงลำดับได้ตลอดคืน — ก่อนเที่ยงถือเป็นวันถัดไป (+24 ชม.)
+ *  ไม่งั้นรอบข้ามเที่ยงคืน (23:00–02:00) จะเรียงผิด: "00:15" < "23:45" ทั้งที่เกิดทีหลัง */
+function nightTimeVal(hhmm){
+  var m=String(hhmm||'').match(/^(\d{1,2}):(\d{2})/);
+  if(!m) return -1;
+  var h=Number(m[1]);
+  return (h<12?h+24:h)*60+Number(m[2]);
+}
 function buildGrid(records, extra){
   if(!S.cfg) return;
   var pts=pointsOf(S.reportSite), rounds=roundsOf(S.reportSite), now=nowEff();
@@ -1047,7 +1061,7 @@ function buildGrid(records, extra){
   S.reportCells={};
   records.forEach(function(r){
     var k=r.round+'|'+r.point, old=S.reportCells[k];
-    if(!old || String(r.time)>=String(old.time)) S.reportCells[k]=r;
+    if(!old || nightTimeVal(r.time)>=nightTimeVal(old.time)) S.reportCells[k]=r;
   });
 
   var ok=0,miss=0,warn=0,wait=0;
@@ -1059,7 +1073,8 @@ function buildGrid(records, extra){
     pts.forEach(function(p){
       var rec=S.reportCells[r.no+'|'+p.no];
       if(rec){
-        var bad = rec.area==='นอก'||rec.area==='ไม่มีGPS';
+        // ยืนยันพิกัดผ่าน = "ใน" เท่านั้น — นอก/ไม่มีGPS/ยังไม่ปักหมุด ต้องเห็นว่าตรวจสอบตำแหน่งไม่ได้
+        var bad = rec.area!=='ใน';
         if(bad) warn++; else ok++;
         html+='<div class="cell '+(bad?'c-warn':'c-ok')+'" onclick="openCell('+r.no+','+p.no+')">'+(bad?'⚠':'✓')+(rec.late?'🕓':'')+(rec.incType?'📝':'')+'<small>'+dotTime(rec.time)+'</small></div>';
       }else if(stat==='past'){ miss++; html+='<div class="c-miss">✗ ขาด</div>'; }
@@ -1178,10 +1193,15 @@ function init(){
     if(!S.cfg){ renderSetup(); }
   });
 
-  window.addEventListener('online',function(){ setConn(true); flushQueue(); });
-  window.addEventListener('offline',function(){ setConn(false); });
-  setInterval(function(){ flushQueue(); },60000);
-  setInterval(function(){ if(S.guard) loadNight(); },120000);
+  // ตัวจับเวลา/ตัวดักเหตุการณ์ ตั้งครั้งเดียวตลอดอายุหน้าเว็บ
+  // (ปุ่ม "ลองใหม่" ในหน้าเลือกชื่อเรียก init() ซ้ำได้ ถ้าไม่กันจะซ้อนกันเรื่อยๆ)
+  if(!S.timersOn){
+    S.timersOn=true;
+    window.addEventListener('online',function(){ setConn(true); flushQueue(); });
+    window.addEventListener('offline',function(){ setConn(false); });
+    setInterval(function(){ flushQueue(); },60000);
+    setInterval(function(){ if(S.guard) loadNight(); },120000);
+  }
   if('speechSynthesis' in window) speechSynthesis.getVoices();   // อุ่นเสียงไว้ก่อน
 }
 window.addEventListener('load',init);
