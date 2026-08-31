@@ -1,6 +1,7 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v8.4 — auditInOutPairs บอกเลขแถวของเคสที่ต้องแก้เอง (หาแถวในชีทได้ทันที)
  * v8.3 — เซิร์ฟเวอร์ตัดสิน เข้า/ออก เอง (คู่แอป v12.54 · ★ ต้อง Deploy New version):
  *         เดิมเชื่อค่าที่แอปส่ง ซึ่งแอปเดาจาก log ในเครื่อง → ว่างได้ (เปลี่ยนเครื่อง/ล้างแคช/
  *         กดก่อน sync กลับมา/จอสแกนลูกทีมตั้งโหมดค้างที่ "เข้า") = ได้ เข้า ซ้อน เข้า ทั้งวัน
@@ -313,7 +314,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.3', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.4', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -4934,7 +4935,8 @@ function inOutPairs_(daysBack, apply) {
     if (list.length === 2 && ins === 2 && outs === 0 && (list[1].ms - list[0].ms) >= 4 * 3600000) {
       fixes.push({ row: list[1].row, label: label });
     } else {
-      review.push(label);
+      // v8.4: เคสที่ต้องแก้เอง — บอกเลขแถวใน CheckinLog ไปเลย จะได้ไม่ต้องนั่งหาในพันกว่าแถว
+      review.push(label + '  (แถว ' + list.map(x => x.row).join(', ') + ')');
     }
   });
 
