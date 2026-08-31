@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v8.2 — auditLeaveDates() / fixLeaveDatesApply() — วันที่ในชีทการลาApp หน้าตาไม่เหมือนกัน
+ *         (คนแก้เซลล์เองในชีท) · ที่กลายเป็น "ข้อความ" ทำสูตรลา+โควต้าตกหล่นเงียบๆ
  * v8.1 — systemHealthCheck() ตรวจสุขภาพระบบรวบยอด (รันจาก editor · อ่านอย่างเดียว)
  *         + ถอด 680032 ชลธิชา วิมลสถาพร ออกจาก HS_QUOTA_2026 (ลาออกแล้ว · ไม่เคยมีในชีทไหน)
  *         เห็นครบ: สแกนซ้ำ · Holidays · สูตรสรุปวันรุ่นใหม่หรือยัง · โควต้า/ใช้ก่อนใช้แอป/ผู้อนุมัติเฉพาะ · การลาApp
@@ -3154,6 +3156,8 @@ function systemHealthCheck() {
         .forEach(r => { const s = String(r[0] || '').toLowerCase().trim(); if (!s || s === 'pending') pend++; });
     }
     L.push(ok(newLayout, 'การลาApp: ' + (sh ? (sh.getLastRow() - 1) + ' แถว · รออนุมัติ ' + pend : 'ไม่พบ') + (newLayout ? '' : ' · ⚠ ยังเป็นโครงเก่า')));
+    const _dt = sh ? sh.getRange(2, 1, Math.max(1, sh.getLastRow() - 1), 1).getValues().filter(r => r[0] !== '' && r[0] != null && !(r[0] instanceof Date)).length : 0;
+    L.push(ok(_dt === 0, 'รูปแบบวันที่การลาApp: ' + (_dt ? _dt + ' ช่องเป็นข้อความ — รัน fixLeaveDatesApply' : 'เป็นวันที่จริงทุกช่อง')));
     L.push('ℹ ทะเบียนกันคำขอซ้ำ (_reqLog): ' + rowsOf('_reqLog') + ' รายการ');
   } catch (e) { L.push('⚠ ตรวจการลาApp ไม่ได้: ' + e.message); }
 
@@ -4734,4 +4738,103 @@ function saveDayFix(p, user) {
   sh.appendRow([new Date(), String(p.empId||''), cleanName_(p.name), p.date||'',
     p.inTime||'', p.outTime||'', p.skip||'', p.by||p.empId||'']);
   return { ok:true };
+}
+
+/* ── v8.2: ตรวจ/แก้รูปแบบวันที่ในชีทการลาApp (A วันที่ · N ถึงวันที่) ─────────────
+   แอปเขียนลงเหมือนกันทุกใบ เป็นข้อความ "dd/MM/yyyy" แล้วชีทแปลงเป็นวันที่จริงให้เอง
+   แถวที่หน้าตาต่าง (เช่น "26 สิงหาคม 2026") = มีคนแก้เซลล์นั้นเองในชีท → รูปแบบเซลล์เปลี่ยนตามที่พิมพ์
+   ▸ ถ้ายังเป็น "วันที่จริง" = แค่หน้าตาต่าง ระบบยังนับถูกทุกอย่าง
+   ▸ ถ้ากลายเป็น "ข้อความ" = พังเงียบ 3 จุด — สูตรลาในแท็บสรุปวัน · ยอดใช้ไปของโควต้า · ช่วงวันที่หน้าอนุมัติ
+   ► auditLeaveDates() ดูเฉยๆ · fixLeaveDatesApply() แก้จริง (ข้อความ→วันที่ + จัดรูปแบบทั้งคอลัมน์) */
+const LV_DATE_COLS = [{ c: 1, name: 'A วันที่' }, { c: 14, name: 'N ถึงวันที่' }];
+const TH_MON_FULL = ['มกรา','กุมภา','มีนา','เมษา','พฤษภา','มิถุนา','กรกฎา','สิงหา','กันยา','ตุลา','พฤศจิกา','ธันวา'];
+const TH_MON_ABBR = ['ม.ค','ก.พ','มี.ค','เม.ย','พ.ค','มิ.ย','ก.ค','ส.ค','ก.ย','ต.ค','พ.ย','ธ.ค'];
+
+function ymd_(y, mo, d) {
+  if (y > 2400) y -= 543;                       // พ.ศ. → ค.ศ.
+  const dt = new Date(y, mo - 1, d);
+  return isNaN(dt.getTime()) ? null : dt;
+}
+function thaiTextToDate_(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!s) return null;
+  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);            // 26/08/2026
+  if (m) return ymd_(+m[3], +m[2], +m[1]);
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);                  // 2026-08-26
+  if (m) return ymd_(+m[1], +m[2], +m[3]);
+  m = s.match(/^(\d{1,2})\s+(\S+)\s+(\d{4})$/);                  // 26 สิงหาคม 2026 · 26 ส.ค. 2026
+  if (m) {
+    let i = TH_MON_FULL.findIndex(x => m[2].indexOf(x) === 0);
+    if (i < 0) i = TH_MON_ABBR.findIndex(x => m[2].indexOf(x) === 0);
+    if (i >= 0) return ymd_(+m[3], i + 1, +m[1]);
+  }
+  return null;
+}
+
+function auditLeaveDates()    { return leaveDateTool_(false); }
+function fixLeaveDatesApply() { return leaveDateTool_(true); }
+
+function leaveDateTool_(apply) {
+  const sh = getSS().getSheetByName('การลาApp');
+  if (!sh || !leaveSheetIsNew_(sh)) throw new Error('ไม่พบชีทการลาApp (โครงใหม่)');
+  const last = sh.getLastRow();
+  if (last < 2) return 'ยังไม่มีข้อมูล';
+  const n = last - 1;
+  const L = ['── รูปแบบวันที่ในชีทการลาApp · ' + n + ' แถว ' + (apply ? '(แก้จริง)' : '(ดูเฉยๆ)') + ' ──'];
+  let fixable = 0, unreadable = 0;
+
+  LV_DATE_COLS.forEach(col => {
+    const rng  = sh.getRange(2, col.c, n, 1);
+    const vals = rng.getValues();
+    const fmts = rng.getNumberFormats();
+    let real = 0, blank = 0, text = 0;
+    const fixes = [], bad = [], seenFmt = {};
+    vals.forEach((r, i) => {
+      const v = r[0];
+      if (v === '' || v == null) { blank++; return; }
+      if (v instanceof Date) {
+        real++;
+        const f = String(fmts[i][0] || '');
+        seenFmt[f] = (seenFmt[f] || 0) + 1;
+        return;
+      }
+      text++;
+      const d = thaiTextToDate_(v);
+      if (d) fixes.push({ row: i + 2, from: String(v), to: d });
+      else   bad.push({ row: i + 2, from: String(v) });
+    });
+
+    L.push('');
+    L.push('▸ ' + col.name + ' — วันที่จริง ' + real + ' · ข้อความ ' + text + ' · ว่าง ' + blank);
+    const fl = Object.keys(seenFmt);
+    if (fl.length > 1) {
+      L.push('  หน้าตาต่างกัน ' + fl.length + ' แบบ: ' + fl.map(f => (f || '(อัตโนมัติ)') + ' ×' + seenFmt[f]).join(' · '));
+    }
+    if (text) {
+      L.push('  ⚠ ที่เป็นข้อความ ระบบมองไม่เห็น (สูตรลาในสรุปวัน + ยอดใช้ไปของโควต้า ตกหล่น)');
+      fixes.slice(0, 12).forEach(f => L.push('    แถว ' + f.row + ': "' + f.from + '"' + (apply ? ' → แก้แล้ว' : ' → แปลงได้')));
+      if (fixes.length > 12) L.push('    … และอีก ' + (fixes.length - 12) + ' แถว');
+      bad.forEach(b => L.push('    ✗ แถว ' + b.row + ': "' + b.from + '" — อ่านไม่ออก ต้องแก้เอง'));
+    }
+    fixable += fixes.length;
+    unreadable += bad.length;
+
+    if (apply) {
+      fixes.forEach(f => sh.getRange(f.row, col.c).setValue(f.to));
+      // จัดรูปแบบทั้งคอลัมน์ (รวมแถวที่ยังว่าง) — แถวใหม่ที่แอปเขียนมาจะหน้าตาเหมือนกันหมด
+      sh.getRange(2, col.c, Math.max(1, sh.getMaxRows() - 1), 1).setNumberFormat('dd/MM/yyyy');
+    }
+  });
+
+  L.push('');
+  if (apply) L.push('✅ แก้ ' + fixable + ' ช่อง + ตั้งรูปแบบ dd/MM/yyyy ทั้ง 2 คอลัมน์' +
+                    (unreadable ? ' · เหลือ ' + unreadable + ' ช่องที่ต้องแก้เอง' : ''));
+  else if (fixable || unreadable) L.push('► เจอ ' + fixable + ' ช่องที่แก้อัตโนมัติได้ — รัน fixLeaveDatesApply() เพื่อแก้จริง' +
+                    (unreadable ? ' (อีก ' + unreadable + ' ช่องอ่านไม่ออก ต้องแก้เอง)' : ''));
+  else L.push('✅ วันที่เป็นวันที่จริงทุกช่อง — ไม่มีอะไรต้องแก้');
+
+  const msg = L.join('\n');
+  Logger.log(msg);
+  try { getSS().toast(apply ? 'แก้วันที่เรียบร้อย' : 'ตรวจเสร็จ — ดูผลใน "บันทึกการดำเนินการ"', 'รูปแบบวันที่การลาApp', 10); } catch (e) {}
+  return msg;
 }
