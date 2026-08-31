@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v8.1 — systemHealthCheck() ตรวจสุขภาพระบบรวบยอด (รันจาก editor · อ่านอย่างเดียว)
+ *         เห็นครบ: สแกนซ้ำ · Holidays · สูตรสรุปวันรุ่นใหม่หรือยัง · โควต้า/ใช้ก่อนใช้แอป/ผู้อนุมัติเฉพาะ · การลาApp
  * v8.0 — cleanDuplicateScans ลบเป็นก้อน (แถวติดกันรวบครั้งเดียว) — 730 แถวเรียกทีละแถวเสี่ยงหมดเวลา
  * v7.9 — แก้ต้นเหตุสแกนลงซ้ำ (คู่แอป v12.53 · ★ ต้อง Deploy New version ถึงจะหยุดซ้ำ):
  *         actionCheckin ไม่เคยมีล็อก → แอป retry ขณะคำขอแรกยังทำงานค้าง = สองคำขอวิ่งพร้อมกัน
@@ -303,7 +305,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.0', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.1', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3074,6 +3076,90 @@ function cleanDuplicateScans(daysBack, apply) {
               ' (ย้อนหลัง ' + back + ' วัน)' + (apply === true ? '' : ' · ลบจริงให้รัน cleanDuplicateScans(60, true)');
   Logger.log(msg);
   try { SpreadsheetApp.getActiveSpreadsheet().toast(msg, 'ล้างสแกนซ้ำ', 15); } catch (e) {}
+  return msg;
+}
+
+/* ── v8.1: ตรวจสุขภาพระบบรวบยอด (รันจาก editor ครั้งเดียว เห็นครบทุกจุด) ──
+   ใช้ยืนยันว่า "รันครบแล้วจริงมั้ย" หลังตั้งค่า/ล้างข้อมูล — ไม่แก้ไขอะไรทั้งสิ้น อ่านอย่างเดียว */
+function systemHealthCheck() {
+  const ss = getSS();
+  const L = [];
+  const tab = n => ss.getSheetByName(n);
+  const rowsOf = n => { const s = tab(n); return s ? Math.max(0, s.getLastRow() - 1) : -1; };
+  const ok = (c, t) => (c ? '✅ ' : '⚠ ') + t;
+
+  L.push('── ระบบลงเวลา Rattana · ตรวจสุขภาพ ──');
+
+  // 1) สแกนซ้ำใน CheckinLog (60 วัน)
+  try {
+    const sh = tab(T.LOG);
+    const last = sh ? sh.getLastRow() : 0;
+    let dup = 0, scanned = 0;
+    if (last > 1) {
+      const since = new Date(Date.now() - 60 * 86400000);
+      const d = sh.getRange(2, 1, last - 1, 6).getValues();
+      const rows = [];
+      d.forEach(r => {
+        const t = (r[0] instanceof Date) ? r[0] : new Date(r[0]);
+        if (!t || isNaN(t.getTime()) || t < since) return;
+        rows.push({ ts: t, empId: String(r[1] || '').trim(), type: String(r[5] || '').toLowerCase() === 'out' ? 'out' : 'in' });
+      });
+      scanned = rows.length;
+      rows.sort((a, b) => a.empId.localeCompare(b.empId) || a.ts - b.ts);
+      for (let i = 1; i < rows.length; i++) {
+        const a = rows[i - 1], b = rows[i];
+        if (a.empId === b.empId && a.type === b.type && Math.abs(b.ts - a.ts) <= 120000) dup++;
+      }
+    }
+    L.push(ok(dup === 0, 'สแกนซ้ำ 60 วัน: ' + dup + ' คู่ (จาก ' + scanned + ' แถว) · ทั้งชีท ' + (last - 1) + ' แถว'));
+  } catch (e) { L.push('⚠ ตรวจ CheckinLog ไม่ได้: ' + e.message); }
+
+  // 2) แท็บ Holidays — ต้องเป็นวันที่จริง
+  try {
+    const sh = tab(T.HOL);
+    if (!sh || sh.getLastRow() < 2) L.push('⚠ Holidays: ยังไม่มีข้อมูล');
+    else {
+      const d = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues();
+      const dates = d.filter(r => r[0] instanceof Date).length;
+      const texts = d.filter(r => r[0] && !(r[0] instanceof Date)).length;
+      L.push(ok(texts === 0 && dates > 0, 'Holidays: ' + dates + ' วันที่จริง' + (texts ? ' · ⚠ เป็นข้อความ ' + texts + ' (รัน fixHolidayDates)' : '')));
+    }
+  } catch (e) { L.push('⚠ ตรวจ Holidays ไม่ได้: ' + e.message); }
+
+  // 3) สูตรสรุปวัน — รัน setupDailySummary รุ่นใหม่หรือยัง (ดูจากคำว่า "ทำงานวันหยุด" ในสูตร F4)
+  try {
+    const sh = tab('สรุปวัน');
+    const f = sh ? String(sh.getRange('F4').getFormula() || '') : '';
+    const isNew = f.indexOf('ทำงานวันหยุด') >= 0;
+    L.push(ok(isNew, 'สรุปวัน: ' + (f ? (isNew ? 'ใช้กติกาใหม่ (วันหยุดที่มีสแกน = นับเป็นวันทำงาน)'
+        : 'ยังเป็นสูตรเดิม — ต้องรัน setupDailySummary') : 'ไม่พบสูตรในช่อง F4')));
+  } catch (e) { L.push('⚠ ตรวจสรุปวันไม่ได้: ' + e.message); }
+
+  // 4) โควต้าลา + ยอดใช้ก่อนใช้แอป + ผู้อนุมัติเฉพาะ
+  try {
+    const q = rowsOf(LQ_TAB), c = rowsOf(CARRY_TAB), a = rowsOf(APPROVER_TAB);
+    const ovr = Object.keys(quotaOverrideMap_()).length;
+    L.push(ok(q > 0, 'โควต้าลา: ' + q + ' คน · ตั้งค่าเองแล้ว ' + ovr + ' คน'));
+    L.push(ok(c >= 0, 'ใช้ก่อนใช้แอป: ' + (c < 0 ? 'ยังไม่มีแท็บ (รัน importQuotaHumanSoft2026)' : c + ' คน')));
+    L.push(ok(a > 0, 'ผู้อนุมัติเฉพาะ: ' + (a < 0 ? 'ยังไม่มีแท็บ' : a + ' รายการ')));
+  } catch (e) { L.push('⚠ ตรวจโควต้าไม่ได้: ' + e.message); }
+
+  // 5) การลาApp + ทะเบียนกันคำขอซ้ำ
+  try {
+    const sh = tab('การลาApp');
+    const newLayout = sh ? leaveSheetIsNew_(sh) : false;
+    let pend = 0;
+    if (sh && sh.getLastRow() > 1) {
+      sh.getRange(2, 9, sh.getLastRow() - 1, 1).getValues()
+        .forEach(r => { const s = String(r[0] || '').toLowerCase().trim(); if (!s || s === 'pending') pend++; });
+    }
+    L.push(ok(newLayout, 'การลาApp: ' + (sh ? (sh.getLastRow() - 1) + ' แถว · รออนุมัติ ' + pend : 'ไม่พบ') + (newLayout ? '' : ' · ⚠ ยังเป็นโครงเก่า')));
+    L.push('ℹ ทะเบียนกันคำขอซ้ำ (_reqLog): ' + rowsOf('_reqLog') + ' รายการ');
+  } catch (e) { L.push('⚠ ตรวจการลาApp ไม่ได้: ' + e.message); }
+
+  const msg = L.join('\n');
+  Logger.log(msg);
+  try { ss.toast('ตรวจเสร็จ — ดูผลใน "บันทึกการดำเนินการ"', 'ตรวจสุขภาพระบบ', 10); } catch (e) {}
   return msg;
 }
 
