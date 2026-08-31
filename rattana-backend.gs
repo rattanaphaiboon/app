@@ -1,7 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v7.5 — ตรวจบั๊กทั้งระบบ (คู่แอป v12.51 · ต้อง Deploy New version):
+ * v7.6 — ตรวจแท็บ Holidays: checkHolidays() บอกว่าคอลัมน์ A เป็นวันที่จริงหรือข้อความ
+ *         (สูตรสรุปวันใช้ VLOOKUP(INT(วันที่)) — ถ้าเป็นข้อความจะหาไม่เจอเงียบๆ)
+ *         + fixHolidayDates() แปลงข้อความเป็นวันที่จริงให้ · รันจาก editor ไม่ต้อง Deploy
+ * v7.5 — ตรวจบั๊กทั้งระบบ (คู่แอป v12.51):
  *         · ทางถอย T.LEAVE ยังคิดโควต้าแบบ ชม.÷8 — เปลี่ยนมาใช้ leaveQuotaDays_ ให้ตรงกติกาเดียวกัน
  *         · reimburseAmount_ หาคอลัมน์ "ค่าแรงต่อวัน" แบบชื่อเป๊ะก่อน (กันโดนคอลัมน์อื่นที่มีคำว่ารายวัน)
  * v7.4 — หน้าอนุมัติเห็น "ลาตั้งแต่–ถึง กี่วัน" (คู่แอป v12.50):
@@ -288,7 +291,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.5', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.6', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -2937,6 +2940,53 @@ function actionGetHolidays(user) {
     out.push({ date: formatDate(data[i][0]), name: String(data[i][1] || ''), type: String(data[i][2] || '') });
   }
   return jsonOut({ ok:true, holidays: out });
+}
+
+/* v7.6: ตรวจแท็บ Holidays ว่าใช้งานได้จริง (รันจาก editor)
+   สูตรในสรุปวันใช้ VLOOKUP(INT(วันที่), Holidays!A:B, 2) → คอลัมน์ A ต้องเป็น "วันที่จริง" ไม่ใช่ข้อความ
+   ถ้าเป็นข้อความ ระบบจะหาไม่เจอเงียบๆ = วันหยุดไม่ถูกนำไปคิดเลย */
+function checkHolidays() {
+  const sh = getTab(T.HOL);
+  if (!sh) return '❌ ไม่พบแท็บ Holidays';
+  const last = sh.getLastRow();
+  if (last < 2) return '⚠ แท็บ Holidays ยังไม่มีข้อมูล';
+  const data = sh.getRange(2, 1, last - 1, 3).getValues();
+  let dates = 0, texts = 0, blanks = 0;
+  const bad = [];
+  data.forEach((r, i) => {
+    if (!r[0]) { blanks++; return; }
+    if (r[0] instanceof Date) dates++;
+    else { texts++; bad.push('แถว ' + (i + 2) + ': "' + r[0] + '"'); }
+  });
+  const head = sh.getRange(1, 1, 1, 3).getValues()[0].map(h => String(h || '').trim());
+  const msg = 'Holidays: ' + (last - 1) + ' แถว · เป็นวันที่จริง ' + dates + ' · เป็นข้อความ ' + texts +
+              (blanks ? ' · ว่าง ' + blanks : '') + ' · หัวตาราง [' + head.join(' | ') + ']' +
+              (texts ? '\n⚠ ต้องแก้เป็นวันที่จริง ไม่งั้นสูตรสรุปวันหาไม่เจอ → ' + bad.slice(0, 5).join(' , ') : '\n✅ พร้อมใช้งาน');
+  Logger.log(msg);
+  try { SpreadsheetApp.getActiveSpreadsheet().toast(msg.replace(/\n/g, ' '), 'ตรวจ Holidays', 12); } catch (e) {}
+  return msg;
+}
+
+/* v7.6: แปลงคอลัมน์ A ในแท็บ Holidays จาก "ข้อความ" เป็น "วันที่จริง" (รันเมื่อ checkHolidays แจ้งว่าเป็นข้อความ) */
+function fixHolidayDates() {
+  const sh = getTab(T.HOL);
+  if (!sh || sh.getLastRow() < 2) throw new Error('ไม่พบข้อมูลในแท็บ Holidays');
+  const n = sh.getLastRow() - 1;
+  const vals = sh.getRange(2, 1, n, 1).getValues();
+  let fixed = 0;
+  const out = vals.map(r => {
+    const v = r[0];
+    if (!v || v instanceof Date) return [v];
+    const d = parseDDMMYYYY(String(v).trim());
+    if (d) { fixed++; return [d]; }
+    return [v];
+  });
+  sh.getRange(2, 1, n, 1).setValues(out);
+  sh.getRange(2, 1, n, 1).setNumberFormat('dd/MM/yyyy');
+  const msg = 'แปลงวันที่เป็นรูปแบบวันที่จริงแล้ว ' + fixed + ' แถว';
+  Logger.log(msg);
+  try { SpreadsheetApp.getActiveSpreadsheet().toast(msg, 'Holidays', 8); } catch (e) {}
+  return msg;
 }
 
 function actionSaveHoliday(p, user) {
