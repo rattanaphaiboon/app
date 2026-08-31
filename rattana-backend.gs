@@ -1,6 +1,11 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v7.9 — แก้ต้นเหตุสแกนลงซ้ำ (คู่แอป v12.53 · ต้อง Deploy New version):
+ *         actionCheckin ไม่เคยมีล็อก → แอป retry ขณะคำขอแรกยังทำงานค้าง = สองคำขอวิ่งพร้อมกัน
+ *         ทั้งคู่อ่านชีทก่อนอีกฝั่งเขียน → ด่านกันซ้ำ+ด่าน 60 นาที มองไม่เห็นกัน → ได้ 2-4 แถวเวลาเดียว
+ *         แก้: ครอบด้วย LockService(25 วิ) ตั้งแต่ตรวจซ้ำจนเขียนเสร็จ + เทียบ clientId แบบตัดช่องว่าง/รองรับค่าเก่าที่เป็นตัวเลข
+ *         + cleanDuplicateScans(วัน, true) ล้างแถวซ้ำเก่า (เก็บแถวที่มีรูปไว้ก่อน)
  * v7.8 — ตรวจสแกนซ้ำ: auditDuplicateScans() → แท็บ "ตรวจสแกนซ้ำ" (รันจาก editor)
  *         บอกสาเหตุรายคู่จาก clientId: เหมือนกัน=ตัวกันซ้ำไม่ทำงาน · ต่างกัน=ส่งคนละครั้ง · ว่าง=แถวเก่า
  * v7.7 — วันหยุดที่ "มีสแกน" = นับเป็นวันทำงาน (ต้องรัน setupDailySummary ใหม่):
@@ -297,7 +302,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.8', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.9', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -961,14 +966,22 @@ function actionCheckin(p, user) {
   const type = (String(p.type || '').trim().toLowerCase() === 'out') ? 'out' : 'in';
 
   const logSh = getOrCreateTab(T.LOG);
+  // ── v7.9: ล็อกก่อนตรวจซ้ำ+เขียน (surat เจอ 103 คู่ที่ clientId เหมือนกัน = ตัวกันซ้ำไม่ทำงาน) ──
+  // ต้นเหตุ: แอป retry ขณะที่คำขอแรก "ยังทำงานค้างอยู่บนเซิร์ฟเวอร์" → สองคำขอวิ่งพร้อมกัน
+  // ทั้งคู่อ่านชีทก่อนที่อีกฝั่งจะเขียน → ด่านกันซ้ำ/ด่าน 60 นาที มองไม่เห็นกัน → ได้ 2-4 แถวเวลาเดียวกัน
+  let _ckLock = null;
+  try { _ckLock = LockService.getScriptLock(); _ckLock.waitLock(25000); } catch (e) { _ckLock = null; }
+  try {
   // v8.7: กันบันทึกซ้ำ — ถ้า clientId นี้เคยลงแล้ว ข้าม (idempotent re-sync)
-  const cid = String(p.clientId || '');
+  const cid = String(p.clientId || '').trim();
   if (cid) {
     const last = logSh.getLastRow();
     if (last > 1) {
       const ids = logSh.getRange(2, 17, last - 1, 1).getValues();
       for (let i = 0; i < ids.length; i++) {
-        if (String(ids[i][0]) === cid) {
+        // v7.9: เทียบแบบตัดช่องว่าง + เผื่อค่าเก่าที่ชีทเก็บเป็นตัวเลข (id รุ่นเดิมเป็นตัวเลขทศนิยม)
+        const cellId = String(ids[i][0] == null ? '' : ids[i][0]).trim();
+        if (cellId && (cellId === cid || (parseFloat(cellId) && parseFloat(cellId) === parseFloat(cid)))) {
           // v2.0/v2.4: รอบก่อนชีทลงแล้วแต่ Supabase/รูปอาจพลาด — เส้นทางซ้ำนี้คือตัวซ่อม:
           // อัปรูปที่ตกหล่น + เติม photo_path ทั้ง Postgres และชีท (client ส่งรูปซ้ำมาเอง)
           let dupPhotoSaved = null;
@@ -1079,6 +1092,7 @@ function actionCheckin(p, user) {
   // v2.3: บอก client ตรงๆ ว่ารูปขึ้น Storage จริงไหม — จะได้ไม่พลาดเงียบ (หน้า audit ขึ้น "ไม่มีรูป")
   return jsonOut({ ok:true, msg:'บันทึกแล้ว', status:res.status, slot:res.slot,
     photoSaved: (useSB && p.photo) ? !!photoPath : null });
+  } finally { if (_ckLock) { try { _ckLock.releaseLock(); } catch (e) {} } }   // v7.9
 }
 
 /* v3.3: สวิตช์ชีท "ลงเวลาApp" — false = หยุดเขียน (HR เขียนสูตรเองจาก CheckinLog) */
@@ -3012,6 +3026,43 @@ function auditDuplicateScans(daysBack) {
               'clientId เหมือนกัน ' + sameCid + ' (บั๊กระบบ) · ต่างกัน ' + diffCid + ' (ส่งคนละครั้ง) · ไม่มี clientId ' + noCid;
   Logger.log(msg);
   try { ss.toast(msg, 'ตรวจสแกนซ้ำ', 15); } catch (e) {}
+  return msg;
+}
+
+/* v7.9: ล้างแถวสแกนซ้ำใน CheckinLog — เก็บแถวแรกของแต่ละคู่ ลบแถวที่ซ้ำ
+   นิยามซ้ำ = คนเดียวกัน ชนิดเดียวกัน ห่างกันไม่เกิน 2 นาที (เหมือน auditDuplicateScans)
+   ► รัน auditDuplicateScans() ดูก่อนเสมอ · ค่าเริ่มต้นเป็นโหมด "ดูเฉยๆ" ไม่ลบจริง
+   ► ลบจริงต้องเรียก cleanDuplicateScans(60, true)  (ลบจากล่างขึ้นบน เลขแถวจึงไม่เลื่อน) */
+function cleanDuplicateScans(daysBack, apply) {
+  const sh = getTab(T.LOG);
+  if (!sh || sh.getLastRow() < 2) throw new Error('ไม่พบข้อมูลใน ' + T.LOG);
+  const back = parseInt(daysBack, 10) || 60;
+  const since = new Date(Date.now() - back * 86400000);
+  const last = sh.getLastRow();
+  const data = sh.getRange(2, 1, last - 1, 17).getValues();
+  const rows = [];
+  data.forEach((r, i) => {
+    const t = (r[0] instanceof Date) ? r[0] : new Date(r[0]);
+    if (!t || isNaN(t.getTime()) || t < since) return;
+    rows.push({ row: i + 2, ts: t, empId: String(r[1] || '').trim(),
+                type: String(r[5] || '').toLowerCase() === 'out' ? 'out' : 'in',
+                photo: String(r[14] || '').trim() });
+  });
+  rows.sort((a, b) => a.empId.localeCompare(b.empId) || a.ts - b.ts || a.row - b.row);
+  const del = [];
+  for (let i = 1; i < rows.length; i++) {
+    const a = rows[i - 1], b = rows[i];
+    if (a.empId !== b.empId || a.type !== b.type) continue;
+    if (Math.abs(b.ts - a.ts) > 2 * 60 * 1000) continue;
+    // เก็บแถวที่ "มีรูป" ไว้ก่อน — ถ้าแถวแรกไม่มีรูปแต่แถวซ้ำมี ให้ลบแถวแรกแทน
+    del.push((!a.photo && b.photo) ? a.row : b.row);
+  }
+  const uniq = [...new Set(del)].sort((x, y) => y - x);   // ลบจากล่างขึ้นบน
+  if (apply === true) uniq.forEach(rw => sh.deleteRow(rw));
+  const msg = (apply === true ? '🧹 ลบแถวซ้ำแล้ว ' : '🔎 โหมดดูเฉยๆ — พบแถวที่จะลบ ') + uniq.length + ' แถว' +
+              ' (ย้อนหลัง ' + back + ' วัน)' + (apply === true ? '' : ' · ลบจริงให้รัน cleanDuplicateScans(60, true)');
+  Logger.log(msg);
+  try { SpreadsheetApp.getActiveSpreadsheet().toast(msg, 'ล้างสแกนซ้ำ', 15); } catch (e) {}
   return msg;
 }
 
