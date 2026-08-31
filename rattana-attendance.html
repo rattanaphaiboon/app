@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.51</title>
+<title>HR Rattana v5.52</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3587,7 +3587,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.51';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.52';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -6313,6 +6313,7 @@ async function doSelfCheckIn() {
   } else {
     renderHomeTodayCard();
   }
+  try { _sumMonthLogs = {}; } catch (_) {}   // v12.52: สแกนใหม่ → ล้างแคชเดือน หน้าประวัติจะได้เห็นทันที
   checkScanPairAlert();   // v12.0: อัปเดตแบนเนอร์เตือนทันทีหลังสแกน (เช่น สแกนออกแล้ว → แบนเนอร์หาย)
   } finally { _checkinBusy = false; }   // v7.7: กัน busy ค้างถาวรถ้ามี exception กลางทาง
 }
@@ -7302,6 +7303,32 @@ function loadDayFix(){ try{ _dayFix = LS.get('rf_dayfix', {}) || {}; }catch(_){ 
 function fixFor(empId,date){ const e=_dayFix[String(empId)]; return e ? e[date] : null; }
 
 /* คิดผลของ 1 วัน จาก logs ของวันนั้น (+ override การแก้ + ใบลาที่อนุมัติของวันนั้น) */
+/* v12.52: ดึงสแกนทั้งเดือนจากระบบ (แหล่งเดียวกับปฏิทิน) แล้วแคชไว้ต่อเดือน
+   ใช้ให้หน้า "สรุปเดือน/รายวัน" เห็นข้อมูลตรงกับระบบ ไม่ขึ้นกับว่าสแกนจากเครื่องไหน */
+let _sumMonthLogs = {};
+async function ensureMonthLogs_(ym, empId) {
+  if (_sumMonthLogs[ym]) return _sumMonthLogs[ym];
+  const [y, m] = String(ym).split('-');
+  const out = [];
+  try {
+    const res = await callAppsScript('getCheckinLog', { empId: empId, month: `${m}/${y}`, limit: 250 });
+    const p2 = n => String(n).padStart(2, '0');
+    (res.logs || []).filter(r => String(r.empId) === String(empId)).forEach(r => {
+      const ms = new Date(r.timestamp).getTime() || 0;
+      if (!ms) return;
+      const d = new Date(ms);
+      const dateKey = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+      if (dateKey.slice(0, 7) !== ym) return;
+      const type = String(r.type).toLowerCase() === 'out' ? 'out' : 'in';
+      out.push({ id: 'srv-' + ms + '-' + type, empId: String(r.empId), type,
+                 ts: new Date(ms).toISOString(), dateKey,
+                 timeStr: _hhmmFromSheetTime_(r.time, ms), remote: true });
+    });
+    _sumMonthLogs[ym] = out;
+  } catch (e) { throw e; }
+  return out;
+}
+
 function computeDay(dayLogs, cfg, leaveDay){
   const csIn=_t2m(cfg.startTime), csOut=_t2m(cfg.endTime);
   const bS=_t2m(cfg.breakStart), bE=_t2m(cfg.breakEnd);
@@ -7394,6 +7421,17 @@ async function renderSummary(){
   // logs ของ emp เดือนนี้
   const combined=[...logs]; const seen=new Set(logs.map(l=>l.id));
   remoteLogs.forEach(r=>{ if(!seen.has(r.id)) combined.push(r); });
+  // v12.52: ดึงสแกนทั้งเดือนจากระบบมารวมด้วย — เดิมหน้านี้ใช้ log ในเครื่องเป็นหลัก
+  // ทำให้วันที่สแกนจากเครื่องอื่น/ก่อนล้างแคช ขึ้น "ไม่มีสแกน · ขาด" ทั้งที่ระบบมีข้อมูล
+  // (หน้าแก้เวลาย้อนหลังถามระบบรายวันจึงเห็นเวลา — เลยขัดกันเอง)
+  try {
+    const srv = await ensureMonthLogs_(_sumMonth, empId);
+    srv.forEach(r => {
+      const dup = combined.some(l => String(l.empId)===empId && l.dateKey===r.dateKey &&
+        String(l.type).toLowerCase()===r.type && Math.abs(new Date(l.ts)-new Date(r.ts)) < 90000);
+      if (!dup) combined.push(r);
+    });
+  } catch (_) {}
   const mine=combined.filter(l=> String(l.empId)===empId && (l.dateKey||'').slice(0,7)===_sumMonth);
 
   // group by day
