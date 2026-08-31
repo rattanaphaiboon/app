@@ -1,6 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v7.7 — วันหยุดที่ "มีสแกน" = นับเป็นวันทำงาน (surat เคาะ · ต้องรัน setupDailySummary ใหม่):
+ *         ไม่มีสแกน → วันอาทิตย์/วันนักขัตฯ ตามเดิม · มีสแกน ≥9 ชม. → "ทำงานเต็มวัน" (นับแรงปกติ)
+ *         มาแต่ไม่ครบเกณฑ์ → "ทำงานวันหยุด" · สแกนขาเดียว → "ไม่ครบคู่ (วันหยุด)" — ทั้งคู่ไม่นับขาด
+ *         คอลัมน์ I ยังโชว์ชื่อวันหยุด → HR กรองคิดค่าทำงานวันหยุดได้
  * v7.6 — ตรวจแท็บ Holidays: checkHolidays() บอกว่าคอลัมน์ A เป็นวันที่จริงหรือข้อความ
  *         (สูตรสรุปวันใช้ VLOOKUP(INT(วันที่)) — ถ้าเป็นข้อความจะหาไม่เจอเงียบๆ)
  *         + fixHolidayDates() แปลงข้อความเป็นวันที่จริงให้ · รันจาก editor ไม่ต้อง Deploy
@@ -291,7 +295,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.6', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'7.7', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -1140,7 +1144,12 @@ function setupDailySummary() {
   //   เพราะวันนั้นได้รับอนุญาตให้อยู่ไม่ครบ) · ไม่มาสแกนเลย = "ผิด (ลาบางส่วน)"
   //   ลาเต็มวัน (K ≥ 8) + ไม่มีสแกน = "ลา"
   rp.getRange('F4').setFormula(
-    `=ARRAYFORMULA(IF(A4:A="",, LET(cnt, IFERROR(VLOOKUP(INT(C4:C)&"|"&A4:A, คิดสรุป!A:D, 4, FALSE), 0), tin, IFERROR(VLOOKUP(INT(C4:C)&"|"&A4:A, คิดสรุป!A:D, 2, FALSE), 0), tout, IFERROR(VLOOKUP(INT(C4:C)&"|"&A4:A, คิดสรุป!A:D, 3, FALSE), 0), hol, IFERROR(VLOOKUP(INT(C4:C), Holidays!A:B, 2, FALSE), ""), lh, IF(ISNUMBER(K4:K), K4:K, 0), IF(WEEKDAY(C4:C)=1, "วันอาทิตย์", IF(hol<>"", "วันนักขัตฯ", IF(cnt=0, IF(lh>=8, "ลา", IF(lh>0, "ผิด (ลาบางส่วน)", "ผิด")), IF((tout-tin)<=5/1440, "ผิด (ไม่ครบคู่)", IF((lh>0)*(lh<8), "ทำงาน (ลาบางส่วน)", IF((tout-tin)>=9/24, "ทำงานเต็มวัน", "ผิด")))))))))`
+    // v7.7 (surat เคาะ 29/08 — ทางเลือก B): "มีสแกน" ชนะวันหยุด
+    //   ไม่มีสแกน → วันอาทิตย์/วันนักขัตฯ ตามเดิม (ไม่ถูกนับขาด)
+    //   มีสแกนในวันหยุด → คิดเหมือนวันทำงาน (ช่วง ≥9 ชม. = "ทำงานเต็มวัน" นับเป็นแรงปกติ)
+    //   วันหยุดที่มาสแกนแต่ไม่ครบเกณฑ์ → "ทำงานวันหยุด" / "ไม่ครบคู่ (วันหยุด)" — ไม่นับขาด (ตัวนับขาดจับเฉพาะ "ผิด*")
+    //   คอลัมน์ I ยังโชว์ชื่อวันหยุดไว้เสมอ → HR กรองคิดค่าทำงานวันหยุดได้
+    `=ARRAYFORMULA(IF(A4:A="",, LET(cnt, IFERROR(VLOOKUP(INT(C4:C)&"|"&A4:A, คิดสรุป!A:D, 4, FALSE), 0), tin, IFERROR(VLOOKUP(INT(C4:C)&"|"&A4:A, คิดสรุป!A:D, 2, FALSE), 0), tout, IFERROR(VLOOKUP(INT(C4:C)&"|"&A4:A, คิดสรุป!A:D, 3, FALSE), 0), hol, IFERROR(VLOOKUP(INT(C4:C), Holidays!A:B, 2, FALSE), ""), lh, IF(ISNUMBER(K4:K), K4:K, 0), off, (WEEKDAY(C4:C)=1)+(hol<>""), IF(cnt=0, IF(WEEKDAY(C4:C)=1, "วันอาทิตย์", IF(hol<>"", "วันนักขัตฯ", IF(lh>=8, "ลา", IF(lh>0, "ผิด (ลาบางส่วน)", "ผิด")))), IF((tout-tin)<=5/1440, IF(off, "ไม่ครบคู่ (วันหยุด)", "ผิด (ไม่ครบคู่)"), IF((lh>0)*(lh<8), "ทำงาน (ลาบางส่วน)", IF((tout-tin)>=9/24, "ทำงานเต็มวัน", IF(off, "ทำงานวันหยุด", "ผิด"))))))))`
   );
   // v4.3: การลาApp โครงใหม่ — A วันที่, N ถึงวันที่, F ประเภทเอกสาร, I สถานะ, M จำนวนชั่วโมง
   rp.getRange('G4').setFormula(
@@ -1176,6 +1185,8 @@ function setupDailySummary() {
   rp.setConditionalFormatRules([
     mk('ทำงานเต็มวัน', '#c9f5ee'),
     mk('ทำงาน (ลาบางส่วน)', '#b8e6cf'),
+    mk('ทำงานวันหยุด', '#ffd9a0'),          // v7.7: มาทำงานในวันหยุด (ยังไม่ครบเกณฑ์วันเต็ม)
+    mk('ไม่ครบคู่ (วันหยุด)', '#ffe3b3'),   // v7.7
     mk('ผิด', '#f8c7c4'),
     mk('วันอาทิตย์', '#fff2a8'),
     mk('วันนักขัตฯ', '#c8f7c5'),
