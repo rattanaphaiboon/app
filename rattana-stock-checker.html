@@ -961,7 +961,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.62';
+const APP_VERSION = 'v4.63';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -3752,6 +3752,7 @@ async function saveCountToSheet() {
   const payload = {
     // ตัวเลือกพิเศษ (เช่น W3COL/W3CHA) → บันทึกเข้าประวัติของคลังแม่ (W3)
     warehouse: SPECIAL_WH[countSession.warehouse] ? SPECIAL_WH[countSession.warehouse].parent : countSession.warehouse,
+    catalog: SPECIAL_WH[countSession.warehouse] ? SPECIAL_WH[countSession.warehouse].label : '',   // v4.63: แยกแท็บ Colgate/Chaindrite
     sessionStart: countSession.startedAt,
     counterName: counterDisplayName(),
     empId: counterDisplayEmpId(),
@@ -3844,9 +3845,14 @@ function saveScrapLocal() { try { localStorage.setItem(SCRAP_STORE, JSON.stringi
 function initScrapMode() {
   const sel = document.getElementById('scrapWh');
   if (!sel.options.length) {
-    sel.innerHTML = visibleWh.length
-      ? visibleWh.map(w => `<option value="${w}">${w} · ${WH_NAMES[w]||w}</option>`).join('')
-      : '<option>— ไม่มีคลัง —</option>';
+    if (!visibleWh.length) { sel.innerHTML = '<option>— ไม่มีคลัง —</option>'; }
+    else {
+      // คลังพิเศษ (Colgate/Chaindrite ของ W3) — แยกเก็บนับเศษเป็นแท็บของตัวเอง
+      const specialOpts = Object.keys(SPECIAL_WH)
+        .filter(k => visibleWh.includes(SPECIAL_WH[k].parent))
+        .map(k => `<option value="${k}">${SPECIAL_WH[k].parent} · ${SPECIAL_WH[k].label}</option>`).join('');
+      sel.innerHTML = visibleWh.map(w => `<option value="${w}">${w} · ${WH_NAMES[w]||w}</option>`).join('') + specialOpts;
+    }
   }
   loadScrap();
   document.getElementById('scrapCounter').textContent = counterDisplayName() || '— (เลือกผู้นับในแท็บนับสต็อก)';
@@ -3855,14 +3861,22 @@ function initScrapMode() {
 }
 function onScrapInput(inp)  { document.getElementById('scrapClear').style.display = inp.value ? 'flex' : 'none'; }
 function clearScrapInput()  { const i = document.getElementById('scrapInput'); i.value = ''; document.getElementById('scrapClear').style.display = 'none'; i.focus(); }
-function onScrapWhChange()  { /* สแกนถัดไปจะใช้คลังใหม่อัตโนมัติ (รายการเก่าคงคลังเดิม) */ }
+function onScrapWhChange() {
+  // สแกนถัดไปจะใช้คลังใหม่อัตโนมัติ (รายการเก่าคงคลังเดิม)
+  const wh = document.getElementById('scrapWh').value;
+  if (SPECIAL_WH[wh] && !adjStockCache[wh]) loadSpecial(wh, true);   // คลังพิเศษ → โหลดแคตตาล็อกเพื่อเติมชื่อ/หน่วยตอนยิง
+}
 
 // ยิ่ง/พิมพ์บาร์โค้ด → หาในแคตตาล็อก เจอ=เติมชื่อ/หน่วยให้ · ไม่เจอ=ฟอร์มกรอกเอง
 function scrapScan(code) {
   const inp = document.getElementById('scrapInput');
   const raw = (code || inp.value).trim();
   if (!raw) { inp.focus(); return; }
-  const found = barcodeIndex[raw];
+  // คลังพิเศษ (Colgate/Chaindrite) → ใช้แคตตาล็อกพิเศษ · คลังปกติ → แคตตาล็อกหลัก
+  const swh = document.getElementById('scrapWh').value;
+  const isSpecial = !!SPECIAL_WH[swh];
+  const sp = (isSpecial && specialBarcodeMap[raw]) ? specialBarcodeMap[raw][0] : null;
+  const found = isSpecial ? sp : barcodeIndex[raw];
   if (found) {
     scrapPending = { barcode: raw, product: found.product, unit: found.unit,
       name: found.product['PRODUCT NAME'] || '', found: true };
@@ -3966,7 +3980,7 @@ function renderScrapList() {
       <div style="min-width:0;flex:1">
         <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis">${it.name || '—'}</div>
         <div style="font-size:11.5px;color:var(--muted);margin-top:2px">
-          <b style="color:var(--navy-mid);font-size:13px">${it.qty} ${it.unit}</b>${it.barcode ? ' · '+it.barcode : ''} · ${it.warehouse}${it.expiry ? ' · 📅 '+formatThaiDate(it.expiry) : ''}
+          <b style="color:var(--navy-mid);font-size:13px">${it.qty} ${it.unit}</b>${it.barcode ? ' · '+it.barcode : ''} · ${SPECIAL_WH[it.warehouse] ? SPECIAL_WH[it.warehouse].parent+' '+SPECIAL_WH[it.warehouse].label : it.warehouse}${it.expiry ? ' · 📅 '+formatThaiDate(it.expiry) : ''}
         </div>
       </div>
       <div style="flex:none;display:flex;gap:4px">
@@ -4004,9 +4018,11 @@ async function saveScrapToSheet() {
   showSpinner('กำลังส่งนับเศษลงชีท...');
   try {
     for (const wh of Object.keys(byWh)) {
+      const sp = SPECIAL_WH[wh];   // คลังพิเศษ → ส่งคลังแม่ + catalog (แยกแท็บ)
       const payload = {
         action: 'saveScrap',
-        warehouse: wh,
+        warehouse: sp ? sp.parent : wh,
+        catalog: sp ? sp.label : '',
         empId: counterDisplayEmpId(),
         counterName: counterDisplayName(),
         email: currentUser?.email || '',
@@ -4715,8 +4731,8 @@ function groupScrapSessions(rows) {
   const map = new Map();
   filtered.forEach(r => {
     const day = dayOf(r.savedAt);
-    const key = `${day}__${r.warehouse}__${r.empId || r.counterName}`;
-    if (!map.has(key)) map.set(key, { savedAt: r.savedAt, warehouse: r.warehouse, empId: r.empId, counterName: r.counterName, items: [] });
+    const key = `${day}__${r.warehouse}__${r.empId || r.counterName}__${r.catalog||''}`;
+    if (!map.has(key)) map.set(key, { savedAt: r.savedAt, warehouse: r.warehouse, empId: r.empId, counterName: r.counterName, catalog: r.catalog||'', items: [] });
     else { const g = map.get(key); if ((r.savedAt||'') > (g.savedAt||'')) g.savedAt = r.savedAt; }
     map.get(key).items.push(r);
   });
@@ -4747,7 +4763,7 @@ function renderScrapHistList() {
       <div class="hist-row" data-idx="${idx}">
         <div style="flex:1;min-width:0">
           <div class="hist-date">${formatThaiDate(s.savedAt)}</div>
-          <div class="hist-meta">${s.warehouse} · ${WH_NAMES[s.warehouse]||''} · ${who} · ${s.items.length} รายการ</div>
+          <div class="hist-meta">${s.warehouse}${s.catalog?' '+s.catalog:''} · ${WH_NAMES[s.warehouse]||''} · ${who} · ${s.items.length} รายการ</div>
         </div>
         <div class="hist-counts"><span class="hc hc-ok">${totQty} หน่วย</span></div>
         <span style="color:var(--muted);font-size:18px">›</span>
@@ -4760,7 +4776,7 @@ function openScrapHistDetail(idx) {
   const sessions = (body && body._sessions) || window._histSessions || [];
   const s = sessions[idx];
   if (!s) return;
-  document.getElementById('histModalTitle').textContent = `${formatThaiDate(s.savedAt)} · ${s.warehouse} · ${s.counterName||s.empId||'-'} · นับเศษ`;
+  document.getElementById('histModalTitle').textContent = `${formatThaiDate(s.savedAt)} · ${s.warehouse}${s.catalog?' '+s.catalog:''} · ${s.counterName||s.empId||'-'} · นับเศษ`;
   const items = [...s.items].sort((a, b) => String(b.countedAt||b.savedAt||'').localeCompare(String(a.countedAt||a.savedAt||'')));
   const rowsHtml = items.map(it => `
     <div style="display:flex;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--border)">
@@ -4799,10 +4815,10 @@ function groupSessions(rows) {
   const map = new Map();
   filtered.forEach(r => {
     const day = dayOf(r.savedAt);
-    const key = `${day}__${r.warehouse}__${r.empId || r.counterName}`;
+    const key = `${day}__${r.warehouse}__${r.empId || r.counterName}__${r.catalog||''}`;
     if (!map.has(key)) {
       map.set(key, { savedAt:r.savedAt, sessionStart:r.sessionStart, warehouse:r.warehouse,
-                     empId:r.empId, counterName:r.counterName, items:[] });
+                     empId:r.empId, counterName:r.counterName, catalog:r.catalog||'', items:[] });
     } else {
       const g = map.get(key);
       // Keep the most recent save timestamp for display; earliest session start
@@ -4871,7 +4887,7 @@ function renderDashHistory() {
       <div class="hist-row" data-idx="${idx}">
         <div style="flex:1;min-width:0">
           <div class="hist-date">${formatThaiDate(s.savedAt)}</div>
-          <div class="hist-meta">${s.warehouse} · ${WH_NAMES[s.warehouse]||''} · ${who} · ${s.items.length} รายการ</div>
+          <div class="hist-meta">${s.warehouse}${s.catalog?' '+s.catalog:''} · ${WH_NAMES[s.warehouse]||''} · ${who} · ${s.items.length} รายการ</div>
         </div>
         <div class="hist-counts">
           ${ok?`<span class="hc hc-ok">✓ ${ok}</span>`:''}
@@ -4905,7 +4921,7 @@ function openHistDetail(idx) {
   if (!s) { console.warn('openHistDetail: no session at idx', idx, 'of', sessions.length); return; }
 
   document.getElementById('histModalTitle').textContent =
-    `${formatThaiDate(s.savedAt)} · ${s.warehouse} · ${s.counterName||s.empId||'-'}`;
+    `${formatThaiDate(s.savedAt)} · ${s.warehouse}${s.catalog?' '+s.catalog:''} · ${s.counterName||s.empId||'-'}`;
 
   // Level 1: group by product key
   // Level 2: within each product, group by savedAt (exact timestamp = one scan entry)
