@@ -1,6 +1,7 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v8.5 — getAmazonOrders() — ประวัติที่ "ผู้กด" คีย์ไว้ ล่าสุดบนสุด (คู่แอป v12.55 · ต้อง Deploy)
  * v8.4 — auditInOutPairs บอกเลขแถวของเคสที่ต้องแก้เอง (หาแถวในชีทได้ทันที)
  * v8.3 — เซิร์ฟเวอร์ตัดสิน เข้า/ออก เอง (คู่แอป v12.54 · ★ ต้อง Deploy New version):
  *         เดิมเชื่อค่าที่แอปส่ง ซึ่งแอปเดาจาก log ในเครื่อง → ว่างได้ (เปลี่ยนเครื่อง/ล้างแคช/
@@ -314,7 +315,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.4', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.5', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -418,6 +419,7 @@ function handle(e, method) {
       case 'submitSalaryAdjust':   return jsonOut(actionSubmitSalaryAdjust(p, user));
       case 'getAmazonMenu':        return jsonOut(getAmazonMenu(p, user));
       case 'submitAmazonOrder':    return jsonOut(actionSubmitAmazonOrder(p, user));
+      case 'getAmazonOrders':      return jsonOut(getAmazonOrders(p, user));   // v8.5: ประวัติที่คีย์ไว้
       case 'submitShift':          return jsonOut(actionSubmitShift(p, user));
       case 'getShifts':            return jsonOut(getShifts(p, user));
       case 'getPTTBuyers':         return jsonOut(getPTTBuyers(p, user));
@@ -4446,6 +4448,40 @@ function getAmazonMenu(p, user) {
       .map(r => ({ name: String(r[0]).trim(), price: Number(r[1]) || 0 }));
     return { ok: true, items };
   } catch(e) { return { ok: false, error: e.message }; }
+}
+
+/* v8.5: ประวัติที่ "ผู้กด" คนนี้คีย์ไว้ — ล่าสุดอยู่บนสุด
+   ชีท Amazon: A ชื่อ สกุล · B ชื่อเมนู+ชนิด · C ราคา · D วันที่ · E ผู้กด (ไม่มีคอลัมน์รหัส จึงเทียบด้วยชื่อ)
+   HR ส่ง all:1 มาได้ = เห็นของทุกคน (ไว้กระทบยอดสิ้นเดือน) */
+function getAmazonOrders(p, user) {
+  try {
+    const sh = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName('Amazon');
+    if (!sh || sh.getLastRow() < 2) return { ok: true, items: [], total: 0 };
+    const wantAll = String(p.all || '') === '1' && isHR(user);
+    const me = cleanName_((user && user.name) || '').trim();
+    const limit = Math.min(200, parseInt(p.limit, 10) || 60);
+    const d = sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues();
+
+    const items = [];
+    for (let i = d.length - 1; i >= 0 && items.length < limit; i--) {   // ไล่จากท้ายชีท = ใหม่สุดก่อน
+      const r = d[i];
+      if (String(r[0] || '').trim() === '' && String(r[1] || '').trim() === '') continue;
+      const by = cleanName_(String(r[4] || '')).trim();
+      if (!wantAll && by !== me) continue;
+      const raw = r[3];
+      items.push({
+        buyer: String(r[0] || '').trim(),
+        menu:  String(r[1] || '').trim(),
+        price: Number(r[2]) || 0,
+        date:  (raw instanceof Date) ? Utilities.formatDate(raw, 'Asia/Bangkok', 'dd/MM/yyyy HH:mm') : String(raw || ''),
+        by:    by,
+        row:   i + 2,
+      });
+    }
+    let total = 0;
+    items.forEach(x => { total += x.price; });
+    return { ok: true, items: items, total: Math.round(total * 100) / 100, all: wantAll };
+  } catch (e) { return { ok: false, error: e.message }; }
 }
 
 /* บันทึกการสั่ง Café Amazon */
