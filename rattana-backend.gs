@@ -1,6 +1,7 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v8.6 — getPTTBuyers อ่านคอลัมน์สถานะผิด (K แทน J) → พนักงาน PTT 4 คนหายจากลิสต์ชื่อผู้ซื้อ
  * v8.5 — getAmazonOrders() — ประวัติที่ "ผู้กด" คีย์ไว้ ล่าสุดบนสุด (คู่แอป v12.55 · ต้อง Deploy)
  * v8.4 — auditInOutPairs บอกเลขแถวของเคสที่ต้องแก้เอง (หาแถวในชีทได้ทันที)
  * v8.3 — เซิร์ฟเวอร์ตัดสิน เข้า/ออก เอง (คู่แอป v12.54 · ★ ต้อง Deploy New version):
@@ -315,7 +316,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.5', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.6', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -4640,7 +4641,7 @@ function getPTTBuyers(p, user) {
     const staff = [];
     data.forEach(r => {
       if (r[0] !== 'บายพาส' && r[0] !== 'ลาดใหญ่') return;
-      if (String(r[10]).trim() !== 'อยู่') return;
+      if (String(r[9]).trim() !== 'อยู่') return;   // v8.6: คอลัมน์ J = "สถานะทำงาน" (เดิมอ่าน K ซึ่งเป็นช่องหัวว่าง มีคน "ออก" ปน)
       const id = String(r[2] || '').trim(); if (!id) return;
       staff.push({ empId: id, name: String(r[6] || '').trim(), nickname: String(r[7] || '').trim() });
     });
