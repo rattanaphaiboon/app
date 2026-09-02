@@ -544,9 +544,12 @@ const THEME_KEY = 'rattana_theme';
 const CACHE_KEY = 'pc_checkin_data';
 
 /*───────── state ─────────*/
-let authEmail   = '';        /* อีเมลจาก Google */
+let authEmail   = '';        /* อีเมลจาก Google — ใช้แสดงผลเท่านั้น ไม่ใช้ยืนยันตัวตน */
 let authPicture = '';
-let rattanaRole = 0;         /* จาก rattana_session ถ้ามี — ใช้เปิดแท็บรายงาน */
+let idToken     = '';        /* JWT สด ๆ จาก Google Sign-In (อายุ 1 ชม.) */
+let sessionToken= '';        /* โทเคนที่เซิร์ฟเวอร์ออกให้ อายุ 30 วัน */
+let rattanaRole = 0;         /* สิทธิ์จากชีตผู้ใช้กลาง — ใช้เปิดแท็บรายงาน */
+let managerOnly = false;     /* หัวหน้าที่ไม่ได้เป็น PC เห็นเฉพาะรายงาน */
 let me          = null;      /* ข้อมูลพนักงาน PC ที่ลงทะเบียนแล้ว */
 let todayPunch  = {};
 let vendors     = [];
@@ -619,10 +622,12 @@ applyTheme(LS.get(THEME_KEY) || 'light');
 
 /*───────── backend ─────────*/
 const RETRYABLE = /ผิดรูปแบบ|Failed to fetch|NetworkError|Load failed|timeout/i;
+const REAUTH    = /เซสชันหมดอายุ|โทเคนหมดอายุ|ต้องเข้าสู่ระบบ|ยืนยันตัวตน/;
 
 async function api(action, payload={}, {retries=1}={}){
   if (!CONFIG.gasUrl) throw new Error('ยังไม่ได้ตั้งค่า Apps Script URL (CONFIG.gasUrl)');
-  const body = JSON.stringify({ action, email: authEmail, ...payload });
+  /* ส่งโทเคนไปให้เซิร์ฟเวอร์ตรวจเอง ไม่ส่งอีเมลลอย ๆ ให้ปลอมเป็นคนอื่นได้ */
+  const body = JSON.stringify({ action, sessionToken, idToken, ...payload });
   let lastErr;
   for (let attempt=0; attempt<=retries; attempt++){
     try{
@@ -636,11 +641,21 @@ async function api(action, payload={}, {retries=1}={}){
       return out;
     }catch(e){
       lastErr = e;
+      if (REAUTH.test(e.message||'')) { forceReauth(e.message); throw e; }
       if (!RETRYABLE.test(e.message||'') || attempt===retries) throw e;
       await new Promise(r=>setTimeout(r,1500));
     }
   }
   throw lastErr;
+}
+/* โทเคนหมดอายุ — กลับไปหน้าล็อกอินแทนที่จะค้างอยู่หน้าเดิมแล้วกดอะไรก็ไม่ขึ้น */
+function forceReauth(msg){
+  LS.del('pc_checkin_session');
+  idToken = ''; sessionToken = '';
+  show('screenLogin');
+  showLoginErr(msg || 'เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่');
+  let tries = 0;
+  const t = setInterval(()=>{ if (renderGsi() || ++tries > 40) clearInterval(t); }, 250);
 }
 /* คำสั่งที่เขียนข้อมูล ห้ามลองซ้ำเอง กันบันทึกซ้ำ */
 const apiWrite = (action, payload={}) => api(action, payload, {retries:0});
@@ -951,7 +966,8 @@ function readSharedSession(){
   }catch{ return null; }
 }
 function savePcSession(){
-  const payload = { data:{ email:authEmail, picture:authPicture }, exp: Date.now() + 30*24*60*60*1000 };
+  const payload = { data:{ email:authEmail, picture:authPicture, sessionToken },
+                    exp: Date.now() + 30*24*60*60*1000 };
   LS.set("pc_checkin_session", JSON.stringify(payload));
 }
 function readPcSession(){
@@ -973,16 +989,19 @@ function decodeJwtPayload(token){
 window.handleGoogleLogin = async function(r){
   try{
     const p = decodeJwtPayload(r.credential);
+    idToken     = r.credential;      /* เซิร์ฟเวอร์จะเอาไปตรวจกับ Google เอง */
+    sessionToken= '';
     authEmail   = normalizeEmail(p.email);
     authPicture = p.picture || '';
-    savePcSession();
+    $('loginErr').classList.add('hidden');
     await afterAuth();
   }catch(e){ showLoginErr('เข้าสู่ระบบไม่สำเร็จ: ' + e.message); }
 };
+/* ใช้ได้เฉพาะตอนเปิดไฟล์ตรง ๆ บนเครื่อง — เซิร์ฟเวอร์จะปฏิเสธเพราะไม่มีโทเคน */
 function devSignIn(){
   const e = normalizeEmail($('devEmail').value);
   if (!e.includes('@')) return showToast('กรอกอีเมลให้ถูกต้อง','warning');
-  authEmail = e; savePcSession(); afterAuth();
+  authEmail = e; afterAuth();
 }
 function showLoginErr(msg){ const el=$('loginErr'); el.textContent=msg; el.classList.remove('hidden'); }
 function logout(){
@@ -991,12 +1010,19 @@ function logout(){
   location.reload();
 }
 
+let gsiDone = false;
 function renderGsi(){
+  if (gsiDone) return true;
   if (!window.google?.accounts?.id) return false;
-  google.accounts.id.initialize({ client_id: CONFIG.clientId, callback: handleGoogleLogin,
-                                  auto_select:false, cancel_on_tap_outside:true });
+  /* เคยล็อกอิน Rattana Hub ไว้ ก็ใบ้อีเมลให้ Google จะได้กดน้อยลงหนึ่งจังหวะ */
+  const hint = readSharedSession()?.email || readPcSession()?.email || '';
+  google.accounts.id.initialize({
+    client_id: CONFIG.clientId, callback: handleGoogleLogin,
+    auto_select:false, cancel_on_tap_outside:true, ...(hint ? { login_hint: hint } : {})
+  });
   google.accounts.id.renderButton($('gsiHost'),
     { type:'standard', size:'large', theme:'outline', text:'signin_with', shape:'pill', width:280 });
+  gsiDone = true;
   return true;
 }
 
@@ -1017,13 +1043,19 @@ async function afterAuth(){
       return;
     }
     const r = await api('me');
-    if (!r.found){ hideSpinner(); show('screenRegister'); prepRegister(); return; }
+    if (r.sessionToken){ sessionToken = r.sessionToken; savePcSession(); }
+    rattanaRole = parseInt(r.role,10) || 0;
+    managerOnly = !r.found && !!r.manager;
+    hideSpinner();
+
+    if (managerOnly) return enterManager();
+    if (!r.found)    { show('screenRegister'); prepRegister(); return; }
+
     me = r.emp; todayPunch = r.today || {};
-    hideSpinner(); enterApp();
+    enterApp();
   }catch(e){
     hideSpinner();
-    show('screenLogin');
-    showLoginErr(e.message);
+    if (!REAUTH.test(e.message||'')){ show('screenLogin'); showLoginErr(e.message); }
   }
 }
 
@@ -1142,9 +1174,11 @@ async function submitRegister(){
       descriptors: enrollResult.descriptors,
       photo    : enrollResult.photo
     });
+    if (r.sessionToken){ sessionToken = r.sessionToken; savePcSession(); }
     hideSpinner();
     showToast(`ลงทะเบียนสำเร็จ · รหัสพนักงาน ${r.empId}`,'success');
     const m = await api('me');
+    rattanaRole = parseInt(m.role,10) || 0;
     me = m.emp; todayPunch = m.today || {};
     enterApp();
   }catch(e){
@@ -1156,10 +1190,18 @@ async function submitRegister(){
 }
 
 /*───────── app ─────────*/
+/* หัวหน้า/HR ที่ไม่ได้เป็น PC — ซ่อนแท็บลงเวลาไว้ เหลือแต่รายงาน */
+function enterManager(){
+  show('screenApp');
+  ['punch','history','profile'].forEach(t =>
+    document.querySelector(`[data-tab="${t}"]`).classList.add('hidden'));
+  document.querySelector('[data-tab="report"]').classList.remove('hidden');
+  showTab('report');
+  showToast('เข้าใช้งานในสิทธิ์หัวหน้า — ดูรายงานได้อย่างเดียว','info');
+}
+
 function enterApp(){
   show('screenApp');
-  const s = readSharedSession();
-  rattanaRole = s ? (parseInt(s.role,10) || 0) : 0;
   document.querySelector('[data-tab="report"]').classList.toggle('hidden', rattanaRole < 4);
 
   $('pcName').textContent = me.name || '-';
@@ -1440,10 +1482,12 @@ async function refreshData(){
   b.disabled = true; b.style.transition='transform .6s'; b.style.transform='rotate(360deg)';
   try{
     await loadBootstrap();
-    const r = await api('me');
-    if (r.found){ me = r.emp; todayPunch = r.today || {}; renderSlots(); }
-    await probeGeo();
-    if (!$('tabHistory').classList.contains('hidden')) await loadHistory();
+    if (!managerOnly){
+      const r = await api('me');
+      if (r.found){ me = r.emp; todayPunch = r.today || {}; renderSlots(); }
+      await probeGeo();
+      if (!$('tabHistory').classList.contains('hidden')) await loadHistory();
+    }
     if (!$('tabReport').classList.contains('hidden'))  await loadReport();
     showToast('อัพเดทเรียบร้อย ✓','success');
   }catch(e){ showToast(e.message,'error'); }
@@ -1465,13 +1509,13 @@ window.addEventListener('scroll', () =>
   const localTest = !(/^https?:$/.test(location.protocol));
   if (localTest) $('devLogin').classList.remove('hidden');
 
-  /* มีเซสชันเดิมอยู่แล้ว — ของแอปนี้ หรือของ Rattana Hub */
+  /* มีเซสชันของแอปนี้อยู่แล้ว (อายุ 30 วัน) — เข้าได้เลยไม่ต้องล็อกอินซ้ำ
+     เซสชันของ Hub ใช้แทนกันไม่ได้ เพราะเซิร์ฟเวอร์ต้องการโทเคนที่ตรวจกับ Google ได้ */
   const pc = readPcSession();
-  const sh = readSharedSession();
-  if (pc?.email || sh?.email){
-    authEmail   = normalizeEmail(pc?.email || sh.email);
-    authPicture = pc?.picture || sh?.picture || '';
-    savePcSession();
+  if (pc?.email && pc?.sessionToken){
+    authEmail    = normalizeEmail(pc.email);
+    authPicture  = pc.picture || '';
+    sessionToken = pc.sessionToken;
     await afterAuth();
     return;
   }
