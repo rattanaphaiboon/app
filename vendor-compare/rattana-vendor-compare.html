@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Vendor Compare v4.6</title>
+<title>Rattana Vendor Compare v4.7</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
@@ -400,8 +400,8 @@ tr.si-sub:hover td{background:transparent}
 
 <div id="appScreen" class="page" style="display:none">
   <header>
-    <div class="logo-text">RATTANA <span>VENDOR</span><span class="ver-tag">v4.6</span></div>
-    <button class="icon-btn" id="btnRefresh" title="รีเฟรช">⟳</button>
+    <div class="logo-text">RATTANA <span>VENDOR</span><span class="ver-tag">v4.7</span></div>
+    <button class="icon-btn" id="btnRefresh" title="รีเฟรชข้อมูลจากชีท (ไม่กินโควตา BigQuery)">⟳</button>
     <button class="icon-btn" id="btnDark" title="โหมดมืด">◐</button>
     <button class="icon-btn" id="btnCfg" title="ตั้งค่า">⚙</button>
     <button class="user-chip" id="userChip" onclick="logout()" title="ออกจากระบบ"><span id="userNick">—</span></button>
@@ -520,7 +520,7 @@ tr.si-sub:hover td{background:transparent}
       <div id="stContent" style="display:none"></div>
     </div>
   </div>
-  <div class="foot-info">Rattana Vendor Compare · v4.6 · 2026-09-02</div>
+  <div class="foot-info">Rattana Vendor Compare · v4.7 · 2026-09-02<br><span id="footCycle" style="opacity:.75"></span></div>
 </div>
 
 <button id="backToTop" onclick="window.scrollTo({top:0,behavior:'smooth'})">↑</button>
@@ -547,6 +547,13 @@ tr.si-sub:hover td{background:transparent}
       <div class="field"><label>Stock Sheet Tab Name</label><input id="cfgStockTab" placeholder="Product_Detail"></div>
       <div class="field"><label>Sell-In Sheet ID</label><input id="cfgClaudeId"></div>
       <div class="field"><label>Sell-In Sheet Tab Name</label><input id="cfgClaudeTab" placeholder="sell in"></div>
+    </div>
+    <div style="padding:0 18px 14px">
+      <div style="background:var(--row-alt);border-radius:8px;padding:10px 12px;font-size:12px;line-height:1.7">
+        <div id="cfgBqCycle" style="color:var(--muted)">—</div>
+        <div style="margin-top:6px;color:var(--muted)">ยอดจาก BigQuery ดึงเดือนละครั้ง (ทุกวันที่ 5) แล้วเก็บไว้ในเครื่อง — ปุ่ม ⟳ รีเฟรชเฉพาะชีท ไม่กินโควตา</div>
+        <button class="btn btn-outline btn-sm" style="margin-top:8px" onclick="forceBqRefresh()">⟲ ดึงข้อมูล BigQuery ใหม่เดี๋ยวนี้</button>
+      </div>
     </div>
     <div class="modal-foot">
       <button class="btn btn-outline" onclick="closeCfg()">ยกเลิก</button>
@@ -1525,15 +1532,28 @@ async function cmpIdbSet(k,v){try{const db=await cmpIdb();await new Promise((res
 async function cmpIdbClear(){try{const db=await cmpIdb();await new Promise((res,rej)=>{const q=db.transaction('kv','readwrite').objectStore('kv').clear();q.onsuccess=()=>res();q.onerror=()=>rej(q.error);});}catch{}}
 /* ── รอบข้อมูล: ดึง BQ เดือนละครั้ง รีเฟรชทุกวันที่ 3 (ผู้ใช้กำหนด) ──
    ก่อนวันที่ 3 ยังนับเป็นรอบของเดือนก่อน เพราะยอดเดือนใหม่ยังไม่เข้า BQ */
-const BQ_REFRESH_DAY=3;
+const BQ_REFRESH_DAY=5;   // ดึง BQ ใหม่เดือนละครั้ง ทุกวันที่ 5
+function nextBqRefresh(){
+  const n=new Date();let y=n.getFullYear(),m=n.getMonth()+1;
+  if(n.getDate()>=BQ_REFRESH_DAY){m++;if(m>12){m=1;y++;}}
+  return new Date(y,m-1,BQ_REFRESH_DAY);
+}
+function bqCycleLabel(){
+  const c=dataCycle().split('-'),nx=nextBqRefresh();
+  return'ข้อมูล BQ รอบ '+mThLong(c[0]+'/'+c[1])+' · ดึงใหม่ '+nx.getDate()+' '+TH_MON[nx.getMonth()]+' '+(nx.getFullYear()+543);
+}
 function dataCycle(){
   const n=new Date();let y=n.getFullYear(),m=n.getMonth()+1;
   if(n.getDate()<BQ_REFRESH_DAY){m--;if(m<1){m=12;y--;}}
   return y+'-'+String(m).padStart(2,'0');
 }
-let CYCLE_BUST='';   // ปุ่ม ⟳ ตั้งค่านี้เพื่อบังคับข้าม cache รอบนี้
+/* CYCLE_BUST: '' | 'sheets' | 'all'
+   ⟳ = รีเฟรชเฉพาะชีท (ฟรี ไม่กินโควตา BQ) · 'all' = ยิง BQ ใหม่ด้วย (ใช้เมื่อจำเป็น) */
+let CYCLE_BUST='';
+const isBqKey=k=>k.indexOf('bq_')===0||k.indexOf('cmp:')===0;
 async function mGet(k){
-  if(CYCLE_BUST)return null;
+  if(CYCLE_BUST==='all')return null;
+  if(CYCLE_BUST==='sheets'&&!isBqKey(k))return null;
   try{const it=await cmpIdbGet('m:'+k);return(it&&it.cyc===dataCycle())?it.data:null;}catch{return null;}
 }
 async function mSet(k,d){try{await cmpIdbSet('m:'+k,{cyc:dataCycle(),ts:Date.now(),data:d});}catch(e){console.warn('[cache] เขียนไม่ได้',k,e);}}
@@ -2912,17 +2932,31 @@ function renderSellIn(){
 document.querySelectorAll('.tab-btn').forEach(btn=>{btn.addEventListener('click',()=>{document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));btn.classList.add('active');$('tab-'+btn.dataset.tab).classList.add('active');if(btn.dataset.tab==='compare')cmpBoot();});});
 const DARK_KEY='rattanaDark';if(localStorage.getItem(DARK_KEY)==='1')document.body.classList.add('dark');
 $('btnDark').addEventListener('click',()=>{document.body.classList.toggle('dark');localStorage.setItem(DARK_KEY,document.body.classList.contains('dark')?'1':'0');});
-$('btnRefresh').addEventListener('click',async()=>{const b=$('btnRefresh');b.disabled=true;CYCLE_BUST='1';['bp_rows','bp_rows_v2','stock_rows_v2','sellin_rows_v2','bq_vendors','goal_rows_v1'].forEach(k=>localStorage.removeItem(k));if(SELECTED_VENDOR){localStorage.removeItem('bq_sales_'+SELECTED_VENDOR);localStorage.removeItem('bq_trend_'+SELECTED_VENDOR);localStorage.removeItem('bq_stores_'+SELECTED_VENDOR);}await cmpIdbClear();CMP.ready=false;CMP.trend=[];CMP.brands=[];CMP.prod={};
+$('btnRefresh').addEventListener('click',async()=>{const b=$('btnRefresh');b.disabled=true;CYCLE_BUST='sheets';['bp_rows','bp_rows_v2','stock_rows_v2','sellin_rows_v2','bq_vendors','goal_rows_v1'].forEach(k=>localStorage.removeItem(k));if(SELECTED_VENDOR){localStorage.removeItem('bq_sales_'+SELECTED_VENDOR);localStorage.removeItem('bq_trend_'+SELECTED_VENDOR);localStorage.removeItem('bq_stores_'+SELECTED_VENDOR);}/* ห้ามล้าง IndexedDB ทั้งก้อน — cache BQ รายเดือนอยู่ที่เดียวกัน ล้างแล้วเท่ากับยิง BQ ใหม่ทุกครั้งที่กดรีเฟรช
+     ตัวกรอง CYCLE_BUST='sheets' บังคับให้ดึงเฉพาะชีทอยู่แล้ว */
+  CMP.ready=false;CMP.trend=[];CMP.brands=[];CMP.prod={};
   await initApp();if(SELECTED_VENDOR)await loadVendorData();
   if(document.querySelector('.tab-btn[data-tab="compare"]').classList.contains('active'))await cmpBoot(true);
-  CYCLE_BUST='';b.disabled=false;});
-$('btnCfg').addEventListener('click',()=>{$('cfgBqUrl').value=CFG.bqProxyUrl||'';$('cfgBpId').value=CFG.bpId||'';$('cfgBpTab').value=CFG.bpTab||'';$('cfgStockId').value=CFG.stockId||'';$('cfgStockTab').value=CFG.stockTab||'';$('cfgClaudeId').value=CFG.claudeId||'';$('cfgClaudeTab').value=CFG.claudeTab||'';$('cfgModal').classList.add('open');});
+  CYCLE_BUST='';b.disabled=false;
+  showToast('รีเฟรชชีทแล้ว (BP · IB · Stocksync · เป้า) — ไม่ได้ยิง BigQuery','success');});
+async function forceBqRefresh(){
+  if(!confirm('ดึงข้อมูลจาก BigQuery ใหม่ทั้งหมด?\n\nปกติไม่ต้องทำ — ระบบดึงให้เองเดือนละครั้ง (ทุกวันที่ 5)\nกดเฉพาะตอนที่รู้ว่าข้อมูลใน BQ เพิ่งอัปเดต'))return;
+  CYCLE_BUST='all';
+  try{
+    await initApp();
+    if(SELECTED_VENDOR)await loadVendorData();
+    CMP.ready=false;CMP.trend=[];CMP.brands=[];CMP.prod={};CMP.allProd=null;
+    showToast('ดึง BigQuery ใหม่เรียบร้อย','success');
+  }finally{CYCLE_BUST='';closeCfg();}
+}
+$('btnCfg').addEventListener('click',()=>{const el=$('cfgBqCycle');if(el)el.textContent=bqCycleLabel();$('cfgBqUrl').value=CFG.bqProxyUrl||'';$('cfgBpId').value=CFG.bpId||'';$('cfgBpTab').value=CFG.bpTab||'';$('cfgStockId').value=CFG.stockId||'';$('cfgStockTab').value=CFG.stockTab||'';$('cfgClaudeId').value=CFG.claudeId||'';$('cfgClaudeTab').value=CFG.claudeTab||'';$('cfgModal').classList.add('open');});
 function closeCfg(){$('cfgModal').classList.remove('open');}
 async function saveCfg(){CFG={bqProxyUrl:$('cfgBqUrl').value.trim(),bpId:$('cfgBpId').value.trim(),bpTab:$('cfgBpTab').value.trim()||'BP',stockId:$('cfgStockId').value.trim(),stockTab:$('cfgStockTab').value.trim()||'Product_Detail',claudeId:$('cfgClaudeId').value.trim(),claudeTab:$('cfgClaudeTab').value.trim()||'sell in'};saveCfgObj(CFG);['bp_rows','bp_rows_v2','stock_rows_v2','sellin_rows_v2','bq_vendors','goal_rows_v1'].forEach(k=>localStorage.removeItem(k));closeCfg();showToast('บันทึกแล้ว','success');await initApp();}
 window.addEventListener('scroll',()=>{$('backToTop').classList.toggle('show',window.scrollY>300);});
 
 /* ══ BOOT ══ */
-window.handleGoogleLogin=handleGoogleLogin;window.selectVendor=selectVendor;window.toggleVendorDD=toggleVendorDD;window.filterVendorList=filterVendorList;window.setDrill=setDrill;window.logout=logout;window.closeCfg=closeCfg;window.saveCfg=saveCfg;window.toggleMonthCols=toggleMonthCols;window.pickStockVendor=pickStockVendor;window.toggleStockExtra=toggleStockExtra;window.drillPage=drillPage;window.stockGoPage=stockGoPage;window.toggleExpand=toggleExpand;window.setChannel=setChannel;window.toggleMonthFilter=toggleMonthFilter;window.toggleMonth=toggleMonth;window.monthFilterAll=monthFilterAll;window.monthFilterNone=monthFilterNone;window.toggleStoresMonthCols=toggleStoresMonthCols;window.cmpCloseChart=cmpCloseChart;window.toggleChDD=toggleChDD;window.siToggle=siToggle;window.renderGoal=renderGoal;window.cmpBoot=cmpBoot;
+window.handleGoogleLogin=handleGoogleLogin;window.selectVendor=selectVendor;window.toggleVendorDD=toggleVendorDD;window.filterVendorList=filterVendorList;window.setDrill=setDrill;window.logout=logout;window.closeCfg=closeCfg;window.saveCfg=saveCfg;window.toggleMonthCols=toggleMonthCols;window.pickStockVendor=pickStockVendor;window.toggleStockExtra=toggleStockExtra;window.drillPage=drillPage;window.stockGoPage=stockGoPage;window.toggleExpand=toggleExpand;window.setChannel=setChannel;window.toggleMonthFilter=toggleMonthFilter;window.toggleMonth=toggleMonth;window.monthFilterAll=monthFilterAll;window.monthFilterNone=monthFilterNone;window.toggleStoresMonthCols=toggleStoresMonthCols;window.cmpCloseChart=cmpCloseChart;window.forceBqRefresh=forceBqRefresh;window.toggleChDD=toggleChDD;window.siToggle=siToggle;window.renderGoal=renderGoal;window.cmpBoot=cmpBoot;
+try{const fc=document.getElementById('footCycle');if(fc)fc.textContent=bqCycleLabel();}catch(e){}
 window.onload=checkSession;
 </script>
 </body>
