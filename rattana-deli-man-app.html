@@ -950,7 +950,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.300';
+const APP_VERSION='3.301';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -4451,12 +4451,25 @@ function checkAggProducts_(job,jobId){
 }
 function checkQtyFmt_(n){ n=Math.round((parseFloat(n)||0)*100)/100; return n.toLocaleString('en-US'); }
 /* v3.142: ดึงรายการสินค้าหลายบิลทีเดียว (B='d1' or B='d2' ...) → 1 query */
+/* ★ v3.301: บิลที่ยิงไปแล้วแต่ DS_DC ยังไม่มีรายการ (ERP ยังไม่ export ของวันนี้) — เดิมธง _dsdcDone ค้างถาวร
+   ทั้ง session แปลว่า "ไม่มีวันลองใหม่อีกเลย" → รายการสินค้าไม่มา → จำนวน CS / ลังน้ำ / ถัง ว่างยกใบทั้งวัน
+   ตอนนี้แยกเป็น "ยิงแล้วไม่เจอ" จำเวลาไว้ ให้ลองใหม่ได้ทุก 3 นาที (ยิงแล้วเจอ = ธงถาวรเหมือนเดิม) */
+const _dsdcMiss={};
+const DSDC_MISS_RETRY_MS=180000;
 async function ensureBillDetailsForDocs_(docs){
-  const need=[...new Set((docs||[]).map(d=>String(d||'').trim()).filter(Boolean))].filter(d=>!(state.billDetails[d]||[]).length && !_dsdcDone['B|'+d]);
+  const _now=Date.now();
+  const need=[...new Set((docs||[]).map(d=>String(d||'').trim()).filter(Boolean))]
+    .filter(d=>!(state.billDetails[d]||[]).length && !_dsdcDone['B|'+d]
+             && ((_dsdcMiss['B|'+d]||0)+DSDC_MISS_RETRY_MS)<=_now);
   if(!need.length) return 0;
   need.forEach(d=>_dsdcDone['B|'+d]=1);
   const where=need.map(d=>"B = '"+_dsdcEsc(d)+"'").join(' or ');
-  try{ const n=mergeDsDc_(await fetchDsDc_(where)); afterBillDetailsLoaded_(); return n; }
+  try{
+    const n=mergeDsDc_(await fetchDsDc_(where));
+    afterBillDetailsLoaded_();
+    need.forEach(d=>{ if(!(state.billDetails[d]||[]).length){ delete _dsdcDone['B|'+d]; _dsdcMiss['B|'+d]=Date.now(); } });   // ★ v3.301
+    return n;
+  }
   catch(e){ need.forEach(d=>delete _dsdcDone['B|'+d]); console.warn('DS_DC batch failed',e); return 0; }
 }
 function renderCheckLoad(){
@@ -5123,7 +5136,11 @@ async function ensureCatReady_(job){
     if(docs.some(d=>!billItems_(d).length)) await ensureBillDetailsForDocs_(docs);
     if(!_catMap) await ensureCatMap_();
   })();
-  try{ await Promise.race([work,new Promise(r=>setTimeout(r,12000))]); }catch(e){ console.warn('catReady',e); }
+  /* ★ v3.301: เดิมตัดที่ 12 วิ — สั้นเกินไป! fetchDsDc_ เองบอกไว้ว่า "ครั้งแรกที่ Google ยังไม่ warm ชีท อาจถึง ~30 วิ"
+     ผลคือ พอแอปรีโหลด (อัปเดตเวอร์ชัน/ปิดเปิด) แล้ว state.billDetails ว่าง การยิงรอบแรกใช้เวลาเกิน 12 วิ
+     → ยอมแพ้ก่อน → นับ CS ไม่ได้ → ชีทว่างเงียบๆ (เจอจริง 2 ก.ย. บิล CVMW1/* ว่างยกชุด ทั้งที่ยอดรวมต่อใบคุมมาครบ)
+     ยืดเป็น 40 วิ (ต่ำกว่า timeout จริง 45 วิ ให้ fetch เป็นคนตัดสิน) — บันทึกบิลไม่ได้ await syncToSheets อยู่แล้ว คนขับไม่ต้องรอ */
+  try{ await Promise.race([work,new Promise(r=>setTimeout(r,40000))]); }catch(e){ console.warn('catReady',e); }
 }
 function countCratesTanks_(job){
   let crates=0,tanks=0; const hit=[];
