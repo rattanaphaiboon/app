@@ -425,23 +425,26 @@ function buildModel(pddtText, ownerText, ctrlText){
     x.home=h;
   });
   /* ---- รวมเป็นแบรนด์ ---- */
-  var brands={}, placeCs={};
+  var brands={};
   recs.forEach(function(x){
     var d=brands[x.brand]||(brands[x.brand]={cs:0,pal:0,stock:0,sku:0,ctm:{},vendor:'',home:'',
-      boughtFrom:[],sizes:[],floorSizes:[],place:''});
+      boughtFrom:[],sizes:[],floorSizes:[],cageSizes:[],rackSizes:[],
+      floorCs:0,floorPal:0,cageCs:0,place:''});
     d.sku++; d.vendor=x.vendor; d.home=x.home; d.boughtFrom=x.boughtFrom;
     d.ctm[x.ct]=(d.ctm[x.ct]||0)+Math.max(x.cs,x.stock*0.001);
     if(d.sizes.indexOf(x.size)<0) d.sizes.push(x.size);
-    if(x.place==='พื้น') d.floorSizes.push(x.size);
-    if(x.place==='แร็ค'){ d.cs+=x.cs; d.pal+=x.pal; d.stock+=x.stock; }
-    (placeCs[x.brand]=placeCs[x.brand]||{})[x.place]=(placeCs[x.brand][x.place]||0)+Math.max(x.cs,0.0001);
+    if(x.place==='พื้น'){ d.floorSizes.push(x.size); d.floorCs+=x.cs; d.floorPal+=x.pal; }
+    else if(x.place==='กรง'){ d.cageSizes.push(x.size); d.cageCs+=x.cs; }
+    else { d.rackSizes.push(x.size); d.cs+=x.cs; d.pal+=x.pal; d.stock+=x.stock; }
   });
+  /* ไซส์ไหนตั้งพื้น = ลงพื้นเฉพาะไซส์นั้น · ไซส์ที่เหลือยังอยู่แร็คตามเดิม
+     แบรนด์จะอยู่ในแร็คถ้ามีอย่างน้อย 1 ไซส์ที่เป็นแร็ค                                */
   Object.keys(brands).forEach(function(b){
     var d=brands[b];
     d.ct=top(d.ctm)||''; delete d.ctm;
-    d.place=top(placeCs[b]);
-    if(d.place!=='แร็ค'){ d.cs=0; d.pal=0; d.stock=0;
-      recs.forEach(function(x){ if(x.brand===b){ d.cs+=x.cs; d.pal+=x.pal; d.stock+=x.stock; } }); }
+    d.place = d.rackSizes.length ? 'แร็ค' : (d.floorSizes.length ? 'พื้น' : 'กรง');
+    if(d.place==='พื้น'){ d.cs=d.floorCs; d.pal=d.floorPal; }
+    if(d.place==='กรง'){ d.cs=d.cageCs; }
   });
   /* ---- ซัพ ---- */
   var sup={};
@@ -528,6 +531,10 @@ function buildModel(pddtText, ownerText, ctrlText){
   for(j2=1;j2<=17;j2++) locs.push('w4.18.'+('0'+j2).slice(-2));
   var bays={}; locs.forEach(function(l){ bays[l]=[]; });
   FROZEN_LOCS.forEach(function(l){ bays[l]=FROZEN[l].map(function(b){return {v:'(เดิม)',b:b,e:false};}); });
+  var freeAll=locs.filter(function(l){ return FROZEN_LOCS.indexOf(l)<0; });
+  var totW=0;
+  seq.forEach(function(s){ totW += s.e?0.02:Math.max(0.06, brands[s.b].pal); });
+  var perBay = totW / freeAll.length;              // น้ำหนักเฉลี่ยต่อ 1 ช่อง
   var taken={};
   Object.keys(lockLoc).forEach(function(b){
     var l=lockLoc[b];
@@ -537,10 +544,19 @@ function buildModel(pddtText, ownerText, ctrlText){
     }
     var owner2=null;
     for(var q3=0;q3<seq.length;q3++) if(seq[q3].b===b){ owner2=seq[q3].v; break; }
-    bays[l].push({v:owner2||brands[b].home, b:b, e:false, locked:true});
-    taken[l]=1;
+    /* กินหลายช่องต่อกันตามปริมาณจริง เริ่มจากช่องที่ล็อก */
+    var need=Math.max(1, Math.round(Math.max(0.06, brands[b].pal)/perBay));
+    var start=freeAll.indexOf(l), got=0;
+    for(var z2=start; z2<freeAll.length && got<need; z2++){
+      var l2=freeAll[z2];
+      if(taken[l2]) break;                          // ชนกับล็อกอื่น -> หยุดแค่นั้น
+      bays[l2].push({v:owner2||brands[b].home, b:b, e:false, locked:true});
+      taken[l2]=1; got++;
+    }
+    if(got<need) lockBad.push({b:b, s:'', v:l,
+      why:'ต้องใช้ '+need+' ช่อง แต่ได้แค่ '+got+' (ช่องถัดไปโดนล็อกอื่นจองแล้ว)'});
   });
-  var usable=locs.filter(function(l){ return FROZEN_LOCS.indexOf(l)<0 && !taken[l]; });
+  var usable=freeAll.filter(function(l){ return !taken[l]; });
   var N=usable.length;
   var rest=seq.filter(function(s){ return !lockLoc[s.b]; });
   var w=rest.map(function(s){ return s.e?0.02:Math.max(0.06, brands[s.b].pal); });
@@ -601,18 +617,25 @@ function toPayload(M){
   /* กองพื้น */
   var F={};
   Object.keys(brands).forEach(function(b){
-    var d=brands[b]; if(d.place!=='พื้น') return;
-    var f=F[d.vendor]||(F[d.vendor]={cs:0,pal:0,br:[]});
-    f.cs+=d.cs; f.pal+=d.pal; f.br.push({b:b,cs:+d.cs.toFixed(1)});
+    var d=brands[b];
+    if(!(d.floorSizes||[]).length) return;          // มีไซส์ไหนตั้งพื้นบ้าง ถึงจะขึ้นกองพื้น
+    var vn=d.home||d.vendor;                       // ใช้ซัพจริง ไม่ใช่แหล่งที่ซื้อ
+    var f=F[vn]||(F[vn]={cs:0,pal:0,br:[]});
+    f.cs+=d.floorCs; f.pal+=d.floorPal;
+    var szs=d.floorSizes||[];
+    f.br.push({b:b, cs:+(d.floorCs||0).toFixed(1),
+               sz:(d.rackSizes||[]).length
+                  ? szs.slice(0,3).join(' · ')+(szs.length>3?' +'+(szs.length-3):'')
+                  : ''});
   });
   var floor=Object.keys(F).sort(function(a,b){return F[b].cs-F[a].cs;})
     .filter(function(v){return F[v].cs>=1;})
     .map(function(v){ return {v:shortV(v), own:owner[v]||'', cs:Math.round(F[v].cs), pal:+F[v].pal.toFixed(1),
       brands:F[v].br.filter(function(x){return x.cs>=0.5;}).sort(function(a,b){return b.cs-a.cs;})}; });
   /* บุหรี่ */
-  var cig=Object.keys(brands).filter(function(b){return brands[b].place==='กรง';})
-    .sort(function(a,b){return brands[b].cs-brands[a].cs;})
-    .map(function(b){ return {b:b, cs:+brands[b].cs.toFixed(1), v:shortV(brands[b].vendor)}; });
+  var cig=Object.keys(brands).filter(function(b){return (brands[b].cageSizes||[]).length;})
+    .sort(function(a,b){return brands[b].cageCs-brands[a].cageCs;})
+    .map(function(b){ return {b:b, cs:+(brands[b].cageCs||0).toFixed(1), v:shortV(brands[b].vendor)}; });
   /* ช่วงของผู้สั่ง */
   var pos={}; locs.forEach(function(l,i){ pos[l]=i; });
   var osp={};
@@ -860,7 +883,7 @@ function renderAll(D){
   document.getElementById('floorlist').innerHTML=D.floor.map(function(f){
     return '<div class="blk"><h3>'+esc(f.v)+'</h3><p><span class="num">'+fmt(f.cs)+'</span> ลัง/วัน · <span class="num">'+
       fmt(f.pal)+'</span> พาเลท/วัน'+(f.own?' · ผู้สั่ง '+esc(f.own):'')+'</p>'+
-      f.brands.map(function(b){return '<span class="tag">'+esc(b.b)+' '+fmt(b.cs)+'</span>';}).join('')+'</div>';
+      f.brands.map(function(b){return '<span class="tag">'+esc(b.b)+(b.sz?' ('+esc(b.sz)+')':'')+' '+fmt(b.cs)+'</span>';}).join('')+'</div>';
   }).join('');
 
   var ot=document.getElementById('owntbl');
