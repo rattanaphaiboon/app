@@ -7,11 +7,12 @@
        จึงตั้งใจ "ไม่ยุ่ง" กับคำขอที่ไม่ใช่ของแอปนี้ — ปล่อยผ่านไปให้เบราว์เซอร์จัดการเอง
        และไฟล์ HTML ใช้ network-first เสมอ เพื่อไม่ให้ค้างเวอร์ชันเก่าหลัง deploy   */
 
-const CACHE = 'rattana-pc-checkin-v1';
+const CACHE = 'rattana-pc-checkin-v2';
 
 /* ไฟล์ของแอปนี้เท่านั้น — ห้ามใส่ไฟล์ของแอปอื่นในโฟลเดอร์เดียวกัน */
 const SHELL = [
   './rattana-pc-checkin.html',
+  './rattana-pc-checkin-guide.html',
   './rattana-pc-checkin.webmanifest',
   './pc-icon-192.png',
   './pc-icon-512.png',
@@ -20,7 +21,8 @@ const SHELL = [
 ];
 
 const mine = url => SHELL.some(p => url.pathname.endsWith(p.replace('./', '')));
-const isDoc = url => url.pathname.endsWith('rattana-pc-checkin.html');
+/* หน้าเว็บทุกหน้าใช้ network-first จะได้ไม่ค้างเวอร์ชันเก่าหลัง deploy */
+const isDoc = url => url.pathname.endsWith('.html');
 
 self.addEventListener('install', e => {
   /* addAll ล้มทั้งชุดถ้าไฟล์เดียวโหลดไม่ได้ จึงใส่ทีละไฟล์แบบไม่สนถ้าพลาด */
@@ -51,15 +53,16 @@ self.addEventListener('fetch', e => {
   if (url.origin !== self.location.origin || !mine(url)) return;
 
   if (isDoc(url)) {
-    /* หน้าเว็บหลัก — เอาของใหม่จากเน็ตก่อนเสมอ เน็ตหลุดค่อยใช้ของในแคช */
+    /* หน้าเว็บ — เอาของใหม่จากเน็ตก่อนเสมอ เน็ตหลุดค่อยใช้ของในแคช */
     e.respondWith(
       fetch(req)
         .then(res => {
           const copy = res.clone();
-          caches.open(CACHE).then(c => c.put('./rattana-pc-checkin.html', copy)).catch(() => {});
+          caches.open(CACHE).then(c => c.put('.' + url.pathname.replace(/^.*\//, '/'), copy))
+                            .catch(() => {});
           return res;
         })
-        .catch(() => caches.match('./rattana-pc-checkin.html', { ignoreSearch: true }))
+        .catch(() => caches.match(req, { ignoreSearch: true }))
     );
     return;
   }
