@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana PC Check-in v1.1</title>
+<title>Rattana PC Check-in v1.2</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -259,7 +259,7 @@ body.dark .badge-gold{color:var(--gold-light)}
 <div id="screenRegister" class="page hidden">
   <header>
     <span class="logo-text">RATTANA <span>PC</span></span>
-    <span class="ver-badge">v1.1</span>
+    <span class="ver-badge">v1.2</span>
     <span class="spacer"></span>
     <button class="icon-btn" id="themeBtn2" onclick="toggleTheme()" title="สลับธีม">🌙</button>
     <button class="icon-btn" onclick="logout()" title="ออกจากระบบ">⏻</button>
@@ -355,7 +355,7 @@ body.dark .badge-gold{color:var(--gold-light)}
 <div id="screenApp" class="page hidden">
   <header>
     <span class="logo-text">RATTANA <span>PC</span></span>
-    <span class="ver-badge">v1.1</span>
+    <span class="ver-badge">v1.2</span>
     <span class="spacer"></span>
     <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
     <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
@@ -520,12 +520,12 @@ body.dark .badge-gold{color:var(--gold-light)}
 
 <script>
 /*═══════════════════════════════════════════════════════════════════════
-  Rattana PC Check-in v1.1
+  Rattana PC Check-in v1.2
   ลงเวลาทำงานพนักงาน PC ด้วยการสแกนใบหน้า + ล็อกพิกัด
   ชีต: เช็คอิน PC 2026
 ═══════════════════════════════════════════════════════════════════════*/
 
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2';
 
 const CONFIG = {
   /* Apps Script Web App — ต้อง deploy แบบ Execute as: Me / Who has access: Anyone */
@@ -544,7 +544,10 @@ const CONFIG = {
   /* GPS บนมือถือคลาดเคลื่อนได้ 10-50 ม. จึงหักค่าคลาดเคลื่อนออกก่อนตัดสิน
      แต่หักได้ไม่เกินค่านี้ เพื่อไม่ให้ยืดหยุ่นจนล็อกพิกัดไม่มีความหมาย */
   gpsGraceMax   : 50,
-  livenessMs    : 12000
+  livenessMs    : 12000,
+  /* ระยะห่างขั้นต่ำจากการลงเวลาครั้งก่อน (นาที) — ใช้แค่ขึ้นนับถอยหลังให้ดู
+     ค่าจริงมาจาก Apps Script ตอน bootstrap และเซิร์ฟเวอร์เป็นคนตัดสินเสมอ */
+  minGap        : { 'พัก':120, 'กลับจากพัก':60, 'เลิกงาน':120 }
 };
 
 const PUNCH_TYPES = ['เข้างาน','พัก','กลับจากพัก','เลิกงาน'];
@@ -713,11 +716,15 @@ async function loadDataTabCsv(){
 
 async function loadBootstrap(){
   const cached = (()=>{ try{ return JSON.parse(LS.get(CACHE_KEY)); }catch{ return null; } })();
-  if (cached?.vendors?.length){ vendors = cached.vendors; locations = cached.locations||[]; }
+  if (cached?.vendors?.length){
+    vendors = cached.vendors; locations = cached.locations||[];
+    if (cached.minGap) CONFIG.minGap = cached.minGap;
+  }
   try{
     const d = CONFIG.gasUrl ? await api('bootstrap') : await loadDataTabCsv();
     vendors = d.vendors || []; locations = d.locations || [];
-    LS.set(CACHE_KEY, JSON.stringify({ vendors, locations, ts: Date.now() }));
+    if (d.minGap) CONFIG.minGap = d.minGap;   /* กติกาเว้นระยะ ยึดตามที่ตั้งไว้ในสคริปต์ */
+    LS.set(CACHE_KEY, JSON.stringify({ vendors, locations, minGap: CONFIG.minGap, ts: Date.now() }));
   }catch(e){
     if (!vendors.length){
       try{ const d = await loadDataTabCsv(); vendors=d.vendors; locations=d.locations; }
@@ -1307,10 +1314,14 @@ function enterApp(){
 }
 
 function startClock(){
+  let lastMin = -1;
   const tick = () => {
     const n = new Date();
     $('clockNow').textContent = thaiTime(n);
     $('dateNow').textContent  = `${THAI_DAYS[n.getDay()]} ${thaiDate(n)}`;
+    /* ข้ามนาทีเมื่อไหร่ ค่อยวาดใหม่ — ตัวนับถอยหลังปุ่มลงเวลาจะได้เดินเอง */
+    const m = n.getHours()*60 + n.getMinutes();
+    if (m !== lastMin){ lastMin = m; if (me) renderSlots(); }
   };
   tick();
   if (clockTimer) clearInterval(clockTimer);
@@ -1320,12 +1331,43 @@ function startClock(){
 function nextPunchType(){
   return PUNCH_TYPES.find(t => !todayPunch[t]) || null;
 }
+const toMin = t => { const m = String(t||'').match(/^(\d{1,2}):(\d{2})$/); return m ? +m[1]*60 + +m[2] : null; };
+const nowMin = () => { const d = new Date(); return d.getHours()*60 + d.getMinutes(); };
+const clockOf = m => `${pad2(Math.floor((((m%1440)+1440)%1440)/60))}.${pad2(m%60)}`;
+function gapText(m){
+  const h = Math.floor(m/60), mm = m%60;
+  return h && mm ? `${h} ชม. ${mm} นาที` : h ? `${h} ชม.` : `${mm} นาที`;
+}
+
+/* ต้องเว้นระยะจากการลงเวลาครั้งก่อน — บอกล่วงหน้าตรงนี้ พนักงานจะได้ไม่เสียเวลาสแกนหน้าแล้วโดนปฏิเสธ
+   ตัวตัดสินจริงอยู่ที่ Apps Script ฝั่งนี้เป็นแค่การแสดงผล */
+function punchGate(){
+  const type = nextPunchType();
+  if (!type) return { type:null, ok:false, done:true };
+  const idx  = PUNCH_TYPES.indexOf(type);
+  const need = CONFIG.minGap?.[type] || 0;
+  if (idx === 0 || !need) return { type, ok:true };
+
+  const prevType = PUNCH_TYPES[idx-1];
+  const prevMin  = toMin(todayPunch[prevType]?.time);
+  if (prevMin === null) return { type, ok:true };
+
+  const readyAt = prevMin + need;
+  const left    = readyAt - nowMin();
+  return { type, ok: left <= 0, prevType, prevTime: todayPunch[prevType].time, readyAt, left, need };
+}
+
 function renderSlots(){
-  const next = nextPunchType();
+  const g    = punchGate();
+  const next = g.type;
   $('slotGrid').innerHTML = PUNCH_TYPES.map(t => {
     const p = todayPunch[t];
     const cls = p ? 'done' : (t === next ? 'next' : 'pending');
-    const sub = p ? (p.geo === 'ในระยะ' ? '✓ ในระยะ' : (p.geo || '')) : (t === next ? 'ถัดไป' : 'รอลงเวลา');
+    let sub;
+    if (p)                              sub = p.geo === 'ในระยะ' ? '✓ ในระยะ' : (p.geo || '');
+    else if (t === next && !g.ok)       sub = `ลงได้ ${clockOf(g.readyAt)}`;
+    else if (t === next)                sub = 'ถัดไป';
+    else                                sub = 'รอลงเวลา';
     return `<div class="slot ${cls}">
       <div class="s-icon">${PUNCH_ICONS[t]}</div>
       <div class="s-label">${t}</div>
@@ -1334,14 +1376,19 @@ function renderSlots(){
   }).join('');
 
   const btn = $('btnBigScan');
-  if (next){
-    btn.disabled = false;
-    $('bigScanLabel').textContent = next;
-    $('punchHint').textContent = 'ต้องอยู่ในระยะที่กำหนด และเป็นใบหน้าที่ลงทะเบียนไว้เท่านั้น';
-  }else{
+  if (!next){
     btn.disabled = true;
     $('bigScanLabel').textContent = 'ครบแล้ววันนี้';
     $('punchHint').textContent = 'วันนี้ลงเวลาครบทั้ง 4 ช่วงแล้ว 🎉';
+  }else if (!g.ok){
+    btn.disabled = true;
+    $('bigScanLabel').textContent = `${next} — รออีก ${gapText(g.left)}`;
+    $('punchHint').innerHTML = `ลง “${esc(next)}” ต้องห่างจาก “${esc(g.prevType)}” (${hm(g.prevTime)}) ` +
+      `อย่างน้อย ${gapText(g.need)}<br>กดได้ตั้งแต่ <b>${clockOf(g.readyAt)}</b> เป็นต้นไป`;
+  }else{
+    btn.disabled = false;
+    $('bigScanLabel').textContent = next;
+    $('punchHint').textContent = 'ต้องอยู่ในระยะที่กำหนด และเป็นใบหน้าที่ลงทะเบียนไว้เท่านั้น';
   }
 }
 
@@ -1359,8 +1406,20 @@ async function probeGeo(){
 }
 
 async function startPunchFlow(){
-  const type = nextPunchType();
+  const g = punchGate();
+  const type = g.type;
   if (!type) return;
+
+  /* 0 · เว้นระยะเวลาครบหรือยัง — เช็คก่อนเปิดกล้อง จะได้ไม่ต้องสแกนหน้าเสียเที่ยว */
+  if (!g.ok){
+    renderSlots();
+    return showResult(false, clockOf(g.readyAt), `ยังลง “${type}” ไม่ได้`, [
+      ['ลงครั้งก่อน', `${g.prevType} ${hm(g.prevTime)}`],
+      ['ต้องเว้นอย่างน้อย', gapText(g.need)],
+      ['เหลืออีก', gapText(g.left)],
+      ['ลงได้ตั้งแต่', clockOf(g.readyAt)]
+    ]);
+  }
 
   /* 1 · พิกัด */
   showSpinner('กำลังตรวจพิกัด...','ยืนกลางแจ้งหรือใกล้หน้าต่างจะแม่นกว่า');
