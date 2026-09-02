@@ -234,6 +234,10 @@ body.fs-on{overflow:hidden}
 #mapzone.fs #panel{flex:0 0 auto; margin:0; max-height:40vh; overflow:auto;
   border-radius:0; border-left:0; border-top:3px solid var(--w4); box-shadow:none}
 #fsbar .fsgroup{display:flex; align-items:center; gap:8px}
+.bay.mk-lock:before{content:""; position:absolute; top:0; left:0; right:0; height:3px;
+  border-radius:2px 2px 0 0; background:var(--tape)}
+.bay.mk-lock{outline:1px dashed var(--tape); outline-offset:-1px}
+.sw.mk-lock{background:var(--tape); border-color:var(--tape)}
 
 #boot{position:fixed; inset:0; z-index:3000; background:var(--paper); display:flex;
   flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:24px; text-align:center}
@@ -267,6 +271,8 @@ var CFG = {
   ownerTab: 'ผู้สั่ง',
   ctrlId : '1GAGteMUI_UsEa-xIZvOgvtelSWNH5AcvyE2S9EFfrks',   // ชีทแยก "W4 ตั้งพื้น"
   ctrlTab : '',
+  lockId : '1trTqq0jC1cNxGsX0mcsHy-gu0iTQ6uxEEdac7pxi7ZE',                              // ชีทแยก "W4 ล็อกตำแหน่ง"
+  lockTab: '',
   buyerSeq: ['โบว์','อ้อย','บุ๊ค','ป่าน','ขนุน','เลิก','(ยังไม่ระบุผู้สั่ง)'],
   cageOwner: 'น้ำฝน',
   floorGroups: ['เบียร์','สุราขาว','สุราขาว X','สุราขาวผสม','สุราสี','น้ำตาล','น้ำดื่ม','โซดา'],
@@ -314,14 +320,15 @@ function loadAll(onStep){
   var jobs=[
     fetch(gvizUrl(CFG.pddtId,'PDDT',CFG.pddtQ)).then(function(r){return r.text();}),
     fetch(gvizUrl(CFG.purchId,CFG.ownerTab)).then(function(r){return r.text();}),
-    fetch(gvizUrl(CFG.ctrlId,CFG.ctrlTab)).then(function(r){return r.text();}).catch(function(){return '';})
+    fetch(gvizUrl(CFG.ctrlId,CFG.ctrlTab)).then(function(r){return r.text();}).catch(function(){return '';}),
+    fetch(gvizUrl(CFG.lockId,CFG.lockTab)).then(function(r){return r.text();}).catch(function(){return '';})
   ];
   jobs.forEach(function(p,i){ p.then(function(){ onStep(i); }); });
   return Promise.all(jobs);
 }
 
 /* ---------------------------------------------------------- แปลงข้อมูล */
-function buildModel(pddtText, ownerText, ctrlText){
+function buildModel(pddtText, ownerText, ctrlText, lockText){
   var P=parseCSV(pddtText), H=P[0]||[], recs=[], byCT={};
   var ix={}; H.forEach(function(h,i){ ix[h.trim()]=i; });
   for(var i=1;i<P.length;i++){
@@ -495,6 +502,28 @@ function buildModel(pddtText, ownerText, ctrlText){
       }).forEach(function(b){ seq.push({v:v,b:b,e:false}); });
     } else seq.push({v:v,b:'(ยังไม่มีของที่ W4)',e:true});
   });
+  /* ---- ชีท "W4 ล็อกตำแหน่ง" : Surat ขยับเอง ---- */
+  var lockLoc={}, lockBad=[], lockRows=0;
+  if(lockText && lockText.indexOf('CAT BRAND')>=0){
+    var K=parseCSV(lockText), kh=(K[0]||[]).map(function(s2){return s2.trim();});
+    var ki={}; kh.forEach(function(h,i3){ ki[h]=i3; });
+    var lcol=-1;
+    kh.forEach(function(h,i3){ if(h.indexOf('ล็อก')>=0) lcol=i3; });
+    if(lcol>=0) for(var n2=1;n2<K.length;n2++){
+      var kr=K[n2]; if(!kr) continue;
+      var kb=normTxt(kr[ki['CAT BRAND']]); if(!kb) continue;
+      var kl=normTxt(kr[lcol]).toLowerCase().replace(/\s/g,'');
+      if(!kl) continue;
+      if(!/^w4\.\d{2}\.\d{2}$/.test(kl)){
+        lockBad.push({b:kb, s:'', v:kl, why:'รูปแบบช่องไม่ถูก (ต้องเป็น w4.06.03)'}); continue;
+      }
+      if(!brands[kb]){ lockBad.push({b:kb, s:'', v:kl, why:'ไม่มีแบรนด์นี้ที่ W4'}); continue; }
+      if(brands[kb].place!=='แร็ค'){ lockBad.push({b:kb, s:'', v:kl,
+        why:'แบรนด์นี้อยู่ '+brands[kb].place+' ไม่ได้อยู่แร็ค'}); continue; }
+      lockLoc[kb]=kl; lockRows++;
+    }
+  }
+
   /* ---- ลงช่อง ---- */
   var locs=[], i2, j2;
   for(i2=1;i2<=16;i2++) for(j2=1;j2<=12;j2++) locs.push('w4.'+('0'+i2).slice(-2)+'.'+('0'+j2).slice(-2));
@@ -502,11 +531,24 @@ function buildModel(pddtText, ownerText, ctrlText){
   for(j2=1;j2<=17;j2++) locs.push('w4.18.'+('0'+j2).slice(-2));
   var bays={}; locs.forEach(function(l){ bays[l]=[]; });
   FROZEN_LOCS.forEach(function(l){ bays[l]=FROZEN[l].map(function(b){return {v:'(เดิม)',b:b,e:false};}); });
-  var usable=locs.filter(function(l){ return FROZEN_LOCS.indexOf(l)<0; });
+  var taken={};
+  Object.keys(lockLoc).forEach(function(b){
+    var l=lockLoc[b];
+    if(FROZEN_LOCS.indexOf(l)>=0 || bays[l]===undefined){
+      lockBad.push({b:b, s:'', v:l, why:'ช่องนี้ล็อกไว้ไม่ได้ (w4.18.11–.17 เว้นไว้)'});
+      delete lockLoc[b]; return;
+    }
+    var owner2=null;
+    for(var q3=0;q3<seq.length;q3++) if(seq[q3].b===b){ owner2=seq[q3].v; break; }
+    bays[l].push({v:owner2||brands[b].home, b:b, e:false, locked:true});
+    taken[l]=1;
+  });
+  var usable=locs.filter(function(l){ return FROZEN_LOCS.indexOf(l)<0 && !taken[l]; });
   var N=usable.length;
-  var w=seq.map(function(s){ return s.e?0.02:Math.max(0.06, brands[s.b].pal); });
+  var rest=seq.filter(function(s){ return !lockLoc[s.b]; });
+  var w=rest.map(function(s){ return s.e?0.02:Math.max(0.06, brands[s.b].pal); });
   var unit=w.reduce(function(a,b){return a+b;},0)/N, cum=0;
-  seq.forEach(function(s,k){
+  rest.forEach(function(s,k){
     var a=Math.min(N-1, Math.floor(cum/unit)); bays[usable[a]].push(s);
     cum+=w[k];
     var c=Math.min(N-1, Math.floor((cum-1e-9)/unit));
@@ -521,7 +563,8 @@ function buildModel(pddtText, ownerText, ctrlText){
       why:'ไม่มีแบรนด์นี้ที่ W4 (ชื่อไม่ตรง PDDT)'});
   });
   return {recs:recs, brands:brands, sup:sup, bays:bays, locs:locs, owner:owner,
-          notsup:notsup, seqB:seqB, ctrlRows:ctrlRows, ctrlBad:ctrlBad, control:control};
+          notsup:notsup, seqB:seqB, ctrlRows:ctrlRows, ctrlBad:ctrlBad.concat(lockBad),
+          lockLoc:lockLoc, lockRows:lockRows, control:control};
 }
 
 /* แปลง model -> payload รูปแบบเดียวกับที่ตัว render ใช้ */
@@ -537,15 +580,17 @@ function toPayload(M){
       var frozen=FROZEN_LOCS.indexOf(l)>=0;
       var items=bays[l].map(function(s){
         var d=brands[s.b]||{}, sp=sup[s.v]||{};
-        return {v: frozen?'(เดิม)':shortV(s.v), b: s.e?'(ยังไม่มีของ)':s.b,
+        return {v: frozen?'(เดิม)':shortV(s.v), b: s.e?'(ยังไม่มีของ)':s.b, lk:!!s.locked,
                 cs:+( (d.cs||0).toFixed(1) ), st:Math.round(d.stock||0),
                 ct: sp.ct||d.ct||'', own: sp.own||'', e:!!s.e, sku:d.sku||0,
                 alt:(d.boughtFrom||[]).map(shortV)};
       });
       items.sort(function(a,b){ if(a.e!==b.e) return a.e?1:-1; if(b.cs!==a.cs) return b.cs-a.cs; return b.st-a.st; });
       var sups=[]; items.forEach(function(it){ if(sups.indexOf(it.v)<0) sups.push(it.v); });
+      var anyLock=items.some(function(it){return it.lk;});
       var cs=0; items.forEach(function(it){ cs+= it.cs/Math.max(1, nb[(frozen?'(เดิม)':it.v)+'|'+it.b]||1); });
-      rb.push({n:parseInt(l.split('.')[2],10), sup:sups, items:items, frozen:frozen, cs:+cs.toFixed(1)});
+      rb.push({n:parseInt(l.split('.')[2],10), sup:sups, items:items, frozen:frozen,
+               locked:anyLock, cs:+cs.toFixed(1)});
     });
     var owns=[], cts={};
     rb.forEach(function(b_){ b_.items.forEach(function(it){
@@ -617,7 +662,7 @@ function toPayload(M){
       if(u[u.length-1]-u[0]+1===u.length) ok++; } return [ok,t]; }
   return {racks:racks, floor:floor, cig:cig, owns:owns, notsup:ns, fix:fix,
     bad:(M.ctrlBad||[]),
-    stat:{brands:nBrand, rack:nRack, sku:M.recs.length, ctrl:M.ctrlRows,
+    stat:{brands:nBrand, rack:nRack, sku:M.recs.length, ctrl:M.ctrlRows, lock:(M.lockRows||0),
           bad:(M.ctrlBad||[]).length, sup:contig(sl), own:contig(ol), ct:contig(cl)}};
 }
 
@@ -628,7 +673,8 @@ function toPayload(M){
   <div id="bootsteps">
     <div id="st0"><span>ข้อมูลสินค้า PDDT</span><b>กำลังโหลด…</b></div>
     <div id="st1"><span>ทะเบียนผู้สั่ง</span><b>รอ</b></div>
-    <div id="st2"><span>แท็บ W4 ตั้งพื้น</span><b>รอ</b></div>
+    <div id="st2"><span>ชีท W4 ตั้งพื้น</span><b>รอ</b></div>
+    <div id="st3"><span>ชีท W4 ล็อกตำแหน่ง</span><b>รอ</b></div>
   </div>
 </div>
 <div class="wrap" id="app" hidden>
@@ -676,6 +722,24 @@ function toPayload(M){
   <div class="card" style="padding:4px 18px"><div class="tblwrap"><table id="owntbl"></table></div></div>
 </section>
 
+<section id="locksec">
+  <div class="shead"><span class="eyebrow">ขยับเอง</span><h2>ล็อกแบรนด์ไว้ช่องที่ต้องการ</h2></div>
+  <p class="lead">ระบบจัดให้อัตโนมัติ แต่ถ้าอยากย้ายเอง ใส่ในชีท
+    <a href="https://docs.google.com/spreadsheets/d/1trTqq0jC1cNxGsX0mcsHy-gu0iTQ6uxEEdac7pxi7ZE/edit" target="_blank" rel="noopener"><b>W4 ล็อกตำแหน่ง</b></a>
+    แล้วรีเฟรช — ตัวที่ล็อกจะอยู่ที่เดิมตลอด ที่เหลือระบบจัดเรียงใหม่รอบๆ ให้เอง</p>
+  <div class="card" style="padding:4px 18px"><div class="tblwrap"><table>
+    <thead><tr><th>คอลัมน์</th><th>ใส่อะไร</th></tr></thead><tbody>
+      <tr><td><b>CAT BRAND</b></td><td>ชื่อแบรนด์ ต้องตรงกับ PDDT เป๊ะ เช่น <span class="loc">เป๊ปซี่</span></td></tr>
+      <tr><td><b>ล็อกที่ช่อง</b></td><td>เลขช่องที่อยากให้ไปอยู่ เช่น <span class="loc">w4.06.01</span> — ต้องเป็นรูปแบบนี้เท่านั้น</td></tr>
+      <tr><td>หมายเหตุ</td><td class="vend">แอปไม่ได้อ่าน จดกันลืมได้ตามใจ</td></tr>
+    </tbody></table></div></div>
+  <div class="note" style="margin-top:14px">
+    ล็อกได้เฉพาะแบรนด์ที่อยู่ในแร็ค — ของกองพื้นกับบุหรี่ล็อกไม่ได้ ·
+    ช่อง w4.18.11–.17 ล็อกไม่ได้ · ลบบรรทัดทิ้ง = กลับไปให้ระบบจัดเอง ·
+    ช่องที่ล็อกจะมีขีดส้มบนหัวในผัง
+  </div>
+</section>
+
 <section id="badsec">
   <div class="shead"><span class="eyebrow">ตรวจชีท</span><h2>แถวในชีทที่ไม่ทำงาน</h2></div>
   <p class="lead">แถวพวกนี้พี่กรอกมาแล้ว แต่ระบบใช้ไม่ได้ — <b>ผังยังใช้ค่าตั้งต้นแทน</b> แก้ในชีทแล้วรีเฟรช</p>
@@ -719,6 +783,7 @@ function toPayload(M){
     <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap">
       <span class="eyebrow">ผังเต็ม</span><h2>18 แถว · 226 ช่อง</h2></div>
     <div style="display:flex; gap:8px">
+      <button type="button" class="fsbtn" id="dlcsv">โหลดผังเป็น CSV</button>
       <button type="button" class="fsbtn" id="narrow">ช่องแคบ</button>
       <button type="button" class="fsbtn" id="fsopen">ดูเต็มจอ</button>
     </div>
@@ -743,6 +808,7 @@ function toPayload(M){
     <span class="lg"><i class="sw" style="background:var(--b2)"></i> 3–15</span>
     <span class="lg"><i class="sw" style="background:var(--b1)"></i> น้อยกว่า 3</span>
     <span class="lg"><i class="sw" style="background:var(--k3)"></i> โซนหลัง (w4.17 · w4.18)</span>
+    <span class="lg"><i class="sw mk-lock"></i> ล็อกเอง (จากชีท)</span>
     <span class="lg"><i class="sw mk-frozen"></i> w4.18.11–.17 เว้นไม่แตะ</span>
   </div>
   <div id="panel" hidden></div>
@@ -840,7 +906,7 @@ function renderAll(D){
         return b.items.map(function(i,k){
           return '<tr><td class="loc">'+(k===0?esc(loc):'')+'</td><td class="vend">'+esc(i.own)+'</td>'+
             '<td class="vend">'+esc(i.v)+'</td><td class="vend">'+esc(i.ct)+'</td>'+
-            '<td'+(i.e?' style="color:var(--faint)"':'')+'>'+esc(i.b)+'</td>'+
+            '<td'+(i.e?' style="color:var(--faint)"':'')+'>'+esc(i.b)+(i.lk?' <span class="tag warn">ล็อกไว้</span>':'')+'</td>'+
             '<td class="n">'+(i.cs>0?fmt(i.cs):'—')+'</td><td class="n">'+(i.st?fmt(i.st):'—')+'</td>'+
             '<td class="n">'+(i.sku||'—')+'</td><td class="vend">'+esc((i.alt||[]).join(' / '))+'</td></tr>';
         }).join('');
@@ -879,7 +945,7 @@ function renderAll(D){
           return '<u><span>'+esc(i.b)+'</span>'+(i.cs>0?'<em>'+fmt(i.cs)+'</em>':(i.st?'<em>·'+fmt(i.st)+'</em>':''))+'</u>';
         }).join('');
         var more=b.items.length>3?'<i>+'+(b.items.length-3)+' แบรนด์</i>':'';
-        return '<span class="bay '+band(b.cs)+(r.back?' back':'')+(b.frozen?' mk-frozen':'')+'" data-loc="'+loc+'" role="button" tabindex="0" '+
+        return '<span class="bay '+band(b.cs)+(r.back?' back':'')+(b.frozen?' mk-frozen':'')+(b.locked?' mk-lock':'')+'" data-loc="'+loc+'" role="button" tabindex="0" '+
           'title="'+esc(loc+' — '+b.sup.join(', '))+'"><b>'+esc(b.sup[0]||'—')+
           (b.sup.length>1?' +'+(b.sup.length-1):'')+'</b>'+names+more+'</span>';
       }).join('')+'</span>';
@@ -894,6 +960,34 @@ function renderAll(D){
       }
     });
     rows.appendChild(head);
+  });
+
+  /* ---------- ดาวน์โหลดผังเป็น CSV ---------- */
+  var dl=document.getElementById('dlcsv');
+  if(dl) dl.addEventListener('click',function(){
+    var NL=String.fromCharCode(10), BOM=String.fromCharCode(65279);
+    var q=function(v){ v=String(v==null?'':v);
+      return (v.indexOf(',')>=0||v.indexOf('"')>=0||v.indexOf(NL)>=0)
+        ? '"'+v.replace(/"/g,'""')+'"' : v; };
+    var out=[['Location','โซน','แถว','ผู้สั่ง','ซัพ','CAT TYPE','CAT BRAND','ลัง/วัน','ของค้าง','SKU','ซื้อจาก','ล็อกไว้'].join(',')];
+    D.racks.forEach(function(r){
+      r.bays.forEach(function(b){
+        var loc=r.row+'.'+pad(b.n);
+        var zn=b.n<=4?'A':(b.n<=8?'B':'C');
+        var rowname=r.back?'ด้านหลัง':(r.own||'');
+        if(!b.items.length){ out.push([loc,zn,rowname,'','','','(ว่าง)','','','','',''].map(q).join(',')); return; }
+        b.items.forEach(function(i){
+          out.push([loc,zn,rowname,i.own,i.v,i.ct,i.b,i.cs||'',i.st||'',i.sku||'',
+                    (i.alt||[]).join(' / '), i.lk?'ล็อกไว้':''].map(q).join(','));
+        });
+      });
+    });
+    var blob=new Blob([BOM+out.join(NL)],{type:'text/csv;charset=utf-8;'});
+    var a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='W4-ผังจริง-'+fmtTime(new Date()).replace(/[: ]/g,'-')+'.csv';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 4000);
   });
 
   /* ---------- ช่องแคบ ---------- */
@@ -931,14 +1025,14 @@ function fmtTime(d){
 }
 function boot(){
   var t0=Date.now();
-  var names=['ข้อมูลสินค้า PDDT','ทะเบียนผู้สั่ง','แท็บ W4 ตั้งพื้น'];
+  var names=['ข้อมูลสินค้า PDDT','ทะเบียนผู้สั่ง','ชีท W4 ตั้งพื้น','ชีท W4 ล็อกตำแหน่ง'];
   loadAll(function(i){
     var el=document.getElementById('st'+i);
     if(el){ el.classList.add('ok'); el.querySelector('b').textContent='เสร็จ'; }
-    for(var k=i+1;k<3;k++){ var e2=document.getElementById('st'+k);
+    for(var k=i+1;k<4;k++){ var e2=document.getElementById('st'+k);
       if(e2 && e2.querySelector('b').textContent==='รอ') e2.querySelector('b').textContent='กำลังโหลด…'; }
   }).then(function(res){
-    var M=buildModel(res[0],res[1],res[2]);
+    var M=buildModel(res[0],res[1],res[2],res[3]);
     var D=toPayload(M);
     renderAll(D);
     document.getElementById('s1').textContent=D.stat.sup[0]+'/'+D.stat.sup[1];
@@ -948,8 +1042,10 @@ function boot(){
     document.getElementById('freshtxt').textContent=
       'ดึงข้อมูลเมื่อ '+fmtTime(new Date())+' · ใช้เวลา '+((Date.now()-t0)/1000).toFixed(1)+' วิ · '+
       'CAT TYPE ติดกัน '+D.stat.ct[0]+'/'+D.stat.ct[1]+' · '+
-      (D.stat.ctrl? ('ชีท W4 ตั้งพื้น: ใช้ได้ '+D.stat.ctrl+' รายการ'+(D.stat.bad?(' · ใช้ไม่ได้ '+D.stat.bad+' แถว'):''))
-                  : 'ชีท W4 ตั้งพื้น ยังอ่านไม่ได้ (ต้องแชร์ Anyone with the link) — ใช้ค่าตั้งต้นของระบบ');
+      (D.stat.ctrl? ('ตั้งพื้น/แร็ค/กรง: ตั้งเอง '+D.stat.ctrl+' รายการ')
+                  : 'ชีท W4 ตั้งพื้น ยังอ่านไม่ได้ (ต้องแชร์ Anyone with the link)') +
+      ' · ล็อกตำแหน่งเอง '+(D.stat.lock||0)+' แบรนด์' +
+      (D.stat.bad? (' · ⚠ กรอกไม่ได้ผล '+D.stat.bad+' แถว') : '');
     var set=function(id,v){ var e=document.getElementById(id); if(e) e.textContent=v; };
     set('d-own', D.stat.own[0]+'/'+D.stat.own[1]);
     set('d-sup', D.stat.sup[0]+'/'+D.stat.sup[1]);
