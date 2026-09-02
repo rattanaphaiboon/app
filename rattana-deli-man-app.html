@@ -950,7 +950,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.305';
+const APP_VERSION='3.306';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -3686,10 +3686,38 @@ function cnIsMine_(c){
   const d=String(c.driver||'').toLowerCase();
   return me.some(m=>m&&d.indexOf(m)>=0);
 }
+/* ★ v3.306: ใบที่ "ขนส่งเก็บเอง" (create_cn_own) — ชีท CN ของ D-Man ลง ประเภทคืน='ขนส่งเก็บ'
+   แถวพวกนี้ถูกกันไม่ให้ลบตั้งแต่ v3.215 (กันหายตอนมีคนทำรับคืนบิลเดียวกันทับ)
+   → ปุ่ม 🗑 ลบ ใช้กับใบพวกนี้ "ไม่ได้จริง" (กดแล้วขึ้นว่าลบแล้ว แต่แถวยังอยู่ พอซิงก์รอบหน้าก็กลับมา)
+   ใช้ "ยกเลิกใบนี้" แทน = คงแถวไว้ในชีท แต่มาร์กสถานะ ไม่ถูกเอาไปหักยอดเงินอีก */
+function cnIsOwnCollect_(c){ return String((c&&c.returnType)||'').trim()==='ขนส่งเก็บ'; }
 /* v3.123: CN ลบได้เฉพาะ "ของตัวเอง" (ชื่อผู้ทำ = ตัวเรา) + ยังไม่อนุมัติเท่านั้น — หัวหน้า/คลัง ลบ CN ของคนอื่นไม่ได้ (กลับนโยบาย v3.98) */
 function cnCanDelete_(c){
   if(cnApproved(c)) return false;   // อนุมัติแล้ว ล็อก ลบไม่ได้
+  if(cnIsOwnCollect_(c)) return false;   // ★ v3.306: ลบไม่ได้จริง → ซ่อนปุ่ม ใช้ "ยกเลิกใบนี้" แทน
   return cnIsMine_(c);              // ไม่ใช่ชื่อตัวเองทำ → ลบไม่ได้
+}
+/* ★ v3.306: ขนส่งยกเลิก CN ที่ตัวเองทำ (เฉพาะแบบเก็บเอง + ยังไม่อนุมัติ)
+   ใช้ action void_cn เดิม (v3.229) — GAS ไม่ต้องแก้: มาร์ก สถานะคืน='ไม่อนุมัติ' ในชีท CN ของ D-Man
+   แล้วมิเรอร์ไปชีท CN-Sale-dman ให้ฝั่งเซลล์เห็นด้วย · แถวยังอยู่ครบทั้ง 2 ชีท (ตรวจย้อนหลังได้ว่าใครยกเลิก)
+   ผลต่อเงิน: cnAmtForBill_ กันใบที่ cnVoided ออกจากยอดหักอยู่แล้ว → บิลกลับไปเก็บเต็มทันที */
+function cnCanCancelOwn_(c){ return cnIsOwnCollect_(c)&&cnIsMine_(c)&&!cnApproved(c)&&!cnVoided(c); }
+async function cancelOwnCN(i){
+  const c=(state._cnView||[])[i]; if(!c) return;
+  if(!cnCanCancelOwn_(c)){ showToast('ยกเลิกได้เฉพาะใบที่ตัวเองทำ และยังไม่อนุมัติ','warning'); return; }
+  const reason=await showPromptModal(`ระบุเหตุผลที่ยกเลิก\nร้าน: ${c.customerName||''}\nบิล: ${c.docNo}`,'',
+    {title:'ยกเลิก CN ใบนี้',placeholder:'เช่น ทำผิดร้าน / ใส่จำนวนผิด',okLabel:'ถัดไป'});
+  if(reason===null) return;
+  if(!String(reason).trim()){ showToast('กรุณาใส่เหตุผล','warning'); return; }
+  if(!await showConfirm(`ยอด ${fmt(c.total||0)} ฿ จะไม่ถูกนำไปหักจากยอดเก็บเงินอีก\nบิล: ${c.docNo}\n\n⚠️ ยกเลิกแล้วแก้ใบเดิมไม่ได้ ถ้าต้องคืนจริงให้ทำใบใหม่`,
+    {title:'ยืนยันยกเลิก CN?',danger:true,okLabel:'ยกเลิกใบนี้',icon:'🚫'})) return;
+  showToast('กำลังส่งเข้าชีท…','info');
+  const r=await postSyncGAS_({action:'void_cn',jobId:c.jobId,docNo:c.docNo,
+    approver:currentUserName_(),note:'ขนส่งยกเลิกเอง: '+String(reason).trim()});
+  if(!r||!r.ok){ showToast('❌ ยกเลิกไม่สำเร็จ: '+((r&&r.error)||'ลองใหม่ได้'),'error'); return; }
+  c.status='ไม่อนุมัติ'; c.approver=currentUserName_(); c.approveNote='ขนส่งยกเลิกเอง: '+String(reason).trim();
+  showToast('ยกเลิก CN '+c.docNo+' แล้ว — ยอดกลับไปเก็บเต็ม','success');
+  refreshCNViews();
 }
 /* ★ v3.235: เลขบิลทั้งหมดในใบคุม "ของคลังเรา" — ใช้ปลดล็อกเคส CN ลงคลังไม่ตรงกับใบคุม */
 function cnDocsOfMyJobs_(){
@@ -3788,8 +3816,10 @@ function cnCardHTML(c,i){
     } else if(mine){
       // ★ v3.229: ใบที่คลัง "ไม่อนุมัติ" = ยกเลิกแล้ว แก้แล้วส่งใหม่ไม่ได้ (ถ้าจะคืนจริงให้ทำใบใหม่)
       actions=cnVoided(c)
-        ? '<span class="badge badge-danger">❌ ไม่อนุมัติ — ยกเลิกแล้ว (ถ้าต้องคืนจริง ให้ทำ CN ใบใหม่)</span>'
-        : `<button class="btn btn-gold btn-sm" onclick="event.stopPropagation();editCN(${i})">✏️ แก้ไข</button>`;
+        ? '<span class="badge badge-danger">❌ ยกเลิกแล้ว — ไม่ถูกหักจากยอดเก็บเงิน (ถ้าต้องคืนจริง ให้ทำ CN ใบใหม่)</span>'
+        : `<button class="btn btn-gold btn-sm" onclick="event.stopPropagation();editCN(${i})">✏️ แก้ไข</button>`
+          /* ★ v3.306: ใบที่เก็บเอง ลบไม่ได้ (แถวถูกกันไว้) → ให้ยกเลิกแทน ยอดจะไม่ถูกหักจากเงินที่ต้องเก็บ */
+          +(cnCanCancelOwn_(c)?` <button class="btn btn-outline txt-danger btn-sm" onclick="event.stopPropagation();cancelOwnCN(${i})">🚫 ยกเลิกใบนี้</button>`:'');
     }
     if(cnCanDelete_(c)) actions+=(actions?' ':'')+delBtn;
   }
