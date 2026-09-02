@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana PC Check-in v1.2</title>
+<title>Rattana PC Check-in v1.3</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -259,7 +259,7 @@ body.dark .badge-gold{color:var(--gold-light)}
 <div id="screenRegister" class="page hidden">
   <header>
     <span class="logo-text">RATTANA <span>PC</span></span>
-    <span class="ver-badge">v1.2</span>
+    <span class="ver-badge">v1.3</span>
     <span class="spacer"></span>
     <button class="icon-btn" id="themeBtn2" onclick="toggleTheme()" title="สลับธีม">🌙</button>
     <button class="icon-btn" onclick="logout()" title="ออกจากระบบ">⏻</button>
@@ -355,7 +355,7 @@ body.dark .badge-gold{color:var(--gold-light)}
 <div id="screenApp" class="page hidden">
   <header>
     <span class="logo-text">RATTANA <span>PC</span></span>
-    <span class="ver-badge">v1.2</span>
+    <span class="ver-badge">v1.3</span>
     <span class="spacer"></span>
     <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
     <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
@@ -520,12 +520,12 @@ body.dark .badge-gold{color:var(--gold-light)}
 
 <script>
 /*═══════════════════════════════════════════════════════════════════════
-  Rattana PC Check-in v1.2
+  Rattana PC Check-in v1.3
   ลงเวลาทำงานพนักงาน PC ด้วยการสแกนใบหน้า + ล็อกพิกัด
   ชีต: เช็คอิน PC 2026
 ═══════════════════════════════════════════════════════════════════════*/
 
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.3';
 
 const CONFIG = {
   /* Apps Script Web App — ต้อง deploy แบบ Execute as: Me / Who has access: Anyone */
@@ -1495,66 +1495,101 @@ async function loadHistory(){
   setLoading(true);
   try{
     const r = await api('history', { month: $('histMonth').value });
-    histRows = r.rows || [];
+    histRows = normalizeDays(r.rows || []);
     renderHistory();
   }catch(e){ showToast(e.message,'error'); }
   finally{ setLoading(false); }
 }
-function groupByDate(rows){
+/* ชีตเก็บเป็น 1 วัน 1 แถวแล้ว ฝั่งนี้จึงไม่ต้องจับกลุ่มเองอีก
+   ชั่วโมงทำงานคิดมาจากเซิร์ฟเวอร์ เป็นทศนิยม (8.50 = 8 ชม. 30 นาที)
+
+   ── รองรับสคริปต์ตัวเก่าไปด้วย ──
+   ระหว่างที่ยังไม่ได้อัป Apps Script เป็น v1.3 เซิร์ฟเวอร์จะยังส่งข้อมูลแบบเก่า
+   (1 ครั้ง = 1 แถว) มา แปลงให้เป็นรูปแบบใหม่ตรงนี้ แอปจะได้ไม่พังระหว่างเปลี่ยนผ่าน */
+const GEO_RANK_C = { 'ในระยะ':0, 'ไม่ได้ล็อกพิกัด':1, 'ในระยะ (เผื่อค่าคลาดเคลื่อน GPS)':1, 'นอกระยะ':2 };
+const worseGeo = (a,b) => !a ? (b||'') : !b ? a : ((GEO_RANK_C[b]||0) > (GEO_RANK_C[a]||0) ? b : a);
+
+function calcHours(t){
+  const inM = toMin(t['เข้างาน']), outM = toMin(t['เลิกงาน']);
+  if (inM === null || outM === null) return '';
+  let total = outM - inM; if (total < 0) total += 1440;
+  const b1 = toMin(t['พัก']), b2 = toMin(t['กลับจากพัก']);
+  if (b1 !== null && b2 !== null){ let br = b2 - b1; if (br < 0) br += 1440; total -= br; }
+  return total > 0 ? (total/60).toFixed(2) : '';
+}
+function normalizeDays(rows){
+  if (!rows?.length) return [];
+  if (rows[0].times) return rows;                       /* v1.3 ส่งมาพร้อมใช้แล้ว */
   const map = {};
   rows.forEach(r => {
-    const d = r['วันที่'];
-    (map[d] = map[d] || { date:d, punches:{} }).punches[r['ประเภท']] =
-      { time:r['เวลา'], geo:r['สถานะพิกัด'] };
+    const d = r['วันที่']; if (!d) return;
+    const day = map[d] = map[d] || { date:d, times:{}, hours:'', loc:'', geo:'', done:'' };
+    day.times[r['ประเภท']] = r['เวลา'];
+    if (!day.loc) day.loc = r['สถานที่'] || '';
+    day.geo = worseGeo(day.geo, r['สถานะพิกัด'] || '');
   });
-  return Object.values(map).sort((a,b)=> b.date.localeCompare(a.date));
+  return Object.values(map).map(d => {
+    d.done  = PUNCH_TYPES.filter(t => d.times[t]).length + '/4';
+    d.hours = calcHours(d.times);
+    return d;
+  }).sort((a,b) => b.date.localeCompare(a.date));
 }
-function workHours(p){
-  const inT = p['เข้างาน']?.time, outT = p['เลิกงาน']?.time;
-  if (!inT || !outT) return '-';
-  const mins = t => { const [h,m] = t.split(':').map(Number); return h*60+m; };
-  let total = mins(outT) - mins(inT);
-  const b1 = p['พัก']?.time, b2 = p['กลับจากพัก']?.time;
-  if (b1 && b2) total -= (mins(b2) - mins(b1));
-  if (total <= 0) return '-';
-  return `${Math.floor(total/60)}.${pad2(Math.round(total%60))}`;
+/* รายงานตัวเก่าส่ง punches:{type:{time}} มา แปลงเป็น times:{type:time} */
+function normalizeReport(rows){
+  return (rows||[]).map(r => {
+    if (r.times) return r;
+    const t = {};
+    Object.keys(r.punches||{}).forEach(k => { t[k] = r.punches[k]?.time || ''; });
+    return { ...r, times:t, hours:calcHours(t),
+             loc: r.punches?.['เข้างาน']?.loc || '', geo: r.punches?.['เข้างาน']?.geo || '',
+             done: PUNCH_TYPES.filter(k => t[k]).length + '/4' };
+  });
 }
+
+const geoBadge = g => !g ? '' :
+  g.indexOf('นอกระยะ') === 0 ? '<span class="badge badge-danger">นอกระยะ</span>' :
+  g.indexOf('เผื่อ')   >= 0 ? '<span class="badge badge-warn">เผื่อคลาดเคลื่อน</span>' :
+                              '<span class="badge badge-ok">ในระยะ</span>';
+
 function renderHistory(){
-  const days = groupByDate(histRows);
+  const days = histRows;
   const body = $('histBody');
   if (!days.length){
     body.innerHTML = '<tr class="empty-row"><td colspan="7">เดือนนี้ยังไม่มีการลงเวลา</td></tr>';
   }else{
     body.innerHTML = days.map(d => {
-      const p = d.punches;
-      const off = Object.values(p).some(x => x.geo && x.geo.indexOf('นอกระยะ') === 0);
+      const t = d.times || {};
       return `<tr>
         <td>${ymdToThai(d.date)}</td>
-        <td>${hm(p['เข้างาน']?.time)}</td>
-        <td>${hm(p['พัก']?.time)}</td>
-        <td>${hm(p['กลับจากพัก']?.time)}</td>
-        <td>${hm(p['เลิกงาน']?.time)}</td>
-        <td class="num">${workHours(p)}</td>
-        <td>${off ? '<span class="badge badge-warn">มีนอกระยะ</span>' : '<span class="badge badge-ok">ปกติ</span>'}</td>
+        <td>${hm(t['เข้างาน'])}</td>
+        <td>${hm(t['พัก'])}</td>
+        <td>${hm(t['กลับจากพัก'])}</td>
+        <td>${hm(t['เลิกงาน'])}</td>
+        <td class="num">${d.hours || '-'}</td>
+        <td>${geoBadge(d.geo)}</td>
       </tr>`;
     }).join('');
   }
-  const full = days.filter(d => PUNCH_TYPES.every(t => d.punches[t])).length;
+  const full  = days.filter(d => d.done === '4/4').length;
+  const total = days.reduce((s,d) => s + (parseFloat(d.hours) || 0), 0);
   $('histStats').innerHTML = [
-    ['วันที่ลงเวลา', days.length + ' วัน'],
-    ['ครบ 4 ช่วง', full + ' วัน']
+    ['วันที่ลงเวลา', `${days.length} วัน · ครบ ${full} วัน`],
+    ['รวมชั่วโมงทำงาน', `${total.toFixed(2)} ชม.`]
   ].map(([k,v]) => `<div class="strip strip-gold"><div class="tx">
       <div class="ds">${k}</div><div class="tt" style="font-size:19px">${v}</div></div></div>`).join('');
 }
 function exportHistory(){
   if (!histRows.length) return showToast('ยังไม่มีข้อมูลให้ดาวน์โหลด','warning');
-  const rows = groupByDate(histRows).map(d => ({
+  const rows = histRows.map(d => ({
     'วันที่': ymdToThai(d.date),
-    'เข้างาน': hm(d.punches['เข้างาน']?.time),
-    'พัก': hm(d.punches['พัก']?.time),
-    'กลับจากพัก': hm(d.punches['กลับจากพัก']?.time),
-    'เลิกงาน': hm(d.punches['เลิกงาน']?.time),
-    'ชั่วโมงทำงาน': workHours(d.punches)
+    'เข้างาน': hm(d.times['เข้างาน']),
+    'พัก': hm(d.times['พัก']),
+    'กลับจากพัก': hm(d.times['กลับจากพัก']),
+    'เลิกงาน': hm(d.times['เลิกงาน']),
+    'ชั่วโมงทำงาน': d.hours || '',
+    'สถานที่': d.loc || '',
+    'พิกัด': d.geo || '',
+    'ครบ': d.done || ''
   }));
   downloadXlsx(rows, `Rattana-PC-Checkin-${me.empId}-${$('histMonth').value}`);
 }
@@ -1564,7 +1599,7 @@ async function loadReport(){
   setLoading(true);
   try{
     const r = await api('report', { date: $('repDate').value });
-    repRows = r.rows || [];
+    repRows = normalizeReport(r.rows || []);
     renderReport(r.total || repRows.length);
   }catch(e){ showToast(e.message,'error'); }
   finally{ setLoading(false); }
@@ -1575,19 +1610,19 @@ function renderReport(total){
     body.innerHTML = '<tr class="empty-row"><td colspan="8">วันนี้ยังไม่มีข้อมูล</td></tr>';
   }else{
     body.innerHTML = repRows.map(r => {
-      const p = r.punches || {};
-      const n = PUNCH_TYPES.filter(t => p[t]).length;
+      const t = r.times || {};
+      const n = PUNCH_TYPES.filter(k => t[k]).length;
       const st = n === 0 ? '<span class="badge badge-danger">ยังไม่ลงเวลา</span>'
                : n === 4 ? '<span class="badge badge-ok">ครบ</span>'
                : `<span class="badge badge-warn">${n}/4</span>`;
       return `<tr>
         <td>${esc(r.empId)}</td><td>${esc(r.name)}</td><td>${esc(r.company)}</td>
-        <td>${hm(p['เข้างาน']?.time)}</td><td>${hm(p['พัก']?.time)}</td>
-        <td>${hm(p['กลับจากพัก']?.time)}</td><td>${hm(p['เลิกงาน']?.time)}</td>
+        <td>${hm(t['เข้างาน'])}</td><td>${hm(t['พัก'])}</td>
+        <td>${hm(t['กลับจากพัก'])}</td><td>${hm(t['เลิกงาน'])}</td>
         <td>${st}</td></tr>`;
     }).join('');
   }
-  const came = repRows.filter(r => r.punches && r.punches['เข้างาน']).length;
+  const came = repRows.filter(r => r.times && r.times['เข้างาน']).length;
   $('repStats').innerHTML = [
     ['เข้างานแล้ว', `${came} / ${total} คน`],
     ['ยังไม่ลงเวลา', `${Math.max(0, total - came)} คน`]
@@ -1597,12 +1632,13 @@ function renderReport(total){
 function exportReport(){
   if (!repRows.length) return showToast('ยังไม่มีข้อมูลให้ดาวน์โหลด','warning');
   const rows = repRows.map(r => {
-    const p = r.punches || {};
+    const t = r.times || {};
     return {
       'รหัสพนักงาน': r.empId, 'ชื่อ-นามสกุล': r.name, 'ชื่อเล่น': r.nickname, 'บริษัท': r.company,
-      'เข้างาน': hm(p['เข้างาน']?.time), 'พัก': hm(p['พัก']?.time),
-      'กลับจากพัก': hm(p['กลับจากพัก']?.time), 'เลิกงาน': hm(p['เลิกงาน']?.time),
-      'สถานที่': p['เข้างาน']?.loc || '', 'สถานะพิกัด': p['เข้างาน']?.geo || ''
+      'เข้างาน': hm(t['เข้างาน']), 'พัก': hm(t['พัก']),
+      'กลับจากพัก': hm(t['กลับจากพัก']), 'เลิกงาน': hm(t['เลิกงาน']),
+      'ชั่วโมงทำงาน': r.hours || '', 'สถานที่': r.loc || '',
+      'พิกัด': r.geo || '', 'ครบ': r.done || ''
     };
   });
   downloadXlsx(rows, `Rattana-PC-Report-${$('repDate').value}`);
