@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana PC Check-in v1.8</title>
+<title>Rattana PC Check-in v1.9</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -481,7 +481,7 @@ body.dark .seg button.on{color:var(--gold-light)}
 <div id="screenRegister" class="page hidden">
   <header>
     <span class="logo-text">RATTANA <span>PC</span></span>
-    <span class="ver-badge">v1.8</span>
+    <span class="ver-badge">v1.9</span>
     <span class="spacer"></span>
     <button class="icon-btn" id="themeBtn2" onclick="toggleTheme()" title="สลับธีม">🌙</button>
     <button class="icon-btn" onclick="logout()" title="ออกจากระบบ">⏻</button>
@@ -579,7 +579,7 @@ body.dark .seg button.on{color:var(--gold-light)}
     <button class="burger" onclick="openDrawer()" title="เมนู" aria-label="เมนู">
       <i></i><i></i><i></i></button>
     <span class="logo-text">RATTANA <span>PC</span></span>
-    <span class="ver-badge">v1.8</span>
+    <span class="ver-badge">v1.9</span>
     <span class="spacer"></span>
     <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
     <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
@@ -838,12 +838,12 @@ body.dark .seg button.on{color:var(--gold-light)}
 
 <script>
 /*═══════════════════════════════════════════════════════════════════════
-  Rattana PC Check-in v1.8
+  Rattana PC Check-in v1.9
   ลงเวลาทำงานพนักงาน PC ด้วยการสแกนใบหน้า + ล็อกพิกัด
   ชีต: เช็คอิน PC 2026
 ═══════════════════════════════════════════════════════════════════════*/
 
-const APP_VERSION = '1.8';
+const APP_VERSION = '1.9';
 
 const CONFIG = {
   /* Apps Script Web App — ต้อง deploy แบบ Execute as: Me / Who has access: Anyone */
@@ -862,7 +862,7 @@ const CONFIG = {
   /* GPS บนมือถือคลาดเคลื่อนได้ 10-50 ม. จึงหักค่าคลาดเคลื่อนออกก่อนตัดสิน
      แต่หักได้ไม่เกินค่านี้ เพื่อไม่ให้ยืดหยุ่นจนล็อกพิกัดไม่มีความหมาย */
   gpsGraceMax   : 50,
-  livenessMs    : 12000,
+  livenessMs    : 8000,
   /* ระยะห่างขั้นต่ำจากการลงเวลาครั้งก่อน (นาที) — ใช้แค่ขึ้นนับถอยหลังให้ดู
      ค่าจริงมาจาก Apps Script ตอน bootstrap และเซิร์ฟเวอร์เป็นคนตัดสินเสมอ */
   minGap        : { 'พัก':120, 'กลับจากพัก':60, 'เลิกงาน':120 }
@@ -1119,10 +1119,24 @@ async function ensureFace(){
     await faceapi.nets.faceLandmark68Net.loadFromUri(CONFIG.modelUrl);
     setSpinnerSub('กำลังโหลดโมเดล 3/3 — ลายเซ็นใบหน้า (ไฟล์ใหญ่ ~6MB)');
     await faceapi.nets.faceRecognitionNet.loadFromUri(CONFIG.modelUrl);
+    setSpinnerSub('กำลังอุ่นเครื่อง...');
+    await warmUpFace();
     faceReady = true;
   } finally { hideSpinner(); }
 }
-const detectorOpts = () => new faceapi.TinyFaceDetectorOptions({ inputSize:320, scoreThreshold:0.5 });
+/* ตอนรอกระพริบตาใช้ภาพเล็กลง (224) เร็วขึ้นมาก พอถึงตอนเก็บใบหน้าจริงค่อยกลับไป 320 */
+const detectorOpts = big => new faceapi.TinyFaceDetectorOptions(
+  { inputSize: big ? 320 : 224, scoreThreshold: 0.5 });
+
+/* ยิงตรวจเปล่า ๆ หนึ่งครั้งตอนโหลดโมเดลเสร็จ ให้ TensorFlow อุ่นเครื่องไว้ก่อน
+   ไม่งั้นเฟรมแรกหลังเปิดกล้องจะค้างไปหนึ่งวินาทีกว่า */
+async function warmUpFace(){
+  try{
+    const c = document.createElement('canvas'); c.width = 224; c.height = 224;
+    const x = c.getContext('2d'); x.fillStyle = '#888'; x.fillRect(0,0,224,224);
+    await faceapi.detectSingleFace(c, detectorOpts(false)).withFaceLandmarks();
+  }catch{}
+}
 
 /* ระยะห่างแบบยุคลิด — ค่ายิ่งน้อยยิ่งเหมือน */
 function euclidean(a,b){
@@ -1142,14 +1156,29 @@ function eyeAspect(eye){
 
 /*───────── camera ─────────*/
 const cam = { stream:null, loop:null, mode:null, resolve:null, reject:null,
-              shots:[], sawClosed:false, blinked:false, deadline:0, busy:false, done:false };
+              shots:[], sawClosed:false, blinked:false, deadline:0, busy:false, done:false,
+              earOpen:0, earSeen:0 };
 
 /* หยุด loop ทันทีที่ได้ผลแล้ว ไม่งั้น tick รอบถัดไปจะยิงซ้ำระหว่างรอ animation ปิด */
-function stopLoop(){ if (cam.loop){ clearInterval(cam.loop); cam.loop=null; } }
+function stopLoop(){ if (cam.loop){ clearTimeout(cam.loop); cam.loop=null; } }
+
+/* วนแบบต่อคิวเอง ไม่ใช่ setInterval — เครื่องแรงก็วิ่งเร็ว เครื่องช้าก็ไม่กองซ้อนกัน
+   ตอนรอกระพริบตาไล่ให้ถี่ที่สุด เพราะการกระพริบใช้เวลาแค่ ~0.1 วิ ถ้าเฟรมห่างจะพลาด */
+function runLoop(){
+  stopLoop();
+  const step = async () => {
+    if (cam.done) return;
+    await tickCam();
+    if (cam.done) return;
+    cam.loop = setTimeout(step, cam.mode === 'enroll' ? 120 : 0);
+  };
+  cam.loop = setTimeout(step, 0);
+}
 
 async function openCam(mode, title, hint){
   await ensureFace();
   cam.mode=mode; cam.shots=[]; cam.sawClosed=false; cam.blinked=false; cam.busy=false; cam.done=false;
+  cam.earOpen=0; cam.earSeen=0;
   cam.deadline = Date.now() + CONFIG.livenessMs;
   $('camTitle').textContent = title;
   $('camHint').textContent  = hint;
@@ -1178,7 +1207,7 @@ async function openCam(mode, title, hint){
 
   return new Promise((resolve,reject)=>{
     cam.resolve=resolve; cam.reject=reject;
-    cam.loop = setInterval(tickCam, 220);
+    runLoop();
   });
 }
 
@@ -1216,7 +1245,11 @@ async function tickCam(){
   if (!v.videoWidth) return;
   cam.busy = true;
   try{
-    const det = await faceapi.detectSingleFace(v, detectorOpts()).withFaceLandmarks().withFaceDescriptor();
+    /* ลายเซ็นใบหน้าเป็นโมเดลที่หนักที่สุด คิดเฉพาะตอนจะใช้จริง
+       ระหว่างรอกระพริบตายังไม่ต้องใช้ ข้ามไปก่อน เฟรมจะเร็วขึ้นหลายเท่า */
+    const needDesc = cam.mode === 'enroll' || cam.blinked === true || cam.blinked === 'ข้าม';
+    const query = faceapi.detectSingleFace(v, detectorOpts(needDesc)).withFaceLandmarks();
+    const det   = needDesc ? await query.withFaceDescriptor() : await query;
     if (!det){ setCamStatus('ไม่พบใบหน้า — จัดหน้าให้อยู่ในกรอบ', 'bad'); return; }
 
     const box   = det.detection.box;
@@ -1247,19 +1280,29 @@ async function tickCam(){
       return;
     }
 
-    /* verify — ต้องกระพริบตาก่อน แล้วค่อยเทียบใบหน้า */
+    /* verify — ต้องกระพริบตาก่อน แล้วค่อยเทียบใบหน้า
+       ใช้ค่าเทียบกับ "ตาเปิดปกติของคนนั้น" ไม่ใช่ตัวเลขตายตัว
+       เพราะคนตาเล็กค่าตาเปิดอาจอยู่แค่ 0.22 ถ้าตั้งเกณฑ์ตายตัวจะไม่มีวันผ่าน */
     const ear = (eyeAspect(det.landmarks.getLeftEye()) + eyeAspect(det.landmarks.getRightEye())) / 2;
     if (cam.blinked !== true && cam.blinked !== 'ข้าม'){
-      if (ear < 0.18) cam.sawClosed = true;
-      else if (cam.sawClosed && ear > 0.25) cam.blinked = true;
+      if (ear > cam.earOpen) cam.earOpen = ear;          /* จำค่าตาเปิดสูงสุดไว้เป็นฐาน */
+      cam.earSeen++;
+
+      if (cam.earSeen >= 3){                             /* มีฐานพอแล้วค่อยเริ่มตัดสิน */
+        if (ear < cam.earOpen * 0.68) cam.sawClosed = true;
+        else if (cam.sawClosed && ear > cam.earOpen * 0.85) cam.blinked = true;
+      }
 
       if (cam.blinked !== true){
         const left = Math.max(0, Math.ceil((cam.deadline - Date.now())/1000));
-        setCamStatus('กระพริบตา 1 ครั้ง เพื่อยืนยันว่าเป็นตัวจริง', 'good');
+        setCamStatus('กระพริบตา 1 ครั้ง', 'good');
         if (Date.now() > cam.deadline) $('camSkipBtn').classList.remove('hidden');
-        else $('camHint').textContent = `ตรวจการกระพริบตา (${left} วิ)`;
+        else $('camHint').textContent = `กำลังตรวจการกระพริบตา (${left} วิ)`;
         return;
       }
+      /* เพิ่งเจอการกระพริบในเฟรมนี้ ยังไม่ได้คิดลายเซ็นใบหน้า รอเฟรมถัดไป */
+      setCamStatus('เจอแล้ว ✓ กำลังยืนยันใบหน้า...', 'good');
+      return;
     }
 
     const dist  = bestMatch(Array.from(det.descriptor), me?.descriptors || []);
