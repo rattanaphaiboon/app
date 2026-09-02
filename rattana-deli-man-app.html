@@ -950,7 +950,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.303';
+const APP_VERSION='3.304';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1534,11 +1534,16 @@ function expandProducts_(arr){
   }));
 }
 let _loadingProducts=null;   // ★ v3.227: promise ที่กำลังโหลดอยู่ (กันโหลดซ้อน)
-async function loadProducts(){
-  if(state.products.length) return;
-  if(_loadingProducts){ try{ await _loadingProducts; }catch(e){} return; }   // ★ v3.227: กันยิงซ้อน (หลายที่เรียกพร้อมกัน = โหลด 3.5MB หลายรอบ)
+/* ★★ v3.304: force=true → ข้ามทั้ง "ของที่โหลดไว้ในหน่วยความจำ" และ "แคช 24 ชม." ดึงชีทสินค้าใหม่
+   เดิมไม่มีทางข้ามเลย 2 ชั้น (state.products.length + IndexedDB) และปุ่ม ↻ ก็ไม่ได้เรียกฟังก์ชันนี้ด้วยซ้ำ
+   → แก้ชื่อ/บาร์โค้ด/ราคาในชีทแล้ว เครื่องคนขับไม่มีทางเห็นของใหม่จนกว่าจะครบ 24 ชม. หรือล้างข้อมูลเว็บ
+   (อาการเดียวกับข้อมูลร้านที่เพิ่งแก้ไปใน v3.300) */
+async function loadProducts(force){
+  if(!force && state.products.length) return;
+  if(_loadingProducts){ try{ await _loadingProducts; }catch(e){} if(!force) return; }   // ★ v3.227: กันยิงซ้อน (หลายที่เรียกพร้อมกัน = โหลด 3.5MB หลายรอบ) · v3.304: force = รอตัวเดิมจบแล้วดึงใหม่ต่อ
   _loadingProducts=(async function(){
   // ★ v3.227: แคชอยู่ใน IndexedDB (24 ชม.) — ไม่ต้องโหลดชีท 3.5MB ใหม่ทุกครั้งที่เข้าหน้ารับคืน/CN
+  if(!force){
   try{
     const c=await idbGet_(PRODUCTS_CACHE_KEY);
     if(c&&c.ts&&Array.isArray(c.data)&&c.data.length&&(Date.now()-c.ts)<CACHE_TTL_LONG){
@@ -1548,6 +1553,7 @@ async function loadProducts(){
   // v2.53: 24h cache — สินค้าเปลี่ยนน้อย (เครื่องที่ IndexedDB ใช้ไม่ได้ ยังใช้ localStorage เหมือนเดิม)
   const cached=getCachedSheet(PRODUCTS_CACHE_KEY,CACHE_TTL_LONG);
   if(cached){ state.products=expandProducts_(cached); afterProductsLoaded_(); return; }
+  }
   try{
     // ★ v3.209: ชีทสินค้ามี 189 คอลัมน์ (12.14 MB / โหลด 63 วิ) แต่ใช้จริงแค่ 22 คอลัมน์
     //   → ดึงเฉพาะที่ใช้ = 2.55 MB / 12 วิ (เร็วขึ้น 5 เท่า) และเล็กพอที่จะแคชได้ 24 ชม.
@@ -5070,14 +5076,16 @@ const NOT_RICE=['แป้ง','ข้าวเกรียบ','ข้าวโ
 const CATTYPE_CACHE_KEY='cattype_v3295';
 const CAT_WANT={'ข้าว':'rice','น้ำตาล':'sugar','บุหรี่':'cig'};
 let _catMap=null, _catLoading=null;
-async function ensureCatMap_(){
-  if(_catMap) return _catMap;
-  if(_catLoading) return _catLoading;
+async function ensureCatMap_(force){   // ★ v3.304: force=true → ข้ามแคช 7 วัน (ปุ่ม ↻ ส่งมา) · หมวดสินค้าแก้ในชีทแล้วต้องเห็นได้
+  if(!force && _catMap) return _catMap;
+  if(!force && _catLoading) return _catLoading;
   _catLoading=(async()=>{
+    if(!force){
     try{
       const c=await idbGet_(CATTYPE_CACHE_KEY);
       if(c&&c.ts&&c.map&&(Date.now()-c.ts)<7*86400000){ _catMap=c.map; return _catMap; }
     }catch(e){}
+    }
     try{
       const rows=await fetchSheet(CFG.productsSheetId,CFG.productsSheetName,{tq:'select A,BB'});
       const m={};
@@ -13274,7 +13282,12 @@ async function refreshData(){
   showSpinner('อัพเดทข้อมูล...');
   try{
     if(outboxCount()){ await flushOutbox(); }               // v3.28: ส่ง outbox ก่อน กันดึงชีทเก่าทับ
-    await Promise.all([loadUsers(),loadVehicles(),loadCustomers(true),loadChoices(),loadSalesStaff()]);   // ★ v3.300: true = ข้ามแคชลูกค้า (พิกัด/เบอร์/เครดิต ที่เพิ่งแก้ในชีทถึงจะมา)
+    /* ★ v3.300: ลูกค้า force=true (พิกัด/เบอร์/เครดิต ที่เพิ่งแก้ในชีทถึงจะมา)
+       ★ v3.304: สินค้า + แมปหมวด CAT TYPE ก็ force ด้วย — แต่ "เฉพาะเครื่องที่เคยโหลดไว้แล้ว"
+         เครื่องที่ยังไม่เคยเปิดหน้ารับคืน/CN จะไม่มีแคตตาล็อกอยู่ กดรีเฟรชแล้วไม่ต้องไปดึง 2.5MB ที่ยังไม่ได้ใช้ */
+    await Promise.all([loadUsers(),loadVehicles(),loadCustomers(true),loadChoices(),loadSalesStaff(),
+      (state.products&&state.products.length)?loadProducts(true).catch(()=>{}):Promise.resolve(),
+      _catMap?ensureCatMap_(true).catch(()=>{}):Promise.resolve()]);
     if(!outboxCount()) await syncJobsFromSheet({force:true}).catch(()=>{});   // v2.53: กด refresh → บังคับ fetch ใหม่ (ข้ามถ้ายังค้าง)
     showToast('อัพเดทข้อมูลแล้ว ✓','success');
     renderCurrent();
