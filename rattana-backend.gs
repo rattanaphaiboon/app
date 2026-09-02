@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v8.7 — getTimeIssues() — ข้อมูลลงเวลาที่ต้องตรวจของลูกทีม (คู่แอป v12.59 · ★ ต้อง Deploy)
+ *         แจ้งเป็นการ์ดในแอปให้หัวหน้า แทนส่งอีเมล — เตือนคนที่แก้ได้ ข้างปุ่มที่ใช้แก้
  * v8.6 — getPTTBuyers อ่านคอลัมน์สถานะผิด (K แทน J) → พนักงาน PTT 4 คนหายจากลิสต์ชื่อผู้ซื้อ
  * v8.5 — getAmazonOrders() — ประวัติที่ "ผู้กด" คีย์ไว้ ล่าสุดบนสุด (คู่แอป v12.55 · ต้อง Deploy)
  * v8.4 — auditInOutPairs บอกเลขแถวของเคสที่ต้องแก้เอง (หาแถวในชีทได้ทันที)
@@ -316,7 +318,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.6', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.7', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -410,6 +412,7 @@ function handle(e, method) {
       case 'submitFoodOrder':      return jsonOut(actionSubmitFoodOrder(p, user));
       case 'getMyFoodOrders':      return jsonOut(actionGetMyFoodOrders(p, user));
       case 'getPendingAll':        return jsonOut(getPendingAll(p, user));
+      case 'getTimeIssues':        return jsonOut(getTimeIssues(p, user));   // v8.7: ข้อมูลลงเวลาที่ต้องตรวจ (การ์ดเตือนหัวหน้า)
       case 'approveAny':           return jsonOut(approveAny(p, user));
       case 'submitWelfare':        return jsonOut(actionSubmitWelfare(p, user));
       case 'getMyWelfare':         return jsonOut(actionGetMyWelfare(p, user));
@@ -3893,6 +3896,84 @@ function setupApproverOverride() {
   Logger.log(msg);
   try { ss.toast(msg, 'ผู้อนุมัติเฉพาะ', 8); } catch (e) {}
   return msg;
+}
+
+/* ── v8.7: ข้อมูลลงเวลาที่ต้องตรวจของ "ลูกทีมเรา" ย้อนหลัง N วัน ───────────────
+   surat เคาะ (2/9): แจ้งในแอปให้หัวหน้าเห็น แทนการส่งอีเมล — เตือนคนที่แก้ได้ ข้างปุ่มที่ใช้แก้
+   ขอบเขตทีม = กติกาเดียวกับคิวอนุมัติ (ชีท Users คอลัมน์ N + แท็บผู้อนุมัติเฉพาะ) + ตัวเราเอง
+   ไม่นับ "วันนี้" เพราะยังทำงานไม่จบ ทุกคนจะขึ้นว่าไม่มีเวลาออกหมด */
+function getTimeIssues(p, user) {
+  try {
+    const supId = String(p.supervisorId || (user && user.empId) || '').trim();
+    if (!supId) return { ok: true, items: [] };
+
+    const team = new Set([supId]);
+    let myName = '';
+    try {
+      const uSh = SpreadsheetApp.openById(CFG.usersSheetId).getSheetByName(CFG.usersTab);
+      if (uSh) {
+        const u = uSh.getDataRange().getValues();
+        for (let i = 1; i < u.length; i++) if (String(u[i][2]).trim() === supId) { myName = String(u[i][4]).trim(); break; }
+        if (myName) for (let i = 1; i < u.length; i++) if (String(u[i][13]).trim() === myName) team.add(String(u[i][2]).trim());
+      }
+    } catch (_) {}
+    if (!myName) myName = cleanName_(String((user && user.name) || ''));
+    const ovr = approverOverrideMap_();
+    Object.keys(ovr).forEach(id => { if (normNameTh_(ovr[id]) === normNameTh_(myName)) team.add(String(id).trim()); });
+    if (team.size <= 1) return { ok: true, items: [] };   // ไม่มีลูกทีม = ไม่ต้องเตือน
+
+    const tz = 'Asia/Bangkok';
+    const days = Math.min(30, parseInt(p.days, 10) || 7);
+    const sh = getTab(T.LOG);
+    if (!sh || sh.getLastRow() < 2) return { ok: true, items: [] };
+    const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    const since = new Date(Date.now() - days * 86400000);
+    const last = sh.getLastRow();
+    const from = Math.max(2, last - 2999);
+    const d = sh.getRange(from, 1, last - from + 1, 6).getValues();
+
+    const byDay = {};
+    d.forEach(r => {
+      const ts = (r[0] instanceof Date) ? r[0] : new Date(r[0]);
+      if (!ts || isNaN(ts.getTime()) || ts < since) return;
+      const id = String(r[1] || '').trim();
+      if (!team.has(id)) return;
+      const day = Utilities.formatDate(ts, tz, 'yyyy-MM-dd');
+      if (day >= today) return;                       // วันนี้ยังไม่จบ
+      const k = id + '|' + day;
+      if (!byDay[k]) byDay[k] = { empId: id, name: String(r[2] || '').trim(), day: day, list: [] };
+      byDay[k].list.push({ ms: ts.getTime(), type: String(r[5] || '').trim().toLowerCase() === 'out' ? 'out' : 'in',
+                           time: Utilities.formatDate(ts, tz, 'HH:mm') });
+    });
+
+    const items = [];
+    Object.keys(byDay).forEach(k => {
+      const g = byDay[k];
+      const L = g.list.sort((a, b) => a.ms - b.ms);
+      // สแกนชนิดเดียวกันติดกันภายใน 60 นาที = สแกนซ้ำ (คนละเรื่องกับลืมสแกน)
+      let dup = null;
+      for (let i = 1; i < L.length; i++) {
+        if (L[i].type === L[i - 1].type && (L[i].ms - L[i - 1].ms) <= 3600000) { dup = [L[i - 1], L[i]]; break; }
+      }
+      let alt = L[0].type === 'in';
+      for (let i = 1; i < L.length && alt; i++) if (L[i].type === L[i - 1].type) alt = false;
+      if (!dup && alt && L.length % 2 === 0) return;   // เข้า-ออก ครบคู่ = ปกติ
+
+      let kind, label, need = '';
+      if (dup)                            { kind = 'dup';    label = 'สแกนซ้ำ ' + (dup[0].type === 'in' ? 'เข้า' : 'ออก') + ' ' + dup[0].time + ' และ ' + dup[1].time; }
+      else if (L[0].type === 'out')       { kind = 'no_in';  label = 'ไม่มีเวลาเข้า (มีแต่ออก ' + L[0].time + ')'; need = 'in'; }
+      else if (alt && L.length % 2 === 1) { kind = 'no_out'; label = 'เข้า ' + L[0].time + ' แล้วไม่มีเวลาออก'; need = 'out'; }
+      else                                { kind = 'mixed';  label = 'เข้า-ออก ไม่เรียงกัน'; }
+
+      const dp = g.day.split('-');
+      items.push({ empId: g.empId, name: g.name, iso: g.day, date: dp[2] + '/' + dp[1] + '/' + dp[0],
+                   kind: kind, label: label, need: need,
+                   scans: L.map(x => ({ type: x.type, time: x.time })) });
+    });
+
+    items.sort((a, b) => (a.iso < b.iso ? 1 : a.iso > b.iso ? -1 : 0));   // ล่าสุดบนสุด
+    return { ok: true, items: items.slice(0, 40), total: items.length, days: days };
+  } catch (e) { return { ok: false, error: e.message }; }
 }
 
 function getPendingAll(p, user) {
