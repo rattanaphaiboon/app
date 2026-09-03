@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v8.8 — getTimeIssues: หัวหน้า PTT เต็มระบบไม่มีลูกน้องในชีท Users → ทีมว่าง การ์ดไม่ขึ้น
+ *         แก้: ดึงทีมจากทะเบียน PTT ให้ด้วย + previewTimeIssues() ไว้ตรวจจาก editor
  * v8.7 — getTimeIssues() — ข้อมูลลงเวลาที่ต้องตรวจของลูกทีม (คู่แอป v12.59 · ★ ต้อง Deploy)
  *         แจ้งเป็นการ์ดในแอปให้หัวหน้า แทนส่งอีเมล — เตือนคนที่แก้ได้ ข้างปุ่มที่ใช้แก้
  * v8.6 — getPTTBuyers อ่านคอลัมน์สถานะผิด (K แทน J) → พนักงาน PTT 4 คนหายจากลิสต์ชื่อผู้ซื้อ
@@ -318,7 +320,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.7', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.8', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3920,6 +3922,11 @@ function getTimeIssues(p, user) {
     if (!myName) myName = cleanName_(String((user && user.name) || ''));
     const ovr = approverOverrideMap_();
     Object.keys(ovr).forEach(id => { if (normNameTh_(ovr[id]) === normNameTh_(myName)) team.add(String(id).trim()); });
+    // v8.8: หัวหน้า PTT เต็มระบบ (เช่น 11202 จิรวรรณ) ไม่มีลูกน้องในชีท Users เลย — ทีมจริงอยู่ทะเบียน PTT
+    //       เดิมจึงได้ team.size = 1 แล้วคืนค่าว่าง = การ์ดไม่ขึ้นทั้งที่มีข้อมูลต้องตรวจ (บั๊กเดียวกับคิวอนุมัติ v6.1)
+    if (PTT_ALL_SUPERVISORS.indexOf(supId) >= 0) {
+      try { Object.keys(pttMap_()).forEach(id => team.add(String(id).trim())); } catch (_) {}
+    }
     if (team.size <= 1) return { ok: true, items: [] };   // ไม่มีลูกทีม = ไม่ต้องเตือน
 
     const tz = 'Asia/Bangkok';
@@ -5083,5 +5090,27 @@ function inOutPairs_(daysBack, apply) {
   const msg = L.join('\n');
   Logger.log(msg);
   try { getSS().toast((apply ? 'ซ่อม ' + fixes.length + ' แถว' : 'ซ่อมได้ ' + fixes.length + ' · ต้องดูเอง ' + review.length) + ' — ดูผลใน "บันทึกการดำเนินการ"', 'คู่ เข้า-ออก', 12); } catch (e) {}
+  return msg;
+}
+
+/* v8.8: ดูว่าการ์ด "ข้อมูลลงเวลาต้องตรวจ" ของคนนี้จะได้อะไรบ้าง (รันจาก editor · อ่านอย่างเดียว)
+   ใช้ตอบว่า "การ์ดไม่ขึ้นเพราะไม่มีลูกทีม หรือเพราะไม่มีปัญหาจริง"
+   ► เปลี่ยนรหัสในบรรทัดล่างเป็นคนที่อยากตรวจ แล้วกด Run */
+const PREVIEW_EMP_ID = '11202';   // จิรวรรณ พวงแก้ว
+function previewTimeIssues() {
+  const id = String(PREVIEW_EMP_ID).trim();
+  const u = findUserByEmpId(id) || (pttMap_()[id] ? { empId:id, name:pttMap_()[id].name, role:5 } : null);
+  const L = ['── ทดลองดึงการ์ด "ข้อมูลลงเวลาต้องตรวจ" ของ ' + id + ' ' + ((u && u.name) || '(ไม่พบชื่อ)') + ' ──'];
+  [7, 30].forEach(days => {
+    const res = getTimeIssues({ supervisorId: id, days: days }, u || { empId:id, name:'' });
+    if (!res.ok) { L.push('⚠ ' + days + ' วัน: ' + res.error); return; }
+    const items = res.items || [];
+    L.push('');
+    L.push('▸ ย้อนหลัง ' + days + ' วัน — พบ ' + (res.total || 0) + ' รายการ');
+    items.slice(0, 15).forEach(it => L.push('   ' + it.date + ' · ' + it.empId + ' ' + it.name + ' · ' + it.label));
+    if (!items.length) L.push('   (ไม่มี — ลูกทีมสแกนครบทุกคน)');
+  });
+  const msg = L.join('\n');
+  Logger.log(msg);
   return msg;
 }
