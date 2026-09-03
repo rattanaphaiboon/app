@@ -950,7 +950,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.308';
+const APP_VERSION='3.309';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -1815,9 +1815,13 @@ function allowedDeliverDates(){
    15 วิสั้นพอที่กด ↻ ทีหลังยังได้ของสด (auto-refresh 180 วิอยู่แล้ว) */
 let _availCache=null;
 async function loadAvailableJobs(fresh){
-  if(_availCache&&(Date.now()-_availCache.ts)<15000) return _availCache.data;
+  /* ★★ v3.309: fresh=true ต้องข้าม memo 15 วิ ด้วย — เดิมเช็ค memo ก่อน fresh
+     ทำให้กด "Sync ใบคุม" ในแอปแล้วอ่านของเก่าซ้ำ (ใบคุมใหม่ไม่โผล่ ต้องไปกดในชีทแทน)
+     และ `_cb` อย่างเดียว bust gviz ไม่ได้จริง — ต้องเปลี่ยน "รูปคิวรี่" ถึงได้ผลใหม่ (พิสูจน์แล้ว 3 ก.ย.) */
+  if(!fresh&&_availCache&&(Date.now()-_availCache.ts)<15000) return _availCache.data;
   try{
-    const rows=await fetchSheet(CFG.jobsSheetId,CFG.jobsSheetName,fresh?{fresh:true}:undefined);   // v3.180: manual refresh → cache-bust (กัน gviz cache ~1-2 นาที ค้างใบคุมเก่า)
+    const _opt=fresh?{fresh:true,tq:'select * limit '+(90000+Math.floor(Math.random()*9999))}:undefined;
+    const rows=await fetchSheet(CFG.jobsSheetId,CFG.jobsSheetName,_opt);   // v3.180: manual refresh → cache-bust (กัน gviz cache ~1-2 นาที ค้างใบคุมเก่า)
     if(!rows||!rows.length) return [];
     // map ลูกค้าสำหรับ enrich
     const custByCode={};
@@ -8987,8 +8991,19 @@ async function manualSyncJadRot(){
     const r=await postSyncGAS_({action:'sync_all'},90000);
     if(r.ok){
       const jr=(r.resp&&r.resp.jadRot)||0;
-      showToast(`✓ Sync ใบคุม สำเร็จ · ${jr} แถว`,'success');
-      try{ await syncJobsFromSheet(); }catch(e){}
+      showToast(`✓ Sync ใบคุม สำเร็จ · ${jr} แถว — กำลังดึงเข้าแอป…`,'success');
+      /* ★ v3.309: เดิมเรียก syncJobsFromSheet() เฉยๆ = ติด throttle 30 วิ + gviz ยังคืนของเก่าอีก 1-2 นาที
+         → ใบคุมใหม่ไม่โผล่ ทั้งที่ชีทลงแล้ว · ตอนนี้บังคับอ่านใหม่ + ลองซ้ำจนกว่าจำนวนงานว่างจะเปลี่ยน */
+      const _cnt=()=>(state.jobs||[]).filter(j=>j&&j.status==='available').length;
+      const _before=_cnt();
+      for(let _i=0;_i<4;_i++){
+        _availCache=null;
+        try{ await syncJobsFromSheet({force:true}); }catch(e){}
+        if(_cnt()!==_before) break;
+        if(_i<3) await new Promise(r=>setTimeout(r,6000));
+      }
+      const _added=_cnt()-_before;
+      showToast(_added>0?`ใบคุมใหม่เข้าแอปแล้ว ${_added} ใบ ✓`:'ชีทอัปเดตแล้ว — ถ้ายังไม่เห็นใบใหม่ กด ↻ อีกครั้งในอีกสักครู่','info');
       // v3.59: รายละเอียดดึงสดจาก DS_DC อยู่แล้ว — แค่ล้างของที่ดึงไว้ ครั้งถัดไปจะดึงใหม่
       try{ resetBillDetails_(); }catch(e){}
     } else {
