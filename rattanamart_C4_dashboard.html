@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana รายงานสรุปยอดขายตามหมวดหมู่ v3.38</title>
+<title>Rattana รายงานสรุปยอดขายตามหมวดหมู่ v3.39</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
 <style>
@@ -108,7 +108,7 @@ body.dark .errbox code{background:rgba(255,255,255,.1)}
 <header>
   <div style="flex:1;min-width:0">
     <div class="logo-text">RATTANA <span>MART</span></div>
-    <div class="h-sub">Rattana รายงานสรุปยอดขายตามหมวดหมู่ · v3.38</div>
+    <div class="h-sub">Rattana รายงานสรุปยอดขายตามหมวดหมู่ · v3.39</div>
   </div>
   <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">&#10227;</button>
   <button class="icon-btn" onclick="document.body.classList.toggle('dark')" title="สลับธีม">&#9686;</button>
@@ -655,7 +655,7 @@ async function switchTab(v){
 }
 
 /* ================= เลือกดูข้อมูลย้อนหลังรายเดือน (BigQuery ผ่าน Apps Script) ================= */
-const BQ_URL='https://script.google.com/macros/s/AKfycbyW3kR8DCSJlNuk9nj9_PwkZFRxiOrECi6jbdfk55cR4ttqrkA8OXoLfk_yEponi1uvuw/exec';
+const BQ_URL='https://script.google.com/macros/s/AKfycbzopWIO-Kf7QOjFwY8Jfh7mCBMOai1ZMm33qgEnH1SML-XfbCeaes4dcEm3HaJXtY9X/exec';
 const BQ_TABLE='`project-test-471907.Testimport.POS`';
 const TH_MON=['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
 let MONTHS=[], SEL=null, PAST={}, MBOOT=false;
@@ -666,6 +666,13 @@ async function bq(sql){
   const j=await r.json();
   if(j.error) throw new Error(j.error);
   return j.data||[];
+}
+/* อ่านแคชรายเดือนที่ Apps Script เตรียมไว้ (เร็วกว่ายิง BigQuery สด) */
+async function bqGet(q){
+  const r=await fetch(BQ_URL+'?'+q,{cache:'no-store'});
+  const j=await r.json();
+  if(j.error) throw new Error(j.error);
+  return j;
 }
 const monLabel=ym=>{ const [y,m]=ym.split('-').map(Number); return `${TH_MON[m-1]} ${y+543}`; };
 const curMonth=()=>{ const ds=ROWS.map(r=>r.dt).filter(Boolean).sort((a,b)=>a-b);
@@ -678,10 +685,16 @@ async function buildMonths(){
   if(!SEL) SEL=now;
   renderMonthChips(true);
   let list=[];
-  try{
-    list=(await bq(`SELECT MONTH FROM ${BQ_TABLE} GROUP BY 1 ORDER BY 1 DESC`))
-      .map(o=>String(o.MONTH).replace('/','-'));
-  }catch(e){ console.warn('BQ months',e); }
+  try{                                      /* 1) รายชื่อเดือนจากแคช Drive */
+    list=(await bqGet('list=1')).months||[];
+  }catch(e){ console.warn('cache list',e); }
+  if(!list.length){                         /* 2) ไม่มีแคช -> ถาม BigQuery สด */
+    try{
+      list=(await bq(`SELECT MONTH FROM ${BQ_TABLE} GROUP BY 1 ORDER BY 1 DESC`))
+        .map(o=>String(o.MONTH).replace('/','-'));
+    }catch(e){ console.warn('BQ months',e); }
+  }
+  list.sort((a,b)=>b.localeCompare(a));
   MONTHS=[{ym:now,live:true}, ...list.filter(x=>x!==now).map(ym=>({ym,live:false}))];
   renderMonthChips();
 }
@@ -709,7 +722,14 @@ async function loadMonth(ym){
   const ck='bqm_'+ym;
   try{ const c=JSON.parse(localStorage.getItem(ck)||'null');
        if(c && Date.now()-c.ts < 12*3600*1000){ PAST[ym]=fromBQ(c.rows); return PAST[ym]; } }catch(e){}
-  const m=ym.replace('-','/');
+  try{                                      /* 1) แคชที่ตัวตั้งเวลาเตรียมไว้ (วันที่ 3 ของเดือน 08:00) */
+    const j=await bqGet('agg='+ym);
+    if(j.data&&j.data.length){
+      try{ localStorage.setItem(ck,JSON.stringify({ts:Date.now(),rows:j.data})); }catch(e){}
+      PAST[ym]=fromBQ(j.data); return PAST[ym];
+    }
+  }catch(e){ console.warn('cache agg',ym,e.message); }
+  const m=ym.replace('-','/');              /* 2) ไม่มีแคช -> ยิง BigQuery สด */
   const rows=await bq(`SELECT a.CAT_GROUP, a.PRODUCT_NAME, a.UNIT, a.TOTAL, a.SALES_QTY, b.BILLS
     FROM (SELECT CAT_GROUP, PRODUCT_NAME, UNIT, SUM(TOTAL) AS TOTAL, SUM(SALES_QTY) AS SALES_QTY
           FROM ${BQ_TABLE} WHERE MONTH='${m}' GROUP BY 1,2,3) a
