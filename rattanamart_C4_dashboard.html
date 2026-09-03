@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana รายงานสรุปยอดขายตามหมวดหมู่ v3.49</title>
+<title>Rattana รายงานสรุปยอดขายตามหมวดหมู่ v3.50</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
 <style>
@@ -112,7 +112,7 @@ body.dark .errbox code{background:rgba(255,255,255,.1)}
 <header>
   <div style="flex:1;min-width:0">
     <div class="logo-text">RATTANA <span>MART</span></div>
-    <div class="h-sub">Rattana รายงานสรุปยอดขายตามหมวดหมู่ · v3.49</div>
+    <div class="h-sub">Rattana รายงานสรุปยอดขายตามหมวดหมู่ · v3.50</div>
   </div>
   <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">&#10227;</button>
   <button class="icon-btn" onclick="document.body.classList.toggle('dark')" title="สลับธีม">&#9686;</button>
@@ -789,19 +789,33 @@ function classify(avg,sell){
   const d=(sell-avg)/avg*100;
   return {k: d>50?'up2' : d>15?'up1' : d>=-15?'flat' : d>=-50?'down1':'down2', d};
 }
+/* "3.14" + 20 ชิ้น/ลัง  ->  {cs:3, ea:14, pcs:74}   (ทศนิยมคือจำนวนชิ้น ไม่ใช่เศษส่วน) */
+function parseStock(raw, perCs){
+  const txt=String(raw==null?'':raw).trim().replace(/,/g,'');
+  if(!txt) return {cs:0,ea:0,pcs:0,perCs:perCs,known:!!perCs};
+  const m=/^(-?)(\d*)(?:\.(\d+))?$/.exec(txt);
+  if(!m) return {cs:0,ea:0,pcs:num(txt),perCs:perCs,known:false};
+  const sign=m[1]?-1:1, cs=+(m[2]||0), ea=+(m[3]||0);   /* "1.10" = 10 ชิ้น (ห้ามตัดศูนย์ท้าย) */
+  const known=perCs>0;
+  if(perCs<=1) return {cs:0, ea:sign*(cs+ea), perCs:perCs||1, known:true, pcs:sign*(cs+ea)};  /* ขายเป็นชิ้นล้วน */
+  return {cs:sign*cs, ea:sign*ea, perCs:perCs, known:known,
+          pcs: known ? sign*(cs*perCs+ea) : sign*ea};
+}
 async function loadTrend(){
-  const ck='rsc_trend_v2', c=getCached(ck);   /* v2: เพิ่มคอลัมน์ STOCK C4 */
+  const ck='rsc_trend_v3', c=getCached(ck);   /* v3: STOCK C4 แบบ ลัง.ชิ้น + QTY CS */
   const rows = c || await fetchCsv(PDDT_ID,PDDT_GID,'PDDT');
   if(!c) setCache(ck,rows);
   TRENDS = rows.filter(r=>(r['IB C4']||'').trim()).map(r=>{
     const avg=num(r['AVERAGE 60D_C4']), sell=num(r['SELL 7D C4']);
     const m=/[-\w]{25,}/.exec(r['SKU_USAGE']||''); const img=m?m[0]:'';
     const day7=sell/7;                       /* เฉลี่ยต่อวันของ 7 วันล่าสุด */
-    const stock=num(r['STOCK C4']);          /* สต๊อกคงเหลือสาขา C4 */
+    /* STOCK C4 เขียนแบบ "ลัง.ชิ้น" เช่น 3.14 = 3 ลัง 14 ชิ้น (ต้องคูณจำนวนชิ้นต่อลังจาก QTY CS) */
+    const st=parseStock(r['STOCK C4'], num(r['QTY CS']));
     const base=day7||avg;                    /* ใช้ยอดขาย/วัน ประเมินว่าสต๊อกพอขายกี่วัน */
     const t=classify(avg,day7);
-    return {n:r['PRODUCT NAME']||'', cat:(r['CAT GROUP']||'').trim(), avg, sell, day7, img, stock,
-            days: base>0 ? stock/base : (stock>0?999:0),
+    return {n:r['PRODUCT NAME']||'', cat:(r['CAT GROUP']||'').trim(), avg, sell, day7, img,
+            cs:st.cs, ea:st.ea, perCs:st.perCs, stock:st.pcs, known:st.known,
+            days: (st.known&&base>0) ? st.pcs/base : (st.known&&st.pcs>0?999:0),
             k:t.k, d:t.d, diff:day7-avg};
   }).filter(o=>o.n);
   IMG={}; TRENDS.forEach(o=>{ if(o.img) IMG[o.n]=o.img; });   /* แผนที่ ชื่อสินค้า -> รูป */
@@ -849,10 +863,14 @@ function renderTrend(){
         <div><div class="tc-lbl">เฉลี่ย/วัน · 7 วันล่าสุด</div><div class="tc-val" style="color:${t.c}">${o.day7.toFixed(1)} <small style="font-size:11px;font-weight:400;color:var(--muted)">ชิ้น</small></div></div>
       </div>
       <div class="tc-stk">
-        <span class="txt-muted" style="white-space:nowrap">สต๊อกคงเหลือ</span>
-        <span><b style="color:${o.stock<=0?'var(--danger)':'var(--text)'}">${fmtU(o.stock)} <small style="font-size:11px;font-weight:400;color:var(--muted)">ชิ้น</small></b>
-        <span class="cov ${o.stock<=0?'bad':o.days<3?'bad':o.days<7?'warn':o.days>=999?'none':'ok'}">${
-          o.stock<=0?'หมด':o.days>=999?'ไม่มียอดขาย':'พอขาย '+o.days.toFixed(o.days<10?1:0)+' วัน'}</span></span>
+        <span style="min-width:0">
+          <span class="txt-muted" style="white-space:nowrap">สต๊อกคงเหลือ</span>
+          <b style="margin-left:6px;color:${o.stock<=0?'var(--danger)':'var(--text)'}">${
+            o.stock<0?'-':''}${o.cs?fmtU(Math.abs(o.cs))+' ลัง ':''}${fmtU(Math.abs(o.ea))} ชิ้น</b>
+          ${o.known&&o.cs?`<small class="txt-muted" style="font-size:10.5px"> = ${fmtU(o.stock)} ชิ้น</small>`:''}
+        </span>
+        <span class="cov ${o.stock<=0?'bad':!o.known?'none':o.days<3?'bad':o.days<7?'warn':o.days>=999?'none':'ok'}">${
+          o.stock<=0?'หมด':!o.known?'ไม่รู้ชิ้น/ลัง':o.days>=999?'ไม่มียอดขาย':'พอขาย '+o.days.toFixed(o.days<10?1:0)+' วัน'}</span>
       </div>
       <div class="tc-res" style="color:${t.c}">${t.ico} ${t.l} ${pct}
         <span class="sm">(${o.diff>0?'+':''}${o.diff.toFixed(1)} ชิ้น/วัน)</span></div>
@@ -864,7 +882,8 @@ function exportTrend(){
   exportExcel((window._trend||[]).map(o=>({'สินค้า':o.n,'หมวดหมู่':o.cat,
     'AVERAGE 60D (ชิ้น/วัน)':+o.avg.toFixed(2),'7 วันล่าสุด (ชิ้น/วัน)':+o.day7.toFixed(2),
     'SELL 7D รวม (ชิ้น)':o.sell,'ส่วนต่าง (ชิ้น/วัน)':+o.diff.toFixed(2),
-    'STOCK C4 (ชิ้น)':o.stock,'พอขาย (วัน)':o.days>=999?'':+o.days.toFixed(1),
+    'STOCK C4 (ลัง)':o.cs,'STOCK C4 (ชิ้น)':o.ea,'ชิ้น/ลัง':o.perCs||'',
+    'สต๊อกรวม (ชิ้น)':o.known?o.stock:'','พอขาย (วัน)':(o.known&&o.days<999)?+o.days.toFixed(1):'',
     '% เทียบ AVERAGE':o.k==='new'?'ใหม่':(o.k==='zero'?'-':+o.d.toFixed(1)),
     'แนวโน้ม':TMAP[o.k].l})),'แนวโน้มขาย7วัน');
 }
