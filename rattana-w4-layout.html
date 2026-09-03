@@ -315,6 +315,7 @@ body.fs-on{overflow:hidden}
 .bchip.ghost{background:var(--line2); color:var(--faint)}
 tr.cont td{border-top:0}
 tr.cont td.loc{border-top:0}
+.ver{font-size:12px; font-weight:600; color:var(--muted); background:var(--card2); border:1px solid var(--line); border-radius:4px; padding:2px 7px; vertical-align:middle; margin-left:6px; white-space:nowrap}
 
 #boot{position:fixed; inset:0; z-index:3000; background:var(--paper); display:flex;
   flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:24px; text-align:center}
@@ -498,17 +499,21 @@ function buildModel(pddtText, ownerText, ctrlText){
   recs.forEach(function(x){
     x.boughtFrom=Object.keys(bv[x.brand]).filter(function(v){return notsup[v];}).sort();
     var h=home[x.brand];
-    if(notsup[h] && ctv[x.ct]) h=top(ctv[x.ct]);
+    /* แบรนด์ที่ไม่มีซัพจริงเลย (ซื้อจากแหล่ง "ไม่ใช่ซัพ" อย่างเดียว เช่น สปาย/ฟูลมูน)
+       -> ฝากไว้ "ท้ายบล็อก" ของซัพที่หมวดเดียวกัน ไม่ใช่แทรกกลางบล็อกเขา          */
+    x.orph = notsup[h] ? 1 : 0;
+    if(x.orph && ctv[x.ct]) h=top(ctv[x.ct]);
     x.home=h;
   });
   /* ---- รวมเป็นแบรนด์ ---- */
   var brands={};
   recs.forEach(function(x){
-    var d=brands[x.brand]||(brands[x.brand]={cs:0,pal:0,stock:0,sku:0,ctm:{},vendor:'',home:'',
-      boughtFrom:[],sizes:[],floorSizes:[],cageSizes:[],rackSizes:[],
+    var d=brands[x.brand]||(brands[x.brand]={cs:0,pal:0,stock:0,sku:0,ctm:{},grpm:{},grp:'',orph:0,
+      vendor:'',home:'',boughtFrom:[],sizes:[],floorSizes:[],cageSizes:[],rackSizes:[],
       floorCs:0,floorPal:0,cageCs:0,place:''});
-    d.sku++; d.vendor=x.vendor; d.home=x.home; d.boughtFrom=x.boughtFrom;
+    d.sku++; d.vendor=x.vendor; d.home=x.home; d.boughtFrom=x.boughtFrom; d.orph=x.orph;
     d.ctm[x.ct]=(d.ctm[x.ct]||0)+Math.max(x.cs,x.stock*0.001);
+    d.grpm[x.group||x.ct]=(d.grpm[x.group||x.ct]||0)+Math.max(x.cs,x.stock*0.001);
     if(d.sizes.indexOf(x.size)<0) d.sizes.push(x.size);
     if(x.place==='พื้น'){ d.floorSizes.push(x.size); d.floorCs+=x.cs; d.floorPal+=x.pal; }
     else if(x.place==='กรง'){ d.cageSizes.push(x.size); d.cageCs+=x.cs; }
@@ -519,6 +524,7 @@ function buildModel(pddtText, ownerText, ctrlText){
   Object.keys(brands).forEach(function(b){
     var d=brands[b];
     d.ct=top(d.ctm)||''; delete d.ctm;
+    d.grp=top(d.grpm)||d.ct||''; delete d.grpm;
     d.place = d.rackSizes.length ? 'แร็ค' : (d.floorSizes.length ? 'พื้น' : 'กรง');
     if(d.place==='พื้น'){ d.cs=d.floorCs; d.pal=d.floorPal; }
     if(d.place==='กรง'){ d.cs=d.cageCs; }
@@ -532,8 +538,8 @@ function buildModel(pddtText, ownerText, ctrlText){
   });
   Object.keys(brands).forEach(function(b){
     var d=brands[b];
-    brands[b].q=(b+' '+(qtext[b]||[]).join(' ')+' '+(d.home||'')+' '+(d.vendor||'')+' '+(d.ct||''))
-      .toLowerCase();
+    brands[b].q=(b+' '+(qtext[b]||[]).join(' ')+' '+(d.home||'')+' '+(d.vendor||'')+' '+
+      (d.boughtFrom||[]).join(' ')+' '+(d.ct||'')+' '+(d.grp||'')).toLowerCase();
   });
 
   /* ---- ซัพ ---- */
@@ -593,9 +599,37 @@ function buildModel(pddtText, ownerText, ctrlText){
   supKeys.forEach(function(v){
     var s=sup[v];
     if(s.brands.length){
+      /* ในซัพเดียวกัน จัดเป็นบล็อกตาม CAT GROUP: เหล้าขาวอยู่ด้วยกัน เหล้าสีอยู่ด้วยกัน
+         ไม่ใช่เรียงตามยอดล้วนจนขาว-สี-ขาว สลับกัน (CAT TYPE หยาบไป ทุกตัวเป็น "เครื่องดื่มแอลกอฮอล์")
+         บล็อกของซัพเองมาก่อนเรียงตามยอด · แบรนด์ที่ฝากมา (ไม่มีซัพจริง) ต่อท้าย        */
+      var gsum={};
+      s.brands.forEach(function(b0){ var d0=brands[b0];
+        var k0=(d0.orph?'1|':'0|')+(d0.grp||'');
+        gsum[k0]=(gsum[k0]||0)+Math.max(d0.cs,0.0001); });
+      /* เรียงบล็อก: เริ่มจากกลุ่มยอดมากสุด แล้วเดินหากลุ่มที่ "ชื่อใกล้กันที่สุด" ต่อไปเรื่อยๆ
+         (สุราขาว → สุราขาว X → สุราขาวผสม → สุราสี) ไม่ใช่เรียงยอดล้วนจนขาว-สี-ขาว สลับ */
+      function pref(a,c){ var n=Math.min(a.length,c.length), i0=0;
+        while(i0<n && a.charAt(i0)===c.charAt(i0)) i0++; return i0; }
+      var gord={}, nOrd=0;
+      ['0','1'].forEach(function(side){
+        var pool=Object.keys(gsum).filter(function(k0){ return k0.charAt(0)===side; });
+        var last=null;
+        while(pool.length){
+          var best=null, bp=-1, bv=-1;
+          pool.forEach(function(k0){
+            var p=(last==null?0:pref(last,k0.slice(2))), v=gsum[k0];
+            if(p>bp || (p===bp && v>bv)){ best=k0; bp=p; bv=v; }
+          });
+          gord[best]=nOrd++; last=best.slice(2);
+          pool.splice(pool.indexOf(best),1);
+        }
+      });
       s.brands.slice().sort(function(a,c){
-        var d=brands[c].cs-brands[a].cs; if(d) return d;
-        d=brands[c].stock-brands[a].stock; if(d) return d; return a<c?-1:1;
+        var da=brands[a], dc=brands[c];
+        var ga=gord[(da.orph?'1|':'0|')+(da.grp||'')], gc=gord[(dc.orph?'1|':'0|')+(dc.grp||'')];
+        if(ga!==gc) return ga-gc;
+        var d=dc.cs-da.cs; if(d) return d;
+        d=dc.stock-da.stock; if(d) return d; return a<c?-1:1;
       }).forEach(function(b){ seq.push({v:v,b:b,e:false}); });
     } else seq.push({v:v,b:'(ยังไม่มีของที่ W4)',e:true});
   });
@@ -672,7 +706,7 @@ function buildModel(pddtText, ownerText, ctrlText){
     if(!ctrlHit['B:'+b]) ctrlBad.push({b:b, s:'(ทุกไซส์)', v:controlBrand[b],
       why:'ไม่มีแบรนด์นี้ที่ W4 (ชื่อไม่ตรง PDDT)'});
   });
-  return {recs:recs, brands:brands, sup:sup, bays:bays, locs:locs, owner:owner,
+  return {recs:recs, brands:brands, sup:sup, bays:bays, locs:locs, owner:owner, seq:seq,
           notsup:notsup, seqB:seqB, ctrlRows:ctrlRows, ctrlBad:ctrlBad.concat(lockBad),
           lockLoc:lockLoc, lockRows:lockRows, control:control};
 }
@@ -682,6 +716,8 @@ function toPayload(M){
   var bays=M.bays, brands=M.brands, sup=M.sup, locs=M.locs, owner=M.owner, notsup=M.notsup;
   var nb={};
   locs.forEach(function(l){ bays[l].forEach(function(s){ var k=s.v+'|'+s.b; nb[k]=(nb[k]||0)+1; }); });
+  /* ลำดับที่เครื่องจัดไว้ — ใช้เรียงของในช่องเดียวกันให้ตรงกับผังจริง (ไม่ใช่เรียงตามยอดซ้ำ) */
+  var seqIdx={}; (M.seq||[]).forEach(function(s,i){ if(seqIdx[s.b]==null) seqIdx[s.b]=i; });
   var racks=[];
   for(var i=1;i<=18;i++){
     var row='w4.'+('0'+i).slice(-2), rb=[];
@@ -690,15 +726,23 @@ function toPayload(M){
       var frozen=FROZEN_LOCS.indexOf(l)>=0;
       var items=bays[l].map(function(s){
         var d=brands[s.b]||{}, sp=sup[s.v]||{};
-        return {v: frozen?'(เดิม)':shortV(s.v), b: s.e?'(ยังไม่มีของ)':s.b, lk:!!s.locked, q:(d.q||''),
+        /* แบรนด์ที่ฝากมา (ไม่มีซัพจริง) โชว์ชื่อแหล่งที่ซื้อจริง ไม่ใช่ชื่อซัพเจ้าบ้าน */
+        var vn = frozen ? '(เดิม)'
+               : (d.orph && (d.boughtFrom||[]).length) ? shortV(d.boughtFrom[0])
+               : shortV(s.v);
+        return {v: vn, rv: s.v, b: s.e?'(ยังไม่มีของ)':s.b, lk:!!s.locked, q:(d.q||''),
                 cs:+( (d.cs||0).toFixed(1) ), st:Math.round(d.stock||0),
-                ct: sp.ct||d.ct||'', own: sp.own||'', e:!!s.e, sku:d.sku||0,
-                alt:(d.boughtFrom||[]).map(shortV)};
+                ct: d.grp||sp.ct||d.ct||'', own: sp.own||'', e:!!s.e, sku:d.sku||0,
+                si: (seqIdx[s.b]==null?9e9:seqIdx[s.b]),
+                alt:(d.orph?[]:(d.boughtFrom||[]).map(shortV))};
       });
-      items.sort(function(a,b){ if(a.e!==b.e) return a.e?1:-1; if(b.cs!==a.cs) return b.cs-a.cs; return b.st-a.st; });
+      items.sort(function(a,b){ if(a.e!==b.e) return a.e?1:-1;
+        if(a.si!==b.si) return a.si-b.si;
+        if(b.cs!==a.cs) return b.cs-a.cs; return b.st-a.st; });
       var sups=[]; items.forEach(function(it){ if(sups.indexOf(it.v)<0) sups.push(it.v); });
       var anyLock=items.some(function(it){return it.lk;});
-      var cs=0; items.forEach(function(it){ cs+= it.cs/Math.max(1, nb[(frozen?'(เดิม)':it.v)+'|'+it.b]||1); });
+      var cs=0; items.forEach(function(it){ cs+= it.cs/Math.max(1, nb[it.rv+'|'+it.b]||1); });
+      items.forEach(function(it){ delete it.rv; });
       rb.push({n:parseInt(l.split('.')[2],10), sup:sups, items:items, frozen:frozen,
                locked:anyLock, cs:+cs.toFixed(1)});
     });
@@ -830,10 +874,11 @@ function toPayload(M){
       <a class="hublink" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">← Hub</a>
     </span>
   </div>
-  <h1>ผังวางสินค้าคลัง W4</h1>
+  <h1>ผังวางสินค้าคลัง W4 <span class="ver">v1.0</span></h1>
   <p class="sub">อ่านสดจาก Google Sheet ทุกครั้งที่เปิดหน้า — แก้ในชีทแล้วรีเฟรช ผังเปลี่ยนตามทันที
     <br>ผู้สั่ง → แท็บ <a href="https://docs.google.com/spreadsheets/d/1CqHARklgveAeJ6rTkNeyUSku__puTiNE7-c6ebn93W8/edit" target="_blank" rel="noopener"><b>ผู้สั่ง</b></a> ในชีท Purchase Actions ·
-    ตั้งพื้น/แร็ค/กรง + ล็อกตำแหน่งเอง → ชีทเดียว <a href="https://docs.google.com/spreadsheets/d/1GAGteMUI_UsEa-xIZvOgvtelSWNH5AcvyE2S9EFfrks/edit" target="_blank" rel="noopener"><b>LayoutW4</b></a></p>
+    ตั้งพื้น/แร็ค/กรง + ล็อกตำแหน่งเอง → ชีทเดียว <a href="https://docs.google.com/spreadsheets/d/1GAGteMUI_UsEa-xIZvOgvtelSWNH5AcvyE2S9EFfrks/edit" target="_blank" rel="noopener"><b>LayoutW4</b></a>
+    <br>ในซัพเดียวกันจัดเป็นบล็อกตาม <b>หมวดสินค้า</b> — เหล้าขาวอยู่ด้วยกัน เหล้าสีอยู่ด้วยกัน ไม่สลับไปมา</p>
   <div class="stats">
     <div class="stat"><b id="s1">–</b><span>ซัพ · แบรนด์ติดกัน</span></div>
     <div class="stat"><b id="s2">–</b><span>ผู้สั่ง · ครองช่วงติดกัน</span></div>
@@ -1044,7 +1089,7 @@ function renderAll(D){
     } else if(bs){ bs.hidden=true; }
   }
   var ft=document.getElementById('fixtbl');
-  if(ft) ft.innerHTML='<thead><tr><th>CAT TYPE</th><th style="text-align:right">ลัง/วัน</th><th>คนหลัก</th><th>ซัพที่ควรย้ายมาให้คนหลัก</th></tr></thead><tbody>'+
+  if(ft) ft.innerHTML='<thead><tr><th>หมวด</th><th style="text-align:right">ลัง/วัน</th><th>คนหลัก</th><th>ซัพที่ควรย้ายมาให้คนหลัก</th></tr></thead><tbody>'+
     D.fix.map(function(f){return '<tr><td><b>'+esc(f.ct)+'</b></td><td class="n">'+fmt(f.cs)+'</td><td class="vend">'+
       esc(f.main)+'</td><td>'+f.move.map(function(m){return '<div style="margin-bottom:3px"><span class="vend">'+
       esc(m.own)+' →</span> '+m.sup.map(function(s){return '<span class="tag'+(s[1]>=1?'':' warn')+'">'+esc(s[0])+
@@ -1058,20 +1103,10 @@ function renderAll(D){
   /* จัดกลุ่มตาม ซัพ + CAT TYPE — ซัพ/หมวดเดิมให้แบรนด์เรียงต่อกันในบรรทัดเดียว
      เปลี่ยนซัพหรือเปลี่ยนหมวดเมื่อไหร่ ค่อยขึ้นบรรทัดใหม่                        */
   function groupItems(items){
-    /* เรียงให้ซัพเดียวกัน+หมวดเดียวกันมาอยู่ติดกันก่อน (ซัพยอดรวมมากขึ้นก่อน) */
-    var tot={};
-    items.forEach(function(i){ var k=i.v+'|'+i.ct; tot[k]=(tot[k]||0)+(i.cs||0); });
-    var sorted=items.slice().sort(function(a,b){
-      var ka=a.v+'|'+a.ct, kb=b.v+'|'+b.ct;
-      if(ka!==kb){
-        if(tot[kb]!==tot[ka]) return tot[kb]-tot[ka];
-        return ka<kb?-1:1;
-      }
-      if((b.cs||0)!==(a.cs||0)) return (b.cs||0)-(a.cs||0);
-      return (b.st||0)-(a.st||0);
-    });
+    /* items เรียงตามลำดับจริงบนแร็คมาแล้ว (ซัพ+หมวดเดียวกันติดกันอยู่แล้ว)
+       ที่นี่แค่ยุบแถวที่ซัพ+หมวดเดิมให้ต่อกัน ❌ ห้ามเรียงใหม่ ไม่งั้นตารางไม่ตรงของจริง */
     var out=[], cur=null;
-    sorted.forEach(function(i){
+    items.forEach(function(i){
       if(!cur || cur.v!==i.v || cur.ct!==i.ct){
         cur={v:i.v, ct:i.ct, own:i.own, alt:(i.alt||[]).slice(), list:[], cs:0, st:0, sku:0, lk:false};
         out.push(cur);
@@ -1090,7 +1125,7 @@ function renderAll(D){
     }).join('');
   }
   function tableHtml(bays,row){
-    return '<div class="tblwrap"><table><thead><tr><th>ช่อง</th><th>ผู้สั่ง</th><th>ซัพ</th><th>CAT TYPE</th>'+
+    return '<div class="tblwrap"><table><thead><tr><th>ช่อง</th><th>ผู้สั่ง</th><th>ซัพ</th><th>หมวด</th>'+
       '<th>แบรนด์ในกลุ่มนี้</th><th style="text-align:right">ลัง/วัน</th><th style="text-align:right">ค้าง</th>'+
       '<th style="text-align:right">SKU</th><th>ซื้อจาก</th></tr></thead><tbody>'+
       bays.map(function(b){
@@ -1242,7 +1277,7 @@ function renderAll(D){
     var q=function(v){ v=String(v==null?'':v);
       return (v.indexOf(',')>=0||v.indexOf('"')>=0||v.indexOf(NL)>=0)
         ? '"'+v.replace(/"/g,'""')+'"' : v; };
-    var out=[['Location','โซน','แถว','ผู้สั่ง','ซัพ','CAT TYPE','CAT BRAND','ลัง/วัน','ของค้าง','SKU','ซื้อจาก','ล็อกไว้'].join(',')];
+    var out=[['Location','โซน','แถว','ผู้สั่ง','ซัพ','หมวด','CAT BRAND','ลัง/วัน','ของค้าง','SKU','ซื้อจาก','ล็อกไว้'].join(',')];
     D.racks.forEach(function(r){
       r.bays.forEach(function(b){
         var loc=r.row+'.'+pad(b.n);
