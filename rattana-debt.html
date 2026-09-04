@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v6.6</title>
+<title>Rattana ยอดหนี้คงค้าง v6.7</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -797,7 +797,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v6.6</span>
+      <span class="app-ver">v6.7</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -1297,6 +1297,28 @@ function salesNameMatchesUser(r){
   return rowName === myName || (myNick && rowName === myNick);
 }
 
+/* v6.7: "ไม่ใช่พนักงานรัตน" — Users Sheet คอลัมน์ "เงื่อนไขพนักงาน"
+   คนนอก (นิสชิน / ซัพฯ มาช่วยขาย) ที่ต้องตั้ง role สูงไว้เพื่อสิทธิ์อนุมัติในแอปขาย
+   → สิทธิ์อนุมัติคงเดิม แต่ "สิทธิ์มองเห็น" ในแอปนี้ลดเหลือเฉพาะหนี้ของตัวเอง ไม่ว่า role จะเท่าไร
+   เทียบแบบ contains — พิมพ์เกินมาท้าย ("ไม่ใช่พนักงานรัตน (นิสชิน)") ก็ยังจำกัด = ผิดทางปลอดภัยไว้ก่อน */
+const OUTSIDER_COND = 'ไม่ใช่พนักงานรัตน';
+function isOutsiderStaff(){
+  return String((currentUser && currentUser.staffCond) || '').replace(/\s+/g, '').indexOf(OUTSIDER_COND) >= 0;
+}
+
+/* v6.7: แถวหนี้นี้เป็นของผู้ใช้คนนี้ไหม — เทียบ 3 ชั้น
+   1) รหัสเซลล์ (Users AD) — ชีท SQL Data คอลัมน์ที่หัวเขียนว่า 'รหัสพนักงาน' เก็บรหัสนี้จริง (NSN002/PMW101)
+   2) รหัสพนักงาน HR (Users C) — เผื่อชีทเปลี่ยนมาใช้เลข HR ภายหลัง
+   3) ชื่อ — fallback สุดท้าย (ชีทหนี้เขียน "คุณ <ชื่อ>" · normSalesName ตัดคำนำหน้าให้แล้ว) */
+function ownDebtRow(r){
+  const rid = String((r && r.empId) || '').trim();
+  const sm  = String((currentUser && currentUser.smCode) || '').trim();
+  const emp = String((currentUser && currentUser.empId) || '').trim();
+  if (rid && sm  && rid === sm)  return true;
+  if (rid && emp && rid === emp) return true;
+  return salesNameMatchesUser(r);
+}
+
 // Normalize D-MAN value from sheet (handles VLOOKUP results, #N/A, errors, whitespace)
 function normDman(raw){
   const s = String(raw == null ? '' : raw)
@@ -1579,6 +1601,10 @@ async function handleGoogleLogin(response){
       company: user['บริษัท'] || '',
       warehouse: user['W'] || '',
       empId: (user['รหัสพนักงาน'] || '').trim(),
+      // v6.7: ชีทหนี้ (SQL Data) คอลัมน์ B หัวเขียนว่า 'รหัสพนักงาน' แต่เก็บ "รหัสเซลล์" จริง
+      //   เช็คของจริงแล้ว: เซล role<=4 ที่มีรหัสเซลล์ 26 คน — รหัสพนักงาน HR ตรง 0 คน · รหัสเซลล์ตรง 19 คน
+      smCode: (user['รหัสเซลล์'] || user['รหัสเซล'] || '').trim(),
+      staffCond: (user['เงื่อนไขพนักงาน'] || '').trim(),
     };
 
     saveSession(currentUser);
@@ -1592,7 +1618,7 @@ async function handleGoogleLogin(response){
 
 const SESSION_DAYS = 30;
 const REVALIDATE_HOURS = 24;
-const SESSION_VERSION = 2; // bump when schema changes — forces re-login
+const SESSION_VERSION = 3; // bump when schema changes — forces re-login (v6.7: +smCode +staffCond)
 
 /* ========================
    SSO SESSION (shared with Rattana Hub & all apps)
@@ -1692,12 +1718,16 @@ async function revalidateUser(){
     const newRole = parseInt(u['User Role']) || 1;
     const newWh   = (u['W'] || '').trim();
     const newName = (u['ชื่อ - สกุล'] || '').trim();
+    const newCond = (u['เงื่อนไขพนักงาน'] || '').trim();                 // v6.7
+    const newSm   = (u['รหัสเซลล์'] || u['รหัสเซล'] || '').trim();        // v6.7
     const curWh   = (currentUser.warehouse || '').trim();
-    // Only reload if role actually changed — warehouse change is soft (no reload needed)
-    if (newRole !== currentUser.role){
+    // v6.7: reload เมื่อ role หรือ "เงื่อนไขพนักงาน" เปลี่ยน — ทั้งคู่คุมว่าเห็นข้อมูลแค่ไหน
+    if (newRole !== currentUser.role || newCond !== (currentUser.staffCond || '')){
       currentUser.role      = newRole;
       currentUser.warehouse = newWh;
       currentUser.name      = newName;
+      currentUser.staffCond = newCond;
+      currentUser.smCode    = newSm;
       showToast('สิทธิ์ผู้ใช้ถูกอัพเดท - กำลังโหลดใหม่...', 'info');
       saveSession(currentUser);
       setTimeout(() => location.reload(), 1500);
@@ -1706,6 +1736,7 @@ async function revalidateUser(){
     // Soft update warehouse + name without reload
     if (newWh !== curWh)   currentUser.warehouse = newWh;
     if (newName && newName !== currentUser.name) currentUser.name = newName;
+    if (newSm !== (currentUser.smCode || '')) currentUser.smCode = newSm;   // v6.7: รหัสเซลล์เปลี่ยน = soft update ไม่ต้อง reload
     saveSession(currentUser); // refresh expiry
   } catch (e){
     console.warn('revalidate skipped (offline?)', e);
@@ -1798,8 +1829,10 @@ function enterApp(){
   // Display user info — dept overrides role label
   const normDeptUI = s => String(s||'').replace(/\s+/g,' ').trim();
   const deptUI = normDeptUI(currentUser.dept);
+  const outsider = isOutsiderStaff();   // v6.7
   let roleLabel;
-  if (deptUI === 'บัญชีและการเงิน')      roleLabel = '💼 บัญชีและการเงิน';
+  if (outsider)                          roleLabel = 'พนักงานขาย · ไม่ใช่พนักงานรัตน';
+  else if (deptUI === 'บัญชีและการเงิน') roleLabel = '💼 บัญชีและการเงิน';
   else if (deptUI === 'ธุรการขาย')        roleLabel = `🏢 ธุรการขาย · คลัง ${currentUser.warehouse || '?'}`;
   else if (currentUser.role < 5)          roleLabel = 'พนักงานขาย';
   else if (currentUser.role === 5)        roleLabel = `ซุป · คลัง ${currentUser.warehouse || '?'}`;
@@ -1809,7 +1842,7 @@ function enterApp(){
   $('tabMatchBtn').style.display = '';
 
   // v5.13: แท็บขายเชื่อ — บัญชีและการเงิน + ผู้บริหาร (role ≥6) เท่านั้น · คนอื่นซ่อน แล้วคืน grid เป็น 5 ช่อง
-  const canReviewCredit = (deptUI === 'บัญชีและการเงิน') || currentUser.role >= 6;
+  const canReviewCredit = !outsider && ((deptUI === 'บัญชีและการเงิน') || currentUser.role >= 6);   // v6.7: คนนอกไม่เห็นแท็บนี้ ไม่ว่า role เท่าไร
   $('tabCreditBtn').style.display = canReviewCredit ? '' : 'none';
   document.querySelector('.tab-nav').classList.toggle('cols5', !canReviewCredit);
   if (canReviewCredit) loadCreditBills();   // โหลดเงียบๆ ตอนเข้าแอป เพื่อให้เลขบนแท็บขึ้นก่อนกดเข้าไปดู
@@ -1817,15 +1850,16 @@ function enterApp(){
   $('userInfo').innerHTML = `
     <div>
       <div class="name">${escapeHtml(currentUser.name || '-')}</div>
-      <div class="role">${roleLabel} · Role ${currentUser.role}</div>
+      <div class="role" title="${escapeHtml(roleLabel)} · Role ${currentUser.role}">${roleLabel} · Role ${currentUser.role}</div>
     </div>
   `;
 
   // UI visibility — dept takes priority over role number
   const atHQ = String(currentUser.warehouse || '').trim().toUpperCase() === 'HQ';
-  const canSeeAll = (deptUI === 'บัญชีและการเงิน') || (currentUser.role > 5) || (currentUser.role === 5 && atHQ);
-  const isWarehouseOnly = (deptUI === 'ธุรการขาย') || (currentUser.role === 5 && deptUI !== 'บัญชีและการเงิน' && !atHQ);
-  const isSalesOnly = !canSeeAll && !isWarehouseOnly && currentUser.role < 5;
+  // v6.7: outsider ตัดสิทธิ์มองเห็นทุกชั้น — บังคับเป็นโหมดเซล (ซ่อนตัวเลือกเซล/คลัง) ไม่ว่า role/แผนกจะเป็นอะไร
+  const canSeeAll = !outsider && ((deptUI === 'บัญชีและการเงิน') || (currentUser.role > 5) || (currentUser.role === 5 && atHQ));
+  const isWarehouseOnly = !outsider && ((deptUI === 'ธุรการขาย') || (currentUser.role === 5 && deptUI !== 'บัญชีและการเงิน' && !atHQ));
+  const isSalesOnly = outsider || (!canSeeAll && !isWarehouseOnly && currentUser.role < 5);
 
   if (isSalesOnly){
     // Salesperson: hide sales + warehouse dropdowns, show only aging chart
@@ -2074,7 +2108,8 @@ function processData(raw){
   // Detect if column L (หมายเหตุ) has any "ค้างชำระ" values
   _hasNoteData = rows.some(r => String(r.note||'').trim().toLowerCase() === 'ค้างชำระ');
 
-  // Access control — dept (column R) overrides role:
+  // Access control — v6.7: "เงื่อนไขพนักงาน" (column W) ชนะทุกอย่าง · จากนั้น dept (column R) ถึงจะ override role:
+  // ไม่ใช่พนักงานรัตน → เห็นเฉพาะของตัวเอง (คนนอกที่ตั้ง role สูงไว้เพื่อสิทธิ์อนุมัติในแอปขาย)
   // บัญชีและการเงิน  → เห็นทั้งหมด (finance needs full view)
   // ธุรการขาย        → เห็นเฉพาะ W ตัวเอง
   // role > 5         → เห็นทั้งหมด (manager / executive)
@@ -2083,7 +2118,13 @@ function processData(raw){
   const normDept = s => String(s||'').replace(/\s+/g,' ').trim();
   const dept = normDept(currentUser.dept);
 
-  if (dept === 'บัญชีและการเงิน'){
+  if (isOutsiderStaff()){
+    // v6.7: ไม่ใช่พนักงานรัตน → เห็นเฉพาะหนี้ของตัวเองเสมอ · ข้าม role/แผนกทั้งหมด
+    allRows = rows.filter(ownDebtRow);
+    if (allRows.length === 0 && rows.length > 0){
+      showToast(`ไม่พบหนี้ของ "${currentUser.smCode || currentUser.name}" — ตรวจสอบ "รหัสเซลล์" ใน Users Sheet`, 'warning');
+    }
+  } else if (dept === 'บัญชีและการเงิน'){
     // Finance: see everything
     allRows = rows;
   } else if (dept === 'ธุรการขาย'){
@@ -2112,24 +2153,15 @@ function processData(raw){
         showToast(`ไม่พบข้อมูลคลัง "${currentUser.warehouse}" — ตรวจสอบ Set คลัง ใน Users Sheet`, 'warning');
       }
     } else {
-      allRows = rows.filter(r => r.empId === currentUser.empId);
+      allRows = rows.filter(ownDebtRow);   // v6.7
       showToast('ไม่ได้กำหนดคลัง — โหมดสำรอง: เห็นเฉพาะของตัวเอง', 'info');
     }
   } else {
-    // Salesperson: own empId only
-    // Primary match: empId exact
-    // Fallback: normalized name match (กรณี empId ใน SQL Data ไม่ตรงกัน)
-    let filtered = rows.filter(r => r.empId && r.empId === currentUser.empId);
-    if (filtered.length === 0 && rows.length > 0){
-      // Fallback: match by normalized name
-      filtered = rows.filter(r => salesNameMatchesUser(r));
-      if (filtered.length > 0){
-        showToast('ใช้ชื่อแทนรหัสพนักงาน (empId ไม่ตรง) — ตรวจสอบ Users Sheet', 'warning');
-      }
-    }
-    allRows = filtered;
-    if (allRows.length === 0){
-      showToast(`ไม่พบข้อมูลของพนักงาน "${currentUser.empId || currentUser.name}" — ตรวจสอบรหัสพนักงานใน Users Sheet`, 'warning');
+    // Salesperson: เห็นเฉพาะของตัวเอง — v6.7: ใช้ ownDebtRow (รหัสเซลล์ → รหัสพนักงาน → ชื่อ)
+    //   เดิมเทียบ empId ตัวเดียวแล้วค่อยตกไปเทียบชื่อ · empId ไม่เคยตรงสักคน = พึ่งชื่อล้วน (เปราะ)
+    allRows = rows.filter(ownDebtRow);
+    if (allRows.length === 0 && rows.length > 0){
+      showToast(`ไม่พบข้อมูลของ "${currentUser.smCode || currentUser.empId || currentUser.name}" — ตรวจสอบ "รหัสเซลล์" ใน Users Sheet`, 'warning');
     }
   }
   _diag.rowsAfterRoleFilter = allRows.length;
@@ -3017,7 +3049,7 @@ function renderDebug(){
   const html = `
     <div class="row">
       <div class="key">USER</div>
-      <div class="val">${escapeHtml(currentUser?.email || '-')} · Role ${currentUser?.role || '-'} · empId: ${escapeHtml(currentUser?.empId || '(ว่าง)')}</div>
+      <div class="val">${escapeHtml(currentUser?.email || '-')} · Role ${currentUser?.role || '-'} · รหัสเซลล์: ${escapeHtml(currentUser?.smCode || '(ว่าง)')} · empId: ${escapeHtml(currentUser?.empId || '(ว่าง)')}<br>เงื่อนไขพนักงาน: ${escapeHtml(currentUser?.staffCond || '(ว่าง)')}</div>
     </div>
     <div class="row">
       <div class="key">FETCH URL</div>
@@ -3058,11 +3090,12 @@ function renderDebug(){
       <div class="key">หลัง role/dept filter (role ${currentUser?.role || '-'} · แผนก: ${escapeHtml(currentUser?.dept || '-')})</div>
       <div class="val ${finalClass}">${_diag.rowsAfterRoleFilter.toLocaleString()} แถว · ${(() => {
         const d = String(currentUser?.dept||'').trim();
+        if (isOutsiderStaff()) return `เห็นเฉพาะของตัวเอง (ไม่ใช่พนักงานรัตน · รหัสเซลล์=${escapeHtml(currentUser?.smCode||'(ว่าง)')})`;
         if (d === 'บัญชีและการเงิน') return '💼 เห็นทั้งหมด (บัญชีและการเงิน)';
         if (d === 'ธุรการขาย') return `🏢 เห็นเฉพาะ W=${escapeHtml(currentUser?.warehouse||'?')} (ธุรการขาย)`;
         if ((currentUser?.role||0) > 5) return 'เห็นทั้งหมด (Manager)';
         if ((currentUser?.role||0) === 5) return `เห็นคลัง W=${escapeHtml(currentUser?.warehouse||'?')} (Sup)`;
-        return `เห็นเฉพาะ empId=${escapeHtml(currentUser?.empId||'')}`;
+        return `เห็นเฉพาะของตัวเอง (รหัสเซลล์=${escapeHtml(currentUser?.smCode||'(ว่าง)')} · empId=${escapeHtml(currentUser?.empId||'(ว่าง)')})`;
       })()}</div>
     </div>
     <div class="row">
@@ -5566,8 +5599,8 @@ function openSlipModal(idx){
     `<div class="si-row"><span class="si-label">${l}</span><span class="si-val">${escapeHtml(String(v))}</span></div>`
   ).join('');
 
-  // Assign section (บัญชี and Role > 5 only, and only if no doc yet)
-  const canAssign = !docNo && currentUser && (
+  // Assign section (บัญชี and Role > 5 only, and only if no doc yet) — v6.7: คนนอกไม่ได้เลย
+  const canAssign = !docNo && currentUser && !isOutsiderStaff() && (
     (currentUser.dept||'').includes('บัญชี') || (currentUser.role||0) > 5
   );
   const assignEl = $('slipModalAssign');
@@ -5595,7 +5628,8 @@ function openSlipModal(idx){
   }
 
   // Partial payment toggle — only for accounting OR role >= 5, and only if slip has docNo
-  const canMarkPartial = docNo && currentUser && (
+  // v6.7: คนนอก (ไม่ใช่พนักงานรัตน) ห้ามแตะ — role 5 ที่ตั้งไว้เพื่ออนุมัติในแอปขาย ไม่ใช่สิทธิ์แก้เงินที่นี่
+  const canMarkPartial = docNo && currentUser && !isOutsiderStaff() && (
     (currentUser.dept || '').includes('บัญชี') || (currentUser.role || 0) >= 5
   );
   const partialSection = $('slipPartialSection');
