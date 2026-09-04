@@ -421,14 +421,18 @@ function loadAll(onStep){
   var jobs=[
     fetch(gvizUrl(CFG.pddtId,'PDDT',CFG.pddtQ)).then(function(r){return r.text();}),
     fetch(gvizUrl(CFG.purchId,CFG.ownerTab)).then(function(r){return r.text();}),
-    fetch(gvizUrl(CFG.ctrlId,CFG.ctrlTab)).then(function(r){return r.text();}).catch(function(){return '';})
+    fetch(gvizUrl(CFG.ctrlId,CFG.ctrlTab)).then(function(r){return r.text();}).catch(function(){return '';}),
+    CFG.gasExec ? fetch(CFG.gasExec+'?action=baseline').then(function(r){return r.text();}).catch(function(){return '';})
+                : Promise.resolve('')
   ];
   jobs.forEach(function(p,i){ p.then(function(){ onStep(i); }); });
   return Promise.all(jobs);
 }
 
 /* ---------------------------------------------------------- แปลงข้อมูล */
-function buildModel(pddtText, ownerText, ctrlText){
+function buildModel(pddtText, ownerText, ctrlText, baseText){
+  /* baseline = ค่า ลำดับ/ช่องเริ่ม/ช่องจบ ที่หลังบ้านเขียนล่าสุด (รายแบรนด์) — ค่าที่ต่างจากนี้ = Surat แก้ */
+  var BL=null; try{ var bo=JSON.parse(baseText||'null'); if(bo && bo.b) BL=bo; }catch(e0){}
   var P=parseCSV(pddtText), H=P[0]||[], recs=[], byCT={};
   var ix={}; H.forEach(function(h,i){ ix[h.trim()]=i; });
   for(var i=1;i<P.length;i++){
@@ -472,7 +476,7 @@ function buildModel(pddtText, ownerText, ctrlText){
      ถ้าเว้น CAT SIZE ว่าง = ใช้กับทุกไซส์ของแบรนด์นั้น  (กันกรอกไม่ครบ)          */
   var control={}, controlBrand={}, ctrlRows=0, ctrlBad=[];
   /* คำสั่งดิบจากชีท (ยังไม่เช็คกับ PDDT) — แก้ที่แถวไหนของแบรนด์นั้นก็ได้ */
-  var ordVals={}, locVals={}, lockVals={}, lockVendor={}, rawBrandOrder=[], seenRaw={};
+  var ordVals={}, locVals={}, endVals={}, lockVals={}, lockVendor={}, rawBrandOrder=[], seenRaw={};
   function normTxt(s){ return String(s==null?'':s).replace(/\s+/g,' ').trim(); }
   function normPlace(s){
     var v=normTxt(s);
@@ -491,12 +495,13 @@ function buildModel(pddtText, ownerText, ctrlText){
   if(ctrlText && ctrlText.indexOf('CAT BRAND')>=0){
     var C=parseCSV(ctrlText), ch=(C[0]||[]).map(function(s){return s.trim();});
     var ci={}; ch.forEach(function(h,i){ ci[h]=i; });
-    var col=-1, ocol=-1, lcol=-1, kcol=-1;
+    var col=-1, ocol=-1, lcol=-1, kcol=-1, ecol=-1;
     ch.forEach(function(h,i){
       if(h.indexOf('ตั้งพื้น')>=0) col=i;
       if(h.indexOf('ลำดับ')>=0) ocol=i;
       if(h.indexOf('ล็อก')>=0) lcol=i;
-      if(h==='ช่อง' || h==='ช่องเริ่ม' || (h.indexOf('ช่อง')===0 && h.indexOf('เริ่ม')>=0)) kcol=i;   /* ช่องจบ = ผลลัพธ์ ไม่อ่าน */
+      if(h==='ช่อง' || h==='ช่องเริ่ม' || (h.indexOf('ช่อง')===0 && h.indexOf('เริ่ม')>=0)) kcol=i;
+      if(h==='ช่องจบ' || (h.indexOf('ช่อง')===0 && h.indexOf('จบ')>=0)) ecol=i;
     });
     for(var m=1;m<C.length;m++){
       var rr=C[m]; if(!rr) continue;
@@ -515,6 +520,10 @@ function buildModel(pddtText, ownerText, ctrlText){
       if(bn && kcol>=0){
         var raw=normTxt(rr[kcol]);
         if(raw && raw.indexOf('–')<0 && raw.indexOf('-')<0){ var bc=bayCode(raw); if(bc) (locVals[bn]=locVals[bn]||[]).push({loc:bc,row:m}); }
+      }
+      if(bn && ecol>=0){
+        var rawE=normTxt(rr[ecol]);
+        if(rawE){ var bce=bayCode(rawE); if(bce) (endVals[bn]=endVals[bn]||[]).push({loc:bce,row:m}); }
       }
       if(lcol>=0){
         var lv=normTxt(rr[lcol]);
@@ -700,17 +709,31 @@ function buildModel(pddtText, ownerText, ctrlText){
      ลำดับ : เลขที่ต่างจาก "ลำดับแถวในชีท" = พี่แก้ (แก้ที่ไซส์ไหนก็ได้ ตัวล่าสุดชนะ)
      ช่อง  : เลขช่องเดี่ยวที่พิมพ์ทับ = ย้ายแบรนด์ไปเริ่มช่องนั้น (รอบนี้) · ถ้าแก้ ลำดับ ของแบรนด์เดียวกันด้วย ให้ ลำดับ ชนะ
      ล็อกที่ช่อง : มี CAT BRAND = ปักแบรนด์นั้นถาวร · มีแต่ VENDOR NAME = ปักทั้งซัพ                                */
-  var lockBad=[], lockRows=0, ordRows=0, sheetOrd={}, ordEdited={}, sheetLoc={}, brandLock={}, pinAt={}, rankOf={};
+  var lockBad=[], lockRows=0, ordRows=0, sheetOrd={}, ordEdited={}, sheetLoc={}, sheetEnd={}, locEdited={}, endEdited={}, brandLock={}, pinAt={}, rankOf={};
   (function(){
     var rankN=0;
     rawBrandOrder.forEach(function(b){ if((ordVals[b]||[]).length) rankOf[b]=++rankN; });
     Object.keys(ordVals).forEach(function(b){
       if(!brands[b]){ lockBad.push({b:b, s:'', v:'ลำดับ', why:'ไม่มีแบรนด์นี้ที่ W4 (ชื่อไม่ตรง PDDT)'}); return; }
-      var vals=ordVals[b], diff=vals.filter(function(x){ return x.v!==rankOf[b]; });
+      var vals=ordVals[b], base=(BL && BL.b[b]) ? parseFloat(BL.b[b][0]) : null;
+      var diff = base!=null && isFinite(base) ? vals.filter(function(x){ return x.v!==base; })
+                                              : vals.filter(function(x){ return x.v!==rankOf[b]; });
       sheetOrd[b]= diff.length ? diff[diff.length-1].v : vals[vals.length-1].v; ordRows++;
       if(diff.length) ordEdited[b]=true;
     });
-    Object.keys(locVals).forEach(function(b){ if(brands[b]) sheetLoc[b]=locVals[b][locVals[b].length-1].loc; });
+    Object.keys(locVals).forEach(function(b){
+      if(!brands[b]) return;
+      var vals=locVals[b], base=(BL && BL.b[b]) ? BL.b[b][1] : null;
+      var diff = base!=null ? vals.filter(function(x){ return x.loc!==base; }) : vals;
+      sheetLoc[b]= diff.length ? diff[diff.length-1].loc : vals[vals.length-1].loc;
+      locEdited[b]= base!=null ? diff.length>0 : null;          /* null = ไม่มีฐานเทียบ ต้องเดาจากผัง */
+    });
+    Object.keys(endVals).forEach(function(b){
+      if(!brands[b] || !BL || !BL.b[b]) return;                 /* ช่องจบ ใช้ได้เฉพาะตอนมีฐานเทียบ */
+      var vals=endVals[b], base=BL.b[b][2]||'';
+      var diff=vals.filter(function(x){ return x.loc!==base; });
+      if(diff.length){ sheetEnd[b]=diff[diff.length-1].loc; endEdited[b]=true; }
+    });
     Object.keys(lockVals).forEach(function(b){
       var l=lockVals[b][lockVals[b].length-1].loc;
       if(!brands[b]){ lockBad.push({b:b, s:'', v:l, why:'ไม่มีแบรนด์นี้ที่ W4 (ชื่อไม่ตรง PDDT)'}); return; }
@@ -756,7 +779,10 @@ function buildModel(pddtText, ownerText, ctrlText){
   for(j2=1;j2<=17;j2++) locs.push('w4.17.'+('0'+j2).slice(-2));
   for(j2=1;j2<=17;j2++) locs.push('w4.18.'+('0'+j2).slice(-2));
   var freeAll=locs.filter(function(l){ return FROZEN_LOCS.indexOf(l)<0; });
-  function wOf(s2){ return s2.e?0.02:Math.max(CFG.minShare, brands[s2.b].need||0); }
+  var widthBays={};
+  function wNat(s2){ return s2.e?0.02:Math.max(CFG.minShare, brands[s2.b].need||0); }
+  var unitEst = ordered.reduce(function(a2,s2){ return a2+wNat(s2); },0) / Math.max(1,freeAll.length);   /* น้ำหนัก ~1 ช่อง */
+  function wOf(s2){ return (!s2.e && widthBays[s2.b]!=null) ? widthBays[s2.b]*unitEst : wNat(s2); }
 
   /* หมุดแบ่งโซน: ซัพ (ล็อกทั้งซัพ) หรือ แบรนด์ (ล็อก/ช่องที่พี่พิมพ์) — ของก่อนหมุดอัดลงช่องก่อนหน้า ที่เหลือไหลต่อ */
   function layout(bpin){
@@ -800,13 +826,37 @@ function buildModel(pddtText, ownerText, ctrlText){
     function packZone(list,cells){
       if(!cells.length || !list.length) return;
       var w2=list.map(wOf), tot2=w2.reduce(function(a2,b2){return a2+b2;},0)||1;
-      var unit2=tot2/cells.length, cum2=0;
+      var unit2=tot2/cells.length;
+      function isFixed(s2){ return !s2.e && widthBays[s2.b]!=null; }
+      /* แบรนด์ที่กำหนดจำนวนช่อง (ช่องจบ) ต้องเริ่มที่ขอบช่องพอดี → เกิดช่องว่างเล็กๆ ก่อนหน้า
+         คำนวณส่วนเผื่อนี้ 2 รอบ แล้วเฉลี่ยน้ำหนักต่อช่องใหม่ ให้ทั้งโซนยังลงพอดีไม่กองท้าย */
+      /* จุดเริ่มของแบรนด์ที่กำหนดช่อง: ปกติขยับไปขอบช่องถัดไป · แต่ถ้าช่องที่พี่พิมพ์ (ช่องเริ่ม) ห่างจากจุดนั้นไม่เกิน 1 ช่อง
+         ให้ยึดช่องที่พิมพ์ แล้วตัวก่อนหน้าบีบลงนิดหน่อยแทน (ไม่ให้ถอยไปทับจุดเริ่มของตัวก่อนหน้า) */
+      function snapStart(s2,k2,c0,prevStart){
+        var ni=Math.ceil(c0/unit2-1e-9), want=(moved[s2.b]!=null)? cells.indexOf(moved[s2.b]) : -1;
+        if(want>=0 && Math.abs(want-ni)<=1 && (k2===0 || want*unit2 > prevStart+1e-9)) ni=want;
+        return ni*unit2;
+      }
+      for(var it=0; it<2; it++){
+        var pad=0, cum=0, pst=-1;
+        list.forEach(function(s2,k2){
+          if(isFixed(s2)){ var sn=snapStart(s2,k2,cum,pst); pad+=Math.max(0,sn-cum); pst=sn; cum=sn+widthBays[s2.b]*unit2; }
+          else { pst=cum; cum+=w2[k2]; }
+        });
+        unit2=(tot2+pad)/cells.length;
+      }
+      var starts=[], ends=[], c0=0;
       list.forEach(function(s2,k2){
-        var a2=Math.min(cells.length-1, Math.floor(cum2/unit2));
-        bays[cells[a2]].push(s2);
-        cum2+=w2[k2];
-        var c2=Math.min(cells.length-1, Math.floor((cum2-1e-9)/unit2));
-        for(var z2=a2+1; z2<=c2; z2++) bays[cells[z2]].push(s2);
+        if(isFixed(s2)) c0=snapStart(s2,k2,c0,(k2>0?starts[k2-1]:-1));
+        starts[k2]=c0; c0+= isFixed(s2) ? widthBays[s2.b]*unit2 : w2[k2]; ends[k2]=c0;
+      });
+      /* ตัวก่อนหน้าแบรนด์ที่กำหนดช่อง จบตรงขอบช่องที่ตัวนั้นเริ่ม (ไม่ล้ำเข้าไป) */
+      list.forEach(function(s2,k2){
+        var st=starts[k2], en=(k2+1<list.length) ? starts[k2+1] : ends[k2];
+        if(en<=st+1e-9) en=st+1e-9;
+        var a2=Math.min(cells.length-1, Math.floor(st/unit2+1e-9));
+        var c2=Math.min(cells.length-1, Math.floor((en-1e-9)/unit2));
+        for(var z2=a2; z2<=c2; z2++) bays[cells[z2]].push(s2);
       });
     }
     var pinInfo=[], finalSeq=[];
@@ -832,7 +882,8 @@ function buildModel(pddtText, ownerText, ctrlText){
   Object.keys(sheetLoc).forEach(function(b){
     var l=sheetLoc[b];
     if(brandLock[b]) return;
-    if(ordEdited[b]){ locNote.push({b:b, s:'', v:l, why:'แก้ทั้ง ลำดับ และ ช่อง — ใช้ ลำดับ (ลบตัวใดตัวหนึ่งถ้าอยากให้อีกตัวทำงาน)'}); return; }
+    if(locEdited[b]===false) return;                              /* มีฐานเทียบ และค่าเท่าเดิม = ไม่ได้แก้ */
+    if(locEdited[b]===null && ordEdited[b]){ locNote.push({b:b, s:'', v:l, why:'แก้ทั้ง ลำดับ และ ช่องเริ่ม แต่ยังไม่มีฐานเทียบ (กดเขียนลงชีท 1 ครั้งก่อน) — รอบนี้ใช้ ลำดับ'}); return; }
     if(brands[b].place!=='แร็ค'){ locNote.push({b:b, s:'', v:l, why:'แบรนด์นี้อยู่'+brands[b].place+' ไม่ได้อยู่ในแร็ค'}); return; }
     if((sp1[b]||[]).indexOf(l)>=0) return;
     if(FROZEN_LOCS.indexOf(l)>=0 || !L.bays[l]){ locNote.push({b:b, s:'', v:l, why:'ช่องนี้ย้ายไปไม่ได้ (w4.18.11–.17 เว้นไว้)'}); return; }
@@ -844,7 +895,28 @@ function buildModel(pddtText, ownerText, ctrlText){
     else { var first=(sp1[anchor.b]||[])[0]===l; me.ord = anchor.ord + (first ? -0.0005 : 0.0005); }
     moved[b]=l; locEdits++;
   });
-  if(locEdits){
+  /* ช่องจบ = จำนวนช่องที่พี่กำหนด · กฎ (Surat: "มีเริ่มอย่างเดียว = ช่องเดียว"):
+       - แก้ ช่องเริ่ม แล้ว → คู่ (เริ่ม, จบ) ในชีทคือคำสั่ง: จบว่าง = 1 ช่อง · จบ ≥ เริ่ม = กินถึงช่องนั้น · จบ < เริ่ม = ไม่ใช้
+       - ไม่ได้แก้ ช่องเริ่ม แต่แก้ ช่องจบ → นับจากช่องเริ่มจริงถึงช่องจบใหม่                                   */
+  var widthEdits=0;
+  Object.keys(brands).forEach(function(b){
+    if(brands[b].place!=='แร็ค') return;
+    var startMoved=!!moved[b], endEd=!!endEdited[b];
+    if(!startMoved && !endEd) return;
+    var st = startMoved ? moved[b] : (sp1[b]||[])[0]; if(!st) return;
+    var endRaw = endVals[b] ? endVals[b][endVals[b].length-1].loc : '';
+    var en = startMoved ? endRaw : sheetEnd[b];
+    var n;
+    if(!en){ if(!startMoved) return; n=1; }
+    else {
+      var a1=freeAll.indexOf(st), a2=freeAll.indexOf(en);
+      if(a1<0 || a2<0){ locNote.push({b:b, s:'', v:en, why:'ช่องจบ อยู่นอกแร็ค/ช่องที่เว้นไว้'}); return; }
+      if(a2<a1){ locNote.push({b:b, s:'', v:en, why:'ช่องจบ มาก่อน ช่องเริ่ม ('+st+') — ใช้ขนาดตามยอดขายแทน'}); return; }
+      n=a2-a1+1;
+    }
+    widthBays[b]=n; widthEdits++;
+  });
+  if(locEdits || widthEdits){
     ordered=seq.slice().sort(function(a,c2){ return (a.ord-c2.ord)||(a.auto-c2.auto); });
     L=layout(brandLock);
   }
@@ -871,7 +943,8 @@ function buildModel(pddtText, ownerText, ctrlText){
   return {recs:recs, brands:brands, sup:sup, bays:bays, locs:locs, owner:owner, seq:finalSeq,
           notsup:notsup, seqB:seqB, ctrlRows:ctrlRows, ctrlBad:ctrlBad.concat(lockBad),
           pinAt:pinAt, brandPins:brandPins, pinInfo:pinInfo, lockRows:lockRows, ordRows:ordRows,
-          ordEdits:Object.keys(ordEdited).length, locEdits:locEdits, control:control,
+          ordEdits:Object.keys(ordEdited).length, locEdits:locEdits, widthEdits:widthEdits,
+          baselineAt:(BL&&BL.at)||'', baselineN:(BL&&BL.n)||0, control:control,
           cap:cap, ctrlText:ctrlText||''};
 }
 
@@ -1037,7 +1110,7 @@ function toPayload(M){
     pins:(M.pinInfo||[]), order:order, rows2:rows2, ctrl:parseCSV(M.ctrlText||''), cap:(M.cap||null),
     bad:(M.ctrlBad||[]),
     stat:{brands:nBrand, rack:nRack, sku:M.recs.length, ctrl:M.ctrlRows, lock:(M.lockRows||0), ord:(M.ordRows||0),
-          ordEdits:(M.ordEdits||0), locEdits:(M.locEdits||0),
+          ordEdits:(M.ordEdits||0), locEdits:(M.locEdits||0), widthEdits:(M.widthEdits||0), baselineAt:(M.baselineAt||''), baselineN:(M.baselineN||0),
           bad:(M.ctrlBad||[]).length, sup:contig(sl), own:contig(ol), ct:contig(cl)}};
 }
 
@@ -1078,7 +1151,7 @@ function toPayload(M){
       <a class="hublink" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">← Hub</a>
     </span>
   </div>
-  <h1>ผังวางสินค้าคลัง W4 <span class="ver">v1.6</span></h1>
+  <h1>ผังวางสินค้าคลัง W4 <span class="ver">v1.7</span></h1>
   <p class="sub">อ่านสดจาก Google Sheet ทุกครั้งที่เปิดหน้า — แก้ในชีทแล้วรีเฟรช ผังเปลี่ยนตามทันที
     <br>ผู้สั่ง → แท็บ <a href="https://docs.google.com/spreadsheets/d/1CqHARklgveAeJ6rTkNeyUSku__puTiNE7-c6ebn93W8/edit" target="_blank" rel="noopener"><b>ผู้สั่ง</b></a> ในชีท Purchase Actions ·
     ตั้งพื้น/แร็ค/กรง + ล็อกตำแหน่งเอง → ชีทเดียว <a href="https://docs.google.com/spreadsheets/d/1GAGteMUI_UsEa-xIZvOgvtelSWNH5AcvyE2S9EFfrks/edit" target="_blank" rel="noopener"><b>LayoutW4</b></a>
@@ -1099,7 +1172,7 @@ function toPayload(M){
 <section id="map">
   <div class="shead" style="justify-content:space-between; width:100%">
     <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap">
-      <span class="eyebrow">ผังเต็ม</span><h2>18 แถว · 226 ช่อง</h2><span class="ver">v1.6</span></div>
+      <span class="eyebrow">ผังเต็ม</span><h2>18 แถว · 226 ช่อง</h2><span class="ver">v1.7</span></div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; min-width:0">
       <button type="button" class="fsbtn primary" id="wrsheet" hidden>เขียนลงชีท LayoutW4</button>
       <button type="button" class="fsbtn" id="cpsheet">คัดลอกลำดับ+ช่อง ไปวางในชีท</button>
@@ -1112,7 +1185,7 @@ function toPayload(M){
     พิมพ์ค้นหาแล้วช่องที่เจอจะขึ้น<b>กรอบส้ม</b></p>
   <p class="note" id="cpmsg" hidden style="margin:0 0 12px"></p>
   <div id="mapzone">
-  <div id="fsbar"><b>ผังคลัง W4 · 18 แถว · 226 ช่อง</b><span class="ver">v1.6</span>
+  <div id="fsbar"><b>ผังคลัง W4 · 18 แถว · 226 ช่อง</b><span class="ver">v1.7</span>
     <span class="fsgroup">
       <button type="button" class="fsbtn" id="reload2">ดึง<span class="long">ข้อมูล</span>ใหม่</button>
       <button type="button" class="fsbtn primary" id="wrsheet2" hidden>เขียน<span class="long">ลง</span>ชีท</button>
@@ -1178,11 +1251,12 @@ function toPayload(M){
       <tr><td><b>ตั้งพื้น?</b></td><td><code>พื้น</code> / <code>แร็ค</code> / <code>กรง</code></td><td>เฉพาะไซส์แถวนั้น</td></tr>
       <tr><td><b>ลำดับ</b></td><td>เลข เช่น <code>2.5</code></td><td>แบรนด์นี้ไปแทรกระหว่าง 2 กับ 3 · ไม่ต้องไล่เลขใหม่</td></tr>
       <tr><td><b>ช่องเริ่ม</b></td><td>เลขช่อง เช่น <code>w4.05.03</code></td><td>ย้ายแบรนด์นี้ไป<b>แทรก</b>ตรงของที่อยู่ช่องนั้น (ไม่บีบของอื่น) · พอกดเขียนลงชีท ระบบจำเป็น ลำดับ ให้</td></tr>
-      <tr><td><b>ช่องจบ</b></td><td class="vend">— ผลลัพธ์ ดูอย่างเดียว —</td><td>ช่องสุดท้ายที่แบรนด์กิน · ว่าง = กินช่องเดียว · แก้แล้วไม่มีผล (ความกว้างมาจากยอดขาย/สต็อก)</td></tr>
+      <tr><td><b>ช่องจบ</b></td><td>เลขช่อง เช่น <code>w4.05.05</code></td><td>กำหนดให้แบรนด์นี้กินถึงช่องนั้น (= จำนวนช่องที่ต้องการ) · ว่าง/ไม่แก้ = ระบบคิดจากยอดขาย+สต็อก</td></tr>
       <tr><td><b>ล็อกที่ช่อง</b></td><td>เลขช่อง</td><td>ปัก<b>ถาวร</b>ที่ช่องนั้น ไม่ขยับแม้ของอื่นเปลี่ยน · ใส่ที่แถวที่มีแต่ VENDOR NAME = ปักทั้งซัพ</td></tr>
     </tbody></table></div></div>
-  <p class="lead"><b>แบรนด์เดียวกันมีหลายคำสั่ง:</b> ล็อกที่ช่อง &gt; ลำดับ &gt; ช่องเริ่ม (ตัวแรกที่มีชนะ ตัวอื่นขึ้นเตือนในตาราง) ·
-    <b>คนละแบรนด์ทำพร้อมกันได้</b> — ระบบจัดตาม ลำดับ ก่อน แล้วค่อยเอา ช่องเริ่ม มาแทรกทีหลัง · แบรนด์ที่ไม่มีเลข ระบบแทรกให้ต่อจากเพื่อนซัพเดียวกัน ·
+  <p class="lead"><b>ระบบรู้ว่าพี่แก้ตรงไหน</b> โดยเทียบชีทกับค่าที่มันเขียนล่าสุด — ต่างตรงไหน = คำสั่ง ·
+    แก้หลายคอลัมน์พร้อมกันได้: จัดตาม <b>ลำดับ</b> ก่อน → แล้ว <b>ช่องเริ่ม</b> ย้ายไปแทรก → <b>ช่องจบ</b> ขยาย/หดจำนวนช่อง · <b>ล็อกที่ช่อง</b> ถาวรเหนือทุกอย่าง ·
+    แบรนด์ที่ไม่มีเลข ระบบแทรกให้ต่อจากเพื่อนซัพเดียวกัน · (ถ้าวางชีทเองด้วยปุ่มคัดลอก ระบบไม่มีฐานเทียบ → ใช้กฎสำรอง: แก้ทั้ง ลำดับ และ ช่องเริ่ม จะใช้ ลำดับ) ·
     กด <b>เขียนลงชีท LayoutW4</b> เมื่อไหร่ เลขและช่องทุกแถวจะถูกเขียนใหม่ให้ตรงกับผัง (ค่าที่พี่พิมพ์ในคอลัมน์อื่นไม่หาย)</p>
   <div class="note warn" style="margin-bottom:22px"><b>ที่ที่แต่ละแบรนด์ได้</b> = เป้าเติมของจัดซื้อ <b>ยอดขาย × 14 วัน</b> แต่ไม่ต่ำกว่าสต็อกจริง →
     แปลงเป็นพาเลท → 1 ช่อง = 4 ชั้น = 4 พาเลท · แบรนด์เล็กสุดยังได้ ¼ ชั้น (4 แบรนด์/ชั้น) ·
@@ -1634,7 +1708,7 @@ function renderAll(D){
       btn.disabled=true; btn.textContent='กำลังเขียน…';
       say('กำลังดึงข้อมูลล่าสุดจากชีทก่อนเขียน (กันทับของที่พี่เพิ่งแก้)…');
       loadAll(function(){}).then(function(res){
-        var P2=toPayload(buildModel(res[0],res[1],res[2]));
+        var P2=toPayload(buildModel(res[0],res[1],res[2],res[3]));
         var saved=D; D=P2;
         var t; try{ t=sheetTSV(); } finally { D=saved; }
         say('กำลังเขียน '+t.rows.toLocaleString('en-US')+' แถว…');
@@ -1700,7 +1774,7 @@ function boot(){
     for(var k=i+1;k<3;k++){ var e2=document.getElementById('st'+k);
       if(e2 && e2.querySelector('b').textContent==='รอ') e2.querySelector('b').textContent='กำลังโหลด…'; }
   }).then(function(res){
-    var M=buildModel(res[0],res[1],res[2]);
+    var M=buildModel(res[0],res[1],res[2],res[3]);
     var D=toPayload(M);
     renderAll(D);
     document.getElementById('s1').textContent=D.stat.sup[0]+'/'+D.stat.sup[1];
@@ -1718,7 +1792,9 @@ function boot(){
     document.getElementById('freshtxt').textContent=
       'ดึงข้อมูลเมื่อ '+fmtTime(new Date())+' · ใช้เวลา '+((Date.now()-t0)/1000).toFixed(1)+' วิ · '+
       'CAT TYPE ติดกัน '+D.stat.ct[0]+'/'+D.stat.ct[1]+' · '+
-      'ลำดับจากชีท '+(D.stat.ord||0)+' แบรนด์'+(D.stat.ordEdits?' (แก้ '+D.stat.ordEdits+')':'')+(D.stat.locEdits?' · ย้ายตามคอลัมน์ ช่อง '+D.stat.locEdits+' แบรนด์':'')+' · '+
+      'ลำดับจากชีท '+(D.stat.ord||0)+' แบรนด์'+
+      ((D.stat.ordEdits||D.stat.locEdits||D.stat.widthEdits) ? ' · พี่แก้: ลำดับ '+(D.stat.ordEdits||0)+' · ช่องเริ่ม '+(D.stat.locEdits||0)+' · ช่องจบ '+(D.stat.widthEdits||0) : '')+
+      (D.stat.baselineAt ? ' · เทียบกับที่เขียนล่าสุด '+D.stat.baselineAt : ' · ⚠ ยังไม่มีฐานเทียบ (กดเขียนลงชีท 1 ครั้ง)')+' · '+
       (D.stat.ctrl? ('ตั้งพื้น/แร็ค/กรง: ตั้งเอง '+D.stat.ctrl+' รายการ')
                   : 'ชีท LayoutW4 ยังอ่านไม่ได้ (ต้องแชร์ Anyone with the link)') +
       ' · ล็อกตำแหน่งเอง '+(D.stat.lock||0)+' แบรนด์' +
