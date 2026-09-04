@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.60</title>
+<title>HR Rattana v5.61</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -2588,7 +2588,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
 
         <div class="input-group">
           <label>ประเภทการลา</label>
-          <select id="leaveType" onchange="updateLeaveQuotaChip()">
+          <select id="leaveType" onchange="updateLeaveQuotaChip();lvUpdateAttachHint()">
             <option value="personal">👤 ลากิจ (ได้รับค่าจ้าง)</option>
             <option value="unpaid_personal">💸 ลากิจ (ไม่รับค่าจ้าง)</option>
             <option value="vacation">🏖 ลาพักร้อน</option>
@@ -2623,9 +2623,10 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
           <textarea id="leaveReason" rows="3" placeholder="เช่น ป่วยเป็นไข้หวัด พบแพทย์"></textarea>
         </div>
         <div class="input-group">
-          <label>แนบรูปใบรับรองแพทย์ / เอกสาร (optional)</label>
-          <input type="file" id="leaveAttachment" accept="image/*">
+          <label id="leaveAttachLabel">แนบรูปใบรับรองแพทย์ / เอกสาร (ไม่บังคับ)</label>
+          <input type="file" id="leaveAttachment" accept="image/*" capture="environment" onchange="lvUpdateAttachHint()">
           <div id="leaveAttachmentPreview"></div>
+          <div id="leaveAttachHint" style="font-size:12px;margin-top:5px;min-height:16px"></div>
         </div>
         <button class="btn btn-primary btn-lg" onclick="submitLeaveRequest()">ยื่นคำขอ</button>
       </div>
@@ -3621,7 +3622,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.60';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.61';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -10435,7 +10436,7 @@ async function loadLeaveFormQuota() {
     const res = await callAppsScript('getLeaveQuota', { empId: currentUser.empId });
     _leaveQuotaData = (res && res.ok !== false && res.quota) ? res : null;
   } catch (_) { _leaveQuotaData = null; }
-  updateLeaveQuotaChip();
+  updateLeaveQuotaChip(); lvUpdateAttachHint();
 }
 /* ── v12.47: หัวข้อมูลวันที่ลา (วันที่ · สถานะ · กะ · สแกนเข้าวันนี้) — แบบเดียวกับ HumanSoft ── */
 function lvUpdateDayInfo() {
@@ -10597,6 +10598,12 @@ async function submitLeaveRequest() {
 
   if (!dateFrom) { toast('กรอกวันที่', 'warning'); return; }
   if (!reason)   { toast('กรอกเหตุผล', 'warning'); return; }
+  // v12.61: ลาป่วย (มีใบรับรองแพทย์) ต้องแนบใบจริง ไม่งั้นยื่นไม่ได้ (surat เคาะ 4/9)
+  if (LEAVE_NEEDS_DOC[type] && !attachment) {
+    toast(`${leaveTypeLabel(type)} ต้องแนบ${LEAVE_NEEDS_DOC[type]} — กด "แนบไฟล์" ก่อนยื่น`, 'error');
+    document.getElementById('leaveAttachment')?.focus();
+    return;
+  }
   if (unit === 'hours' && (!startTimeThai || !endTimeThai)) { toast('กรอกเวลา', 'warning'); return; }
 
   const hoursVal = rg.hours;   // v12.49: ชั่วโมงคิดจากช่วงที่เลือก (หักพักเที่ยงแล้ว)
@@ -10635,12 +10642,33 @@ async function submitLeaveRequest() {
     document.getElementById('leaveReason').value = '';
     document.getElementById('leaveAttachment').value = '';
     document.getElementById('leaveAttachmentPreview').innerHTML = '';
+    lvUpdateAttachHint();   // v12.61: รีเซ็ตป้าย "ยังไม่ได้แนบ" หลังยื่นสำเร็จ
     loadMyLeaves();
     loadLeaveQuota();   // refresh quota
     loadMyFeed();       // refresh feed
   } catch (e) {
     toast('❌ ' + e.message, 'error');
   } finally { hideSpinner(); }
+}
+
+/* v12.61: ประเภทลาที่ "ต้องแนบเอกสาร" — ค่าคือชื่อเอกสารที่ใช้ในข้อความเตือน
+   เพิ่มประเภทอื่นได้ที่นี่ที่เดียว ทั้งป้ายในฟอร์มและด่านตอนกดยื่นอ่านจากตัวนี้ */
+const LEAVE_NEEDS_DOC = { sick_with_cert: 'ใบรับรองแพทย์' };
+
+/* ป้ายใต้ช่องแนบไฟล์ + คำว่า (บังคับ)/(ไม่บังคับ) ที่หัวช่อง — เรียกตอนเปลี่ยนประเภทลาและตอนเลือกไฟล์ */
+function lvUpdateAttachHint() {
+  const type = document.getElementById('leaveType')?.value || '';
+  const need = LEAVE_NEEDS_DOC[type] || '';
+  const lb   = document.getElementById('leaveAttachLabel');
+  const hint = document.getElementById('leaveAttachHint');
+  const has  = !!document.getElementById('leaveAttachment')?.files?.[0];
+  if (lb) lb.innerHTML = need
+    ? `แนบ${need} <span style="color:var(--danger)">*จำเป็น</span>`
+    : 'แนบรูปใบรับรองแพทย์ / เอกสาร (ไม่บังคับ)';
+  if (!hint) return;
+  if (!need)     hint.innerHTML = '';
+  else if (has)  hint.innerHTML = '<span style="color:var(--success)">✓ แนบแล้ว</span>';
+  else           hint.innerHTML = `<span style="color:var(--danger)">✕ ยังไม่ได้แนบ${need} — ยื่นไม่ได้</span>`;
 }
 
 function leaveTypeLabel(t) {
@@ -11398,6 +11426,20 @@ function openApprovalDetail(idx) {
     <div class="adm-row"><span class="adm-lbl">รหัสพนักงาน</span><span class="adm-val">${it.empId || '—'}</span></div>
     ${parts.map((p, i) => `<div class="adm-row"><span class="adm-lbl">${labels[i] || 'รายละเอียด'+(parts.length > 1 ? ' '+(i+1) : '')}</span><span class="adm-val">${p}</span></div>`).join('')}
   </div>`;
+  // v12.61: รูปที่พนักงานแนบมา (ใบรับรองแพทย์ ฯลฯ) — แตะเปิดดูเต็มจอ
+  if (it.photo) {
+    const u = escH_(it.photo);
+    html += `<div class="adm-section">
+      <div class="adm-section-title">เอกสารแนบ</div>
+      <img src="${u}" alt="เอกสารแนบ" onclick="window.open('${u}','_blank')"
+        style="width:100%;max-height:340px;object-fit:contain;border-radius:10px;border:1px solid var(--line);background:var(--bg);cursor:zoom-in"
+        onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+      <div style="display:none;font-size:12.5px;color:var(--muted);padding:8px 0">
+        เปิดรูปไม่ได้ — <a href="${u}" target="_blank" style="color:var(--primary)">กดเปิดในแท็บใหม่</a>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:5px;text-align:center">แตะที่รูปเพื่อดูขนาดเต็ม</div>
+    </div>`;
+  }
   // v12.38: รายการที่ตัดสินแล้ว = ดูอย่างเดียว (ซ่อนปุ่มอนุมัติ/ปฏิเสธ + โชว์ผล)
   const st = it.status || 'pending';
   if (st !== 'pending') {

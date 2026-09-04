@@ -1,6 +1,7 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v8.9 — หน้าอนุมัติเห็น "รูปแนบ" ที่พนักงานส่งมา (คอลัมน์ O การลาApp) — คู่แอป v12.61 · ต้อง Deploy
  * v8.8 — getTimeIssues: หัวหน้า PTT เต็มระบบไม่มีลูกน้องในชีท Users → ทีมว่าง การ์ดไม่ขึ้น
  *         แก้: ดึงทีมจากทะเบียน PTT ให้ด้วย + previewTimeIssues() ไว้ตรวจจาก editor
  * v8.7 — getTimeIssues() — ข้อมูลลงเวลาที่ต้องตรวจของลูกทีม (คู่แอป v12.59 · ★ ต้อง Deploy)
@@ -320,7 +321,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.8', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.9', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3839,7 +3840,8 @@ function actionGetMyFoodOrders(p, user) {
 
 const APPROVE_CFG = {
   // v4.3: โครงใหม่ — I สถานะ, J ผู้อนุมัติ, K อนุมัติเมื่อ (stampAt), F ประเภทเอกสาร, L รายละเอียด
-  'การลาApp':   { status: 8,  approver: 9, stampAt: 10, name: 2, info: [5, 11] },
+  // v8.9: photo = คอลัมน์ "รูปแนบ" (O = 14) — ส่งให้หน้าอนุมัติโชว์ใบรับรองแพทย์/หลักฐาน
+  'การลาApp':   { status: 8,  approver: 9, stampAt: 10, name: 2, info: [5, 11], photo: 14 },
   'ขอตกเบิก':   { status: 9,  approver: 10, name: 2, info: [6, 12] },
   'อุปกรณ์App': { status: 14, approver: null, name: 2, info: [4, 5, 7] },
   'เอกสารApp':  { status: 6,  approver: 7,  name: 2, info: [4, 5] },
@@ -4055,6 +4057,7 @@ function getPendingAll(p, user) {
           status: stKey,
           approver: (cfg.approver != null) ? String(r[cfg.approver] || '') : '',
           assigned: assigned,   // v6.2: ใบนี้ถูกกำหนดให้เราเป็นผู้อนุมัติเฉพาะ (แอปข้ามการกรองทีม)
+          photo: (cfg.photo != null) ? String(r[cfg.photo] || '') : '',   // v8.9: รูปแนบ (ลิงก์ photoView)
         };
         // v7.4: ส่งช่วงวันลา + ชั่วโมง มาด้วย เพื่อให้หน้าอนุมัติโชว์ "ลาตั้งแต่–ถึง กี่วัน"
         if (name === 'การลาApp' && leaveSheetIsNew_(sh)) {
