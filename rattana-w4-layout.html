@@ -468,7 +468,8 @@ function buildModel(pddtText, ownerText, ctrlText, baseText){
   /* ---- ทะเบียนผู้สั่ง ---- */
   var O=parseCSV(ownerText), oh=(O[0]||[]).map(function(s){return s.trim();});
   var oi={}; oh.forEach(function(h,i){ oi[h]=i; });
-  var owner={}, notsup={}, regct={}, buyers={};
+  var owner={}, notsup={}, regct={}, regSales={}, buyers={};
+  var oiSales=-1; oh.forEach(function(h,i){ if(h.indexOf('ยอดขาย')>=0) oiSales=i; });
   for(var j=1;j<O.length;j++){
     var q2=O[j]; if(!q2||!q2[0]) continue;
     var nm=(q2[oi['ชื่อ']]||'').trim(); if(!nm) continue;
@@ -477,6 +478,7 @@ function buildModel(pddtText, ownerText, ctrlText, baseText){
     if(oi['หมายเหตุ']!=null && String(q2[oi['หมายเหตุ']]||'').indexOf('ไม่ใช่ซัพ')>=0) notsup[nm]=1;
     var ct2=String(q2[oi['CAT TYPE']]||'');
     regct[nm]= ct2 ? ct2.split(/\s*\(\d+\)|\s*·\s*/)[0].trim() : '';
+    regSales[nm]= oiSales>=0 ? num(q2[oiSales]) : 0;
   }
   /* ---- ชีท "W4 ตั้งพื้น" ที่ Surat กรอกเอง ----
      คีย์ที่จับ = CAT BRAND + CAT SIZE (ตรงเป๊ะ)
@@ -484,6 +486,7 @@ function buildModel(pddtText, ownerText, ctrlText, baseText){
   var control={}, controlBrand={}, ctrlRows=0, ctrlBad=[];
   /* คำสั่งดิบจากชีท (ยังไม่เช็คกับ PDDT) — แก้ที่แถวไหนของแบรนด์นั้นก็ได้ */
   var ordVals={}, locVals={}, endVals={}, lockVals={}, lockVendor={}, rawBrandOrder=[], seenRaw={};
+  var phLocVals={}, phEndVals={};   /* แถว (จองรอของ) — คีย์ = VENDOR NAME */
   function normTxt(s){ return String(s==null?'':s).replace(/\s+/g,' ').trim(); }
   function normPlace(s){
     var v=normTxt(s);
@@ -513,6 +516,11 @@ function buildModel(pddtText, ownerText, ctrlText, baseText){
     for(var m=1;m<C.length;m++){
       var rr=C[m]; if(!rr) continue;
       var bn=normTxt(rr[ci['CAT BRAND']]), sz=normTxt(rr[ci['CAT SIZE']]), kv=normTxt(rr[ci['VENDOR NAME']]);
+      if(bn.indexOf('(จองรอของ)')===0){
+        if(kv && kcol>=0){ var rawP=normTxt(rr[kcol]); var bcP=rawP?bayCode(rawP):null; if(bcP) (phLocVals[kv]=phLocVals[kv]||[]).push({loc:bcP,row:m}); }
+        if(kv && ecol>=0){ var rawPE=normTxt(rr[ecol]); var bcPE=rawPE?bayCode(rawPE):null; if(bcPE) (phEndVals[kv]=phEndVals[kv]||[]).push({loc:bcPE,row:m}); }
+        continue;
+      }
       if(bn && !seenRaw[bn]){ seenRaw[bn]=1; rawBrandOrder.push(bn); }
       if(bn && col>=0){
         var v=normPlace(rr[col]);
@@ -639,6 +647,7 @@ function buildModel(pddtText, ownerText, ctrlText, baseText){
     if(owner[v2]===CFG.cageOwner) continue;
     if(notsup[v2] && !sup[v2]) continue;
     if(vendorHasGoods[v2] && !sup[v2]) continue;
+    if(!sup[v2] && !(regSales[v2]>0)) continue;            /* จองรอของเฉพาะซัพที่เคยขาย (Surat 2026-09-04) */
     if(!sup[v2]) sup[v2]={brands:[],cs:0,pal:0,ctm:{},own:owner[v2],has:false,notsup:false,ct:regct[v2]||''};
   }
   Object.keys(sup).forEach(function(v){
@@ -898,7 +907,7 @@ function buildModel(pddtText, ownerText, ctrlText, baseText){
      ❌ ไม่ใช่หมุดตายตัว — หมุดจะบีบทุกอย่างก่อนหน้าลงช่องเดียว (เคสจริง: สปาย→w4.01.02 บีบนำทิพย์ทั้งบล็อกลง 1 ช่อง)
      อยากตายตัวจริงใช้คอลัมน์ ล็อกที่ช่อง                                                            */
   var L=null, sp1=null, locEdits=0, locNote=[], moved={}, widthEdits=0, brandPins=brandLock, bays=null, pinInfo=[], finalSeq=[],
-      placedN=0, autoN=0, anyPlaced=false;
+      placedN=0, autoN=0, anyPlaced=false, phN=0, phPlacedN=0, phPending=[];
   if(!CFG.sheetIsLayout){
   /* ===== v1.x (ปิดไว้): ผังอัตโนมัติ · ลำดับ/ช่องเริ่ม/ช่องจบ เป็นคำสั่งปรับ · เทียบกับฐานที่เขียนล่าสุด ===== */
   L=layout(brandLock); sp1=spansOf(L.bays);
@@ -970,7 +979,20 @@ function buildModel(pddtText, ownerText, ctrlText, baseText){
   anyPlaced = placedN>0;
   bays={}; locs.forEach(function(l){ bays[l]=[]; });
   FROZEN_LOCS.forEach(function(l){ bays[l]=FROZEN[l].map(function(b){return {v:'(เดิม)',b:b,e:false};}); });
-  var entries=ordered.filter(function(s2){ return !s2.e || !anyPlaced; });   /* ช่องจองรอของ มีเฉพาะโหมดอัตโนมัติ */
+  /* จองรอของ: แถวในชีทที่ Surat ใส่ช่องแล้ว → วางตามนั้น · ยังไม่ใส่ → ไม่วาด แต่ขึ้นลิสต์รอ */
+  var phLoc={}, phEnd={}, phPlaced={};
+  Object.keys(phLocVals).forEach(function(v){ phLoc[v]=pickVal(phLocVals[v]); });
+  Object.keys(phEndVals).forEach(function(v){ phEnd[v]=pickVal(phEndVals[v]); });
+  Object.keys(phLoc).forEach(function(v){
+    var st=phLoc[v], en=phEnd[v]||st, a1=locs.indexOf(st), a2=locs.indexOf(en);
+    if(a1<0){ locNote.push({b:'(จองรอของ) '+shortV(v), s:'', v:st, why:'ช่องเริ่ม ไม่มีในผัง (w4.01.01–w4.18.17)'}); return; }
+    if(a2<0 || a2<a1){ locNote.push({b:'(จองรอของ) '+shortV(v), s:'', v:en, why:'ช่องจบ ไม่ถูก — ใช้ช่องเดียว'}); a2=a1; }
+    phPlaced[v]=[a1,a2];
+  });
+  var autoSpanPH={};
+  locs.forEach(function(l,i5){ L.bays[l].forEach(function(s2){ if(s2.e){ var a=autoSpanPH[s2.v]||(autoSpanPH[s2.v]=[i5,i5]); a[1]=i5; } }); });
+  ordered.forEach(function(s2){ if(s2.e){ phN++; if(phPlaced[s2.v]) phPlacedN++; else if(anyPlaced) phPending.push(s2.v); } });
+  var entries=ordered.filter(function(s2){ return !s2.e || !anyPlaced || phPlaced[s2.v]; });
   function idxOfSpan(b){ var a=autoSpan[b]||[]; return a.length ? [locs.indexOf(a[0]), locs.indexOf(a[a.length-1])] : null; }
   var lastFree=locs.indexOf(freeAll[freeAll.length-1]);
   var byV={}, byOwn={};
@@ -983,7 +1005,9 @@ function buildModel(pddtText, ownerText, ctrlText, baseText){
   FROZEN_LOCS.forEach(function(l){ FROZEN[l].forEach(function(b){ (frozenOf[b]=frozenOf[b]||[]).push(locs.indexOf(l)); }); });
   entries.forEach(function(s2){
     var rng=null; s2.autoPlaced=false; s2.locked=false;
-    if(!s2.e && frozenOf[s2.b]) rng=[Math.min.apply(null,frozenOf[s2.b]), Math.max.apply(null,frozenOf[s2.b])];
+    if(s2.e && phPlaced[s2.v]) rng=phPlaced[s2.v];
+    else if(s2.e && !anyPlaced) rng=autoSpanPH[s2.v] || [lastFree,lastFree];
+    else if(!s2.e && frozenOf[s2.b]) rng=[Math.min.apply(null,frozenOf[s2.b]), Math.max.apply(null,frozenOf[s2.b])];
     else if(!s2.e && placed[s2.b]) rng=placed[s2.b];
     else if(!anyPlaced) rng=idxOfSpan(s2.b) || [lastFree, lastFree];
     else {
@@ -1025,6 +1049,7 @@ function buildModel(pddtText, ownerText, ctrlText, baseText){
           pinAt:pinAt, brandPins:brandPins, pinInfo:pinInfo, lockRows:lockRows, ordRows:ordRows,
           ordEdits:Object.keys(ordEdited).length, locEdits:locEdits, widthEdits:widthEdits,
           placedN:placedN, autoN:autoN, sheetMode:(CFG.sheetIsLayout && anyPlaced),
+          phN:phN, phPlacedN:phPlacedN, phPending:phPending, regSales:regSales, regct:regct,
           baselineAt:(BL&&BL.at)||'', baselineN:(BL&&BL.n)||0, control:control,
           cap:cap, ctrlText:ctrlText||''};
 }
@@ -1048,7 +1073,8 @@ function toPayload(M){
         var vn = frozen ? '(เดิม)'
                : (d.orph && (d.boughtFrom||[]).length) ? shortV(d.boughtFrom[0])
                : shortV(s.v);
-        return {v: vn, rv: s.v, b: s.e?'(ยังไม่มีของ)':s.b, lk:!!s.locked, nw:!!s.autoPlaced, q:(d.q||''),
+        return {v: vn, rv: s.v, b: s.e?'(จองรอของ)':s.b, lk:!!s.locked, nw:!!s.autoPlaced, q:(d.q||''),
+                sales: s.e ? Math.round((M.regSales||{})[s.v]||0) : 0,
                 cs:+( (d.cs||0).toFixed(1) ), st:Math.round(d.stock||0), need:+((d.need||0).toFixed(2)),
                 ct: d.grp||sp.ct||d.ct||'', own: sp.own||'', e:!!s.e, sku:d.sku||0,
                 si: (seqIdx[s.b]==null?9e9:seqIdx[s.b]),
@@ -1178,6 +1204,23 @@ function toPayload(M){
     var so=sizeOrder[x.brand]||(sizeOrder[x.brand]=[]); if(so.indexOf(x.size)<0) so.push(x.size);
   });
   var rows2=[];
+  /* แถวจองรอของ (ต่อท้าย): เรียงตามผู้สั่ง → ยอดขาย 2 เดือน มาก→น้อย · ช่องเริ่ม/จบ = ที่ Surat ใส่ (ว่าง = ยังไม่จอง) */
+  var phSpan={};
+  locs.forEach(function(l){ bays[l].forEach(function(s){ if(s.e){ var a=phSpan[s.v]||(phSpan[s.v]=[l,l]); a[1]=l; } }); });
+  var phAll=(M.seq||[]).filter(function(s){ return s.e; }).map(function(s){ return s.v; });
+  Object.keys(sup).forEach(function(v){ if(sup[v] && sup[v].has===false && phAll.indexOf(v)<0) phAll.push(v); });
+  var seenPH={}; phAll=phAll.filter(function(v){ if(seenPH[v]) return false; seenPH[v]=1; return true; });
+  var bseq=CFG.buyerSeq||[];
+  phAll.sort(function(a,b){
+    var oa=bseq.indexOf((sup[a]||{}).own), ob=bseq.indexOf((sup[b]||{}).own);
+    if(oa<0) oa=99; if(ob<0) ob=99; if(oa!==ob) return oa-ob;
+    return ((M.regSales||{})[b]||0)-((M.regSales||{})[a]||0);
+  });
+  var phRows=phAll.map(function(v){ var sp=phSpan[v];
+    return {b:'(จองรอของ) '+shortV(v), s:'', ct:(M.regct||{})[v]||(sup[v]||{}).ct||'', v:v, cs:'', st:'', sys:'จอง', ord:'',
+            loc: sp?(sp[0]===sp[1]?sp[0]:sp[0]+'–'+sp[1]):'', loc1: sp?sp[0]:'', loc2: (sp&&sp[1]!==sp[0])?sp[1]:''}; });
+  var pending=phAll.filter(function(v){ return !phSpan[v]; }).map(function(v){
+    return {v:shortV(v), own:(sup[v]||{}).own||'', ct:(M.regct||{})[v]||(sup[v]||{}).ct||'', sales:Math.round((M.regSales||{})[v]||0)}; });
   order.forEach(function(o){
     (sizeOrder[o.b]||[]).forEach(function(s){
       var d=bySize[o.b+'|'+s];
@@ -1188,11 +1231,11 @@ function toPayload(M){
     });
   });
   return {racks:racks, floor:floor, cig:cig, owns:owns, notsup:ns, fix:fix, off:off,
-    pins:(M.pinInfo||[]), order:order, rows2:rows2, ctrl:parseCSV(M.ctrlText||''), cap:(M.cap||null),
+    pins:(M.pinInfo||[]), order:order, rows2:rows2.concat(phRows), pending:pending, ctrl:parseCSV(M.ctrlText||''), cap:(M.cap||null),
     bad:(M.ctrlBad||[]),
     stat:{brands:nBrand, rack:nRack, sku:M.recs.length, ctrl:M.ctrlRows, lock:(M.lockRows||0), ord:(M.ordRows||0),
           ordEdits:(M.ordEdits||0), locEdits:(M.locEdits||0), widthEdits:(M.widthEdits||0), baselineAt:(M.baselineAt||''), baselineN:(M.baselineN||0),
-          placedN:(M.placedN||0), autoN:(M.autoN||0), sheetMode:!!M.sheetMode,
+          placedN:(M.placedN||0), autoN:(M.autoN||0), sheetMode:!!M.sheetMode, phN:phAll.length, phPlacedN:phAll.length-pending.length,
           bad:(M.ctrlBad||[]).length, sup:contig(sl), own:contig(ol), ct:contig(cl)}};
 }
 
@@ -1233,7 +1276,7 @@ function toPayload(M){
       <a class="hublink" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">← Hub</a>
     </span>
   </div>
-  <h1>ผังวางสินค้าคลัง W4 <span class="ver">v2.0</span></h1>
+  <h1>ผังวางสินค้าคลัง W4 <span class="ver">v2.1</span></h1>
   <p class="sub">อ่านสดจาก Google Sheet ทุกครั้งที่เปิดหน้า — แก้ในชีทแล้วรีเฟรช ผังเปลี่ยนตามทันที
     <br>ผู้สั่ง → แท็บ <a href="https://docs.google.com/spreadsheets/d/1CqHARklgveAeJ6rTkNeyUSku__puTiNE7-c6ebn93W8/edit" target="_blank" rel="noopener"><b>ผู้สั่ง</b></a> ในชีท Purchase Actions ·
     ตั้งพื้น/แร็ค/กรง + ล็อกตำแหน่งเอง → ชีทเดียว <a href="https://docs.google.com/spreadsheets/d/1GAGteMUI_UsEa-xIZvOgvtelSWNH5AcvyE2S9EFfrks/edit" target="_blank" rel="noopener"><b>LayoutW4</b></a>
@@ -1254,7 +1297,7 @@ function toPayload(M){
 <section id="map">
   <div class="shead" style="justify-content:space-between; width:100%">
     <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap">
-      <span class="eyebrow">ผังเต็ม</span><h2>18 แถว · 226 ช่อง</h2><span class="ver">v2.0</span></div>
+      <span class="eyebrow">ผังเต็ม</span><h2>18 แถว · 226 ช่อง</h2><span class="ver">v2.1</span></div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; min-width:0">
       <button type="button" class="fsbtn primary" id="wrsheet" hidden>เขียนลงชีท LayoutW4</button>
       <button type="button" class="fsbtn" id="cpsheet">คัดลอกลำดับ+ช่อง ไปวางในชีท</button>
@@ -1267,7 +1310,7 @@ function toPayload(M){
     พิมพ์ค้นหาแล้วช่องที่เจอจะขึ้น<b>กรอบส้ม</b></p>
   <p class="note" id="cpmsg" hidden style="margin:0 0 12px"></p>
   <div id="mapzone">
-  <div id="fsbar"><b>ผังคลัง W4 · 18 แถว · 226 ช่อง</b><span class="ver">v2.0</span>
+  <div id="fsbar"><b>ผังคลัง W4 · 18 แถว · 226 ช่อง</b><span class="ver">v2.1</span>
     <span class="fsgroup">
       <button type="button" class="fsbtn" id="reload2">ดึง<span class="long">ข้อมูล</span>ใหม่</button>
       <button type="button" class="fsbtn primary" id="wrsheet2" hidden>เขียน<span class="long">ลง</span>ชีท</button>
@@ -1338,6 +1381,10 @@ function toPayload(M){
     <b>แบรนด์ใหม่ที่ยังไม่มีช่อง</b> ระบบวางท้ายเพื่อนซัพเดียวกันแล้วติดป้าย "ระบบวาง" (ขีดฟ้าบนช่อง) ให้พี่ย้ายต่อ ·
     ชีทเปล่าทั้งแผ่น = ระบบจัดผังอัตโนมัติให้ทั้งหมดเป็นข้อเสนอ · กด <b>เขียนลงชีท</b> เมื่อไหร่ ช่องทุกแถวจะถูกเขียนให้ตรงกับผัง</p>
   <div class="note warn"><b>ความจุ</b> — 1 ช่อง = 4 ชั้น = 4 พาเลท · กดที่ช่องดูคอลัมน์ "พาเลท" ว่าแบรนด์นั้นต้องใช้เท่าไหร่ (ยอดขาย × 14 วัน ไม่ต่ำกว่าสต็อกจริง) เทียบกับช่องที่ให้</div>
+  <div class="shead" style="margin-top:22px"><span class="eyebrow">จองรอของ</span><h2>ซัพที่เคยขายแต่ยังไม่มีของที่ W4 — ใส่ช่องเองในชีท</h2></div>
+  <p class="lead">ในชีทมีแถว <b>(จองรอของ) ชื่อซัพ</b> ต่อท้ายให้ทุกซัพในทะเบียนที่มียอดขาย 2 เดือน แต่ยังไม่มีของในแร็ค ·
+    ใส่ <b>ช่องเริ่ม</b> (และ ช่องจบ ถ้ากินหลายช่อง) → ขึ้นในผังเป็นช่องจอง (ตัวจาง) · ยังไม่ใส่ = อยู่ในตารางนี้</p>
+  <div id="phwrap" hidden><div class="card" style="padding:4px 18px"><div class="tblwrap"><table id="phtbl"></table></div></div></div>
   <div id="pinwrap" hidden style="margin-top:18px">
     <div class="card" style="padding:4px 18px"><div class="tblwrap"><table id="pintbl"></table></div></div>
   </div>
@@ -1466,6 +1513,13 @@ function renderAll(D){
           '<td class="n">'+z.sups+'</td><td><span class="tag'+cls+'">'+lbl+'</span></td></tr>';
       }).join('')+'</tbody>';
   } else if(pw){ pw.hidden=true; }
+  var phw=document.getElementById('phwrap'), pht=document.getElementById('phtbl');
+  if(pht && D.pending && D.pending.length){
+    phw.hidden=false;
+    pht.innerHTML='<thead><tr><th>ซัพ (เคยขาย · ยังไม่มีของที่ W4)</th><th>ผู้สั่ง</th><th>หมวด</th><th style="text-align:right">ยอดขาย 2 เดือน (฿)</th></tr></thead><tbody>'+
+      D.pending.map(function(x){ return '<tr><td><b>'+esc(x.v)+'</b></td><td class="vend">'+esc(x.own)+'</td><td class="vend">'+esc(x.ct)+
+        '</td><td class="n">'+x.sales.toLocaleString('en-US')+'</td></tr>'; }).join('')+'</tbody>';
+  } else if(phw){ phw.hidden=true; }
   var ft=document.getElementById('fixtbl');
   if(ft) ft.innerHTML='<thead><tr><th>หมวด</th><th style="text-align:right">ลัง/วัน</th><th>คนหลัก</th><th>ซัพที่ควรย้ายมาให้คนหลัก</th></tr></thead><tbody>'+
     D.fix.map(function(f){return '<tr><td><b>'+esc(f.ct)+'</b></td><td class="n">'+fmt(f.cs)+'</td><td class="vend">'+
@@ -1690,7 +1744,7 @@ function renderAll(D){
              'ลำดับ':'ord','ช่อง':'loc1','ช่องเริ่ม':'loc1','ช่องจบ':'loc2'};
     var ctrl=D.ctrl||[];
     var oldHead=(ctrl[0]||[]).map(function(h){return String(h||'').trim();});
-    var head=oldHead.indexOf('CAT BRAND')>=0 ? oldHead.slice() : DEF.slice();
+    var head=(oldHead.indexOf('CAT BRAND')>=0 ? oldHead.slice() : DEF.slice()).filter(function(h){ return !!h; });   /* ตัดหัวว่าง (คอลัมน์เก่าที่ถูกล้าง) */
     var iOld=head.indexOf('ช่อง');
     if(iOld>=0 && head.indexOf('ช่องเริ่ม')<0) head[iOld]='ช่องเริ่ม';
     if(head.indexOf('ช่องเริ่ม')<0) head.push('ช่องเริ่ม');
@@ -1854,7 +1908,7 @@ function boot(){
       'ดึงข้อมูลเมื่อ '+fmtTime(new Date())+' · ใช้เวลา '+((Date.now()-t0)/1000).toFixed(1)+' วิ · '+
       'CAT TYPE ติดกัน '+D.stat.ct[0]+'/'+D.stat.ct[1]+' · '+
       (CFG.sheetIsLayout
-        ? (D.stat.sheetMode ? 'วางตามชีท '+D.stat.placedN+' แบรนด์'+(D.stat.autoN?' · ระบบวางให้ '+D.stat.autoN+' แบรนด์ใหม่ (ขีดฟ้า)':'') : 'ชีทยังไม่มีตำแหน่ง — ผังอัตโนมัติ (ข้อเสนอ)')
+        ? (D.stat.sheetMode ? 'วางตามชีท '+D.stat.placedN+' แบรนด์'+(D.stat.autoN?' · ระบบวางให้ '+D.stat.autoN+' แบรนด์ใหม่ (ขีดฟ้า)':'')+' · จองรอของ '+D.stat.phN+' ราย (ใส่ช่องแล้ว '+D.stat.phPlacedN+')' : 'ชีทยังไม่มีตำแหน่ง — ผังอัตโนมัติ (ข้อเสนอ)')
         : 'ลำดับจากชีท '+(D.stat.ord||0)+' แบรนด์'+
           ((D.stat.ordEdits||D.stat.locEdits||D.stat.widthEdits) ? ' · พี่แก้: ลำดับ '+(D.stat.ordEdits||0)+' · ช่องเริ่ม '+(D.stat.locEdits||0)+' · ช่องจบ '+(D.stat.widthEdits||0) : '')+
           (D.stat.baselineAt ? ' · เทียบกับที่เขียนล่าสุด '+D.stat.baselineAt : ' · ⚠ ยังไม่มีฐานเทียบ (กดเขียนลงชีท 1 ครั้ง)'))+' · '+
