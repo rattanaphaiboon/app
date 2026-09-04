@@ -1,7 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v8.9 — หน้าอนุมัติเห็น "รูปแนบ" ที่พนักงานส่งมา (คอลัมน์ O การลาApp) — คู่แอป v12.61 · ต้อง Deploy
+ * v9.0 — "ไม่อนุมัติ" มีคำว่า "อนุมัติ" อยู่ข้างใน → สูตรลาในสรุปวันนับใบที่ถูกปฏิเสธเป็นอนุมัติ
+ *         (เกิดเมื่อ HR พิมพ์สถานะไทยเองในชีท) · แก้ทั้งสูตร + leaveIsApproved_() ที่นับโควต้า
+ *         ★ ต้องรัน setupDailySummary ใหม่หลัง Deploy เพราะสูตรฝังอยู่ในชีท
+ * v8.9 — หน้าอนุมัติเห็น "รูปแนบ" ที่พนักงานส่งมา (คอลัมน์ O การลาApp) — คู่แอป v12.61
  * v8.8 — getTimeIssues: หัวหน้า PTT เต็มระบบไม่มีลูกน้องในชีท Users → ทีมว่าง การ์ดไม่ขึ้น
  *         แก้: ดึงทีมจากทะเบียน PTT ให้ด้วย + previewTimeIssues() ไว้ตรวจจาก editor
  * v8.7 — getTimeIssues() — ข้อมูลลงเวลาที่ต้องตรวจของลูกทีม (คู่แอป v12.59 · ★ ต้อง Deploy)
@@ -321,7 +324,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'8.9', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.0', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -1232,7 +1235,7 @@ function setupDailySummary() {
   );
   // v4.3: การลาApp โครงใหม่ — A วันที่, N ถึงวันที่, F ประเภทเอกสาร, I สถานะ, M จำนวนชั่วโมง
   rp.getRange('G4').setFormula(
-    `=MAP(A4:A, C4:C, LAMBDA(id, d, IF(id="",, IFERROR(TEXTJOIN(", ", 1, FILTER('การลาApp'!F2:F, 'การลาApp'!B2:B&""=id, IFERROR(DATEVALUE('การลาApp'!A2:A), 'การลาApp'!A2:A)<=d, IFERROR(DATEVALUE('การลาApp'!N2:N), 'การลาApp'!N2:N)>=d, ISNUMBER(SEARCH("อนุมัติ", 'การลาApp'!I2:I&"")) + ('การลาApp'!I2:I="approved"))), ""))))`
+    `=MAP(A4:A, C4:C, LAMBDA(id, d, IF(id="",, IFERROR(TEXTJOIN(", ", 1, FILTER('การลาApp'!F2:F, 'การลาApp'!B2:B&""=id, IFERROR(DATEVALUE('การลาApp'!A2:A), 'การลาApp'!A2:A)<=d, IFERROR(DATEVALUE('การลาApp'!N2:N), 'การลาApp'!N2:N)>=d, (ISNUMBER(SEARCH("อนุมัติ", 'การลาApp'!I2:I&""))*NOT(ISNUMBER(SEARCH("ไม่อนุมัติ", 'การลาApp'!I2:I&"")))) + ('การลาApp'!I2:I="approved"))), ""))))`
   );
   // v4.9: โชว์ชั่วโมงลาของ "วันนั้น" (cap 8 จากคอลัมน์ K) — เดิมโชว์ยอดรวมทั้งใบ (ลา 3 วันขึ้น 24 ทุกวัน)
   rp.getRange('H4').setFormula(
@@ -1249,7 +1252,7 @@ function setupDailySummary() {
   // v4.7: K (ซ่อน) = ชั่วโมงลาอนุมัติของวันนั้น (cap 8) — ใช้คิดสถานะลาบางส่วน + เศษวันใน ลงเวลาAuto
   rp.getRange('K3').setValue('ชม.ลา').setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
   rp.getRange('K4').setFormula(
-    `=MAP(A4:A, C4:C, LAMBDA(id, d, IF(id="",, LET(s, IFERROR(SUM(FILTER('การลาApp'!M2:M, 'การลาApp'!B2:B&""=id, IFERROR(DATEVALUE('การลาApp'!A2:A), 'การลาApp'!A2:A)<=d, IFERROR(DATEVALUE('การลาApp'!N2:N), 'การลาApp'!N2:N)>=d, ISNUMBER(SEARCH("อนุมัติ", 'การลาApp'!I2:I&"")) + ('การลาApp'!I2:I="approved"))), 0), MIN(8, N(s))))))`
+    `=MAP(A4:A, C4:C, LAMBDA(id, d, IF(id="",, LET(s, IFERROR(SUM(FILTER('การลาApp'!M2:M, 'การลาApp'!B2:B&""=id, IFERROR(DATEVALUE('การลาApp'!A2:A), 'การลาApp'!A2:A)<=d, IFERROR(DATEVALUE('การลาApp'!N2:N), 'การลาApp'!N2:N)>=d, (ISNUMBER(SEARCH("อนุมัติ", 'การลาApp'!I2:I&""))*NOT(ISNUMBER(SEARCH("ไม่อนุมัติ", 'การลาApp'!I2:I&"")))) + ('การลาApp'!I2:I="approved"))), 0), MIN(8, N(s))))))`
   );
   try { rp.hideColumns(11); } catch (e) {}
 
@@ -2615,6 +2618,17 @@ function leaveQuotaDays_(hours, startDate, endDate) {
   return h <= 4 ? 0.5 : 1;                // ลาวันเดียว = ครึ่งวัน หรือ เต็มวัน
 }
 
+/* v9.0: "ใบนี้อนุมัติแล้วหรือยัง" — ที่เดียวจบ ใช้ทั้งตอนนับโควต้าและตอนตรวจ
+   แอปเขียน approved/rejected/cancelled (อังกฤษ) แต่ HR แก้ในชีทเป็นไทยได้
+   ★ กับดัก: คำว่า "ไม่อนุมัติ" มีคำว่า "อนุมัติ" อยู่ข้างใน — ต้องตัดออกก่อนเสมอ */
+function leaveIsApproved_(v) {
+  const s = String(v == null ? '' : v).trim().toLowerCase();
+  if (!s) return false;
+  if (s.indexOf('ไม่อนุมัติ') >= 0 || s.indexOf('reject') === 0) return false;
+  if (s.indexOf('ยกเลิก') >= 0 || s.indexOf('cancel') === 0) return false;
+  return s === 'approved' || s.indexOf('อนุมัติ') >= 0;
+}
+
 function countUsedLeave(empId, from, to) {
   const c = { personal:0, sickWithCert:0, sickNoCert:0, vacation:0, unpaidPersonal:0, maternity:0, training:0 };
   // v5.0: นับจาก การลาApp — approveAny อนุมัติที่ชีทนี้ (แท็บ log เดิมสถานะค้าง pending ตลอด
@@ -2624,7 +2638,7 @@ function countUsedLeave(empId, from, to) {
     for (let i = 1; i < data.length; i++) {
       const r = data[i];
       if (String(r[1] || '').trim() !== String(empId)) continue;
-      if (String(r[8] || '').toLowerCase() !== 'approved') continue;
+      if (!leaveIsApproved_(r[8])) continue;   // v9.0: รับ "อนุมัติ" ไทยด้วย · กัน "ไม่อนุมัติ" หลุดเข้ามา
       const sd = r[0] instanceof Date ? r[0] : parseDDMMYYYY(formatDate(r[0]));
       if (!sd || isNaN(sd.getTime())) continue;
       if (sd < from || sd > to) continue;
