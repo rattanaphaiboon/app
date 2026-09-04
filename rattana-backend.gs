@@ -3838,6 +3838,23 @@ function actionGetMyFoodOrders(p, user) {
   } catch(e) { return { ok: false, error: e.message }; }
 }
 
+/* v8.9: แปลงค่าคอลัมน์ "รูปแนบ" ให้เป็น URL รูปตรงๆ ที่ <img src> ใช้ได้
+   ในชีทเก็บได้ 2 แบบ — ลิงก์ photoView (…?action=photoView&k=…&p=<path>) หรือ path ดิบ
+   photoView คืนค่าเป็น "หน้าเว็บที่มีรูป" ไม่ใช่ไฟล์รูป → ใส่ใน <img> แล้วไม่ขึ้น
+   ตรงนี้จึงดึง path ออกมาเซ็นใหม่เป็นลิงก์ Supabase ตรง (อายุ 1 ชม. พอสำหรับการอนุมัติ 1 รอบ) */
+function photoDirectUrl_(v) {
+  const s = String(v || '').trim();
+  if (!s) return '';
+  try {
+    let path = '';
+    const m = s.match(/[?&]p=([^&]+)/);
+    if (m) path = decodeURIComponent(m[1]);
+    else if (s.indexOf('http') !== 0) path = s;        // เก็บเป็น path ดิบ (ตอนยังไม่ได้ตั้ง PHOTO_KEY)
+    if (path) { const u = sbSignedUrl_(path, 3600); if (u) return u; }
+  } catch (_) {}
+  return s;   // แปลงไม่ได้ ก็ส่งของเดิมไป (อย่างน้อยกดเปิดแท็บใหม่ได้)
+}
+
 const APPROVE_CFG = {
   // v4.3: โครงใหม่ — I สถานะ, J ผู้อนุมัติ, K อนุมัติเมื่อ (stampAt), F ประเภทเอกสาร, L รายละเอียด
   // v8.9: photo = คอลัมน์ "รูปแนบ" (O = 14) — ส่งให้หน้าอนุมัติโชว์ใบรับรองแพทย์/หลักฐาน
@@ -4057,7 +4074,7 @@ function getPendingAll(p, user) {
           status: stKey,
           approver: (cfg.approver != null) ? String(r[cfg.approver] || '') : '',
           assigned: assigned,   // v6.2: ใบนี้ถูกกำหนดให้เราเป็นผู้อนุมัติเฉพาะ (แอปข้ามการกรองทีม)
-          photo: (cfg.photo != null) ? String(r[cfg.photo] || '') : '',   // v8.9: รูปแนบ (ลิงก์ photoView)
+          photo: (cfg.photo != null) ? photoDirectUrl_(r[cfg.photo]) : '',   // v8.9: รูปแนบ (ลิงก์รูปตรง ใส่ <img> ได้เลย)
         };
         // v7.4: ส่งช่วงวันลา + ชั่วโมง มาด้วย เพื่อให้หน้าอนุมัติโชว์ "ลาตั้งแต่–ถึง กี่วัน"
         if (name === 'การลาApp' && leaveSheetIsNew_(sh)) {
