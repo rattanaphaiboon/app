@@ -1,0 +1,165 @@
+/*  ══════════════════════════════════════════════════════════════════════
+    Rattana Check Out — Excel → Supabase auto sync   (v1.0)
+    ──────────────────────────────────────────────────────────────────────
+    ทำอะไร : เฝ้าไฟล์ Excel  ถ้ามีการแก้ไข → อ่านชีทแล้วส่งขึ้น Supabase (doc_cache)
+             แอปทุกเครื่องอ่านจาก Supabase อยู่แล้ว จึงเห็นข้อมูลใหม่ภายในไม่กี่นาที
+    วิธีติดตั้ง (ทำครั้งเดียว)
+      1) script.google.com → New project → วางโค้ดนี้ทั้งไฟล์ → บันทึก
+      2) เลือกฟังก์ชัน syncNow → Run  (ครั้งแรกจะให้กด Authorize → อนุญาต)
+      3) เลือกฟังก์ชัน installTrigger → Run   (สร้างตัวตั้งเวลาให้ทุก 5 นาที)
+    เลิกใช้ : Run ฟังก์ชัน removeTriggers
+    ══════════════════════════════════════════════════════════════════════ */
+
+const SUPA_URL = 'https://uytzsuwapwkqkougorvb.supabase.co';
+const SUPA_KEY = 'sb_publishable_2iDqojkyM2pqJxQJfvnxyg_Y6WMQ6Q8';
+
+/* แหล่งข้อมูลที่แอปใช้ — ชื่อ source ต้องตรงกับในแอป ห้ามเปลี่ยน */
+const SRC = [
+  { source: 'dsdc',  fileId: '1S_HTxQ71AWHym1X_-CBwe-tzfCEPqY4T', sheet: 'DSDC'  },  // ใบขาย        (Check Out.xlsx)
+  { source: 'bvbk2', fileId: '1S_HTxQ71AWHym1X_-CBwe-tzfCEPqY4T', sheet: 'BVBK'  },  // ใบจอง คลังอื่น (Check Out.xlsx)
+  { source: 'dm',    fileId: '1S_HTxQ71AWHym1X_-CBwe-tzfCEPqY4T', sheet: 'DM'    },  // ใบโอนย้าย     (Check Out.xlsx)
+  { source: 'bvbk',  fileId: '1YZB25pg43yZ-meRG8raX7MRdQ6HpA-51', sheet: 'BK_BV' }   // ใบจอง W4      (BK_BV)
+];
+
+/* ══ ตัวหลัก: ตัวตั้งเวลาเรียกอันนี้ทุก 5 นาที ══ */
+function syncAll() { run_(false); }
+
+/* ══ บังคับดึงใหม่ทั้งหมด (ไม่สนว่าไฟล์เปลี่ยนหรือยัง) ══ */
+function syncNow() { run_(true); }
+
+function run_(force) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) { Logger.log('รอบก่อนยังทำงานอยู่ — ข้ามรอบนี้'); return; }
+  try {
+    const prop = PropertiesService.getScriptProperties();
+    const files = {};
+    SRC.forEach(s => { (files[s.fileId] = files[s.fileId] || []).push(s); });
+
+    let pushed = 0, skipped = 0;
+    Object.keys(files).forEach(fileId => {
+      let mt = '';
+      try { mt = String(DriveApp.getFileById(fileId).getLastUpdated().getTime()); }
+      catch (e) { Logger.log('อ่านเวลาแก้ไขไฟล์ไม่ได้ ' + fileId + ' : ' + e); }
+
+      const key = 'mt_' + fileId;
+      if (!force && mt && prop.getProperty(key) === mt) {
+        skipped += files[fileId].length;
+        return;                                   // ไฟล์ยังไม่ถูกแก้ → ไม่ต้องอ่านใหม่
+      }
+      let allOk = true;
+      files[fileId].forEach(s => {
+        try {
+          const raw = gviz_(s.fileId, s.sheet);
+          putCache_(s.source, raw);
+          pushed++;
+          Logger.log('✔ ' + s.source + ' → ' + raw.matrix.length + ' แถว');
+        } catch (e) {
+          allOk = false;
+          Logger.log('✖ ' + s.source + ' : ' + e);
+        }
+        Utilities.sleep(1500);                    // เว้นจังหวะ กัน Google throttle
+      });
+      if (mt && allOk) prop.setProperty(key, mt); // สำเร็จครบถึงค่อยจำเวลาไฟล์
+    });
+
+    stampAuto_();                                 // กันแอปในเครื่องไปอ่าน Excel ซ้ำ
+    Logger.log('เสร็จ · อัปเดต ' + pushed + ' แหล่ง · ข้าม ' + skipped + ' แหล่ง');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* ── อ่านชีทผ่าน gviz แล้วแปลงเป็น {cols, matrix} แบบเดียวกับที่แอปใช้ ── */
+function gviz_(fileId, sheet) {
+  const base = 'https://docs.google.com/spreadsheets/d/' + fileId +
+               '/gviz/tq?tqx=out:json&headers=1&sheet=' + encodeURIComponent(sheet);
+  const waits = [0, 1500, 3500, 6000];
+  let text = '', err = '';
+  for (let i = 0; i < waits.length; i++) {
+    if (waits[i]) Utilities.sleep(waits[i]);
+    const res = UrlFetchApp.fetch(base + '&_cb=' + Date.now(), { muteHttpExceptions: true });
+    const code = res.getResponseCode();
+    if (code !== 200) { err = 'HTTP ' + code; continue; }
+    text = res.getContentText();
+    if (/QUOTA_EXCEEDED|TRANSIENT_FAILURE|throttled/i.test(text)) { err = 'โควตา/ถูกจำกัดชั่วคราว'; text = ''; continue; }
+    err = ''; break;
+  }
+  if (err) throw new Error(err);
+
+  const json = JSON.parse(text.replace(/^[^(]+\(/, '').replace(/\);?\s*$/, ''));
+  const cols = (json.table.cols || []).map(c => c.label || c.id || '');
+  const cv = c => {
+    if (!c) return '';
+    if (c.f != null && c.f !== '') return String(c.f).trim();
+    let v = c.v; if (v == null) return '';
+    if (typeof v === 'string' && /^Date\(/.test(v)) {
+      const m = v.match(/Date\((-?\d+),(\d+),(\d+)/);
+      if (m) return m[1] + '/' + ('0' + (+m[2] + 1)).slice(-2) + '/' + ('0' + (+m[3])).slice(-2);
+    }
+    return String(v).trim();
+  };
+  const matrix = (json.table.rows || []).map(r => (r.c || []).map(cv));
+  return { cols: cols, matrix: matrix };
+}
+
+/* ── เขียนลง Supabase (ตาราง doc_cache · คีย์ source) ── */
+function putCache_(source, raw) {
+  const body = [{
+    source: source,
+    cols: raw.cols,
+    matrix: raw.matrix,
+    row_count: raw.matrix.length,
+    synced_at: new Date().toISOString(),
+    synced_by: 'auto (Apps Script)'
+  }];
+  const res = UrlFetchApp.fetch(SUPA_URL + '/rest/v1/doc_cache?on_conflict=source', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { apikey: SUPA_KEY, Authorization: 'Bearer ' + SUPA_KEY, Prefer: 'resolution=merge-duplicates,return=minimal' },
+    payload: JSON.stringify(body),
+    muteHttpExceptions: true
+  });
+  const code = res.getResponseCode();
+  if (code >= 300) throw new Error('Supabase ' + code + ' ' + res.getContentText().slice(0, 120));
+}
+
+/* ── ประทับเวลาแถว __auto__ → แอปในเครื่องจะไม่ไปอ่าน Excel เอง (ถือว่าฝั่งนี้ดูแลแล้ว) ── */
+function stampAuto_() {
+  const body = [{
+    source: '__auto__', cols: [], matrix: [], row_count: 0,
+    synced_at: new Date().toISOString(), synced_by: 'auto (Apps Script)'
+  }];
+  UrlFetchApp.fetch(SUPA_URL + '/rest/v1/doc_cache?on_conflict=source', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { apikey: SUPA_KEY, Authorization: 'Bearer ' + SUPA_KEY, Prefer: 'resolution=merge-duplicates,return=minimal' },
+    payload: JSON.stringify(body),
+    muteHttpExceptions: true
+  });
+}
+
+/* ── ตัวตั้งเวลา ── */
+function installTrigger() {
+  removeTriggers();
+  ScriptApp.newTrigger('syncAll').timeBased().everyMinutes(5).create();
+  Logger.log('ตั้งเวลาแล้ว: ทุก 5 นาที → syncAll');
+}
+function removeTriggers() {
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'syncAll') ScriptApp.deleteTrigger(t);
+  });
+  Logger.log('ลบตัวตั้งเวลาเดิมแล้ว');
+}
+
+/* ── ตรวจสถานะ (Run แล้วดู Execution log) ── */
+function checkStatus() {
+  const prop = PropertiesService.getScriptProperties();
+  SRC.forEach(s => Logger.log(s.source + ' ← ' + s.sheet + ' (' + s.fileId.slice(0, 8) + '…)'));
+  Object.keys(prop.getProperties()).forEach(k => {
+    if (k.indexOf('mt_') === 0) Logger.log(k + ' = ' + new Date(+prop.getProperty(k)));
+  });
+  const res = UrlFetchApp.fetch(SUPA_URL + '/rest/v1/doc_cache?select=source,row_count,synced_at,synced_by', {
+    headers: { apikey: SUPA_KEY, Authorization: 'Bearer ' + SUPA_KEY }, muteHttpExceptions: true
+  });
+  Logger.log(res.getContentText());
+}
