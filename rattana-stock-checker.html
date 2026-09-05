@@ -819,6 +819,8 @@
       <button class="btn-pull" onclick="clearCounterPick()" title="ล้างชื่อผู้นับ" type="button">×</button>
     </div>
 
+    <div id="scrapSyncStatus" class="sync-bar mt-8" style="display:none"></div>
+
     <!-- pending entry card -->
     <div id="scrapPending"></div>
 
@@ -962,7 +964,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.68';
+const APP_VERSION = 'v4.69';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -2277,6 +2279,7 @@ function setMode(mode) {
   if (mode!=='lookup' && cameraOpen) stopCamera();
   if (mode!=='count' && countCamOpen) stopCountCamera();
   if (mode!=='scrap' && scrapCamOpen) stopScrapCamera();
+  if (mode !== 'scrap') stopScrapPoll();
   if (mode !== 'count') stopDraftPoll();
   if (mode==='count') {
     initCountMode();
@@ -3867,7 +3870,150 @@ let scrapItems = [];      // [{id,barcode,name,unit,qty,expiry,warehouse,counter
 let scrapPending = null;  // {barcode, product, unit, name, found}
 const SCRAP_STORE = 'stock_scrap_v1';
 function loadScrap()      { try { scrapItems = JSON.parse(localStorage.getItem(SCRAP_STORE)) || []; } catch { scrapItems = []; } }
-function saveScrapLocal() { try { localStorage.setItem(SCRAP_STORE, JSON.stringify(scrapItems)); } catch {} }
+function saveScrapLocal() { saveScrapQuiet(); scrapLastEditMs = Date.now(); scrapMirrored = false; queueScrapSync(); }
+
+// ══════════ Sync รายการนับเศษข้ามเครื่อง (v4.69) ══════════
+// ใช้ตาราง stock_draft เดิม โดย namespace ด้วย wh='SCRAP' (PK = wh+counter_key+item_key)
+// → ไม่ชนกับ draft ของนับสต็อก และไม่ต้องสร้างตารางใหม่ใน Supabase
+// โมเดลเดียวกับนับสต็อก: เครื่องที่แก้ล่าสุดเป็นหลัก · เครื่องที่ว่าง (>8 วิ) มิเรอร์ตาม
+const SCRAP_SYNC_WH = 'SCRAP';
+const SCRAP_ACTIVE_MS = 8000;
+let scrapSyncTimer = null, scrapPollTimer = null;
+let scrapLastEditMs = 0;      // เครื่องนี้แก้ล่าสุดเมื่อไหร่
+let scrapMirrored = false;    // true = ของชุดนี้มิเรอร์มาจากอีกเครื่อง (ห้ามดันกลับ + ล้างตามได้)
+let scrapSyncState = '';      // '' | 'pending' | 'ok' | 'fail'
+let scrapSavedAtMs = 0;       // เพิ่งส่งลงชีท → เว้นไม่ให้ของเก่าย้อนกลับมา
+
+function scrapSig(items) {
+  return (items || []).map(it => `${it.id}:${it.qty}.${it.unit}.${it.expiry||''}`).sort().join('|');
+}
+function saveScrapQuiet() { try { localStorage.setItem(SCRAP_STORE, JSON.stringify(scrapItems)); } catch {} }
+function scrapToRows(items, key, now, dev) {
+  return (items || []).map(it => ({
+    wh: SCRAP_SYNC_WH, counter_key: key, item_key: String(it.id),
+    code: it.barcode || '', name: it.name || '', sku: it.warehouse || '',
+    cs: 0, bp: 0, pa: 0, ea: +it.qty || 0,
+    factor_cs: 1, factor_pa: 1, factor_bp: 1,
+    lots: { unit: it.unit || '', expiry: it.expiry || '', warehouse: it.warehouse || '', counter: it.counter || '' },
+    counted_at: it.ts || now, device: dev, updated_at: now,
+  }));
+}
+function rowsToScrap(rows) {
+  return (rows || []).map(r => {
+    const L = r.lots || {};
+    return { id: r.item_key, barcode: r.code || '', name: r.name || '',
+      unit: L.unit || '', qty: +r.ea || 0, expiry: L.expiry || '',
+      warehouse: L.warehouse || r.sku || '', counter: L.counter || '', ts: r.counted_at || '' };
+  }).sort((a, b) => String(b.ts||'').localeCompare(String(a.ts||'')));
+}
+function queueScrapSync() {
+  if (!SUPA_URL || !currentUser || !userKey()) return;
+  clearTimeout(scrapSyncTimer);
+  scrapSyncTimer = setTimeout(syncScrapNow, 400);
+}
+async function syncScrapNow() {
+  const key = userKey();
+  if (!SUPA_URL || !currentUser || !key) return;
+  scrapSyncState = 'pending'; renderScrapSyncBar();
+  try {
+    const now = new Date().toISOString(), dev = deviceId();
+    const base = `/stock_draft?wh=eq.${SCRAP_SYNC_WH}&counter_key=eq.${encodeURIComponent(key)}`;
+    const ids = scrapItems.map(i => String(i.id));
+    if (!ids.length) {
+      const dr = await supaFetch(base, { method:'DELETE', headers:{'Prefer':'return=minimal'} });
+      if (!dr.ok) throw new Error('HTTP ' + dr.status);
+    } else {
+      const res = await supaFetch('/stock_draft', {
+        method:'POST', headers:{'Prefer':'resolution=merge-duplicates,return=minimal'},
+        body: JSON.stringify(scrapToRows(scrapItems, key, now, dev)),
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const inList = ids.map(k => encodeURIComponent('"' + k.replace(/"/g,'') + '"')).join(',');
+      await supaFetch(`${base}&item_key=not.in.(${inList})`, { method:'DELETE', headers:{'Prefer':'return=minimal'} });
+    }
+    scrapSyncState = 'ok';
+  } catch (e) { scrapSyncState = 'fail'; console.warn('scrap sync error', e); }
+  renderScrapSyncBar();
+}
+async function fetchRemoteScrap() {
+  const key = userKey();
+  if (!SUPA_URL || !currentUser || !key) return null;
+  try {
+    const res = await supaFetch(`/stock_draft?wh=eq.${SCRAP_SYNC_WH}&counter_key=eq.${encodeURIComponent(key)}&select=*`, { cache:'no-store' });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return Array.isArray(rows) ? rowsToScrap(rows) : null;
+  } catch { return null; }
+}
+async function clearRemoteScrap() {
+  const key = userKey();
+  if (!SUPA_URL || !currentUser || !key) return false;
+  const path = `/stock_draft?wh=eq.${SCRAP_SYNC_WH}&counter_key=eq.${encodeURIComponent(key)}`;
+  for (let i = 0; i < 3; i++) {
+    try { const r = await supaFetch(path, { method:'DELETE', headers:{'Prefer':'return=minimal'} }); if (r.ok) return true; } catch {}
+    await new Promise(res => setTimeout(res, 700 * (i + 1)));
+  }
+  return false;
+}
+async function maybeAdoptRemoteScrap() {
+  if (scrapSavedAtMs && Date.now() - scrapSavedAtMs < 30000) return;   // เพิ่งส่งลงชีท
+  const remote = await fetchRemoteScrap();
+  if (!remote) { renderScrapSyncBar(); return; }
+  if (!remote.length) {
+    // ระบบว่าง: ของในเครื่องเป็นของมิเรอร์ → ล้างตาม (อีกเครื่องส่งลงชีท/ล้างไปแล้ว)
+    if (scrapItems.length && scrapMirrored) {
+      scrapItems = []; saveScrapQuiet(); renderScrapList();
+      showToast('อีกเครื่องส่ง/ล้างรายการนับเศษแล้ว — ล้างตามให้ตรง', 'info');
+    }
+    renderScrapSyncBar(); return;
+  }
+  if (scrapSig(remote) === scrapSig(scrapItems)) { renderScrapSyncBar(); return; }
+  if (Date.now() - scrapLastEditMs < SCRAP_ACTIVE_MS) { renderScrapSyncBar(); return; }  // เครื่องนี้กำลังนับ
+  scrapItems = remote; scrapMirrored = true; saveScrapQuiet(); renderScrapList();
+  showToast(`ซิงค์รายการนับเศษจากอีกเครื่อง (${remote.length} รายการ)`, 'info');
+  renderScrapSyncBar();
+}
+async function enterScrapSync() {
+  await maybeAdoptRemoteScrap();
+  if (scrapSavedAtMs && Date.now() - scrapSavedAtMs < 30000) return;
+  // ระบบว่างแต่เครื่องนี้มีของที่นับเอง (ไม่ใช่ของมิเรอร์) → ดันขึ้น
+  if (scrapItems.length && !scrapMirrored) {
+    const remote = await fetchRemoteScrap();
+    if (!remote || !remote.length) await syncScrapNow();
+  }
+}
+function startScrapPoll() {
+  stopScrapPoll();
+  scrapPollTimer = setInterval(() => {
+    if (currentMode === 'scrap' && !document.hidden && navigator.onLine !== false) maybeAdoptRemoteScrap();
+  }, 5000);
+}
+function stopScrapPoll() { if (scrapPollTimer) { clearInterval(scrapPollTimer); scrapPollTimer = null; } }
+async function forcePullScrap() {
+  if (!SUPA_URL || !currentUser || !userKey()) { showToast('เลือกชื่อผู้นับก่อน แล้วค่อยดึงรายการ', 'warning'); return; }
+  showSpinner('กำลังดึงรายการนับเศษ...');
+  try {
+    scrapSavedAtMs = 0;
+    const remote = await fetchRemoteScrap();
+    if (!remote || !remote.length) { showToast('ไม่มีรายการนับเศษค้างไว้ในระบบ', 'info'); return; }
+    if (scrapItems.length && !confirm(`พบ ${remote.length} รายการในระบบ — แทนที่รายการในเครื่องนี้?`)) return;
+    scrapItems = remote; scrapMirrored = true; saveScrapQuiet(); renderScrapList();
+    showToast(`โหลด ${remote.length} รายการแล้ว ✓`, 'success');
+  } finally { hideSpinner(); renderScrapSyncBar(); }
+}
+function renderScrapSyncBar() {
+  const el = document.getElementById('scrapSyncStatus');
+  if (!el) return;
+  if (!SUPA_URL || !currentUser) { el.style.display = 'none'; return; }
+  const key = userKey();
+  let main;
+  if (!key)                              main = '☁️ เลือกชื่อผู้นับ เพื่อซิงค์ข้ามเครื่อง';
+  else if (scrapSyncState === 'fail')    main = '<span style="color:var(--danger);font-weight:700">⚠️ ส่งขึ้นระบบไม่สำเร็จ</span>';
+  else if (scrapSyncState === 'pending') main = '☁️ กำลังส่งขึ้นระบบ…';
+  else                                   main = `☁️ ซิงค์แล้ว · <b>${scrapItems.length}</b> ✓`;
+  el.innerHTML = `<span>${main}</span><button class="sync-pull" onclick="forcePullScrap()" type="button">↻ ดึงให้ตรง</button>`;
+  el.style.display = 'flex';
+}
 
 function initScrapMode() {
   const sel = document.getElementById('scrapWh');
@@ -3886,6 +4032,9 @@ function initScrapMode() {
   loadScrap();
   renderCounterPicker('scrapCounterHost');
   renderScrapList();
+  renderScrapSyncBar();
+  enterScrapSync();
+  startScrapPoll();
   setTimeout(() => document.getElementById('scrapInput').focus(), 60);
 }
 function onScrapInput(inp)  { document.getElementById('scrapClear').style.display = inp.value ? 'flex' : 'none'; }
@@ -4065,7 +4214,8 @@ async function saveScrapToSheet() {
       await fetch(COUNT_SAVE_URL, { method:'POST', mode:'no-cors',
         headers:{ 'Content-Type':'text/plain;charset=utf-8' }, body: JSON.stringify(payload) });
     }
-    scrapItems = []; saveScrapLocal(); renderScrapList();
+    scrapSavedAtMs = Date.now(); clearRemoteScrap();
+    scrapItems = []; saveScrapQuiet(); scrapMirrored = false; renderScrapList(); renderScrapSyncBar();
     showToast('ส่งนับเศษลงชีทแล้ว ✓', 'success');
   } catch (e) {
     showToast('ส่งไม่สำเร็จ: ' + e, 'error');
