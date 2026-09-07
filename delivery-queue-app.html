@@ -652,7 +652,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.138</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.139</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -1202,7 +1202,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
     .pk-tw{overflow-x:auto}
     /* v9.135: ตารางรถ = การ์ดมีกรอบ แต่คอลัมน์ตรงกันทุกใบด้วยกริดชุดเดียว */
     .pk-list{min-width:660px}
-    .pk-g{display:grid;grid-template-columns:minmax(140px,1.35fr) 62px 76px 62px 96px minmax(150px,1.4fr);gap:8px;align-items:center}
+    .pk-g{display:grid;grid-template-columns:minmax(160px,1.5fr) 76px 76px 62px 96px minmax(146px,1.35fr);gap:8px;align-items:center}
     .pk-ghd{padding:0 11px 6px;font-size:9.5px;font-weight:700;color:var(--muted)}
     .pk-ghd>*{text-align:right}
     .pk-ghd>*:first-child,.pk-ghd>*:last-child{text-align:left}
@@ -1211,7 +1211,10 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
     .pk-card.pick{border-color:#BFE0CB;background:rgba(76,154,99,.06)}
     .pk-card>.pk-g{padding:8px 11px}
     .pk-car{display:block;font-size:12px;font-weight:700;line-height:1.35;color:var(--text)}
-    .pk-drv{display:block;font-size:9.5px;font-weight:400;color:var(--muted);line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .pk-drv{display:block;font-size:9.5px;font-weight:400;color:var(--muted);line-height:1.4}
+    /* v9.139: คนขับคนเดียวหลายคัน = ขีดส้มซ้าย + ทะเบียนเน้น */
+    .pk-card.multi{border-left:3px solid #B45309}
+    .pk-card.multi .pk-drv{color:#B45309;font-weight:700}
     .pk-n{text-align:right;font-variant-numeric:tabular-nums;font-size:11px;color:var(--text)}
     .pk-n b{font-weight:700}
     .pk-sub{display:block;font-size:9.5px;font-weight:400;color:var(--muted)}
@@ -10058,10 +10061,11 @@ async function puEdit(id){
   if(r&&r.ok)await puLoad(true); else { renderPickupPage(); await dqAlert('แก้ไขไม่สำเร็จ\n'+((r&&r.message)||'')); }
 }
 
-// ── ตาราง "รถที่พอแวะรับของกลับได้" — คิดเป็น "คัน" ไม่ใช่ "เที่ยว" ──
+// ── ตาราง "รถที่พอแวะรับของกลับได้" — คิดเป็น "คนขับ" ──
 //   v9.118: รถที่วิ่ง 2 เที่ยว ไม่ได้ว่างตั้งแต่จบเที่ยวแรก — ต้องกลับเข้าคลังไปโหลดแล้ววิ่งเที่ยว 2 ต่อ
-//   v9.134: อ่านจาก "แผนที่บันทึกลงชีทแล้ว" ของวันที่ขน อย่างเดียว (เอาทางคิวสดออก)
-//     คิวสดเป็นแผนที่ยังไม่ได้บันทึก + คิวค้างจากวันเก่าทำให้ตารางว่างมาแล้ว
+//   v9.129: อ่านจากแผนที่บันทึกลงชีทแล้วของวันที่ขน
+//   v9.139: คนขับคนเดียวขับหลายคันในวันเดียวได้ → รวมเป็นแถวเดียว ต่อคิวทุกเที่ยวทุกคัน
+//           เพราะเขาจะว่างจริงก็ต่อเมื่อจบงานคันสุดท้าย · ความจุที่รับได้ = คันที่จบงานด้วย
 function _puFleetRows(){
   const dd=_puTheDate();
   const key=dd+'|s'+((keepData||[]).length)+'|'+_puRows.length;
@@ -10070,15 +10074,34 @@ function _puFleetRows(){
   (keepData||[]).forEach(r=>{ if(!r.plate||!dd||r.deliveryDate!==dd)return;
     const tr=(+r.trip||1);
     const t=(byTruck[r.plate]=byTruck[r.plate]||{}); (t[tr]=t[tr]||[]).push(r); });
-  const rows=[];
+
+  // จับกลุ่มตามคนขับ (ไม่รู้ชื่อคนขับ = แยกตามคัน)
+  const grp={};
   Object.keys(byTruck).forEach(plate=>{
-    const t=(TRUCKS||[]).find(x=>x.plate===plate)||{};
-    const trips=Object.keys(byTruck[plate]).map(Number).sort((a,b)=>a-b);
-    let drive=0, mins=0, nStores=0, d1=0, m1=0, last=null, noGps=false, fbNick='', fbType='', fbDrv='';
-    const legs=[];
-    trips.forEach((tr,ti)=>{
-      const bs=byTruck[plate][tr], seen={}, pts=[];
-      bs.forEach(b=>{ if(!fbNick&&b.nick)fbNick=b.nick; if(!fbType&&b.truckType)fbType=b.truckType; if(!fbDrv&&b.driver)fbDrv=b.driver;
+    let drv='';
+    Object.keys(byTruck[plate]).forEach(tr=>byTruck[plate][tr].forEach(b=>{ if(!drv&&b.driver)drv=String(b.driver).trim(); }));
+    if(!drv){ const t0=(TRUCKS||[]).find(x=>x.plate===plate)||{}; drv=(t0.driver||'').trim(); }
+    const k=drv?('D|'+drv):('P|'+plate);
+    (grp[k]=grp[k]||{driver:drv,plates:[]}).plates.push(plate);
+  });
+
+  const rows=[];
+  Object.keys(grp).forEach(k=>{
+    const G=grp[k];
+    // ทุกขา (คัน+เที่ยว) เรียงตามเที่ยว แล้วค่อยตามทะเบียน
+    const legsIn=[];
+    G.plates.forEach(plate=>Object.keys(byTruck[plate]).map(Number).sort((a,b)=>a-b)
+      .forEach(tr=>legsIn.push({plate:plate,tr:tr,bs:byTruck[plate][tr]})));
+    legsIn.sort((a,b)=>(a.tr-b.tr)||String(a.plate).localeCompare(String(b.plate)));
+    let drive=0, mins=0, nStores=0, d1=0, m1=0, last=null, noGps=false;
+    const legs=[], plateSeq=[], nickSeq=[], typeSeq=[];
+    let fbDrv=G.driver;
+    legsIn.forEach((lg,li)=>{
+      if(plateSeq.indexOf(lg.plate)<0)plateSeq.push(lg.plate);
+      const seen={}, pts=[];
+      lg.bs.forEach(b=>{ if(b.nick&&nickSeq.indexOf(b.nick)<0)nickSeq.push(b.nick);
+        if(b.truckType&&typeSeq.indexOf(b.truckType)<0)typeSeq.push(b.truckType);
+        if(!fbDrv&&b.driver)fbDrv=b.driver;
         const id=b.arCode||b.arName||b.ref; if(seen[id])return; seen[id]=1;
         if(b.lat&&b.lng&&(typeof validGps!=='function'||validGps(b.lat,b.lng)))pts.push(b); });
       const n=Object.keys(seen).length; nStores+=n;
@@ -10092,22 +10115,27 @@ function _puFleetRows(){
       let km=0;
       if(ord.length){
         km+=haversine(HQ.lat,HQ.lng,ord[0].lat,ord[0].lng);
-        if(ti===0){ d1=haversine(HQ.lat,HQ.lng,ord[0].lat,ord[0].lng); m1=d1/45*60; }
+        if(li===0){ d1=haversine(HQ.lat,HQ.lng,ord[0].lat,ord[0].lng); m1=d1/45*60; }
         for(let i=1;i<ord.length;i++)km+=haversine(ord[i-1].lat,ord[i-1].lng,ord[i].lat,ord[i].lng);
         last=ord[ord.length-1];
       }
       const unload=n*30;
       drive+=km; mins+=km/45*60+unload;
-      legs.push({tr:tr,n:n,km:km,unload:unload,cum:mins});
-      if(ti<trips.length-1&&last){
+      legs.push({tr:lg.tr,plate:lg.plate,n:n,km:km,unload:unload,cum:mins});
+      if(li<legsIn.length-1&&last){                       // ยังมีขาต่อ → กลับเข้าคลังไปโหลด/เปลี่ยนคัน
         const back=haversine(last.lat,last.lng,HQ.lat,HQ.lng);
         drive+=back; mins+=back/45*60; legs[legs.length-1].back=back;
       }
     });
-    // ชื่อเล่น/ประเภท/คนขับ ใช้ของแผนที่บันทึกไว้ก่อน เพราะวันนั้นคนขับอาจสลับคันกับลิสต์รถ
-    rows.push({plate:plate,nick:(fbNick||t.nick)||'',type:(fbType||t.type)||'',driver:(fbDrv||t.driver)||'',
-      maxW:t.maxW||0,maxV:t.maxV||0,
-      trips:trips, nTrips:trips.length, lastTrip:trips[trips.length-1]||1,
+    const endPlate=legsIn.length?legsIn[legsIn.length-1].plate:(G.plates[0]||'');
+    const et=(TRUCKS||[]).find(x=>x.plate===endPlate)||{};
+    const t0=(TRUCKS||[]).find(x=>x.plate===plateSeq[0])||{};
+    rows.push({plate:endPlate, plates:plateSeq,
+      nick:(nickSeq[0]||et.nick||t0.nick||''),
+      type:(typeSeq.join(' + ')||et.type||''),
+      driver:(fbDrv||et.driver||''),
+      maxW:et.maxW||0, maxV:et.maxV||0, endType:(et.type||typeSeq[typeSeq.length-1]||''),
+      trips:legs.map(l=>l.tr), nTrips:legs.length, lastTrip:(legs.length?legs[legs.length-1].tr:1),
       n:nStores, d1:d1, m1:m1, drive:drive, unload:nStores*30, fin:mins, legs:legs, noGps:noGps,
       lastName:last?((last.district||'')+(last.province?' '+last.province:'')).trim():'',
       lastKm:last?haversine(HQ.lat,HQ.lng,last.lat,last.lng):0});
@@ -10131,22 +10159,27 @@ function _puFleetTable(){
       return `<div class="pk-empty2">⏳ กำลังโหลดแผนจัดรถที่บันทึกไว้…</div>`;
     return `<div class="pk-empty2"><b>ยังไม่มีแผนจัดรถที่บันทึกไว้ของวันที่ ${_puEsc(_puTheDate()||'-')}</b>ตารางนี้อ่านจากแผนที่ <b>กดบันทึกลงชีทแล้ว</b> เท่านั้น — จัดรถของวันนั้นแล้วกดบันทึก ตารางจะบอกว่าคันไหนว่างเร็ว พอแวะรับของกลับได้</div>`;
   }
-  const taken=_puTakenMap(), best=rows.filter(r=>!taken[r.plate]&&r.nTrips===1).slice(0,3).map(r=>r.plate);
-  const n2=rows.filter(r=>r.nTrips>1).length;
-  return `<div class="pk-fh">🚚 รถที่พอแวะรับของกลับได้<em>จากแผนที่บันทึกไว้ ${_puEsc(_puTheDate()||'')} · ${rows.length} คัน${n2?' (วิ่ง 2 เที่ยวขึ้นไป '+n2+' คัน)':''}</em></div>
-  <p class="pk-fs">เรียง<b>คันที่วิ่งเที่ยวเดียวก่อน</b> เพราะว่างจริงเร็วกว่า · คันที่วิ่ง 2 เที่ยวคิดครบทั้งสองเที่ยว รวมขากลับเข้าคลังไปโหลดของระหว่างเที่ยวแล้ว (ยังไม่รวมเวลาโหลดของที่คลัง) · ลงของร้านละ 30 นาที · “ว่างเมื่อ” นับจากออกจากคลัง · ความเร็วประมาณ 45 กม./ชม. จากระยะตรง</p>
+  const taken=_puTakenMap();
+  const tkOf=r=>{ let v=''; (r.plates||[r.plate]).forEach(p=>{ if(taken[p]==='done')v='done'; else if(taken[p]&&v!=='done')v='wait'; }); return v; };
+  const best=rows.filter(r=>!tkOf(r)&&r.nTrips===1).slice(0,3).map(r=>r.plate);
+  const n2=rows.filter(r=>r.nTrips>1).length, nCar=rows.reduce((a,r)=>a+(r.plates||[r.plate]).length,0);
+  const nMulti=rows.filter(r=>(r.plates||[]).length>1).length;
+  return `<div class="pk-fh">🚚 คนขับที่พอแวะรับของกลับได้<em>จากแผนที่บันทึกไว้ ${_puEsc(_puTheDate()||'')} · ${rows.length} คน / ${nCar} คัน${n2?' · ยังมีงานต่ออีก '+n2+' คน':''}</em></div>
+  <p class="pk-fs">คิดเป็น<b>คนขับ</b> — คนเดียวขับหลายคัน/หลายเที่ยว ต่อคิวรวมเป็นแถวเดียว เพราะเขาว่างจริงตอนจบงาน<b>คันสุดท้าย</b>${nMulti?` (วันนี้มี ${nMulti} คนที่ขับมากกว่า 1 คัน)`:''} · เรียง<b>คนที่มีขาเดียวก่อน</b> · รวมขากลับเข้าคลังไปโหลด/เปลี่ยนคันระหว่างขาแล้ว (ยังไม่รวมเวลาโหลดของที่คลัง) · ลงของร้านละ 30 นาที · “ว่างเมื่อ” นับจากออกจากคลัง · ความเร็วประมาณ 45 กม./ชม. จากระยะตรง · “รับได้” = ความจุของคันที่จบงานด้วย</p>
   <div class="pk-tw"><div class="pk-list">
-    <div class="pk-g pk-ghd"><span>รถ / คนขับ</span><span>เที่ยว·ร้าน</span><span>วิ่ง</span><span>ลงของ</span><span>ว่างเมื่อ</span><span>จบงานแถว · รับได้</span></div>
+    <div class="pk-g pk-ghd"><span>คนขับ / รถ</span><span>ขา·ร้าน</span><span>วิ่ง</span><span>ลงของ</span><span>ว่างเมื่อ</span><span>จบงานแถว · รับได้</span></div>
     ${rows.map(r=>{
-      const tk=taken[r.plate], pick=best.indexOf(r.plate)>=0;
+      const tk=tkOf(r), pick=best.indexOf(r.plate)>=0, pls=r.plates||[r.plate], multi=pls.length>1;
       const cap=tk==='done'?`<span class="pk-cap used">รับงานแล้ว</span>`
               :tk==='wait'?`<span class="pk-cap wait">รอยืนยัน</span>`
-              :(r.maxW?`<span class="pk-cap">${(r.maxW/1000).toFixed(1)} ต. · ${r.maxV} m³</span>`:`<span class="pk-cap none">ไม่รู้ความจุ</span>`);
-      const far=r.lastKm>50;
-      const sub=r.nTrips>1?`<span class="pk-sub">ท.${r.legs[0].tr} จบ ${_puHm(r.legs[0].cum)}</span>`:'';
-      return `<div class="pk-card${pick?' pick':''}"><div class="pk-g">
-        <div><span class="pk-car">${r.nick?_puEsc(r.nick)+' ':''}${_puEsc(r.plate)}</span><span class="pk-drv">${r.driver?_puEsc(r.driver)+' · ':''}${_puEsc(r.type||'')}</span></div>
-        <div class="pk-n"><span class="pk-trip${r.nTrips>1?' two':''}">ท.${r.trips.join('+')}</span><span class="pk-sub">${r.n} ร้าน</span></div>
+              :(r.maxW?`<span class="pk-cap" title="ความจุของ ${_puEsc(r.plate)} — คันที่จบงานด้วย">${(r.maxW/1000).toFixed(1)} ต. · ${r.maxV} m³</span>`:`<span class="pk-cap none">ไม่รู้ความจุ</span>`);
+      const far=r.lastKm>50, l0=r.legs[0]||null;
+      const sub=r.nTrips>1&&l0?`<span class="pk-sub">${multi?_puEsc(l0.plate)+' ':''}ท.${l0.tr} จบ ${_puHm(l0.cum)}</span>`:'';
+      const trip=multi?`<span class="pk-trip two" title="${_puEsc(pls.join(' + '))} · ท.${r.trips.join('+')}">${pls.length} คัน</span><span class="pk-sub">ท.${r.trips.join('+')} · ${r.n} ร้าน</span>`
+                      :`<span class="pk-trip${r.nTrips>1?' two':''}">ท.${r.trips.join('+')}</span><span class="pk-sub">${r.n} ร้าน</span>`;
+      return `<div class="pk-card${pick?' pick':''}${multi?' multi':''}"><div class="pk-g">
+        <div><span class="pk-car">${r.driver?_puEsc(r.driver):(r.nick?_puEsc(r.nick):_puEsc(r.plate))}</span><span class="pk-drv">${r.nick?_puEsc(r.nick)+' ':''}${pls.map(_puEsc).join(' + ')}${r.type?' · '+_puEsc(r.type):''}</span></div>
+        <div class="pk-n">${trip}</div>
         <div class="pk-n">${r.drive>0.05?`<b>${_puKm(r.drive)}</b><span class="pk-sub">${_puHm(r.drive/45*60)}</span>`:'—'}</div>
         <div class="pk-n">${_puHm(r.unload)}</div>
         <div class="pk-n"><span class="pk-free">${_puHm(r.fin)}</span>${sub}</div>
@@ -10159,24 +10192,25 @@ function _puCarMenu(p){
   if(_puRowCar!==p.id)return '';
   const rows=_puFleetRows(), taken=_puTakenMap();
   const one=rows.filter(r=>r.nTrips===1), many=rows.filter(r=>r.nTrips>1);
-  const item=r=>{
-    const tk=taken[r.plate];
-    return `<button type="button" class="pk-citem${(p.plate===r.plate)?' on':''}" onclick="puCarPick('${p.id}','${r.plate}',${r.lastTrip})">
-      <b>${r.nick?r.nick+' ':''}${r.plate} · ท.${r.trips.join('+')}</b>
-      <i>ว่าง ${_puHm(r.fin)} · ${tk==='done'?'รับงานขนกลับแล้ว':tk==='wait'?'มีคำขอรอยืนยัน':'รับได้ '+(r.maxW/1000).toFixed(1)+' ต.'}</i></button>`;
+  const item=r=>{                                   // v9.139: 1 แถว = คนขับ 1 คน (อาจมีหลายทะเบียน) · เลือกแล้วผูกกับคันที่จบงานด้วย
+    const pls=r.plates||[r.plate];
+    let tk=''; pls.forEach(x=>{ if(taken[x]==='done')tk='done'; else if(taken[x]&&tk!=='done')tk='wait'; });
+    return `<button type="button" class="pk-citem${(pls.indexOf(p.plate)>=0)?' on':''}" onclick="puCarPick('${p.id}','${r.plate}',${r.lastTrip})">
+      <b>${r.driver?r.driver+' · ':''}${r.nick?r.nick+' ':''}${pls.join(' + ')} · ท.${r.trips.join('+')}</b>
+      <i>ว่าง ${_puHm(r.fin)} · ${tk==='done'?'รับงานขนกลับแล้ว':tk==='wait'?'มีคำขอรอยืนยัน':'รับได้ '+(r.maxW/1000).toFixed(1)+' ต.'+(pls.length>1?' (คันที่จบงาน '+r.plate+')':'')}</i></button>`;
   };
-  const others=(TRUCKS||[]).filter(t=>!rows.some(r=>r.plate===t.plate)).map(t=>
+  const others=(TRUCKS||[]).filter(t=>!rows.some(r=>(r.plates||[r.plate]).indexOf(t.plate)>=0)).map(t=>
     `<button type="button" class="pk-citem${(p.plate===t.plate)?' on':''}" onclick="puCarPick('${p.id}','${t.plate}',1)"><b>${t.nick?t.nick+' ':''}${t.plate} · ท.1</b><i>ไม่มีงานออกวันนี้</i></button>`).join('');
   return `<div class="pk-cmenu" onclick="event.stopPropagation()">
-    ${one.length?`<div class="pk-cmh">วิ่งเที่ยวเดียว — ว่างเร็วสุด</div>`+one.map(item).join(''):''}
-    ${many.length?`<div class="pk-cmh">วิ่ง 2 เที่ยวขึ้นไป — ว่างหลังจบเที่ยวสุดท้าย</div>`+many.map(item).join(''):''}
+    ${one.length?`<div class="pk-cmh">วิ่งขาเดียว — ว่างเร็วสุด</div>`+one.map(item).join(''):''}
+    ${many.length?`<div class="pk-cmh">มีงานต่ออีก — ว่างหลังจบขาสุดท้าย</div>`+many.map(item).join(''):''}
     ${others?`<div class="pk-cmh">คันที่ไม่มีงานออก</div>${others}`:''}
     <button type="button" class="pk-citem clr" onclick="puCarPick('${p.id}','',1)">✕ เอารถออก</button></div>`;
 }
 function _puRowHtml(p){
   const done=p.status===PU_DONE;
   const t=(TRUCKS||[]).find(x=>x.plate===p.plate);
-  const fr=_puFleetRows().find(r=>r.plate===p.plate);   // v9.118: ว่างเมื่อไร คิดทั้งคัน
+  const fr=_puFleetRows().find(r=>(r.plates||[r.plate]).indexOf(p.plate)>=0);   // v9.118: ว่างเมื่อไร คิดทั้งคัน · v9.139: คิดทั้งคนขับ
   const car=p.plate
     ? `<button type="button" class="pk-tk" onclick="puCarToggle('${p.id}')">🚚 ${t&&t.nick?t.nick+' ':''}${p.plate}${fr?' · ท.'+fr.trips.join('+'):' · ท.'+(p.trip||1)}${fr?` <i>· ว่าง ${_puHm(fr.fin)}</i>`:''}</button>`
     : `<button type="button" class="pk-tk none" onclick="puCarToggle('${p.id}')">🚚 เลือกรถ ▾</button>`;
