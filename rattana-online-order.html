@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v4.57</title>
+<title>Rattana Online Order v4.60</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -811,7 +811,7 @@ body.dark .pdpa-body h4,body.dark .pdpa-body b{color:var(--gold-light,#e2c882)}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.57</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.60</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -1246,6 +1246,78 @@ const numOr0 = s => { const n=parseFloat(String(s==null?'':s).replace(/,/g,''));
 const baht = n => '฿'+ (Math.round((n+Number.EPSILON)*100)/100).toLocaleString('th-TH',{minimumFractionDigits:0,maximumFractionDigits:2});
 function imgUrl(u){ u=clean(u); if(!u) return ''; const m=u.match(/[-\w]{25,}/); return m?`https://drive.google.com/thumbnail?id=${m[0]}&sz=w600`:u; }
 const PLACEHOLDER = 'data:image/svg+xml;charset=utf-8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><rect width="120" height="120" fill="#f0f2f7"/><text x="60" y="64" font-size="13" fill="#9aa6c0" text-anchor="middle" font-family="sans-serif">ไม่มีรูป</text></svg>');
+
+/* 🖼️ v4.58 — คิวโหลดรูป (กัน Google Drive throttle) — Surat 06/09 "เอาที่มีรูปมาไว้หน้าแรก ๆ"
+   ปัญหาที่เจอตอนทำ: เรียงมีรูปขึ้นหน้าแรกแล้ว แต่ในจอยังขึ้น "ไม่มีรูป" เกือบครึ่งหน้า
+   ┌ วัดจริง 06/09 (ร้านคลัง W1 · การ์ด 40 ใบ/หน้า)
+   │ ยิงรูปพร้อมกัน 40 ใบ  → ขึ้น 22 · พัง 18            ← Drive กันไว้ ไม่ใช่ไฟล์เสีย
+   │ ใส่ retry เฉย ๆ       → กลับมาได้ 0 ใบ (retry พร้อมกันอีก ก็โดนกันอีก)
+   │ 6 ใบที่พังโหลดทีละใบเว้น 300ms ในแท็บว่าง → ขึ้นครบ 6/6
+   └ สรุป: รูป "มีจริงทุกใบ" ต้นเหตุคือยิงพร้อมกันเยอะ
+   → โหลดทีละ IMGQ_MAX ใบ ที่เหลือรอคิว · พลาดแล้วต่อท้ายคิวลองใหม่ได้อีก 2 รอบ
+   v4.60: ใช้ทุกที่ที่โหลดรูปเป็นชุด — การ์ดสินค้าปกติ · แถบแฟลช/ดีล · การ์ดของน่าสั่งเพิ่ม · รูปใหญ่หน้าสินค้า
+   (รูปที่ลูกค้ากำลังเปิดดูอยู่ใส่ front=true ให้แซงคิวการ์ด 40 ใบ) */
+const IMGQ_MAX = 4;
+let _imgq = [], _imgqRun = 0;
+function imgqScan(root, front){
+  try{
+    (root || document).querySelectorAll('img[data-imgq]:not([data-imgq-q])').forEach(el => {
+      el.setAttribute('data-imgq-q', '1');
+      const job = { el: el, url: el.getAttribute('data-imgq'), n: 0 };
+      if (front) _imgq.unshift(job); else _imgq.push(job);   /* front = รูปใหญ่ในหน้าสินค้า ต้องมาก่อนรูปการ์ด 40 ใบ */
+    });
+    imgqPump();
+  }catch(e){ console.warn('[imgq]', e); }
+}
+function imgqPump(){
+  while (_imgqRun < IMGQ_MAX && _imgq.length){
+    const job = _imgq.shift(), el = job.el;
+    if (!el || !el.isConnected) continue;                       // การ์ดถูกวาดใหม่ไปแล้ว = ทิ้งงานเก่า
+    _imgqRun++;
+    let settled = false;
+    const fin = ok => {
+      if (settled) return; settled = true;
+      el.onload = null; el.onerror = null; _imgqRun--;
+      if (ok) imgBadClear(el.getAttribute('data-imgq-k') || '');
+      if (!ok){
+        el.src = PLACEHOLDER;
+        if (job.n < 2){ job.n++; setTimeout(() => { _imgq.push(job); imgqPump(); }, 800 + Math.random() * 700); }
+        else imgBadMark(el.getAttribute('data-imgq-k') || '');      // ลองครบแล้วยังไม่ขึ้น = จำไว้
+      }
+      imgqPump();
+    };
+    el.onload = () => fin(true);
+    el.onerror = () => fin(false);
+    el.src = job.url + (job.n ? ((job.url.indexOf('?') >= 0 ? '&' : '?') + 'r=' + job.n) : '');
+  }
+}
+/* 🚫 v4.58 — "ลิงก์รูปมี แต่โหลดไม่ขึ้นจริง" (ไฟล์ Drive ไม่ได้แชร์สาธารณะ)
+   ลองครบ 3 รอบแล้วยังไม่ขึ้น = จำชื่อไว้ รอบหน้าถือว่าไม่มีรูป จะได้ไม่ไปกินที่หน้าแรก ๆ
+   เก็บ 7 วันแล้วลืม (เผื่อมีคนไปแก้สิทธิ์ให้ หรือรอบนั้นเน็ตร้านมีปัญหาเอง) */
+const IMGBAD_TTL = 2 * 864e5;   /* v4.59: ลดจาก 7 วัน — ตรวจแล้วไฟล์รูปใน Drive ดีหมด ที่พลาดคือโดน throttle ชั่วคราว ไม่ใช่รูปเสียถาวร */
+let IMGBAD = {};
+function imgBadLoad(){
+  try{
+    let raw = null; try{ raw = localStorage.getItem('rop_imgbad'); }catch(e){}
+    const o = raw ? (JSON.parse(raw) || {}) : {}, now = Date.now(), keep = {};
+    for (const k in o) if (now - o[k] < IMGBAD_TTL) keep[k] = o[k];
+    IMGBAD = keep;
+  }catch(e){ IMGBAD = {}; }
+}
+let _imgBadDirty = false, _imgBadT = null;
+function imgBadMark(name){
+  name = clean(name); if (!name || IMGBAD[name]) return;
+  IMGBAD[name] = Date.now(); _imgBadDirty = true;
+  if (_imgBadT) clearTimeout(_imgBadT);
+  _imgBadT = setTimeout(() => { try{ if (_imgBadDirty){ lsSet('rop_imgbad', JSON.stringify(IMGBAD)); _imgBadDirty = false; } }catch(e){} }, 1500);
+}
+function imgIsBad(name){ return !!IMGBAD[clean(name)]; }
+/* v4.59: โหลดขึ้นเมื่อไหร่ = ลบออกจากรายชื่อทันที (เคยพลาดเพราะ throttle ไม่ใช่รูปเสีย) */
+function imgBadClear(name){ name = clean(name); if (!name || !IMGBAD[name]) return;
+  delete IMGBAD[name]; _imgBadDirty = true;
+  if (_imgBadT) clearTimeout(_imgBadT);
+  _imgBadT = setTimeout(() => { try{ lsSet('rop_imgbad', JSON.stringify(IMGBAD)); _imgBadDirty = false; }catch(e){} }, 1500); }
+try{ imgBadLoad(); }catch(e){}          /* ⚠️ ต้องโหลดตรงนี้ ไม่ใช่ใน boot — boot ช้ากว่าการวาดการ์ดรอบแรก */
 
 function parseCsv(text){
   if(!text) return [];
@@ -2374,6 +2446,16 @@ function intProducts(){
     .sort((a,b)=>numOr0(b['AVERAGE 60D_C4'])-numOr0(a['AVERAGE 60D_C4']));
   _intCache=out; _intKey=key; return out;
 }
+/* 🖼️ v4.58 (Surat 06/09): "เอาสินค้าที่มีรูปภาพมาไว้หน้าแรก ๆ ก่อน เพราะว่าได้ดึงดูดลูกค้า"
+   สลับเฉพาะ "ลำดับ" เท่านั้น ไม่ตัดตัวที่ไม่มีรูปทิ้ง — ของครบเท่าเดิม แค่ตัวมีรูปขึ้นก่อน
+   ในแต่ละกลุ่มยังเรียงขายดี→น้อยเหมือนเดิม (sort ของ JS เป็น stable ตั้งแต่ ES2019)
+   ⚠️ ตอน "ค้นหา" ไม่เรียกตัวนี้ — Surat สั่ง "ถ้าลูกค้าเสิร์ชหาก็ตามเดิม" (คนหาของอยู่ ต้องเจอตัวที่ตรงที่สุดก่อน) */
+function intImgFirst(list){
+  try{
+    const sc=p=>(clean(p['SKU_USAGE']) && !imgIsBad(p['PRODUCT NAME'])) ? 1 : 0;   /* ลิงก์มี + เคยโหลดขึ้น */
+    return (list||[]).slice().sort((a,b)=>sc(b)-sc(a));
+  }catch(e){ return list||[]; }
+}
 function intIs(p){ if(!p||!intOn()) return false; const nm=clean(p['PRODUCT NAME']); return intProducts().some(x=>clean(x['PRODUCT NAME'])===nm); }
 function intGot(name){ return !!INT_MEM[clean(name)]; }
 function intUnitLabel(p){ const u=(unitsFor(p)||[])[0]; return u?(u.detail||u.name):'ลัง'; }
@@ -2384,7 +2466,7 @@ function intCardHtml(p){
   const name=clean(p['PRODUCT NAME']), got=intGot(name);
   return `<div class="pcard" onclick="openInterest('${esc(name)}')">
     <div class="p-thumb" style="background:${cardTint(p)}">
-      <img class="p-img" src="${imgUrl(p['SKU_USAGE'])||PLACEHOLDER}" onerror="this.src='${PLACEHOLDER}'" loading="lazy">
+      <img class="p-img" src="${PLACEHOLDER}"${imgUrl(p['SKU_USAGE'])?` data-imgq="${esc(imgUrl(p['SKU_USAGE']))}" data-imgq-k="${esc(name)}"`:''}>
       <span class="p-inttag">ยังไม่มีที่ร้าน</span>
     </div>
     <div class="p-body">
@@ -2401,17 +2483,17 @@ function intZoneHtml(){
     list=list.filter(p=>(clean(p['PRODUCT NAME'])+clean(p['SHORT NAME'])+clean(p['CAT BRAND'])+clean(p['CAT GROUP'])).toLowerCase().includes(q)); }
   else if(activeCat!=='ทั้งหมด'){ list=list.filter(p=>clean(p['CAT GROUP'])===activeCat); }
   if(!list.length) return '';
+  if(!searchTerm) list=intImgFirst(list);            /* v4.58: เดินดู/เลือกหมวด = ตัวมีรูปขึ้นก่อน · เสิร์ช = ลำดับเดิม */
   const show=list.slice(0,12);
   return `<div class="int-head"><div class="int-box"><span class="ic">🛒</span><div style="flex:1">
       <b>ยังไม่มีที่ร้าน แต่ถ้าอยากได้ กด “สนใจ” ไว้ได้เลย 💛</b></div></div></div>
     <div class="int-zone">${show.map(intCardHtml).join('')}</div>
     ${list.length>show.length?`<button class="int-more" onclick="setSpecial('int')">ดูทั้งหมด ${list.length} รายการ →</button>`:''}`;
 }
-/* หัวแบนเนอร์ของหน้าแท็บ ✨ สินค้าแนะนำ */
+/* หัวแบนเนอร์ของหน้าแท็บ ✨ ของน่าสั่งเพิ่ม (v4.60 เปลี่ยนชื่อจาก "สินค้าแนะนำ" — ชนกับชีทของฟีเจอร์ 💡 แนะนำสินค้า) */
 function intTabHeadHtml(){
   return `<div class="int-tabhead"><div class="int-box"><span class="ic">✨</span><div style="flex:1">
     <b>ยังไม่มีที่ร้าน แต่ถ้าอยากได้ กด “สนใจ” ไว้ได้เลย 💛</b>
-    <small>รวมของขายดีจากคลังอื่น ที่ร้านคุณยังสั่งไม่ได้</small>
     </div></div></div>`;
 }
 /* หน้ารายละเอียดแบบ "สนใจ" (ไม่มีตะกร้า ไม่มีสเต็ปราคา) */
@@ -2424,7 +2506,7 @@ function openInterest(name){
   const meta=[clean(p['CAT BRAND']),clean(p['CAT GROUP'])].filter(Boolean).join(' • ');
   document.getElementById('pdBody').innerHTML=`
     <div class="pd-grid">
-      <div class="pd-col-img"><div class="pd-imgwrap"><img class="pd-img" src="${imgUrl(p['SKU_USAGE'])||PLACEHOLDER}" onerror="this.src='${PLACEHOLDER}'"></div></div>
+      <div class="pd-col-img"><div class="pd-imgwrap"><img class="pd-img" src="${PLACEHOLDER}"${imgUrl(p['SKU_USAGE'])?` data-imgq="${esc(imgUrl(p['SKU_USAGE']))}"`:''}></div></div>
       <div class="pd-col-info">
         <div class="pd-name">${name}</div>
         ${meta?`<div class="pd-meta">${meta}</div>`:''}
@@ -2433,6 +2515,7 @@ function openInterest(name){
       </div>
     </div>
     <div class="pd-below" id="intBody">${intBodyHtml(p,!!got,qty)}</div>`;
+  try{ imgqScan(document.getElementById('pdBody'), true); }catch(e){}   /* แซงคิว: ลูกค้ากดเข้ามาดูอยู่ */
   openModal('productModal');
   const _pm=document.querySelector('#productModal .modal'); if(_pm) _pm.scrollTop=0;
 }
@@ -3153,7 +3236,7 @@ function newestProducts(){
   return visibleProducts().filter(p=>productRank(p,wh)==='NEW');   // เฉพาะ RANK = New (คงลำดับยอดขาย/กระจายหมดชั่วคราวจาก visibleProducts)
 }
 function filteredProducts(){
-  if(specialFilter==='int') return intProducts();   /* 💛 v4.56: หน้า "สินค้าแนะนำ" — คนละชุดกับสินค้าที่สั่งได้ */
+  if(specialFilter==='int') return searchTerm ? intProducts() : intImgFirst(intProducts());   /* 💛 v4.56: หน้า "สินค้าแนะนำ" — คนละชุดกับสินค้าที่สั่งได้ · v4.58: มีรูปขึ้นหน้าแรก ๆ (เสิร์ช=ลำดับเดิม) */
   let list = specialFilter==='new' ? newestProducts() : (specialFilter==='pchg' ? pchgProducts() : visibleProducts());
   if(specialFilter==='promo') list=list.filter(p=>promosFor(p).length);
   if(activeCat!=='ทั้งหมด') list=list.filter(p=>clean(p['CAT GROUP'])===activeCat);
@@ -3321,7 +3404,7 @@ function setSpecial(mode){
       <button class="seg-tab ${mode==='promo'?'on':''}" onclick="setSpecial('promo')">🎁 โปรโมชั่น</button>
       <button class="seg-tab ${mode==='new'?'on':''}" onclick="setSpecial('new')">🆕 สินค้าใหม่</button>
       ${pchgOn()?`<button class="seg-tab ${mode==='pchg'?'on':''}" onclick="setSpecial('pchg')">💹 ปรับราคา</button>`:''}
-      ${intOn()?`<button class="seg-tab ${mode==='int'?'on':''}" onclick="setSpecial('int')">✨ สินค้าแนะนำ</button>`:''}
+      ${intOn()?`<button class="seg-tab ${mode==='int'?'on':''}" onclick="setSpecial('int')">✨ ของน่าสั่งเพิ่ม</button>`:''}
     </div>`;
   renderCatDropdown(); renderProducts(); renderFlashSale(); renderDealLock(); renderDealLock();
 }
@@ -3657,7 +3740,7 @@ function openProduct(name,preferType,hideRec,keepStack){
   document.getElementById('pdBody').innerHTML=`
     <div class="pd-grid">
       <div class="pd-col-img">
-        <div class="pd-imgwrap"><img class="pd-img" src="${imgUrl(p['SKU_USAGE'])||PLACEHOLDER}" onerror="this.src='${PLACEHOLDER}'" onclick="openImgZoom(this.src)">${stockBandHtml(p)}</div>
+        <div class="pd-imgwrap"><img class="pd-img" src="${PLACEHOLDER}"${imgUrl(p['SKU_USAGE'])?` data-imgq="${esc(imgUrl(p['SKU_USAGE']))}" data-imgq-k="${esc(name)}"`:''} onclick="openImgZoom(this.src)">${stockBandHtml(p)}</div>
       </div>
       <div class="pd-col-info">
         <div class="pd-name">${name}</div>
@@ -3686,6 +3769,7 @@ function openProduct(name,preferType,hideRec,keepStack){
       ${inCart?`<div class="txt-sm muted" style="margin-top:8px">🛒 ในตะกร้าแล้ว ${inCart} หน่วย</div>`:''}
     </div>
     ${hideRec?'':recommendHtml(p)}`;
+  try{ imgqScan(document.getElementById('pdBody'), true); }catch(e){}   /* 🖼️ v4.60: รูปที่ลูกค้าเปิดดูอยู่ ต้องมาก่อน */
   renderPdUnits(); renderPdPrice(); renderPdTiers(); openModal('productModal');
   const _pm=document.querySelector('#productModal .modal'); if(_pm) _pm.scrollTop=0;   // เปิดมา = เห็นรูปสินค้าเต็มด้านบนเสมอ (ไม่เด้งลงล่าง)
 }
@@ -3828,7 +3912,7 @@ function renderProducts(){
     return `<div class="pcard ${inCart?'in-cart':''}" onclick="openProduct('${esc(name)}')">
       ${pchgStrip(p)}
       <div class="p-thumb" style="background:${tint}">
-        <img class="p-img" src="${imgUrl(p['SKU_USAGE'])||PLACEHOLDER}" onerror="this.src='${PLACEHOLDER}'" loading="lazy">
+        <img class="p-img" src="${PLACEHOLDER}"${imgUrl(p['SKU_USAGE'])?` data-imgq="${esc(imgUrl(p['SKU_USAGE']))}" data-imgq-k="${esc(name)}"`:''}>
         ${promo.length?'<span class="p-tag tag-promo">โปร</span>':(isNew?'<span class="p-tag tag-new">ใหม่</span>':'')}
         ${band}
       </div>
@@ -3859,6 +3943,7 @@ function renderProducts(){
     </div>`;
   }
   grid.innerHTML=(specialFilter==='int'?intTabHeadHtml():'')+cardsHtml+pagerHtml+intZoneHtml();   /* 💛 v4.56: โซน "ยังไม่มีที่ร้าน" ต่อท้ายเสมอ */
+  try{ imgqScan(grid); }catch(e){}                                                                /* 🖼️ v4.58: รูปการ์ดสินค้าแนะนำโหลดทีละ 4 ใบ */
 }
 
 /* ===================== CART OPS ===================== */
@@ -3992,7 +4077,7 @@ function renderDealLock(){
     const dkey=name+'__'+f.unit, dqty=cart[dkey]?cart[dkey].qty:0;
     return `<div class="pcard fs-card dl-card ${unlocked?'':'locked'} ${dqty>0?'in-cart':''}" onclick="${unlocked?`openProduct('${esc(name)}','${f.unit}')`:`dealLockBlock('${esc(name)}')`}">
       <div class="p-thumb" style="background:${tint}">
-        <img class="p-img" src="${img}" onerror="this.src='${PLACEHOLDER}'" loading="lazy">
+        <img class="p-img" src="${PLACEHOLDER}"${img&&img!==PLACEHOLDER?` data-imgq="${esc(img)}" data-imgq-k="${esc(name)}"`:''}>
         ${!worth?`<span class="fs-best">😊 คุณได้ราคานี้อยู่แล้ว</span>`
           :(unlocked?`<span class="fs-off">ลด ${baht(dealSave(f))}</span>`:`<span class="dl-lockbadge">🔒 ลด ${baht(dealSave(f))}</span>`)}
         ${stockBandHtml(p)}
@@ -4017,6 +4102,7 @@ function renderDealLock(){
       <div class="dl-track"><div class="dl-fill" style="width:${pct}%"></div></div>
     </div>
     <div class="fs-row">${cards}</div></div>`;
+  try{ imgqScan(box, true); }catch(e){}   /* 🖼️ v4.60: แถบอยู่บนสุด ให้แซงคิวการ์ดในกริด */
   tickDealLock(); if(_dlTimer) clearInterval(_dlTimer); if(+box.dataset.end) _dlTimer=setInterval(tickDealLock,1000);
 }
 let _dlTimer=null;
@@ -4046,7 +4132,7 @@ function renderFlashSale(){
     const dkey=name+'__'+(paInCart?'PA':f.unit); const dqty=cart[dkey]?cart[dkey].qty:0;
     return `<div class="pcard fs-card ${dqty>0?'in-cart':''}" onclick="openProduct('${esc(name)}','${f.unit}')">
       <div class="p-thumb" style="background:${tint}">
-        <img class="p-img" src="${img}" onerror="this.src='${PLACEHOLDER}'" loading="lazy" onclick="event.stopPropagation();openImgZoom(this.src)">
+        <img class="p-img" src="${PLACEHOLDER}"${img&&img!==PLACEHOLDER?` data-imgq="${esc(img)}" data-imgq-k="${esc(name)}"`:''} onclick="event.stopPropagation();openImgZoom(this.src)">
         ${dealWorth(f)?`<span class="fs-off">ลด ${baht(dealSave(f))}</span>`:`<span class="fs-best">😊 คุณได้ราคานี้อยู่แล้ว</span>`}
         ${stockBandHtml(p)}
       </div>
@@ -4066,6 +4152,7 @@ function renderFlashSale(){
   box.dataset.end=ends.length?Math.min.apply(null,ends):0;
   box.style.display='block';
   box.innerHTML=`<div class="fs-wrap"><div class="fs-bar"><div class="fs-ttl">⚡ แฟลชเซล<span class="fs-cnt">${FLASH_LIST.length} รายการ</span></div><div class="fs-cd" id="fsCd"></div></div><div class="fs-row">${cards}</div></div>`;
+  try{ imgqScan(box, true); }catch(e){}   /* 🖼️ v4.60 */
   tickFlash(); if(_flashTimer) clearInterval(_flashTimer); if(+box.dataset.end) _flashTimer=setInterval(tickFlash,1000);
 }
 function tickFlash(){
