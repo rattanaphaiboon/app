@@ -1,6 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.1 — ★ บั๊กร้ายแรง: อนุมัติใบปรับเงินเดือนแล้วเขียนทับช่องเงิน (คู่แอปเดิม · ต้อง Deploy ด่วน)
+ *         APPROVE_CFG ตั้ง status/approver = 7/8 ตามชีทแบบ 10 คอลัมน์ แต่ชีทนี้มี 16 คอลัมน์
+ *         → "approved" ทับ H เบี้ยขยันพิเศษ · ชื่อผู้อนุมัติทับ I ค่าโทร (ของจริงอยู่ N/O)
+ *         + auditSalaryAdjustRows() ไล่หาแถวที่โดนไปแล้ว เพื่อกู้จากประวัติเวอร์ชัน
  * v9.0 — "ไม่อนุมัติ" มีคำว่า "อนุมัติ" อยู่ข้างใน → สูตรลาในสรุปวันนับใบที่ถูกปฏิเสธเป็นอนุมัติ
  *         (เกิดเมื่อ HR พิมพ์สถานะไทยเองในชีท) · แก้ทั้งสูตร + leaveIsApproved_() ที่นับโควต้า
  *         ★ ต้องรัน setupDailySummary ใหม่หลัง Deploy เพราะสูตรฝังอยู่ในชีท
@@ -324,7 +328,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.0', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.1', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3880,7 +3884,11 @@ const APPROVE_CFG = {
   'สวัสดิการApp': { status: 8,  approver: null, name: 2, info: [4, 6] },
   'โอนย้ายApp':     { status: 7, approver: 8, name: 2, info: [4, 5] },
   'ผ่านทดลองApp':   { status: 7, approver: 8, name: 2, info: [4, 5] },
-  'ปรับเงินเดือนApp':{ status: 7, approver: 8, name: 2, info: [4, 5] },
+  // v9.1 ★ ชีทนี้ 16 คอลัมน์ ไม่ใช่ 10 เหมือน 3 ชีทข้างบน — เดิมลอกค่า 7/8 มาใช้
+  //         ทำให้ตอนกดอนุมัติเขียน "approved" ทับ H เบี้ยขยันพิเศษ และชื่อผู้อนุมัติทับ I ค่าโทร
+  //         ของจริง: N สถานะ (13) · O ผู้อนุมัติ (14) · P อัพเดทเมื่อ (15)
+  //         info เพิ่มเงินเดือน (G) + วันที่มีผล (M) — เดิมผู้อนุมัติกดอนุมัติโดยไม่เห็นตัวเลขเลย
+  'ปรับเงินเดือนApp':{ status: 13, approver: 14, stampAt: 15, name: 2, info: [4, 5, 6, 12] },
   'ขอกำลังคนApp':   { status: 7, approver: 8, name: 2, info: [4, 5] },
 };
 
@@ -5146,5 +5154,45 @@ function previewTimeIssues() {
   });
   const msg = L.join('\n');
   Logger.log(msg);
+  return msg;
+}
+
+/* ── v9.1: หาแถวในชีทปรับเงินเดือนApp ที่ถูกเขียนทับช่องเงิน ────────────────────
+   ต้นเหตุ (แก้แล้ว): APPROVE_CFG ตั้งคอลัมน์สถานะ/ผู้อนุมัติเป็น 7/8 ตามชีทแบบ 10 คอลัมน์
+   แต่ชีทนี้มี 16 คอลัมน์ → ตอนกดอนุมัติเลยเขียนทับ H "เบี้ยขยันพิเศษ" และ I "ค่าโทร"
+   ตัวนี้ไล่หาว่าโดนไปกี่แถว จะได้กู้ค่าเดิมจาก "ประวัติเวอร์ชัน" ของชีทได้ถูกแถว
+   ► ไฟล์ → ประวัติเวอร์ชัน → ดูประวัติเวอร์ชัน แล้วย้อนดูวันก่อนวันที่อนุมัติ */
+function auditSalaryAdjustRows() {
+  const sh = getSS().getSheetByName('ปรับเงินเดือนApp');
+  if (!sh || sh.getLastRow() < 2) throw new Error('ไม่พบข้อมูลในชีท ปรับเงินเดือนApp');
+  const last = sh.getLastRow();
+  const d = sh.getRange(2, 1, last - 1, 16).getValues();
+  const bad = [], ok = [];
+  const isNum = v => v === '' || v === null || typeof v === 'number' || String(v).trim() === '' ||
+                     !isNaN(parseFloat(String(v).replace(/,/g, '')));
+  d.forEach((r, i) => {
+    if (String(r[1] || '').trim() === '') return;
+    const hBad = !isNum(r[7]), iBad = !isNum(r[8]);
+    const line = 'แถว ' + (i + 2) + ' · ' + String(r[1]) + ' ' + String(r[2] || '') + ' · ยื่น ' + String(r[0] || '');
+    if (hBad || iBad) {
+      bad.push(line + '\n        H เบี้ยขยันพิเศษ = "' + String(r[7]) + '"   ·   I ค่าโทร = "' + String(r[8]) + '"');
+    } else ok.push(line);
+  });
+
+  const L = ['── ตรวจชีทปรับเงินเดือนApp · ' + d.length + ' แถว ──', ''];
+  L.push('▸ ช่องเงินถูกเขียนทับ: ' + bad.length + ' แถว');
+  bad.forEach(x => L.push('   ' + x));
+  if (!bad.length) L.push('   ✅ ไม่มี — ช่อง H/I เป็นตัวเลขครบทุกแถว');
+  L.push('');
+  L.push('▸ ปกติ: ' + ok.length + ' แถว');
+  if (bad.length) {
+    L.push('');
+    L.push('► กู้ค่าเดิม: ไฟล์ → ประวัติเวอร์ชัน → ดูประวัติเวอร์ชัน');
+    L.push('  ย้อนไปวันก่อนที่ใบนั้นถูกอนุมัติ แล้วคัดลอกตัวเลข H กับ I กลับมาใส่');
+    L.push('  (อย่ากดกู้คืนทั้งไฟล์ — จะทับข้อมูลใหม่ของชีทอื่นด้วย)');
+  }
+  const msg = L.join('\n');
+  Logger.log(msg);
+  try { getSS().toast('พบช่องเงินถูกเขียนทับ ' + bad.length + ' แถว — ดูผลใน "บันทึกการดำเนินการ"', 'ตรวจปรับเงินเดือน', 12); } catch (e) {}
   return msg;
 }
