@@ -652,7 +652,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.141</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.142</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -2184,12 +2184,17 @@ async function fetchPaidDocs(){
   return {docSet,notDelivSet,ok};
 }
 let _dcDelivRefSet=new Set(); // v9.41: ref ใบจอง BK/BV ที่มีใบส่ง "DC" แล้ว (ปลีกส่งแล้ว) — ใช้ตัดออกจากค้างส่ง
+// v9.142: ref ใบจอง BK/BV ที่เปิดบิลเป็น "DSC" = ลูกค้ามารับเองหน้าร้าน → ไม่ต้องจัดรถส่งอีกแล้ว
+//   ต่างจาก DC/DSI ตรงที่ "จบแล้ว" ไม่มีของค้างต้องส่ง จึงตัดทิ้งได้เลย ไม่ต้องเว้นใบใหม่ ≤BOOKING_KEEP_DAYS วัน
+//   (ตรวจข้อมูลจริง 2026-09-07: ใบจอง 66 ใบที่มี DSC ไม่มีใบไหนมีใบส่งชนิดอื่นปนเลย = ไม่ใช่การแบ่งรับบางส่วน)
+let _dscPickupRefSet=new Set();
 // v8.88: DS_DC × บันทึกบิลฯ → คืนชุด "ใบจองที่ส่งแล้วจริง" (จะถูกตัดออกจากรอจัด)
 //   ใบส่ง 1-3 วันก่อน ที่ "ไม่พบในไฟล์" หรือ "ไม่ได้ส่ง" → คืนใบจองกลับมารอจัด (ไม่ตัดออก)
 async function fetchDsDcRefs(){
   const c=orderCutoffStr();
   _dsdcReturned=new Map();
   _dcDelivRefSet=new Set(); // v9.41: reset ทุกครั้งที่โหลด (ตามคลังปัจจุบัน)
+  _dscPickupRefSet=new Set();
   const loadDsdc=async()=>{
     const tries=[
       {why:'text', tq:`SELECT A, B, O WHERE G='${ORDER_WL}' AND A >= '${c.text}'`},   // A=DI_DATE B=DI_REF O=DI_REMARK
@@ -2222,6 +2227,7 @@ async function fetchDsDcRefs(){
     const bk=_parseBkRef(r['DI_REMARK']); if(!bk)return;
     const ref=_payNorm(r['DI_REF']);
     if(ref.startsWith('DC'))_dcDelivRefSet.add(bk); // v9.41: ใบส่งปลีก DC → ใบจองนี้ส่งแล้ว (ตัดออกจากค้างส่ง)
+    if(ref.startsWith('DSC'))_dscPickupRefSet.add(bk);   // v9.142: DSC → ลูกค้ามารับเองหน้าร้าน
     const date=(r['DI_DATE']||'').toString().trim();
     if(canReturn && date>=dayN && date<=day1){        // อยู่ในช่วง 1-3 วันก่อน → เทียบไฟล์
       const notDeliv=pay.notDelivSet.has(ref);
@@ -2232,6 +2238,7 @@ async function fetchDsDcRefs(){
     removeSet.add(bk);                                // วันนี้ / เก่ากว่า N วัน / ยังไม่ถึงคิวบันทึก(lag) / ส่งแล้วจริง → ตัดออก
   });
   returnSet.forEach(bk=>removeSet.delete(bk));        // ใบจองที่มีบิลค้างส่ง — คงไว้ในรอจัด
+  if(_dscPickupRefSet.size)console.log(`🏪 v9.142 ใบจองที่เปิดบิลเป็น DSC (ลูกค้ามารับเองหน้าร้าน): ${_dscPickupRefSet.size} ใบ — ตัดออกจากรอจัด/ค้างส่งทั้งหมด`);
   console.log(`🔎 v8.88 เทียบใบส่ง(1-${DSDC_RETURN_DAYS}วันก่อน)×บันทึกบิลฯ: ตัดที่ส่งแล้ว ${removeSet.size} · คืนกลับรอจัด ${returnSet.size}`+(canReturn?'':' [ไฟล์บันทึกบิลโหลดไม่ได้ — ข้ามการคืน]')+(_dsdcReturned.size?` — ${[..._dsdcReturned.values()].slice(0,8).map(v=>v.ref+'('+v.reason+')').join(', ')}${_dsdcReturned.size>8?' ...':''}`:''));
   return removeSet;
 }
@@ -2681,9 +2688,14 @@ async function loadData(){
       //         (เดิม v9.3 เว้นเฉพาะบิลลงวันนี้ · ขยายเป็น 3 วัน กันบิลใหม่หายจากรอจัด)
       const _cut3=new Date(); _cut3.setHours(0,0,0,0); _cut3.setDate(_cut3.getDate()-BOOKING_KEEP_DAYS); // v9.50: 3→7 วัน
       const _isRecentBill=b=>{const m=/(\d{4})[\/\-](\d{2})[\/\-](\d{2})/.exec(b.date||'');if(!m)return false;return new Date(+m[1],+m[2]-1,+m[3])>=_cut3;};
-      const before=bills.length, dropped=[]; let keptRecent=0;
+      const before=bills.length, dropped=[], dscDropped=[]; let keptRecent=0;
       bills=bills.filter(b=>{
         const ref=norm(b.ref);
+        // v9.142: เปิดบิลเป็น DSC = ลูกค้ารับของไปเองแล้ว → ตัดทันที ไม่เข้าข้อยกเว้นใบใหม่ ≤7 วัน
+        //   (นี่คือช่องโหว่เดิม: ใบจองที่ลูกค้ามาเอาหน้าร้านวันนี้/เมื่อวาน ยังค้างอยู่ในรอจัดทุกใบ)
+        if(/^(BK|BV)/.test(ref)&&_dscPickupRefSet.has(ref)){
+          dscDropped.push(b.ref); delete billMap[b.ref]; return false;
+        }
         if(/^(BK|BV)/.test(ref)&&dsDcRefSet.has(ref)){
           if(_isRecentBill(b)){ keptRecent++; return true; }   // v9.50: ลง ≤7 วัน → เก็บไว้ ไม่เทียบ DS_DC
           dropped.push(b.ref); delete billMap[b.ref]; return false;
@@ -2691,6 +2703,7 @@ async function loadData(){
         return true;
       });
       console.log(`🗂️ v8.55/9.19 กรองใบจองที่ส่งแล้ว: ตัด ${before-bills.length}/${before} บิล BK/BV (DS_DC อ้าง ${dsDcRefSet.size} เลขที่ · เว้นบิลย้อนหลัง ≤${BOOKING_KEEP_DAYS}วัน ${keptRecent})`+(dropped.length?` — ${dropped.slice(0,8).join(', ')}${dropped.length>8?' ...':''}`:''));
+      if(dscDropped.length)console.log(`🏪 v9.142 ตัดใบจองที่ลูกค้ามารับเองหน้าร้าน (DSC): ${dscDropped.length} ใบ — ${dscDropped.slice(0,8).join(', ')}${dscDropped.length>8?' ...':''}`);
     })();
     // ══ v9.60/61: กัน DS_DC วันนี้ "ซ้ำ" ใบจองที่รอดในพูล (หลังกรองใบส่งแล้ว) — คงใบจองไว้ (queue ไม่หลุด) ══
     //   ตัด DS_DC เฉพาะที่ "อ้างใบจองในพูล + ชื่อร้านตรงกัน" (ซ้ำจริง) · v9.61: ถ้า "ชื่อร้านไม่ตรงใบจอง" → คงไว้ + ป้ายเตือน (จับเคสส่งผิดร้าน/อ้างผิดใบ)
@@ -8195,6 +8208,7 @@ function _lineBacklogAutoSet(){
   (bills||[]).forEach(b=>{
     if(!_isDIToday(b.date)||assigned.has(b.ref))return;
     if(cw&&b.wh&&b.wh!==cw)return; // v9.43: ร้านนี้คลังอื่นส่ง (Customer.WH) → ไม่ใช่ค้างส่งของคลังนี้
+    if(_dscPickupRefSet&&_dscPickupRefSet.has(norm(b.ref)))return; // v9.142: DSC = ลูกค้ามารับเองหน้าร้าน (ทุกชนิดร้าน)
     if(typeof _segRSof==='function'&&_segRSof(b,storeW)==='R'&&_dcDelivRefSet&&_dcDelivRefSet.has(norm(b.ref)))return; // ปลีก+มี DC = ส่งแล้ว
     s.add(b.ref);
   });
