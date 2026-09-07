@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana ยอดขายเทียบเป้าหมาย v8.06</title>
+<title>Rattana ยอดขายเทียบเป้าหมาย v8.07</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -227,7 +227,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v8.06</small>
+      <small>ยอดขายเทียบเป้าหมาย v8.07</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -655,6 +655,35 @@ function getLatestBpMonth(bpRaw) {
   return latest;
 }
 
+function calcBpActualForMonth(parsed, normName, month, bpIndex) {
+  if (!month) return null;
+  const key = normName + '||' + month.mm + '/' + month.yyyy;
+  const bucket = bpIndex.get(key) || [];
+  if (!bucket.length) return null;
+  const dimKey = parsed.dim.toUpperCase();
+  const bpCol = DIM_MAP[dimKey];
+  if (dimKey === 'PRODUCT NAME') {
+    const pn = normalizeText(parsed.value);
+    const s = new Set(); bucket.forEach(r => { if (normalizeText(String(r['Product_Name']||'')) === pn && r['Customer_Code']) s.add(r['Customer_Code']); });
+    return s.size;
+  }
+  if (dimKey === 'KPI') {
+    const val = normalizeText(parsed.value).toLowerCase();
+    if (val === 'รวมbplus') return bucket.reduce((s,r)=>s+r._exvatcn2,0);
+    if (val === 'active outlet') return new Set(bucket.map(r=>r['Customer_Code']).filter(Boolean)).size;
+    if (val === 'all sku') return new Set(bucket.map(r=>r['Product_Name']).filter(Boolean)).size;
+    return null;
+  }
+  if (bpCol) {
+    const wantVal = normalizeText(parsed.value).toUpperCase();
+    const matches = bucket.filter(r => normalizeText(r[bpCol]).toUpperCase() === wantVal);
+    if (parsed.unit === 'บาท' || parsed.unit === '%บาท') return matches.reduce((s,r)=>s+r._exvatcn2,0);
+    if (parsed.unit === 'ตัน') return matches.reduce((s,r)=>s+r._csx,0)/1000;
+    if (parsed.unit === 'ลัง') return matches.reduce((s,r)=>s+r._csx,0);
+    if (parsed.unit === 'ร้าน') return new Set(matches.map(r=>r['Customer_Code'])).size;
+  }
+  return null;
+}
 function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw) {
   const bpIndex = buildBpIndex(bpRaw);
   const latestBpMonth = getLatestBpMonth(bpRaw);
@@ -663,6 +692,7 @@ function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw) {
   const _calMm = _now.getMonth() + 1, _calYyyy = _now.getFullYear();
   const _hasCurMon = (bpRaw || []).some(r => { const my = bpMonthYear(r['Doc_Date']); return my && my.mm === _calMm && my.yyyy === _calYyyy; });
   const globalRefMonth = _hasCurMon ? { mm: _calMm, yyyy: _calYyyy } : latestBpMonth;
+  const prevRefMonth = globalRefMonth ? { mm: globalRefMonth.mm === 1 ? 12 : globalRefMonth.mm - 1, yyyy: globalRefMonth.mm === 1 ? globalRefMonth.yyyy - 1 : globalRefMonth.yyyy } : null;
   const debtorActualIndex = buildDebtorActualIndex(targetRaw);
   // Visits actual: normName(ชื่อ-สกุล) → Set ชื่อร้าน เฉพาะ ในพิกัด=ใช่
   const visitsIdx = new Map();
@@ -879,11 +909,12 @@ function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw) {
     }
     const pct = (supported && targetVal > 0) ? (actual/targetVal*100) : null;
     const st = statusOf(pct, supported);
+    const prevActual = calcBpActualForMonth(parsed, normName, prevRefMonth, bpIndex);
     rows.push({
       wh, name, nickname: t['ชื่อเล่น']||'', month: t['เดือน']||'', empCode,
       dim: parsed.dim, dimLabel: DIM_LABEL[dimKey] || parsed.dim,
       value: parsed.value, unit: parsed.unit,
-      target: targetVal, actual, stores, pct, supported,
+      target: targetVal, actual, prevActual, stores, pct, supported,
       statusLabel: st.label, statusCls: st.cls,
     });
   });
@@ -1234,6 +1265,7 @@ function renderPivot() {
       <tbody>
         ${mkRow('เป้าหมาย', c => `<td class="ptbl-td">${c._empty ? '' : fmtC(c, c.target)}</td>`)}
         ${mkRow('ทำได้', c => `<td class="ptbl-td">${c._empty ? '' : (c.supported ? fmtC(c, c.actual) : '<span class="ptbl-muted">-</span>')}</td>`)}
+        ${mkRow('ทำได้เดือนที่แล้ว', c => `<td class="ptbl-td ptbl-muted" style="font-size:11px">${c._empty ? '' : (c.prevActual !== null ? fmtC(c, c.prevActual) : '<span class="ptbl-muted">-</span>')}</td>`)}
         <tr><td class="ptbl-label">%</td>${cols.map(c => {
           if (c._empty) return `<td class="ptbl-td"></td>`;
           if (c.pct === null) return `<td class="ptbl-td ptbl-muted">-</td>`;
