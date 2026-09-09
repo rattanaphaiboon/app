@@ -1,6 +1,7 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.6 — traceLeaveQuota() พิสูจน์ทีละใบว่าใบลาไหนหักโควต้า ใบไหนไม่หัก เพราะอะไร
  * v9.5 — showCheckinPhotosInCells() โชว์รูปสแกนในเซลล์เลย (คอลัมน์ R · ไม่ทับช่อง O)
  *         ใช้ =IMAGE + ลิงก์เซ็นอายุ 1 ปี · ค่าเริ่มต้น 7 วันล่าสุด กันชีทอืด
  *         + clearCheckinPhotoCells() ล้างออกเมื่อไม่ต้องการ
@@ -338,7 +339,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.5', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.6', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5386,5 +5387,75 @@ function clearCheckinPhotoCells() {
   const msg = 'ล้างรูปในเซลล์ออกแล้ว + คืนความสูงแถวเป็นปกติ (ช่อง O ลิงก์เดิมยังอยู่ครบ)';
   Logger.log(msg);
   try { getSS().toast(msg, 'ล้างรูปในเซลล์', 8); } catch (e) {}
+  return msg;
+}
+
+/* ── v9.6: พิสูจน์ว่า "ใบลาตัดโควต้าจริงไหม" ของคนคนเดียว ─────────────────────
+   ไล่ให้ดูทีละใบว่าใบไหนหัก ใบไหนไม่หัก และไม่หักเพราะอะไร แล้วสรุปยอดท้ายสุด
+   ► เปลี่ยนรหัสในบรรทัดล่างเป็นคนที่อยากตรวจ แล้วกด Run (อ่านอย่างเดียว ไม่แก้อะไร) */
+const TRACE_EMP_ID = '12023';   // พิชชาพร ภู่สกุล
+
+function traceLeaveQuota() {
+  const id = String(TRACE_EMP_ID).trim();
+  const q = leaveQuotaFor_(id);
+  if (!q) throw new Error('ไม่พบวันเริ่มงานของ ' + id + ' (ชีท Users / ทะเบียน PTT / แท็บโควต้าลา)');
+  const fmt = d => Utilities.formatDate(d, 'Asia/Bangkok', 'dd/MM/yyyy');
+  const KEY_TH = { personal:'ลากิจ', unpaidPersonal:'ลากิจไม่รับค่าจ้าง', sickWithCert:'ลาป่วย (มีใบ)',
+                   sickNoCert:'ลาป่วย (ไม่มีใบ)', vacation:'ลาพักร้อน', maternity:'ลาคลอด', training:'ลาฝึกอบรม' };
+  const CODE2KEY = { personal:'personal', unpaid_personal:'unpaidPersonal', sick_with_cert:'sickWithCert',
+                     sick_no_cert:'sickNoCert', vacation:'vacation', training:'training',
+                     maternity_paid:'maternity', maternity_unpaid:'maternity' };
+
+  const L = ['── ตรวจการตัดโควต้าลา · ' + id + ' ──', ''];
+  L.push('วันเริ่มงาน: ' + fmt(q.startDate) + ' (จาก ' + q.startSource + ')');
+  L.push('รอบปีที่กำลังนับ: ' + fmt(q.cycleStart) + ' – ' + fmt(q.cycleEnd));
+  L.push('ช่วงอายุงาน: ' + (q.quota.stageLabel || '-'));
+  L.push('');
+  L.push('▸ ใบลาทุกใบของคนนี้ในชีทการลาApp');
+
+  const data = leaveRowsAll_();
+  let n = 0, cut = 0;
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (String(r[1] || '').trim() !== id) continue;
+    n++;
+    const sd = (r[0] instanceof Date) ? r[0] : parseDDMMYYYY(formatDate(r[0]));
+    const label = String(r[5] || ''), st = String(r[8] || '').trim() || '(ว่าง)';
+    const code = leaveCodeFromLabel_(label), key = CODE2KEY[code];
+    const head = '   ' + (sd ? fmt(sd) : String(r[0])) + ' · ' + label + ' · สถานะ ' + st;
+    let why = '';
+    if (!leaveIsApproved_(r[8]))            why = '→ ไม่หัก (ยังไม่อนุมัติ/ถูกปฏิเสธ/ยกเลิก)';
+    else if (!key)                          why = '→ ไม่หัก (ประเภทนี้ไม่ใช้โควต้าลา)';
+    else if (!sd || isNaN(sd.getTime()))    why = '→ ไม่หัก (อ่านวันที่ไม่ออก) ⚠';
+    else if (sd < q.cycleStart || sd > new Date()) why = '→ ไม่หัก (อยู่นอกรอบปีนี้)';
+    else {
+      const days = leaveQuotaDays_(r[12], r[0], r[13]);
+      cut += days;
+      why = '→ ★ หัก ' + days + ' วัน จาก' + (KEY_TH[key] || key) + ' (ชั่วโมงในชีท: ' + (r[12] === '' ? '-' : r[12]) + ')';
+    }
+    L.push(head);
+    L.push('        ' + why);
+  }
+  if (!n) L.push('   (ไม่มีใบลาของคนนี้ในชีทเลย)');
+
+  const carried = carriedUsedMap_()[id] || {};
+  const cKeys = Object.keys(carried).filter(k => (parseFloat(carried[k]) || 0) > 0);
+  L.push('');
+  L.push('▸ วันลาที่ใช้ก่อนย้ายมาใช้แอป (แท็บ "ใช้ก่อนใช้แอป")');
+  if (cKeys.length) cKeys.forEach(k => L.push('   ' + (KEY_TH[k] || k) + ': ' + carried[k] + ' วัน'));
+  else L.push('   (ไม่มี)');
+
+  L.push('');
+  L.push('▸ สรุปที่แอปแสดงให้พนักงานเห็น');
+  L.push('   ' + ['ประเภท', 'เพดาน', 'ใช้ไป', 'คงเหลือ'].join('  ·  '));
+  Object.keys(KEY_TH).forEach(k => {
+    const cap = q.quota[k], u = q.used[k] || 0, rm = q.remaining[k];
+    L.push('   ' + KEY_TH[k] + ': ' + (cap == null ? 'ไม่จำกัด' : cap) + '  ·  ' + u + '  ·  ' + (rm == null ? '-' : rm));
+  });
+  L.push('');
+  L.push('รวมที่หักจากใบในแอปรอบปีนี้: ' + Math.round(cut * 100) / 100 + ' วัน (ยังไม่รวมยอดใช้ก่อนใช้แอป)');
+
+  const msg = L.join('\n');
+  Logger.log(msg);
   return msg;
 }
