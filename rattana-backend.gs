@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.4 — auditScanPhotos: ไม่นับแถวที่มาจากอนุมัติแก้เวลาย้อนหลัง (retroactive=Y)
+ *         แถวพวกนั้นระบบเติมให้ ไม่เคยมีรูปตั้งแต่ต้น เดิมนับรวมทำให้ตัวเลขสแกนหน้าดูแย่เกินจริง
  * v9.3 — auditScanPhotos() ตรวจว่าสแกนแล้วมีรูปแนบครบไหม แยกตามวิธีสแกน+รายคน
  *         (คู่กับแอป v12.63 ที่แก้ต้นเหตุ: กดบันทึกก่อนกล้องหน้าเปิดเสร็จหลังสแกน QR)
  * v9.2 — ช่องรูปในชีท CheckinLog คลิกดูรูปได้ (ใส่ลิงก์ทับ path ด้วย rich text)
@@ -333,7 +335,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.3', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.4', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5270,16 +5272,19 @@ function auditScanPhotos(daysBack) {
   const last = sh.getLastRow();
   const d = sh.getRange(2, 1, last - 1, 15).getValues();
 
-  let all = 0, has = 0;
+  let all = 0, has = 0, retro = 0;
   const byMode = {};   // self / qr / supervisor
   const byEmp  = {};
   d.forEach(r => {
     const ts = (r[0] instanceof Date) ? r[0] : new Date(r[0]);
     if (!ts || isNaN(ts.getTime()) || ts < since) return;
     const id = String(r[1] || '').trim(); if (!id) return;
-    const who = String(r[11] || 'self').trim();
-    const mode = who.indexOf('qr:') === 0 ? 'สแกน QR' : (who.indexOf('supervisor:') === 0 ? 'หัวหน้าสแกนให้' : 'สแกนหน้า');
-    const ok = String(r[14] || '').trim() !== '';
+    const who = String(r[11] || "self").trim();
+    // v9.4: แถวที่มาจากอนุมัติ "แก้เวลาย้อนหลัง" ไม่เคยมีรูปตั้งแต่ต้น (ระบบเติมให้ ไม่ได้สแกนจริง)
+    //       เดิมนับรวมเป็น "รูปขาด" ทำให้ตัวเลขสแกนหน้าดูแย่กว่าความจริง
+    if (String(r[12] || "").trim().toUpperCase() === "Y") { retro++; return; }
+    const mode = who.indexOf("qr:") === 0 ? "สแกน QR" : (who.indexOf("supervisor:") === 0 ? "หัวหน้าสแกนให้" : "สแกนหน้า");
+    const ok = String(r[14] || "").trim() !== "";
     all++; if (ok) has++;
     if (!byMode[mode]) byMode[mode] = { n: 0, ok: 0 };
     byMode[mode].n++; if (ok) byMode[mode].ok++;
@@ -5289,7 +5294,8 @@ function auditScanPhotos(daysBack) {
 
   const pct = (a, b) => b ? Math.round(a * 1000 / b) / 10 : 0;
   const L = ['── รูปแนบตอนสแกน · ย้อนหลัง ' + back + ' วัน ──', ''];
-  L.push('รวม ' + all + ' ครั้ง · มีรูป ' + has + ' (' + pct(has, all) + '%) · ไม่มีรูป ' + (all - has));
+  L.push("รวมสแกนจริง " + all + " ครั้ง · มีรูป " + has + " (" + pct(has, all) + "%) · ไม่มีรูป " + (all - has));
+  if (retro) L.push("(ไม่นับ " + retro + " แถวที่มาจากอนุมัติแก้เวลาย้อนหลัง — ระบบเติมให้ ไม่มีรูปอยู่แล้ว)");
   L.push('');
   L.push('▸ แยกตามวิธีสแกน');
   Object.keys(byMode).sort().forEach(k => {
