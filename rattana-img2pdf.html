@@ -10,7 +10,7 @@
 <link rel="icon" type="image/png" sizes="32x32" href="img2pdf-icon-32.png">
 <link rel="icon" type="image/png" sizes="192x192" href="img2pdf-icon-192.png">
 <link rel="apple-touch-icon" href="img2pdf-icon-180.png">
-<title>Rattana Scanner v2.7</title>
+<title>Rattana Scanner v2.8</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -188,6 +188,7 @@ body.dark .spinner-box{background:var(--card-bg)}
 .history-file{font-size:13px;font-weight:600;word-break:break-all}
 .history-meta{font-size:11px;color:var(--muted);margin-top:2px}
 .history-empty{text-align:center;padding:32px 16px;color:var(--muted);font-size:13px}
+.history-dl-btn{width:34px;height:34px;border-radius:50%;background:var(--navy-light);color:#fff;border:none;font-size:14px;flex-shrink:0;display:flex;align-items:center;justify-content:center}
 
 .pdf-item{display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:8px;background:var(--row-alt)}
 .pdf-item-icon{font-size:24px;flex-shrink:0}
@@ -222,14 +223,15 @@ body.dark .spinner-box{background:var(--card-bg)}
 .txt-sm{font-size:12px}
 .flex-between{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .hidden{display:none}
-footer{text-align:center;padding:16px;color:var(--muted);font-size:11px}
+footer{text-align:center;padding:16px;color:var(--muted);font-size:11px;line-height:1.8}
+footer a{color:inherit;text-decoration:underline}
 </style>
 </head>
 <body>
 
 <header>
   <button class="icon-btn" onclick="openDrawer()" title="เมนู">☰</button>
-  <span class="logo-text">RATTANA <span>SCANNER</span> <span class="badge badge-gold">v2.7</span></span>
+  <span class="logo-text">RATTANA <span>SCANNER</span> <span class="badge badge-gold">v2.8</span></span>
   <span class="badge badge-gold hidden" id="userNameChip" style="margin-left:2px"></span>
   <div class="spacer"></div>
   <button class="icon-btn hidden" id="logoutBtn" onclick="logout()" title="ออกจากระบบ">🚪</button>
@@ -486,7 +488,10 @@ footer{text-align:center;padding:16px;color:var(--muted);font-size:11px}
   </div>
 </div>
 
-<footer>Rattana Scanner v2.7</footer>
+<footer>
+  Rattana Scanner v2.8<br>
+  มีปัญหาการใช้งาน? ติดต่อ LINE HR หรือโทร <a href="tel:0640978417">064-097-8417</a>
+</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
@@ -626,11 +631,44 @@ function logout(){
   if (own) { currentUser = own; showApp(); return; }
 })();
 
-async function logScanHistory(entry){
+function arrayBufferToBase64(buf){
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function logScanHistory(entry, blob){
   if (!HISTORY_SCRIPT_URL) return;
   try {
-    await fetch(HISTORY_SCRIPT_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(entry) });
+    const fileBase64 = blob ? arrayBufferToBase64(await blob.arrayBuffer()) : null;
+    await fetch(HISTORY_SCRIPT_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ ...entry, fileBase64 }) });
   } catch (e) { /* best-effort only — never block the main PDF flow over a logging failure */ }
+}
+
+async function redownloadFromHistory(fileId, pages){
+  showSpinner('กำลังโหลดไฟล์...');
+  try {
+    const res = await fetch(`${HISTORY_SCRIPT_URL}?action=file&fileId=${encodeURIComponent(fileId)}&empId=${encodeURIComponent(currentUser?.empId || '')}`);
+    const json = await res.json();
+    if (!json.ok) { showToast('ไม่พบไฟล์ หรือไม่มีสิทธิ์เข้าถึง', 'error'); return; }
+    const binary = atob(json.fileBase64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const blob = new Blob([bytes], { type: 'application/pdf' });
+    const filename = json.filename || 'scan.pdf';
+    lastPdf = { blob, file: new File([blob], filename, { type: 'application/pdf' }), filename, pages: pages || '-' };
+    closeDrawer();
+    openResultModal();
+  } catch (e) {
+    console.error(e);
+    showToast('โหลดไฟล์ไม่สำเร็จ', 'error');
+  } finally {
+    hideSpinner();
+  }
 }
 
 function openDrawer(){
@@ -656,10 +694,11 @@ async function loadHistory(){
     list.innerHTML = rows.map(r => `
       <div class="history-item">
         <div class="history-icon">📄</div>
-        <div>
+        <div style="flex:1;min-width:0">
           <div class="history-file">${r['filename']||'-'}</div>
           <div class="history-meta">${r['name']||currentUser?.name||'-'} · ${formatThaiDateTime(r['timestamp'])} · ${r['pages']||'-'} หน้า · ${r['sizeKB']?r['sizeKB']+' KB':'-'}</div>
         </div>
+        ${r['fileId'] ? `<button class="history-dl-btn" onclick="redownloadFromHistory('${r['fileId']}','${r['pages']||''}')" title="ดาวน์โหลด / ส่งต่อ">⬇️</button>` : ''}
       </div>
     `).join('');
   } catch (e) {
@@ -1392,7 +1431,7 @@ async function convertToPDF(){
       empId: currentUser?.empId || '', name: currentUser?.name || '',
       filename, pages: lastPdf.pages, sizeKB: Math.round(blob.size/1024),
       timestamp: new Date().toISOString(),
-    });
+    }, blob);
     openResultModal();
   } catch (e) {
     console.error(e);
@@ -1591,7 +1630,7 @@ async function mergePdfFiles(){
       empId: currentUser?.empId || '', name: currentUser?.name || '',
       filename, pages: lastPdf.pages, sizeKB: Math.round(blob.size/1024),
       timestamp: new Date().toISOString(),
-    });
+    }, blob);
     openResultModal();
   } catch (e) {
     console.error(e);
