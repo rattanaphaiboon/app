@@ -23,6 +23,10 @@ APPS=(
   rattana-pc-checkin-guide.html
   rattana-empid.html
   rattana-repair-doc.html
+  rattana-onboard.html
+  rattana-hr-docs.html
+  rattana-jobs.html
+  rattana-img2pdf.html
   rattana-pc-checkin.webmanifest
   rattana-pc-checkin-sw.js
   pc-icon-192.png
