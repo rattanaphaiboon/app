@@ -1,6 +1,9 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.7 — revokeApproval() ถอนการอนุมัติจากในแอป (คู่แอป v12.64 · ★ ต้อง Deploy)
+ *         อุดเคส: อนุมัติลาวันที่ 9 แล้วพนักงานขอเปลี่ยนเป็นวันที่ 10 → ใบเดิมค้าง approved
+ *         กินโควต้าต่อ พอยื่นใบใหม่โดนตัดซ้ำ = เสียโควต้า 2 วันทั้งที่ลาวันเดียว
  * v9.6 — traceLeaveQuota() พิสูจน์ทีละใบว่าใบลาไหนหักโควต้า ใบไหนไม่หัก เพราะอะไร
  * v9.5 — showCheckinPhotosInCells() โชว์รูปสแกนในเซลล์เลย (คอลัมน์ R · ไม่ทับช่อง O)
  *         ใช้ =IMAGE + ลิงก์เซ็นอายุ 1 ปี · ค่าเริ่มต้น 7 วันล่าสุด กันชีทอืด
@@ -339,7 +342,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.6', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.7', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -435,6 +438,7 @@ function handle(e, method) {
       case 'getPendingAll':        return jsonOut(getPendingAll(p, user));
       case 'getTimeIssues':        return jsonOut(getTimeIssues(p, user));   // v8.7: ข้อมูลลงเวลาที่ต้องตรวจ (การ์ดเตือนหัวหน้า)
       case 'approveAny':           return jsonOut(approveAny(p, user));
+      case 'revokeApproval':       return jsonOut(revokeApproval(p, user));   // v9.7: ถอนการอนุมัติ
       case 'submitWelfare':        return jsonOut(actionSubmitWelfare(p, user));
       case 'getMyWelfare':         return jsonOut(actionGetMyWelfare(p, user));
       case 'submitHrApp':          return jsonOut(actionSubmitHrApp(p, user));
@@ -4206,6 +4210,42 @@ function cancelMyLeave(p, user) {
     la.getRange(row, 10).setValue('ยกเลิกโดย ' + (user.name || rowEmp));
     la.getRange(row, 11).setValue(new Date());
     return { ok:true };
+  } catch (e) { return { ok:false, error:e.message }; }
+}
+
+/* ── v9.7: ถอนการอนุมัติ (surat เจอช่องโหว่ 9/9) ────────────────────────────────
+   เคสจริง: อนุมัติลาวันที่ 9 ไปแล้ว พนักงานเปลี่ยนใจจะลาวันที่ 10 แทน
+     · พนักงานกดยกเลิกเองไม่ได้ (cancelMyLeave ปล่อยเฉพาะใบที่ยัง pending)
+     · ใบวันที่ 9 จึงค้างเป็น approved กินโควต้าต่อไป
+     · พอยื่นใบวันที่ 10 แล้วอนุมัติอีก = โควต้าโดนตัด 2 วัน ทั้งที่ลาจริงวันเดียว
+   เดิมแก้ได้ทางเดียวคือให้ HR ไปพิมพ์ทับในชีท ซึ่งเสี่ยงพิมพ์ผิดคอลัมน์
+   ตัวนี้ให้หัวหน้า/HR กดถอนได้จากในแอป เขียนถูกช่องเสมอ + เก็บว่าใครถอนเมื่อไหร่ */
+function revokeApproval(p, user) {
+  try {
+    if (!isSupervisor(user) && !isHR(user)) return { ok:false, error:'ไม่มีสิทธิ์ถอนการอนุมัติ' };
+    let cfg = APPROVE_CFG[p.sheet];
+    if (!cfg) return { ok:false, error:'unknown sheet' };
+    const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
+    const sh = ss.getSheetByName(p.sheet);
+    if (!sh) return { ok:false, error:'no sheet' };
+    if (p.sheet === 'การลาApp' && !leaveSheetIsNew_(sh)) cfg = { status: 9, approver: 10, name: 2, info: [6, 12] };
+    const row = parseInt(p.row, 10);
+    if (!(row >= 2) || row > sh.getLastRow()) return { ok:false, error:'ไม่พบรายการ' };
+
+    const cur = String(sh.getRange(row, cfg.status + 1).getValue() || '').trim();
+    if (!cur || cur.toLowerCase() === 'pending') return { ok:false, error:'ใบนี้ยังไม่ถูกพิจารณา — ไม่ต้องถอน' };
+    if (cur.toLowerCase().indexOf('cancel') === 0 || cur.indexOf('ยกเลิก') >= 0) {
+      return { ok:false, error:'ใบนี้ถูกยกเลิกไปแล้ว' };
+    }
+    const who = cleanName_((user && user.name) || '') || String(user.empId || '');
+    sh.getRange(row, cfg.status + 1).setValue('cancelled');
+    if (cfg.approver != null) {
+      sh.getRange(row, cfg.approver + 1).setValue('ถอนการอนุมัติโดย ' + who + (p.reason ? ' · ' + String(p.reason).slice(0, 120) : ''));
+    }
+    if (cfg.stampAt != null) {
+      sh.getRange(row, cfg.stampAt + 1).setValue(Utilities.formatDate(new Date(), 'Asia/Bangkok', 'dd/MM/yyyy HH:mm:ss'));
+    }
+    return { ok:true, msg:'ถอนการอนุมัติแล้ว — โควต้าที่หักไปจะคืนให้เองในการคำนวณครั้งถัดไป', was: cur };
   } catch (e) { return { ok:false, error:e.message }; }
 }
 
