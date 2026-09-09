@@ -665,7 +665,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.151</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.153</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -9359,6 +9359,12 @@ function _mgGroupDiMs(g){ const a=(g&&g.stores||[]).map(_mgDiMs); return a.lengt
 //      (ข้อมูลจริง 2026-09-09: ใบเมื่อวาน 172 ใบเข้าข่ายนี้ ถ้าไม่กันจะถูกดึงมาซ้ำทั้งที่ส่งไปแล้ว)
 let _jrCarryOn=(function(){ try{ return localStorage.getItem('dq_carry_off')!=='1'; }catch(e){ return true; } })();
 let _jrCarryDays=3, _jrCarry=new Set(), _jrCarryWhy={};
+// v9.153: ไฟล์ D-man ลงข้อมูล "ไม่เรียงเลข" — คนขับปิดงานคนละเวลา ใบเลขท้ายอาจลงก่อนใบเลขต้น
+//   เกณฑ์ "ไฟล์บันทึกผ่านเลขนี้ไปแล้ว = หายจริง" จึงใช้กับใบของเมื่อวานไม่ได้
+//   วัดจริง 2026-09-09: ใบ 08/09 ถูกตัดสินว่าไม่มีประวัติส่ง 72 ใบ และเพิ่มขึ้นเรื่อยๆ ระหว่างวัน
+//   (payDocs 4516→4546 ใน 2 ชม. ทำให้ตัวเลขเด้ง 33→104) · พอรอถึง 2 วันเหลือ 2 ใบ · 3 วันเหลือ 1
+//   → ใบที่ใหม่กว่านี้ นับเป็นค้างได้เฉพาะกรณีชัดเจน: ยังไม่เปิดบิล หรือติดธง "ไม่ได้ส่ง"
+const CARRY_SETTLE_DAYS=2;
 function _jrCarryToggle(){ _jrCarryOn=!_jrCarryOn;
   try{ localStorage.setItem('dq_carry_off',_jrCarryOn?'0':'1'); }catch(e){}
   _manualBuiltDay=null; buildStoreGroups(); _mgRefreshViews();
@@ -9376,7 +9382,17 @@ function _jrCarryCompute(){
     .filter(d=>{ const dt=_diToDate(d); return dt&&dt<today; })
     .sort((a,b)=>_diToDate(b)-_diToDate(a)).slice(0,_jrCarryDays);
   if(!past.length)return _jrCarry;
-  const pastSet=new Set(past);
+  // v9.152: ตัดสิน "จัดรถไปแล้วหรือยัง" ได้เฉพาะช่วงที่ Keepdata ครอบคลุม
+  //   เก่ากว่าแถวที่เก่าสุดใน Keepdata = ไม่มีข้อมูลว่าเคยจัดไปหรือเปล่า
+  //   → ห้ามดึงมา ไม่งั้นใบที่ส่งไปนานแล้วจะโผล่ขึ้นแผนที่ซ้ำ (user: "อันที่จัดรถไปแล้ววันอื่นๆ ไม่ต้องขึ้นในแมป")
+  let _kpFloor=null;
+  (typeof keepData!=='undefined'?(keepData||[]):[]).forEach(r=>{ const dt=parseAnyDate(r.deliveryDate); if(dt&&(!_kpFloor||dt<_kpFloor))_kpFloor=dt; });
+  const _skipped=[];
+  const past2=past.filter(d=>{ const dt=_diToDate(d);
+    if(_kpFloor&&dt&&dt<_kpFloor){ _skipped.push(d); return false; } return true; });
+  if(_skipped.length)try{ console.warn(`🕗 v9.152 ข้ามใบค้างของ ${_skipped.join(', ')} — เก่ากว่าที่ Keepdata มีข้อมูล (เช็คไม่ได้ว่าจัดรถไปแล้วหรือยัง)`); }catch(e){}
+  if(!past2.length)return _jrCarry;
+  const pastSet=new Set(past2);
   // จัดรถไปแล้ว = มีทะเบียนในแผนที่ที่บันทึกลงชีท (วันไหนก็ได้)
   //   ⚠️ ห้ามเอา queue มานับเป็น "จัดแล้ว" ตรงนี้ — queue คือรอบที่กำลังจัดอยู่
   //      พอคนลากใบค้างขึ้นรถ ref จะเข้า queue ทันที ถ้านับเป็นจัดแล้วมันจะหลุดจาก _jrCarry
@@ -9393,12 +9409,13 @@ function _jrCarryCompute(){
     if(!docs.length)why='ยังไม่เปิดบิล';
     else if(docs.some(d=>_payDocSet.has(d)))return;                      // ส่งแล้ว มีในไฟล์ D-man
     else if(docs.some(d=>_payNotDeliv.has(d)))why='ทำเครื่องหมายไม่ได้ส่ง';
-    else if(docs.every(d=>{ const {p,n}=_docSeries(d); return _payMax[p]!=null&&n>0&&n<_payMax[p]; }))why='เปิดบิลแล้วไม่มีประวัติส่ง';
+    else if(_jrCarryAge(b.date)>=CARRY_SETTLE_DAYS
+         && docs.every(d=>{ const {p,n}=_docSeries(d); return _payMax[p]!=null&&n>0&&n<_payMax[p]; }))why='เปิดบิลแล้วไม่มีประวัติส่ง';
     else return;                                                          // ไฟล์ D-man ยังลงไม่ถึง — ยังตัดสินไม่ได้
     _jrCarry.add(b.ref);
     _jrCarryWhy[b.ref]={why, date:b.date, doc:docs[0]||''};
   });
-  if(_jrCarry.size)try{ console.log(`🕗 v9.150 ใบค้างส่งย้อนหลัง ${past.slice().reverse().join(', ')} → ${_jrCarry.size} ใบ`,
+  if(_jrCarry.size)try{ console.log(`🕗 v9.150 ใบค้างส่งย้อนหลัง ${past2.slice().reverse().join(', ')} → ${_jrCarry.size} ใบ`,
     Object.entries(_jrCarryWhy).slice(0,8).map(([r,w])=>r+' ('+w.why+')')); }catch(e){}
   return _jrCarry;
 }
@@ -11128,7 +11145,7 @@ function jrRenderBills(){
     const ds={}; Object.values(_jrCarryWhy).forEach(w=>{ds[w.date]=(ds[w.date]||0)+1;});
     const why={}; Object.values(_jrCarryWhy).forEach(w=>{why[w.why]=(why[w.why]||0)+1;});
     return `<div class="jr-carrybar">🕗 ดึง<b>ใบค้างส่ง ${_jrCarry.size} ใบ</b>จาก ${Object.keys(ds).sort().join(' · ')} มารวมในรอบนี้แล้ว
-      <span class="w">${Object.entries(why).map(([k,v])=>k+' '+v).join(' · ')}</span>
+      <span class="w">${Object.entries(why).map(([k,v])=>k+' '+v).join(' · ')} · ใบที่เปิดบิลแล้วต้องรอ ${CARRY_SETTLE_DAYS} วันให้ D-man ลงข้อมูลครบก่อน ถึงจะนับว่าค้าง</span>
       <button type="button" onclick="_jrCarryToggle()" title="ไม่เอาใบค้างมารวม">ปิด</button></div>`;
   })();
   host.innerHTML=(cur.length||other.length||arrN)?(_cyBar+_noToday+curHtml+otherHtml+arrHtml):(q?`<div class="jr-empty">ไม่พบ "${q}"</div>`:_cyBar+'<div class="jr-empty">ไม่มีเอกสารรอจัด (ย้อน 3 วัน)</div>');
