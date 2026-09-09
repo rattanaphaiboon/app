@@ -6,19 +6,16 @@ function getOrCreateFolder_() {
   return folders.hasNext() ? folders.next() : DriveApp.createFolder(FOLDER_NAME);
 }
 
+var EXPECTED_HEADERS = ['timestamp', 'empId', 'name', 'filename', 'pages', 'sizeKB', 'fileId'];
+
 function getOrCreateSheet_() {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Sheet1');
-  if (!sheet) {
-    sheet = SpreadsheetApp.getActiveSpreadsheet().insertSheet('Sheet1');
-    sheet.appendRow(['timestamp', 'empId', 'name', 'filename', 'pages', 'sizeKB', 'fileId']);
-    return sheet;
-  }
-  // self-heal sheets created by an earlier version of this script that predates the fileId column
-  var lastCol = sheet.getLastColumn();
-  var headers = lastCol > 0 ? sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
-  if (headers.indexOf('fileId') === -1) {
-    sheet.getRange(1, headers.length + 1).setValue('fileId');
-  }
+  if (!sheet) sheet = SpreadsheetApp.getActiveSpreadsheet().insertSheet('Sheet1');
+  // Always force row 1 to exactly this header set, in this order — correct for a brand-new
+  // sheet, an older sheet from before the fileId column existed, and a no-op if already right.
+  var current = sheet.getRange(1, 1, 1, EXPECTED_HEADERS.length).getValues()[0];
+  var matches = EXPECTED_HEADERS.every(function (h, i) { return current[i] === h; });
+  if (!matches) sheet.getRange(1, 1, 1, EXPECTED_HEADERS.length).setValues([EXPECTED_HEADERS]);
   return sheet;
 }
 
