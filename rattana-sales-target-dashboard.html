@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana ยอดขายเทียบเป้าหมาย v8.20</title>
+<title>Rattana ยอดขายเทียบเป้าหมาย v8.21</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -227,7 +227,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v8.20</small>
+      <small>ยอดขายเทียบเป้าหมาย v8.21</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -340,6 +340,8 @@ const W1_SHEET_NAME  = 'W1';
 const RSP_SHEET_NAME      = 'RSP ส่ง';
 const RSP_PLIK_SHEET_NAME = 'RSP ปลีก';
 const CHANNEL_SHEET_NAME  = 'Channal';
+const PVSALE_SHEET_ID   = '1DahhMqP4nXHOBjh8nGfaGsQNsN71nDRW3uJTAkp5kj4';
+const PVSALE_SHEET_NAME = 'PV Sale';
 const NL_SHEET_ID   = '1zE_AJzFe7AruA9gft1vax6XN2Qt-hidCH09krBH8wf4';
 const NL_SHEET_NAME = 'NL';
 const CG_SHEET_NAME = 'CG';
@@ -691,8 +693,39 @@ function calcBpActualForMonth(parsed, normName, month, bpIndex) {
   }
   return null;
 }
-function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw) {
+function buildPvSaleIndex(pvSaleRaw) {
+  const idx = new Map();
+  pvSaleRaw.forEach(r => {
+    const nm = normalizeName(r['Sale No ROO'] || r['Sale NO ROO'] || '');
+    const catBu = normalizeText(r['Cat_BU'] || '');
+    if (!nm || !catBu) return;
+    const key = nm + '||' + catBu.toUpperCase();
+    idx.set(key, {
+      baht: parseNum(r['บาท']),
+      lang: parseNum(r['ลัง']),
+      ran: parseNum(r['ร้าน']),
+    });
+  });
+  return idx;
+}
+function lookupPvSale(pvSaleIndex, normName, parsed) {
+  if (!pvSaleIndex || pvSaleIndex.size === 0) return null;
+  const dimKey = normalizeText(parsed.dim).toUpperCase();
+  if (dimKey !== 'CAT BU') return null;
+  const catBu = normalizeText(parsed.value).toUpperCase();
+  const key = normName + '||' + catBu;
+  const entry = pvSaleIndex.get(key);
+  if (!entry) return null;
+  const unit = parsed.unit;
+  if (unit === 'บาท' || unit === '%บาท') return entry.baht;
+  if (unit === 'ลัง') return entry.lang;
+  if (unit === 'ร้าน') return entry.ran;
+  if (unit === 'ตัน') return (entry.lang || 0) / 1000;
+  return null;
+}
+function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw, pvSaleRaw) {
   const bpIndex = buildBpIndex(bpRaw);
+  const pvSaleIndex = buildPvSaleIndex(pvSaleRaw || []);
   const latestBpMonth = getLatestBpMonth(bpRaw);
   // ใช้เดือนปัจจุบัน (calendar) ถ้า BP มีข้อมูล ไม่งั้น fallback latestBpMonth
   const _now = new Date();
@@ -940,7 +973,8 @@ function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw) 
     if (!supported) console.warn('[UNSUPPORTED]', normName, empCode, 'goalName=', goalName, 'dim=', JSON.stringify(parsed.dim), 'dimKey=', dimKey, 'supported=', supported);
     const pct = (supported && targetVal > 0) ? (actual/targetVal*100) : null;
     const st = statusOf(pct, supported);
-    const prevActual = calcBpActualForMonth(parsed, normName, prevRefMonth, bpIndex);
+    const _pvPrev = lookupPvSale(pvSaleIndex, normName, parsed);
+    const prevActual = _pvPrev !== null ? _pvPrev : calcBpActualForMonth(parsed, normName, prevRefMonth, bpIndex);
     rows.push({
       wh, name, nickname: t['ชื่อเล่น']||'', month: t['เดือน']||'', empCode,
       dim: parsed.dim, dimLabel: DIM_LABEL[dimKey] || parsed.dim,
@@ -983,6 +1017,7 @@ async function loadData(showSpin) {
       return parseCsvDedup(await res.text());
     })();
     const pvTotalRaw   = await loadFromSheets(BP_SHEET_ID, PV_TOTAL_SHEET_NAME).catch(()=>[]);
+    const pvSaleRaw    = await loadFromSheets(PVSALE_SHEET_ID, PVSALE_SHEET_NAME).catch(()=>[]);
     const nlRaw      = await (async()=>{
       const url = `https://docs.google.com/spreadsheets/d/${NL_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(NL_SHEET_NAME)}&range=S:W`;
       const res = await fetch(url).catch(()=>null);
@@ -1026,6 +1061,7 @@ async function loadData(showSpin) {
     state.rspPlikRaw  = rspPlikRaw;
     state.channelRaw  = channelRaw;
     state.pvTotalRaw  = pvTotalRaw;
+    state.pvSaleRaw   = pvSaleRaw;
     state.nlRaw      = nlRaw;
     state.nlSkuRaw   = nlSkuRaw;
     state.cgRaw      = cgRaw;
@@ -1035,7 +1071,7 @@ async function loadData(showSpin) {
     const _ghc = (bpRaw||[]).some(r => { const my = bpMonthYear(r['Doc_Date']); return my && my.mm===_gcm && my.yyyy===_gcy; });
     state.globalRefMonth = _ghc ? { mm:_gcm, yyyy:_gcy } : state.latestBpMonth;
     setCache('targetCache', targetRaw);
-    state.rows = computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw);
+    state.rows = computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw, pvSaleRaw);
     buildFilterControls();
     renderAll();
   } catch (e) {
