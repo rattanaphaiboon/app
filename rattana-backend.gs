@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.3 — auditScanPhotos() ตรวจว่าสแกนแล้วมีรูปแนบครบไหม แยกตามวิธีสแกน+รายคน
+ *         (คู่กับแอป v12.63 ที่แก้ต้นเหตุ: กดบันทึกก่อนกล้องหน้าเปิดเสร็จหลังสแกน QR)
  * v9.2 — ช่องรูปในชีท CheckinLog คลิกดูรูปได้ (ใส่ลิงก์ทับ path ด้วย rich text)
  *         ข้อความในเซลล์ยังเป็น path เหมือนเดิม โค้ดที่อ่านไปเซ็น URL จึงไม่พัง
  *         + linkifyCheckinPhotos(วัน) เติมลิงก์ให้แถวเก่า · ต้องมี PHOTO_KEY ใน Script Properties
@@ -331,7 +333,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.2', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.3', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5252,5 +5254,59 @@ function auditSalaryAdjustRows() {
   const msg = L.join('\n');
   Logger.log(msg);
   try { getSS().toast('พบช่องเงินถูกเขียนทับ ' + bad.length + ' แถว — ดูผลใน "บันทึกการดำเนินการ"', 'ตรวจปรับเงินเดือน', 12); } catch (e) {}
+  return msg;
+}
+
+/* ── v9.3: ตรวจว่าสแกนแล้ว "มีรูปแนบครบไหม" ────────────────────────────────────
+   ที่มา: surat เจอว่ากัญญารัตน์ (qr:บายพาส) รูปขาดเป็นช่วงๆ ทั้งที่สแกนทุกวัน
+   ต้นเหตุฝั่งแอป (แก้ใน v12.63): หลังสแกน QR ติด ระบบสลับกล้องหลัง→หน้าแบบไม่รอให้เสร็จ
+   ใครกดบันทึกเร็วกว่ากล้องเปิด = ถ่ายไม่ทัน แถวนั้นจึงไม่มีรูป
+   ► auditScanPhotos()  ดูภาพรวม + คนที่ขาดเยอะสุด   ► auditScanPhotos(30) ปรับช่วงวันได้ */
+function auditScanPhotos(daysBack) {
+  const sh = getTab(T.LOG);
+  if (!sh || sh.getLastRow() < 2) throw new Error('ไม่พบข้อมูลใน ' + T.LOG);
+  const back = parseInt(daysBack, 10) || 30;
+  const since = new Date(Date.now() - back * 86400000);
+  const last = sh.getLastRow();
+  const d = sh.getRange(2, 1, last - 1, 15).getValues();
+
+  let all = 0, has = 0;
+  const byMode = {};   // self / qr / supervisor
+  const byEmp  = {};
+  d.forEach(r => {
+    const ts = (r[0] instanceof Date) ? r[0] : new Date(r[0]);
+    if (!ts || isNaN(ts.getTime()) || ts < since) return;
+    const id = String(r[1] || '').trim(); if (!id) return;
+    const who = String(r[11] || 'self').trim();
+    const mode = who.indexOf('qr:') === 0 ? 'สแกน QR' : (who.indexOf('supervisor:') === 0 ? 'หัวหน้าสแกนให้' : 'สแกนหน้า');
+    const ok = String(r[14] || '').trim() !== '';
+    all++; if (ok) has++;
+    if (!byMode[mode]) byMode[mode] = { n: 0, ok: 0 };
+    byMode[mode].n++; if (ok) byMode[mode].ok++;
+    if (!byEmp[id]) byEmp[id] = { n: 0, ok: 0, name: String(r[2] || '').trim() };
+    byEmp[id].n++; if (ok) byEmp[id].ok++;
+  });
+
+  const pct = (a, b) => b ? Math.round(a * 1000 / b) / 10 : 0;
+  const L = ['── รูปแนบตอนสแกน · ย้อนหลัง ' + back + ' วัน ──', ''];
+  L.push('รวม ' + all + ' ครั้ง · มีรูป ' + has + ' (' + pct(has, all) + '%) · ไม่มีรูป ' + (all - has));
+  L.push('');
+  L.push('▸ แยกตามวิธีสแกน');
+  Object.keys(byMode).sort().forEach(k => {
+    const m = byMode[k];
+    L.push('   ' + k + ': ' + m.ok + '/' + m.n + ' (' + pct(m.ok, m.n) + '%)' + (m.n - m.ok ? '  ← ขาด ' + (m.n - m.ok) : ''));
+  });
+
+  const miss = Object.keys(byEmp).map(id => Object.assign({ id: id }, byEmp[id]))
+    .filter(x => x.n - x.ok > 0).sort((a, b) => (b.n - b.ok) - (a.n - a.ok));
+  L.push('');
+  L.push('▸ คนที่รูปขาดมากสุด (' + miss.length + ' คน)');
+  miss.slice(0, 15).forEach(x => L.push('   ' + x.id + ' ' + x.name + ' — ขาด ' + (x.n - x.ok) + ' จาก ' + x.n + ' ครั้ง (' + pct(x.ok, x.n) + '%)'));
+  if (!miss.length) L.push('   ✅ ไม่มีใครขาดเลย');
+  if (miss.length > 15) L.push('   … และอีก ' + (miss.length - 15) + ' คน');
+
+  const msg = L.join('\n');
+  Logger.log(msg);
+  try { getSS().toast('มีรูป ' + pct(has, all) + '% — ดูผลใน "บันทึกการดำเนินการ"', 'ตรวจรูปแนบตอนสแกน', 12); } catch (e) {}
   return msg;
 }
