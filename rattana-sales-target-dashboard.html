@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana ยอดขายเทียบเป้าหมาย v7.98</title>
+<title>Rattana ยอดขายเทียบเป้าหมาย v8.14</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -227,7 +227,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v7.98</small>
+      <small>ยอดขายเทียบเป้าหมาย v8.14</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -322,10 +322,12 @@ const CN_SHEET_ID = '1WNJFRUTMZg4lGftUJRLyTuLczhobmFb6jsOrm9l_TYg';
 const CN_SHEET_NAME = 'incentive CN หัวข้อเซลล์';
 const BUDGET_SHEET_ID = '1ww64IJdFJk8z8CDCCoFYZyE8FNzuH9W6sFDO6K44gWw';
 const BUDGET_SHEET_NAME = 'Budget Incentive';
+const BUDGET15_SHEET_NAME = 'Budget 15 ร้าน';
 const NEWSKU_SHEET_ID = '1pEuwai-9O38A0C22eKI2_vU5rqUEa0liApjoUfNw1SY';
 const NEWSKU_SHEET_NAME = 'SKUใหม่ต่อร้านค้า';
 const CUSTOMER_SHEET_ID = '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI';
 const CUSTOMER_SHEET_NAME = 'Customer';
+const VISITS_SHEET_NAME = 'Visits';
 const OUTLET_SHEET_ID = '1Ekf5knNodR-gjOVIjg_7y87HRcb-qYn_HdgwaLI8_dY';
 const OUTLET_SHEET_NAME = 'Active Outlet';
 const EO_SHEET_ID = '1Ekf5knNodR-gjOVIjg_7y87HRcb-qYn_HdgwaLI8_dY';
@@ -588,14 +590,18 @@ function buildDebtorActualIndex(targetRaw) {
   const nameCol = cols.find(k => k.includes('เซลล์') && k.includes('คุณ'))
                || cols.find(k => k.includes('ชื่อ') && k.includes('คุณ'));
   const valCol  = cols.find(k => k.includes('จำนวนวัน') || k.includes('จ่ายเกิน'));
-  if (!nameCol || !valCol) return idx;
+  console.log('[DebtorIdx] cols:', cols.join('|'));
+  console.log('[DebtorIdx] nameCol:', nameCol, 'valCol:', valCol);
+  if (!nameCol || !valCol) { console.warn('[DebtorIdx] column not found — skip'); return idx; }
   targetRaw.forEach(t => {
     const rawName = String(t[nameCol] || '').trim().replace(/^คุณ\s*/, '');
     const v = parseNum(t[valCol]);
     if (!rawName || !v) return;
     const key = normalizeName(rawName);
+    console.log('[DebtorIdx] entry:', key, '=', v);
     if (!idx.has(key)) idx.set(key, v);
   });
+  console.log('[DebtorIdx] total entries:', idx.size);
   return idx;
 }
 
@@ -650,7 +656,42 @@ function getLatestBpMonth(bpRaw) {
   return latest;
 }
 
-function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw) {
+function calcBpActualForMonth(parsed, normName, month, bpIndex) {
+  if (!month) return null;
+  const key = normName + '||' + month.mm + '/' + month.yyyy;
+  const bucket = bpIndex.get(key) || [];
+  if (!bucket.length) return null;
+  const dimKey = parsed.dim.toUpperCase();
+  const bpCol = DIM_MAP[dimKey];
+  if (dimKey === 'PRODUCT NAME') {
+    const pn = normalizeText(parsed.value);
+    const pnNoCode = pn.includes('@') ? normalizeText(pn.split('@').slice(1).join('@')) : pn;
+    const s = new Set();
+    bucket.forEach(r => {
+      const rn = normalizeText(String(r['Product_Name']||''));
+      const rnNoCode = rn.includes('@') ? normalizeText(rn.split('@').slice(1).join('@')) : rn;
+      if ((rn === pn || rnNoCode === pnNoCode) && r['Customer_Code']) s.add(r['Customer_Code']);
+    });
+    return s.size;
+  }
+  if (dimKey === 'KPI') {
+    const val = normalizeText(parsed.value).toLowerCase();
+    if (val === 'รวมbplus') return bucket.reduce((s,r)=>s+r._exvatcn2,0);
+    if (val === 'active outlet') return new Set(bucket.map(r=>r['Customer_Code']).filter(Boolean)).size;
+    if (val === 'all sku') return new Set(bucket.map(r=>r['Product_Name']).filter(Boolean)).size;
+    return null;
+  }
+  if (bpCol) {
+    const wantVal = normalizeText(parsed.value).toUpperCase();
+    const matches = bucket.filter(r => normalizeText(r[bpCol]).toUpperCase() === wantVal);
+    if (parsed.unit === 'บาท' || parsed.unit === '%บาท') return matches.reduce((s,r)=>s+r._exvatcn2,0);
+    if (parsed.unit === 'ตัน') return matches.reduce((s,r)=>s+r._csx,0)/1000;
+    if (parsed.unit === 'ลัง') return matches.reduce((s,r)=>s+r._csx,0);
+    if (parsed.unit === 'ร้าน') return new Set(matches.map(r=>r['Customer_Code'])).size;
+  }
+  return null;
+}
+function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw) {
   const bpIndex = buildBpIndex(bpRaw);
   const latestBpMonth = getLatestBpMonth(bpRaw);
   // ใช้เดือนปัจจุบัน (calendar) ถ้า BP มีข้อมูล ไม่งั้น fallback latestBpMonth
@@ -658,17 +699,57 @@ function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw) {
   const _calMm = _now.getMonth() + 1, _calYyyy = _now.getFullYear();
   const _hasCurMon = (bpRaw || []).some(r => { const my = bpMonthYear(r['Doc_Date']); return my && my.mm === _calMm && my.yyyy === _calYyyy; });
   const globalRefMonth = _hasCurMon ? { mm: _calMm, yyyy: _calYyyy } : latestBpMonth;
+  const prevRefMonth = globalRefMonth ? { mm: globalRefMonth.mm === 1 ? 12 : globalRefMonth.mm - 1, yyyy: globalRefMonth.mm === 1 ? globalRefMonth.yyyy - 1 : globalRefMonth.yyyy } : null;
   const debtorActualIndex = buildDebtorActualIndex(targetRaw);
+  // Visits actual: normName(ชื่อ-สกุล) → Set ชื่อร้าน เฉพาะ ในพิกัด=ใช่
+  const visitsIdx = new Map();
+  if ((state.visitsRaw||[]).length > 0) {
+    const _vkeys = Object.keys(state.visitsRaw[0]);
+    const _vSelK = _vkeys.find(k => k.replace(/[-\s]/g,'').includes('ชื่อสกุล') || k.replace(/[-\s]/g,'').includes('ชื่อนามสกุล'));
+    const _vStoreK = _vkeys.find(k => k.replace(/\s/g,'').includes('ชื่อร้าน'));
+    const _vPikadK = _vkeys.find(k => k.replace(/\s/g,'').includes('ในพิกัด'));
+    if (_vSelK && _vStoreK && _vPikadK) {
+      state.visitsRaw.forEach(r => {
+        if (String(r[_vPikadK]||'').trim() !== 'ใช่') return;
+        const rawSel = String(r[_vSelK]||'').trim();
+        const storeName = String(r[_vStoreK]||'').trim();
+        if (!rawSel || !storeName) return;
+        const nm = normalizeName(rawSel);
+        if (!nm) return;
+        if (!visitsIdx.has(nm)) visitsIdx.set(nm, new Set());
+        visitsIdx.get(nm).add(storeName);
+      });
+    }
+  }
+  // Check in-ร้าน: นับชื่อร้านค้าไม่ซ้ำต่อ salesman จาก customerRaw
+  const checkInTargetIdx = new Map();
+  if ((state.customerRaw||[]).length > 0) {
+    const _ckeys = Object.keys(state.customerRaw[0]);
+    const _selK = _ckeys.find(k => k.replace(/\s/g,'').includes('เซลล์ผู้ดูแล')) || _ckeys.find(k => k.includes('เซลล์'));
+    const _storeK = _ckeys.find(k => k.replace(/\s/g,'').includes('ชื่อร้าน')) || _ckeys.find(k => k.includes('ชื่อ') && !k.includes('เซลล์') && !k.includes('รหัส'));
+    if (_selK) {
+      state.customerRaw.forEach(r => {
+        const rawSel = String(r[_selK]||'').trim();
+        const storeName = _storeK ? String(r[_storeK]||'').trim() : String(r[Object.keys(r).find(k=>k!==_selK)||'']||'').trim();
+        if (!rawSel || !storeName) return;
+        const nm = normalizeName(rawSel);
+        if (!nm) return;
+        if (!checkInTargetIdx.has(nm)) checkInTargetIdx.set(nm, new Set());
+        checkInTargetIdx.get(nm).add(storeName);
+      });
+    }
+  }
   const cnIndex = buildCnIndex(cnRaw);
   const newSkuIndex = buildNewSkuIndex(newSkuRaw);
   const budgetIndex = buildBudgetIndex(budgetRaw);
+  const budget15Index = buildBudgetIndex(budget15Raw);
   const rows = [];
   targetRaw.forEach(t => {
     const name = t['ชื่อ สกุล'];
     const goalName = t['ชื่อเป้าหมาย'];
     const targetValRaw = t['เป้าหมายขาย'];
     const parsed0 = parseTargetName(goalName);
-    const isSpecialKpi = parsed0 && parsed0.dim.toUpperCase() === 'KPI' && ['ลูกหนี้','Budget'].includes(parsed0.value);
+    const isSpecialKpi = parsed0 && parsed0.dim.toUpperCase() === 'KPI' && (['ลูกหนี้','Check in','Check-in'].includes(parsed0.value) || normalizeText(parsed0.value).toLowerCase().startsWith('budget'));
     if (!name || !goalName || (!targetValRaw && !isSpecialKpi)) return;
     const parsed = parseTargetName(goalName);
     if (!parsed) return;
@@ -718,12 +799,50 @@ function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw) {
         stores = actual;
         supported = true;
       }
+    } else if (parsed.dim.toUpperCase() === 'PRODUCT NAME') {
+      const _prodName = normalizeText(parsed.value);
+      const _prodNameNoCode = _prodName.includes('@') ? normalizeText(_prodName.split('@').slice(1).join('@')) : _prodName;
+      if (effectiveMonth) {
+        const key = normName + '||' + effectiveMonth.mm + '/' + effectiveMonth.yyyy;
+        const bucket = bpIndex.get(key) || [];
+        const custSet = new Set();
+        bucket.forEach(r => {
+          const rn = normalizeText(String(r['Product_Name']||''));
+          const rnNoCode = rn.includes('@') ? normalizeText(rn.split('@').slice(1).join('@')) : rn;
+          if ((rn === _prodName || rnNoCode === _prodNameNoCode) && r['Customer_Code']) custSet.add(r['Customer_Code']);
+        });
+        actual = custSet.size;
+      } else {
+        actual = 0;
+      }
+      supported = true;
+    } else if (parsed.dim.toUpperCase() === 'KPI' && ['Check in','Check-in'].includes(parsed.value)) {
+      // นับชื่อร้านค้าไม่ซ้ำ จาก customerRaw ตาม salesman name; fallback ลอง "คุณ"+name
+      const _ciSet = checkInTargetIdx.get(normName) || checkInTargetIdx.get(normalizeName('คุณ ' + normName));
+      const _ciCount = _ciSet ? _ciSet.size : 0;
+      const _ec = empCode.toUpperCase();
+      targetVal = _ec.startsWith('HSW') ? Math.round(_ciCount * 0.8) : _ec.startsWith('PMW') ? Math.round(_ciCount * 0.5) : _ciCount;
+      const _vSet = visitsIdx.get(normName) || visitsIdx.get(normalizeName('คุณ ' + normName));
+      actual = _vSet ? _vSet.size : null;
+      supported = actual !== null;
+    } else if (parsed.dim.toUpperCase() === 'KPI' && normalizeText(parsed.value).toLowerCase().startsWith('budget') && parsed.value !== 'Budget' && effectiveMonth) {
+      // Budget X ร้าน: เป้า = sum(EXVat+CN*2 ที่ Budget=1) × 0.8%
+      const key = normName + '||' + (effectiveMonth||monthInfo).mm + '/' + (effectiveMonth||monthInfo).yyyy;
+      const bucket = bpIndex.get(key) || [];
+      const filtered = bucket.filter(r => String(r['Budget']||'').trim() === '1');
+      targetVal = filtered.reduce((s, r) => s + r._exvatcn2, 0) * 0.008;
+      actual = budget15Index.get(empCode) ?? null;
+      supported = actual !== null;
     } else if (parsed.dim.toUpperCase() === 'KPI' && parsed.value === 'Budget' && effectiveMonth) {
       const key = normName + '||' + (effectiveMonth||monthInfo).mm + '/' + (effectiveMonth||monthInfo).yyyy;
       const bucket = bpIndex.get(key) || [];
-      const filtered = bucket.filter(r => !r['Budget'] || String(r['Budget']).trim() === '');
+      const filtered = bucket.filter(r => {
+        const bud = String(r['Budget']||'').trim();
+        const slCode = String(r['Salesman_Code']||r['SLMN_CODE']||'').toUpperCase();
+        return bud === '' && !slCode.startsWith('RO');
+      });
       const sumExvat = filtered.reduce((s, r) => s + r._exvatcn2, 0);
-      targetVal = sumExvat * 0.002;
+      targetVal = sumExvat * 0.0007;
       actual = budgetIndex.get(empCode) ?? null;
       supported = actual !== null;
     } else if (parsed.dim.toUpperCase() === 'KPI' && (()=>{ const pv=normalizeText(parsed.value).replace(/\s+/g,'').toLowerCase(); return pv.includes('sku') && pv.includes('ใหม่'); })() && effectiveMonth) {
@@ -819,11 +938,12 @@ function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw) {
     }
     const pct = (supported && targetVal > 0) ? (actual/targetVal*100) : null;
     const st = statusOf(pct, supported);
+    const prevActual = calcBpActualForMonth(parsed, normName, prevRefMonth, bpIndex);
     rows.push({
       wh, name, nickname: t['ชื่อเล่น']||'', month: t['เดือน']||'', empCode,
       dim: parsed.dim, dimLabel: DIM_LABEL[dimKey] || parsed.dim,
       value: parsed.value, unit: parsed.unit,
-      target: targetVal, actual, stores, pct, supported,
+      target: targetVal, actual, prevActual, stores, pct, supported,
       statusLabel: st.label, statusCls: st.cls,
     });
   });
@@ -835,7 +955,7 @@ async function loadData(showSpin) {
   if (showSpin) showSpinner('กำลังโหลดข้อมูลยอดขาย...');
   setLoading(true);
   try {
-    const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, outletRaw, eoRaw, customerRaw, onTopRaw, rooRaw, onlineRaw, supRaw, w1Raw] = await Promise.all([
+    const [targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, outletRaw, eoRaw, customerRaw, onTopRaw, rooRaw, onlineRaw, supRaw, w1Raw, visitsRaw] = await Promise.all([
       loadFromSheets(TARGET_SHEET_ID, TARGET_SHEET_NAME),
       loadFromSheets(BP_SHEET_ID, BP_SHEET_NAME),
       loadFromSheets(CN_SHEET_ID, CN_SHEET_NAME),
@@ -849,7 +969,9 @@ async function loadData(showSpin) {
       loadFromSheets(OUTLET_SHEET_ID, ONLINE_SHEET_NAME),
       loadFromSheets(OUTLET_SHEET_ID, SUP_SHEET_NAME),
       loadFromSheets(OUTLET_SHEET_ID, W1_SHEET_NAME),
+      loadFromSheets(TARGET_SHEET_ID, VISITS_SHEET_NAME).catch(()=>[]),
     ]);
+    const budget15Raw  = await loadFromSheets(BUDGET_SHEET_ID, BUDGET15_SHEET_NAME).catch(()=>[]);
     const rspRaw     = await loadFromSheets(OUTLET_SHEET_ID, RSP_SHEET_NAME).catch(()=>[]);
     const rspPlikRaw   = await loadFromSheets(OUTLET_SHEET_ID, RSP_PLIK_SHEET_NAME).catch(()=>[]);
     const channelRaw   = await (async()=>{
@@ -887,10 +1009,12 @@ async function loadData(showSpin) {
     state.bpRaw = bpRaw;
     state.cnRaw = cnRaw;
     state.budgetRaw = budgetRaw;
+    state.budget15Raw = budget15Raw;
     state.newSkuRaw = newSkuRaw;
     state.outletRaw = outletRaw;
     state.eoRaw = eoRaw;
     state.customerRaw = customerRaw;
+    state.visitsRaw = visitsRaw;
     state.onTopRaw = onTopRaw;
     state.rooRaw = rooRaw;
     state.onlineRaw = onlineRaw;
@@ -909,7 +1033,7 @@ async function loadData(showSpin) {
     const _ghc = (bpRaw||[]).some(r => { const my = bpMonthYear(r['Doc_Date']); return my && my.mm===_gcm && my.yyyy===_gcy; });
     state.globalRefMonth = _ghc ? { mm:_gcm, yyyy:_gcy } : state.latestBpMonth;
     setCache('targetCache', targetRaw);
-    state.rows = computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw);
+    state.rows = computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw);
     buildFilterControls();
     renderAll();
   } catch (e) {
@@ -1190,6 +1314,7 @@ function renderPivot() {
           const need = Math.max(0, c.target - (c.actual||0));
           return `<td class="ptbl-td">${fmtC(c, need / wd.remaining)}</td>`;
         })}
+        ${mkRow('ทำได้เดือนที่แล้ว', c => `<td class="ptbl-td ptbl-muted" style="font-size:11px">${c._empty ? '' : (c.prevActual !== null ? fmtC(c, c.prevActual) : '<span class="ptbl-muted">-</span>')}</td>`)}
       </tbody>
     </table></div></div>`;
   });
