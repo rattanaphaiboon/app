@@ -1,6 +1,9 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.5 — showCheckinPhotosInCells() โชว์รูปสแกนในเซลล์เลย (คอลัมน์ R · ไม่ทับช่อง O)
+ *         ใช้ =IMAGE + ลิงก์เซ็นอายุ 1 ปี · ค่าเริ่มต้น 7 วันล่าสุด กันชีทอืด
+ *         + clearCheckinPhotoCells() ล้างออกเมื่อไม่ต้องการ
  * v9.4 — auditScanPhotos: ไม่นับแถวที่มาจากอนุมัติแก้เวลาย้อนหลัง (retroactive=Y)
  *         แถวพวกนั้นระบบเติมให้ ไม่เคยมีรูปตั้งแต่ต้น เดิมนับรวมทำให้ตัวเลขสแกนหน้าดูแย่เกินจริง
  * v9.3 — auditScanPhotos() ตรวจว่าสแกนแล้วมีรูปแนบครบไหม แยกตามวิธีสแกน+รายคน
@@ -335,7 +338,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.4', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.5', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5314,5 +5317,74 @@ function auditScanPhotos(daysBack) {
   const msg = L.join('\n');
   Logger.log(msg);
   try { getSS().toast('มีรูป ' + pct(has, all) + '% — ดูผลใน "บันทึกการดำเนินการ"', 'ตรวจรูปแนบตอนสแกน', 12); } catch (e) {}
+  return msg;
+}
+
+/* ── v9.5: โชว์รูปสแกน "ในเซลล์" เลย ไม่ต้องกดลิงก์ ─────────────────────────────
+   ทำไมไม่แปลงช่อง O ทับของเดิม: มีโค้ดหลายที่อ่านค่าช่องนั้นเป็น path ไปเซ็น URL ต่อ
+   (หน้าประวัติในแอป · auditScanPhotos · auditDuplicateScans) ถ้าใส่สูตร IMAGE ทับ
+   ค่าที่อ่านได้จะไม่ใช่ path อีก → พังเงียบหลายจุด · จึงวางรูปไว้ "คอลัมน์ R" แทน
+   ★ อย่าใส่ทั้งชีท — สูตร IMAGE ทุกแถวคือการโหลดรูปจากเน็ตทุกครั้งที่เปิดชีท
+     ระดับพันแถว = ชีทอืดจนใช้ไม่ได้ · ค่าเริ่มต้นจึงทำให้แค่ 7 วันล่าสุด
+   ► showCheckinPhotosInCells()      7 วันล่าสุด สูง 90px
+   ► showCheckinPhotosInCells(14,120) กำหนดเอง (วัน, ความสูงพิกเซล)
+   ► clearCheckinPhotoCells()        ล้างรูปออก คืนความเร็วชีท */
+const PHOTO_CELL_COL = 18;   // R
+
+function showCheckinPhotosInCells(daysBack, px) {
+  const sh = getTab(T.LOG);
+  if (!sh || sh.getLastRow() < 2) throw new Error('ไม่พบข้อมูลใน ' + T.LOG);
+  if (!sbReady_()) throw new Error('ยังไม่ได้ตั้งค่า Supabase (SB_URL / SB_KEY)');
+  const back = parseInt(daysBack, 10) || 7;
+  const size = parseInt(px, 10) || 90;
+  const since = new Date(Date.now() - back * 86400000);
+  const last = sh.getLastRow();
+  const d = sh.getRange(2, 1, last - 1, 15).getValues();
+
+  const rows = [];
+  for (let i = 0; i < d.length; i++) {
+    const ts = (d[i][0] instanceof Date) ? d[i][0] : new Date(d[i][0]);
+    if (!ts || isNaN(ts.getTime()) || ts < since) continue;
+    const path = String(d[i][14] || '').trim();
+    if (!path || path.indexOf('data:') === 0) continue;
+    rows.push({ row: i + 2, path: path });
+  }
+  if (!rows.length) return 'ไม่มีแถวที่มีรูปในช่วง ' + back + ' วันล่าสุด';
+
+  // เซ็นลิงก์อายุ 1 ปี — สูตร IMAGE ต้องเปิดรูปได้เองทุกครั้งที่เปิดชีท ลิงก์อายุสั้นจะกลายเป็นรูปเสีย
+  const signed = sbSignedUrls_(rows.map(r => r.path), 31536000);
+  sh.getRange(1, PHOTO_CELL_COL).setValue('รูป')
+    .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+
+  let done = 0, fail = 0;
+  rows.forEach(r => {
+    const u = signed[r.path];
+    if (!u) { fail++; return; }
+    sh.getRange(r.row, PHOTO_CELL_COL)
+      .setFormula('=IMAGE("' + u.replace(/"/g, '%22') + '", 4, ' + size + ', ' + size + ')');
+    try { sh.setRowHeight(r.row, size + 6); } catch (_) {}
+    done++;
+  });
+  sh.setColumnWidth(PHOTO_CELL_COL, size + 12);
+
+  const msg = 'ใส่รูปในเซลล์แล้ว ' + done + ' แถว (คอลัมน์ R · ' + back + ' วันล่าสุด · ' + size + 'px)' +
+              (fail ? ' · เซ็นลิงก์ไม่ได้ ' + fail + ' แถว' : '') +
+              '\nรูปจะขึ้นช้าหน่อยตอนเปิดชีทครั้งแรก — ถ้าชีทอืดให้รัน clearCheckinPhotoCells()';
+  Logger.log(msg);
+  try { getSS().toast('ใส่รูป ' + done + ' แถว', 'รูปในเซลล์', 10); } catch (e) {}
+  return msg;
+}
+
+function clearCheckinPhotoCells() {
+  const sh = getTab(T.LOG);
+  if (!sh) throw new Error('ไม่พบชีท ' + T.LOG);
+  const last = sh.getLastRow();
+  if (last > 1) {
+    sh.getRange(2, PHOTO_CELL_COL, last - 1, 1).clearContent();
+    for (let r = 2; r <= last; r++) { try { sh.setRowHeight(r, 21); } catch (_) {} }
+  }
+  const msg = 'ล้างรูปในเซลล์ออกแล้ว + คืนความสูงแถวเป็นปกติ (ช่อง O ลิงก์เดิมยังอยู่ครบ)';
+  Logger.log(msg);
+  try { getSS().toast(msg, 'ล้างรูปในเซลล์', 8); } catch (e) {}
   return msg;
 }
