@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Image to PDF v1.3</title>
+<title>Rattana Image to PDF v1.4</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -179,7 +179,7 @@ footer{text-align:center;padding:16px;color:var(--muted);font-size:11px}
 <body>
 
 <header>
-  <span class="logo-text">RATTANA <span>IMAGE → PDF</span> <span class="badge badge-gold">v1.3</span></span>
+  <span class="logo-text">RATTANA <span>IMAGE → PDF</span> <span class="badge badge-gold">v1.4</span></span>
   <div class="spacer"></div>
   <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
   <a href="https://rattanaphaiboon.github.io/app/rattana-hub.html" class="hub-btn" title="กลับ Hub">
@@ -348,7 +348,7 @@ footer{text-align:center;padding:16px;color:var(--muted);font-size:11px}
   </div>
 </div>
 
-<footer>Rattana Image to PDF v1.3</footer>
+<footer>Rattana Image to PDF v1.4</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
@@ -368,7 +368,7 @@ function showToast(msg, type='info'){
   document.body.appendChild(t); setTimeout(()=>t.remove(),3500);
 }
 
-const MAX_DIM = 2000;
+const MAX_DIM = 1800;
 let images = [];
 let lastPdf = null;
 
@@ -401,7 +401,9 @@ function saveLastPdf(){
 async function shareLastPdf(){
   if (!lastPdf) return;
   try {
-    await navigator.share({ files: [lastPdf.file], title: lastPdf.filename });
+    // files only, no title/text — some share targets (LINE included) post title/text as a
+    // separate chat message before the file, which is not what "share the file" should do
+    await navigator.share({ files: [lastPdf.file] });
   } catch (e) {
     if (e.name !== 'AbortError') showToast('แชร์ไม่สำเร็จ ลองบันทึกลงเครื่องแทน', 'error');
   }
@@ -447,7 +449,9 @@ async function decodeFileToEntry(file){
   ctx.fillStyle = '#fff'; ctx.fillRect(0,0,cw,ch); // flatten transparent PNGs to white before JPEG encode
   ctx.drawImage(drawSource, 0, 0, cw, ch);
   if (bitmap && bitmap.close) bitmap.close();
-  return { dataUrl: canvas.toDataURL('image/jpeg', 0.85), width: cw, height: ch };
+  // near-lossless: this becomes the working master that rotate/crop re-derive from each time,
+  // so keep it high-quality here and do the one real size/quality trade-off later, at export
+  return { dataUrl: canvas.toDataURL('image/jpeg', 0.95), width: cw, height: ch };
 }
 
 function newId(){ return 'img_' + Date.now() + '_' + Math.random().toString(36).slice(2,9); }
@@ -510,7 +514,7 @@ function applySharpen(ctx, canvas, w, h, amount){
   const blurCanvas = document.createElement('canvas');
   blurCanvas.width = w; blurCanvas.height = h;
   const bctx = blurCanvas.getContext('2d');
-  bctx.filter = 'blur(1.4px)';
+  bctx.filter = 'blur(2px)';
   bctx.drawImage(canvas, 0, 0);
   const sharp = ctx.getImageData(0, 0, w, h);
   const blurred = bctx.getImageData(0, 0, w, h);
@@ -578,7 +582,26 @@ function warpQuadToRect(srcCanvas, quad, outW, outH){
     }
   }
   octx.putImageData(outImg, 0, 0);
+
+  // hard white edge clamp: even a slightly loose detected quad can leave a thin sliver of
+  // desk/background at the very border after warping — force it to paper-white so the page
+  // background always comes out clean
+  const fringe = Math.max(2, Math.round(Math.min(outW, outH) * 0.012));
+  octx.fillStyle = '#ffffff';
+  octx.fillRect(0, 0, outW, fringe);
+  octx.fillRect(0, outH-fringe, outW, fringe);
+  octx.fillRect(0, 0, fringe, outH);
+  octx.fillRect(outW-fringe, 0, fringe, outH);
+
   return outCanvas;
+}
+
+// Shrinks a quad inward toward its own centroid — a small safety margin so an
+// auto-detected boundary that's a touch too generous doesn't carry background into the crop.
+function insetQuad(quad, ratio){
+  const cx = (quad[0][0]+quad[1][0]+quad[2][0]+quad[3][0])/4;
+  const cy = (quad[0][1]+quad[1][1]+quad[2][1]+quad[3][1])/4;
+  return quad.map(([x,y]) => [x + (cx-x)*ratio, y + (cy-y)*ratio]);
 }
 
 // Lightweight auto-crop guess: assumes the document contrasts with the surface it's on
@@ -621,40 +644,44 @@ function detectDocumentQuad(canvas){
   const area = fgCount / (sw*sh);
   if (area < 0.15 || area > 0.97) return fullFrame;
   const inv = 1/scale;
-  return [tl,tr,br,bl].map(([x,y]) => [x*inv, y*inv]);
+  const quad = [tl,tr,br,bl].map(([x,y]) => [x*inv, y*inv]);
+  return insetQuad(quad, 0.02);
 }
 
 async function applyDocFilter(baseDataUrl, w, h, f){
-  if (isFilterDefault(f)) return baseDataUrl;
   const img = await loadImageFromDataUrl(baseDataUrl);
   const canvas = document.createElement('canvas');
   canvas.width = w; canvas.height = h;
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0, w, h);
 
-  if (f.shadow) applyDeshadow(ctx, canvas, w, h);
+  if (!isFilterDefault(f)) {
+    if (f.shadow) applyDeshadow(ctx, canvas, w, h);
 
-  const grayscale = f.mode === 'gray' || f.mode === 'bw';
-  const imageData = ctx.getImageData(0, 0, w, h);
-  const data = imageData.data;
-  if (f.mode !== 'original') autoLevels(data);
+    const grayscale = f.mode === 'gray' || f.mode === 'bw';
+    const imageData = ctx.getImageData(0, 0, w, h);
+    const data = imageData.data;
+    if (f.mode !== 'original') autoLevels(data);
 
-  const extraContrast = f.mode === 'bw' ? 55 : 0;
-  const c = Math.max(-254, Math.min(254, f.contrast + extraContrast));
-  const factor = (259 * (c + 255)) / (255 * (259 - c));
-  const b = f.brightness;
-  for (let i = 0; i < data.length; i += 4) {
-    let r = data[i], g = data[i+1], bl = data[i+2];
-    if (grayscale) { const gray = 0.299*r + 0.587*g + 0.114*bl; r = g = bl = gray; }
-    data[i]   = factor*(r-128)+128+b;
-    data[i+1] = factor*(g-128)+128+b;
-    data[i+2] = factor*(bl-128)+128+b;
+    const extraContrast = f.mode === 'bw' ? 55 : (f.mode === 'original' ? 0 : 20);
+    const c = Math.max(-254, Math.min(254, f.contrast + extraContrast));
+    const factor = (259 * (c + 255)) / (255 * (259 - c));
+    const b = f.brightness;
+    for (let i = 0; i < data.length; i += 4) {
+      let r = data[i], g = data[i+1], bl = data[i+2];
+      if (grayscale) { const gray = 0.299*r + 0.587*g + 0.114*bl; r = g = bl = gray; }
+      data[i]   = factor*(r-128)+128+b;
+      data[i+1] = factor*(g-128)+128+b;
+      data[i+2] = factor*(bl-128)+128+b;
+    }
+    ctx.putImageData(imageData, 0, 0);
+
+    if (f.sharpen > 0) applySharpen(ctx, canvas, w, h, f.sharpen/100);
   }
-  ctx.putImageData(imageData, 0, 0);
 
-  if (f.sharpen > 0) applySharpen(ctx, canvas, w, h, f.sharpen/100);
-
-  return canvas.toDataURL('image/jpeg', 0.88);
+  // single delivery-quality encode point in the whole pipeline (rotate/crop keep a near-lossless
+  // master instead), so this is the only place image quality is actually traded for file size
+  return canvas.toDataURL('image/jpeg', 0.8);
 }
 
 async function reprocessAllImages(){
@@ -688,7 +715,7 @@ function setMode(mode){
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
   if (mode !== 'original') {
     docFilter.shadow = true;
-    if (docFilter.sharpen === 0) { docFilter.sharpen = 40; document.getElementById('sharpenSlider').value = 40; document.getElementById('sharpenVal').textContent = '40'; }
+    if (docFilter.sharpen === 0) { docFilter.sharpen = 65; document.getElementById('sharpenSlider').value = 65; document.getElementById('sharpenVal').textContent = '65'; }
     updateShadowToggleUI();
   }
   scheduleReprocess(true);
@@ -747,7 +774,7 @@ async function rotateImage(id, deg){
   ctx.translate(nw/2, nh/2);
   ctx.rotate(deg * Math.PI/180);
   ctx.drawImage(img, -item.width/2, -item.height/2);
-  item.baseDataUrl = canvas.toDataURL('image/jpeg', 0.9);
+  item.baseDataUrl = canvas.toDataURL('image/jpeg', 0.95);
   item.width = nw; item.height = nh;
   item.dataUrl = await applyDocFilter(item.baseDataUrl, item.width, item.height, docFilter);
   renderList();
@@ -845,7 +872,7 @@ async function applyCrop(){
     outH = Math.max(20, Math.round(outH*capScale));
 
     const warped = warpQuadToRect(srcCanvas, q, outW, outH);
-    item.baseDataUrl = warped.toDataURL('image/jpeg', 0.9);
+    item.baseDataUrl = warped.toDataURL('image/jpeg', 0.95);
     item.width = outW; item.height = outH;
     item.dataUrl = await applyDocFilter(item.baseDataUrl, item.width, item.height, docFilter);
     closeCropModal();
@@ -880,7 +907,7 @@ async function autoCropAll(){
       outW = Math.max(20, Math.round(outW*capScale));
       outH = Math.max(20, Math.round(outH*capScale));
       const warped = warpQuadToRect(srcCanvas, quad, outW, outH);
-      item.baseDataUrl = warped.toDataURL('image/jpeg', 0.9);
+      item.baseDataUrl = warped.toDataURL('image/jpeg', 0.95);
       item.width = outW; item.height = outH;
       item.dataUrl = await applyDocFilter(item.baseDataUrl, item.width, item.height, docFilter);
       cropped++;
