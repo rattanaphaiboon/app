@@ -1,7 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v9.1 — ★ บั๊กร้ายแรง: อนุมัติใบปรับเงินเดือนแล้วเขียนทับช่องเงิน (คู่แอปเดิม · ต้อง Deploy ด่วน)
+ * v9.2 — ช่องรูปในชีท CheckinLog คลิกดูรูปได้ (ใส่ลิงก์ทับ path ด้วย rich text)
+ *         ข้อความในเซลล์ยังเป็น path เหมือนเดิม โค้ดที่อ่านไปเซ็น URL จึงไม่พัง
+ *         + linkifyCheckinPhotos(วัน) เติมลิงก์ให้แถวเก่า · ต้องมี PHOTO_KEY ใน Script Properties
+ * v9.1 — ★ บั๊กร้ายแรง: อนุมัติใบปรับเงินเดือนแล้วเขียนทับช่องเงิน (ต้อง Deploy ด่วน)
  *         APPROVE_CFG ตั้ง status/approver = 7/8 ตามชีทแบบ 10 คอลัมน์ แต่ชีทนี้มี 16 คอลัมน์
  *         → "approved" ทับ H เบี้ยขยันพิเศษ · ชื่อผู้อนุมัติทับ I ค่าโทร (ของจริงอยู่ N/O)
  *         + auditSalaryAdjustRows() ไล่หาแถวที่โดนไปแล้ว เพื่อกู้จากประวัติเวอร์ชัน
@@ -328,7 +331,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.1', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.2', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -963,6 +966,57 @@ function autoInOut_(logSh, empId, when) {
   return lastType === 'in' ? 'out' : 'in';
 }
 
+/* ── v9.2: ทำให้ช่อง "รูป" ในชีท CheckinLog คลิกดูรูปได้ ────────────────────────
+   เดิมเก็บเป็น path ดิบ (เช่น checkin/12023/20260909/Cxxxx.jpg) = ข้อความเฉยๆ คลิกไม่ได้
+   วิธีแก้: ใส่ลิงก์ทับข้อความ (rich text) — ตัวหนังสือในเซลล์ยัง "เป็น path เหมือนเดิม"
+   จึงไม่กระทบโค้ดที่อ่านคอลัมน์นี้ไปเซ็น URL (audit / getCheckinLog) แต่คลิกแล้วเปิดรูปได้
+   ★ ต้องตั้ง Script Property ชื่อ PHOTO_KEY ไว้ก่อน ไม่งั้นลิงก์เปิดไม่ได้ (ประตูกันคนนอก) */
+function photoCellLink_(path) {
+  try {
+    const key = PropertiesService.getScriptProperties().getProperty('PHOTO_KEY') || '';
+    if (!key || !path || String(path).indexOf('data:') === 0) return '';
+    return ScriptApp.getService().getUrl() + '?action=photoView&k=' + encodeURIComponent(key) +
+           '&p=' + encodeURIComponent(path);
+  } catch (_) { return ''; }
+}
+function setPhotoCellLink_(sh, row, col, path) {
+  const url = photoCellLink_(path);
+  if (!url) return false;
+  try {
+    sh.getRange(row, col).setRichTextValue(
+      SpreadsheetApp.newRichTextValue().setText(String(path)).setLinkUrl(url).build());
+    return true;
+  } catch (_) { return false; }
+}
+
+/* เติมลิงก์ให้แถวเก่าที่ลงไปแล้ว (รันจากเอดิเตอร์ · ค่าเริ่มต้นย้อนหลัง 90 วัน)
+   รันซ้ำได้ ไม่พัง — แถวที่มีลิงก์อยู่แล้วจะถูกเขียนทับด้วยลิงก์เดิม */
+function linkifyCheckinPhotos(daysBack) {
+  const sh = getTab(T.LOG);
+  if (!sh || sh.getLastRow() < 2) throw new Error('ไม่พบข้อมูลใน ' + T.LOG);
+  if (!PropertiesService.getScriptProperties().getProperty('PHOTO_KEY')) {
+    throw new Error('ยังไม่ได้ตั้ง PHOTO_KEY ใน Script Properties — ตั้งก่อนแล้วรันใหม่');
+  }
+  const back = parseInt(daysBack, 10) || 90;
+  const since = new Date(Date.now() - back * 86400000);
+  const last = sh.getLastRow();
+  const d = sh.getRange(2, 1, last - 1, 15).getValues();
+  let done = 0, empty = 0, skip = 0;
+  for (let i = 0; i < d.length; i++) {
+    const ts = (d[i][0] instanceof Date) ? d[i][0] : new Date(d[i][0]);
+    if (!ts || isNaN(ts.getTime()) || ts < since) continue;
+    const path = String(d[i][14] || '').trim();
+    if (!path) { empty++; continue; }
+    if (path.indexOf('data:') === 0) { skip++; continue; }   // รูปฝังเป็น base64 ของเก่า — ลิงก์ไม่ได้
+    if (setPhotoCellLink_(sh, i + 2, 15, path)) done++;
+  }
+  const msg = 'ใส่ลิงก์รูปแล้ว ' + done + ' แถว (ย้อนหลัง ' + back + ' วัน) · ไม่มีรูป ' + empty +
+              ' แถว' + (skip ? ' · ข้ามรูปแบบเก่า ' + skip + ' แถว' : '');
+  Logger.log(msg);
+  try { getSS().toast(msg, 'ใส่ลิงก์รูปสแกน', 12); } catch (e) {}
+  return msg;
+}
+
 function actionCheckin(p, user) {
   const empId = String(p.empId || user.empId);
   if (empId !== user.empId && !isSupervisor(user)) {
@@ -1149,6 +1203,10 @@ function actionCheckin(p, user) {
     (p.retroactive && p.reason) || '',
     photoCell, user.email, cid,   // O=photo(path) · Q(17)=clientId
   ]);
+  // v9.2: ใส่ลิงก์ทับ path ในช่องรูป — HR คลิกดูรูปจากในชีทได้เลย (ข้อความยังเป็น path เหมือนเดิม)
+  if (photoCell && photoCell.indexOf('data:') !== 0) {
+    try { setPhotoCellLink_(logSh, logSh.getLastRow(), 15, photoCell); } catch (e) {}
+  }
 
   // v3.3: เลิกเขียนชีท "ลงเวลาApp" — ตรรกะช่อง IN/OUT ไม่เข้ากับกะจริง ข้อมูลเพี้ยน
   // HR ทำสูตรเองจาก CheckinLog (ดิบ ถูกต้อง) แทน · เปิดกลับได้ด้วยสวิตช์เดียว
