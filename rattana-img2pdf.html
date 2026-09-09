@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Image to PDF v1.2</title>
+<title>Rattana Image to PDF v1.3</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -157,7 +157,13 @@ body.dark .spinner-box{background:var(--card-bg)}
 .modal-close:hover{color:var(--text);background:rgba(0,0,0,.06)}
 .modal-body{padding:20px}
 .modal-actions{display:flex;flex-direction:column;gap:10px;margin-top:16px}
-.modal-foot{padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end}
+.modal-foot{padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end}
+
+#cropStage{position:relative;width:100%;touch-action:none;background:#000;border-radius:var(--radius-sm);overflow:hidden}
+#cropStage img{width:100%;height:100%;display:block}
+#cropSvg{position:absolute;inset:0;width:100%;height:100%}
+.crop-handle{cursor:grab;touch-action:none}
+.crop-handle:active{cursor:grabbing}
 
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes slideIn{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}
@@ -173,7 +179,7 @@ footer{text-align:center;padding:16px;color:var(--muted);font-size:11px}
 <body>
 
 <header>
-  <span class="logo-text">RATTANA <span>IMAGE → PDF</span> <span class="badge badge-gold">v1.2</span></span>
+  <span class="logo-text">RATTANA <span>IMAGE → PDF</span> <span class="badge badge-gold">v1.3</span></span>
   <div class="spacer"></div>
   <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
   <a href="https://rattanaphaiboon.github.io/app/rattana-hub.html" class="hub-btn" title="กลับ Hub">
@@ -201,7 +207,10 @@ footer{text-align:center;padding:16px;color:var(--muted);font-size:11px}
   <div class="card">
     <div class="card-head">
       <h3 id="listTitle">รูปภาพ (0)</h3>
-      <button class="btn btn-outline btn-sm" onclick="clearAll()">🗑 ล้างทั้งหมด</button>
+      <div class="flex-between" style="gap:8px">
+        <button class="btn btn-outline btn-sm" onclick="autoCropAll()">✂️ ครอบตัดอัตโนมัติ</button>
+        <button class="btn btn-outline btn-sm" onclick="clearAll()">🗑 ล้างทั้งหมด</button>
+      </div>
     </div>
     <div class="card-body" id="listBody">
       <div class="empty-state" id="emptyState">ยังไม่มีรูปภาพ — เลือกหรือถ่ายรูปเพื่อเริ่มต้น</div>
@@ -315,7 +324,31 @@ footer{text-align:center;padding:16px;color:var(--muted);font-size:11px}
   </div>
 </div>
 
-<footer>Rattana Image to PDF v1.2</footer>
+<div class="modal-overlay" id="cropModal">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-head">
+      <h3>✂️ ครอบตัด / ปรับมุม</h3>
+      <button class="modal-close" onclick="closeCropModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div id="cropStage">
+        <img id="cropImg" src="" alt="">
+        <svg id="cropSvg" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+      </div>
+      <p class="txt-muted txt-sm" style="margin-top:10px">ลากจุดมุมทั้ง 4 ให้ตรงขอบเอกสาร</p>
+      <div class="modal-actions" style="flex-direction:row">
+        <button class="btn btn-outline btn-sm" onclick="autoDetectCrop()">🔍 ตรวจจับอัตโนมัติ</button>
+        <button class="btn btn-outline btn-sm" onclick="resetCropToFull()">⬜ เต็มภาพ</button>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-outline btn-sm" onclick="closeCropModal()">ยกเลิก</button>
+      <button class="btn btn-gold btn-sm" onclick="applyCrop()">✅ ใช้การครอบตัด</button>
+    </div>
+  </div>
+</div>
+
+<footer>Rattana Image to PDF v1.3</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
@@ -490,6 +523,107 @@ function applySharpen(ctx, canvas, w, h, amount){
   ctx.putImageData(sharp, 0, 0);
 }
 
+function dist(p1, p2){ return Math.hypot(p1[0]-p2[0], p1[1]-p2[1]); }
+
+function sampleBilinear(data, sw, sh, x, y){
+  x = Math.max(0, Math.min(sw - 1.001, x));
+  y = Math.max(0, Math.min(sh - 1.001, y));
+  const x0 = Math.floor(x), y0 = Math.floor(y), x1 = x0+1, y1 = y0+1;
+  const fx = x - x0, fy = y - y0;
+  const i00 = (y0*sw+x0)*4, i10 = (y0*sw+x1)*4, i01 = (y1*sw+x0)*4, i11 = (y1*sw+x1)*4;
+  const out = [0,0,0,0];
+  for (let c = 0; c < 4; c++) {
+    const top = data[i00+c]*(1-fx) + data[i10+c]*fx;
+    const bot = data[i01+c]*(1-fx) + data[i11+c]*fx;
+    out[c] = top*(1-fy) + bot*fy;
+  }
+  return out;
+}
+
+// Classic square-to-quad projective mapping (Heckbert): warps an arbitrary 4-point
+// quad (photographed at an angle) back to a flat rectangle, as if scanned straight-on.
+function warpQuadToRect(srcCanvas, quad, outW, outH){
+  const sw = srcCanvas.width, sh = srcCanvas.height;
+  const srcData = srcCanvas.getContext('2d').getImageData(0, 0, sw, sh).data;
+  const [[x0,y0],[x1,y1],[x2,y2],[x3,y3]] = quad;
+
+  const dx1 = x1-x2, dx2 = x3-x2, dx3 = x0-x1+x2-x3;
+  const dy1 = y1-y2, dy2 = y3-y2, dy3 = y0-y1+y2-y3;
+  let a,b,c,d,e,f,g,h;
+  if (Math.abs(dx3) < 1e-9 && Math.abs(dy3) < 1e-9) {
+    a=x1-x0; b=x2-x1; c=x0; d=y1-y0; e=y2-y1; f=y0; g=0; h=0;
+  } else {
+    const denom = dx1*dy2 - dx2*dy1;
+    g = (dx3*dy2 - dx2*dy3) / denom;
+    h = (dx1*dy3 - dx3*dy1) / denom;
+    a = x1-x0+g*x1; b = x3-x0+h*x3; c = x0;
+    d = y1-y0+g*y1; e = y3-y0+h*y3; f = y0;
+  }
+
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = outW; outCanvas.height = outH;
+  const octx = outCanvas.getContext('2d');
+  const outImg = octx.createImageData(outW, outH);
+  const outData = outImg.data;
+  for (let dy = 0; dy < outH; dy++) {
+    const v = dy / outH;
+    for (let dx = 0; dx < outW; dx++) {
+      const u = dx / outW;
+      const denom2 = g*u + h*v + 1;
+      const X = (a*u + b*v + c) / denom2;
+      const Y = (d*u + e*v + f) / denom2;
+      const px = sampleBilinear(srcData, sw, sh, X, Y);
+      const oi = (dy*outW+dx)*4;
+      outData[oi]=px[0]; outData[oi+1]=px[1]; outData[oi+2]=px[2]; outData[oi+3]=255;
+    }
+  }
+  octx.putImageData(outImg, 0, 0);
+  return outCanvas;
+}
+
+// Lightweight auto-crop guess: assumes the document contrasts with the surface it's on
+// (the common "paper on a desk" case). Samples a border ring as the background estimate,
+// classifies pixels that differ from it as "document", then takes the 4 extreme corners
+// of that region. Falls back to the full frame when the result looks unreliable.
+function detectDocumentQuad(canvas){
+  const w = canvas.width, h = canvas.height;
+  const fullFrame = [[0,0],[w,0],[w,h],[0,h]];
+  const scale = Math.min(1, 300 / Math.max(w, h));
+  const sw = Math.max(8, Math.round(w*scale)), sh = Math.max(8, Math.round(h*scale));
+  const small = document.createElement('canvas');
+  small.width = sw; small.height = sh;
+  small.getContext('2d').drawImage(canvas, 0, 0, sw, sh);
+  const data = small.getContext('2d').getImageData(0, 0, sw, sh).data;
+  const gray = new Float32Array(sw*sh);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) gray[p] = 0.299*data[i]+0.587*data[i+1]+0.114*data[i+2];
+
+  const border = [];
+  for (let x = 0; x < sw; x++) { border.push(gray[x], gray[(sh-1)*sw+x]); }
+  for (let y = 0; y < sh; y++) { border.push(gray[y*sw], gray[y*sw+sw-1]); }
+  border.sort((a,b) => a-b);
+  const bg = border[Math.floor(border.length/2)];
+
+  let minSum=Infinity, maxSum=-Infinity, minDiff=Infinity, maxDiff=-Infinity, fgCount=0;
+  let tl=[0,0], tr=[sw-1,0], br=[sw-1,sh-1], bl=[0,sh-1];
+  const threshold = 28;
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) {
+      if (Math.abs(gray[y*sw+x] - bg) > threshold) {
+        fgCount++;
+        const s = x+y, dd = x-y;
+        if (s < minSum) { minSum=s; tl=[x,y]; }
+        if (s > maxSum) { maxSum=s; br=[x,y]; }
+        if (dd > maxDiff) { maxDiff=dd; tr=[x,y]; }
+        if (dd < minDiff) { minDiff=dd; bl=[x,y]; }
+      }
+    }
+  }
+  const area = fgCount / (sw*sh);
+  if (area < 0.15 || area > 0.97) return fullFrame;
+  const inv = 1/scale;
+  return [tl,tr,br,bl].map(([x,y]) => [x*inv, y*inv]);
+}
+
 async function applyDocFilter(baseDataUrl, w, h, f){
   if (isFilterDefault(f)) return baseDataUrl;
   const img = await loadImageFromDataUrl(baseDataUrl);
@@ -619,6 +753,145 @@ async function rotateImage(id, deg){
   renderList();
 }
 
+let cropState = null;
+
+async function openCropModal(id){
+  const item = images.find(i => i.id === id);
+  if (!item) return;
+  cropState = { itemId: id, natW: item.width, natH: item.height, quad: null, dragIdx: -1 };
+  document.getElementById('cropImg').src = item.baseDataUrl;
+  document.getElementById('cropStage').style.aspectRatio = `${item.width} / ${item.height}`;
+  document.getElementById('cropSvg').setAttribute('viewBox', `0 0 ${item.width} ${item.height}`);
+  document.getElementById('cropModal').classList.add('open');
+  await autoDetectCrop();
+}
+
+function closeCropModal(){
+  document.getElementById('cropModal').classList.remove('open');
+  cropState = null;
+}
+
+async function autoDetectCrop(){
+  if (!cropState) return;
+  const img = await loadImageFromDataUrl(document.getElementById('cropImg').src);
+  const c = document.createElement('canvas');
+  c.width = cropState.natW; c.height = cropState.natH;
+  c.getContext('2d').drawImage(img, 0, 0);
+  cropState.quad = detectDocumentQuad(c);
+  buildCropHandles();
+}
+
+function resetCropToFull(){
+  if (!cropState) return;
+  cropState.quad = [[0,0],[cropState.natW,0],[cropState.natW,cropState.natH],[0,cropState.natH]];
+  buildCropHandles();
+}
+
+function buildCropHandles(){
+  const svg = document.getElementById('cropSvg');
+  const r = Math.max(cropState.natW, cropState.natH) * 0.016;
+  svg.innerHTML = `<polygon class="crop-poly" fill="rgba(201,168,76,0.18)" stroke="#c9a84c" stroke-width="${r*0.35}"></polygon>` +
+    [0,1,2,3].map(i => `<circle class="crop-handle" data-i="${i}" r="${r}" fill="#c9a84c" stroke="#0d1b3e" stroke-width="${r*0.25}"></circle>`).join('');
+  svg.querySelectorAll('.crop-handle').forEach(hEl => {
+    hEl.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      cropState.dragIdx = Number(hEl.dataset.i);
+      hEl.setPointerCapture(e.pointerId);
+    });
+    hEl.addEventListener('pointermove', e => {
+      if (cropState.dragIdx !== Number(hEl.dataset.i)) return;
+      cropState.quad[cropState.dragIdx] = svgPointFromEvent(e);
+      updateCropVisuals();
+    });
+    hEl.addEventListener('pointerup', () => { cropState.dragIdx = -1; });
+  });
+  updateCropVisuals();
+}
+
+function updateCropVisuals(){
+  const svg = document.getElementById('cropSvg');
+  const q = cropState.quad;
+  svg.querySelector('.crop-poly').setAttribute('points', q.map(p => p.join(',')).join(' '));
+  svg.querySelectorAll('.crop-handle').forEach(hEl => {
+    const p = q[Number(hEl.dataset.i)];
+    hEl.setAttribute('cx', p[0]); hEl.setAttribute('cy', p[1]);
+  });
+}
+
+function svgPointFromEvent(e){
+  const svg = document.getElementById('cropSvg');
+  const pt = svg.createSVGPoint();
+  pt.x = e.clientX; pt.y = e.clientY;
+  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+  return [Math.max(0, Math.min(cropState.natW, p.x)), Math.max(0, Math.min(cropState.natH, p.y))];
+}
+
+async function applyCrop(){
+  if (!cropState || !cropState.quad) { closeCropModal(); return; }
+  const item = images.find(i => i.id === cropState.itemId);
+  if (!item) { closeCropModal(); return; }
+  showSpinner('กำลังครอบตัด...');
+  try {
+    const img = await loadImageFromDataUrl(item.baseDataUrl);
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = item.width; srcCanvas.height = item.height;
+    srcCanvas.getContext('2d').drawImage(img, 0, 0);
+
+    const q = cropState.quad;
+    let outW = Math.round(Math.max(dist(q[0],q[1]), dist(q[3],q[2])));
+    let outH = Math.round(Math.max(dist(q[0],q[3]), dist(q[1],q[2])));
+    const capScale = Math.min(1, MAX_DIM / Math.max(outW, outH));
+    outW = Math.max(20, Math.round(outW*capScale));
+    outH = Math.max(20, Math.round(outH*capScale));
+
+    const warped = warpQuadToRect(srcCanvas, q, outW, outH);
+    item.baseDataUrl = warped.toDataURL('image/jpeg', 0.9);
+    item.width = outW; item.height = outH;
+    item.dataUrl = await applyDocFilter(item.baseDataUrl, item.width, item.height, docFilter);
+    closeCropModal();
+    renderList();
+    showToast('ครอบตัดสำเร็จ ✓', 'success');
+  } catch (e) {
+    console.error(e);
+    showToast('ครอบตัดไม่สำเร็จ', 'error');
+  } finally {
+    hideSpinner();
+  }
+}
+
+async function autoCropAll(){
+  if (!images.length) return;
+  showSpinner('กำลังครอบตัดอัตโนมัติ...');
+  try {
+    let cropped = 0;
+    for (let i = 0; i < images.length; i++) {
+      const item = images[i];
+      document.getElementById('spinnerMsg').textContent = `กำลังครอบตัดอัตโนมัติ ${i+1}/${images.length}...`;
+      const img = await loadImageFromDataUrl(item.baseDataUrl);
+      const srcCanvas = document.createElement('canvas');
+      srcCanvas.width = item.width; srcCanvas.height = item.height;
+      srcCanvas.getContext('2d').drawImage(img, 0, 0);
+      const quad = detectDocumentQuad(srcCanvas);
+      const isFullFrame = quad[0][0]===0 && quad[0][1]===0 && quad[2][0]===item.width && quad[2][1]===item.height;
+      if (isFullFrame) continue;
+      let outW = Math.round(Math.max(dist(quad[0],quad[1]), dist(quad[3],quad[2])));
+      let outH = Math.round(Math.max(dist(quad[0],quad[3]), dist(quad[1],quad[2])));
+      const capScale = Math.min(1, MAX_DIM / Math.max(outW, outH));
+      outW = Math.max(20, Math.round(outW*capScale));
+      outH = Math.max(20, Math.round(outH*capScale));
+      const warped = warpQuadToRect(srcCanvas, quad, outW, outH);
+      item.baseDataUrl = warped.toDataURL('image/jpeg', 0.9);
+      item.width = outW; item.height = outH;
+      item.dataUrl = await applyDocFilter(item.baseDataUrl, item.width, item.height, docFilter);
+      cropped++;
+    }
+    renderList();
+    showToast(cropped ? `ครอบตัดอัตโนมัติแล้ว ${cropped} รูป — ตรวจสอบ/ปรับมุมเพิ่มเติมได้ที่ ✂️` : 'ไม่พบขอบเอกสารที่ชัดเจน ลองครอบตัดเองที่ปุ่ม ✂️ แต่ละรูป', cropped ? 'success' : 'warning');
+  } finally {
+    hideSpinner();
+  }
+}
+
 function moveImage(id, dir){
   const idx = images.findIndex(i => i.id === id);
   const swapIdx = idx + dir;
@@ -657,6 +930,7 @@ function renderList(){
         <button onclick="moveImage('${item.id}',-1)" title="เลื่อนขึ้น" ${i===0?'disabled':''}>↑</button>
         <button onclick="moveImage('${item.id}',1)" title="เลื่อนลง" ${i===images.length-1?'disabled':''}>↓</button>
         <button onclick="rotateImage('${item.id}',90)" title="หมุน">↻</button>
+        <button onclick="openCropModal('${item.id}')" title="ครอบตัด">✂️</button>
         <button class="danger" onclick="removeImage('${item.id}')" title="ลบ">🗑</button>
       </div>
     </div>
@@ -762,6 +1036,9 @@ document.addEventListener('paste', e => {
 });
 document.getElementById('resultModal').addEventListener('click', e => {
   if (e.target.id === 'resultModal') closeResultModal();
+});
+document.getElementById('cropModal').addEventListener('click', e => {
+  if (e.target.id === 'cropModal') closeCropModal();
 });
 
 document.getElementById('modeGroup').addEventListener('click', e => {
