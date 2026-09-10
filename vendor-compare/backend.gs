@@ -1,5 +1,6 @@
 /**
  * Rattana Vendor Compare — Dedicated BigQuery Proxy
+ * v3.1 — 2026-09-10  (เพิ่ม action=customers — ยอดซื้อ ราย ร้าน x เดือน ใช้หา 'ร้านที่หายไป')
  * v2.0 — 2026-06-18  (แยกออกจาก shared proxy v1.8 — เฉพาะ vendor-compare)
  *
  * ทำไมแยก: เดิม proxy ตัวเดียวใช้ร่วม 3 แอป (vendor-compare + Pre-order Picker + sales-app)
@@ -18,7 +19,8 @@
  *      → copy "Web App URL" ที่ได้ (ลงท้าย /exec)
  *   6. ส่ง URL ใหม่นั้นมา → จะเอาไปใส่ใน HTML (DEFAULT_CFG.bqProxyUrl)
  *
- * Endpoints: ?action=ping | vendors | trend | sales | stores  (&vendor=<v>&months=6)
+ * Endpoints: ?action=ping | vendors | trend | sales | stores | customers
+ *            (&vendor=<v>  รับหลายตัวคั่น |  ·  &months=6  หรือ  &mlist=2026/03,2026/04,...)
  */
 
 var PROJECT_ID = 'project-test-471907';
@@ -30,7 +32,7 @@ function doGet(e) {
     var action = (e && e.parameter && e.parameter.action) || 'ping';
     var out;
     if (action === 'ping') {
-      out = { ok: true, msg: 'pong', proxy: 'vendor-compare v2.0', time: new Date().toISOString() };
+      out = { ok: true, msg: 'pong', proxy: 'vendor-compare v3.1', time: new Date().toISOString() };
     } else if (action === 'vendors') {
       out = { ok: true, data: getVendors_(parseInt(e.parameter.months) || 6) };
     } else if (action === 'trend') {
@@ -45,6 +47,10 @@ function doGet(e) {
       var v3 = e.parameter.vendor || '';
       if (!v3) return json_({ ok: false, error: 'missing vendor param' });
       out = { ok: true, data: getStoresForVendor_(v3, parseInt(e.parameter.months) || 6) };
+    } else if (action === 'customers') {
+      var v4 = e.parameter.vendor || '';
+      if (!v4) return json_({ ok: false, error: 'missing vendor param' });
+      out = { ok: true, data: getCustomers_(v4, e.parameter.mlist, e.parameter.months) };
     } else {
       out = { ok: false, error: 'unknown action: ' + action };
     }
@@ -154,6 +160,73 @@ function getStoresForVendor_(vendor, months) {
     "SELECT 'product', Month_Year, Cat_Brand, Cat_Pack, Product_Name, Channel, COUNT(DISTINCT Customer_Code) " +
     'FROM base GROUP BY Month_Year, Cat_Brand, Cat_Pack, Product_Name, Channel';
   return runQuery_(query, ['level', 'month_year', 'cat_brand', 'cat_pack', 'product_name', 'channel', 'stores']);
+}
+
+/* ═══ v3.1 — ยอดซื้อ ราย ร้าน x เดือน ═══
+   ใช้ตอบคำถาม "ร้านไหนเคยซื้อประจำแล้วหายไป" ในการ์ดสรุปผู้บริหารของแอป
+   - vendor: รับหลายตัวคั่น | (ให้ตรงกับที่หน้าเว็บส่งมาตอนรวม Cat_Vendor หลายชื่อ)
+     ตั้งใจกรองด้วย Cat_Vendor อย่างเดียวเหมือน action=stores ตัวเลข "หายกี่ร้าน" บนการ์ด
+     จะได้มาจากฐานเดียวกันกับรายชื่อ ไม่งั้นเลขไม่ตรงกัน
+   - เดือน: ส่ง mlist=2026/03,2026/04,... มาได้ตรง ๆ (หน้าเว็บส่งแบบนี้) ถ้าไม่ส่งใช้ months=N
+   - ขนาดผลลัพธ์เล็ก (ร้าน ~400 x 6 เดือน ≈ 2,400 แถว) แอป cache ไว้เดือนละครั้งอยู่แล้ว */
+function getCustomers_(vendor, mlist, months) {
+  var vs = String(vendor || '').split('|')
+    .map(function (x) { return x.trim(); })
+    .filter(function (x) { return x; });
+  if (!vs.length) throw new Error('missing vendor param');
+
+  var labels = monthLabels_(mlist, months);
+  var nameCol = hasCol_('Customer_Name') ? 'ANY_VALUE(Customer_Name)' : "''";
+  var query =
+    'SELECT Month_Year, CAST(Customer_Code AS STRING) AS customer_code, ' +
+    '       ' + nameCol + ' AS customer_name, ' +
+    '       SUM(Exvat) AS exvat, SUM(Sales_CSxValue) AS sales_cs ' +
+    'FROM `' + PROJECT_ID + '.' + DATASET + '.' + VIEW + '` ' +
+    'WHERE Cat_Vendor IN (' + vs.map(sqlStr_).join(',') + ') ' +
+    '  AND Month_Year IN (' + labels.map(sqlStr_).join(',') + ') ' +
+    "  AND Customer_Code IS NOT NULL AND CAST(Customer_Code AS STRING) != '' " +
+    'GROUP BY Month_Year, customer_code ' +
+    'ORDER BY Month_Year, exvat DESC';
+  return runQuery_(query, ['month_year', 'customer_code', 'customer_name', 'exvat', 'sales_cs']);
+}
+
+function sqlStr_(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
+
+function monthLabels_(mlist, months) {
+  if (mlist) {
+    var a = String(mlist).split(',')
+      .map(function (x) { return x.trim(); })
+      .filter(function (x) { return /^[0-9]{4}\/[0-9]{2}$/.test(x); });
+    if (a.length) return a;
+  }
+  return lastNMonthLabels_(parseInt(months) || 6);
+}
+
+/* view มีคอลัมน์นี้ไหม (cache 6 ชม.) — กัน query พังถ้า BQ ไม่มี Customer_Name
+   ถ้าไม่มี ชื่อร้านจะว่าง แล้วแอปไปหยิบชื่อจากชีท BP แทนเอง */
+function hasCol_(col) {
+  try {
+    var c = CacheService.getScriptCache();
+    var k = 'hasCol_' + VIEW + '_' + col;
+    var v = c.get(k);
+    if (v !== null) return v === '1';
+    var q = 'SELECT column_name AS c ' +
+            'FROM `' + PROJECT_ID + '.' + DATASET + '.INFORMATION_SCHEMA.COLUMNS` ' +
+            "WHERE table_name = '" + VIEW + "'";
+    var cols = runQuery_(q, ['c']).map(function (r) { return String(r.c).toLowerCase(); });
+    var has = cols.indexOf(String(col).toLowerCase()) >= 0;
+    c.put(k, has ? '1' : '0', 21600);
+    return has;
+  } catch (e) {
+    return false;
+  }
+}
+
+/* ทดสอบใน editor ได้เลย (กด Run แล้วดู Execution log) */
+function testCustomers_() {
+  var r = getCustomers_('บริษัท ไทยเบฟเวอเรจ จำกัด (มหาชน)', '', 6);
+  Logger.log('ได้ ' + r.length + ' แถว');
+  Logger.log(JSON.stringify(r.slice(0, 3)));
 }
 
 function runQuery_(query, keys) {
