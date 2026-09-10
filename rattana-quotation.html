@@ -200,6 +200,13 @@ button{cursor:pointer;border:0;background:none}
   #sheets{gap:0}
 }
 [hidden]{display:none!important}
+.toast{position:fixed;left:50%;bottom:1.1rem;transform:translateX(-50%);z-index:calc(var(--z-modal) + 10);
+  max-width:min(560px,calc(100vw - 2rem));background:var(--navy);color:var(--on-navy);
+  border-radius:var(--r-inner);padding:.72rem 1.05rem;font-size:var(--fs-small);line-height:1.55;
+  box-shadow:0 12px 30px rgba(13,27,62,.3)}
+.toast.err{background:var(--err)}
+.toast a{color:var(--gold);word-break:break-all}
+
 /* กล่องดึงคำขอจากเว็บ */
 .cardhead{display:flex;align-items:center;justify-content:space-between;gap:.6rem;flex-wrap:wrap}
 .cardhead h2{margin:0}
@@ -243,6 +250,8 @@ button{cursor:pointer;border:0;background:none}
   <span class="ver" id="ver">v1.0</span>
   <span class="sp"></span>
   <button class="btn btn-gold btn-sm" id="printBtn">พิมพ์ / เซฟ PDF</button>
+  <button class="btn btn-ghost btn-sm" id="mailBtn">ส่งอีเมล</button>
+  <button class="btn btn-ghost btn-sm" id="lineBtn">ส่งไลน์</button>
   <a class="btn btn-ghost btn-sm" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">← Hub</a>
 </header>
 
@@ -259,6 +268,7 @@ button{cursor:pointer;border:0;background:none}
       <div class="f"><label for="cShop">ชื่อร้าน</label><input id="cShop" placeholder="ชื่อร้านลูกค้า"></div>
       <div class="f"><label for="cPerson">ชื่อผู้ติดต่อ</label><input id="cPerson" placeholder="คนที่เราคุยด้วย"></div>
       <div class="f"><label for="cPhone">เบอร์โทร</label><input id="cPhone" inputmode="tel" placeholder="08x-xxx-xxxx"></div>
+      <div class="f"><label for="cEmail">อีเมลลูกค้า</label><input id="cEmail" type="email" inputmode="email" placeholder="สำหรับส่งใบเสนอราคา"></div>
       <div class="f"><label for="cTax">เลขประจำตัวผู้เสียภาษีลูกค้า</label><input id="cTax" inputmode="numeric" placeholder="13 หลัก"></div>
       <div class="f full"><label for="cAddr">ที่อยู่ลูกค้า</label><textarea id="cAddr" rows="2" placeholder="เลขที่ หมู่ ตำบล อำเภอ จังหวัด รหัสไปรษณีย์"></textarea></div>
       <div class="f"><label for="qNo">เลขที่ใบเสนอราคา</label><input id="qNo" class="num"></div>
@@ -387,7 +397,7 @@ button{cursor:pointer;border:0;background:none}
 <script>
 (function(){
 'use strict';
-var VER='v1.9';
+var VER='v1.11';
 var DATA_URL='data/quote-products.json';
 var SHEET_ID='16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I';
 var LIVE_COLS='A,B,D,F,H,J,K,L,M,N,O,P,Q,R,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,BD,BE,BF,CG,CH,CI,CJ,CK,DT';
@@ -696,7 +706,8 @@ function renderTotals(){
   /* มีของยกเว้นภาษีปนอยู่ ต้องแยกให้เห็นว่า VAT คิดจากฐานไหน ไม่งั้นลูกค้าคูณตามแล้วไม่ตรง */
   if(t.netEx>0&&t.mode!=='none'){
     rows.push(['มูลค่าสินค้ายกเว้นภาษี',t.netEx]);
-    rows.push(['มูลค่าสินค้าที่เสียภาษี',t.mode==='in'?t.base:t.netTax]);
+    /* ยกเว้นภาษีทั้งใบ ไม่ต้องขึ้นบรรทัด "ที่เสียภาษี 0.00" ให้รก บรรทัด VAT 0.00 ก็บอกอยู่แล้ว */
+    if(t.netTax>0) rows.push(['มูลค่าสินค้าที่เสียภาษี',t.mode==='in'?t.base:t.netTax]);
   }else if(t.mode==='in'){
     rows.push(['มูลค่าสินค้า (ก่อน VAT)',t.base]);
   }
@@ -746,6 +757,92 @@ function renderPaper(){
   if(rows.length<7) for(var k=rows.length;k<7;k++) rows.push('<tr><td colspan="8" style="height:26px"></td></tr>');
   $('#pLines').innerHTML=rows.join('');
 }
+/* ───────── ส่งใบให้ลูกค้า ─────────
+   ทำ PDF จากหน้าจอเอง แล้วให้หลังบ้านเก็บลง Drive + ส่งอีเมล
+   ไลน์ส่งไฟล์จากเว็บไม่ได้ ส่งได้แต่ข้อความกับลิงก์ จึงต้องมีไฟล์บน Drive ก่อน */
+var H2C='https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+var JSPDF='https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+var PENDING=null, SENDING=false;
+
+function toast(msg,isErr,ms){
+  var el=$('#toast');
+  el.innerHTML=msg; el.className='toast'+(isErr?' err':''); el.hidden=false;
+  clearTimeout(toast._t);
+  if(ms!==0) toast._t=setTimeout(function(){ el.hidden=true; }, ms||6000);
+}
+function loadLib(src,globalName){
+  return new Promise(function(res,rej){
+    if(window[globalName]) return res();
+    var s=document.createElement('script');
+    s.src=src; s.onload=function(){ window[globalName]?res():rej(0); }; s.onerror=function(){ rej(0); };
+    document.head.appendChild(s);
+  });
+}
+/* ล็อกอินก่อนถึงจะส่งได้ — ใช้ด่านเดียวกับตอนดึงคำขอ */
+function needAuth(fn){
+  AUTH=loadAuth();
+  if(AUTH){ fn(); return; }
+  PENDING=fn;
+  $('#ldWrap').hidden=false; document.body.style.overflow='hidden';
+  showLogin();
+}
+function makePdf(){
+  return loadLib(H2C,'html2canvas').then(function(){ return loadLib(JSPDF,'jspdf'); })
+    .then(function(){ return document.fonts?document.fonts.ready:null; })   /* ฟอนต์ไทยต้องโหลดเสร็จก่อน ไม่งั้นภาพได้ฟอนต์สำรอง */
+    .then(function(){
+      var sheets=$$('#sheets .sheet'), pdf=null, i=0;
+      function step(){
+        if(i>=sheets.length) return pdf.output('datauristring').split(',')[1];
+        return html2canvas(sheets[i],{scale:2,backgroundColor:'#ffffff',useCORS:true,logging:false})
+          .then(function(cv){
+            var img=cv.toDataURL('image/jpeg',0.92);
+            if(!pdf) pdf=new jspdf.jsPDF({unit:'mm',format:'a4',orientation:'portrait'});
+            else pdf.addPage();
+            pdf.addImage(img,'JPEG',0,0,210,297);
+            i++;
+            return step();
+          });
+      }
+      return step();
+    });
+}
+function quoteMeta(){
+  var t=totals();
+  return {no:val('#qNo'),shop:val('#cShop'),to:val('#cEmail'),by:val('#qBy'),
+          until:$('#pUntil')?$('#pUntil').textContent:'',total:money(t.grand)+' บาท'};
+}
+function sendQuote(wantMail){
+  if(SENDING) return;
+  if(!S.lines.length){ toast('ยังไม่มีรายการในใบ ใส่สินค้าก่อนนะครับ',true); return; }
+  var m=quoteMeta();
+  if(wantMail&&!m.to){ toast('ยังไม่ได้ใส่อีเมลลูกค้า กรอกในช่อง “อีเมลลูกค้า” ก่อน',true);
+    try{ $('#cEmail').focus(); }catch(e){} return; }
+  needAuth(function(){
+    SENDING=true;
+    toast('กำลังทำไฟล์ใบเสนอราคา…',false,0);
+    makePdf().then(function(b64){
+      toast(wantMail?'กำลังส่งอีเมล…':'กำลังอัปโหลดไฟล์…',false,0);
+      return api({action:'sendQuote',token:AUTH.token,pdf:b64,no:m.no,shop:m.shop,
+                  to:wantMail?m.to:'',by:m.by,until:m.until,total:m.total});
+    }).then(function(r){
+      SENDING=false;
+      if(r&&r.error==='auth'){ clearAuth(); toast('หมดเวลาเข้าใช้งาน กดใหม่อีกครั้งเพื่อเข้าสู่ระบบ',true); return; }
+      if(r&&r.error==='unknown action'){   /* หลังบ้านยังเป็นรุ่นเก่าที่ยังไม่รู้จักคำสั่งนี้ */
+        toast('หลังบ้านยังไม่ได้อัปเดตเป็นรุ่นที่ส่งใบได้ · แจ้งผู้ดูแลให้วาง Code.gs รุ่นใหม่ก่อน',true,12000); return; }
+      if(!r||!r.ok){ toast((r&&r.message)||'ส่งไม่สำเร็จ ลองใหม่อีกครั้ง',true); return; }
+      if(wantMail){
+        toast(r.sent?('ส่งอีเมลถึง '+esc(r.to)+' แล้ว · <a href="'+esc(r.url)+'" target="_blank" rel="noopener">เปิดไฟล์</a>')
+                    :esc(r.message||'ส่งอีเมลไม่สำเร็จ'), !r.sent, 12000);
+      }else{
+        var txt='ใบเสนอราคา '+m.no+(m.shop?('\n'+m.shop):'')+'\nยอดรวม '+m.total+
+                (m.until?('\nยืนราคาถึง '+m.until):'')+'\n'+r.url;
+        window.open('https://line.me/R/share?text='+encodeURIComponent(txt),'_blank','noopener');
+        toast('เปิดไลน์ให้แล้ว เลือกแชทที่จะส่ง · <a href="'+esc(r.url)+'" target="_blank" rel="noopener">เปิดไฟล์</a>',false,12000);
+      }
+    }).catch(function(){ SENDING=false; toast('ทำไฟล์หรือส่งไม่สำเร็จ ลองใหม่อีกครั้ง',true); });
+  });
+}
+
 /* ───────── แบ่งหน้ากระดาษ ─────────
    ใบเดียวยาวๆ แล้วให้เบราว์เซอร์ตัดหน้าเอง จะได้หน้า 2 ที่ไม่มีหัวไม่มีท้าย
    จึงต้องวัดเองว่าแถวไหนเลยขอบล่างของแผ่น แล้วย้ายแถวที่เหลือไปแผ่นใหม่ที่มีหัวครบ */
@@ -881,6 +978,7 @@ function openLeads(){
   if(AUTH) fetchLeads(); else showLogin();
 }
 function closeLeads(){
+  PENDING=null;
   $('#ldWrap').hidden=true;
   document.body.style.overflow='';
 }
@@ -906,6 +1004,7 @@ function onCred(resp){
   api({action:'login',credential:resp.credential}).then(function(r){
     if(!r||!r.ok){ leadState('err',(r&&r.message)||'เข้าสู่ระบบไม่สำเร็จ'); return; }
     AUTH={token:r.token,exp:r.exp,user:r.user}; saveAuth(AUTH);
+    if(PENDING){ var go=PENDING; PENDING=null; closeLeads(); go(); return; }
     fetchLeads();
   }).catch(function(){ leadState('err','ต่อหลังบ้านไม่ได้ ลองใหม่อีกครั้ง'); });
 }
@@ -1013,6 +1112,7 @@ function useLead(r){
   $('#cPerson').value=r.contact||'';
   $('#cPhone').value=r.phone||'';
   $('#cTax').value=r.taxId||d.extra['เลขผู้เสียภาษี']||'';
+  $('#cEmail').value=r.email||d.extra['อีเมล']||'';
   $('#cAddr').value=r.address||d.extra['ที่อยู่']||
                     [r.district,r.province].filter(Boolean).join(' ');
   if(r.province&&!val('#qZone')) $('#qZone').value=r.province;
@@ -1068,11 +1168,13 @@ function init(){
 
   $('#q').addEventListener('input',function(){ S.q=this.value; $('#qx').classList.toggle('on',!!this.value); renderRes(); });
   $('#qx').addEventListener('click',function(){ S.q=''; $('#q').value=''; $('#qx').classList.remove('on'); renderRes(); try{$('#q').focus({preventScroll:true})}catch(e){$('#q').focus()} });
-  $$('#cShop,#cPerson,#cPhone,#cTax,#cAddr,#qNo,#qDate,#qDays,#qBy,#qZone,#tPay,#tShip,#tNote').forEach(function(el){
+  $$('#cShop,#cPerson,#cPhone,#cEmail,#cTax,#cAddr,#qNo,#qDate,#qDays,#qBy,#qZone,#tPay,#tShip,#tNote').forEach(function(el){
     el.addEventListener('input',function(){ renderPaper(); paginate(); });
   });
   $('#tVat').addEventListener('change',function(){ renderTotals(); renderPaper(); paginate(); });
   $('#printBtn').addEventListener('click',function(){ window.print(); });
+  $('#mailBtn').addEventListener('click',function(){ sendQuote(true); });
+  $('#lineBtn').addEventListener('click',function(){ sendQuote(false); });
   $('#ldOpen').addEventListener('click',openLeads);
   $('#ldClose').addEventListener('click',closeLeads);
   $('#ldOut').addEventListener('click',logoutLeads);
@@ -1084,6 +1186,8 @@ function init(){
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
 })();
 </script>
+
+<div class="toast" id="toast" hidden></div>
 
 <div class="ldwrap" id="ldWrap" hidden>
   <div class="ldbox" role="dialog" aria-modal="true" aria-labelledby="ldTitle">
