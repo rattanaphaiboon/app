@@ -27,6 +27,13 @@ APPS=(
   rattana-hr-docs.html
   rattana-jobs.html
   rattana-img2pdf.html
+  rattana-img2pdf-history.gs
+  rattana-img2pdf-sw.js
+  rattana-img2pdf.webmanifest
+  img2pdf-icon-32.png
+  img2pdf-icon-180.png
+  img2pdf-icon-192.png
+  img2pdf-icon-512.png
   rattana-pc-checkin.webmanifest
   rattana-pc-checkin-sw.js
   pc-icon-192.png
