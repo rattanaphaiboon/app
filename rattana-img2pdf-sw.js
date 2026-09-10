@@ -2,7 +2,7 @@
 // กลยุทธ์: network-first สำหรับตัวแอป (เปิดเน็ตอยู่ = ได้โค้ดใหม่เสมอ ไม่ค้างเวอร์ชันเก่า)
 //          แล้วค่อย fallback ไปที่ cache เมื่อออฟไลน์
 // อัปเวอร์ชันแอปต้องขยับ CACHE ด้วย เพื่อล้าง cache ก้อนเก่า
-var CACHE = 'rattana-scanner-v4.2';
+var CACHE = 'rattana-scanner-v4.3';
 var ASSETS = [
   './rattana-img2pdf.html',
   './rattana-img2pdf.webmanifest',
