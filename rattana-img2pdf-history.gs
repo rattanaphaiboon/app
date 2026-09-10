@@ -1,39 +1,73 @@
+// Rattana Scanner — หลังบ้านประวัติการสแกน + เก็บไฟล์ใน Google Drive
+// deploy: Deploy → Manage deployments → ✏️ → Version: New version → Deploy
+//         (Execute as: Me / Who has access: Anyone)
+//
+// เช็กว่า deploy เวอร์ชันใหม่แล้วจริงไหม: เปิด URL ต่อท้าย ?action=ping
+//   ต้องเห็น {"ok":true,"version":"4.0", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
+
+var VERSION = '4.0';
 var FOLDER_NAME = 'Rattana Scanner Files';
 var RETENTION_DAYS = 90;
+var SHEET_NAME = 'Sheet1';
+
+// ตำแหน่งคอลัมน์ตายตัว (1-based) — ไม่อ่านจากหัวตารางอีกแล้ว
+// เดิมโค้ดใช้ headers.indexOf('fileId') ซึ่งพังถ้าหัวตารางคอลัมน์ G ว่าง/เพี้ยน
+// ทำให้ปุ่มดาวน์โหลดในประวัติใช้ไม่ได้ทั้งที่ไฟล์อยู่ใน Drive ครบ
+var C_TIMESTAMP = 1, C_EMPID = 2, C_NAME = 3, C_FILENAME = 4, C_PAGES = 5, C_SIZEKB = 6, C_FILEID = 7;
+var N_COLS = 7;
+var HEADERS = ['timestamp', 'empId', 'name', 'filename', 'pages', 'sizeKB', 'fileId'];
+
+function json_(obj) {
+  obj.version = VERSION;
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
 
 function getOrCreateFolder_() {
   var folders = DriveApp.getFoldersByName(FOLDER_NAME);
   return folders.hasNext() ? folders.next() : DriveApp.createFolder(FOLDER_NAME);
 }
 
-var EXPECTED_HEADERS = ['timestamp', 'empId', 'name', 'filename', 'pages', 'sizeKB', 'fileId'];
-
-function getOrCreateSheet_() {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Sheet1');
-  if (!sheet) sheet = SpreadsheetApp.getActiveSpreadsheet().insertSheet('Sheet1');
-  // Always force row 1 to exactly this header set, in this order — correct for a brand-new
-  // sheet, an older sheet from before the fileId column existed, and a no-op if already right.
-  var current = sheet.getRange(1, 1, 1, EXPECTED_HEADERS.length).getValues()[0];
-  var matches = EXPECTED_HEADERS.every(function (h, i) { return current[i] === h; });
-  if (!matches) sheet.getRange(1, 1, 1, EXPECTED_HEADERS.length).setValues([EXPECTED_HEADERS]);
+function getSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
+  // เขียนหัวตารางไว้ให้คนอ่านเข้าใจ — โค้ดไม่ได้พึ่งค่านี้แล้ว
+  var current = sheet.getRange(1, 1, 1, N_COLS).getValues()[0];
+  var same = HEADERS.every(function (h, i) { return current[i] === h; });
+  if (!same) sheet.getRange(1, 1, 1, N_COLS).setValues([HEADERS]);
   return sheet;
 }
 
-// Deletes rows (and their Drive files) older than RETENTION_DAYS. Runs opportunistically
-// on every save so no separate time-driven trigger needs to be configured.
+// อ่านทุกแถวข้อมูล (ไม่รวมหัวตาราง) เป็น array ความกว้าง 7 คอลัมน์เสมอ
+function readRows_(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  return sheet.getRange(2, 1, lastRow - 1, N_COLS).getValues();
+}
+
+function rowToObj_(r) {
+  return {
+    timestamp: r[C_TIMESTAMP - 1] instanceof Date ? r[C_TIMESTAMP - 1].toISOString() : String(r[C_TIMESTAMP - 1] || ''),
+    empId: String(r[C_EMPID - 1] || ''),
+    name: String(r[C_NAME - 1] || ''),
+    filename: String(r[C_FILENAME - 1] || ''),
+    pages: r[C_PAGES - 1],
+    sizeKB: r[C_SIZEKB - 1],
+    fileId: String(r[C_FILEID - 1] || ''),
+  };
+}
+
+// ลบแถว (พร้อมไฟล์ใน Drive) ที่เก่ากว่า RETENTION_DAYS — เรียกทุกครั้งที่บันทึก
+// จะได้ไม่ต้องตั้ง time-driven trigger แยก
 function cleanupOldEntries_(sheet) {
   var cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - RETENTION_DAYS);
-  var values = sheet.getDataRange().getValues();
-  var headers = values[0];
-  var tsCol = headers.indexOf('timestamp');
-  var fileIdCol = headers.indexOf('fileId');
-  for (var i = values.length - 1; i >= 1; i--) {
-    var ts = new Date(values[i][tsCol]);
-    if (ts < cutoff) {
-      var fid = values[i][fileIdCol];
-      if (fid) { try { DriveApp.getFileById(fid).setTrashed(true); } catch (e) {} }
-      sheet.deleteRow(i + 1);
+  var rows = readRows_(sheet);
+  for (var i = rows.length - 1; i >= 0; i--) {
+    var ts = new Date(rows[i][C_TIMESTAMP - 1]);
+    if (!isNaN(ts.getTime()) && ts < cutoff) {
+      var fid = rows[i][C_FILEID - 1];
+      if (fid) { try { DriveApp.getFileById(String(fid)).setTrashed(true); } catch (e) {} }
+      sheet.deleteRow(i + 2); // +2 = ข้ามหัวตาราง + index 0-based
     }
   }
 }
@@ -41,7 +75,25 @@ function cleanupOldEntries_(sheet) {
 function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents);
-    var sheet = getOrCreateSheet_();
+
+    // ลบรายการเดียวออกจากประวัติ (เจ้าของเท่านั้น)
+    if (data.action === 'delete') {
+      var sheetD = getSheet_();
+      var rowsD = readRows_(sheetD);
+      var wantId = String(data.fileId || '');
+      var owner = String(data.empId || '');
+      for (var i = 0; i < rowsD.length; i++) {
+        if (String(rowsD[i][C_FILEID - 1]) === wantId && wantId) {
+          if (String(rowsD[i][C_EMPID - 1]) !== owner) return json_({ ok: false, error: 'not authorized' });
+          try { DriveApp.getFileById(wantId).setTrashed(true); } catch (err2) {}
+          sheetD.deleteRow(i + 2);
+          return json_({ ok: true, deleted: wantId });
+        }
+      }
+      return json_({ ok: false, error: 'not found' });
+    }
+
+    var sheet = getSheet_();
     var fileId = '';
     if (data.fileBase64) {
       var blob = Utilities.newBlob(Utilities.base64Decode(data.fileBase64), 'application/pdf', data.filename || 'scan.pdf');
@@ -57,54 +109,48 @@ function doPost(e) {
       fileId,
     ]);
     cleanupOldEntries_(sheet);
-    return ContentService.createTextOutput(JSON.stringify({ ok: true, fileId: fileId }))
-      .setMimeType(ContentService.MimeType.JSON);
+    return json_({ ok: true, fileId: fileId });
   } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({ ok: false, error: String(err) }))
-      .setMimeType(ContentService.MimeType.JSON);
+    return json_({ ok: false, error: String(err) });
   }
 }
 
-// GET ?empId=123                          -> { ok:true, rows:[...] } (own history, newest first, max 30)
-// GET ?action=file&fileId=X&empId=123     -> { ok:true, fileBase64, filename } only if that row's
-//                                             own empId matches — one person's history never returns
-//                                             another person's file, even if fileId is guessed.
+// GET ?action=ping                        -> เช็กว่า deploy เวอร์ชันไหนอยู่
+// GET ?empId=123                          -> { ok:true, rows:[...] } ประวัติของตัวเอง ใหม่สุดก่อน สูงสุด 30
+// GET ?action=file&fileId=X&empId=123     -> { ok:true, fileBase64, filename } เฉพาะเมื่อ empId ตรงกับเจ้าของแถวนั้น
+//                                            ของคนอื่นดึงไม่ได้แม้จะเดา fileId ถูก
 function doGet(e) {
   try {
     var params = (e && e.parameter) || {};
-    var sheet = getOrCreateSheet_();
-    var values = sheet.getDataRange().getValues();
-    var headers = values.shift() || [];
 
-    if (params.action === 'file') {
-      var fileId = params.fileId;
-      var empId = (params.empId || '').toString();
-      var empIdCol = headers.indexOf('empId'), fileIdCol = headers.indexOf('fileId'), filenameCol = headers.indexOf('filename');
-      var row = values.find(function (r) { return String(r[fileIdCol]) === fileId; });
-      if (!row || !fileId || String(row[empIdCol]) !== empId) {
-        return ContentService.createTextOutput(JSON.stringify({ ok: false, error: 'not found or not authorized' }))
-          .setMimeType(ContentService.MimeType.JSON);
-      }
-      var file = DriveApp.getFileById(fileId);
-      var base64 = Utilities.base64Encode(file.getBlob().getBytes());
-      return ContentService.createTextOutput(JSON.stringify({ ok: true, fileBase64: base64, filename: row[filenameCol] }))
-        .setMimeType(ContentService.MimeType.JSON);
+    if (params.action === 'ping') {
+      var sheetP = getSheet_();
+      return json_({ ok: true, rowCount: Math.max(0, sheetP.getLastRow() - 1), lastColumn: sheetP.getLastColumn() });
     }
 
-    var empId2 = (params.empId || '').toString();
-    var rows = values
-      .map(function (row) {
-        var obj = {};
-        headers.forEach(function (h, i) { obj[h] = row[i]; });
-        return obj;
-      })
-      .filter(function (r) { return !empId2 || String(r.empId) === empId2; })
+    var sheet = getSheet_();
+    var rows = readRows_(sheet);
+
+    if (params.action === 'file') {
+      var fileId = String(params.fileId || '');
+      var empId = String(params.empId || '');
+      var hit = null;
+      for (var i = 0; i < rows.length; i++) {
+        if (String(rows[i][C_FILEID - 1]) === fileId && fileId) { hit = rows[i]; break; }
+      }
+      if (!hit || String(hit[C_EMPID - 1]) !== empId) return json_({ ok: false, error: 'not found or not authorized' });
+      var file = DriveApp.getFileById(fileId);
+      return json_({ ok: true, fileBase64: Utilities.base64Encode(file.getBlob().getBytes()), filename: String(hit[C_FILENAME - 1] || 'scan.pdf') });
+    }
+
+    var empId2 = String(params.empId || '');
+    var out = rows
+      .map(rowToObj_)
+      .filter(function (r) { return !empId2 || r.empId === empId2; })
       .sort(function (a, b) { return new Date(b.timestamp) - new Date(a.timestamp); })
       .slice(0, 30);
-    return ContentService.createTextOutput(JSON.stringify({ ok: true, rows: rows }))
-      .setMimeType(ContentService.MimeType.JSON);
+    return json_({ ok: true, rows: out });
   } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({ ok: false, error: String(err) }))
-      .setMimeType(ContentService.MimeType.JSON);
+    return json_({ ok: false, error: String(err) });
   }
 }
