@@ -5,7 +5,7 @@
 // เช็กว่า deploy เวอร์ชันใหม่แล้วจริงไหม: เปิด URL ต่อท้าย ?action=ping
 //   ต้องเห็น {"ok":true,"version":"4.0", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
 
-var VERSION = '4.0';
+var VERSION = '4.1';
 var FOLDER_NAME = 'Rattana Scanner Files';
 var RETENTION_DAYS = 90;
 var SHEET_NAME = 'Sheet1';
@@ -82,6 +82,7 @@ function doPost(e) {
       var rowsD = readRows_(sheetD);
       var wantId = String(data.fileId || '');
       var owner = String(data.empId || '');
+      if (!owner) return json_({ ok: false, error: 'not authorized' });
       for (var i = 0; i < rowsD.length; i++) {
         if (String(rowsD[i][C_FILEID - 1]) === wantId && wantId) {
           if (String(rowsD[i][C_EMPID - 1]) !== owner) return json_({ ok: false, error: 'not authorized' });
@@ -134,6 +135,8 @@ function doGet(e) {
     if (params.action === 'file') {
       var fileId = String(params.fileId || '');
       var empId = String(params.empId || '');
+      // ต้องระบุตัวตนเสมอ — กันกรณีแถวเก่าที่ empId ว่างแล้วเรียกด้วย empId ว่างจนตรงกันพอดี
+      if (!empId || !fileId) return json_({ ok: false, error: 'not found or not authorized' });
       var hit = null;
       for (var i = 0; i < rows.length; i++) {
         if (String(rows[i][C_FILEID - 1]) === fileId && fileId) { hit = rows[i]; break; }
@@ -143,10 +146,14 @@ function doGet(e) {
       return json_({ ok: true, fileBase64: Utilities.base64Encode(file.getBlob().getBytes()), filename: String(hit[C_FILENAME - 1] || 'scan.pdf') });
     }
 
+    // ไม่ส่งรหัสพนักงานมา = ไม่คืนอะไรเลย
+    // เดิมเงื่อนไขเป็น (!empId2 || ...) ทำให้เปิด URL เปล่า ๆ เห็นรายการของทุกคน
+    // (ชื่อไฟล์/ชื่อผู้ทำ/วันที่) ซึ่งผิดข้อกำหนดที่ว่าประวัติต้องเห็นเฉพาะของตัวเอง
     var empId2 = String(params.empId || '');
+    if (!empId2) return json_({ ok: true, rows: [] });
     var out = rows
       .map(rowToObj_)
-      .filter(function (r) { return !empId2 || r.empId === empId2; })
+      .filter(function (r) { return r.empId === empId2; })
       .sort(function (a, b) { return new Date(b.timestamp) - new Date(a.timestamp); })
       .slice(0, 30);
     return json_({ ok: true, rows: out });
