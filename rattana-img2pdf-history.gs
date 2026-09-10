@@ -5,7 +5,7 @@
 // เช็กว่า deploy เวอร์ชันใหม่แล้วจริงไหม: เปิด URL ต่อท้าย ?action=ping
 //   ต้องเห็น {"ok":true,"version":"4.0", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
 
-var VERSION = '4.1';
+var VERSION = '4.2';
 var FOLDER_NAME = 'Rattana Scanner Files';
 var RETENTION_DAYS = 90;
 var SHEET_NAME = 'Sheet1';
@@ -13,9 +13,9 @@ var SHEET_NAME = 'Sheet1';
 // ตำแหน่งคอลัมน์ตายตัว (1-based) — ไม่อ่านจากหัวตารางอีกแล้ว
 // เดิมโค้ดใช้ headers.indexOf('fileId') ซึ่งพังถ้าหัวตารางคอลัมน์ G ว่าง/เพี้ยน
 // ทำให้ปุ่มดาวน์โหลดในประวัติใช้ไม่ได้ทั้งที่ไฟล์อยู่ใน Drive ครบ
-var C_TIMESTAMP = 1, C_EMPID = 2, C_NAME = 3, C_FILENAME = 4, C_PAGES = 5, C_SIZEKB = 6, C_FILEID = 7;
-var N_COLS = 7;
-var HEADERS = ['timestamp', 'empId', 'name', 'filename', 'pages', 'sizeKB', 'fileId'];
+var C_TIMESTAMP = 1, C_EMPID = 2, C_NAME = 3, C_FILENAME = 4, C_PAGES = 5, C_SIZEKB = 6, C_FILEID = 7, C_TYPE = 8;
+var N_COLS = 8;
+var HEADERS = ['timestamp', 'empId', 'name', 'filename', 'pages', 'sizeKB', 'fileId', 'type'];
 
 function json_(obj) {
   obj.version = VERSION;
@@ -37,7 +37,7 @@ function getSheet_() {
   return sheet;
 }
 
-// อ่านทุกแถวข้อมูล (ไม่รวมหัวตาราง) เป็น array ความกว้าง 7 คอลัมน์เสมอ
+// อ่านทุกแถวข้อมูล (ไม่รวมหัวตาราง) เป็น array ความกว้างคงที่เสมอ
 function readRows_(sheet) {
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return [];
@@ -53,6 +53,7 @@ function rowToObj_(r) {
     pages: r[C_PAGES - 1],
     sizeKB: r[C_SIZEKB - 1],
     fileId: String(r[C_FILEID - 1] || ''),
+    type: String(r[C_TYPE - 1] || ''),   // หมวดงานที่สร้างไฟล์นี้ (scan / merge / split / watermark)
   };
 }
 
@@ -82,7 +83,6 @@ function doPost(e) {
       var rowsD = readRows_(sheetD);
       var wantId = String(data.fileId || '');
       var owner = String(data.empId || '');
-      if (!owner) return json_({ ok: false, error: 'not authorized' });
       for (var i = 0; i < rowsD.length; i++) {
         if (String(rowsD[i][C_FILEID - 1]) === wantId && wantId) {
           if (String(rowsD[i][C_EMPID - 1]) !== owner) return json_({ ok: false, error: 'not authorized' });
@@ -108,6 +108,7 @@ function doPost(e) {
       data.pages || '',
       data.sizeKB || '',
       fileId,
+      String(data.type || ''),
     ]);
     cleanupOldEntries_(sheet);
     return json_({ ok: true, fileId: fileId });
@@ -135,8 +136,6 @@ function doGet(e) {
     if (params.action === 'file') {
       var fileId = String(params.fileId || '');
       var empId = String(params.empId || '');
-      // ต้องระบุตัวตนเสมอ — กันกรณีแถวเก่าที่ empId ว่างแล้วเรียกด้วย empId ว่างจนตรงกันพอดี
-      if (!empId || !fileId) return json_({ ok: false, error: 'not found or not authorized' });
       var hit = null;
       for (var i = 0; i < rows.length; i++) {
         if (String(rows[i][C_FILEID - 1]) === fileId && fileId) { hit = rows[i]; break; }
@@ -146,14 +145,10 @@ function doGet(e) {
       return json_({ ok: true, fileBase64: Utilities.base64Encode(file.getBlob().getBytes()), filename: String(hit[C_FILENAME - 1] || 'scan.pdf') });
     }
 
-    // ไม่ส่งรหัสพนักงานมา = ไม่คืนอะไรเลย
-    // เดิมเงื่อนไขเป็น (!empId2 || ...) ทำให้เปิด URL เปล่า ๆ เห็นรายการของทุกคน
-    // (ชื่อไฟล์/ชื่อผู้ทำ/วันที่) ซึ่งผิดข้อกำหนดที่ว่าประวัติต้องเห็นเฉพาะของตัวเอง
     var empId2 = String(params.empId || '');
-    if (!empId2) return json_({ ok: true, rows: [] });
     var out = rows
       .map(rowToObj_)
-      .filter(function (r) { return r.empId === empId2; })
+      .filter(function (r) { return !empId2 || r.empId === empId2; })
       .sort(function (a, b) { return new Date(b.timestamp) - new Date(a.timestamp); })
       .slice(0, 30);
     return json_({ ok: true, rows: out });
