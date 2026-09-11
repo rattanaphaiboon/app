@@ -577,9 +577,11 @@ const LS = {
 
 const CONFIG = {
   /* ชีตข้อมูลรถ + ศูนย์ซ่อม (อ่านอย่างเดียว) — ชุดเดียวกับ Rattana Repair Doc */
-  srcSheetId : '1B-fFrzUFaQ38Z0LC--1kAjAKy-U0rCQTtcGA8YmQrYw',
-  fleetGid   : '0',            /* ทะเบียนรถ + คลัง + ศูนย์ซ่อม */
-  priceGid   : '1013047526',   /* ตารางราคากลาง — ใช้เป็นคลังชื่องานซ่อม */
+  srcSheetId  : '1B-fFrzUFaQ38Z0LC--1kAjAKy-U0rCQTtcGA8YmQrYw',
+  fleetGid    : '0',           /* ทะเบียนรถ + คลัง + รุ่น/ประเภท */
+  repairsGid  : '1282495487',  /* งานซ่อมที่ผ่านมา — ใช้ทำตัวเลือกศูนย์ซ่อม/ชื่อรายการ */
+  priceSheetId: '1PJadywTiYFM8pjrsNZwQQI_aO4l0XxuqunzmUe1heBk',
+  priceGid    : '1013047526',  /* ตารางราคากลาง แยกตามประเภทรถ */
   customer   : 'บริษัท รัตนไพบูลย์ จำกัด',
   gasUrl     : LS.get('rq_gas') || ''
 };
@@ -591,6 +593,7 @@ let PROF  = {};                  /* ข้อมูลร้าน + เงื�
 let QUOTES = [];                 /* ประวัติในเครื่อง */
 let LOOKUP = { vendors:[], plates:[], items:[] };
 let PLATE_INFO = new Map();
+let PRICE = new Map();           /* ชื่องานซ่อม → { ประเภทรถ: ราคากลาง } */
 let MODE   = 'file';
 let FILES  = [];                 /* {id,name,type,size,blob,url} */
 let ITEMS  = [];
@@ -606,6 +609,8 @@ const int = n => Math.round(num(n)).toLocaleString('th-TH');
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 /* "บฉ 762 (รัตน)" → "บฉ762" — เทียบทะเบียนให้ตรงแม้พิมพ์ต่างกัน */
 const nplate = v => clean(v).replace(/\([^)]*\)/g,'').replace(/[\s-]/g,'').toLowerCase();
+/* "6 ล้อ" / "6ล้อ" / "4ล้อใหญ่" → เทียบกันได้ */
+const ntype = v => clean(v).replace(/\s+/g,'').toLowerCase();
 
 function fmtThaiDate(d){
   if(!d) return '-';
@@ -712,17 +717,20 @@ async function loadLookups(silent){
       const c = JSON.parse(cached);
       LOOKUP = c.look || LOOKUP;
       PLATE_INFO = new Map(c.plateInfo || []);
+      PRICE = new Map(c.price || []);
     }catch(e){}
   }
   try{
     setLoading(true);
-    const [fleet, price] = await Promise.all([
+    const [fleet, repairs, price] = await Promise.all([
       fetchRows(CONFIG.srcSheetId, CONFIG.fleetGid).catch(()=>[]),
-      fetchRows(CONFIG.srcSheetId, CONFIG.priceGid).catch(()=>[])
+      fetchRows(CONFIG.srcSheetId, CONFIG.repairsGid).catch(()=>[]),
+      fetchRows(CONFIG.priceSheetId, CONFIG.priceGid).catch(()=>[])
     ]);
     const vendors=new Map(), plates=new Map(), items=new Map();
     const add=(m,v,extra)=>{ const s=clean(v); if(!s||s.length<2||/^#/.test(s)) return;
-      if(!m.has(s)) m.set(s, Object.assign({v:s}, extra||{})); };
+      if(!m.has(s)) m.set(s, Object.assign({v:s}, extra||{}));
+      else if(extra && extra.hint && !m.get(s).hint) m.get(s).hint = extra.hint; };
 
     if(fleet.length){
       const head = fleet[0].map(h => clean(h).replace(/\s+/g,' '));
@@ -739,16 +747,40 @@ async function loadLookups(silent){
       });
       if(pinfo.size) PLATE_INFO = pinfo;
     }
+    /* งานซ่อมที่ผ่านมา — ชื่อศูนย์ซ่อมและชื่อรายการที่ใช้จริง */
+    if(repairs.length){
+      const head = repairs[0].map(h => clean(h));
+      const iv = head.indexOf('vendor');
+      const iItems = head.map((h,i) => /^รายการ\d/.test(h) ? i : -1).filter(i => i >= 0);
+      repairs.slice(1).forEach(r => {
+        if(iv >= 0) add(vendors, r[iv]);
+        iItems.forEach(i => add(items, r[i]));
+      });
+    }
+    /* ตารางราคากลาง — บล็อกละ "หัวข้อ" แล้วตามด้วยคอลัมน์ประเภทรถ */
     if(price.length){
       const head = price[0].map(h => clean(h));
-      const cols = head.map((h,i) => /หัวข้อ|รายการ/.test(h) ? i : -1).filter(i => i >= 0);
-      price.slice(1).forEach(r => cols.forEach(i => add(items, r[i], { hint:'ราคากลาง' })));
+      const blocks = [];
+      head.forEach((h,i) => { if(/^หัวข้อ/.test(h)) blocks.push({ name:i, types:[] }); });
+      blocks.forEach((b,bi) => {
+        const end = bi+1 < blocks.length ? blocks[bi+1].name : head.length;
+        for(let i = b.name+1; i < end; i++) if(clean(head[i])) b.types.push({ i, t: clean(head[i]) });
+      });
+      const pm = new Map();
+      price.slice(1).forEach(r => blocks.forEach(b => {
+        const nm = clean(r[b.name]); if(!nm || nm.length < 2) return;
+        const row = pm.get(nm) || {};
+        b.types.forEach(t => { const p = num(r[t.i]); if(p) row[ntype(t.t)] = p; });
+        pm.set(nm, row);
+        add(items, nm, { hint:'ราคากลาง' });
+      }));
+      if(pm.size) PRICE = pm;
     }
     const sortT = (a,b) => a.v.localeCompare(b.v, 'th');
     if(vendors.size) LOOKUP.vendors = [...vendors.values()].sort(sortT);
     if(plates.size)  LOOKUP.plates  = [...plates.values()].sort(sortT);
     if(items.size)   LOOKUP.items   = [...items.values()].sort(sortT);
-    LS.set(K.look, JSON.stringify({ look:LOOKUP, plateInfo:[...PLATE_INFO] }));
+    LS.set(K.look, JSON.stringify({ look:LOOKUP, plateInfo:[...PLATE_INFO], price:[...PRICE] }));
     if(!silent) showToast('อัพเดทข้อมูลเรียบร้อย ✓','success');
   }catch(e){
     if(!silent) showToast('โหลดรายชื่อไม่สำเร็จ: ' + e.message + ' (พิมพ์เองได้ตามปกติ)','warning',5000);
@@ -756,10 +788,27 @@ async function loadLookups(silent){
 }
 
 /* ══════════ Combo: dropdown + พิมพ์เองได้ ══════════ */
+/* ประเภทรถของทะเบียนที่กรอกอยู่ — ใช้เลือกคอลัมน์ราคากลาง */
+function curVType(){
+  const info = PLATE_INFO.get(nplate($('fPlate') ? $('fPlate').value : ''));
+  return info ? ntype(info.vtype) : '';
+}
+function stdPrice(name){
+  const row = PRICE.get(clean(name)); if(!row) return 0;
+  const t = curVType();
+  if(t && row[t]) return row[t];
+  const vals = Object.values(row).filter(Boolean);
+  return vals.length === 1 ? vals[0] : 0;   /* มีราคาเดียว = ใช้ได้ทุกประเภทรถ */
+}
 function comboList(src){
   if(src === 'vendors') return LOOKUP.vendors;
   if(src === 'plates')  return LOOKUP.plates;
-  if(src === 'items')   return LOOKUP.items;
+  if(src === 'items'){
+    return LOOKUP.items.map(o => {
+      const p = stdPrice(o.v);
+      return p ? { v:o.v, hint:'ราคากลาง ' + money(p) } : o;
+    });
+  }
   return [];
 }
 function bindCombo(inp){
@@ -793,6 +842,7 @@ function bindCombo(inp){
     panel.classList.remove('open');
     inp.dispatchEvent(new Event('input'));
     inp.dispatchEvent(new Event('change'));
+    if(inp.dataset.combo === 'items') fillStdPrice(inp);
   });
 }
 const initCombos = () => document.querySelectorAll('[data-combo]').forEach(bindCombo);
@@ -996,6 +1046,18 @@ function onItem(id, field, el){
   const row = el.closest('.irow');
   if(row) row.querySelector('.amt').textContent = money(num(it.qty) * num(it.price)) + ' ฿';
   renderSummary();
+}
+/* เลือกชื่อรายการที่มีในตารางราคากลาง → เติมราคาให้ ถ้ายังไม่ได้กรอกราคาเอง */
+function fillStdPrice(inp){
+  const row = inp.closest('.irow'); if(!row) return;
+  const it = ITEMS.find(i => i.id === row.dataset.id); if(!it || num(it.price)) return;
+  const p = stdPrice(inp.value); if(!p) return;
+  it.price = p;
+  const pi = row.querySelector('.p');
+  if(pi) pi.value = money(p);
+  row.querySelector('.amt').textContent = money(num(it.qty)*p) + ' ฿';
+  renderSummary();
+  showToast('เติมราคากลางให้แล้ว — แก้เป็นราคาร้านได้เลย','info',3000);
 }
 function renderItems(){
   $('itemRows').innerHTML = ITEMS.map((it,i) => `
