@@ -29,6 +29,7 @@ APPS=(
   rattana-img2pdf.html
   rattana-img2pdf-history.gs
   rattana-img2pdf-sw.js
+  rattana-img2pdf-version.json
   rattana-img2pdf.webmanifest
   img2pdf-icon-32.png
   img2pdf-icon-180.png
@@ -58,6 +59,15 @@ for a in "$@"; do
   esac
 done
 [ ${#PICK[@]} -gt 0 ] && APPS=("${PICK[@]}")
+
+# Rattana Scanner: สร้างไฟล์เวอร์ชันอัตโนมัติจาก <title> ในไฟล์ HTML
+# แอปใช้ไฟล์นี้เช็กว่ามีเวอร์ชันใหม่ไหม — สร้างจากของจริงทุกครั้ง เลขจะได้ไม่หลุดไม่ตรงกัน
+if [ -f "$SRC_DIR/rattana-img2pdf.html" ]; then
+  SCANV=$(grep -aoE '<title>Rattana Scanner v[0-9.]+' "$SRC_DIR/rattana-img2pdf.html" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+  if [ -n "$SCANV" ]; then
+    printf '{"version":"%s"}\n' "$SCANV" > "$SRC_DIR/rattana-img2pdf-version.json"
+  fi
+fi
 
 cd "$DEPLOY"
 
