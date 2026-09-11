@@ -1,6 +1,7 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.9 — รูปในเซลล์เก็บย้อนหลัง 30 วัน (เดิม 7) ตามที่ surat เคาะ · ~2,300 แถว ชีทจะหนักขึ้น
  * v9.8 — รูปในเซลล์อัปเดตเองทุกชั่วโมง (setupPhotoCellTrigger) + ล้างแถวที่หลุดช่วงออกให้เอง
  *         เดิม showCheckinPhotosInCells เป็นภาพนิ่ง แถวที่สแกนเข้ามาทีหลังจึงไม่มีรูป
  * v9.7 — revokeApproval() ถอนการอนุมัติจากในแอป (คู่แอป v12.64 · ★ ต้อง Deploy)
@@ -344,7 +345,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.8', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.9', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5374,8 +5375,8 @@ function auditScanPhotos(daysBack) {
    (หน้าประวัติในแอป · auditScanPhotos · auditDuplicateScans) ถ้าใส่สูตร IMAGE ทับ
    ค่าที่อ่านได้จะไม่ใช่ path อีก → พังเงียบหลายจุด · จึงวางรูปไว้ "คอลัมน์ R" แทน
    ★ อย่าใส่ทั้งชีท — สูตร IMAGE ทุกแถวคือการโหลดรูปจากเน็ตทุกครั้งที่เปิดชีท
-     ระดับพันแถว = ชีทอืดจนใช้ไม่ได้ · ค่าเริ่มต้นจึงทำให้แค่ 7 วันล่าสุด
-   ► showCheckinPhotosInCells()      7 วันล่าสุด สูง 90px
+     ระดับพันแถว = ชีทเริ่มหน่วง · 30 วัน ≈ 2,300 แถว (surat รับทราบและเลือกเอง 11/9)
+   ► showCheckinPhotosInCells()      ใช้ค่ากลาง PHOTO_CELL_DAYS (ตอนนี้ 30 วัน) สูง 90px
    ► showCheckinPhotosInCells(14,120) กำหนดเอง (วัน, ความสูงพิกเซล)
    ► clearCheckinPhotoCells()        ล้างรูปออก คืนความเร็วชีท */
 const PHOTO_CELL_COL = 18;   // R
@@ -5384,7 +5385,7 @@ function showCheckinPhotosInCells(daysBack, px) {
   const sh = getTab(T.LOG);
   if (!sh || sh.getLastRow() < 2) throw new Error('ไม่พบข้อมูลใน ' + T.LOG);
   if (!sbReady_()) throw new Error('ยังไม่ได้ตั้งค่า Supabase (SB_URL / SB_KEY)');
-  const back = parseInt(daysBack, 10) || 7;
+  const back = parseInt(daysBack, 10) || PHOTO_CELL_DAYS;   // v9.9: ไม่ส่งค่ามา = ใช้ค่ากลางตัวเดียวกับทริกเกอร์
   const size = parseInt(px, 10) || 90;
   const since = new Date(Date.now() - back * 86400000);
   const last = sh.getLastRow();
@@ -5529,7 +5530,7 @@ function traceLeaveQuota() {
    = ทุกคนที่สแกนพร้อมกันตอนเช้าจะช้าตามกันหมด · ใช้ทริกเกอร์รายชั่วโมงแทน คุ้มกว่า
    ► setupPhotoCellTrigger()  ติดตั้งครั้งเดียว (ถามสิทธิ์ครั้งแรก)
    ► removePhotoCellTrigger() ถอนออก */
-const PHOTO_CELL_DAYS = 7;    // โชว์ย้อนหลังกี่วัน
+const PHOTO_CELL_DAYS = 30;   // โชว์ย้อนหลังกี่วัน (surat เคาะ 11/9: 1 เดือน)
 const PHOTO_CELL_PX   = 90;   // ขนาดรูป (พิกเซล)
 
 function refreshCheckinPhotoCells() {
