@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.8 — รูปในเซลล์อัปเดตเองทุกชั่วโมง (setupPhotoCellTrigger) + ล้างแถวที่หลุดช่วงออกให้เอง
+ *         เดิม showCheckinPhotosInCells เป็นภาพนิ่ง แถวที่สแกนเข้ามาทีหลังจึงไม่มีรูป
  * v9.7 — revokeApproval() ถอนการอนุมัติจากในแอป (คู่แอป v12.64 · ★ ต้อง Deploy)
  *         อุดเคส: อนุมัติลาวันที่ 9 แล้วพนักงานขอเปลี่ยนเป็นวันที่ 10 → ใบเดิมค้าง approved
  *         กินโควต้าต่อ พอยื่นใบใหม่โดนตัดซ้ำ = เสียโควต้า 2 วันทั้งที่ลาวันเดียว
@@ -342,7 +344,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.7', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.8', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -371,6 +373,12 @@ function handle(e, method) {
     }
     if (action === 'registerUserSlip') {
       return jsonOut(actionRegisterUserSlip(p));
+    }
+
+    // v9.8: จุดรับสแกนจากเครื่อง ZKTeco (ผ่าน Cloudflare Worker rattana-adms)
+    // ไม่ใช้ session — กันด้วย DEVICE_KEY ใน actionDeviceIngest_ (ดู rattana-device-ingest.gs)
+    if (action === 'deviceIngest') {
+      return jsonOut(actionDeviceIngest_(p));
     }
 
     // ตรวจ session — รองรับทั้ง Google idToken และ SHEET:<รหัส>
@@ -5382,6 +5390,19 @@ function showCheckinPhotosInCells(daysBack, px) {
   const last = sh.getLastRow();
   const d = sh.getRange(2, 1, last - 1, 15).getValues();
 
+  // v9.8: เก็บกวาดแถวที่หลุดช่วงออกก่อน — ไม่งั้นรูปสะสมไปเรื่อยๆ จนชีทอืด
+  const oldCells = sh.getRange(2, PHOTO_CELL_COL, Math.max(1, last - 1), 1).getValues();
+  let cleared = 0;
+  for (let i = 0; i < d.length; i++) {
+    const ts = (d[i][0] instanceof Date) ? d[i][0] : new Date(d[i][0]);
+    const inWindow = ts && !isNaN(ts.getTime()) && ts >= since;
+    if (!inWindow && String(oldCells[i][0] || '') !== '') {
+      sh.getRange(i + 2, PHOTO_CELL_COL).clearContent();
+      try { sh.setRowHeight(i + 2, 21); } catch (_) {}
+      cleared++;
+    }
+  }
+
   const rows = [];
   for (let i = 0; i < d.length; i++) {
     const ts = (d[i][0] instanceof Date) ? d[i][0] : new Date(d[i][0]);
@@ -5390,7 +5411,7 @@ function showCheckinPhotosInCells(daysBack, px) {
     if (!path || path.indexOf('data:') === 0) continue;
     rows.push({ row: i + 2, path: path });
   }
-  if (!rows.length) return 'ไม่มีแถวที่มีรูปในช่วง ' + back + ' วันล่าสุด';
+  if (!rows.length) return 'ไม่มีแถวที่มีรูปในช่วง ' + back + ' วันล่าสุด' + (cleared ? ' · ล้างของเก่าออก ' + cleared + ' แถว' : '');
 
   // เซ็นลิงก์อายุ 1 ปี — สูตร IMAGE ต้องเปิดรูปได้เองทุกครั้งที่เปิดชีท ลิงก์อายุสั้นจะกลายเป็นรูปเสีย
   const signed = sbSignedUrls_(rows.map(r => r.path), 31536000);
@@ -5496,6 +5517,41 @@ function traceLeaveQuota() {
   L.push('รวมที่หักจากใบในแอปรอบปีนี้: ' + Math.round(cut * 100) / 100 + ' วัน (ยังไม่รวมยอดใช้ก่อนใช้แอป)');
 
   const msg = L.join('\n');
+  Logger.log(msg);
+  return msg;
+}
+
+/* ── v9.8: ให้รูปในเซลล์อัปเดตเองทุกชั่วโมง ────────────────────────────────────
+   ที่มา (surat เจอ 11/9): รูปขึ้นอยู่ดีๆ แล้วแถวใหม่ไม่ขึ้น
+   เพราะ showCheckinPhotosInCells เป็น "ถ่ายภาพนิ่ง" — เติมรูปให้เฉพาะแถวที่มีอยู่ ณ ตอนรัน
+   สแกนที่เข้ามาทีหลังจึงไม่มีรูป ต้องมารันเองใหม่ทุกครั้ง
+   ทำไมไม่เติมตอนสแกนเลย: ต้องขอลิงก์จาก Supabase เพิ่มอีก 1 รอบ ขณะที่ยังถือล็อกอยู่
+   = ทุกคนที่สแกนพร้อมกันตอนเช้าจะช้าตามกันหมด · ใช้ทริกเกอร์รายชั่วโมงแทน คุ้มกว่า
+   ► setupPhotoCellTrigger()  ติดตั้งครั้งเดียว (ถามสิทธิ์ครั้งแรก)
+   ► removePhotoCellTrigger() ถอนออก */
+const PHOTO_CELL_DAYS = 7;    // โชว์ย้อนหลังกี่วัน
+const PHOTO_CELL_PX   = 90;   // ขนาดรูป (พิกเซล)
+
+function refreshCheckinPhotoCells() {
+  return showCheckinPhotosInCells(PHOTO_CELL_DAYS, PHOTO_CELL_PX);
+}
+
+function setupPhotoCellTrigger() {
+  removePhotoCellTrigger();
+  ScriptApp.newTrigger('refreshCheckinPhotoCells').timeBased().everyHours(1).create();
+  const msg = 'ตั้งให้รูปในเซลล์อัปเดตเองทุก 1 ชั่วโมงแล้ว (ย้อนหลัง ' + PHOTO_CELL_DAYS + ' วัน · ' + PHOTO_CELL_PX + 'px)\n' +
+              'แถวที่เก่ากว่านั้นจะถูกล้างออกให้เอง ชีทจึงไม่อืดสะสม';
+  Logger.log(msg);
+  try { getSS().toast(msg, 'ตั้งอัปเดตรูปอัตโนมัติ', 10); } catch (e) {}
+  return msg;
+}
+
+function removePhotoCellTrigger() {
+  let n = 0;
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'refreshCheckinPhotoCells') { ScriptApp.deleteTrigger(t); n++; }
+  });
+  const msg = n ? 'ถอนทริกเกอร์อัปเดตรูปออกแล้ว ' + n + ' ตัว' : 'ไม่มีทริกเกอร์อัปเดตรูปอยู่';
   Logger.log(msg);
   return msg;
 }
