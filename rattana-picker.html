@@ -425,10 +425,13 @@ code{font-family:'Courier New',monospace;font-size:12px;background:var(--pill-bg
         </div>
       </div>
       <div class="hint" id="bpProg"></div>
+      <div class="hint" id="bkProg"></div>
       <div class="hint" id="bpStatus"></div>
       <div class="hint">
         <b>รีเฟรช SQL</b> = สั่งเครื่องที่ออฟฟิศไปดึงชีต <code>ปลีกก</code> ใหม่ (ทำครั้งเดียวพอ)<br>
-        <b>อ่านเอกสารวันนี้</b> = อ่านชีต <code>BK_BV</code> ตามวันที่ที่เลือก แล้วเอาปลีกกมาเทียบ
+        <b>อ่านเอกสารวันนี้</b> = อ่านชีต <code>BK_BV</code> ตามวันที่ที่เลือก แล้วเอาปลีกกมาเทียบ<br>
+        <span class="txt-muted">ถ้ายังไม่ได้ตั้งสคริปต์ที่ออฟฟิศ กด <b>อ่านเอกสารวันนี้</b> อย่างเดียวก็ดูข้อมูลได้
+        แต่จะยังไม่มีการปรับจำนวน</span>
       </div>
 
       <!-- ── 2) เลือกห้องเอกสาร ── -->
@@ -1668,17 +1671,25 @@ function bpRequestSync(kind){
     });
 }
 
+var BP_PICKUP_MS=30000;   /* ไม่มีใครมารับงานภายในเท่านี้ = สคริปต์ไม่ได้เปิด ไม่ต้องรอต่อ */
+
 function bpPollJob(id,onTick){
-  var t0=Date.now();
+  var t0=Date.now(), sawRunning=false;
   return new Promise(function(resolve,reject){
     (function tick(){
       BPC.from('bp_sync_jobs').select('*').eq('id',id).single().then(function(r){
         if(r.error){ reject(new Error(r.error.message)); return; }
         var j=r.data, sec=Math.round((Date.now()-t0)/1000);
+        if(j.status==='running') sawRunning=true;
         if(j.status==='done'){ resolve(j); return; }
         if(j.status==='error'){ reject(new Error(j.message||'สคริปต์แจ้งว่าทำงานไม่สำเร็จ')); return; }
+        /* ยังไม่มีใครมารับงานเลย = สคริปต์ที่ออฟฟิศไม่ได้เปิด บอกเร็วๆ ดีกว่าให้รอเก้อ */
+        if(!sawRunning && Date.now()-t0>BP_PICKUP_MS){
+          reject(new Error('ไม่มีสคริปต์มารับงานภายใน '+Math.round(BP_PICKUP_MS/1000)+' วินาที'));
+          return;
+        }
         if(Date.now()-t0>BP_WAIT_MS){
-          reject(new Error('รอเกิน '+Math.round(BP_WAIT_MS/1000)+' วินาที — สคริปต์ที่ออฟฟิศอาจไม่ได้เปิดอยู่'));
+          reject(new Error('สคริปต์รับงานแล้วแต่รันเกิน '+Math.round(BP_WAIT_MS/1000)+' วินาที'));
           return;
         }
         if(onTick) onTick(j.status,sec);
@@ -1730,8 +1741,6 @@ function bpLoadCut(){
 function bpRefresh(){
   setBusy('btnRefresh',true,'กำลังสั่งงาน...');
   prog('bpProg','<span class="txt-muted">⏳ ส่งคำสั่งไปที่เครื่องออฟฟิศ...</span>');
-  document.getElementById('roomZone').style.display='none';
-  document.getElementById('bpResult').style.display='none';
 
   bpRequestSync('all')
     .then(function(id){
@@ -1744,18 +1753,18 @@ function bpRefresh(){
     })
     .then(function(job){
       setBusy('btnRefresh',false);
-      prog('bpProg','<span class="txt-success">✅ รีเฟรชแล้ว — '+(job.message||'สำเร็จ')+'</span>');
-      return bpLoadRooms();
+      prog('bpProg','<span class="txt-success">✅ รีเฟรช ปลีกก แล้ว — '+(job.message||'สำเร็จ')+'</span>');
     })
     .catch(function(e){
       setBusy('btnRefresh',false);
       var m=String(e&&e.message||e);
-      prog('bpProg','<span class="txt-danger">❌ '+m+'</span>');
-      prog('bpStatus', m.indexOf('รอเกิน')>=0
-        ? '<span class="txt-danger">ตรวจว่าสคริปต์ <code>rattana-sql-bridge.ps1</code> รันอยู่ที่เครื่องออฟฟิศหรือไม่</span>'
-        : '');
-      showToast('รีเฟรชไม่สำเร็จ','error');
-    });
+      prog('bpProg','<span class="txt-danger">❌ รีเฟรชไม่สำเร็จ: '+m+
+        '</span><br><span class="txt-muted">สคริปต์ <code>rattana-sql-bridge.ps1</code> ยังไม่ได้เปิดที่เครื่องออฟฟิศ '+
+        '— จะอ่านเอกสารต่อให้ แต่<b>จะยังไม่มีการปรับจำนวน</b></span>');
+      showToast('รีเฟรชไม่สำเร็จ — อ่านเอกสารต่อให้','warning');
+    })
+    /* สำเร็จหรือไม่ก็อ่านเอกสารต่อเสมอ ผู้ใช้จะได้ไม่ค้างอยู่ที่หน้าว่าง */
+    .then(function(){ return bpLoadRooms(); });
 }
 
 /* ═══ 2) โหลดรายห้องจากชีต BK_BV — ดึงแค่ "เลขที่ใบจอง + จำนวนบรรทัด" ═══ */
@@ -1765,7 +1774,7 @@ function bpLoadRooms(){
   CO.room=''; CO.lines=[]; CO.shops=[]; CO.adj=[]; CO.stat=null;
   document.getElementById('bpResult').style.display='none';
   setBusy('btnRooms',true,'กำลังโหลด...');
-  prog('bpProg','<span class="txt-muted">⏳ กำลังอ่านชีต BK_BV และตารางปลีกก...</span>');
+  prog('bkProg','<span class="txt-muted">⏳ กำลังอ่านชีต BK_BV ('+formatThaiDate(dstr)+')...</span>');
 
   return Promise.all([
     gvizJsonp(BKBV_SHEET_ID,BKBV_TAB,
@@ -1798,16 +1807,41 @@ function bpLoadRooms(){
 
     if(!CO.rooms.length){
       document.getElementById('roomZone').style.display='none';
-      prog('bpProg','<span class="txt-danger">ไม่พบเอกสารของวันที่ '+formatThaiDate(dstr)+' ในชีต BK_BV</span>');
-      return;
+      prog('bkProg','<span class="txt-danger">ไม่พบเอกสารของวันที่ '+formatThaiDate(dstr)+
+        ' ในชีต BK_BV</span> <span class="txt-muted">กำลังหาว่ามีวันไหนบ้าง...</span>');
+      /* บอกให้รู้ว่ามีวันไหนให้เลือกบ้าง จะได้ไม่ต้องเดา */
+      return gvizJsonp(BKBV_SHEET_ID,BKBV_TAB,'select A, count(B) group by A order by A desc limit 8')
+        .then(function(dd){
+          var ds=gvizRows(dd).map(function(r){ return { d:r._c[0], n:num(r._c[1]) }; })
+                             .filter(function(x){ return x.d; });
+          prog('bkProg','<span class="txt-danger">ไม่พบเอกสารของวันที่ '+formatThaiDate(dstr)+
+            ' ในชีต BK_BV</span>'+
+            (ds.length? ('<br>วันที่มีข้อมูลล่าสุด: '+ds.map(function(x){
+                return '<a href="javascript:void(0)" onclick="useDate(\''+
+                       String(x.d).replace(/\//g,'-')+'\')"><b>'+formatThaiDate(x.d)+
+                       '</b></a> <span class="txt-muted">('+nf(x.n)+')</span>';
+              }).join(' · '))
+            : '<br><span class="txt-muted">อ่านรายการวันที่ไม่ได้ — ตรวจว่าชีตยังแชร์แบบ "ทุกคนที่มีลิงก์" อยู่หรือไม่</span>'));
+        })
+        .catch(function(){
+          prog('bkProg','<span class="txt-danger">ไม่พบเอกสารของวันที่ '+formatThaiDate(dstr)+
+            ' ในชีต BK_BV</span>');
+        });
     }
-    prog('bpProg','<span class="txt-success">✅ พบ '+CO.rooms.length+' ห้อง</span>');
+    prog('bkProg','<span class="txt-success">✅ พบ '+CO.rooms.length+' ห้อง</span>');
     document.getElementById('roomZone').style.display='block';
     renderRooms();
   }).catch(function(e){
     setBusy('btnRooms',false);
-    prog('bpProg','<span class="txt-danger">❌ โหลดไม่สำเร็จ: '+(e&&e.message||e)+'</span>');
+    prog('bkProg','<span class="txt-danger">❌ อ่านชีตไม่สำเร็จ: '+(e&&e.message||e)+
+      '</span><br><span class="txt-muted">ถ้าขึ้น timeout ให้ลองกดใหม่ หรือตรวจว่าชีตยังแชร์แบบ "ทุกคนที่มีลิงก์" อยู่</span>');
   });
+}
+
+/* กดวันที่จากรายการที่แนะนำ */
+function useDate(d){
+  document.getElementById('bkDate').value=d;
+  bpLoadRooms();
 }
 
 function renderRooms(){
@@ -1828,7 +1862,7 @@ function renderRooms(){
 function pickRoom(room){
   CO.room=room;
   renderRooms();
-  prog('bpProg','<span class="txt-muted">⏳ กำลังโหลดห้อง '+room+'...</span>');
+  prog('bkProg','<span class="txt-muted">⏳ กำลังโหลดห้อง '+room+'...</span>');
   document.getElementById('bpResult').style.display='none';
 
   gvizJsonp(BKBV_SHEET_ID,BKBV_TAB,
@@ -1839,12 +1873,12 @@ function pickRoom(room){
       coRender();
       renderBillRuns();
       document.getElementById('bpResult').style.display='block';
-      prog('bpProg','<span class="txt-success">✅ ห้อง '+room+' — '+nf(CO.lines.length)+
+      prog('bkProg','<span class="txt-success">✅ ห้อง '+room+' — '+nf(CO.lines.length)+
         ' บรรทัดพร้อมเปิดบิล · ปรับจำนวน '+nf(CO.adj.length)+' รายการ</span>');
       showToast('โหลดห้อง '+room+' แล้ว','success');
     })
     .catch(function(e){
-      prog('bpProg','<span class="txt-danger">❌ โหลดห้อง '+room+' ไม่สำเร็จ: '+(e&&e.message||e)+'</span>');
+      prog('bkProg','<span class="txt-danger">❌ โหลดห้อง '+room+' ไม่สำเร็จ: '+(e&&e.message||e)+'</span>');
     });
 }
 
