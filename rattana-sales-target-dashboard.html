@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana ยอดขายเทียบเป้าหมาย v8.20</title>
+<title>Rattana ยอดขายเทียบเป้าหมาย v8.34</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -227,7 +227,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v8.20</small>
+      <small>ยอดขายเทียบเป้าหมาย v8.34</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
       <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">⟳</button>
@@ -340,6 +340,8 @@ const W1_SHEET_NAME  = 'W1';
 const RSP_SHEET_NAME      = 'RSP ส่ง';
 const RSP_PLIK_SHEET_NAME = 'RSP ปลีก';
 const CHANNEL_SHEET_NAME  = 'Channal';
+const PVSALE_SHEET_ID   = '1WcjSqYCggx79UPNlUpKqEkqIrwbt9RZxc6jEvBju0Ak';
+const PVSALE_SHEET_NAME = 'Data Sale';
 const NL_SHEET_ID   = '1zE_AJzFe7AruA9gft1vax6XN2Qt-hidCH09krBH8wf4';
 const NL_SHEET_NAME = 'NL';
 const CG_SHEET_NAME = 'CG';
@@ -656,7 +658,7 @@ function getLatestBpMonth(bpRaw) {
   return latest;
 }
 
-function calcBpActualForMonth(parsed, normName, month, bpIndex) {
+function calcBpActualForMonth(parsed, normName, month, bpIndex, empCode) {
   if (!month) return null;
   const key = normName + '||' + month.mm + '/' + month.yyyy;
   const bucket = bpIndex.get(key) || [];
@@ -666,19 +668,56 @@ function calcBpActualForMonth(parsed, normName, month, bpIndex) {
   if (normalizeText(parsed.dim).toUpperCase() === 'PRODUCT NAME' || normalizeText(parsed.dim).toUpperCase() === 'PRODUCT') {
     const pn = normalizeText(parsed.value);
     const pnNoCode = pn.includes('@') ? normalizeText(pn.split('@').slice(1).join('@')) : pn;
-    const s = new Set();
-    bucket.forEach(r => {
+    const matches = bucket.filter(r => {
       const rn = normalizeText(String(r['Product_Name']||''));
       const rnNoCode = rn.includes('@') ? normalizeText(rn.split('@').slice(1).join('@')) : rn;
-      if ((rn === pn || rnNoCode === pnNoCode) && r['Customer_Code']) s.add(r['Customer_Code']);
+      return rn === pn || rnNoCode === pnNoCode;
     });
-    return s.size;
+    if (parsed.unit === 'ร้าน') return new Set(matches.map(r=>r['Customer_Code']).filter(Boolean)).size;
+    if (parsed.unit === 'บาท' || parsed.unit === '%บาท') return matches.reduce((s,r)=>s+r._exvatcn2, 0);
+    if (parsed.unit === 'ลัง') return matches.reduce((s,r)=>s+r._csx, 0);
+    if (parsed.unit === 'ตัน') return matches.reduce((s,r)=>s+r._csx, 0) / 1000;
+    return new Set(matches.map(r=>r['Customer_Code']).filter(Boolean)).size;
   }
   if (dimKey === 'KPI') {
     const val = normalizeText(parsed.value).toLowerCase();
     if (val === 'รวมbplus') return bucket.reduce((s,r)=>s+r._exvatcn2,0);
     if (val === 'active outlet') return new Set(bucket.map(r=>r['Customer_Code']).filter(Boolean)).size;
     if (val === 'all sku') return new Set(bucket.map(r=>r['Product_Name']).filter(Boolean)).size;
+    if (val === 'effective outlet' && empCode) {
+      const thresh = debtorThreshold(empCode);
+      if (thresh !== null) {
+        const custMap = new Map();
+        bucket.forEach(r => { if (r['Customer_Code']) custMap.set(r['Customer_Code'], (custMap.get(r['Customer_Code'])||0) + r._exvatcn2); });
+        return [...custMap.values()].filter(s => s >= thresh).length;
+      }
+    }
+    if (val.includes('fmcg')) {
+      const EXCLUDE_CAT_BU_FMCG = ['bplus บุหรี่', 'bplus thaibev al'];
+      const filtered = bucket.filter(r => {
+        const prathan = normalizeText(String(r['ประเภทตัวแทน'] || '')).toLowerCase();
+        const catBu = normalizeText(String(r['Cat_BU'] || '')).toLowerCase();
+        return prathan !== 'ตัวแทน' && !EXCLUDE_CAT_BU_FMCG.includes(catBu);
+      });
+      return filtered.reduce((s, r) => s + r._exvatcn2, 0);
+    }
+    if (normalizeText(parsed.value).startsWith('สินค้าตัวแทน') && !val.includes('บุหรี่')) {
+      const EXCLUDE_CAT_BU = ['bplus บุหรี่', 'bplus thaibev al', 'ไม่กำหนดประเภท'];
+      const filtered = bucket.filter(r => {
+        const prathan = normalizeText(String(r['ประเภทตัวแทน'] || '')).toLowerCase();
+        const catBu = normalizeText(String(r['Cat_BU'] || '')).toLowerCase();
+        return prathan === 'ตัวแทน' && !EXCLUDE_CAT_BU.includes(catBu);
+      });
+      return filtered.reduce((s, r) => s + r._exvatcn2, 0);
+    }
+    if (val.includes('บุหรี่') && val.includes('สินค้าตัวแทน')) {
+      const filtered = bucket.filter(r => {
+        const prathan = normalizeText(String(r['ประเภทตัวแทน'] || '')).toLowerCase();
+        const catBu = normalizeText(String(r['Cat_BU'] || '')).toLowerCase();
+        return catBu === 'bplus บุหรี่' && prathan !== 'ตัวแทน';
+      });
+      return filtered.reduce((s, r) => s + r._exvatcn2, 0);
+    }
     return null;
   }
   if (bpCol) {
@@ -691,8 +730,82 @@ function calcBpActualForMonth(parsed, normName, month, bpIndex) {
   }
   return null;
 }
-function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw) {
+function buildPvSaleIndex(pvSaleRaw) {
+  const idx = new Map();
+  pvSaleRaw.forEach(r => {
+    const nm = normalizeName(r['Sale No ROO'] || r['Sale NO ROO'] || '');
+    const catBu = normalizeText(r['Cat_BU'] || '');
+    if (nm && catBu) {
+      const key = nm + '||CATBU||' + catBu.toUpperCase();
+      idx.set(key, { baht: parseNum(r['บาท']), lang: parseNum(r['ลัง']), ran: parseNum(r['ร้าน']) });
+    }
+    const nm2 = normalizeName(r['Sale No ROO_2'] || r['Sale NO ROO_2'] || '');
+    const catType = normalizeText(r['Cat_Type'] || '');
+    if (nm2 && catType) {
+      const key = nm2 + '||CATTYPE||' + catType.toUpperCase();
+      idx.set(key, { baht: parseNum(r['บาท_2'] || ''), lang: parseNum(r['ลัง_2'] || ''), ran: parseNum(r['ร้าน_2'] || '') });
+    }
+    const nm3 = normalizeName(r['Sale No ROO_3'] || r['Sale NO ROO_3'] || '');
+    const prodName = normalizeText(r['Product_Name'] || '');
+    if (nm3 && prodName) {
+      const prodNameUp = prodName.toUpperCase();
+      const prodNoCode = prodNameUp.includes('@') ? normalizeText(prodNameUp.split('@').slice(1).join('@')) : prodNameUp;
+      const key = nm3 + '||PRODUCT||' + prodNoCode;
+      idx.set(key, { baht: parseNum(r['บาท_3'] || ''), lang: parseNum(r['ลัง_3'] || ''), ran: parseNum(r['ร้าน_3'] || '') });
+    }
+    const nm4 = normalizeName(r['Sale No ROO_4'] || r['Sale NO ROO_4'] || '');
+    const catBrand = normalizeText(r['Cat_Brand'] || '');
+    if (nm4 && catBrand) {
+      const key = nm4 + '||CATBRAND||' + catBrand.toUpperCase();
+      idx.set(key, { baht: parseNum(r['บาท_4'] || ''), lang: parseNum(r['ลัง_4'] || ''), ran: parseNum(r['ร้าน_4'] || '') });
+    }
+    const nm5 = normalizeName(r['Sale No ROO_5'] || r['Sale NO ROO_5'] || '');
+    const catPack = normalizeText(r['Cat_Pack'] || '');
+    if (nm5 && catPack) {
+      const key = nm5 + '||CATSIZE||' + catPack.toUpperCase();
+      idx.set(key, { baht: parseNum(r['บาท_5'] || ''), lang: parseNum(r['ลัง_5'] || ''), ran: parseNum(r['ร้าน_5'] || '') });
+    }
+    const nm6 = normalizeName(r['Sale No ROO_6'] || r['Sale NO ROO_6'] || '');
+    if (nm6) {
+      const key = nm6 + '||BUREE||';
+      idx.set(key, { baht: parseNum(r['บาท_6'] || ''), lang: parseNum(r['ลัง_6'] || ''), ran: parseNum(r['ร้าน_6'] || '') });
+    }
+  });
+  return idx;
+}
+function lookupPvSale(pvSaleIndex, normName, parsed) {
+  if (!pvSaleIndex || pvSaleIndex.size === 0) return null;
+  const dimKey = normalizeText(parsed.dim).toUpperCase();
+  let key;
+  if (dimKey === 'CAT BU') {
+    key = normName + '||CATBU||' + normalizeText(parsed.value).toUpperCase();
+  } else if (dimKey === 'CAT TYPE') {
+    key = normName + '||CATTYPE||' + normalizeText(parsed.value).toUpperCase();
+  } else if (dimKey === 'PRODUCT NAME' || dimKey === 'PRODUCT') {
+    const pv = normalizeText(parsed.value).toUpperCase();
+    const pvNoCode = pv.includes('@') ? normalizeText(pv.split('@').slice(1).join('@')) : pv;
+    key = normName + '||PRODUCT||' + pvNoCode;
+  } else if (dimKey === 'CAT BRAND') {
+    key = normName + '||CATBRAND||' + normalizeText(parsed.value).toUpperCase();
+  } else if (dimKey === 'CAT SIZE') {
+    key = normName + '||CATSIZE||' + normalizeText(parsed.value).toUpperCase();
+  } else if (dimKey === 'KPI' && normalizeText(parsed.value).includes('บุหรี่') && normalizeText(parsed.value).includes('สินค้าตัวแทน')) {
+    key = normName + '||BUREE||';
+  } else return null;
+  const entry = pvSaleIndex.get(key);
+  if (!entry) return null;
+  const unit = parsed.unit;
+  if (unit === 'บาท' || unit === '%บาท') return entry.baht;
+  if (unit === 'ลัง') return entry.lang;
+  if (unit === 'ร้าน') return entry.ran;
+  if (unit === 'ตัน') return (entry.lang || 0) / 1000;
+  return null;
+}
+function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw, pvSaleRaw) {
   const bpIndex = buildBpIndex(bpRaw);
+  const prevBpIndex = buildBpIndex(pvSaleRaw || []);
+  const prevSaleMonth = getLatestBpMonth(pvSaleRaw || []);
+  console.log('[DataSale] index size:', prevBpIndex.size, 'latestMonth:', prevSaleMonth, 'sample keys:', [...prevBpIndex.keys()].slice(0,5));
   const latestBpMonth = getLatestBpMonth(bpRaw);
   // ใช้เดือนปัจจุบัน (calendar) ถ้า BP มีข้อมูล ไม่งั้น fallback latestBpMonth
   const _now = new Date();
@@ -805,17 +918,21 @@ function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw) 
       if (effectiveMonth) {
         const key = normName + '||' + effectiveMonth.mm + '/' + effectiveMonth.yyyy;
         const bucket = bpIndex.get(key) || [];
-        const custSet = new Set();
-        bucket.forEach(r => {
+        const matches = bucket.filter(r => {
           const rn = normalizeText(String(r['Product_Name']||''));
           const rnNoCode = rn.includes('@') ? normalizeText(rn.split('@').slice(1).join('@')) : rn;
-          if ((rn === _prodName || rnNoCode === _prodNameNoCode) && r['Customer_Code']) custSet.add(r['Customer_Code']);
+          return rn === _prodName || rnNoCode === _prodNameNoCode;
         });
-        actual = custSet.size;
+        if (parsed.unit === 'ร้าน') actual = new Set(matches.map(r=>r['Customer_Code']).filter(Boolean)).size;
+        else if (parsed.unit === 'บาท' || parsed.unit === '%บาท') actual = matches.reduce((s,r)=>s+r._exvatcn2, 0);
+        else if (parsed.unit === 'ลัง') actual = matches.reduce((s,r)=>s+r._csx, 0);
+        else if (parsed.unit === 'ตัน') actual = matches.reduce((s,r)=>s+r._csx, 0) / 1000;
+        else actual = new Set(matches.map(r=>r['Customer_Code']).filter(Boolean)).size;
+        stores = new Set(matches.map(r=>r['Customer_Code']).filter(Boolean)).size;
       } else {
         actual = 0;
       }
-      console.log('[PRODNAME]', normName, empCode, '_prodName=', _prodName, 'effectiveMonth=', effectiveMonth, 'actual=', actual);
+      console.log('[PRODNAME]', normName, empCode, '_prodName=', _prodName, 'unit=', parsed.unit, 'actual=', actual);
       supported = true;
     } else if (parsed.dim.toUpperCase() === 'KPI' && ['Check in','Check-in'].includes(parsed.value)) {
       // นับชื่อร้านค้าไม่ซ้ำ จาก customerRaw ตาม salesman name; fallback ลอง "คุณ"+name
@@ -940,7 +1057,7 @@ function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw) 
     if (!supported) console.warn('[UNSUPPORTED]', normName, empCode, 'goalName=', goalName, 'dim=', JSON.stringify(parsed.dim), 'dimKey=', dimKey, 'supported=', supported);
     const pct = (supported && targetVal > 0) ? (actual/targetVal*100) : null;
     const st = statusOf(pct, supported);
-    const prevActual = calcBpActualForMonth(parsed, normName, prevRefMonth, bpIndex);
+    const prevActual = calcBpActualForMonth(parsed, normName, prevSaleMonth, prevBpIndex, empCode);
     rows.push({
       wh, name, nickname: t['ชื่อเล่น']||'', month: t['เดือน']||'', empCode,
       dim: parsed.dim, dimLabel: DIM_LABEL[dimKey] || parsed.dim,
@@ -983,6 +1100,7 @@ async function loadData(showSpin) {
       return parseCsvDedup(await res.text());
     })();
     const pvTotalRaw   = await loadFromSheets(BP_SHEET_ID, PV_TOTAL_SHEET_NAME).catch(()=>[]);
+    const pvSaleRaw    = await loadFromSheets(PVSALE_SHEET_ID, PVSALE_SHEET_NAME).catch(()=>[]);
     const nlRaw      = await (async()=>{
       const url = `https://docs.google.com/spreadsheets/d/${NL_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(NL_SHEET_NAME)}&range=S:W`;
       const res = await fetch(url).catch(()=>null);
@@ -1026,6 +1144,7 @@ async function loadData(showSpin) {
     state.rspPlikRaw  = rspPlikRaw;
     state.channelRaw  = channelRaw;
     state.pvTotalRaw  = pvTotalRaw;
+    state.pvSaleRaw   = pvSaleRaw;
     state.nlRaw      = nlRaw;
     state.nlSkuRaw   = nlSkuRaw;
     state.cgRaw      = cgRaw;
@@ -1035,7 +1154,7 @@ async function loadData(showSpin) {
     const _ghc = (bpRaw||[]).some(r => { const my = bpMonthYear(r['Doc_Date']); return my && my.mm===_gcm && my.yyyy===_gcy; });
     state.globalRefMonth = _ghc ? { mm:_gcm, yyyy:_gcy } : state.latestBpMonth;
     setCache('targetCache', targetRaw);
-    state.rows = computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw);
+    state.rows = computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw, pvSaleRaw);
     buildFilterControls();
     renderAll();
   } catch (e) {
@@ -1265,7 +1384,7 @@ function renderPivot() {
 
   const fmtC = (r, n) => {
     if (n === null || n === undefined || n === '') return '-';
-    if (r && (r.unit === 'ตัน' || r.unit === 'บาท' || r.unit === '%บาท' || r.unit === 'ลัง')) return fmtNum(n, 2);
+    if (r && (r.unit === 'ตัน' || r.unit === 'ลัง')) return Number.isInteger(n) ? fmtNum(n, 0) : fmtNum(n, 2);
     return fmtNum(Math.round(n), 0);
   };
 
@@ -1296,7 +1415,7 @@ function renderPivot() {
         ${colHdrWh}
       </tr></thead>
       <tbody>
-        ${mkRow('เป้าหมาย', c => `<td class="ptbl-td">${c._empty ? '' : fmtC(c, c.target)}</td>`)}
+        ${mkRow('เป้าหมาย', c => `<td class="ptbl-td">${c._empty ? '' : (c.target === null ? '-' : fmtNum(Math.round(c.target), 0))}</td>`)}
         ${mkRow('ทำได้', c => `<td class="ptbl-td">${c._empty ? '' : (c.supported ? fmtC(c, c.actual) : '<span class="ptbl-muted">-</span>')}</td>`)}
         <tr><td class="ptbl-label">%</td>${cols.map(c => {
           if (c._empty) return `<td class="ptbl-td"></td>`;
@@ -1316,7 +1435,7 @@ function renderPivot() {
           const need = Math.max(0, c.target - (c.actual||0));
           return `<td class="ptbl-td">${fmtC(c, need / wd.remaining)}</td>`;
         })}
-        ${mkRow('ทำได้เดือนที่แล้ว', c => `<td class="ptbl-td ptbl-muted" style="font-size:11px">${c._empty ? '' : (c.prevActual !== null ? fmtC(c, c.prevActual) : '<span class="ptbl-muted">-</span>')}</td>`)}
+        ${mkRow('ทำได้เดือนที่แล้ว', c => `<td class="ptbl-td">${c._empty ? '' : (c.prevActual !== null ? fmtC(c, c.prevActual) : '<span class="ptbl-muted">-</span>')}</td>`)}
       </tbody>
     </table></div></div>`;
   });
