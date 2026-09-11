@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v4.63</title>
+<title>Rattana Online Order v4.64</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -811,7 +811,7 @@ body.dark .pdpa-body h4,body.dark .pdpa-body b{color:var(--gold-light,#e2c882)}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.63</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.64</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -1655,16 +1655,50 @@ let cartUnsel=(function(){ try{return new Set(JSON.parse(localStorage.getItem('r
      และฝั่งลูกค้า = ตะกร้าเดี๋ยวมีเดี๋ยวหาย เพราะ getPending คืนเฉพาะ orderId ใหม่สุด
    แก้: จำไว้ใน **หน่วยความจำ** (กันภายในเซสชัน) + **IndexedDB** (กันข้ามการรีโหลด) คู่กับ localStorage */
 let _draftOid='';
+/* 🐛 v4.64 (Surat 11/09) — "บิลเก่าคืนชีพ": บิลที่ปิดไปแล้วมีแถว "รออนุมัติ" โผล่ใต้เลขเดิม
+   เคสจริง ORD1787209503733 ร้านเจ๊ลั้ง ปิดบิล 21/08 → 10/09 มีของใหม่มาเกาะเลขเดิม (ห่าง 20 วัน)
+   กวาดทั้งชีทเจอ 6 บิล ~฿23,400 ส่วนใหญ่เป็นเคส "ข้ามคืน"
+
+   ต้นเหตุ: resetDraft() เดิม "ล้างเลขให้เป็นค่าว่าง" — localStorage ล้างทันที
+   แต่ IndexedDB **ยิงทิ้งไว้ไม่รอผล** → เปิดผ่านไลน์ พอกดยืนยันเสร็จลูกค้าปิดหน้าต่างทันที
+   คำสั่งล้างยังไม่ทันวิ่งจบก็โดนตัด → เลขเก่าค้างใน IndexedDB
+   รอบหน้า restoreDraftOid() ไล่หา memory → localStorage (ว่างแล้ว) → **IndexedDB (เจอเลขเก่า)**
+
+   กติกาใหม่: **ไม่เก็บค่าว่างอีกต่อไป** — ที่เก็บมีเลขที่ยังไม่ถูกใช้เสมอ
+   ต่อให้เขียนไม่ทัน ตัวที่ค้างก็เป็นเลขใหม่ ไม่ใช่เลขเก่า */
+const OID_STALE_MS = 12*3600*1000;     // เก่ากว่านี้ + ชีทไม่มีแถวรออนุมัติ = บิลปิดไปแล้วแน่
+function newOid(){ return 'ORD'+Date.now(); }
+function oidAgeMs(id){                  // อายุเลขบิล อ่านจากตัวเลขในเลขเอง (ORD<epoch ms>)
+  const m=/^ORD(\d{13})$/.exec(String(id||'')); if(!m) return -1;   // รูปแบบอื่น = ไม่รู้อายุ อย่าเดา
+  const ts=+m[1]; if(!(ts>1600000000000 && ts<=Date.now()+864e5)) return -1;
+  return Date.now()-ts;
+}
+let _oidIdbQ=Promise.resolve();
 function _setDraftOid(id){
   _draftOid = id || '';
   try{ if(id) lsSet('rop_orderId',id); else localStorage.removeItem('rop_orderId'); }catch(e){}
-  try{ idbSet('rop_orderId', id||''); }catch(e){}   // async best-effort — โควตาใหญ่กว่ามาก ไม่ค่อยเต็ม
+  /* ⭐ v4.64: ต่อคิวการเขียน IndexedDB ให้เรียงตามลำดับ (เดิมยิงทิ้งไว้เฉย ๆ)
+     ยังเป็น best-effort อยู่ — ตัวที่กันจริงคือ "ไม่เก็บค่าว่าง" ข้างบน */
+  try{ _oidIdbQ = _oidIdbQ.then(function(){ return idbSet('rop_orderId', id||''); }).catch(function(){}); }catch(e){}
 }
 function draftOrderId(){
   let id=_draftOid;
   if(!id){ try{ id=localStorage.getItem('rop_orderId')||''; }catch(e){} }
+  /* 🛡️ v4.64 ชั้นที่ 2 — กันเครื่องที่ถือเลขเก่าอยู่แล้ว (และเครื่องที่อัปเดตไม่ทัน)
+     เงื่อนไขที่ "ปลอดภัยพอจะทิ้งเลขเดิม" ต้องครบ 2 ข้อ:
+       ① ชีท **ตอบแล้วว่าไม่มีแถวรออนุมัติของร้านนี้** (_srvPendSeen===false)
+       ② เลขเก่ากว่า 12 ชม. (อ่านเวลาจากตัวเลขในเลขบิลเอง)
+     ⚠️ ถ้าชีทยังมีแถวค้างจริง **ห้ามเปลี่ยนเลขเด็ดขาด** — ของเก่าจะกลายเป็นแถวกำพร้า
+        แล้วของเดิมจะถูกดันขึ้นใหม่เป็นอีกบิล = แถวเบิ้ล */
+  if(id && _srvPendSeen===false){
+    const age=oidAgeMs(id);
+    if(age>=0 && age>OID_STALE_MS){
+      try{ console.warn('[draft] เลขบิลเก่าเกิน 12 ชม. + ชีทไม่มีแถวรออนุมัติ → ออกเลขใหม่', id); }catch(e){}
+      id=''; _srvSeenOid='';
+    }
+  }
   if(id){ if(!_draftOid) _draftOid=id; return id; }
-  id='ORD'+Date.now(); _setDraftOid(id); return id;
+  id=newOid(); _setDraftOid(id); return id;
 }
 /* กู้เลขบิลร่างตอนเปิดแอป — localStorage เขียนไม่ติดตั้งแต่รอบก่อน ก็ยังได้เลขเดิมจาก IndexedDB */
 async function restoreDraftOid(){
@@ -1672,7 +1706,9 @@ async function restoreDraftOid(){
   try{ const ls=localStorage.getItem('rop_orderId'); if(ls){ _draftOid=ls; return; } }catch(e){}
   try{ const v=await idbGet('rop_orderId'); if(v) _draftOid=String(v); }catch(e){}
 }
-function resetDraft(){ _setDraftOid(''); removedItems={}; saveRemoved(); }
+/* ⭐ v4.64: ปิดบิลแล้ว = **ออกเลขใหม่ทันที** (เดิมล้างเป็นค่าว่าง แล้วรอไปมินต์ตอนหยิบของชิ้นแรก)
+   ช่วงที่เป็นค่าว่างนั่นแหละคือรูที่ทำให้เลขเก่าใน IndexedDB คืนชีพได้ */
+function resetDraft(){ _setDraftOid(newOid()); removedItems={}; saveRemoved(); }
 function cancelItem(key){ if(cart[key]){ removedItems[key]=Object.assign({},cart[key]); saveRemoved(); delete cart[key]; } if(cartUnsel.delete(key)) saveUnsel(); }  // ลบจากตะกร้า = ทำเครื่องหมาย "ไม่อนุมัติ"
 /* ── ติ๊กเลือกสินค้าที่จะสั่ง (หน้าตะกร้า แบบ Shopee) — สั่งเฉพาะที่ติ๊ก ที่เหลือค้างในตะกร้า ── */
 function isSel(key){ return !cartUnsel.has(key); }
@@ -1828,6 +1864,10 @@ function loadCart(){ try{return JSON.parse(localStorage.getItem('rop_cart'))||{}
 let _cartDirtyUntil=0;   // เพิ่งแก้ตะกร้าในเครื่องนี้ → อย่าเพิ่งทับด้วยของเซิร์ฟเวอร์ จนกว่าจะ sync ขึ้นเสร็จ
 let _lastCartChange=0;   // เวลาแก้ตะกร้าครั้งล่าสุด (ใช้กันล้างตะกร้าทั้งที่ sync ยังไปไม่ถึงชีท)
 let _srvSeenOid='';      /* v4.32: orderId ล่าสุดที่ "เคยเห็นบนชีทจริง" — ล้างตะกร้าได้เฉพาะ draft ที่เคยขึ้นชีทแล้ว */
+/* 🛡️ v4.64 — ชีทตอบว่ามีแถว "รออนุมัติ" ของร้านนี้ไหม
+   null = ยังไม่รู้ (ยังไม่ได้ถาม/ถามแล้วแต่ยังไม่ชัด) · true = มี · false = ไม่มี
+   ใช้เป็นเงื่อนไขเดียวที่อนุญาตให้ draftOrderId() ทิ้งเลขเก่าได้ — ไม่รู้ = ไม่ทิ้ง */
+let _srvPendSeen=null;
 /* ⚠ v4.34 - จำว่า key ไหนถูกแก้ในเครื่องนี้เมื่อไหร่ -> pullCart จะไม่ลบของที่ชีทยังตามไม่ทัน */
 /* 🔴 v4.36 (Surat 27/08: "ใส่ตะกร้าแล้วยังเด้งเหมือนเดิม") — บันทึกลง localStorage ด้วย
    v4.34/4.35 เก็บ _kTouch ไว้ใน "หน่วยความจำหน้าเว็บ" เท่านั้น → พอแอปในไลน์ถูกรีโหลด
@@ -1907,6 +1947,7 @@ function pullCart(force){
       const items=r.items||[];
       if(r.orderId && items.length){
         window._emptyPulls=0;                           // เซิร์ฟเวอร์มีของ → รีเซ็ตตัวนับล้างตะกร้า (v3.75)
+        _srvPendSeen=true;                              /* v4.64: ชีทมีแถวรออนุมัติจริง → ห้ามเปลี่ยนเลขบิล */
         _setDraftOid(r.orderId);                        // ใช้ orderId ร่วมทุกเครื่อง → กันออเดอร์เบิ้ล (v3.93: จำในหน่วยความจำ+IDB ด้วย)
         _srvSeenOid=String(r.orderId);                  /* v4.32: draft นี้อยู่บนชีทจริง — ต่อไปถ้าชีทว่างค่อยล้างได้ */
         const obj={}; items.forEach(row=>{ const it=cartItemFromRow(row); if(it){ if(obj[it.key]) obj[it.key].qty+=it.qty; else obj[it.key]=it; } });
@@ -1953,6 +1994,9 @@ function pullCart(force){
            — เดิมล้างทันทีรอบเดียว: ช่วงเช้าคนเยอะ Apps Script ชนลิมิต → draft sync หายเงียบ (no-cors มองไม่เห็น 429)
            → poll ถัดไปเจอชีทว่าง → ตะกร้าลูกค้าโดนล้างทิ้งทั้งที่ยังไม่เคยขึ้นชีท (ของหายถาวร) */
         window._emptyPulls=(window._emptyPulls||0)+1;
+        /* v4.64: เชื่อว่า "ชีทว่างจริง" ต่อเมื่อตอบว่างติดกัน 2 รอบ — รอบเดียวอาจเป็นเพราะ
+           Apps Script คิวแน่นแล้ว draft sync หายเงียบ (กติกาเดียวกับ v3.75 ที่ใช้ตัดสินล้างตะกร้า) */
+        if(window._emptyPulls>=2) _srvPendSeen=false;
         if(_srvSeenOid!==draftOrderId()){
           /* 🐛 v4.32 — draft ใบนี้ "ไม่เคยขึ้นชีทเลย" (sync ล้มเงียบตอน Apps Script หนัก) → ห้ามล้าง!
              เดิมเงื่อนไข 2 รอบ+30 วิ ยังหลุด: ลูกค้าเลือกของเสร็จแล้วพักมือเกิน 30 วิ = ตะกร้าหายทั้งเครื่อง
@@ -1964,7 +2008,7 @@ function pullCart(force){
           try{ idbSet('rop_cart',{cart:{},ts:Date.now()}); }catch(e){}   /* v4.37 */  // ไม่มีรออนุมัติแล้ว (อนุมัติ/ส่งแล้ว) → เคลียร์ทุกเครื่อง
           renderCartBadge(); if(document.getElementById('viewCart').classList.contains('active')) renderCart(); renderProducts();
         }
-      } else { window._emptyPulls=0; }
+      } else { window._emptyPulls=0; _srvPendSeen=false; }   /* v4.64: ชีทว่าง + ตะกร้าในเครื่องก็ว่าง = ไม่มีอะไรให้กำพร้า ทิ้งเลขเก่าได้เลย */
     }
   }catch(e){console.warn('pullCart',e);} finally{ delete window[cb]; const s=document.getElementById(cb); if(s) s.remove(); } };
   const s=document.createElement('script'); s.id=cb;
@@ -2017,7 +2061,10 @@ function clearCartState(){
   cart={}; removedItems={}; try{ cartUnsel.clear(); }catch(e){}
   ['rop_orderId','rop_cart','rop_cart_ts','rop_ktouch','rop_kgone','rop_removed','rop_unsel'].forEach(function(k){ try{ localStorage.removeItem(k); }catch(e){} });
   _kTouch={}; _kGone={}; try{ idbSet('rop_cart',{cart:{},ts:Date.now()}); idbSet('rop_ktouch',{t:{},g:{},ts:Date.now()}); }catch(e){}   /* v4.37: ไม่งั้นร้านใหม่กู้ตะกร้าร้านเก่ากลับมา */
-  try{ _setDraftOid(''); }catch(e){}   // ⭐ v3.93: ล้างเลขบิลร่างในหน่วยความจำ+IDB ด้วย ไม่งั้นร้านใหม่หยิบเลขของร้านเก่าไปใช้
+  /* ⭐ v3.93: ล้างเลขบิลร่างในหน่วยความจำ+IDB ด้วย ไม่งั้นร้านใหม่หยิบเลขของร้านเก่าไปใช้
+     ⭐ v4.64: ให้ "เลขใหม่ที่ยังไม่ถูกใช้" แทนค่าว่าง — ถ้าเขียนไม่ติด ร้านใหม่ก็ได้เลขใหม่ ไม่ใช่ของร้านเก่า */
+  try{ _setDraftOid(newOid()); }catch(e){}
+  try{ _srvSeenOid=''; _srvPendSeen=null; }catch(e){}   // v4.64: ลืมสิ่งที่รู้เรื่องชีทของร้านเก่าให้หมด
 }
 /* 🚨 v4.19 — คีย์ต้องมี "เบอร์" ด้วย
    เคสจริง: บริษัท เจ้ลั้ง โชห่วย จำกัด มี 2 สาขา (วัดคู้ 0612298685 / ปากท่อ 0986474424)
