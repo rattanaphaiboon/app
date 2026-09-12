@@ -4474,31 +4474,47 @@ function coHealDupSku(force, quiet){
     const byKey={};
     (coPicked||[]).forEach(p=>{ const k=coProdKey({barcode:p.barcode, product:p.product}); (byKey[k]=byKey[k]||[]).push(p); });
     const demBc=new Set(); try{ coDemand().forEach(d=>demBc.add(String(d.barcode))); }catch(e){}
+    const uKeys=(p)=>Object.keys(p.units||{}).filter(b=>(+(((p.units||{})[b]||{}).q)||0)>0);
     const drop=new Set(); let n=0;
     Object.keys(byKey).forEach(k=>{
       const list=byKey[k]; if(list.length<2) return;
-      const keep=list.find(p=>demBc.has(String(p.barcode))) || list.slice().sort((a,b)=>(+b.ea||0)-(+a.ea||0))[0];
-      const units={}, umeta=Object.assign({}, keep.umeta||{}), alloc={}, uall={}, uwh={};
-      list.forEach(p=>{
-        Object.keys(p.units||{}).forEach(b=>{ const v=p.units[b]||{}, q=+v.q||0;
-          const o=units[b]=units[b]||{l:v.l||'EA', p:Math.max(1,+v.p||1), q:0}; if(q>o.q) o.q=q; });
-        Object.keys(p.umeta||{}).forEach(b=>{ if(!umeta[b]) umeta[b]=p.umeta[b]; });
-        Object.keys(p.alloc||{}).forEach(r=>{ const q=Math.round(+p.alloc[r]||0); if(q>(+alloc[r]||0)) alloc[r]=q; });
-        Object.keys(p.uall||{}).forEach(r=>{ const src=p.uall[r]||{}, o=uall[r]=uall[r]||{};
-          Object.keys(src).forEach(b=>{ const q=Math.round(+src[b]||0); if(q>(+o[b]||0)) o[b]=q; }); });
-        Object.keys(p.uwh||{}).forEach(b=>{ const src=p.uwh[b]||{}, o=uwh[b]=uwh[b]||{};
-          Object.keys(src).forEach(w=>{ const q=Math.round(+src[w]||0); if(q>(+o[w]||0)) o[w]=q; }); });
-        if(p!==keep) drop.add(p); });
-      const totEa=Object.keys(units).reduce((s,b)=>s+coUnitEa(units[b]),0);
-      let sum=Object.keys(alloc).reduce((s,r)=>s+(+alloc[r]||0),0);
-      if(totEa>0 && sum>totEa){   /* ยอดต่อบิลรวมกันต้องไม่เกินของที่ยิงจริง — ตัดจากใบที่ได้เยอะสุดก่อน */
-        let cut=sum-totEa;
-        Object.keys(alloc).sort((a,b)=>(+alloc[b]||0)-(+alloc[a]||0)).forEach(r=>{ if(cut<=0) return;
-          const t=Math.min(+alloc[r]||0, cut); alloc[r]=(+alloc[r]||0)-t; cut-=t; if(alloc[r]<=0) delete alloc[r]; });
-        sum=Object.keys(alloc).reduce((s,r)=>s+(+alloc[r]||0),0); }
-      keep.units=units; keep.umeta=umeta; keep.alloc=alloc; keep.uall=uall; keep.uwh=uwh;
-      keep.ea=sum||totEa; keep.qty=Math.floor((keep.ea+0.001)/Math.max(1,+keep.eaPer||1));
-      keep.ts=nowStamp(); n++; });
+      /* ═══ รวมเฉพาะ "แถวที่ซ้ำกันจริง" ═══
+         ซ้ำจริง = มี "บาร์ที่ยิง" ตัวเดียวกันอยู่ทั้งสองแถว (แถวหลังถูกสร้างใหม่แล้วลอกของเดิมมา)
+         ส่วนสินค้าตัวเดียวกันที่ยิงคนละบาร์/คนละหน่วยจริง ๆ = คนละของ ปล่อยไว้ ยอดบวกกันถูกอยู่แล้ว */
+      const used=new Set();
+      list.forEach(p0=>{
+        if(used.has(p0)) return;
+        const cluster=[p0]; used.add(p0);
+        const keys=new Set(uKeys(p0));
+        let grew=true;
+        while(grew){ grew=false;
+          list.forEach(q=>{ if(used.has(q)) return;
+            if(uKeys(q).some(b=>keys.has(b))){ cluster.push(q); used.add(q); uKeys(q).forEach(b=>keys.add(b)); grew=true; } }); }
+        if(cluster.length<2) return;
+        const keep=cluster.find(p=>demBc.has(String(p.barcode))) || cluster.slice().sort((a,b)=>(+b.ea||0)-(+a.ea||0))[0];
+        const units={}, umeta=Object.assign({}, keep.umeta||{}), alloc={}, uall={}, uwh={};
+        cluster.forEach(p=>{
+          /* หน่วย/ที่มา: เอา "มากสุดต่อบาร์" (สองแถวลอกกันมา ห้ามบวกซ้ำ) */
+          Object.keys(p.units||{}).forEach(b=>{ const v=p.units[b]||{}, q=+v.q||0;
+            const o=units[b]=units[b]||{l:v.l||'EA', p:Math.max(1,+v.p||1), q:0}; if(q>o.q) o.q=q; });
+          Object.keys(p.umeta||{}).forEach(b=>{ if(!umeta[b]) umeta[b]=p.umeta[b]; });
+          Object.keys(p.uall||{}).forEach(r=>{ const src=p.uall[r]||{}, o=uall[r]=uall[r]||{};
+            Object.keys(src).forEach(b=>{ const q=Math.round(+src[b]||0); if(q>(+o[b]||0)) o[b]=q; }); });
+          Object.keys(p.uwh||{}).forEach(b=>{ const src=p.uwh[b]||{}, o=uwh[b]=uwh[b]||{};
+            Object.keys(src).forEach(w=>{ const q=Math.round(+src[w]||0); if(q>(+o[w]||0)) o[w]=q; }); });
+          /* ยอดต่อใบ: บวกกันก่อน (คนละหน่วยอาจลงคนละใบ) แล้วค่อยตัดไม่ให้เกินของที่ยิงจริง */
+          Object.keys(p.alloc||{}).forEach(r=>{ alloc[r]=(+alloc[r]||0)+Math.round(+p.alloc[r]||0); });
+          if(p!==keep) drop.add(p); });
+        const totEa=Object.keys(units).reduce((s,b)=>s+coUnitEa(units[b]),0);
+        let sum=Object.keys(alloc).reduce((s,r)=>s+(+alloc[r]||0),0);
+        if(totEa>0 && sum>totEa){   /* เกินของที่ยิงจริง = ตัดจากใบที่ได้เยอะสุดก่อน */
+          let cut=sum-totEa;
+          Object.keys(alloc).sort((a,b)=>(+alloc[b]||0)-(+alloc[a]||0)).forEach(r=>{ if(cut<=0) return;
+            const t=Math.min(+alloc[r]||0, cut); alloc[r]=(+alloc[r]||0)-t; cut-=t; if(alloc[r]<=0) delete alloc[r]; });
+          sum=Object.keys(alloc).reduce((s,r)=>s+(+alloc[r]||0),0); }
+        keep.units=units; keep.umeta=umeta; keep.alloc=alloc; keep.uall=uall; keep.uwh=uwh;
+        keep.ea=sum||totEa; keep.qty=Math.floor((keep.ea+0.001)/Math.max(1,+keep.eaPer||1));
+        keep.ts=nowStamp(); n++; }); });
     if(!n) return 0;
     drop.forEach(p=>{ coGoneBc.add(String(p.barcode)); });
     coPicked=(coPicked||[]).filter(p=>!drop.has(p));
