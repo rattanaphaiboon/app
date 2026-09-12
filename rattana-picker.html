@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Picker v5.7</title>
+<title>Rattana Picker v5.8</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
@@ -277,7 +277,7 @@ code{font-family:'Courier New',monospace;font-size:12px;background:var(--pill-bg
 <div id="spinner"><div class="spin-box"><div class="spin-ring"></div><p id="spinnerMsg">กำลังโหลด...</p></div></div>
 
 <header>
-  <span class="logo-text">RATTANA <span class="g">PICKER</span> <span class="ver">v5.7</span></span>
+  <span class="logo-text">RATTANA <span class="g">PICKER</span> <span class="ver">v5.8</span></span>
   <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับโหมดสี">🌙</button>
   <a href="https://rattanaphaiboon.github.io/app/rattana-hub.html" class="hub-btn" title="กลับ Hub">
     <span class="hub-btn-icon"></span><span>Hub</span>
@@ -602,16 +602,15 @@ function markEntered(orders,value){
   SB.forEach(function(s){
     var mine=orders.filter(function(o){ return o.src===s.name; });
     if(!mine.length) return;
-    /* ต้องบันทึกด้วย order_id ไม่ใช่ bill_id
-       เพราะ bill_id ในข้อมูลจริงซ้ำข้ามออเดอร์ได้ ถ้าใช้ bill_id
-       กดรับใบเดียวจะไปติ๊กใบอื่นที่ bill_id เดียวกันไปด้วยทั้งหมด */
-    var byOrd=[], byBill=[];
+    /* บันทึกด้วย bill_id ให้ตรงกับที่จัดกลุ่มไว้
+       ส่วนที่เซลล์เพิ่มมาทีหลังใน billId เดิม ก็จะถูกรับพร้อมกันตอนกดรับรอบถัดไป */
+    var byBill=[], byOrd=[];
     mine.forEach(function(o){
-      if(o.order_id) byOrd.push(o.order_id);
-      else if(o.bill_id) byBill.push(o.bill_id);
+      if(o.bill_id) byBill.push(o.bill_id);
+      else if(o.order_id) byOrd.push(o.order_id);
     });
     var payload={}; payload[ENTERED]=value;
-    [['order_id',byOrd],['bill_id',byBill]].forEach(function(pair){
+    [['bill_id',byBill],['order_id',byOrd]].forEach(function(pair){
       var colName=pair[0], ids=pair[1];
       if(!ids.length) return;
       jobs.push(
@@ -1198,22 +1197,24 @@ function finishView(rows){
 function groupOrders(rows){
   var map={}, order=[];
   rows.forEach(function(r){
-    /* จัดกลุ่มด้วย order_id เป็นหลัก
-       เพราะในข้อมูลจริง billId ซ้ำข้ามออเดอร์ได้ (เจอ 1 billId ครอบ 3 orderId)
-       ถ้าเอา billId มาเป็นคีย์ ออเดอร์คนละใบจะถูกรวบเป็นใบเดียว */
-    var k=r.order_id||r.bill_id||('row'+r.id);
+    /* จัดกลุ่มด้วย billId — เซลล์ตั้งใจรวมบิล หลาย orderId ที่อยู่ใน billId เดียวกัน
+       คือใบเดียวกันจริงๆ จึงต้องรวบเข้าด้วยกัน
+       ส่วนที่เซลล์เพิ่มมาทีหลัง (แอดมินยังไม่รับ) จะยังโผล่ให้เห็นอยู่
+       เพราะการตัด "รับแล้ว" ทำที่ระดับบรรทัด ไม่ใช่ระดับใบ */
+    var k=r.bill_id||r.order_id||('row'+r.id);
     if(!map[k]){
-      map[k]={ key:k, order_id:r.order_id||'', bill_id:r.bill_id||k,
+      map[k]={ key:k, order_id:r.order_id||'', bill_id:k,
         order_date:r.order_date, order_time:r.order_time,
         salesman_code:r.salesman_code, salesman_name:r.salesman_name,
         shop_code:r.shop_code, shop_name:r.shop_name,
         delivery_warehouse:r.delivery_warehouse||r.warehouse,
         order_type:r.order_type, due:r.delivery_due_date||'',
-        src:r.__src||'', entered:r.entered||'', lines:0, amount:0, items:[],
+        src:r.__src||'', entered:'', nEnt:0, lines:0, amount:0, items:[],
         weight:0, volume:0, noW:0, noV:0, susp:0 };
       order.push(k);
     }
     map[k].lines++; map[k].amount+=num(r.total_amount); map[k].items.push(r);
+    if(r.entered) map[k].nEnt++;
     var bk=lineBulk(r);
     map[k].weight+=bk.w; map[k].volume+=bk.v;
     if(!bk.hasW) map[k].noW++;
@@ -1223,7 +1224,14 @@ function groupOrders(rows){
   /* เรียงตามวันที่ แล้วค่อยตามเวลา เก่าสุดขึ้นก่อน
      ทั้งสองแหล่งเก็บเป็น ปี/เดือน/วัน ต่างกันแค่ตัวคั่น (rattana ใช้ / · ROO ใช้ -)
      ยุบให้เป็นตัวคั่นเดียวกันแล้วเทียบเป็นข้อความได้เลย */
-  return order.map(function(k){return map[k];})
+  return order.map(function(k){
+      var o=map[k];
+      /* รับครบทุกบรรทัดถึงจะถือว่ารับแล้ว ถ้ารับไปบางส่วน (เซลล์มาเพิ่มทีหลัง)
+         ให้ขึ้นว่ารับบางส่วน จะได้รู้ว่ายังมีของค้างอยู่ในใบนี้ */
+      o.entered = (o.nEnt>0 && o.nEnt===o.lines) ? ENTERED_VAL : '';
+      o.partial = (o.nEnt>0 && o.nEnt<o.lines);
+      return o;
+    })
     .sort(function(a,b){ return orderSortKey(a).localeCompare(orderSortKey(b)); });
 }
 function orderSortKey(o){
@@ -1289,7 +1297,13 @@ function renderTable(){
     tr.innerHTML=
       '<td><input type="checkbox" '+(S.sel[o.key]?'checked':'')+' onclick="toggleSel(\''+o.key+'\',this)"></td>'+
       '<td>'+formatThaiDate(o.order_date)+'</td>'+
-      '<td>'+(o.entered ? '<span class="badge-done">'+o.entered+'</span>' : (o.order_time||'-'))+'</td>'+
+      '<td>'+(o.entered
+        ? '<span class="badge-done">'+o.entered+'</span>'
+        : (o.partial
+          ? '<span class="badge-done" style="background:#fff4d6;color:#8a6100;border-color:#e8c97a" '+
+            'title="รับไปแล้ว '+o.nEnt+' จาก '+o.lines+' บรรทัด — ที่เหลือเซลล์เพิ่มมาทีหลัง">'+
+            'รับบางส่วน '+o.nEnt+'/'+o.lines+'</span>'
+          : (o.order_time||'-')))+'</td>'+
       '<td>'+(normSalesName(o.salesman_name)||'-')+'</td>'+
       '<td class="shop">'+(o.shop_name||'-')+'</td>'+
       '<td class="code">'+(o.delivery_warehouse||'-')+'</td>'+
