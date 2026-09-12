@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v4.66</title>
+<title>Rattana Online Order v4.67</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -811,7 +811,7 @@ body.dark .pdpa-body h4,body.dark .pdpa-body b{color:var(--gold-light,#e2c882)}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.66</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.67</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -3242,6 +3242,7 @@ function stockBadge(p){
 function stockBandHtml(p){
   if(skucBlocked(p)) return '<div class="stock-band out">🚫 สินค้าหมด</div>';   /* v4.30: ปิดสินค้า - ลูกค้าเห็นเป็น "หมด" (Surat 21/08) ป้ายนี้ชนะป้ายอื่น */
   const s=stockBadge(p);
+  const f=fshortBand(p,s); if(f) return f;      /* ⛔ v4.67: ของที่ "ขาดจากโรงงาน" บอกให้ตรง ๆ — ชนะป้ายหมด/เหลือน้อย */
   if(s==='out') return '<div class="stock-band out">🚫 สินค้าหมดชั่วคราว</div>';
   if(s==='low') return '<div class="stock-band low">⚠️ สินค้าเหลือน้อย</div>';
   return '';
@@ -5434,6 +5435,114 @@ function skucIndexProducts(){
   SKUC.alias=al;
 }
 function skucAliasOf(p){ return (SKUC.alias && SKUC.alias.get(clean(p['PRODUCT NAME'])))||''; }
+
+/* ==================================================================================
+   ⛔ v4.67 — ป้าย "ขาดจากโรงงาน"  (Surat 12/09)
+   เดิม: ของหมด = "สินค้าหมดชั่วคราว" เหมือนกันหมด
+        ลูกค้าแยกไม่ออกว่า "หมดแป๊บเดียวเดี๋ยวมา" กับ "โรงงานไม่ส่งมาตั้งแต่ มิ.ย." → ทักถามเซลล์ทุกวัน
+   แหล่ง: ไฟล์ Purchase Actions (QCFG.quotaSheet) แท็บ `ขาดจากโรงงาน` — อ่านอย่างเดียว ห้ามเขียน
+     MeasureBy | ชื่อสินค้า | Barcode | เริ่มขาด | ได้สินค้า | หมายเหตุขาด
+
+   กติกา (Surat เคาะ 12/09 หลังดูเดโม่):
+     ① ป้ายเดิมต้องเป็น "หมดชั่วคราว" หรือ "เหลือน้อย" อยู่แล้ว
+     ② สต๊อกคลังนั้นต้อง < 2 ลัง (ของยังเหลือเยอะ = ไม่ต้องไปบอกว่าขาด)
+     ③ เอา "แถวล่าสุดที่วันเริ่มขาดถึงแล้ว" ของสินค้านั้น → ค่อยเช็คต่อ
+     ④ แถวนั้นต้อง "ได้สินค้า" ยังว่าง (มีวันที่ = ของมาแล้ว จบเรื่อง)
+     ⑤ และ "หมายเหตุขาด" ต้องมีคำว่า "โรงงาน"  ← ทาง ข.
+        ⚠️ สำคัญมาก: แถวในชีทไม่ได้เป็นเรื่องโรงงานทุกแถว — วัดจริง 12/09:
+           "ขาดจากโรงงาน" 40 ตัว · "สั่ง 2WEEK ครั้ง" 28 ตัว (ไร่ทิพย์ทั้งยี่ห้อ)
+           · "ไม่มีโปรซื้อเข้า ทุนแพง" 5 ตัว · "ระงับการผลิต" 1 ตัว
+           34 ตัวหลังเป็น "เรื่องของเราเอง" — เหมาขึ้นว่าขาดจากโรงงาน = โกหกลูกค้า
+
+   กฎ fail: โหลดชีทไม่ได้ = ไม่เปลี่ยนป้ายอะไรเลย (ขึ้นหมดชั่วคราวเหมือนเดิม)
+     — ป้ายนี้เป็นแค่ "คำอธิบาย" ไม่ได้บล็อกการขาย ไม่มีด่านไหนมาเกี่ยว พลาดแล้วเสียน้อยกว่าปิดขายผิด
+   ================================================================================== */
+const FSHORT={ rows:null, hit:null, ts:0, ttl:300000, busy:false, p:null, ver:0 };
+const FSHORT_MAXCS=2;      /* สต๊อกต้องน้อยกว่านี้ (ลัง) ถึงจะขึ้นป้าย — Surat เคาะ */
+/* gviz คืนคอลัมน์ type date มาเป็นสตริง "Date(2026,4,1)" — เดือนเริ่มที่ 0 (กับดักเดิม อย่า +1) */
+function fshortDay(v){
+  if(v instanceof Date) return new Date(v.getFullYear(),v.getMonth(),v.getDate());
+  const s=String(v==null?'':v).trim(); if(!s) return null;
+  let m=s.match(/^Date\((\d+),(\d+),(\d+)/);            if(m) return new Date(+m[1],+m[2],+m[3]);
+  m=s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);     if(m) return new Date(+m[1],+m[2]-1,+m[3]);
+  m=s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);     if(m) return new Date(+m[3],+m[2]-1,+m[1]);
+  const d=new Date(s); return isNaN(d.getTime())?null:new Date(d.getFullYear(),d.getMonth(),d.getDate());
+}
+async function fshortBoot(force){
+  if(FSHORT.busy) return FSHORT.p;
+  if(!force && FSHORT.ts && Date.now()-FSHORT.ts<FSHORT.ttl) return;
+  FSHORT.busy=true;
+  FSHORT.p=(async()=>{
+  try{
+    const rows=await qGviz(QCFG.quotaSheet,{sheet:'ขาดจากโรงงาน'}).then(skucRows);
+    FSHORT.rows=rows; FSHORT.ts=Date.now(); FSHORT.ver++;
+    fshortIndexProducts();
+    try{ renderProducts(); renderStrips(); }catch(e){}
+    if(FSHORT.hit&&FSHORT.hit.size) console.log('[fshort] ขาดจากโรงงาน '+FSHORT.hit.size+' ตัว (จากชีท '+rows.length+' แถว)');
+  }catch(e){
+    /* โหลดครั้งแรกไม่ได้ = ไม่เปลี่ยนป้ายอะไร · รีเฟรชไม่ได้ = ใช้ของเดิมไปก่อน */
+    console.warn('[fshort] โหลดไม่ได้ - '+((FSHORT.hit&&FSHORT.hit.size)?'ใช้ข้อมูลเดิมไปก่อน':'ไม่เปลี่ยนป้ายอะไรเลย'),e&&e.message);
+  }finally{ FSHORT.busy=false; FSHORT.p=null; }
+  })();
+  return FSHORT.p;
+}
+/* แถวในชีท → ชื่อสินค้าจริงในระบบ (เรียกซ้ำหลัง PRODUCTS พร้อม เหมือน skucIndexProducts)
+   จับด้วย "บาร์โค้ด" ก่อนเสมอ (69/74 แถวมีบาร์) — ไม่มีค่อยใช้ MeasureBy
+   ⚠️ MeasureBy ที่ไม่ใช่ PRODUCT NAME (CAT SIZE/CAT BRAND/VENDOR NAME) = ครอบทั้งกลุ่ม
+      ต้องตรงเป๊ะเท่านั้น ห้าม fuzzy (บทเรียนเดียวกับ skuแทน) */
+function fshortIndexProducts(){
+  const m=new Map();
+  try{
+    const rows=FSHORT.rows||[];
+    if(rows.length && (PRODUCTS||[]).length){
+      const today=new Date(); today.setHours(0,0,0,0);
+      const FLD={'PRODUCT NAME':'PRODUCT NAME','CAT SIZE':'CAT SIZE','CAT BRAND':'CAT BRAND',
+                 'VENDOR NAME':'CAT VENDOR','CAT VENDOR':'CAT VENDOR'};
+      const gcache={};
+      const byField=(f,val)=>{                                  /* สร้างดัชนีเฉพาะคอลัมน์ที่ได้ใช้จริง */
+        let g=gcache[f];
+        if(!g){ g=gcache[f]=new Map();
+          PRODUCTS.forEach(q=>{ const k=clean(q[f]); if(!k) return; const a=g.get(k); if(a) a.push(q); else g.set(k,[q]); }); }
+        return g.get(val)||[];
+      };
+      const latest=new Map();                                   /* ชื่อสินค้า → แถวที่เริ่มขาดล่าสุด */
+      rows.forEach(r=>{
+        const st=fshortDay(r['เริ่มขาด']);
+        if(!st || st.getTime()>today.getTime()) return;         /* ยังไม่ถึงวันเริ่มขาด / อ่านวันไม่ออก = ข้าม */
+        let tg=[];
+        const code=clCode(r['Barcode']);
+        if(code){ const e=findByScan(code); if(e&&e.p) tg=[e.p]; }
+        if(!tg.length){
+          const f=FLD[clean(r['MeasureBy'])]||'', val=clean(r['ชื่อสินค้า']);
+          if(f&&val) tg=byField(f,val);
+        }
+        tg.forEach(q=>{
+          const nm=clean(q['PRODUCT NAME']); if(!nm) return;
+          const prev=latest.get(nm);
+          if(!prev || st.getTime()>=prev.st.getTime()) latest.set(nm,{st:st,r:r});
+        });
+      });
+      /* เอาแถวล่าสุดมาแล้วค่อยตัดสิน (ตามที่ Surat สั่ง: "เอาตัวที่เจอล่าสุดเลย")
+         ถ้ารอบล่าสุดได้ของแล้ว/ไม่ใช่เรื่องโรงงาน = จบ ไม่ต้องไปดูรอบเก่าอีก */
+      latest.forEach((v,nm)=>{
+        if(clean(v.r['ได้สินค้า'])) return;                                  /* ของมาแล้ว */
+        if(clean(v.r['หมายเหตุขาด']).indexOf('โรงงาน')<0) return;        /* ทาง ข. — ไม่ใช่เรื่องโรงงาน = ป้ายปกติ */
+        m.set(nm,{start:v.st,note:clean(v.r['หมายเหตุขาด'])});
+      });
+    }
+  }catch(e){ try{ console.warn('[fshort] index:',e&&e.message); }catch(_){} }
+  FSHORT.hit=m;
+}
+/* ป้าย "ขาดจากโรงงาน" (คืน '' = ใช้ป้ายเดิม) · Surat 12/09: ไม่เอาวันที่บนป้าย */
+function fshortBand(p,s){
+  if(s!=='out' && s!=='low') return '';                        /* ของยังปกติ = ไม่ต้องบอกอะไร */
+  if(!p || !FSHORT.hit || !FSHORT.hit.size) return '';
+  try{
+    if(stockForWh(p,displayWarehouse(currentCustomer)) >= FSHORT_MAXCS) return '';
+    if(!FSHORT.hit.has(clean(p['PRODUCT NAME']))) return '';
+  }catch(e){ return ''; }
+  return '<div class="stock-band out">⛔ ขาดจากโรงงาน</div>';
+}
 /* target {code,name} -> แถวสินค้าจริง (จับด้วยรหัสก่อน ชื่อตรงเป๊ะเป็นรอง - ห้าม fuzzy) */
 function skucResolve(tgt){
   if(!tgt) return null;
@@ -6455,7 +6564,7 @@ async function postGAS(payload,opts){
 /* ===================== REFRESH / BOOT ===================== */
 async function refreshData(){
   const b=document.getElementById('btnRefresh'); b.disabled=true; b.style.transition='transform .6s'; b.style.transform='rotate(360deg)';
-  SKUC.ts=0; try{ skucBoot(true); }catch(e){}   /* v4.30: กดโหลดใหม่ต้องดึงตารางปิดสินค้าใหม่ด้วย (ไม่งั้นค่าเก่าค้างทั้ง session - Sales App เจอบั๊กนี้มาแล้ว) */
+  SKUC.ts=0; try{ skucBoot(true); }catch(e){} FSHORT.ts=0; try{ fshortBoot(true); }catch(e){}   /* v4.30: กดโหลดใหม่ต้องดึงตารางปิดสินค้าใหม่ด้วย (ไม่งั้นค่าเก่าค้างทั้ง session - Sales App เจอบั๊กนี้มาแล้ว) */
   await loadAll(true);
   b.disabled=false; setTimeout(()=>{b.style.transform='';b.style.transition='';},600);
   showToast('อัพเดทข้อมูลแล้ว ✓','success');
@@ -6548,7 +6657,7 @@ function applyData(prod,promo,users,cust,ea,whmap,special,rubclaim,override,spec
   if(whmap) WH_BY_AREA=whmap;   // map พื้นที่→WH ส่วนใหญ่ (โชว์สินค้าตามคลังของพื้นที่ร้าน)
   if(dcwh && Object.keys(dcwh).length) DC_WH=dcwh;   // ⭐ v3.91: รหัสเซลล์ → คลังส่ง (Data Center) — ต้องมาก่อน renderAll ไม่งั้นกรองสินค้าผิดคลัง
   buildBarcodeIndex(); buildPromoIndex(); buildSpecialPriceIndex(); buildFlashIndex();
-  try{ skucIndexProducts(); }catch(e){}   // v4.30: BARCODE_INDEX สร้างใหม่ → แปลงรหัสที่ปิดเป็นชื่อสินค้าใหม่ด้วย
+  try{ skucIndexProducts(); }catch(e){} try{ fshortIndexProducts(); }catch(e){}   // v4.30: BARCODE_INDEX สร้างใหม่ → แปลงรหัสที่ปิดเป็นชื่อสินค้าใหม่ด้วย
   refreshCurrentCustomer();   // ดึงข้อมูลร้านล่าสุดจากชีท (ที่อยู่/เซลล์/คลัง/สถานะ)
   try{ dropBlockedFromCart(); }catch(e){}   // ⭐ v3.92: ตะกร้าในเครื่องมีเหล้าข้ามเขตค้าง (ใส่ไว้ก่อนมีกฎ) → เอาออกทันทีที่รู้จังหวัดร้าน
   try{ dropPremiumFromCart(); }catch(e){}   // v4.03: ของพรีเมียมค้างในตะกร้าเครื่องนี้
@@ -6608,7 +6717,8 @@ async function boot(){
   /* v4.30: ยิงโหลดตารางปิดสินค้าก่อนโหลดสินค้า (ตารางจิ๋ว ~3 แถว เสร็จก่อนแคตตาล็อกเปิดให้ค้นแน่)
      + เช็คทุก 1 นาที (ttl 5 นาทีเช็คใน skucBoot เอง) → จัดซื้อลบแถว/เพิ่มแถว มีผลใน ≤5 นาทีโดยลูกค้าไม่ต้องทำอะไร */
   try{ skucBoot(); }catch(e){}
-  try{ setInterval(()=>{ try{ if(!document.hidden) skucBoot(); }catch(e){} },60000); }catch(e){}
+  try{ fshortBoot(); }catch(e){}          /* ⛔ v4.67: ตารางขาดจากโรงงาน (ตารางจิ๋ว ~74 แถว) */
+  try{ setInterval(()=>{ try{ if(!document.hidden){ skucBoot(); fshortBoot(); } }catch(e){} },60000); }catch(e){}
   await loadAll(false);
   try{ if(currentCustomer) pingApp(); }catch(e){}   /* 📲 v4.53: เปิดแอปด้วย session เดิม (ไม่ผ่าน saveSession) */
   /* 💹 v4.54: ตารางสินค้าปรับราคา — โหลดหลังสินค้าพร้อม (ต้องใช้ BARCODE_INDEX) · ปิดอยู่ = ไม่โหลดเลย */
