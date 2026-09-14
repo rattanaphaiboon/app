@@ -951,7 +951,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.330';
+const APP_VERSION='3.331';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -6355,15 +6355,31 @@ function checkManualScan(){
 }
 function toggleScanCam(){ if(_scanControls) stopScanCamera(); else startScanCamera(); }
 /* v2.33: ใช้ @zxing/browser แบบเดียวกับแอปเช็คสต็อก — ถอดรหัสทั้งเฟรม จับบาร์โค้ด 1 มิติแม่นทั้ง iOS + Android */
+/* ★★ v3.331: "กล้องเปิดแต่อ่านไม่ติด" บน Android (user แจ้ง 2026-09-14 · หน้ารับคืน/CN · ใช้ร่วมกับเช็คบิล/เช็คของขึ้นรถ)
+   ต้นเหตุ (พิสูจน์ด้วยวิดีโอบาร์โค้ดจำลอง): @zxing/browser 0.1.5 สร้างผืนจับภาพ (canvas) "ครั้งเดียว" ตามขนาดภาพกล้องตอนเริ่ม
+     แล้ววาดเฟรมด้วย drawImage(video,0,0) แบบไม่ย่อ → กล้องเปลี่ยนความละเอียดทีหลัง (Android มักเริ่ม 640×480 แล้วค่อยขยับเป็น 1080p)
+     = ตัวอ่านเห็นแค่ "มุมซ้ายบน" ของภาพ บาร์โค้ดกลางจอไม่เคยถูกอ่าน
+     ผลทดสอบ: ขนาดคงที่ → อ่านได้ 1.3 วิ · 640×480→1920×1080 บาร์โค้ดกลางจอ → ไม่ติดเลย · บาร์โค้ดมุมซ้ายบน → อ่านได้ทันที
+   แก้ (ท่าเดียวกับแอปเช็คสต็อก v4.4 ที่ใช้งานจริงบน Android):
+     1) เปิดกล้องเอง แล้วใช้ตัวอ่านบาร์โค้ดของเครื่อง (BarcodeDetector · Chrome Android) อ่านจาก video ตรงๆ ทุกเฟรม — ไม่มีเรื่องขนาดผืน
+        และไม่ต้องโหลดไลบรารี 395KB เลย
+     2) เครื่องที่ไม่มี (iPhone) → ZXing แต่วนเอง: ปรับขนาดผืนให้ตรงภาพกล้อง "ทุกรอบ" ก่อนอ่าน
+   ⚠️ ZXingBrowser.DecodeHintType ไม่มีใน UMD ของ @zxing/browser → zxingHints_() คืน undefined มาตั้งแต่ v2.33 (ZXing ใช้ค่าเริ่มต้น)
+      คงไว้ตามเดิม ไม่เปลี่ยนพฤติกรรมฝั่ง iPhone */
 function ensureScanLib(){
   if(window.ZXingBrowser&&ZXingBrowser.BrowserMultiFormatReader) return Promise.resolve(true);
   if(_scanLibPromise) return _scanLibPromise;
-  _scanLibPromise=new Promise(res=>{
+  const load=(src)=>new Promise(res=>{
     const s=document.createElement('script');
-    s.src='https://unpkg.com/@zxing/browser@0.1.5/umd/zxing-browser.min.js';
-    s.onload=()=>res(true); s.onerror=()=>res(false);
+    s.src=src;
+    s.onload=()=>res(!!(window.ZXingBrowser&&ZXingBrowser.BrowserMultiFormatReader));
+    s.onerror=()=>{ try{ s.remove(); }catch(e){} res(false); };
     document.head.appendChild(s);
   });
+  // ★ v3.331: unpkg ล่ม/ช้า → ลอง jsDelivr (ไฟล์เดียวกันเป๊ะ) · โหลดไม่ได้ทั้งคู่ = ล้าง promise ให้กดลองใหม่ได้ (เดิมพังค้างทั้ง session)
+  _scanLibPromise=load('https://unpkg.com/@zxing/browser@0.1.5/umd/zxing-browser.min.js')
+    .then(ok=>ok||load('https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js'))
+    .then(ok=>{ if(!ok) _scanLibPromise=null; return ok; });
   return _scanLibPromise;
 }
 /* hints: TRY_HARDER (จับบาร์โค้ดเล็ก/ยับได้ดีขึ้น) + ALSO_INVERTED (ฉลากขาวบนพื้นดำ) */
@@ -6378,31 +6394,118 @@ function zxingHints_(){
   }
   return hints;
 }
+/* ★ v3.331: ตัวอ่านบาร์โค้ดของเครื่อง — คืนรายการชนิดบาร์โค้ดที่เครื่องอ่านได้ ([] = ไม่มี/ใช้ไม่ได้ → ใช้ ZXing)
+   บาง Android ไม่มี Google Play services → getSupportedFormats คืน [] */
+const SCAN_NATIVE_FMTS=['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf','codabar'];
+let _scanNativeFmts=null;
+async function scanNativeFormats_(){
+  if(_scanNativeFmts) return _scanNativeFmts;
+  if(!('BarcodeDetector' in window)) return (_scanNativeFmts=[]);
+  try{
+    const sup=await window.BarcodeDetector.getSupportedFormats();
+    _scanNativeFmts=SCAN_NATIVE_FMTS.filter(f=>(sup||[]).indexOf(f)>=0);
+  }catch(e){ _scanNativeFmts=[]; }
+  return _scanNativeFmts;
+}
+/* ★ v3.331: เปิดกล้องหลัง ไล่จากความละเอียดสูง → ต่ำ (ชุดเดียวกับเดิม) · ไม่อนุญาต = หยุดเลย ลองแบบอื่นก็ไม่ได้ */
+async function scanOpenStream_(){
+  const list=[
+    {video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:30},advanced:[{focusMode:'continuous'},{whiteBalanceMode:'continuous'}]}},
+    {video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}},
+    {video:{facingMode:'environment'}},
+    {video:true}
+  ];
+  let last=null;
+  for(const c of list){
+    try{ return await navigator.mediaDevices.getUserMedia(c); }
+    catch(e){ last=e; if(e&&(e.name==='NotAllowedError'||e.name==='SecurityError')) break; }
+  }
+  throw last||new Error('เปิดกล้องไม่ได้');
+}
+let _scanSeq=0;   // ★ v3.331: เลขรอบเปิดกล้อง — ปิดหน้าต่าง/กดปิดระหว่างรอกล้อง → รอบเก่าคืนกล้องทันที ไม่ค้าง
 async function startScanCamera(){
   const msg=$('scanCamMsg'), btn=$('btnScanCam');
+  const seq=++_scanSeq;
+  const done=(t)=>{ if(btn) btn.disabled=false; if(t!=null&&seq===_scanSeq&&msg) msg.textContent=t; };
   if(btn) btn.disabled=true;
   if(msg) msg.textContent='กำลังเปิดกล้อง...';
-  const ok=await ensureScanLib();
-  if(btn) btn.disabled=false;
-  if(!ok||!window.ZXingBrowser||!ZXingBrowser.BrowserMultiFormatReader){ if(msg) msg.textContent='โหลดตัวสแกนไม่สำเร็จ (เน็ต?) — ใช้ช่องพิมพ์/ยิงบาร์โค้ดแทนได้'; return; }
-  const videoEl=$('scanVideo'); if(!videoEl) return;   // ปิด modal ไปแล้ว
-  try{
-    const reader=new ZXingBrowser.BrowserMultiFormatReader(zxingHints_(),{delayBetweenScanAttempts:80});
-    const cb=(result)=>{ if(result){ onScanBarcode(result.getText()); } };
-    // ขอกล้องหลังความละเอียดสูง + โฟกัสต่อเนื่อง — ถ้าไม่รองรับจะลดระดับลงเอง
-    const hi={video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:30},advanced:[{focusMode:'continuous'},{whiteBalanceMode:'continuous'}]}};
-    try{ _scanControls=await reader.decodeFromConstraints(hi,videoEl,cb); }
-    catch(e1){
-      try{ _scanControls=await reader.decodeFromConstraints({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}},videoEl,cb); }
-      catch(e2){ _scanControls=await reader.decodeFromVideoDevice(undefined,videoEl,cb); }
+  if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)){ done('เครื่อง/เบราว์เซอร์นี้เปิดกล้องจากเว็บไม่ได้ — ใช้ช่องพิมพ์/ยิงบาร์โค้ดแทนได้'); return; }
+  const fmts=await scanNativeFormats_();
+  let useNative=fmts.length>0;
+  if(!useNative){
+    const ok=await ensureScanLib();
+    if(!ok||!window.ZXingBrowser||!ZXingBrowser.BrowserMultiFormatReader){ done('โหลดตัวสแกนไม่สำเร็จ (เน็ต?) — ใช้ช่องพิมพ์/ยิงบาร์โค้ดแทนได้'); return; }
+  }
+  let stream=null;
+  try{ stream=await scanOpenStream_(); }
+  catch(e){ done('เปิดกล้องไม่ได้: '+((e&&e.message)||e)+' — ใช้ช่องพิมพ์แทนได้'); return; }
+  const videoEl=$('scanVideo'), ov=$('modalScan');
+  // ★ ระหว่างรอกล้อง มีคนปิดหน้าต่าง/กดปิด/เปิดสแกนรอบใหม่ → คืนกล้องทันที (กล้องค้าง = เปิดกล้องถ่ายรูป CN ไม่ได้ + เปลืองแบต)
+  if(seq!==_scanSeq||!videoEl||!document.body.contains(videoEl)||!ov||!ov.classList.contains('open')){
+    try{ stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+    if(btn) btn.disabled=false;
+    return;
+  }
+  videoEl.setAttribute('playsinline',''); videoEl.muted=true;
+  videoEl.srcObject=stream;
+  try{ await videoEl.play(); }catch(e){}
+  let stopped=false;
+  const stopAll=()=>{ stopped=true; try{ stream.getTracks().forEach(t=>t.stop()); }catch(e){} if(videoEl.srcObject===stream) videoEl.srcObject=null; };
+  if(seq!==_scanSeq){ stopAll(); if(btn) btn.disabled=false; return; }   // ปิดระหว่าง play()
+  _scanControls={stop:stopAll};
+  _scanStream=stream; _scanTorchOn=false; updateScanTorchBtn_();
+  const hit=(raw)=>{ if(!stopped&&raw) onScanBarcode(raw); };
+  const ready=(label)=>{ if(btn){ btn.disabled=false; btn.textContent='⏹ ปิดกล้อง'; } if(msg) msg.textContent='เล็งบาร์โค้ดให้อยู่กลางจอ · '+label; };
+  // ── ทางที่ 1: ตัวอ่านของเครื่อง (Android) — อ่านจาก video ตรงๆ ขนาดภาพเปลี่ยนก็ไม่มีผล ──
+  if(useNative){
+    let det=null;
+    try{ det=new window.BarcodeDetector({formats:fmts}); }catch(e){ det=null; }
+    if(det){
+      const loop=async()=>{
+        if(stopped) return;
+        try{
+          if(videoEl.readyState>=2&&videoEl.videoWidth){
+            const codes=await det.detect(videoEl);
+            if(codes&&codes.length) hit(codes[0].rawValue);
+          }
+        }catch(e){}
+        if(stopped) return;
+        if(typeof videoEl.requestVideoFrameCallback==='function') videoEl.requestVideoFrameCallback(()=>loop());
+        else setTimeout(loop,80);
+      };
+      loop();
+      ready('ตัวอ่านของเครื่อง');
+      return;
     }
-    _scanStream=videoEl.srcObject||null; _scanTorchOn=false; updateScanTorchBtn_();
-    if(btn) btn.textContent='⏹ ปิดกล้อง';
-    if(msg) msg.textContent='เล็งบาร์โค้ดให้อยู่กลางจอ';
-  }catch(e){ _scanControls=null; if(msg) msg.textContent='เปิดกล้องไม่ได้: '+((e&&e.message)||e)+' — ใช้ช่องพิมพ์แทนได้'; }
+    // สร้างตัวอ่านของเครื่องไม่ได้ → ตกไป ZXing
+    const ok=await ensureScanLib();
+    if(stopped) return;
+    if(!ok||!window.ZXingBrowser||!ZXingBrowser.BrowserMultiFormatReader){ stopScanCamera(); const m2=$('scanCamMsg'); if(m2) m2.textContent='โหลดตัวสแกนไม่สำเร็จ (เน็ต?) — ใช้ช่องพิมพ์/ยิงบาร์โค้ดแทนได้'; return; }
+  }
+  // ── ทางที่ 2: ZXing (iPhone) — วนเอง ปรับขนาดผืนตามภาพกล้องทุกรอบ (แก้บั๊กอ่านแค่มุมซ้ายบน) ──
+  const reader=new ZXingBrowser.BrowserMultiFormatReader(zxingHints_());
+  const cv=document.createElement('canvas');
+  let ctx=null;
+  const loopZ=()=>{
+    if(stopped) return;
+    try{
+      const w=videoEl.videoWidth, h=videoEl.videoHeight;
+      if(videoEl.readyState>=2&&w&&h){
+        if(cv.width!==w||cv.height!==h){ cv.width=w; cv.height=h; }
+        if(!ctx){ try{ ctx=cv.getContext('2d',{willReadFrequently:true}); }catch(e){ ctx=null; } if(!ctx) ctx=cv.getContext('2d'); }
+        ctx.drawImage(videoEl,0,0,w,h);
+        const r=reader.decodeFromCanvas(cv);
+        if(r) hit(r.getText());
+      }
+    }catch(e){}   // เฟรมนี้ไม่เจอบาร์โค้ด = ปกติ
+    if(!stopped) setTimeout(loopZ,100);
+  };
+  loopZ();
+  ready('ZXing');
 }
 function stopScanCamera(){
-  const btn=$('btnScanCam'); if(btn) btn.textContent='📷 เปิดกล้องสแกน';
+  _scanSeq++;   // ★ v3.331: ยกเลิกรอบเปิดกล้องที่ยังรออยู่ (ถ้ามี)
+  const btn=$('btnScanCam'); if(btn){ btn.textContent='📷 เปิดกล้องสแกน'; btn.disabled=false; }
   const msg=$('scanCamMsg'); if(msg) msg.textContent='';
   if(_scanControls){ try{ _scanControls.stop(); }catch(e){} _scanControls=null; }
   const v=$('scanVideo'); if(v&&v.srcObject){ try{ v.srcObject.getTracks().forEach(t=>t.stop()); }catch(e){} v.srcObject=null; }
