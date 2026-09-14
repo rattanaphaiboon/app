@@ -752,7 +752,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.181</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.182</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -6332,7 +6332,29 @@ async function doSave(silent){
     //   ชีท Keepdata สะสม 8,903 แถว (มีรถแค่ 437) และสคริปต์ล้าง+เขียนใหม่ทั้งชีททุกครั้ง → กดบันทึกค้างนาน
     //   แถว "รอจัด" ไม่มีใครใช้: loadKeepdata กรอง r.plate ทิ้งอยู่แล้ว
     //   + filter คืน array ใหม่ — เดิม bills.sort() เรียงบิลทั้งแอปใหม่ในที่ ทำให้ลำดับที่ป้อน tspRoute เปลี่ยนหลังกดบันทึก
-    const rows=bills.filter(b=>queue[b.ref]).sort((a,b)=>(a.province||'').localeCompare(b.province||'','th')).map(b=>{
+    // v9.182: บันทึกเฉพาะบิลที่อยู่ในกลุ่มที่จัดรถแล้วบนหน้าจัดรถ (แผนที่ผู้ใช้เห็น)
+    //   บิลอื่นที่ค้างในคิว = มักเป็นแผนวันอื่นที่เคยดึงมา → ไม่บันทึก + ล้างออกจากเครื่อง
+    //   ไม่มีกลุ่มเลย (ทางเก่า) = บันทึกตามคิวเหมือนเดิม
+    let _planRefs=null;
+    if(Array.isArray(_manualGroups)&&_manualGroups.some(g=>g&&g.assign&&g.assign.plate)){
+      _planRefs=new Set();
+      _manualGroups.forEach(g=>{ if(g&&g.assign&&g.assign.plate)(g.bills||[]).forEach(r=>_planRefs.add(r)); });
+      const extra=bills.filter(b=>queue[b.ref]&&!_planRefs.has(b.ref)).map(b=>b.ref);
+      if(extra.length){
+        if(!silent){
+          const kdBy={}; (keepData||[]).forEach(r=>{ if(r.ref&&r.plate)(kdBy[r.ref]||(kdBy[r.ref]=[])).push(r.deliveryDate); });
+          const src={}; extra.forEach(r=>{ const ds=(kdBy[r]||[]).filter(d=>d!==_deliveryDate); const k=ds.length?('แผน '+ds.sort((a,b)=>parseDateTH(b)-parseDateTH(a))[0]):'ไม่เคยบันทึก'; src[k]=(src[k]||0)+1; });
+          const srcTxt=Object.entries(src).map(([k,n])=>`• ${k}: ${n} ใบ`).join('\n');
+          const go=await dqConfirm(`มีบิลค้างในเครื่อง ${extra.length} ใบที่ไม่อยู่ในแผนที่กำลังจัด\nจะบันทึกเฉพาะแผนที่เห็นบนหน้าจัดรถ (${_planRefs.size} บิล) และล้างบิลที่ค้างออกจากเครื่อง\n${srcTxt}`,{ok:'บันทึกเฉพาะที่เห็น',cancel:'ยกเลิก',danger:false});
+          if(!go){ if(btn)btn.disabled=false; updateSyncBadge(); if(typeof showToast==='function')showToast('ยกเลิกการบันทึก','warn'); return; }
+        }
+        extra.forEach(r=>{ delete queue[r]; delete tripMap[r]; });
+        try{localStorage.setItem(STORE_KEY,JSON.stringify(queue));}catch(e){}
+        try{localStorage.setItem(STORE_KEY+'_trip',JSON.stringify(tripMap));}catch(e){}
+        console.warn(`[save] v9.182 ตัดบิลที่ไม่อยู่ในแผน ${extra.length} ใบ ไม่บันทึก`);
+      }
+    }
+    const rows=bills.filter(b=>queue[b.ref]&&(!_planRefs||_planRefs.has(b.ref))).sort((a,b)=>(a.province||'').localeCompare(b.province||'','th')).map(b=>{
       const t=TRUCKS.find(tt=>tt.plate===queue[b.ref]);
       const hasGPS=!!(b.lat&&b.lng);
       return[
@@ -11750,17 +11772,50 @@ async function jrClearAll(){
   if(typeof showToast==='function')showToast('🧹 ล้างข้อมูลจัดรถแล้ว — เริ่มจัดใหม่ได้เลย','ok');
 }
 // ══ v8.85: ดึงข้อมูลที่เคยบันทึกลงชีท (Keepdata) กลับมาจัดใหม่ — เฉพาะที่เคยจัด (ไม่รวมออเดอร์ใหม่) ══
+// ══ v9.182: หน้าบันทึกผิด — แผน 14/09 ในชีทมี 323 บิล แต่ 270 ใบเป็นสำเนาแผน 09-12/09 (ทะเบียน+เที่ยวเดียวกันเป๊ะ) ══
+//   ต้นเหตุ: คิว (queue) อยู่ใน localStorage ไม่เคยล้าง · ดึงแผนที่บันทึก = "เติม" เข้าคิวโดยไม่ลบของเดิม
+//   ดึงหลายวันต่อกันแล้วกดบันทึก → doSave เขียนทุกบิลที่ค้างในคิวลงวันที่กำลังบันทึก
+//   แก้ 3 ชั้น: (1) ดึงแผน = แทนที่คิว (2) ตรวจ+เสนอตัดบิลซ้ำแผนวันก่อน (3) doSave บันทึกเฉพาะบิลในกลุ่มที่เห็นบนหน้าจัดรถ
+function _jrSavedCopies(dd){   // บิลของวัน dd ที่ติดมาจาก "ทั้งแผน" ของวันก่อน (เลขบิล + ทะเบียน + เที่ยว ตรงกัน)
+  // v9.182: นับเฉพาะแผนวันก่อนที่ติดมา >=90% ของแผนวันนั้น — ซ้ำกันบางส่วนถือว่ากำกวม ไม่เสนอตัด
+  //   ข้อมูลจริง: 14/09 มีแผน 09/09 99% · 10/09 100% · 11/09 100% · 12/09 100% (ปนแน่นอน)
+  //   แต่ 10/09 ซ้ำ 09/09 แค่ 69 ใบ = 49% ของแผน 09/09 (อาจบันทึกแผนเดียวกันสองวัน) → ไม่แตะ
+  const COVER=0.9;
+  const kd=(typeof keepData!=='undefined'?keepData:[]).filter(r=>r&&r.ref&&r.plate);
+  const plans={}; kd.forEach(r=>{ (plans[r.deliveryDate]||(plans[r.deliveryDate]=new Map())).set(r.ref,r); });
+  const cur=plans[dd]; if(!cur)return {refs:[],byDate:{}};
+  const t=parseDateTH(dd), drop=new Set(), byDate={};
+  Object.keys(plans).forEach(E=>{
+    if(E===dd||!(parseDateTH(E)<t))return;
+    const pe=plans[E], hit=[];
+    cur.forEach((r,ref)=>{ const e=pe.get(ref); if(e&&e.plate===r.plate&&(e.trip||1)===(r.trip||1))hit.push(ref); });
+    if(hit.length&&pe.size&&hit.length/pe.size>=COVER){ hit.forEach(x=>drop.add(x)); byDate[E]=hit.length; }
+  });
+  return {refs:[...drop], byDate};
+}
+function _jrDropDecision(dd,v){   // จำว่าวันไหน user เลือกตัดบิลซ้ำ (หน้ารีเฟรช/กู้โหมดดึงข้อมูลจะได้ตัดเหมือนเดิม)
+  let m={}; try{ m=JSON.parse(localStorage.getItem('dq_v4_dropcopies')||'{}')||{}; }catch(e){}
+  if(v===undefined)return !!m[dd];
+  if(v)m[dd]=1; else delete m[dd];
+  try{ localStorage.setItem('dq_v4_dropcopies',JSON.stringify(m)); }catch(e){}
+  return !!v;
+}
 function _jrReconstructSaved(dd){
   let rows=(typeof keepData!=='undefined'?keepData:[]).filter(r=>r.deliveryDate===dd&&r.plate);
+  if(_jrDropDecision(dd)){ const cp=new Set(_jrSavedCopies(dd).refs); if(cp.size)rows=rows.filter(r=>!cp.has(r.ref)); }   // v9.182
   // v9.98: ชีทอาจมีบิลเดียวกันหลายแถว (บันทึกซ้ำ / ย้ายคันแล้วบันทึกใหม่) → เอาแถวหลังสุดของแต่ละบิลพอ
   //   ถ้าไม่ตัด หน่วยเดียวจะได้ ref ซ้ำ = ขึ้นปุ่มกรรไกร กดแล้วแยกได้ใบเดียวกัน 2 แถว และน้ำหนัก/ปริมาตรถูกบวกซ้ำ
   { const _byRef={}; rows.forEach(r=>{ if(r.ref)_byRef[r.ref]=r; }); rows=Object.values(_byRef); }
   if(!rows.length)return false;
+  // v9.182: แทนที่คิวทั้งหมดด้วยแผนนี้ — เดิมเติมเข้าไปเฉยๆ บิลแผนวันอื่นที่ค้างในเครื่องเลยติดไปตอนบันทึก
+  { const keep=new Set(rows.map(r=>r.ref));
+    Object.keys(queue).forEach(r=>{ if(!keep.has(r)){ delete queue[r]; delete tripMap[r]; } }); }
   // 1) เติม billMap + queue/tripMap จากแถวที่บันทึกไว้ (ให้เอนจินคำนวณต่อได้)
   rows.forEach(r=>{ if(!r.ref)return;
     if(!billMap[r.ref])billMap[r.ref]={ref:r.ref,arName:r.arName||'',arCode:r.arCode||'',province:r.province||'',district:r.district||'',lat:r.lat||0,lng:r.lng||0,route:r.route||'',days:r.days||'',totalW:r.weight||0,totalV:r.volume||0,totalAmt:r.amount||0,slmnCode:''};
     queue[r.ref]=r.plate; tripMap[r.ref]=r.trip||1; });
   if(typeof saveQ==='function')saveQ();
+  isDirty=false; if(typeof updateSyncBadge==='function')updateSyncBadge();   // v9.182: คิว = แผนในชีทพอดี ยังไม่มีอะไรค้างบันทึก
   // 2) วัน/วันที่ส่ง จากวันที่บันทึก
   _deliveryDate=dd; try{localStorage.setItem('dq_v4_deliv_date',dd);}catch(e){}
   const dt=parseAnyDate(dd); if(dt){const i=dt.getDay();_manualDay={short:_MG_S[i],full:_MG_F[i],label:_MG_F[i]};_jrSaveDay();}
@@ -11796,7 +11851,24 @@ function _jrReconstructSaved(dd){
     .map(r=>({id:r.ref||(PU_PREFIX+Math.random().toString(36).slice(2,8)),company:r.arName||'',note:r.province||'',plate:r.plate||'',trip:+r.trip||1}));
   return true;
 }
-function jrLoadSaved(dd){
+async function jrLoadSaved(dd){
+  const _prevSaved=_jrSavedDate||'';
+  if(dd){
+    // v9.182: มีงานจัดรถที่ยังไม่บันทึก → ถามก่อน เพราะดึงแผนจะแทนที่คิวในเครื่อง
+    const _nq=Object.keys(queue).filter(r=>queue[r]).length;
+    if(isDirty&&_nq&&dd!==_prevSaved){
+      const go=await dqConfirm(`ดึงแผนที่บันทึกไว้ ${dd}\nงานจัดรถในเครื่องที่ยังไม่ได้กดบันทึก (${_nq} บิล) จะถูกแทนที่ด้วยแผนนี้`,{ok:'ดึงแผนนี้',cancel:'ยกเลิก',danger:true});
+      if(!go){ const sel=document.getElementById('jrLoadSel'); if(sel)sel.value=_prevSaved; return; }
+    }
+    // v9.182: แผนนี้มีบิลซ้ำแผนวันก่อน (ทะเบียน+เที่ยวเดียวกัน) → เสนอตัดออก · ยังไม่แก้ชีทจนกว่าจะกดบันทึก
+    const cp=_jrSavedCopies(dd);
+    if(cp.refs.length){
+      const nAll=(keepData||[]).filter(r=>r.deliveryDate===dd&&r.plate).length;
+      const by=Object.keys(cp.byDate).sort((a,b)=>parseDateTH(a)-parseDateTH(b)).map(k=>`• แผน ${k}: ${cp.byDate[k]} ใบ`).join('\n');
+      const drop=await dqConfirm(`แผน ${dd} มีบิลซ้ำกับแผนวันก่อน ${cp.refs.length} จาก ${nAll} ใบ\nทะเบียนและเที่ยวตรงกับแผนเดิมทุกใบ — มักเกิดจากแผนเก่าค้างในเครื่องแล้วถูกบันทึกทับวันนี้\n${by}\n\nตัดบิลซ้ำออกจากแผนนี้ไหม? (ชีทจะถูกแก้เมื่อกดบันทึก)`,{ok:'ตัดบิลซ้ำออก',cancel:'เก็บไว้ทั้งหมด',danger:false});
+      _jrDropDecision(dd,!!drop);
+    } else _jrDropDecision(dd,false);
+  }
   try{_puFleetKey='';}catch(e){}                              // v9.130: แผนเปลี่ยน ตารางรถต้องคิดใหม่
   if(typeof puLoad==='function')setTimeout(()=>puLoad(),0);   // v9.116: คำขอขนกลับของวันนั้น
   if(!dd){ jrExitSaved(); jrRenderAll(); return; }        // เลือก placeholder = ออกจากโหมดดึงข้อมูล
