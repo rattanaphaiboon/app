@@ -1,6 +1,7 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.17 — diagLeaveFormula2() วินิจฉัยรอบสอง (รอบแรก COUNTA นับ "" ด้วย เลยอ่านผิด)
  * v9.16 — diagLeaveFormula() ไล่หาสาเหตุคอลัมน์วันลาว่าง (เขียนสูตรทดสอบในแท็บชั่วคราว)
  * v9.15 — ★ แก้สูตรวันลาในสรุปวันที่ผมทำพังตอน v9.0 (ต้องรัน setupDailySummary ใหม่):
  *          ใช้ NOT() บนช่วงข้อมูลใน FILTER ซึ่ง Google Sheets ไม่กระจายเป็นอาเรย์
@@ -157,7 +158,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.16', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.17', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5588,6 +5589,40 @@ function diagLeaveFormula() {
   } finally {
     try { ss.deleteSheet(t); } catch (_) {}
   }
+  const msg = L.join('\n');
+  Logger.log(msg);
+  return msg;
+}
+
+/* ── v9.17: วินิจฉัยรอบสอง — รอบแรกอ่านผิดเพราะ COUNTA นับช่องที่สูตรคืน "" ด้วย
+   และ FILTER ที่ไม่เจอแถวตรงเงื่อนไขก็คืน #N/A เหมือนกับตอนสูตรพัง แยกกันไม่ออก
+   รอบนี้: นับเฉพาะช่องที่มีตัวอักษรจริง + ดูว่ามีใบลาคาบช่วง B1..D1 ของสรุปวันไหม */
+function diagLeaveFormula2() {
+  const ss = getSS();
+  const name = '_diag2_' + Date.now();
+  const t = ss.insertSheet(name);
+  const L = ['── วินิจฉัยคอลัมน์วันลา รอบ 2 ──', ''];
+  try {
+    const A = "'การลาApp'!", S = "'สรุปวัน'!";
+    const probes = [
+      ['ช่วงที่สรุปวันแสดง',            '="B1 "&TEXT(' + S + 'B1,"dd/mm/yyyy")&"  ถึง  D1 "&TEXT(' + S + 'D1,"dd/mm/yyyy")'],
+      ['ใบลาที่อนุมัติทั้งหมด',          '=SUMPRODUCT((' + A + 'I2:I="approved")*1)'],
+      ['— ในนั้น เป็นลาจริง (ไม่ใช่แก้เวลา/เปลี่ยนวันหยุด)',
+        '=SUMPRODUCT((' + A + 'I2:I="approved")*(ISNUMBER(SEARCH("ป่วย",' + A + 'F2:F))+ISNUMBER(SEARCH("กิจ",' + A + 'F2:F))+ISNUMBER(SEARCH("พักร้อน",' + A + 'F2:F))+ISNUMBER(SEARCH("คลอด",' + A + 'F2:F))>0))'],
+      ['— ในนั้น คาบช่วง B1..D1 ของสรุปวัน  ★',
+        '=SUMPRODUCT((' + A + 'I2:I="approved")*(ISNUMBER(SEARCH("ป่วย",' + A + 'F2:F))+ISNUMBER(SEARCH("กิจ",' + A + 'F2:F))+ISNUMBER(SEARCH("พักร้อน",' + A + 'F2:F))+ISNUMBER(SEARCH("คลอด",' + A + 'F2:F))>0)*(' + A + 'A2:A<=' + S + 'D1)*(' + A + 'N2:N>=' + S + 'B1))'],
+      ['สรุปวัน G มีตัวอักษรจริงกี่ช่อง  ★', '=SUMPRODUCT((LEN(' + S + 'G4:G)>0)*1)'],
+      ['สรุปวัน K มีตัวเลขจริงกี่ช่อง',   '=SUMPRODUCT(ISNUMBER(' + S + 'K4:K)*(' + S + 'K4:K<>0))'],
+      ['ประเภทลาที่โผล่ในสรุปวัน',        '=IFERROR(TEXTJOIN(" | ",1,UNIQUE(FILTER(' + S + 'G4:G,LEN(' + S + 'G4:G)>0))),"‹ไม่มีเลย›")'],
+      ['ตัวอย่างใบลาที่ควรเห็น (รหัส · ตั้งแต่ · ถึง · ประเภท)',
+        '=IFERROR(TEXTJOIN(" / ",1,ARRAYFORMULA(FILTER(' + A + 'B2:B&" · "&TEXT(' + A + 'A2:A,"dd/mm")&"-"&TEXT(' + A + 'N2:N,"dd/mm")&" · "&' + A + 'F2:F, ' + A + 'I2:I="approved", ' + A + 'A2:A<=' + S + 'D1, ' + A + 'N2:N>=' + S + 'B1, ISNUMBER(SEARCH("ป่วย",' + A + 'F2:F))+ISNUMBER(SEARCH("กิจ",' + A + 'F2:F))+ISNUMBER(SEARCH("พักร้อน",' + A + 'F2:F))+ISNUMBER(SEARCH("คลอด",' + A + 'F2:F))>0))),"‹ไม่มีใบลาคาบช่วงนี้›")'],
+      ['แถวในสรุปวันที่มีทั้งรหัสและวันที่', '=SUMPRODUCT((LEN(' + S + 'A4:A)>0)*ISNUMBER(' + S + 'C4:C))'],
+    ];
+    probes.forEach((p, i) => t.getRange(i + 1, 1).setFormula(p[1]));
+    SpreadsheetApp.flush();
+    const got = t.getRange(1, 1, probes.length, 1).getDisplayValues();
+    probes.forEach((p, i) => L.push('   ' + p[0] + ': ' + String(got[i][0]).slice(0, 300)));
+  } finally { try { ss.deleteSheet(t); } catch (_) {} }
   const msg = L.join('\n');
   Logger.log(msg);
   return msg;
