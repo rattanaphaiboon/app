@@ -1,6 +1,7 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.14 — systemHealthCheck นับทริกเกอร์ย้ายสแกนเก่าเข้าไปในรายการที่ต้องมีด้วย
  * v9.13 — ย้ายสแกนเก่าออกจากชีทหลัก: เก็บเฉพาะเดือนนี้+เดือนที่แล้ว (surat เคาะ 19/9)
  *          archiveOldCheckins() ดูก่อน · ...Apply() ย้ายจริง · setupArchiveTrigger() ทุกวันที่ 3
  *          + getCheckinLog ดึงเดือนเก่าจาก Postgres ให้เอง (ปฏิทินประวัติในแอปจึงไม่ว่าง)
@@ -151,7 +152,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.13', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.14', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3126,6 +3127,7 @@ function systemHealthCheck() {
     const want = {
       cleanupOldPhotos_:        'ลบรูปเก่าเกิน 60 วัน (กัน Storage เต็ม)',
       refreshCheckinPhotoCells: 'เติมรูปในเซลล์ + ล้างแถวเกินช่วง',
+      archiveOldCheckinsApply:  'ย้ายสแกนเก่าออกจากชีทหลัก (ทุกวันที่ 3)',
     };
     const have = {};
     ScriptApp.getProjectTriggers().forEach(t => { have[t.getHandlerFunction()] = true; });
