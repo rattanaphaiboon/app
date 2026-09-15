@@ -964,7 +964,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.69';
+const APP_VERSION = 'v4.70';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -2088,19 +2088,25 @@ async function startScanner(videoElId, onDetected) {
   torchOn = false;
   updateTorchButton();
 
-  // ── Native BarcodeDetector ─ เร็วสุด + แม่นสุด (Chrome Android/Desktop) ──
-  const hasNative = ('BarcodeDetector' in window);
   let stopped = false;
+  const stopAll = () => {
+    stopped = true;
+    try { stream.getTracks().forEach(t=>t.stop()); } catch(_){}
+    if (videoEl.srcObject === stream) videoEl.srcObject = null;
+  };
   const handleHit = (raw) => {
     const t = String(raw||'').trim();
-    if (t && acceptScan(t)) onDetected(t);
+    if (!stopped && t && acceptScan(t)) onDetected(t);
   };
 
-  if (hasNative) {
+  // ── Native BarcodeDetector ─ เร็วสุด + แม่นสุด (Chrome Android/Desktop) ──
+  if ('BarcodeDetector' in window) {
     try {
       const supported = await BarcodeDetector.getSupportedFormats();
-      const formats = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf'].filter(f=>supported.includes(f));
-      const detector = new BarcodeDetector({ formats: formats.length ? formats : undefined });
+      const formats = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf'].filter(f=>(supported||[]).includes(f));
+      // v4.70: เครื่องไม่รองรับบาร์โค้ดสักชนิด (Android ไม่มี Google Play services → รายการว่าง) = วนอ่านไม่ติดตลอด → ไป ZXing
+      if (!formats.length) throw new Error('BarcodeDetector: no supported barcode formats');
+      const detector = new BarcodeDetector({ formats });
       let lastHit = 0;
       const loop = async () => {
         if (stopped) return;
@@ -2118,17 +2124,40 @@ async function startScanner(videoElId, onDetected) {
         else setTimeout(loop, 80);
       };
       loop();
-      return { stop: () => { stopped = true; try { stream.getTracks().forEach(t=>t.stop()); } catch(_){} videoEl.srcObject=null; } };
+      return { stop: stopAll };
     } catch(e) {
       console.warn('BarcodeDetector failed, falling back to ZXing:', e);
     }
   }
 
   // ── Fallback: ZXing (iOS Safari, older Android) ──
-  const reader = new ZXingBrowser.BrowserMultiFormatReader(zxingHints(), { delayBetweenScanAttempts: 60 });
-  const cb = (result) => { if (result) handleHit(result.getText()); };
-  const ctrl = await reader.decodeFromStream(stream, videoEl, cb);
-  return { stop: () => { try { ctrl.stop(); } catch(_){} try { stream.getTracks().forEach(t=>t.stop()); } catch(_){} videoEl.srcObject=null; } };
+  // v4.70: วนอ่านเอง ตั้งขนาดผืน = ขนาดภาพกล้อง "ทุกรอบ" (ท่าเดียวกับ D-MAN v3.331)
+  //   เดิม reader.decodeFromStream (@zxing/browser 0.1.5) สร้างผืน canvas ครั้งเดียวตามขนาดภาพตอนเริ่ม แล้ววาดเฟรมแบบไม่ย่อ
+  //   → กล้องเปลี่ยนความละเอียดทีหลัง (Android มักเริ่มต่ำแล้วขยับเป็น 1080p) / หมุนจอ = อ่านแค่มุมซ้ายบน บาร์โค้ดกลางจอไม่ติด
+  //   ห้ามกลับไปใช้ decodeFromStream / decodeFromConstraints / decodeFromVideoElement
+  //   ⚠️ ZXingBrowser.DecodeHintType ไม่มีใน UMD → zxingHints() คืน undefined (ZXing ใช้ค่าเริ่มต้น)
+  let reader;
+  try { reader = new ZXingBrowser.BrowserMultiFormatReader(zxingHints()); }
+  catch (e) { stopAll(); throw new Error('โหลดตัวสแกนไม่สำเร็จ (เน็ต?) — พิมพ์บาร์โค้ดแทนได้'); }
+  const cv = document.createElement('canvas');
+  let ctx = null, timer = 0;
+  const loopZ = () => {
+    if (stopped) return;
+    try {
+      const w = videoEl.videoWidth, h = videoEl.videoHeight;
+      if (videoEl.readyState >= 2 && w && h) {
+        if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+        if (!ctx) ctx = cv.getContext('2d', { willReadFrequently: true }) || cv.getContext('2d');
+        ctx.drawImage(videoEl, 0, 0, w, h);
+        const r = reader.decodeFromCanvas(cv);
+        if (r) handleHit(r.getText());
+      }
+    } catch(_) {}   // เฟรมนี้ไม่เจอบาร์โค้ด (NotFoundException) = ปกติ
+    if (!stopped) timer = setTimeout(loopZ, 100);
+  };
+  // รอบแรกเริ่มหลัง return — ผู้เรียกเก็บตัวควบคุม (html5QR/countQR/scrapQR) ก่อน ยิงเจอแล้วสั่งปิดกล้องได้จริง
+  timer = setTimeout(loopZ, 0);
+  return { stop: () => { clearTimeout(timer); stopAll(); } };
 }
 
 // ── Torch (flashlight) — only shown when the device supports it ──
