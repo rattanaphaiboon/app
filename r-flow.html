@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>R-Flow — ติดตามงานทีม v4.84</title>
+<title>R-Flow — ติดตามงานทีม v4.85</title>
 <link rel="icon" type="image/png" href="r-flow-icon.png">
 <link rel="manifest" href="r-flow.webmanifest">
 <link rel="apple-touch-icon" href="r-flow-icon.png">
@@ -1727,7 +1727,7 @@ body.dark .rf-taskpick .ck,body.dark .rf-planchips .rf-closedchip.on{color:#1B12
    Design:  Claude Design "Team Task Tracker" (task-tracker/design/) */
 
 const CFG = {
-  version: '4.84',
+  version: '4.85',
   exec: 'https://script.google.com/macros/s/AKfycbx3lmJqh1WYDhKFE-0Il4A4ihdcCsbbHYN6c9JuAXWj3TU-oWHGvate7NmxSAwDYdWfww/exec',
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
   hubUrl: 'https://rattanaphaiboon.github.io/app/rattana-hub.html',
@@ -2211,10 +2211,40 @@ let _writeSeq = 0;
    ถ้านับ จะไปทริกการ์ดใน loadAll แล้ว "ทิ้งผลโหลดทั้งก้อน" → จอว่างจนกว่าจะถึงรอบ poll 75 วิ
    (บั๊คจริง v4.4: หลังเปลี่ยนมาลงคิวทุกครั้ง คิวมีของค้าง → boot ยิง wqFlush ชนกับ loadAll
     ผลโหลดโดนทิ้ง งานเลยขึ้นช้า ~2 นาที — Surat เจอ 30 ก.ค.) */
+/* ══ v4.85 งานที่เพิ่งสร้าง ยังถือ id ปลอม 'tmp-<clientId>' อยู่ราว 3-8 วิ ═══════════════
+   🔴 บั๊คจริงจาก RejectLog (4 ครั้งใน 10 วัน · R5 คนละคนกันทั้ง 4 — 3, 4, 4, 12 ก.ย. 2026):
+      'บันทึกการแก้ไข → task not found: tmp-d0de6e8d-…'
+   ที่มา: กด "สร้างงาน" แล้วการ์ดขึ้นจอทันทีพร้อม toast "สร้างงานแล้ว" (optimistic)
+   แต่ id จริงมาจากหลังบ้านทีหลัง ระหว่างนั้น id ของการ์ดคือ 'tmp-' + clientId
+   ผู้ใช้แตะต่อได้เลยตั้งแต่วินาทีแรก — ติ๊กเช็คลิสต์ · เปลี่ยนสถานะ · แก้ไข · คอมเม้น
+   ทุกคำขอจะถือ id ปลอมไปด้วย → หลังบ้านหาแถวไม่เจอ → คิวโยนทิ้ง สิ่งที่กดหายเงียบๆ
+   แก้: จด Promise ของ create ไว้ แล้วให้ api() "จอดรอ" จน id จริงมาถึงก่อนค่อยส่ง
+   ⚠️ หลังบ้าน v1.89 แกะ 'tmp-<clientId>' กลับเป็น id จริงได้อีกชั้น — จำเป็นจริงๆ ไม่ใช่ของแถม
+      เพราะคำขอที่ค้างในคิว localStorage ข้ามคืน แล้ว wqFlush ส่งซ้ำหลังเปิดแอปใหม่
+      ตอนนั้นฝั่งแอปจำ Promise เดิมไม่ได้แล้ว (คนละรอบชีวิตของหน้า) */
+const _tmpWait = {};                 // 'tmp-xxx' → Promise<id จริง>
+const TMP_WAIT_MS = 20000;           // จอดรอนานสุดเท่านี้ แล้วปล่อยไปให้หลังบ้านแกะเอง — ห้ามค้างตลอดกาล
+async function tmpSwap(payload){
+  if (!payload) return payload;
+  let out = payload;
+  const keys = ['id', 'taskId'];
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i], v = String(out[k] || '');
+    if (v.indexOf('tmp-') !== 0 || !_tmpWait[v]) continue;
+    let real = v;
+    try {
+      real = await Promise.race([ _tmpWait[v],
+        new Promise(function(r){ setTimeout(function(){ r(v); }, TMP_WAIT_MS); }) ]);
+    } catch(e){ real = v; }          // create ล้มเหลว → ปล่อยให้คำขอนี้ล้มตามทางของมันเอง
+    if (real && real !== v) { if (out === payload) out = Object.assign({}, payload); out[k] = real; }
+  }
+  return out;
+}
 async function api(action, payload, opts){
   const isWrite = !!WRITE_ACTIONS[action] && !(opts && opts.wqBacked);
   if (isWrite) { _pendingWrites++; _writeSeq++; }
   try {
+    payload = await tmpSwap(payload);   // v4.85: งานที่เพิ่งสร้างยังถือ id ปลอม — รอ id จริงก่อนส่ง
     const body = Object.assign({ action: action, email: S.me ? S.me.email : (SESSION.email || '') }, payload || {});
     let res;
     // v2.88: fetch พังเอง = เน็ตไม่ถึง (สัญญาณหลุดในคลัง) → ติดธง offline ไว้ให้ผู้เรียกเอาเข้าคิวส่งซ้ำได้
@@ -12439,13 +12469,25 @@ RF.saveForm = () => {
     const unhid = clearFiltersHiding(temp);
     render(); renderOverlays();
     toast(unhid ? 'สร้างงานแล้ว — ล้างตัวกรองให้เห็นงานใหม่' : 'สร้างงานแล้ว');
+    /* v4.85: จด "คำสัญญาว่าจะได้ id จริง" ไว้ก่อนยิง — ถ้าผู้ใช้แตะการ์ดนี้ระหว่างรอ
+       api() จะไปจอดรอที่ Promise ตัวนี้แล้วสลับเป็น id จริงให้เอง (ดูหมายเหตุที่ _tmpWait) */
+    const tmpId = temp.id;
+    let _tmpOk, _tmpNo;
+    const _idP = new Promise(function(a, b){ _tmpOk = a; _tmpNo = b; });
+    _idP.catch(function(){});                              // กัน unhandled rejection ตอนไม่มีใครจอดรออยู่
+    _tmpWait[tmpId] = _idP;
     api('create', { task: payload }, { wqBacked: true }).then(j => {
       wqDropOp(cid);
-      if (S.detailId === temp.id) S.detailId = j.task.id;   // เปิดดูงานที่เพิ่งสร้างอยู่ → id เปลี่ยน ต้องตามไปด้วย ไม่งั้นหน้ารายละเอียดหายเฉยๆ
-      temp.id = j.task.id; invalidateDec(); render(); renderOverlays(); calSyncOne(temp.id);
+      if (S.detailId === tmpId) S.detailId = j.task.id;   // เปิดดูงานที่เพิ่งสร้างอยู่ → id เปลี่ยน ต้องตามไปด้วย ไม่งั้นหน้ารายละเอียดหายเฉยๆ
+      temp.id = j.task.id;
+      _tmpOk(j.task.id); delete _tmpWait[tmpId];           // ปล่อยคำขอที่จอดรอ แล้วเลิกจด (temp.id เป็นของจริงแล้ว)
+      invalidateDec(); render(); renderOverlays(); calSyncOne(temp.id);
       // รูปแนบ — อัปโหลดหลังสร้างงานเสร็จ (ต้องมี id ก่อน) แล้วค่อย patch URL กลับเข้างาน
       if (pendingImgs.length) return uploadTaskImages(temp.id, pendingImgs, 'images');
     }).then(function(){ loadAll(true); }).catch(e => {
+      /* สร้างไม่สำเร็จ = ไม่มี id จริงให้รอแล้ว — ต้องปลดคนที่จอดรออยู่เสมอ ไม่งั้นค้างยาว
+         (ถ้า _tmpOk ถูกเรียกไปแล้วข้างบน บรรทัดนี้เป็น no-op ตามธรรมชาติของ Promise) */
+      _tmpNo(e); delete _tmpWait[tmpId];
       if (e && e.offline) {          // ยังอยู่ในคิว — งานยังอยู่บนจอ ระบบลองส่งใหม่ให้เอง
         wqMarkFailedOp(cid); invalidateDec(); render(); renderOverlays();
         toast('ยังส่งไม่ขึ้นระบบ — เก็บไว้ให้แล้ว กำลังลองส่งใหม่');
