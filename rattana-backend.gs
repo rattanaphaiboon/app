@@ -1,7 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
- * v9.18 — diagLeaveSumifs() ไล่ SUMIFS ของลงเวลาAuto ทีละเงื่อนไข (K มีค่า 8 จริง H สะท้อนจาก K)
+ * v9.19 — diagAutoFormulaVariants() ทดสอบสูตรลงเวลาAuto 4 แบบกับข้อมูลจริงก่อนเอาไปใช้
+ * v9.18 — diagLeaveSumifs() ไล่ SUMIFS ของลงเวลาAuto ทีละเงื่อนไข
  * v9.17 — diagLeaveFormula2() วินิจฉัยรอบสอง (รอบแรก COUNTA นับ "" ด้วย เลยอ่านผิด)
  * v9.16 — diagLeaveFormula() ไล่หาสาเหตุคอลัมน์วันลาว่าง (เขียนสูตรทดสอบในแท็บชั่วคราว)
  * v9.15 — ★ แก้สูตรวันลาในสรุปวันที่ผมทำพังตอน v9.0 (ต้องรัน setupDailySummary ใหม่):
@@ -159,7 +160,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.18', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.19', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5656,6 +5657,39 @@ function diagLeaveSumifs() {
     SpreadsheetApp.flush();
     const got = t.getRange(1, 1, probes.length, 1).getDisplayValues();
     probes.forEach((p, i) => L.push('   ' + p[0] + ': ' + String(got[i][0]).slice(0, 220)));
+  } finally { try { ss.deleteSheet(t); } catch (_) {} }
+  const msg = L.join('\n');
+  Logger.log(msg);
+  return msg;
+}
+
+/* ── v9.19: ทดสอบสูตรลงเวลาAuto 4 แบบกับข้อมูลจริง ก่อนเอาไปใช้จริง ──────────
+   ผลตรวจ v9.18: SUMIFS เงื่อนไขครบได้ 88 (=11 วัน) แปลว่าตรรกะถูก
+   ที่พังคือสูตรไม่กระจายทีละแถว — ทดสอบว่าเขียนแบบไหนถึงกระจายได้จริง */
+function diagAutoFormulaVariants() {
+  const ss = getSS();
+  const t = ss.insertSheet('_diag4_' + Date.now());
+  const L = ['── ทดสอบสูตรลงเวลาAuto 4 แบบ ──', '', '   (คาดหวัง: 11202 ต้องได้ 11 · 69151 ต้องว่างหรือ 0)', ''];
+  try {
+    const S = "'สรุปวัน'!";
+    const crit = S + 'A4:A, A2:A&"", ' + S + 'G4:G, "*ป่วย*", ' + S + 'G4:G, "<>*ไม่มีใบ*", ' +
+                 S + 'F4:F, "<>วันอาทิตย์", ' + S + 'F4:F, "<>วันนักขัตฯ"';
+    t.getRange('A2:A4').setValues([['69151'], ['11202'], ['660071']]);
+    t.getRange('B1:E1').setValues([['แบบ1 ปัจจุบัน', 'แบบ2 ใส่ "" ชัดๆ', 'แบบ3 ไม่ซ่อนศูนย์', 'แบบ4 ไม่ใช้ ARRAYFORMULA']]);
+    t.getRange('B2').setFormula('=ARRAYFORMULA(IF(A2:A="",, LET(s, SUMIFS(' + S + 'K4:K, ' + crit + ')/8, IF(s=0,,s))))');
+    t.getRange('C2').setFormula('=ARRAYFORMULA(IF(A2:A="","", LET(s, SUMIFS(' + S + 'K4:K, ' + crit + ')/8, IF(s=0,"",s))))');
+    t.getRange('D2').setFormula('=ARRAYFORMULA(IF(A2:A="","", SUMIFS(' + S + 'K4:K, ' + crit + ')/8))');
+    ['D2', 'D3', 'D4'].forEach(() => {});
+    for (let r = 2; r <= 4; r++) {
+      t.getRange(r, 5).setFormula('=SUMIFS(' + S + 'K4:K, ' + S + 'A4:A, A' + r + '&"", ' + S +
+        'G4:G, "*ป่วย*", ' + S + 'G4:G, "<>*ไม่มีใบ*", ' + S + 'F4:F, "<>วันอาทิตย์", ' + S + 'F4:F, "<>วันนักขัตฯ")/8');
+    }
+    t.getRange('B2:E4').setNumberFormat('0.##');   // ล้างฟอร์แมตเวลาที่ติดมาจากคอลัมน์ K
+    SpreadsheetApp.flush();
+    const got = t.getRange(2, 1, 3, 5).getDisplayValues();
+    L.push('   รหัส    | แบบ1  | แบบ2  | แบบ3  | แบบ4(คุมสอบ)');
+    got.forEach(r => L.push('   ' + (r[0] + '      ').slice(0, 8) + '| ' + ['1','2','3','4']
+      .map((_, i) => ((r[i + 1] === '' ? '‹ว่าง›' : r[i + 1]) + '     ').slice(0, 6)).join('| ')));
   } finally { try { ss.deleteSheet(t); } catch (_) {} }
   const msg = L.join('\n');
   Logger.log(msg);
