@@ -1,6 +1,7 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.12 — auditScanPhotosAfterFix() ดูเฉพาะ 5 วันล่าสุด (ตัดช่วงก่อนแก้บั๊กกล้อง QR ออก)
  * v9.11 — auditScanPhotos ไม่นับแถวจากเครื่องสแกนนิ้ว (scannedBy ขึ้นต้น device:)
  *          เครื่องไม่ส่งรูปมาอยู่แล้ว เดิมนับรวมทำให้พนักงานที่ใช้เครื่องขึ้น 0% ทั้งกลุ่ม
  * v9.10 — systemHealthCheck บอกด้วยว่าตั้งทริกเกอร์ครบมั้ย (ลบรูปเก่า/เติมรูปในเซลล์)
@@ -349,7 +350,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.11', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.12', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5579,3 +5580,8 @@ function removePhotoCellTrigger() {
   Logger.log(msg);
   return msg;
 }
+
+/* v9.12: ดูเฉพาะ 5 วันล่าสุด — ตัดช่วงก่อนแก้บั๊กกล้อง QR (แอป v12.63 ขึ้น 9/9/2026) ออก
+   ค่าเฉลี่ย 30 วันมีของเก่าที่พังไปแล้วถ่วงอยู่ จึงบอกไม่ได้ว่าแก้หายหรือยัง
+   ถ้า "สแกน QR" ในนี้ขึ้นใกล้ 99% เท่าสแกนหน้า = แก้ตรงจุดแล้ว */
+function auditScanPhotosAfterFix() { return auditScanPhotos(5); }
