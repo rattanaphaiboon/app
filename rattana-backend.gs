@@ -1,6 +1,7 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.18 — diagLeaveSumifs() ไล่ SUMIFS ของลงเวลาAuto ทีละเงื่อนไข (K มีค่า 8 จริง H สะท้อนจาก K)
  * v9.17 — diagLeaveFormula2() วินิจฉัยรอบสอง (รอบแรก COUNTA นับ "" ด้วย เลยอ่านผิด)
  * v9.16 — diagLeaveFormula() ไล่หาสาเหตุคอลัมน์วันลาว่าง (เขียนสูตรทดสอบในแท็บชั่วคราว)
  * v9.15 — ★ แก้สูตรวันลาในสรุปวันที่ผมทำพังตอน v9.0 (ต้องรัน setupDailySummary ใหม่):
@@ -158,7 +159,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.17', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.18', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5622,6 +5623,39 @@ function diagLeaveFormula2() {
     SpreadsheetApp.flush();
     const got = t.getRange(1, 1, probes.length, 1).getDisplayValues();
     probes.forEach((p, i) => L.push('   ' + p[0] + ': ' + String(got[i][0]).slice(0, 300)));
+  } finally { try { ss.deleteSheet(t); } catch (_) {} }
+  const msg = L.join('\n');
+  Logger.log(msg);
+  return msg;
+}
+
+/* ── v9.18: ไล่ SUMIFS ของลงเวลาAuto ทีละเงื่อนไข หาว่าอันไหนทำให้ได้ศูนย์
+   ใช้จิรวรรณ 11202 เป็นตัวอย่าง (ในสรุปวันมีลาป่วยมีใบหลายวัน ควรได้เลขแน่ๆ) */
+const DIAG_EMP = '11202';
+function diagLeaveSumifs() {
+  const ss = getSS();
+  const t = ss.insertSheet('_diag3_' + Date.now());
+  const L = ['── ไล่ SUMIFS ของลงเวลาAuto · รหัส ' + DIAG_EMP + ' ──', ''];
+  try {
+    const S = "'สรุปวัน'!", id = '"' + DIAG_EMP + '"';
+    const probes = [
+      ['A ในสรุปวันเป็นตัวเลขหรือข้อความ', '=IF(ISNUMBER(' + S + 'A4),"ตัวเลข","ข้อความ")'],
+      ['แถวของคนนี้ในสรุปวัน',            '=COUNTIF(' + S + 'A4:A, ' + id + ')'],
+      ['1) SUMIFS(K) กรองแค่รหัส',        '=SUMIFS(' + S + 'K4:K, ' + S + 'A4:A, ' + id + ')'],
+      ['2) + G มีคำว่า ป่วย',             '=SUMIFS(' + S + 'K4:K, ' + S + 'A4:A, ' + id + ', ' + S + 'G4:G, "*ป่วย*")'],
+      ['3) + G ไม่มีคำว่า ไม่มีใบ',        '=SUMIFS(' + S + 'K4:K, ' + S + 'A4:A, ' + id + ', ' + S + 'G4:G, "*ป่วย*", ' + S + 'G4:G, "<>*ไม่มีใบ*")'],
+      ['4) + F ไม่ใช่วันอาทิตย์',          '=SUMIFS(' + S + 'K4:K, ' + S + 'A4:A, ' + id + ', ' + S + 'G4:G, "*ป่วย*", ' + S + 'G4:G, "<>*ไม่มีใบ*", ' + S + 'F4:F, "<>วันอาทิตย์")'],
+      ['5) + F ไม่ใช่วันนักขัตฯ  (สูตรจริง)', '=SUMIFS(' + S + 'K4:K, ' + S + 'A4:A, ' + id + ', ' + S + 'G4:G, "*ป่วย*", ' + S + 'G4:G, "<>*ไม่มีใบ*", ' + S + 'F4:F, "<>วันอาทิตย์", ' + S + 'F4:F, "<>วันนักขัตฯ")'],
+      ['เทียบ: COUNTIFS เงื่อนไขเดียวกัน',  '=COUNTIFS(' + S + 'A4:A, ' + id + ', ' + S + 'G4:G, "*ป่วย*")'],
+      ['ค่า G ของคนนี้ (ไม่ซ้ำ)',          '=IFERROR(TEXTJOIN(" | ",1,UNIQUE(FILTER(' + S + 'G4:G, ' + S + 'A4:A=' + DIAG_EMP + ', LEN(' + S + 'G4:G)>0))),"‹ว่าง›")'],
+      ['ค่า G ของคนนี้ (แบบข้อความ)',      '=IFERROR(TEXTJOIN(" | ",1,UNIQUE(FILTER(' + S + 'G4:G, ' + S + 'A4:A&""=' + id + ', LEN(' + S + 'G4:G)>0))),"‹ว่าง›")'],
+      ['ความยาวอักษรของ G ช่องแรกที่มีค่า', '=IFERROR(LEN(INDEX(FILTER(' + S + 'G4:G, LEN(' + S + 'G4:G)>0),1)),"-")'],
+      ['ผลรวม K ทั้งคอลัมน์',              '=SUM(' + S + 'K4:K)'],
+    ];
+    probes.forEach((p, i) => t.getRange(i + 1, 1).setFormula(p[1]));
+    SpreadsheetApp.flush();
+    const got = t.getRange(1, 1, probes.length, 1).getDisplayValues();
+    probes.forEach((p, i) => L.push('   ' + p[0] + ': ' + String(got[i][0]).slice(0, 220)));
   } finally { try { ss.deleteSheet(t); } catch (_) {} }
   const msg = L.join('\n');
   Logger.log(msg);
