@@ -1,6 +1,7 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.16 — diagLeaveFormula() ไล่หาสาเหตุคอลัมน์วันลาว่าง (เขียนสูตรทดสอบในแท็บชั่วคราว)
  * v9.15 — ★ แก้สูตรวันลาในสรุปวันที่ผมทำพังตอน v9.0 (ต้องรัน setupDailySummary ใหม่):
  *          ใช้ NOT() บนช่วงข้อมูลใน FILTER ซึ่ง Google Sheets ไม่กระจายเป็นอาเรย์
  *          → เงื่อนไขยุบเหลือค่าเดียว FILTER เออเรอร์ → IFERROR คืน "" = คอลัมน์ลาว่างทั้งแผ่น
@@ -156,7 +157,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.15', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.16', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5541,5 +5542,53 @@ function setupArchiveTrigger() {
               'เลือกวันที่ 3 เพื่อให้มีเวลาปิดงานเงินเดือนของเดือนก่อนหน้าก่อน';
   Logger.log(msg);
   try { getSS().toast(msg, 'ตั้งย้ายอัตโนมัติ', 10); } catch (e) {}
+  return msg;
+}
+
+/* ── v9.16: หาสาเหตุ "คอลัมน์วันลาในสรุปวัน/ลงเวลาAuto ว่าง" ───────────────────
+   เลิกเดา — ตัวนี้เขียนสูตรทดสอบลงแท็บชั่วคราว อ่านค่าจริงออกมา แล้วลบแท็บทิ้ง
+   ไล่ทีละเงื่อนไขของสูตรว่าอันไหนทำให้ผลเป็นศูนย์ · ไม่แตะข้อมูลจริงเลย */
+function diagLeaveFormula() {
+  const ss = getSS();
+  const name = '_diag_' + Date.now();
+  const t = ss.insertSheet(name);
+  const L = ['── วินิจฉัยคอลัมน์วันลา ──', ''];
+  try {
+    const probes = [
+      ['แถวในการลาApp ทั้งหมด',        '=COUNTA(\'การลาApp\'!B2:B)'],
+      ['สถานะที่มีคำว่า "อนุมัติ"',      '=SUMPRODUCT(ISNUMBER(SEARCH("อนุมัติ",\'การลาApp\'!I2:I&""))*1)'],
+      ['สถานะที่มีคำว่า "ไม่อนุมัติ"',   '=SUMPRODUCT(ISNUMBER(SEARCH("ไม่อนุมัติ",\'การลาApp\'!I2:I&""))*1)'],
+      ['สถานะ = "approved" เป๊ะ',       '=SUMPRODUCT((\'การลาApp\'!I2:I="approved")*1)'],
+      ['ผ่านเงื่อนไขอนุมัติรวม',        '=SUMPRODUCT(((ISNUMBER(SEARCH("อนุมัติ",\'การลาApp\'!I2:I&""))*(1-ISNUMBER(SEARCH("ไม่อนุมัติ",\'การลาApp\'!I2:I&""))))+(\'การลาApp\'!I2:I="approved"))>0)'],
+      ['คอลัมน์ A เป็นวันที่จริงกี่แถว', '=SUMPRODUCT(ISNUMBER(\'การลาApp\'!A2:A)*1)'],
+      ['คอลัมน์ N เป็นวันที่จริงกี่แถว', '=SUMPRODUCT(ISNUMBER(\'การลาApp\'!N2:N)*1)'],
+      ['คอลัมน์ M (ชม.ลา) มีเลขกี่แถว', '=SUMPRODUCT(ISNUMBER(\'การลาApp\'!M2:M)*1)'],
+      ['สรุปวัน มีกี่แถว',               '=COUNTA(\'สรุปวัน\'!A4:A)'],
+      ['สรุปวัน คอลัมน์ G มีค่ากี่ช่อง', '=COUNTA(\'สรุปวัน\'!G4:G)'],
+      ['สรุปวัน คอลัมน์ K มีค่ากี่ช่อง', '=COUNTA(\'สรุปวัน\'!K4:K)'],
+      ['ช่วงวันที่ในสรุปวัน B1',         '=TEXT(\'สรุปวัน\'!B1,"dd/mm/yyyy")'],
+      ['ช่วงวันที่ในสรุปวัน D1',         '=TEXT(\'สรุปวัน\'!D1,"dd/mm/yyyy")'],
+      ['รหัสแรกในสรุปวัน',               '=\'สรุปวัน\'!A4&""'],
+      ['วันที่แรกในสรุปวัน',             '=TEXT(\'สรุปวัน\'!C4,"dd/mm/yyyy")'],
+      // ลองรันสูตรลาจริงกับแถวแรกของสรุปวัน — ถ้าเออเรอร์จะเห็นข้อความเออเรอร์ตรงนี้
+      ['ทดลองสูตรลากับแถวแรก',
+       '=IFERROR(TEXTJOIN(", ",1,FILTER(\'การลาApp\'!F2:F, \'การลาApp\'!B2:B&""=\'สรุปวัน\'!A4&"", ' +
+       'IFERROR(DATEVALUE(\'การลาApp\'!A2:A),\'การลาApp\'!A2:A)<=\'สรุปวัน\'!C4, ' +
+       'IFERROR(DATEVALUE(\'การลาApp\'!N2:N),\'การลาApp\'!N2:N)>=\'สรุปวัน\'!C4, ' +
+       '((ISNUMBER(SEARCH("อนุมัติ",\'การลาApp\'!I2:I&""))*(1-ISNUMBER(SEARCH("ไม่อนุมัติ",\'การลาApp\'!I2:I&""))))+(\'การลาApp\'!I2:I="approved")))),"‹ว่างหรือเออเรอร์›")'],
+      ['เออเรอร์จริงของสูตรลา (ไม่ครอบ IFERROR)',
+       '=IFERROR(TEXTJOIN(", ",1,FILTER(\'การลาApp\'!F2:F, \'การลาApp\'!B2:B&""=\'สรุปวัน\'!A4&"", ' +
+       'IFERROR(DATEVALUE(\'การลาApp\'!A2:A),\'การลาApp\'!A2:A)<=\'สรุปวัน\'!C4, ' +
+       'IFERROR(DATEVALUE(\'การลาApp\'!N2:N),\'การลาApp\'!N2:N)>=\'สรุปวัน\'!C4)),"FILTER พังตั้งแต่เงื่อนไขวันที่")'],
+    ];
+    probes.forEach((p, i) => t.getRange(i + 1, 1).setFormula(p[1]));
+    SpreadsheetApp.flush();
+    const got = t.getRange(1, 1, probes.length, 1).getDisplayValues();
+    probes.forEach((p, i) => L.push('   ' + p[0] + ': ' + got[i][0]));
+  } finally {
+    try { ss.deleteSheet(t); } catch (_) {}
+  }
+  const msg = L.join('\n');
+  Logger.log(msg);
   return msg;
 }
