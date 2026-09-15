@@ -1,6 +1,11 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.20 — ★ เจอต้นเหตุจริงของคอลัมน์วันลาว่าง: SUMIFS ใช้ใน ARRAYFORMULA ไม่ได้
+ *          มันไม่กระจายทีละแถว ยุบเหลือค่าเดียวแล้วแจกทุกแถวเท่ากัน (แถวแรกเป็น 0 = ว่างหมด)
+ *          พิสูจน์ด้วย diagAutoFormulaVariants — ARRAYFORMULA ทุกแบบได้ 0 · ทีละแถวได้ 11
+ *          แก้เป็น MAP()+LAMBDA ทั้ง 3 จุด (D · J · leaveSum ที่ใช้กับ E F G H I K L)
+ *          ★ ต้องรัน setupMonthlyAuto ใหม่ · หมายเหตุ: คอลัมน์ D เคยเพี้ยนเงียบๆ ด้วย
  * v9.19 — diagAutoFormulaVariants() ทดสอบสูตรลงเวลาAuto 4 แบบกับข้อมูลจริงก่อนเอาไปใช้
  * v9.18 — diagLeaveSumifs() ไล่ SUMIFS ของลงเวลาAuto ทีละเงื่อนไข
  * v9.17 — diagLeaveFormula2() วินิจฉัยรอบสอง (รอบแรก COUNTA นับ "" ด้วย เลยอ่านผิด)
@@ -160,7 +165,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.19', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.20', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -1210,11 +1215,15 @@ function setupMonthlyAuto() {
   //   ช่องลา = Σ(ชม.ลา)/8 ต่อประเภท · ศูนย์เว้นว่าง · ปัด 2 ตำแหน่ง
   const noHol = `สรุปวัน!F4:F, "<>วันอาทิตย์", สรุปวัน!F4:F, "<>วันนักขัตฯ"`;
   // เก็บค่าจริงไม่ปัดเศษ (กัน 0.63+0.38=1.01) — การแสดงผล 2 ตำแหน่งใช้ number format แทน
+  // v9.20: ★ SUMIFS ใช้ใน ARRAYFORMULA ไม่ได้ — ไม่กระจายทีละแถว ยุบเหลือค่าเดียวแล้วแจกเท่ากันหมด
+  //   (พิสูจน์ด้วย diagAutoFormulaVariants: ARRAYFORMULA ทุกแบบได้ 0 · เขียนแยกทีละแถวได้ 11)
+  //   COUNTIFS กระจายได้ คอลัมน์ D จึงดูเหมือนปกติมาตลอด ทั้งที่ท่อน SUMIFS ข้างในก็เพี้ยนเงียบๆ
+  //   แก้ด้วย MAP() ซึ่งเรียก LAMBDA ทีละแถวจริง — แบบเดียวกับที่แท็บสรุปวันใช้อยู่แล้ว
   const leaveSum = (crit) =>
-    `=ARRAYFORMULA(IF(B2:B="",, LET(s, SUMIFS(สรุปวัน!K4:K, สรุปวัน!A4:A, B2:B&"", ${crit})/8, IF(s=0,,s))))`;
+    `=MAP(B2:B, LAMBDA(id, IF(id="",, LET(s, SUMIFS(สรุปวัน!K4:K, สรุปวัน!A4:A, id&"", ${crit})/8, IF(s=0,,s)))))`;
   // D แรง = วันเต็ม + เศษที่เหลือของวัน "ทำงาน (ลาบางส่วน)" (1 − ชม.ลา/8)
   sh.getRange('D2').setFormula(
-    `=ARRAYFORMULA(IF(B2:B="",, LET(full, COUNTIFS(สรุปวัน!A4:A, B2:B&"", สรุปวัน!F4:F, "ทำงานเต็มวัน"), pc, COUNTIFS(สรุปวัน!A4:A, B2:B&"", สรุปวัน!F4:F, "ทำงาน (ลาบางส่วน)"), ph, SUMIFS(สรุปวัน!K4:K, สรุปวัน!A4:A, B2:B&"", สรุปวัน!F4:F, "ทำงาน (ลาบางส่วน)"), full + pc - ph/8)))`
+    `=MAP(B2:B, LAMBDA(id, IF(id="",, LET(full, COUNTIFS(สรุปวัน!A4:A, id&"", สรุปวัน!F4:F, "ทำงานเต็มวัน"), pc, COUNTIFS(สรุปวัน!A4:A, id&"", สรุปวัน!F4:F, "ทำงาน (ลาบางส่วน)"), ph, SUMIFS(สรุปวัน!K4:K, สรุปวัน!A4:A, id&"", สรุปวัน!F4:F, "ทำงาน (ลาบางส่วน)"), full + pc - ph/8))))`
   );
   sh.getRange('E2').setFormula(leaveSum(`สรุปวัน!G4:G, "*ป่วย*", สรุปวัน!G4:G, "<>*ไม่มีใบ*", ${noHol}`));
   sh.getRange('F2').setFormula(leaveSum(`สรุปวัน!G4:G, "*กิจ*", สรุปวัน!G4:G, "<>*ไม่รับค่าจ้าง*", ${noHol}`));
@@ -1223,7 +1232,7 @@ function setupMonthlyAuto() {
   sh.getRange('I2').setFormula(leaveSum(`สรุปวัน!G4:G, "*ไม่มีใบ*", ${noHol}`));
   // J ขาด = "ผิด" ที่ไม่มีใบลา (เต็มวัน) + เศษที่ขาดของ "ผิด (ลาบางส่วน)" (ลาแล้วส่วนที่เหลือไม่มาสแกน)
   sh.getRange('J2').setFormula(
-    `=ARRAYFORMULA(IF(B2:B="",, LET(a, COUNTIFS(สรุปวัน!A4:A, B2:B&"", สรุปวัน!F4:F, "ผิด*", สรุปวัน!G4:G, "="), pc, COUNTIFS(สรุปวัน!A4:A, B2:B&"", สรุปวัน!F4:F, "ผิด (ลาบางส่วน)"), ph, SUMIFS(สรุปวัน!K4:K, สรุปวัน!A4:A, B2:B&"", สรุปวัน!F4:F, "ผิด (ลาบางส่วน)"), s, a + pc - ph/8, IF(s=0,,s))))`
+    `=MAP(B2:B, LAMBDA(id, IF(id="",, LET(a, COUNTIFS(สรุปวัน!A4:A, id&"", สรุปวัน!F4:F, "ผิด*", สรุปวัน!G4:G, "="), pc, COUNTIFS(สรุปวัน!A4:A, id&"", สรุปวัน!F4:F, "ผิด (ลาบางส่วน)"), ph, SUMIFS(สรุปวัน!K4:K, สรุปวัน!A4:A, id&"", สรุปวัน!F4:F, "ผิด (ลาบางส่วน)"), s, a + pc - ph/8, IF(s=0,,s)))))`
   );
   // v4.6: กันนับซ้ำ — "ลาคลอด (ไม่รับค่าจ้าง)" ต้องเข้าช่องลาคลอดช่องเดียว
   sh.getRange('K2').setFormula(leaveSum(`สรุปวัน!G4:G, "*ไม่รับค่าจ้าง*", สรุปวัน!G4:G, "<>*คลอด*", ${noHol}`));
