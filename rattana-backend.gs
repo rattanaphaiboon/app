@@ -1,6 +1,9 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.13 — ย้ายสแกนเก่าออกจากชีทหลัก: เก็บเฉพาะเดือนนี้+เดือนที่แล้ว (surat เคาะ 19/9)
+ *          archiveOldCheckins() ดูก่อน · ...Apply() ย้ายจริง · setupArchiveTrigger() ทุกวันที่ 3
+ *          + getCheckinLog ดึงเดือนเก่าจาก Postgres ให้เอง (ปฏิทินประวัติในแอปจึงไม่ว่าง)
  * v9.12 — auditScanPhotosAfterFix() ดูเฉพาะ 5 วันล่าสุด (ตัดช่วงก่อนแก้บั๊กกล้อง QR ออก)
  * v9.11 — auditScanPhotos ไม่นับแถวจากเครื่องสแกนนิ้ว (scannedBy ขึ้นต้น device:)
  *          เครื่องไม่ส่งรูปมาอยู่แล้ว เดิมนับรวมทำให้พนักงานที่ใช้เครื่องขึ้น 0% ทั้งกลุ่ม
@@ -148,7 +151,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.12', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.13', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3249,6 +3252,31 @@ function actionGetAttendance(p, user) {
   return jsonOut({ ok:true, rows: out });
 }
 
+/* v9.13: อ่านสแกนของ "เดือนเก่า" จาก Postgres — ใช้เมื่อเดือนนั้นถูกย้ายออกจากชีทแล้ว
+   ปฏิทินประวัติในแอปเรียก getCheckinLog แบบระบุเดือน ถ้าชีทไม่มีแล้วจะได้หน้าว่าง
+   Postgres เก็บครบทุกแถวตั้งแต่วันแรก จึงใช้เป็นตัวสำรองได้ตรงๆ */
+function sbCheckinByMonth_(empId, month, limit) {
+  if (!sbReady_()) return [];
+  const m = String(month || '').match(/^(\d{1,2})\/(\d{4})$/);
+  if (!m) return [];
+  const y = +m[2], mo = +m[1];
+  const pad = n => ('0' + n).slice(-2);
+  const from = y + '-' + pad(mo) + '-01T00:00:00+07:00';
+  const ny = mo === 12 ? y + 1 : y, nm = mo === 12 ? 1 : mo + 1;
+  const to = ny + '-' + pad(nm) + '-01T00:00:00+07:00';
+  const s = sb_();
+  try {
+    const q = '/rest/v1/checkin_log?select=*&scan_at=gte.' + encodeURIComponent(from) +
+              '&scan_at=lt.' + encodeURIComponent(to) +
+              (empId ? '&emp_id=eq.' + encodeURIComponent(empId) : '') +
+              '&order=scan_at.desc&limit=' + (parseInt(limit, 10) || 500);
+    const res = UrlFetchApp.fetch(s.url + q, {
+      headers: { apikey: s.key, Authorization: 'Bearer ' + s.key }, muteHttpExceptions: true });
+    if (res.getResponseCode() >= 300) return [];
+    return JSON.parse(res.getContentText()) || [];
+  } catch (e) { console.error('sbCheckinByMonth_', e); return []; }
+}
+
 function actionGetCheckinLog(p, user) {
   const sh = getTab(T.LOG);
   if (!sh) return jsonOut({ ok:true, logs: [] });
@@ -3270,6 +3298,24 @@ function actionGetCheckinLog(p, user) {
       type: r[5], branch: r[6], lat: r[7], lng: r[8], distance: r[9],
       faceDist: r[10], scannedBy: r[11], retroactive: r[12], reason: r[13],
     });
+  }
+  // v9.13: ชีทไม่มีเดือนนี้แล้ว (ถูกย้ายไปคลัง) → ดึงจาก Postgres ซึ่งเก็บครบทุกแถว
+  if (!out.length && p.month) {
+    const eid = p.empId ? String(p.empId) : String(user.empId || '');
+    if (eid && canSeeUser(user, eid)) {
+      sbCheckinByMonth_(eid, p.month, limit).forEach(r => {
+        const ts = new Date(r.scan_at);
+        if (isNaN(ts.getTime())) return;
+        out.push({
+          timestamp: ts.toISOString(), empId: String(r.emp_id || ''), name: r.name || '',
+          date: Utilities.formatDate(ts, 'Asia/Bangkok', 'dd/MM/yyyy'),
+          time: Utilities.formatDate(ts, 'Asia/Bangkok', 'HH:mm:ss'),
+          type: r.type, branch: r.branch || '', lat: r.lat, lng: r.lng, distance: r.distance,
+          faceDist: r.face_dist, scannedBy: r.scanned_by || '', retroactive: '', reason: r.reason || '',
+          fromArchive: true,
+        });
+      });
+    }
   }
   return jsonOut({ ok:true, logs: out });
 }
@@ -5383,3 +5429,111 @@ function removePhotoCellTrigger() {
    ค่าเฉลี่ย 30 วันมีของเก่าที่พังไปแล้วถ่วงอยู่ จึงบอกไม่ได้ว่าแก้หายหรือยัง
    ถ้า "สแกน QR" ในนี้ขึ้นใกล้ 99% เท่าสแกนหน้า = แก้ตรงจุดแล้ว */
 function auditScanPhotosAfterFix() { return auditScanPhotos(5); }
+
+/* ── v9.13: ย้ายสแกนเก่าออกจากชีทหลัก ────────────────────────────────────────
+   กติกา (surat เคาะ 19/9): ชีทหลักเก็บ "เดือนนี้ + เดือนที่แล้ว" เท่านั้น
+     วันนี้ 19/9 → เก็บ 1/8 ถึงปัจจุบัน · ของเดือน 7 ขึ้นไปย้ายออก
+     พอขึ้นเดือน 10 → เดือน 8 ถูกย้ายออกอัตโนมัติ
+   ย้ายไปไหน: สเปรดชีทแยกชื่อ "CheckinLog เก่า (คลังข้อมูล)" — จำ ID ไว้ใน Script Properties
+   ★ Postgres เก็บครบทุกแถวตลอดไปอยู่แล้ว ชีทคลังนี้เป็นแค่สำเนาไว้เปิดดูง่ายๆ
+   ⚠ ก่อนย้าย ต้องปิดงานเงินเดือนของเดือนนั้นให้เรียบร้อยก่อน — แท็บ "สรุปวัน" กับ
+     "ลงเวลาAuto" เป็นสูตรสดที่อ่านจาก CheckinLog ย้ายแล้วเดือนนั้นจะกลายเป็นว่าง
+   ► archiveOldCheckins()      ดูเฉยๆ ว่าจะย้ายกี่แถว (ไม่แตะข้อมูล)
+   ► archiveOldCheckinsApply() ย้ายจริง
+   ► setupArchiveTrigger()     ตั้งให้ย้ายเองทุกวันที่ 3 ของเดือน */
+const ARCHIVE_PROP = 'ARCHIVE_SHEET_ID';
+
+function archiveCutoff_() {
+  const n = new Date();
+  return new Date(n.getFullYear(), n.getMonth() - 1, 1);   // วันที่ 1 ของเดือนที่แล้ว
+}
+function archiveBook_() {
+  const props = PropertiesService.getScriptProperties();
+  const id = props.getProperty(ARCHIVE_PROP);
+  if (id) { try { return SpreadsheetApp.openById(id); } catch (_) {} }
+  const bk = SpreadsheetApp.create('CheckinLog เก่า (คลังข้อมูล)');
+  props.setProperty(ARCHIVE_PROP, bk.getId());
+  return bk;
+}
+
+function archiveOldCheckins()      { return archiveCheckins_(false); }
+function archiveOldCheckinsApply() { return archiveCheckins_(true); }
+
+function archiveCheckins_(apply) {
+  const sh = getTab(T.LOG);
+  if (!sh || sh.getLastRow() < 2) throw new Error('ไม่พบข้อมูลใน ' + T.LOG);
+  const cutoff = archiveCutoff_();
+  const fmt = d => Utilities.formatDate(d, 'Asia/Bangkok', 'dd/MM/yyyy');
+  const last = sh.getLastRow(), wide = sh.getLastColumn();
+  const vals = sh.getRange(2, 1, last - 1, wide).getValues();
+
+  const move = [], rows = [];
+  vals.forEach((r, i) => {
+    const ts = (r[0] instanceof Date) ? r[0] : new Date(r[0]);
+    if (!ts || isNaN(ts.getTime())) return;      // อ่านวันที่ไม่ออก = ไม่แตะ ปลอดภัยไว้ก่อน
+    if (ts >= cutoff) return;
+    move.push(r); rows.push(i + 2);
+  });
+
+  const L = ['── ย้ายสแกนเก่าออกจากชีทหลัก ' + (apply ? '(ย้ายจริง)' : '(ดูเฉยๆ)') + ' ──', ''];
+  L.push('เก็บในชีทหลักตั้งแต่: ' + fmt(cutoff) + ' เป็นต้นไป');
+  L.push('ทั้งชีท ' + (last - 1) + ' แถว · จะย้ายออก ' + move.length + ' แถว · เหลือ ' + (last - 1 - move.length));
+  if (!move.length) { L.push(''); L.push('✅ ไม่มีแถวเก่าต้องย้าย'); const m0 = L.join('\n'); Logger.log(m0); return m0; }
+
+  const first = move[0][0], lastOld = move[move.length - 1][0];
+  L.push('ช่วงที่ย้าย: ' + fmt(new Date(first)) + ' – ' + fmt(new Date(lastOld)));
+
+  if (!apply) {
+    L.push('');
+    L.push('► รัน archiveOldCheckinsApply() เพื่อย้ายจริง');
+    L.push('  ⚠ เช็คก่อนว่าปิดงานเงินเดือนของเดือนที่จะย้ายเรียบร้อยแล้ว');
+    L.push('     (สรุปวัน / ลงเวลาAuto เป็นสูตรสดจาก CheckinLog — ย้ายแล้วเดือนนั้นจะว่าง)');
+    const m1 = L.join('\n'); Logger.log(m1); return m1;
+  }
+
+  // 1) เขียนลงคลังให้สำเร็จก่อน ค่อยลบของเดิม — ลำดับนี้ห้ามสลับ
+  const bk = archiveBook_();
+  let ash = bk.getSheetByName('CheckinLog');
+  if (!ash) { ash = bk.getSheets()[0]; ash.setName('CheckinLog'); }
+  if (ash.getLastRow() === 0) {
+    ash.getRange(1, 1, 1, wide).setValues([sh.getRange(1, 1, 1, wide).getValues()[0]])
+       .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+    ash.setFrozenRows(1);
+  }
+  const startRow = Math.max(2, ash.getLastRow() + 1);
+  ash.getRange(startRow, 1, move.length, wide).setValues(move);
+  SpreadsheetApp.flush();
+  const wrote = ash.getLastRow() - startRow + 1;
+  if (wrote < move.length) throw new Error('เขียนลงคลังไม่ครบ (' + wrote + '/' + move.length + ') — ยังไม่ลบของเดิม ลองใหม่');
+
+  // 2) ลบจากชีทหลัก — ไล่จากล่างขึ้นบน รวบแถวที่ติดกันเป็นก้อนเดียว (เร็วกว่าลบทีละแถวมาก)
+  let del = 0;
+  for (let i = rows.length - 1; i >= 0; ) {
+    let end = rows[i], j = i;
+    while (j > 0 && rows[j - 1] === rows[j] - 1) j--;
+    const count = end - rows[j] + 1;
+    sh.deleteRows(rows[j], count);
+    del += count; i = j - 1;
+  }
+
+  L.push('');
+  L.push('✅ ย้ายแล้ว ' + del + ' แถว → ไฟล์ "' + bk.getName() + '"');
+  L.push('   ' + bk.getUrl());
+  L.push('   (Postgres ยังเก็บครบทุกแถวตามเดิม · ปฏิทินประวัติในแอปดึงเดือนเก่าจาก Postgres ให้เอง)');
+  const msg = L.join('\n');
+  Logger.log(msg);
+  try { getSS().toast('ย้าย ' + del + ' แถวออกจากชีทหลักแล้ว', 'ย้ายสแกนเก่า', 12); } catch (e) {}
+  return msg;
+}
+
+function setupArchiveTrigger() {
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'archiveOldCheckinsApply') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('archiveOldCheckinsApply').timeBased().onMonthDay(3).atHour(3).create();
+  const msg = 'ตั้งให้ย้ายสแกนเก่าอัตโนมัติทุกวันที่ 3 ของเดือน (~ตี 3) แล้ว\n' +
+              'เลือกวันที่ 3 เพื่อให้มีเวลาปิดงานเงินเดือนของเดือนก่อนหน้าก่อน';
+  Logger.log(msg);
+  try { getSS().toast(msg, 'ตั้งย้ายอัตโนมัติ', 10); } catch (e) {}
+  return msg;
+}
