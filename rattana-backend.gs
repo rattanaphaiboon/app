@@ -1,6 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.15 — ★ แก้สูตรวันลาในสรุปวันที่ผมทำพังตอน v9.0 (ต้องรัน setupDailySummary ใหม่):
+ *          ใช้ NOT() บนช่วงข้อมูลใน FILTER ซึ่ง Google Sheets ไม่กระจายเป็นอาเรย์
+ *          → เงื่อนไขยุบเหลือค่าเดียว FILTER เออเรอร์ → IFERROR คืน "" = คอลัมน์ลาว่างทั้งแผ่น
+ *          เปลี่ยนเป็น (1-ISNUMBER(...)) ซึ่งคำนวณทีละช่องได้จริง
  * v9.14 — systemHealthCheck นับทริกเกอร์ย้ายสแกนเก่าเข้าไปในรายการที่ต้องมีด้วย
  * v9.13 — ย้ายสแกนเก่าออกจากชีทหลัก: เก็บเฉพาะเดือนนี้+เดือนที่แล้ว (surat เคาะ 19/9)
  *          archiveOldCheckins() ดูก่อน · ...Apply() ย้ายจริง · setupArchiveTrigger() ทุกวันที่ 3
@@ -152,7 +156,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.14', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.15', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -1125,7 +1129,7 @@ function setupDailySummary() {
   );
   // v4.3: การลาApp โครงใหม่ — A วันที่, N ถึงวันที่, F ประเภทเอกสาร, I สถานะ, M จำนวนชั่วโมง
   rp.getRange('G4').setFormula(
-    `=MAP(A4:A, C4:C, LAMBDA(id, d, IF(id="",, IFERROR(TEXTJOIN(", ", 1, FILTER('การลาApp'!F2:F, 'การลาApp'!B2:B&""=id, IFERROR(DATEVALUE('การลาApp'!A2:A), 'การลาApp'!A2:A)<=d, IFERROR(DATEVALUE('การลาApp'!N2:N), 'การลาApp'!N2:N)>=d, (ISNUMBER(SEARCH("อนุมัติ", 'การลาApp'!I2:I&""))*NOT(ISNUMBER(SEARCH("ไม่อนุมัติ", 'การลาApp'!I2:I&"")))) + ('การลาApp'!I2:I="approved"))), ""))))`
+    `=MAP(A4:A, C4:C, LAMBDA(id, d, IF(id="",, IFERROR(TEXTJOIN(", ", 1, FILTER('การลาApp'!F2:F, 'การลาApp'!B2:B&""=id, IFERROR(DATEVALUE('การลาApp'!A2:A), 'การลาApp'!A2:A)<=d, IFERROR(DATEVALUE('การลาApp'!N2:N), 'การลาApp'!N2:N)>=d, (ISNUMBER(SEARCH("อนุมัติ", 'การลาApp'!I2:I&""))*(1-ISNUMBER(SEARCH("ไม่อนุมัติ", 'การลาApp'!I2:I&"")))) + ('การลาApp'!I2:I="approved"))), ""))))`
   );
   // v4.9: โชว์ชั่วโมงลาของ "วันนั้น" (cap 8 จากคอลัมน์ K) — เดิมโชว์ยอดรวมทั้งใบ (ลา 3 วันขึ้น 24 ทุกวัน)
   rp.getRange('H4').setFormula(
@@ -1142,7 +1146,7 @@ function setupDailySummary() {
   // v4.7: K (ซ่อน) = ชั่วโมงลาอนุมัติของวันนั้น (cap 8) — ใช้คิดสถานะลาบางส่วน + เศษวันใน ลงเวลาAuto
   rp.getRange('K3').setValue('ชม.ลา').setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
   rp.getRange('K4').setFormula(
-    `=MAP(A4:A, C4:C, LAMBDA(id, d, IF(id="",, LET(s, IFERROR(SUM(FILTER('การลาApp'!M2:M, 'การลาApp'!B2:B&""=id, IFERROR(DATEVALUE('การลาApp'!A2:A), 'การลาApp'!A2:A)<=d, IFERROR(DATEVALUE('การลาApp'!N2:N), 'การลาApp'!N2:N)>=d, (ISNUMBER(SEARCH("อนุมัติ", 'การลาApp'!I2:I&""))*NOT(ISNUMBER(SEARCH("ไม่อนุมัติ", 'การลาApp'!I2:I&"")))) + ('การลาApp'!I2:I="approved"))), 0), MIN(8, N(s))))))`
+    `=MAP(A4:A, C4:C, LAMBDA(id, d, IF(id="",, LET(s, IFERROR(SUM(FILTER('การลาApp'!M2:M, 'การลาApp'!B2:B&""=id, IFERROR(DATEVALUE('การลาApp'!A2:A), 'การลาApp'!A2:A)<=d, IFERROR(DATEVALUE('การลาApp'!N2:N), 'การลาApp'!N2:N)>=d, (ISNUMBER(SEARCH("อนุมัติ", 'การลาApp'!I2:I&""))*(1-ISNUMBER(SEARCH("ไม่อนุมัติ", 'การลาApp'!I2:I&"")))) + ('การลาApp'!I2:I="approved"))), 0), MIN(8, N(s))))))`
   );
   try { rp.hideColumns(11); } catch (e) {}
 
