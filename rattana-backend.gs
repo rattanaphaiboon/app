@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.21 — crossCheckLeaveDays() คำนวณวันลาใหม่ด้วยโค้ด แล้วเทียบกับเลขที่สูตรในชีทคิด
+ *          สองทางไม่ใช้กลไกร่วมกัน ตรงกัน = ท่อส่งข้อมูลเชื่อได้
  * v9.20 — ★ เจอต้นเหตุจริงของคอลัมน์วันลาว่าง: SUMIFS ใช้ใน ARRAYFORMULA ไม่ได้
  *          มันไม่กระจายทีละแถว ยุบเหลือค่าเดียวแล้วแจกทุกแถวเท่ากัน (แถวแรกเป็น 0 = ว่างหมด)
  *          พิสูจน์ด้วย diagAutoFormulaVariants — ARRAYFORMULA ทุกแบบได้ 0 · ทีละแถวได้ 11
@@ -165,7 +167,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.20', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.21', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5702,5 +5704,94 @@ function diagAutoFormulaVariants() {
   } finally { try { ss.deleteSheet(t); } catch (_) {} }
   const msg = L.join('\n');
   Logger.log(msg);
+  return msg;
+}
+
+/* ── v9.21: ตรวจว่าเลขในลงเวลาAuto ถูกไหม โดยคำนวณใหม่ "คนละทาง" แล้วเทียบ ──────
+   ทางที่ 1 (ของเดิม): การลาApp → สูตรในสรุปวัน → สูตรในลงเวลาAuto
+   ทางที่ 2 (ตัวนี้)  : การลาApp → คำนวณด้วยโค้ด JavaScript ตรงๆ ไม่ผ่านสูตรชีทเลย
+   สองทางไม่ใช้กลไกร่วมกันเลย ถ้าได้เลขตรงกัน = ท่อส่งข้อมูลไม่มีรูรั่ว
+   (ยังไม่ได้พิสูจน์ว่า "กติกา" ถูก — อันนั้นต้องเทียบกับ HumanSoft หรือที่นับมือ) */
+function crossCheckLeaveDays() {
+  const ss = getSS();
+  const rp = ss.getSheetByName('สรุปวัน'), au = ss.getSheetByName('ลงเวลาAuto');
+  if (!rp || !au) throw new Error('ไม่พบแท็บ สรุปวัน หรือ ลงเวลาAuto');
+  const ws = rp.getRange('B1').getValue(), we = rp.getRange('D1').getValue();
+  if (!(ws instanceof Date) || !(we instanceof Date)) throw new Error('ช่อง B1/D1 ของสรุปวันไม่ใช่วันที่');
+  const fmt = d => Utilities.formatDate(d, 'Asia/Bangkok', 'dd/MM/yyyy');
+  const key = d => Utilities.formatDate(d, 'Asia/Bangkok', 'yyyy-MM-dd');
+
+  // วันหยุดนักขัตฤกษ์ — สูตรในสรุปวันก็ตัดวันพวกนี้ออก ต้องตัดให้เหมือนกัน
+  const hol = {};
+  const hs = ss.getSheetByName(T.HOL);
+  if (hs && hs.getLastRow() > 1) hs.getRange(2, 1, hs.getLastRow() - 1, 1).getValues()
+    .forEach(r => { if (r[0] instanceof Date) hol[key(r[0])] = 1; });
+
+  // ── ทางที่ 2: นับวันลาจากการลาApp ด้วยโค้ดตรงๆ ──
+  const COL = { sickWithCert:'E', personal:'F', maternity:'G', vacation:'H',
+                sickNoCert:'I', unpaidPersonal:'K', changeOff:'L' };
+  const calc = {};   // empId → {key: วัน}
+  const la = ss.getSheetByName('การลาApp');
+  const ld = la.getDataRange().getValues();
+  for (let i = 1; i < ld.length; i++) {
+    const r = ld[i];
+    const id = String(r[1] || '').trim(); if (!id) continue;
+    if (!leaveIsApproved_(r[8])) continue;
+    const sd = (r[0] instanceof Date) ? r[0] : parseDDMMYYYY(formatDate(r[0]));
+    const ed = (r[13] instanceof Date) ? r[13] : parseDDMMYYYY(formatDate(r[13] || r[0]));
+    if (!sd || !ed || isNaN(sd.getTime()) || isNaN(ed.getTime())) continue;
+    const label = String(r[5] || '');
+    let k = null;
+    if (label.indexOf('เปลี่ยนวันหยุด') >= 0)      k = 'changeOff';
+    else if (label.indexOf('คลอด') >= 0)           k = 'maternity';
+    else if (label.indexOf('พักร้อน') >= 0)        k = 'vacation';
+    else if (label.indexOf('ไม่มีใบ') >= 0)        k = 'sickNoCert';
+    else if (label.indexOf('ป่วย') >= 0)           k = 'sickWithCert';
+    else if (label.indexOf('ไม่รับค่าจ้าง') >= 0)  k = 'unpaidPersonal';
+    else if (label.indexOf('กิจ') >= 0)            k = 'personal';
+    if (!k) continue;                               // แก้เวลา/OT ไม่ใช่วันลา
+    const hrs = parseFloat(r[12]) || 0;
+    const single = key(sd) === key(ed);
+    // ไล่ทีละวันในช่วงที่ทับกับหน้าต่างของสรุปวัน · ตัดวันอาทิตย์+วันนักขัตฯ ให้ตรงกับสูตร
+    for (let d = new Date(Math.max(sd.getTime(), ws.getTime()));
+         d <= we && d <= ed; d = new Date(d.getTime() + 86400000)) {
+      if (d.getDay() === 0 || hol[key(d)]) continue;
+      const add = (single ? Math.min(hrs, 8) : 8) / 8;
+      if (!calc[id]) calc[id] = {};
+      calc[id][k] = Math.round(((calc[id][k] || 0) + add) * 100) / 100;
+    }
+  }
+
+  // ── ทางที่ 1: อ่านเลขที่สูตรในลงเวลาAuto คำนวณไว้ ──
+  const last = au.getLastRow();
+  const sheet = au.getRange(2, 1, Math.max(1, last - 1), 12).getValues();
+  const idxOf = c => c.charCodeAt(0) - 65;           // 'E' → 4
+  const L = ['── เทียบเลขวันลา 2 ทาง · ช่วง ' + fmt(ws) + ' – ' + fmt(we) + ' ──', ''];
+  let same = 0, diff = 0; const bad = [];
+  sheet.forEach(row => {
+    const id = String(row[1] || '').trim(); if (!id) return;
+    const name = String(row[0] || '').trim();
+    Object.keys(COL).forEach(k => {
+      const fromSheet = Math.round((parseFloat(row[idxOf(COL[k])]) || 0) * 100) / 100;
+      const fromCode  = Math.round(((calc[id] || {})[k] || 0) * 100) / 100;
+      if (Math.abs(fromSheet - fromCode) < 0.01) { same++; return; }
+      diff++;
+      bad.push('   ' + id + ' ' + name + ' · ' + k + ' → ชีท ' + fromSheet + ' · โค้ด ' + fromCode);
+    });
+  });
+
+  L.push('ช่องที่ตรงกัน: ' + same + ' · ไม่ตรง: ' + diff);
+  L.push('');
+  if (!diff) {
+    L.push('✅ สองทางให้เลขตรงกันทุกช่อง — ท่อส่งข้อมูลไม่มีรูรั่ว');
+    L.push('   (ยังต้องเทียบกับ HumanSoft/ที่นับมือ 1 เดือน เพื่อยืนยันว่า "กติกา" ถูกด้วย)');
+  } else {
+    L.push('▸ ช่องที่ไม่ตรง (สูงสุด 40 รายการ)');
+    bad.slice(0, 40).forEach(x => L.push(x));
+    if (bad.length > 40) L.push('   … และอีก ' + (bad.length - 40) + ' ช่อง');
+  }
+  const msg = L.join('\n');
+  Logger.log(msg);
+  try { ss.toast(diff ? 'ไม่ตรง ' + diff + ' ช่อง' : 'ตรงกันทุกช่อง ✓', 'เทียบเลขวันลา', 12); } catch (e) {}
   return msg;
 }
