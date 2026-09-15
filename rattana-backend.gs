@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.11 — auditScanPhotos ไม่นับแถวจากเครื่องสแกนนิ้ว (scannedBy ขึ้นต้น device:)
+ *          เครื่องไม่ส่งรูปมาอยู่แล้ว เดิมนับรวมทำให้พนักงานที่ใช้เครื่องขึ้น 0% ทั้งกลุ่ม
  * v9.10 — systemHealthCheck บอกด้วยว่าตั้งทริกเกอร์ครบมั้ย (ลบรูปเก่า/เติมรูปในเซลล์)
  *          ตัวที่ขาดคือตัวที่ทำให้ Storage บวมเงียบๆ
  * v9.9 — รูปในเซลล์เก็บย้อนหลัง 30 วัน (เดิม 7) ตามที่ surat เคาะ · ~2,300 แถว ชีทจะหนักขึ้น
@@ -347,7 +349,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.10', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.11', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5342,7 +5344,7 @@ function auditScanPhotos(daysBack) {
   const last = sh.getLastRow();
   const d = sh.getRange(2, 1, last - 1, 15).getValues();
 
-  let all = 0, has = 0, retro = 0;
+  let all = 0, has = 0, retro = 0, device = 0;
   const byMode = {};   // self / qr / supervisor
   const byEmp  = {};
   d.forEach(r => {
@@ -5353,6 +5355,9 @@ function auditScanPhotos(daysBack) {
     // v9.4: แถวที่มาจากอนุมัติ "แก้เวลาย้อนหลัง" ไม่เคยมีรูปตั้งแต่ต้น (ระบบเติมให้ ไม่ได้สแกนจริง)
     //       เดิมนับรวมเป็น "รูปขาด" ทำให้ตัวเลขสแกนหน้าดูแย่กว่าความจริง
     if (String(r[12] || "").trim().toUpperCase() === "Y") { retro++; return; }
+    // v9.11: สแกนจากเครื่องสแกนนิ้ว (ADMS) ไม่มีรูปตั้งแต่ต้น — เครื่องไม่ได้ส่งรูปมา
+    //       เดิมนับรวมเป็น "รูปขาด" ทำให้พนักงานที่ใช้เครื่องขึ้น 0% ทั้งกลุ่ม (surat ทักมา 15/9)
+    if (who.indexOf("device:") === 0) { device++; return; }
     const mode = who.indexOf("qr:") === 0 ? "สแกน QR" : (who.indexOf("supervisor:") === 0 ? "หัวหน้าสแกนให้" : "สแกนหน้า");
     const ok = String(r[14] || "").trim() !== "";
     all++; if (ok) has++;
@@ -5365,7 +5370,8 @@ function auditScanPhotos(daysBack) {
   const pct = (a, b) => b ? Math.round(a * 1000 / b) / 10 : 0;
   const L = ['── รูปแนบตอนสแกน · ย้อนหลัง ' + back + ' วัน ──', ''];
   L.push("รวมสแกนจริง " + all + " ครั้ง · มีรูป " + has + " (" + pct(has, all) + "%) · ไม่มีรูป " + (all - has));
-  if (retro) L.push("(ไม่นับ " + retro + " แถวที่มาจากอนุมัติแก้เวลาย้อนหลัง — ระบบเติมให้ ไม่มีรูปอยู่แล้ว)");
+  if (retro)  L.push("(ไม่นับ " + retro + " แถวที่มาจากอนุมัติแก้เวลาย้อนหลัง — ระบบเติมให้ ไม่มีรูปอยู่แล้ว)");
+  if (device) L.push("(ไม่นับ " + device + " แถวจากเครื่องสแกนนิ้ว — เครื่องไม่ส่งรูปมา ปกติของมัน)");
   L.push('');
   L.push('▸ แยกตามวิธีสแกน');
   Object.keys(byMode).sort().forEach(k => {
