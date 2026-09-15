@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.10 — systemHealthCheck บอกด้วยว่าตั้งทริกเกอร์ครบมั้ย (ลบรูปเก่า/เติมรูปในเซลล์)
+ *          ตัวที่ขาดคือตัวที่ทำให้ Storage บวมเงียบๆ
  * v9.9 — รูปในเซลล์เก็บย้อนหลัง 30 วัน (เดิม 7) ตามที่ surat เคาะ · ~2,300 แถว ชีทจะหนักขึ้น
  * v9.8 — รูปในเซลล์อัปเดตเองทุกชั่วโมง (setupPhotoCellTrigger) + ล้างแถวที่หลุดช่วงออกให้เอง
  *         เดิม showCheckinPhotosInCells เป็นภาพนิ่ง แถวที่สแกนเข้ามาทีหลังจึงไม่มีรูป
@@ -345,7 +347,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.9', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.10', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3314,6 +3316,21 @@ function systemHealthCheck() {
     L.push(ok(_dt === 0, 'รูปแบบวันที่การลาApp: ' + (_dt ? _dt + ' ช่องเป็นข้อความ — รัน fixLeaveDatesApply' : 'เป็นวันที่จริงทุกช่อง')));
     L.push('ℹ ทะเบียนกันคำขอซ้ำ (_reqLog): ' + rowsOf('_reqLog') + ' รายการ');
   } catch (e) { L.push('⚠ ตรวจการลาApp ไม่ได้: ' + e.message); }
+
+  // 6) v9.10: งานอัตโนมัติที่ตั้งไว้ — ตัวที่ขาดคือตัวที่ทำให้ข้อมูลบวมเงียบๆ
+  try {
+    const want = {
+      cleanupOldPhotos_:        'ลบรูปเก่าเกิน 60 วัน (กัน Storage เต็ม)',
+      refreshCheckinPhotoCells: 'เติมรูปในเซลล์ + ล้างแถวเกินช่วง',
+    };
+    const have = {};
+    ScriptApp.getProjectTriggers().forEach(t => { have[t.getHandlerFunction()] = true; });
+    L.push('');
+    L.push('▸ งานอัตโนมัติ (ทริกเกอร์)');
+    Object.keys(want).forEach(fn => L.push('   ' + ok(!!have[fn], fn + ' — ' + want[fn])));
+    const extra = Object.keys(have).filter(f => !want[f]);
+    if (extra.length) L.push('   ℹ อื่นๆ ที่ตั้งไว้: ' + extra.join(', '));
+  } catch (e) { L.push('⚠ ตรวจทริกเกอร์ไม่ได้: ' + e.message); }
 
   const msg = L.join('\n');
   Logger.log(msg);
