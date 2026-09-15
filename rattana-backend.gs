@@ -1,6 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.25 — เร็วขึ้นตอนเปิดแอป (คู่แอป v12.67 · ★ ต้อง Deploy):
+ *          getBootstrap() รวม 5 คำขอเป็นคำขอเดียว — เดิมตรวจ token (อ่านชีท Users ทั้งแผ่น)
+ *          ซ้ำ 5 รอบ + เปิดสเปรดชีท 5 รอบ · ตอนนี้ทำครั้งเดียว
+ *          + getFaceData รับ light — ส่งรูปหน้าเฉพาะของตัวเอง (300 คน x 8-15KB = 3-4MB ที่ไม่ต้องโหลด)
  * v9.24 — ตรวจวันลาอัตโนมัติ วันที่ 1 และ 16 เวลา 6 โมง (setupCrossCheckTrigger)
  *          ผลลงแท็บ "ตรวจวันลา" ทุกครั้ง · อีเมลเฉพาะตอนเจอเลขไม่ตรง
  * v9.23 — crossCheckLeaveDays ตัดวันหยุดด้วย "สถานะการลงเวลา" ให้ตรงกับสูตรในชีท
@@ -172,7 +176,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.24', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.25', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -236,6 +240,7 @@ function handle(e, method) {
       case 'submitWarning':        return actionSubmitWarning(p, user);
       case 'approveRequest':       return actionApproveRequest(p, user);
       case 'getFaceData':          return actionGetFaceData(user);
+      case 'getBootstrap':         return getBootstrap(p, user);   // v9.25: รวม 5 คำขอตอนเปิดแอป
       case 'getSettings':          return actionGetSettings(user);
       case 'getLocations':         return actionGetLocations(user);
       case 'getLocationQR':        return jsonOut(getLocationQR(p, user));   // v5.5: HR พิมพ์ QR ประจำจุด
@@ -1548,20 +1553,25 @@ function sbDeleteFace_(empId) {
   } catch (e) { console.error('sbDeleteFace', e); }
 }
 
-function actionGetFaceData(user) {
+/* v9.25: light=true → ส่ง "รูปหน้า" เฉพาะของตัวเอง คนอื่นส่งแต่ descriptor
+   รูปเป็น base64 ราว 8-15KB/คน · 300 คน = 3-4 MB ที่ต้องดาวน์โหลดทุกครั้งที่เปิดแอป
+   ทั้งที่ตอนบูตใช้แค่ descriptor ไว้เทียบหน้า · รูปใช้ตอนเปิดหน้าทีมเท่านั้น */
+function actionGetFaceData(user, light) {
   const sh = getOrCreateTab(T.FACE);
   const data = sh.getDataRange().getValues();
   const out = [];
+  const me = String((user && user.empId) || '').trim();
   for (let i = 1; i < data.length; i++) {
     const r = data[i];
     if (!r[0]) continue;
     if (!canSeeUser(user, r[0])) continue;
+    const keepPhoto = !light || String(r[0]).trim() === me;
     try {
       out.push({
         empId: String(r[0]),
         name: String(r[1] || ''),
         descriptor: JSON.parse(r[2] || '[]'),
-        photo: String(r[3] || ''),
+        photo: keepPhoto ? String(r[3] || '') : '',
         registeredAt: r[4],
       });
     } catch(_) {}
@@ -5935,3 +5945,23 @@ function removeCrossCheckTrigger() {
   return n ? 'ถอนทริกเกอร์ตรวจวันลาออกแล้ว ' + n + ' ตัว' : 'ไม่มีทริกเกอร์ตรวจวันลาอยู่';
 }
 function ss_toast_(m) { getSS().toast(m, 'ตรวจวันลาอัตโนมัติ', 12); }
+
+/* ── v9.25: รวม 5 คำขอตอนเปิดแอปเป็นคำขอเดียว ─────────────────────────────────
+   เดิมแอปยิง getSettings · getLocations · getFaceData · getPersonalLocations ·
+   getCheckinLog แยกกัน 5 ครั้ง — แต่ละครั้งเซิร์ฟเวอร์ต้อง
+     1) ตรวจ token → เปิดชีท Users อ่านทั้งแผ่น   ← ทำซ้ำ 5 รอบ
+     2) เปิดสเปรดชีทใหม่อีกรอบ
+   รวมเป็นครั้งเดียว = ตรวจ token ครั้งเดียว เปิดชีทครั้งเดียว ประหยัดทั้งเวลาและโควตา
+   เรียกฟังก์ชันเดิมทั้งหมดต่อกัน ผลลัพธ์จึงหน้าตาเหมือนเดิมเป๊ะ ไม่ต้องแก้ฝั่งแอปมาก */
+function getBootstrap(p, user) {
+  const grab = (fn) => { try { return JSON.parse(fn().getContent()); } catch (e) { return { ok:false, error:e.message }; } };
+  const light = String(p.light || '') === '1';
+  return jsonOut({
+    ok: true,
+    settings:  grab(() => actionGetSettings(user)),
+    locations: grab(() => actionGetLocations(user)),
+    faces:     grab(() => actionGetFaceData(user, light)),
+    ploc:      grab(() => actionGetPersonalLocations(p, user)),
+    logs:      grab(() => actionGetCheckinLog({ limit: parseInt(p.limit, 10) || 500 }, user)),
+  });
+}
