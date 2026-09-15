@@ -1,6 +1,7 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.22 — diagChangeOff() เจาะดู 4 ช่องสลับวันหยุดที่เทียบแล้วไม่ตรง + หาสาเหตุแถวซ้ำ
  * v9.21 — crossCheckLeaveDays() คำนวณวันลาใหม่ด้วยโค้ด แล้วเทียบกับเลขที่สูตรในชีทคิด
  *          สองทางไม่ใช้กลไกร่วมกัน ตรงกัน = ท่อส่งข้อมูลเชื่อได้
  * v9.20 — ★ เจอต้นเหตุจริงของคอลัมน์วันลาว่าง: SUMIFS ใช้ใน ARRAYFORMULA ไม่ได้
@@ -167,7 +168,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.21', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.22', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5793,5 +5794,68 @@ function crossCheckLeaveDays() {
   const msg = L.join('\n');
   Logger.log(msg);
   try { ss.toast(diff ? 'ไม่ตรง ' + diff + ' ช่อง' : 'ตรงกันทุกช่อง ✓', 'เทียบเลขวันลา', 12); } catch (e) {}
+  return msg;
+}
+
+/* ── v9.22: เจาะดูเคส "สลับวันหยุด" ที่ 2 ทางให้เลขไม่ตรงกัน ───────────────────
+   ผลเทียบ v9.21: 605/609 ตรง · ที่เหลือ 4 ช่องเป็น changeOff ล้วน
+   ตัวนี้กางให้ดูทีละใบทีละวันว่าต่างกันตรงไหน จะได้รู้ว่าฝั่งไหนถูก */
+const DIAG_CHANGEOFF_IDS = ['660034', '690025', '690018'];
+
+function diagChangeOff() {
+  const ss = getSS();
+  const rp = ss.getSheetByName('สรุปวัน'), la = ss.getSheetByName('การลาApp');
+  const ws = rp.getRange('B1').getValue(), we = rp.getRange('D1').getValue();
+  const fmt = d => (d instanceof Date) ? Utilities.formatDate(d, 'Asia/Bangkok', 'dd/MM/yyyy') : String(d);
+  const L = ['── เจาะเคสสลับวันหยุด · ช่วง ' + fmt(ws) + ' – ' + fmt(we) + ' ──'];
+
+  const ld = la.getDataRange().getValues();
+  const rd = rp.getRange(4, 1, Math.max(1, rp.getLastRow() - 3), 11).getValues();
+
+  DIAG_CHANGEOFF_IDS.forEach(id => {
+    L.push('');
+    L.push('▸ ' + id);
+    L.push('   ใบเปลี่ยนวันหยุดในการลาApp:');
+    let n = 0;
+    for (let i = 1; i < ld.length; i++) {
+      const r = ld[i];
+      if (String(r[1] || '').trim() !== id) continue;
+      if (String(r[5] || '').indexOf('เปลี่ยนวันหยุด') < 0) continue;
+      n++;
+      L.push('      ' + fmt(r[0]) + ' – ' + fmt(r[13]) + ' · ชม. ' + (r[12] === '' ? '-' : r[12]) +
+             ' · สถานะ ' + String(r[8] || '(ว่าง)') + (leaveIsApproved_(r[8]) ? ' ✓นับ' : ' ✗ไม่นับ'));
+    }
+    if (!n) L.push('      (ไม่มี)');
+
+    L.push('   แถวในสรุปวันที่มีคำว่าเปลี่ยนวันหยุด:');
+    let m = 0, sumK = 0;
+    rd.forEach(r => {
+      if (String(r[0] || '').trim() !== id) return;
+      const g = String(r[6] || '');
+      if (g.indexOf('เปลี่ยนวันหยุด') < 0) return;
+      m++;
+      const k = parseFloat(r[10]) || 0; sumK += k;
+      L.push('      ' + fmt(r[2]) + ' · G="' + g + '" · K=' + k + ' · สถานะวัน="' + String(r[5] || '') + '"');
+    });
+    if (!m) L.push('      (ไม่มี)');
+    L.push('   → สูตรชีทจะได้ ' + (Math.round(sumK / 8 * 100) / 100) + ' วัน  (ผลรวม K ' + sumK + ' ÷ 8)');
+  });
+
+  // แถมเช็คแถวซ้ำในลงเวลาAuto (ปรารถนาขึ้น 2 แถว)
+  const au = ss.getSheetByName('ลงเวลาAuto');
+  const ad = au.getRange(2, 1, Math.max(1, au.getLastRow() - 1), 3).getValues();
+  const seen = {}, dup = [];
+  ad.forEach(r => {
+    const id = String(r[1] || '').trim(); if (!id) return;
+    const sig = id + '|' + String(r[0] || '') + '|' + String(r[2] || '');
+    if (seen[id] && seen[id] !== sig) dup.push(id + ' ' + String(r[0] || '') + ' · คลัง "' + String(r[2] || '') + '" กับ "' + seen[id].split('|')[2] + '"');
+    seen[id] = sig;
+  });
+  L.push('');
+  L.push('▸ แถวซ้ำในลงเวลาAuto: ' + (dup.length ? '' : 'ไม่มี'));
+  dup.forEach(x => L.push('   ' + x));
+
+  const msg = L.join('\n');
+  Logger.log(msg);
   return msg;
 }
