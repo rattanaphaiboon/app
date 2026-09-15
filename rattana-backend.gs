@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.23 — crossCheckLeaveDays ตัดวันหยุดด้วย "สถานะการลงเวลา" ให้ตรงกับสูตรในชีท
+ *          เดิมตัดวันอาทิตย์ทุกวันจากปฏิทิน แต่วันอาทิตย์ที่มีกะทำงาน = วันทำงานของคนนั้น
  * v9.22 — diagChangeOff() เจาะดู 4 ช่องสลับวันหยุดที่เทียบแล้วไม่ตรง + หาสาเหตุแถวซ้ำ
  * v9.21 — crossCheckLeaveDays() คำนวณวันลาใหม่ด้วยโค้ด แล้วเทียบกับเลขที่สูตรในชีทคิด
  *          สองทางไม่ใช้กลไกร่วมกัน ตรงกัน = ท่อส่งข้อมูลเชื่อได้
@@ -168,7 +170,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.22', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.23', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -5722,11 +5724,22 @@ function crossCheckLeaveDays() {
   const fmt = d => Utilities.formatDate(d, 'Asia/Bangkok', 'dd/MM/yyyy');
   const key = d => Utilities.formatDate(d, 'Asia/Bangkok', 'yyyy-MM-dd');
 
-  // วันหยุดนักขัตฤกษ์ — สูตรในสรุปวันก็ตัดวันพวกนี้ออก ต้องตัดให้เหมือนกัน
-  const hol = {};
-  const hs = ss.getSheetByName(T.HOL);
-  if (hs && hs.getLastRow() > 1) hs.getRange(2, 1, hs.getLastRow() - 1, 1).getValues()
-    .forEach(r => { if (r[0] instanceof Date) hol[key(r[0])] = 1; });
+  // v9.23: ตัดวันหยุดด้วย "สถานะการลงเวลา" ของวันนั้น ไม่ใช่ดูปฏิทิน
+  //   เดิมโค้ดตัดวันอาทิตย์ทุกวัน แต่สูตรในชีทตัดเฉพาะวันที่สถานะขึ้นว่า วันอาทิตย์/วันนักขัตฯ
+  //   วันอาทิตย์ที่ "มีกะทำงาน" สถานะจะเป็นอย่างอื่น = เป็นวันทำงานของคนนั้น ลาวันนั้นต้องนับ
+  //   (เคสแก้วมณี 690016 ลาป่วยไม่มีใบตรงวันอาทิตย์ที่มีกะ — ชีทนับ 1 โค้ดเดิมนับ 0)
+  const statusOf = {};   // รหัส|yyyy-MM-dd → สถานะการลงเวลา
+  const rpRows = rp.getRange(4, 1, Math.max(1, rp.getLastRow() - 3), 6).getValues();
+  rpRows.forEach(r => {
+    const id = String(r[0] || '').trim();
+    const d = r[2];
+    if (!id || !(d instanceof Date)) return;
+    statusOf[id + '|' + key(d)] = String(r[5] || '').trim();
+  });
+  const isOffDay = (id, d) => {
+    const st = statusOf[id + '|' + key(d)];
+    return st === 'วันอาทิตย์' || st === 'วันนักขัตฯ';
+  };
 
   // ── ทางที่ 2: นับวันลาจากการลาApp ด้วยโค้ดตรงๆ ──
   const COL = { sickWithCert:'E', personal:'F', maternity:'G', vacation:'H',
@@ -5756,7 +5769,7 @@ function crossCheckLeaveDays() {
     // ไล่ทีละวันในช่วงที่ทับกับหน้าต่างของสรุปวัน · ตัดวันอาทิตย์+วันนักขัตฯ ให้ตรงกับสูตร
     for (let d = new Date(Math.max(sd.getTime(), ws.getTime()));
          d <= we && d <= ed; d = new Date(d.getTime() + 86400000)) {
-      if (d.getDay() === 0 || hol[key(d)]) continue;
+      if (isOffDay(id, d)) continue;   // v9.23: ใช้เกณฑ์เดียวกับสูตรในชีท
       const add = (single ? Math.min(hrs, 8) : 8) / 8;
       if (!calc[id]) calc[id] = {};
       calc[id][k] = Math.round(((calc[id][k] || 0) + add) * 100) / 100;
