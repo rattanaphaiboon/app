@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.24 — ตรวจวันลาอัตโนมัติ วันที่ 1 และ 16 เวลา 6 โมง (setupCrossCheckTrigger)
+ *          ผลลงแท็บ "ตรวจวันลา" ทุกครั้ง · อีเมลเฉพาะตอนเจอเลขไม่ตรง
  * v9.23 — crossCheckLeaveDays ตัดวันหยุดด้วย "สถานะการลงเวลา" ให้ตรงกับสูตรในชีท
  *          เดิมตัดวันอาทิตย์ทุกวันจากปฏิทิน แต่วันอาทิตย์ที่มีกะทำงาน = วันทำงานของคนนั้น
  * v9.22 — diagChangeOff() เจาะดู 4 ช่องสลับวันหยุดที่เทียบแล้วไม่ตรง + หาสาเหตุแถวซ้ำ
@@ -170,7 +172,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.23', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.24', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3150,6 +3152,7 @@ function systemHealthCheck() {
       cleanupOldPhotos_:        'ลบรูปเก่าเกิน 60 วัน (กัน Storage เต็ม)',
       refreshCheckinPhotoCells: 'เติมรูปในเซลล์ + ล้างแถวเกินช่วง',
       archiveOldCheckinsApply:  'ย้ายสแกนเก่าออกจากชีทหลัก (ทุกวันที่ 3)',
+      crossCheckScheduled_:     'ตรวจเลขวันลา 2 ทาง (วันที่ 1 และ 16)',
     };
     const have = {};
     ScriptApp.getProjectTriggers().forEach(t => { have[t.getHandlerFunction()] = true; });
@@ -5872,3 +5875,63 @@ function diagChangeOff() {
   Logger.log(msg);
   return msg;
 }
+
+/* ── v9.24: ตรวจวันลาอัตโนมัติ วันที่ 1 และ 16 ตอน 6 โมงเช้า ────────────────────
+   Apps Script ตั้ง onMonthDay ได้วันเดียวต่อทริกเกอร์ จึงต้องสร้าง 2 ตัว
+   ผลบันทึกลงแท็บ "ตรวจวันลา" ทุกครั้ง · ส่งอีเมลเฉพาะตอนเจอเลขไม่ตรง (วันปกติไม่กวน)
+   อีเมลส่งหาเจ้าของสคริปต์เอง ไม่ได้ฝังที่อยู่ไว้ในโค้ด
+   ⚠ ตรวจตามช่วงวันที่ที่ตั้งไว้ในช่อง B1/D1 ของแท็บสรุปวัน ณ ตอนนั้น — ไม่ไปแก้ให้เอง
+     เพราะ HR อาจตั้งช่วงไว้ใช้งานอยู่ ถ้าโค้ดไปเปลี่ยนจะกวนงานเขา */
+function crossCheckScheduled_() {
+  const ss = getSS();
+  let out = '', diff = 0, win = '';
+  try {
+    out = crossCheckLeaveDays();
+    const m = out.match(/ไม่ตรง:\s*(\d+)/);      diff = m ? parseInt(m[1], 10) : 0;
+    const w = out.match(/ช่วง\s*([\d/]+\s*–\s*[\d/]+)/); win = w ? w[1] : '';
+  } catch (e) {
+    out = 'รันไม่สำเร็จ: ' + e.message; diff = -1;
+  }
+
+  let sh = ss.getSheetByName('ตรวจวันลา');
+  if (!sh) {
+    sh = ss.insertSheet('ตรวจวันลา');
+    sh.getRange(1, 1, 1, 4).setValues([['ตรวจเมื่อ', 'ช่วงที่ตรวจ', 'ไม่ตรงกี่ช่อง', 'รายละเอียด']])
+      .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+    sh.setFrozenRows(1);
+    sh.setColumnWidth(4, 600);
+  }
+  sh.appendRow([Utilities.formatDate(new Date(), 'Asia/Bangkok', 'dd/MM/yyyy HH:mm'), win,
+                diff < 0 ? 'ERROR' : diff, out.slice(0, 5000)]);
+
+  if (diff !== 0) {
+    try {
+      const to = Session.getEffectiveUser().getEmail();
+      if (to) MailApp.sendEmail(to,
+        (diff < 0 ? '⚠ ตรวจวันลาไม่สำเร็จ' : '⚠ ตรวจวันลา: ไม่ตรง ' + diff + ' ช่อง') + ' · ' + win,
+        out + '\n\n— ระบบลงเวลา Rattana · ตรวจอัตโนมัติวันที่ 1 และ 16\n' +
+        'ดูประวัติการตรวจทั้งหมดได้ที่แท็บ "ตรวจวันลา" ในชีท');
+    } catch (e) { console.error('ส่งอีเมลไม่ได้: ' + e.message); }
+  }
+  return out;
+}
+
+function setupCrossCheckTrigger() {
+  removeCrossCheckTrigger();
+  [1, 16].forEach(d => ScriptApp.newTrigger('crossCheckScheduled_').timeBased().onMonthDay(d).atHour(6).create());
+  const to = (function () { try { return Session.getEffectiveUser().getEmail(); } catch (_) { return '(ไม่ทราบ)'; } })();
+  const msg = 'ตั้งตรวจวันลาอัตโนมัติแล้ว — วันที่ 1 และ 16 ของทุกเดือน ~6 โมงเช้า\n' +
+              'ผลลงแท็บ "ตรวจวันลา" ทุกครั้ง · ส่งอีเมลหา ' + to + ' เฉพาะตอนเจอเลขไม่ตรง\n' +
+              '⚠ ตรวจตามช่วงวันที่ในช่อง B1/D1 ของแท็บสรุปวัน ณ ตอนนั้น — ตั้งช่วงให้ตรงงวดก่อนถึงวันตรวจ';
+  Logger.log(msg);
+  try { ss_toast_(msg); } catch (e) {}
+  return msg;
+}
+function removeCrossCheckTrigger() {
+  let n = 0;
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'crossCheckScheduled_') { ScriptApp.deleteTrigger(t); n++; }
+  });
+  return n ? 'ถอนทริกเกอร์ตรวจวันลาออกแล้ว ' + n + ' ตัว' : 'ไม่มีทริกเกอร์ตรวจวันลาอยู่';
+}
+function ss_toast_(m) { getSS().toast(m, 'ตรวจวันลาอัตโนมัติ', 12); }
