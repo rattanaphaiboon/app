@@ -752,7 +752,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.182</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.183</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -2371,6 +2371,10 @@ let _dcDelivRefSet=new Set(); // v9.41: ref ใบจอง BK/BV ที่ม�
 //   ต่างจาก DC/DSI ตรงที่ "จบแล้ว" ไม่มีของค้างต้องส่ง จึงตัดทิ้งได้เลย ไม่ต้องเว้นใบใหม่ ≤BOOKING_KEEP_DAYS วัน
 //   (ตรวจข้อมูลจริง 2026-09-07: ใบจอง 66 ใบที่มี DSC ไม่มีใบไหนมีใบส่งชนิดอื่นปนเลย = ไม่ใช่การแบ่งรับบางส่วน)
 let _dscPickupRefSet=new Set();
+// v9.183: หมายเหตุบิล (DI_REMARK) บอกว่าลูกค้า "รับสินค้าเอง" เช่น "รับของ: รับสินค้าเองที่รัตนไพบูลย์" → ไม่ต้องจัดรถ
+//   ชุดนี้ = ใบจองพวกนั้น + ใบส่ง DS_DC วันนี้ที่อ้างใบจองนั้น (ใช้ตอนกรอง + ปุ่มตรวจบิลหาย)
+let _selfPickupRefSet=new Set();
+function _isSelfPickupRmk(s){ return /รับ\s*สินค้า\s*เอง/.test(String(s||'')); }
 // v9.150: เก็บไว้ให้ "ใบค้างส่ง" ใช้ตรวจย้อนหลัง — เดิมข้อมูลพวกนี้ถูกทิ้งหลังคำนวณเสร็จ
 let _bkDocMap={};                  // ใบจอง BK/BV → Set(เลขใบส่ง DS_DC ที่อ้างถึงมัน)
 let _payDocSet=new Set();          // เลขใบส่งที่มีในไฟล์ "บันทึกบิลและการชำระ" (D-man) = ส่งแล้วจริง
@@ -2885,6 +2889,21 @@ async function loadData(){
     });
 
     bills=Object.values(billMap);
+    // ══ v9.183: ลูกค้า "รับสินค้าเอง" (ช่อง DI_REMARK) → ไม่ต้องจัดรถ ตัดออกทุกหน้า ══
+    //   ข้อมูลจริง W1 08-14/09: 21 ใบ · 15 ใบเปิดบิลเป็น DSC แล้ว (v9.142 ตัดอยู่แล้ว) · อีก 6 ใบยังค้างในรอจัด (ยังไม่เปิดบิล / เปิดเป็น DSI, DC)
+    //   ใบส่ง DS_DC วันนี้ที่อ้างใบจองนั้นก็ตัดด้วย — ไม่งั้นพอใบจองหาย dedupDsDcToday จะปล่อยใบส่งโผล่มาแทน (แบบเดียวกับ v9.143)
+    (function filterSelfPickup(){
+      const norm=s=>(s||'').toString().replace(/\s+/g,'').toUpperCase();
+      const set=new Set();
+      (orderBills||[]).forEach(r=>{ if(_isSelfPickupRmk(r['DI_REMARK'])){ const k=norm(r['DI_REF']); if(k)set.add(k); } });
+      (dsDcTodayRows||[]).forEach(r=>{ const k=norm(r['DI_REF']); if(!k)return; const bk=_parseBkRef(r['DI_REMARK']);
+        if(_isSelfPickupRmk(r['DI_REMARK'])||(bk&&set.has(bk)))set.add(k); });
+      _selfPickupRefSet=set;
+      if(!set.size)return;
+      const dropped=[];
+      bills=bills.filter(b=>{ if(!set.has(norm(b.ref)))return true; dropped.push(b.ref); delete billMap[b.ref]; return false; });
+      console.log(`🙋 v9.183 ตัดบิลลูกค้ารับสินค้าเอง (DI_REMARK): ${dropped.length} ใบ`+(dropped.length?` — ${dropped.slice(0,8).join(', ')}${dropped.length>8?' ...':''}`:''));
+    })();
     // ══ v8.55: กรอง "ใบจอง BK/BV ที่ถูกส่งแล้ว" (ถูกอ้างในแท็บ DS_DC) ออกก่อนจัดรถ ══
     //   dsDcRefSet = เลขใบจองที่ใบส่งของ (DS_DC) อ้างถึงในช่อง DI_REMARK
     (function filterFulfilledBookings(){
@@ -3245,7 +3264,8 @@ async function dqCheckBill(){
   const inB=bills.filter(x=>String(x.arName||'').includes(q));
   let msg='🔍 ตรวจ "'+q+'"  ·  คลังที่จัด: '+ORDER_WL+'\n\n';
   msg+='① ดิบจาก Google (ก่อนกรอง): '+rawRefs.length+' บิล\n';
-  rawRefs.slice(0,10).forEach(r=>{msg+='   • '+r.ref+' | วันบิล '+r.date+(r.wl?' | คลัง '+r.wl:'')+'\n';});
+  const _spk=r=>_selfPickupRefSet.has(String(r||'').replace(/\s+/g,'').toUpperCase());   // v9.183
+  rawRefs.slice(0,10).forEach(r=>{msg+='   • '+r.ref+' | วันบิล '+r.date+(r.wl?' | คลัง '+r.wl:'')+(_spk(r.ref)?' | 🙋 ลูกค้ารับสินค้าเอง':'')+'\n';});
   msg+='\n② เหลือใน "รอจัด" (หลังกรอง): '+inB.length+' บิล\n';
   inB.slice(0,10).forEach(x=>{msg+='   • '+x.ref+' | '+x.date+' | วันส่ง '+(x.days||'ว่าง')+(x.lat?' | GPS✓':' | ไม่มีGPS')+'\n';});
   // v9.20b: ถ้าอยู่ใน bills แล้ว เช็คต่อว่าตกหล่นตรงไหนในหน้าจัดรถ
@@ -3277,7 +3297,7 @@ async function dqCheckBill(){
   }
   msg+='\n\n③ สรุป: ';
   if(!rawRefs.length) msg+='❌ ไม่ได้โหลดมาเลย → คนละคลัง หรือ วันบิลเกิน 7 วัน';
-  else if(!inB.length) msg+='⚠️ โหลดมาแล้วแต่โดนกรองออก (DS_DC/พิกัด)';
+  else if(!inB.length) msg+=(rawRefs.some(r=>_spk(r.ref))?'🙋 ลูกค้ารับสินค้าเอง (หมายเหตุในบิล) → ตัดออก ไม่ต้องจัดรถ':'⚠️ โหลดมาแล้วแต่โดนกรองออก (DS_DC/พิกัด)');
   else msg+='✅ อยู่ในบิลแล้ว — ดูข้อ ④ ว่าตกหล่นตรงไหน';
   await dqAlert(msg,{title:'🔎 ผลการตรวจบิล'});   // v9.97
   console.log('[ตรวจบิล]',q,{raw:rawRefs,inBills:inB.map(x=>({ref:x.ref,date:x.date,days:x.days}))});
