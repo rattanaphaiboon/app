@@ -1,6 +1,25 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.29 — ★ เจอแล้วว่าทำไม deleteRows ไม่ลบ: "ฟิลเตอร์" คลุม A1:Z1890 ทั้งชีท
+ *          ลบแถวท้ายชีท (นอกฟิลเตอร์) ได้ · ลบแถวกลางชีท (ในฟิลเตอร์) เงียบ ไม่มี error
+ *          fixBlankShiftRows() ถอดฟิลเตอร์ → ลบ → ใส่กลับพร้อมเงื่อนไขเดิม
+ *          มีวิธีสำรอง (ดันข้อมูลขึ้นแล้วตัดท้าย) เผื่อไม่ใช่เพราะฟิลเตอร์
+ * v9.28 — หาสาเหตุ "deleteRows สั่งลบแล้วแถวไม่หาย" + ล้างแถวว่างในแท็บ จัดกะ
+ *          fixBlankShiftRows() รันเดียวได้ทั้งวินิจฉัยและแก้ — ตรวจ B ไม่ผ่านจะหยุด ไม่แตะข้อมูล
+ *          ★ ใช้ maxRows ตัดสินว่าลบสำเร็จมั้ย (ลบแถวได้ maxRows ต้องลด)
+ *          lastRow/getDataRange หลอกได้ถ้ามีสูตรกินพื้นที่ — v9.27 ใช้ตัวที่หลอกได้
+ * v9.27 — ★ dedupeShiftRowsApply เดิมขึ้น ✅ ทั้งที่ลบไม่จริง (สั่งลบ 218 หายจริง 12):
+ *          พิมพ์ผลสำเร็จทันทีหลังสั่งลบ โดยไม่อ่านชีทกลับมานับ
+ *          แก้เป็น ล้างค่า A:H ก่อน (สูตรกรอง TRIM(C)<>"" อยู่แล้ว → รายงานถูกทันที)
+ *          แล้วค่อยลบแถวเป็นช่วงด้วย deleteRows + flush + อ่านใหม่นับซ้ำ รายงานเลขจริง
+ * v9.26 — ★ จัดกะซ้ำหลายแถว/วัน ทำให้ IN-OUT ใน สรุปวัน เพี้ยน (★ ต้อง Deploy):
+ *          actionSubmitShift เทียบวันที่ String(cell G) กับ "13/09/2026" แต่ G เป็น Date object
+ *          → หาแถวเดิมไม่เจอ → กดบันทึกทีต่อท้ายที (13/09 ของแก้วมณี มี 4 แถว)
+ *          สูตร "คิดสรุป" ถามแค่ "มีแถวไหนเข้า >= 18:00 มั้ย" ไม่ได้เลือกแถวล่าสุด
+ *          → กะดึกแถวเก่าชนะกะ 8:00-17:00 ที่ลงทีหลัง → นับแบบเที่ยงถึงเที่ยง → สแกนลงผิดวัน
+ *          แก้: normalize วันที่ทั้งสองฝั่ง + ไล่จนจบแถวเอาแถวล่าสุด
+ *          diagShiftDup() ตรวจ · dedupeShiftRows() พรีวิว · dedupeShiftRowsApply() ล้างจริง
  * v9.25 — เร็วขึ้นตอนเปิดแอป (คู่แอป v12.67 · ★ ต้อง Deploy):
  *          getBootstrap() รวม 5 คำขอเป็นคำขอเดียว — เดิมตรวจ token (อ่านชีท Users ทั้งแผ่น)
  *          ซ้ำ 5 รอบ + เปิดสเปรดชีท 5 รอบ · ตอนนี้ทำครั้งเดียว
@@ -176,7 +195,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.25', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.29', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -4727,10 +4746,21 @@ function actionSubmitShift(p, user) {
       p.ot || '',
     ];
     const data = sh.getDataRange().getValues();
+    // v9.26: คอลัมน์ G กลับมาเป็น Date object (Sheets แปลงสตริงวันที่ให้ตอนเขียน)
+    //   เดิมเทียบ String(Date) กับ "13/09/2026" ซึ่งไม่มีทางตรง → กดบันทึกทีเพิ่มแถวที
+    //   จนซ้ำ 3-4 แถว/วัน · สูตร "คิดสรุป" มองทุกแถว (แถวไหนเข้า >= 18:00 ก็ถือทั้งวัน
+    //   เป็นกะดึก) → กะที่แก้ทีหลังไม่ชนะของเก่า → IN/OUT ใน สรุปวัน เพี้ยน
+    const dnorm = (v) => {
+      if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Bangkok', 'dd/MM/yyyy');
+      const q = String(v == null ? '' : v).trim().split('/');
+      if (q.length !== 3) return String(v == null ? '' : v).trim();
+      let y = parseInt(q[2], 10); if (y > 2400) y -= 543;
+      return ('0' + q[0]).slice(-2) + '/' + ('0' + q[1]).slice(-2) + '/' + y;
+    };
+    const want = dnorm(p.date);
     let found = -1;
-    for (let i = 1; i < data.length; i++) {
-      if (String(data[i][2]).trim() === _nm.trim() &&
-          String(data[i][6]).trim() === String(p.date).trim()) { found = i + 1; break; }
+    for (let i = 1; i < data.length; i++) {          // ไล่จนจบแถว → ได้ "แถวล่าสุด" ถ้ามีซ้ำค้างอยู่
+      if (cleanName_(data[i][2]) === _nm && dnorm(data[i][6]) === want) found = i + 1;
     }
     if (found > 0) {
       sh.getRange(found, 1, 1, 8).setValues([row]);
@@ -5964,4 +5994,404 @@ function getBootstrap(p, user) {
     ploc:      grab(() => actionGetPersonalLocations(p, user)),
     logs:      grab(() => actionGetCheckinLog({ limit: parseInt(p.limit, 10) || 500 }, user)),
   });
+}
+
+/* ============================================================
+   v9.26 · diag: จัดกะซ้ำ — หาแถว "ชื่อ|วันที่" ที่ซ้ำกันในแท็บ จัดกะ
+   ซึ่งทำให้ "คิดสรุป/สรุปวัน" จับกะผิด (กฎตอนนี้ = มีแถวไหนเข้า ≥18:00 ก็ถือทั้งวันเป็นกะดึก)
+   สมมติฐาน: actionSubmitShift เทียบ String(cell G) === "13/09/2026"
+             แต่ cell G เป็น Date object → ไม่มีทางตรง → เพิ่มแถวใหม่ทุกครั้งที่กดบันทึก
+   แก้ 3 ค่าข้างล่างให้ตรงเคสที่จะดู แล้วกด Run
+   ============================================================ */
+const DUP_NAME = 'แก้วมณี ชาญฉลาด';
+const DUP_FROM = '01/09/2026';
+const DUP_TO   = '15/09/2026';
+
+function diagShiftDup() {
+  const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
+  const sh = ss.getSheetByName('จัดกะ');
+  if (!sh) { Logger.log('ไม่พบแท็บ จัดกะ'); return; }
+  const data = sh.getDataRange().getValues();
+
+  const pad   = n => ('0' + n).slice(-2);
+  const dstr  = v => (v instanceof Date) ? Utilities.formatDate(v, 'Asia/Bangkok', 'dd/MM/yyyy')
+                                         : String(v == null ? '' : v).trim();
+  const tstr  = v => (v instanceof Date) ? Utilities.formatDate(v, 'Asia/Bangkok', 'HH:mm')
+                                         : String(v == null ? '' : v).trim();
+  const tfrac = v => {
+    if (v instanceof Date) return (v.getHours() * 60 + v.getMinutes()) / 1440;
+    const m = String(v == null ? '' : v).trim().match(/^(\d{1,2}):(\d{2})/);
+    return m ? (parseInt(m[1], 10) * 60 + parseInt(m[2], 10)) / 1440 : -1;
+  };
+  const toD  = s => { const p = String(s).split('/'); return new Date(+p[2], +p[1] - 1, +p[0]); };
+  const kOf  = d => pad(d.getDate()) + '/' + pad(d.getMonth() + 1) + '/' + d.getFullYear();
+  const L = [];
+
+  /* ---- 1) คอลัมน์ G เก็บเป็นอะไร ---- */
+  L.push('===== 1) ชนิดข้อมูลคอลัมน์ G (วันที่) =====');
+  let nDate = 0, nText = 0, sample = '';
+  for (let i = 1; i < data.length; i++) {
+    if (!String(data[i][2] || '').trim()) continue;
+    const g = data[i][6];
+    if (g instanceof Date) { nDate++; if (!sample) sample = String(g); }
+    else if (String(g || '').trim()) nText++;
+  }
+  L.push('เป็น Date object : ' + nDate + ' แถว');
+  L.push('เป็นข้อความ      : ' + nText + ' แถว');
+  if (sample) {
+    L.push('String(cell) ได้ : "' + sample + '"');
+    L.push('แต่โค้ดเทียบกับ  : "13/09/2026" → ไม่มีทางตรง → กดบันทึกทีเพิ่มแถวที');
+  }
+
+  /* ---- 2) นับแถวซ้ำทั้งชีท ---- */
+  const byKey = {}, order = [];
+  for (let i = 1; i < data.length; i++) {
+    const nm = cleanName_(data[i][2]); if (!nm) continue;
+    const d  = dstr(data[i][6]);       if (!d)  continue;
+    const k  = nm + '|' + d;
+    if (!byKey[k]) { byKey[k] = []; order.push(k); }
+    byKey[k].push(i + 1);
+  }
+  let dupKeys = 0, dupRows = 0, worstK = '', worstN = 0;
+  order.forEach(k => {
+    const n = byKey[k].length;
+    if (n > 1) { dupKeys++; dupRows += n - 1; if (n > worstN) { worstN = n; worstK = k; } }
+  });
+  L.push('');
+  L.push('===== 2) แถวซ้ำทั้งแท็บ จัดกะ =====');
+  L.push('แถวทั้งหมด        : ' + (data.length - 1));
+  L.push('คีย์ ชื่อ|วันที่     : ' + order.length);
+  L.push('คีย์ที่มีแถวซ้ำ     : ' + dupKeys);
+  L.push('แถวส่วนเกิน (ขยะ) : ' + dupRows);
+  if (worstK) L.push('ซ้ำมากสุด        : ' + worstK + ' = ' + worstN + ' แถว');
+
+  /* ---- 3) วันที่ "กฎปัจจุบันบอกกะดึก แต่แถวล่าสุดไม่ใช่กะดึก" ---- */
+  const nightAny = {}, nightLast = {};
+  order.forEach(k => {
+    const rs = byKey[k];
+    nightAny[k]  = rs.some(r => tfrac(data[r - 1][3]) >= 0.75);
+    nightLast[k] = tfrac(data[rs[rs.length - 1] - 1][3]) >= 0.75;
+  });
+  const conflict = order.filter(k => nightAny[k] !== nightLast[k]);
+  L.push('');
+  L.push('===== 3) คีย์ที่ "ทั้งกอง" กับ "แถวล่าสุด" ให้ผลต่างกัน =====');
+  L.push('จำนวน : ' + conflict.length + '  ← เท่ากับจำนวนวันที่สรุปวันจับคู่ IN/OUT ผิด');
+  conflict.slice(0, 25).forEach(k => {
+    L.push('  ' + k + ' | ทั้งกอง=' + (nightAny[k] ? 'ดึก' : 'ไม่ดึก') +
+           ' แถวล่าสุด=' + (nightLast[k] ? 'ดึก' : 'ไม่ดึก') +
+           ' (แถว ' + byKey[k].join(',') + ')');
+  });
+  if (conflict.length > 25) L.push('  ... อีก ' + (conflict.length - 25) + ' คีย์');
+
+  /* ---- 4) แถวจัดกะของคนที่เจาะดู ---- */
+  L.push('');
+  L.push('===== 4) แถวจัดกะของ ' + DUP_NAME + ' (' + DUP_FROM + ' - ' + DUP_TO + ') =====');
+  const from = toD(DUP_FROM), to = toD(DUP_TO);
+  for (let i = 1; i < data.length; i++) {
+    if (cleanName_(data[i][2]) !== DUP_NAME) continue;
+    const g = data[i][6];
+    const d = (g instanceof Date) ? new Date(g.getFullYear(), g.getMonth(), g.getDate())
+                                  : toD(dstr(g));
+    if (!(d >= from && d <= to)) continue;
+    L.push('  แถว ' + (i + 1) + ' | ' + dstr(g) +
+           ' | เข้า ' + (tstr(data[i][3]) || '-') +
+           ' ออก ' + (tstr(data[i][4]) || '-') +
+           ' | วันหยุด ' + (String(data[i][5] || '').trim() || '-') +
+           ' | OT ' + (String(data[i][7] || '').trim() || '-'));
+  }
+
+  /* ---- 5) สแกนจริง ลงวันไหน ---- */
+  L.push('');
+  L.push('===== 5) สแกนจริง → ลงวันไหน =====');
+  const lg = ss.getSheetByName('CheckinLog');
+  const ld = lg ? lg.getDataRange().getValues() : [];
+  const lo = new Date(from.getTime() - 86400000), hi = new Date(to.getTime() + 2 * 86400000);
+  const scans = [];
+  for (let i = 1; i < ld.length; i++) {
+    const ts = ld[i][0];
+    if (!(ts instanceof Date)) continue;
+    if (cleanName_(ld[i][2]) !== DUP_NAME) continue;
+    if (ts < lo || ts > hi) continue;
+    scans.push(ts);
+  }
+  scans.sort((a, b) => a - b);
+  const dayOf   = ts => new Date(ts.getFullYear(), ts.getMonth(), ts.getDate());
+  const minus12 = ts => { const x = new Date(ts.getTime() - 12 * 3600000);
+                          return new Date(x.getFullYear(), x.getMonth(), x.getDate()); };
+  let diffN = 0;
+  scans.slice(0, 80).forEach(ts => {
+    const back = minus12(ts), k = DUP_NAME + '|' + kOf(back);
+    const now  = nightAny[k]  ? back : dayOf(ts);
+    const fix  = nightLast[k] ? back : dayOf(ts);
+    const same = kOf(now) === kOf(fix);
+    if (!same) diffN++;
+    L.push('  สแกน ' + Utilities.formatDate(ts, 'Asia/Bangkok', 'dd/MM HH:mm') +
+           ' → ตอนนี้ลงวัน ' + kOf(now).slice(0, 5) +
+           (same ? '' : '   ❌ ถ้าใช้แถวล่าสุด = ' + kOf(fix).slice(0, 5)));
+  });
+  L.push('สแกนที่ลงผิดวัน : ' + diffN + ' ครั้ง');
+
+  Logger.log(L.join('\n'));
+}
+
+/* ============================================================
+   v9.26 · ล้างแถวจัดกะซ้ำ — เก็บ "แถวล่าสุด" ของแต่ละ ชื่อ|วันที่ ที่เหลือลบทิ้ง
+   dedupeShiftRows()      = พรีวิว (ไม่แตะข้อมูล)
+   dedupeShiftRowsApply() = ลบจริง
+   ทำหลังจาก Save โค้ดใหม่แล้ว (ไม่งั้นกดบันทึกกะทีก็ซ้ำใหม่)
+   ============================================================ */
+function dedupeShiftRows()      { return shiftDedupe_(false); }
+function dedupeShiftRowsApply() { return shiftDedupe_(true); }
+
+function shiftDedupe_(apply) {
+  const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
+  const sh = ss.getSheetByName('จัดกะ');
+  if (!sh) { Logger.log('ไม่พบแท็บ จัดกะ'); return; }
+  const data = sh.getDataRange().getValues();
+  const dstr = v => (v instanceof Date) ? Utilities.formatDate(v, 'Asia/Bangkok', 'dd/MM/yyyy')
+                                        : String(v == null ? '' : v).trim();
+  const tstr = v => (v instanceof Date) ? Utilities.formatDate(v, 'Asia/Bangkok', 'HH:mm')
+                                        : String(v == null ? '' : v).trim();
+  const show = r => '[เข้า ' + (tstr(data[r - 1][3]) || '-') + ' ออก ' + (tstr(data[r - 1][4]) || '-') +
+                    (String(data[r - 1][5] || '').trim() ? ' ' + String(data[r - 1][5]).trim() : '') +
+                    (String(data[r - 1][7] || '').trim() ? ' OT' + String(data[r - 1][7]).trim() : '') + ']';
+
+  const byKey = {}, order = [];
+  for (let i = 1; i < data.length; i++) {
+    const nm = cleanName_(data[i][2]); if (!nm) continue;
+    const d  = dstr(data[i][6]);       if (!d)  continue;
+    const k  = nm + '|' + d;
+    if (!byKey[k]) { byKey[k] = []; order.push(k); }
+    byKey[k].push(i + 1);
+  }
+
+  // v9.26b: ยกคีย์ที่ "ทำให้รายงานผิดจริง" ขึ้นโชว์ก่อน (เดิมโชว์ 15 คีย์แรกตามลำดับชีท
+  //   ซึ่งมักไม่มีตัวที่ต้องตรวจอยู่เลย) — คีย์ที่ผิดจริง = ทั้งกองบอกกะดึก แต่แถวล่าสุดไม่ใช่
+  const tfrac = v => {
+    if (v instanceof Date) return (v.getHours() * 60 + v.getMinutes()) / 1440;
+    const m = String(v == null ? '' : v).trim().match(/^(\d{1,2}):(\d{2})/);
+    return m ? (parseInt(m[1], 10) * 60 + parseInt(m[2], 10)) / 1440 : -1;
+  };
+  const isCon = k => {
+    const rs = byKey[k];
+    return rs.some(r => tfrac(data[r - 1][3]) >= 0.75) !== (tfrac(data[rs[rs.length - 1] - 1][3]) >= 0.75);
+  };
+  const dup  = order.filter(k => byKey[k].length > 1);
+  const con  = dup.filter(isCon);
+  const rest = dup.filter(k => !isCon(k));
+  const kill = [];
+  dup.forEach(k => byKey[k].slice(0, -1).forEach(r => kill.push(r)));
+
+  const L = ['===== ล้างแถวจัดกะซ้ำ (เก็บแถวล่าสุด) ====='];
+  const dump = k => {
+    const rs = byKey[k];
+    L.push(k + '  → เก็บแถว ' + rs[rs.length - 1] + ' ' + show(rs[rs.length - 1]));
+    rs.slice(0, -1).forEach(r => L.push('      ลบแถว ' + r + ' ' + show(r)));
+  };
+  L.push('');
+  L.push('--- ' + con.length + ' คีย์ที่ทำให้รายงานผิด — ตรวจให้ครบ ---');
+  con.forEach(dump);
+  L.push('');
+  L.push('--- อีก ' + rest.length + ' คีย์ ซ้ำเฉยๆ ไม่กระทบรายงาน (ตัวอย่าง 10 คีย์) ---');
+  rest.slice(0, 10).forEach(dump);
+
+  L.push('');
+  L.push('แถวทั้งหมด : ' + (data.length - 1));
+  L.push('จะลบ       : ' + kill.length + ' แถว');
+  L.push('เหลือ      : ' + (data.length - 1 - kill.length) + ' แถว');
+
+  // เช็คก่อนว่าคอลัมน์ I/J/K (วัน/เดือน/ปี) เป็นสูตรแถวเดียวหรือเปล่า — ถ้าใช่ ห้ามลบแถว 2
+  let warn = '';
+  try {
+    const f = sh.getRange(2, 9, 1, 3).getFormulas()[0].join('');
+    if (f && kill.indexOf(2) >= 0) warn = 'แถว 2 มีสูตรในคอลัมน์ I/J/K — ลบแล้วสูตรหาย';
+    else if (f) warn = 'คอลัมน์ I/J/K แถว 2 เป็นสูตร (แถว 2 ไม่อยู่ในรายการลบ ปลอดภัย)';
+  } catch (e) {}
+  if (warn) { L.push(''); L.push('⚠ ' + warn); }
+
+  if (!apply) {
+    L.push('');
+    L.push('>>> พรีวิวเท่านั้น ยังไม่ได้ลบอะไร · ถ้าถูกต้องให้ Run dedupeShiftRowsApply()');
+    Logger.log(L.join('\n'));
+    return;
+  }
+
+  /* v9.27: ลบแล้วต้องพิสูจน์ว่าลบจริง — รอบก่อนขึ้น ✅ ทั้งที่แถวยังอยู่ (สั่งลบ 218 หายจริง 12)
+     ขั้น 1 ล้างค่า A:H ของแถวเก่า เขียนครั้งเดียวทั้งช่วง — ไม่ขยับแถว
+            สูตร "คิดสรุป" กรอง TRIM(C)<>"" อยู่แล้ว แถวที่ล้างค่าจึงหายจากการคำนวณทันที
+            → ต่อให้ขั้น 2 พลาด รายงานก็ถูกแล้ว
+     ขั้น 2 ลบแถวว่างเป็นช่วงๆ จากล่างขึ้นบน (deleteRows ทีละกลุ่ม ไม่ใช่ deleteRow 218 ครั้ง)
+     ขั้น 3 อ่านชีทกลับมานับใหม่ รายงานเลขจริง */
+  const before = data.length - 1, beforeLast = sh.getLastRow();
+
+  const fx = sh.getRange(2, 1, before, 8).getFormulas();
+  if (fx.some(r => r.some(c => c !== ''))) {
+    L.push('');
+    L.push('❌ คอลัมน์ A-H มีสูตรอยู่ ไม่ล้างให้เพื่อกันพัง — แจ้ง Claude');
+    Logger.log(L.join('\n'));
+    return;
+  }
+
+  const rng = sh.getRange(2, 1, before, 8), vals = rng.getValues();
+  kill.forEach(r => { vals[r - 2] = ['', '', '', '', '', '', '', '']; });
+  rng.setValues(vals);
+  SpreadsheetApp.flush();
+
+  const asc = kill.slice().sort((a, b) => a - b), groups = [];
+  asc.forEach(r => {
+    const g = groups[groups.length - 1];
+    if (g && r === g[0] + g[1]) g[1]++; else groups.push([r, 1]);
+  });
+  let del = 0;
+  groups.sort((a, b) => b[0] - a[0]).forEach(g => { sh.deleteRows(g[0], g[1]); del += g[1]; });
+  SpreadsheetApp.flush();
+
+  const d2 = sh.getDataRange().getValues(), seen = {};
+  let dupLeft = 0, keyLeft = 0;
+  for (let i = 1; i < d2.length; i++) {
+    const nm = cleanName_(d2[i][2]); if (!nm) continue;
+    const dd = dstr(d2[i][6]);       if (!dd) continue;
+    const k = nm + '|' + dd;
+    if (seen[k]) dupLeft++; else { seen[k] = 1; keyLeft++; }
+  }
+  L.push('');
+  L.push('===== ผลจริง (อ่านชีทกลับมานับใหม่) =====');
+  L.push('ก่อน : ' + before + ' แถว (lastRow ' + beforeLast + ')');
+  L.push('หลัง : ' + (d2.length - 1) + ' แถว (lastRow ' + sh.getLastRow() + ')');
+  L.push('สั่งลบ ' + kill.length + ' · ลบไป ' + del + ' · หายจริง ' + (before - (d2.length - 1)));
+  L.push('คีย์ที่เหลือ : ' + keyLeft + ' · แถวซ้ำที่เหลือ : ' + dupLeft);
+  L.push(dupLeft === 0
+    ? '✅ สะอาดแล้ว — 1 คน 1 วัน 1 แถว'
+    : '❌ ยังเหลือซ้ำ ' + dupLeft + ' แถว — ส่งผลนี้ให้ Claude');
+  Logger.log(L.join('\n'));
+}
+
+/* ============================================================
+   v9.29 · ล้างแถวว่างในแท็บ จัดกะ — เจอต้นเหตุแล้ว: "ฟิลเตอร์"
+   หลักฐานจาก v9.28: ฟิลเตอร์คลุม A1:Z1890 (ทั้งชีท) · ไม่มี protection · แท็บเดียว
+     ลบแถวท้ายชีท (นอกขอบเขตฟิลเตอร์) → maxRows ลด ✅
+     ลบแถวกลางชีท (ในขอบเขตฟิลเตอร์)  → maxRows เท่าเดิม ❌ ไม่มี error
+   วิธีแก้: ถอดฟิลเตอร์ → ลบ → ใส่ฟิลเตอร์กลับพร้อมเงื่อนไขเดิม
+   ถ้าถอดแล้วยังลบไม่ได้ ใช้วิธีสำรอง: ดันข้อมูล A-H ขึ้นให้ชิด แล้วตัดแถวท้าย
+   ปลอดภัย: แตะเฉพาะแถวที่ A-H ว่างทั้งแถว · ไม่แตะแถว 2 · ไม่เขียนทับคอลัมน์ I/J/K
+   ============================================================ */
+function fixBlankShiftRows() {
+  const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
+  const sh = ss.getSheetByName('จัดกะ');
+  if (!sh) { Logger.log('ไม่พบแท็บ จัดกะ'); return; }
+  const L = [], NCOL = 8;              // A-H เท่านั้น (I/J/K เป็นสูตร)
+
+  const isBlank = row => {
+    for (let c = 0; c < NCOL; c++) if (String(row[c] == null ? '' : row[c]).trim() !== '') return false;
+    return true;
+  };
+  const scanBlanks = () => {
+    const v = sh.getDataRange().getValues(), out = [];
+    for (let i = 2; i < v.length; i++) if (isBlank(v[i])) out.push(i + 1);   // ข้ามแถว 2
+    return out;
+  };
+  const countReal = () => {
+    const v = sh.getDataRange().getValues(); let n = 0;
+    for (let i = 1; i < v.length; i++) if (!isBlank(v[i])) n++;
+    return n;
+  };
+
+  L.push('===== ก่อนแก้ =====');
+  L.push('maxRows=' + sh.getMaxRows() + ' lastRow=' + sh.getLastRow() + ' lastCol=' + sh.getLastColumn());
+  L.push('แถวว่าง ' + scanBlanks().length + ' · แถวที่มีข้อมูล ' + countReal());
+
+  /* ---- 1) ถอดฟิลเตอร์ เก็บเงื่อนไขไว้ใส่กลับ ---- */
+  let hadFilter = false, fCols = 11, crit = [];
+  try {
+    const f = sh.getFilter();
+    if (f) {
+      hadFilter = true;
+      fCols = Math.max(f.getRange().getNumColumns(), sh.getLastColumn());
+      for (let c = 1; c <= f.getRange().getNumColumns(); c++) {
+        try { const cc = f.getColumnFilterCriteria(c); if (cc) crit.push([c, cc.copy().build()]); } catch (e) {}
+      }
+      f.remove();
+      SpreadsheetApp.flush();
+      L.push('ถอดฟิลเตอร์แล้ว (เก็บเงื่อนไขไว้ ' + crit.length + ' คอลัมน์)');
+    } else L.push('ไม่มีฟิลเตอร์');
+  } catch (e) { L.push('⚠ ถอดฟิลเตอร์ไม่ได้ : ' + e.message); }
+
+  /* ---- 2) ทดสอบลบกลางชีทอีกครั้ง ---- */
+  L.push('');
+  L.push('===== ทดสอบหลังถอดฟิลเตอร์ =====');
+  let blanks = scanBlanks(), midOK = false;
+  if (blanks.length) {
+    const a = sh.getMaxRows(), t = blanks[blanks.length - 1];
+    sh.deleteRows(t, 1);
+    SpreadsheetApp.flush();
+    const b = sh.getMaxRows();
+    midOK = b < a;
+    L.push('deleteRows(' + t + ',1) : maxRows ' + a + ' → ' + b +
+           (midOK ? '  ✅ ฟิลเตอร์คือต้นเหตุจริง' : '  ❌ ไม่ใช่ฟิลเตอร์ — ใช้วิธีสำรอง'));
+  }
+
+  /* ---- 3) ล้าง ---- */
+  const before = sh.getMaxRows();
+  let method;
+  if (midOK) {
+    method = 'ลบแถวเป็นช่วง (หลังถอดฟิลเตอร์)';
+    const groups = [];
+    scanBlanks().forEach(r => {
+      const g = groups[groups.length - 1];
+      if (g && r === g[0] + g[1]) g[1]++; else groups.push([r, 1]);
+    });
+    groups.sort((a, b) => b[0] - a[0]).forEach(g => sh.deleteRows(g[0], g[1]));
+    SpreadsheetApp.flush();
+    L.push('ลบ ' + groups.length + ' ช่วง');
+  } else {
+    // สำรอง: ดันข้อมูลขึ้นให้ชิด แล้วตัดแถวท้าย (ลบท้ายชีททำได้แน่)
+    // กันพัง: ถ้า I/J/K แถว 3 ลงไปเป็น "ค่านิ่ง" (ไม่ใช่สูตร/ไม่ใช่ spill) การดันแถวจะทำให้เลื่อนไม่ตรง
+    const f2 = sh.getRange(2, 9, 1, 3).getFormulas()[0].join(' ');
+    const f3 = sh.getRange(3, 9, 1, 3).getFormulas()[0].join('');
+    const v3 = sh.getRange(3, 9, 1, 3).getValues()[0].join('');
+    if (!(/ARRAYFORMULA|MAP\(/i.test(f2) || f3 !== '' || v3 === '')) {
+      L.push('');
+      L.push('❌ คอลัมน์ I/J/K แถว 3 เป็นค่านิ่ง ดันแถวแล้วจะเลื่อนไม่ตรง — หยุดไว้ ไม่แตะข้อมูล');
+      if (hadFilter) { try { sh.getRange(1, 1, sh.getLastRow(), fCols).createFilter(); } catch (e) {} }
+      Logger.log(L.join('\n'));
+      return;
+    }
+    method = 'ดันข้อมูลขึ้นแล้วตัดท้าย';
+    const rng = sh.getRange(2, 1, sh.getLastRow() - 1, NCOL), v = rng.getValues();
+    const keep = v.filter(r => !isBlank(r)), pad = [];
+    for (let c = 0; c < NCOL; c++) pad.push('');
+    const out = keep.slice();
+    while (out.length < v.length) out.push(pad.slice());
+    rng.setValues(out);
+    SpreadsheetApp.flush();
+    const firstEmpty = 2 + keep.length, trail = sh.getMaxRows() - firstEmpty + 1;
+    if (trail > 0) { sh.deleteRows(firstEmpty, trail); SpreadsheetApp.flush(); }
+    L.push('ดันขึ้น ' + keep.length + ' แถว · ตัดท้าย ' + trail + ' แถว');
+  }
+
+  /* ---- 4) ใส่ฟิลเตอร์กลับ ---- */
+  if (hadFilter) {
+    try {
+      const nf = sh.getRange(1, 1, sh.getLastRow(), fCols).createFilter();
+      crit.forEach(c => { try { nf.setColumnFilterCriteria(c[0], c[1]); } catch (e) {} });
+      L.push('ใส่ฟิลเตอร์กลับแล้ว A1:' + sh.getRange(1, fCols).getA1Notation().replace(/[0-9]+$/, '') + sh.getLastRow());
+    } catch (e) {
+      L.push('⚠ ใส่ฟิลเตอร์กลับไม่ได้ : ' + e.message);
+      L.push('   สร้างเองได้ที่เมนู ข้อมูล > สร้างตัวกรอง (ข้อมูลไม่เสียหาย)');
+    }
+  }
+
+  /* ---- 5) ผลจริง ---- */
+  const after = sh.getMaxRows(), left = scanBlanks(), real = countReal();
+  L.push('');
+  L.push('===== ผลจริง =====');
+  L.push('วิธีที่ใช้ : ' + method);
+  L.push('maxRows ' + before + ' → ' + after + '  (หายจริง ' + (before - after) + ')');
+  L.push('lastRow : ' + sh.getLastRow());
+  L.push('แถวที่มีข้อมูล : ' + real + '   (ต้องได้ 1683)');
+  L.push('แถวว่างที่เหลือ : ' + left.length);
+  L.push(left.length === 0 && real === 1683
+    ? '✅ ชีทจัดกะสะอาดแล้ว'
+    : '❌ ยังไม่เรียบร้อย — ส่งผลนี้ให้ Claude');
+  Logger.log(L.join('\n'));
 }
