@@ -3,9 +3,9 @@
 //         (Execute as: Me / Who has access: Anyone)
 //
 // เช็กว่า deploy เวอร์ชันใหม่แล้วจริงไหม: เปิด URL ต่อท้าย ?action=ping
-//   ต้องเห็น {"ok":true,"version":"5.4", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
+//   ต้องเห็น {"ok":true,"version":"5.5", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
 
-var VERSION = '5.4';
+var VERSION = '5.5';
 var FOLDER_NAME = 'Rattana Scanner Files';
 var SHARED_FOLDER_NAME = 'ส่วนกลาง (ทุกคนเห็นได้)';
 var RETENTION_DAYS = 90;
@@ -429,7 +429,7 @@ function doPost(e) {
     if (data.action === 'deleteFolder') {
       var del = deleteFolder_(String(data.folderId || ''), empId);
       if (!del.ok) return json_(del);
-      return json_({ ok: true, deleted: del.deleted, folders: visibleFolders_(empId) });
+      return json_({ ok: true, deleted: del.deleted, unlinked: !!del.unlinked, folders: visibleFolders_(empId) });
     }
 
     // บันทึกไฟล์ + ลงประวัติ
