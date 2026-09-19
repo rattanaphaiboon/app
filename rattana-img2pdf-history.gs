@@ -1,21 +1,33 @@
-// Rattana Scanner — หลังบ้านประวัติการสแกน + เก็บไฟล์ใน Google Drive
+// Rattana Scanner — หลังบ้านประวัติการสแกน + เก็บไฟล์ใน Google Drive + โฟลเดอร์ของผู้ใช้
 // deploy: Deploy → Manage deployments → ✏️ → Version: New version → Deploy
 //         (Execute as: Me / Who has access: Anyone)
 //
 // เช็กว่า deploy เวอร์ชันใหม่แล้วจริงไหม: เปิด URL ต่อท้าย ?action=ping
-//   ต้องเห็น {"ok":true,"version":"4.0", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
+//   ต้องเห็น {"ok":true,"version":"5.2", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
 
-var VERSION = '4.2';
+var VERSION = '5.2';
 var FOLDER_NAME = 'Rattana Scanner Files';
+var SHARED_FOLDER_NAME = 'ส่วนกลาง (ทุกคนเห็นได้)';
 var RETENTION_DAYS = 90;
 var SHEET_NAME = 'Sheet1';
+var FOLDER_SHEET_NAME = 'Folders';
 
 // ตำแหน่งคอลัมน์ตายตัว (1-based) — ไม่อ่านจากหัวตารางอีกแล้ว
 // เดิมโค้ดใช้ headers.indexOf('fileId') ซึ่งพังถ้าหัวตารางคอลัมน์ G ว่าง/เพี้ยน
 // ทำให้ปุ่มดาวน์โหลดในประวัติใช้ไม่ได้ทั้งที่ไฟล์อยู่ใน Drive ครบ
-var C_TIMESTAMP = 1, C_EMPID = 2, C_NAME = 3, C_FILENAME = 4, C_PAGES = 5, C_SIZEKB = 6, C_FILEID = 7, C_TYPE = 8;
-var N_COLS = 8;
-var HEADERS = ['timestamp', 'empId', 'name', 'filename', 'pages', 'sizeKB', 'fileId', 'type'];
+var C_TIMESTAMP = 1, C_EMPID = 2, C_NAME = 3, C_FILENAME = 4, C_PAGES = 5, C_SIZEKB = 6,
+    C_FILEID = 7, C_TYPE = 8, C_FOLDERID = 9, C_FOLDERNAME = 10;
+var N_COLS = 10;
+// หัวตารางเขียนเป็นภาษาคนอ่านได้ เพราะโค้ดอ้างด้วยเลขคอลัมน์ ไม่ได้พึ่งข้อความหัวตาราง
+var HEADERS = ['เวลา', 'รหัสพนักงาน', 'ชื่อผู้ทำ', 'ชื่อไฟล์', 'จำนวนหน้า', 'ขนาด (KB)',
+               'Drive File ID', 'หมวดงาน', 'รหัสโฟลเดอร์', 'ชื่อโฟลเดอร์'];
+
+// ทะเบียนโฟลเดอร์ (แท็บ Folders) — เก็บว่าใครเป็นเจ้าของ สร้างเมื่อไหร่ ใครเห็นได้บ้าง
+var F_ID = 1, F_NAME = 2, F_OWNER_ID = 3, F_OWNER_NAME = 4, F_CREATED = 5, F_VISIBILITY = 6, F_DRIVE_ID = 7, F_LINK = 8;
+var F_COLS = 8;
+// หัวตารางเขียนเป็นภาษาคนอ่านได้ เพราะโค้ดอ้างด้วยเลขคอลัมน์ ไม่ได้พึ่งข้อความหัวตาราง
+var F_HEADERS = ['รหัสโฟลเดอร์', 'ชื่อโฟลเดอร์', 'รหัสเจ้าของ', 'ชื่อเจ้าของ', 'สร้างเมื่อ',
+                 'สิทธิ (private=เฉพาะเจ้าของ / all=ทุกคนเห็น)', 'Drive ID', 'เปิดโฟลเดอร์'];
 
 function json_(obj) {
   obj.version = VERSION;
@@ -27,6 +39,209 @@ function getOrCreateFolder_() {
   return folders.hasNext() ? folders.next() : DriveApp.createFolder(FOLDER_NAME);
 }
 
+// ---------- โครงสร้างใน Drive ----------
+//   Rattana Scanner Files /
+//     ส่วนกลาง (ทุกคนเห็นได้) /
+//        ใบลา /                    <- โฟลเดอร์ที่ตั้งสิทธิเป็น "ทุกคนเห็นได้"
+//     12345 - สมชาย ใจดี /          <- โฟลเดอร์ประจำตัว สร้างอัตโนมัติจากรหัสพนักงาน
+//        ใบเสร็จของฉัน /            <- โฟลเดอร์ที่ตั้งสิทธิเป็น "เห็นเฉพาะฉัน"
+//        (ไฟล์ที่ไม่ได้เลือกโฟลเดอร์ อยู่ชั้นนี้)
+
+// ชื่อโฟลเดอร์ห้ามมีอักขระที่ Drive ใช้ไม่ได้ และห้ามยาวเกินจนอ่านไม่รู้เรื่อง
+function safeFolderName_(s) {
+  return String(s || '').replace(/[\/\\:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+}
+
+function userFolderName_(empId, name) {
+  var id = safeFolderName_(empId);
+  var nm = safeFolderName_(name);
+  if (id && nm) return id + ' - ' + nm;
+  return id || nm || 'ไม่ระบุตัวตน';
+}
+
+function childFolder_(parent, name) {
+  var it = parent.getFoldersByName(name);
+  return it.hasNext() ? it.next() : parent.createFolder(name);
+}
+
+// จำ id โฟลเดอร์ประจำตัวไว้ใน Script Properties — ถ้าวันหลังชื่อพนักงานในชีตเปลี่ยน
+// จะได้ใช้โฟลเดอร์เดิมต่อ ไม่สร้างโฟลเดอร์ใหม่ทิ้งไฟล์เก่าไว้คนละที่
+function getUserFolder_(empId, name) {
+  var id = String(empId || '').trim();
+  if (!id) throw new Error('empId required');
+  var props = PropertiesService.getScriptProperties();
+  var key = 'uf_' + id;
+  var cached = props.getProperty(key);
+  if (cached) {
+    try {
+      var f = DriveApp.getFolderById(cached);
+      if (!f.isTrashed()) return f;
+    } catch (e) { /* โฟลเดอร์ถูกลบไปแล้ว ตกไปสร้างใหม่ข้างล่าง */ }
+  }
+  var folder = childFolder_(getOrCreateFolder_(), userFolderName_(id, name));
+  props.setProperty(key, folder.getId());
+  return folder;
+}
+
+function getSharedRoot_() {
+  return childFolder_(getOrCreateFolder_(), SHARED_FOLDER_NAME);
+}
+
+// ---------- ทะเบียนโฟลเดอร์ ----------
+function getFolderSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(FOLDER_SHEET_NAME) || ss.insertSheet(FOLDER_SHEET_NAME);
+  var current = sheet.getRange(1, 1, 1, F_COLS).getValues()[0];
+  var same = F_HEADERS.every(function (h, i) { return current[i] === h; });
+  if (!same) { sheet.getRange(1, 1, 1, F_COLS).setValues([F_HEADERS]); formatFolderSheet_(sheet); }
+  return sheet;
+}
+
+// จัดหน้าตาแท็บให้อ่านรู้เรื่องตอนเปิดดูในชีต (ทำครั้งเดียวตอนเขียนหัวตาราง)
+function formatFolderSheet_(sheet) {
+  try {
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, F_COLS).setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+    var widths = [150, 200, 180, 170, 160, 250, 190, 110];
+    for (var i = 0; i < widths.length; i++) sheet.setColumnWidth(i + 1, widths[i]);
+  } catch (e) { /* จัดรูปแบบไม่ได้ก็ไม่เป็นไร ข้อมูลสำคัญกว่า */ }
+}
+
+// แถวทะเบียน 1 แถว — คอลัมน์สุดท้ายเป็นลิงก์กดเปิดโฟลเดอร์ใน Drive ได้เลย
+function folderRowValues_(id, name, ownerId, ownerName, createdAt, visibility, driveId) {
+  return [id, name, ownerId, ownerName, createdAt, visibility, driveId,
+    // เขียน URL ตรง ๆ ไม่ใช้สูตร HYPERLINK เพราะตัวคั่นอาร์กิวเมนต์ (, หรือ ;) ต่างกันตามภาษาของชีต
+    // แล้วจะกลายเป็นสูตรพัง · ชีตแปลง URL เป็นลิงก์กดได้ให้เองอยู่แล้ว
+    driveId ? 'https://drive.google.com/drive/folders/' + driveId : ''];
+}
+
+function readFolderRows_(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  return sheet.getRange(2, 1, lastRow - 1, F_COLS).getValues();
+}
+
+function folderRowToObj_(r) {
+  return {
+    id: String(r[F_ID - 1] || ''),
+    name: String(r[F_NAME - 1] || ''),
+    ownerEmpId: String(r[F_OWNER_ID - 1] || ''),
+    ownerName: String(r[F_OWNER_NAME - 1] || ''),
+    createdAt: r[F_CREATED - 1] instanceof Date ? r[F_CREATED - 1].toISOString() : String(r[F_CREATED - 1] || ''),
+    visibility: String(r[F_VISIBILITY - 1] || 'private'),
+    driveFolderId: String(r[F_DRIVE_ID - 1] || ''),
+  };
+}
+
+function allFolders_() {
+  return readFolderRows_(getFolderSheet_()).map(folderRowToObj_).filter(function (f) { return !!f.id; });
+}
+
+// เห็นได้ = โฟลเดอร์ของตัวเอง (ไม่ว่าตั้งสิทธิอะไร) + โฟลเดอร์ของคนอื่นที่ตั้งเป็น "ทุกคนเห็นได้"
+function visibleFolders_(empId) {
+  return allFolders_().filter(function (f) {
+    return f.ownerEmpId === empId || f.visibility === 'all';
+  }).sort(function (a, b) {
+    if (a.visibility !== b.visibility) return a.visibility === 'all' ? 1 : -1;
+    return a.name.localeCompare(b.name, 'th');
+  });
+}
+
+function folderById_(id) {
+  var list = allFolders_();
+  for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+  return null;
+}
+
+// ใช้เก็บไฟล์ได้ไหม — ของตัวเอง หรือของส่วนกลางที่ทุกคนเห็นได้
+function canUseFolder_(f, empId) {
+  return !!f && (f.ownerEmpId === empId || f.visibility === 'all');
+}
+
+function newFolderId_() {
+  return 'f' + Date.now() + '_' + Math.floor(Math.random() * 1000000);
+}
+
+// ---------- ดึงโฟลเดอร์ที่คนไปสร้างเองใน Google Drive เข้าทะเบียน ----------
+// ถ้าไม่ทำ คนที่เข้าไปสร้างโฟลเดอร์ใน Drive เองแล้วกลับมาเปิดแอปจะไม่เห็นโฟลเดอร์นั้นเลย
+// (เจอปัญหานี้จริงตอนใช้งานรอบแรก) · เรียกทุกครั้งที่ขอรายการโฟลเดอร์
+function pruneDeadFolders_(sheet) {
+  var rows = readFolderRows_(sheet);
+  for (var i = rows.length - 1; i >= 0; i--) {
+    var did = String(rows[i][F_DRIVE_ID - 1] || '');
+    if (!did) continue;
+    var gone = false;
+    try { if (DriveApp.getFolderById(did).isTrashed()) gone = true; } catch (e) { gone = true; }
+    if (gone) sheet.deleteRow(i + 2);   // โฟลเดอร์ถูกลบใน Drive แล้ว เอาออกจากทะเบียนด้วย
+  }
+}
+
+function syncDriveFolders_(empId, name) {
+  var sheet = getFolderSheet_();
+  pruneDeadFolders_(sheet);
+  var known = {};
+  readFolderRows_(sheet).forEach(function (r) { known[String(r[F_DRIVE_ID - 1])] = true; });
+  var added = 0;
+  function scan(parent, visibility, ownerId, ownerName) {
+    var it = parent.getFolders();
+    while (it.hasNext()) {
+      var f = it.next();
+      if (f.isTrashed() || known[f.getId()]) continue;
+      // โฟลเดอร์ส่วนกลางที่สร้างมือไม่รู้ว่าใครทำ จึงไม่ผูกเจ้าของ = ลบจากในแอปไม่ได้ (ลบใน Drive เอา)
+      sheet.appendRow(folderRowValues_(newFolderId_(), f.getName(), ownerId, ownerName, f.getDateCreated().toISOString(), visibility, f.getId()));
+      known[f.getId()] = true;
+      added++;
+    }
+  }
+  scan(getUserFolder_(empId, name), 'private', empId, String(name || ''));
+  scan(getSharedRoot_(), 'all', '', 'สร้างใน Google Drive');
+  return added;
+}
+
+function createFolder_(empId, ownerName, rawName, visibility) {
+  var name = safeFolderName_(rawName);
+  if (!name) return { ok: false, error: 'ชื่อโฟลเดอร์ใช้ไม่ได้' };
+  var vis = visibility === 'all' ? 'all' : 'private';
+
+  // ชื่อซ้ำ: ของตัวเองห้ามซ้ำกับของตัวเอง · ส่วนกลางห้ามซ้ำกับส่วนกลาง
+  var dup = allFolders_().filter(function (f) {
+    if (f.name !== name) return false;
+    return vis === 'all' ? f.visibility === 'all' : f.ownerEmpId === empId && f.visibility === 'private';
+  });
+  if (dup.length) return { ok: false, error: 'มีโฟลเดอร์ชื่อนี้อยู่แล้ว' };
+
+  var parent = vis === 'all' ? getSharedRoot_() : getUserFolder_(empId, ownerName);
+  // ชื่อโฟลเดอร์จริงใน Drive เติมรหัสไว้กันชนกันเมื่อคนละคนตั้งชื่อเดียวกันในส่วนกลาง
+  var driveName = vis === 'all' ? name : name;
+  var driveFolder = parent.createFolder(driveName);
+
+  var id = newFolderId_();
+  getFolderSheet_().appendRow(folderRowValues_(id, name, empId, String(ownerName || ''), new Date().toISOString(), vis, driveFolder.getId()));
+  return { ok: true, folder: { id: id, name: name, ownerEmpId: empId, ownerName: String(ownerName || ''), createdAt: new Date().toISOString(), visibility: vis, driveFolderId: driveFolder.getId() } };
+}
+
+// ลบได้เฉพาะเจ้าของ และเฉพาะโฟลเดอร์ที่ว่างเปล่า กันเผลอลบไฟล์ทั้งกอง
+function deleteFolder_(id, empId) {
+  var sheet = getFolderSheet_();
+  var rows = readFolderRows_(sheet);
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i][F_ID - 1]) !== id) continue;
+    var f = folderRowToObj_(rows[i]);
+    if (f.ownerEmpId !== empId) return { ok: false, error: 'not authorized' };
+    if (f.driveFolderId) {
+      try {
+        var df = DriveApp.getFolderById(f.driveFolderId);
+        if (df.getFiles().hasNext() || df.getFolders().hasNext()) return { ok: false, error: 'not empty' };
+        df.setTrashed(true);
+      } catch (e) { /* โฟลเดอร์หายไปแล้ว ลบทะเบียนทิ้งได้เลย */ }
+    }
+    sheet.deleteRow(i + 2);
+    return { ok: true, deleted: id };
+  }
+  return { ok: false, error: 'not found' };
+}
+
+// ---------- ประวัติ ----------
 function getSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
@@ -37,7 +252,6 @@ function getSheet_() {
   return sheet;
 }
 
-// อ่านทุกแถวข้อมูล (ไม่รวมหัวตาราง) เป็น array ความกว้างคงที่เสมอ
 function readRows_(sheet) {
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return [];
@@ -53,7 +267,9 @@ function rowToObj_(r) {
     pages: r[C_PAGES - 1],
     sizeKB: r[C_SIZEKB - 1],
     fileId: String(r[C_FILEID - 1] || ''),
-    type: String(r[C_TYPE - 1] || ''),   // หมวดงานที่สร้างไฟล์นี้ (scan / merge / split / watermark)
+    type: String(r[C_TYPE - 1] || ''),             // หมวดงานที่สร้างไฟล์นี้ (scan / merge / split / watermark)
+    folderId: String(r[C_FOLDERID - 1] || ''),
+    folderName: String(r[C_FOLDERNAME - 1] || ''), // เก็บชื่อไว้ด้วย ประวัติจะได้ยังอ่านออกแม้โฟลเดอร์ถูกลบไปแล้ว
   };
 }
 
@@ -76,16 +292,17 @@ function cleanupOldEntries_(sheet) {
 function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents);
+    var empId = String(data.empId || '').trim();
+    if (!empId) return json_({ ok: false, error: 'empId required' });
 
     // ลบรายการเดียวออกจากประวัติ (เจ้าของเท่านั้น)
     if (data.action === 'delete') {
       var sheetD = getSheet_();
       var rowsD = readRows_(sheetD);
       var wantId = String(data.fileId || '');
-      var owner = String(data.empId || '');
       for (var i = 0; i < rowsD.length; i++) {
         if (String(rowsD[i][C_FILEID - 1]) === wantId && wantId) {
-          if (String(rowsD[i][C_EMPID - 1]) !== owner) return json_({ ok: false, error: 'not authorized' });
+          if (String(rowsD[i][C_EMPID - 1]) !== empId) return json_({ ok: false, error: 'not authorized' });
           try { DriveApp.getFileById(wantId).setTrashed(true); } catch (err2) {}
           sheetD.deleteRow(i + 2);
           return json_({ ok: true, deleted: wantId });
@@ -94,30 +311,56 @@ function doPost(e) {
       return json_({ ok: false, error: 'not found' });
     }
 
+    if (data.action === 'newFolder') {
+      var made = createFolder_(empId, data.name, data.folderName, data.visibility);
+      if (!made.ok) return json_(made);
+      return json_({ ok: true, folder: made.folder, folders: visibleFolders_(empId) });
+    }
+
+    if (data.action === 'deleteFolder') {
+      var del = deleteFolder_(String(data.folderId || ''), empId);
+      if (!del.ok) return json_(del);
+      return json_({ ok: true, deleted: del.deleted, folders: visibleFolders_(empId) });
+    }
+
+    // บันทึกไฟล์ + ลงประวัติ
     var sheet = getSheet_();
+    var folderId = String(data.folderId || '').trim();
+    var target = null, folderName = '';
+    if (folderId) {
+      var fObj = folderById_(folderId);
+      if (!canUseFolder_(fObj, empId)) return json_({ ok: false, error: 'folder not allowed' });
+      folderName = fObj.name;
+      try { target = DriveApp.getFolderById(fObj.driveFolderId); } catch (e2) { target = null; }
+    }
+    if (!target) { target = getUserFolder_(empId, data.name); folderId = ''; folderName = ''; }
+
     var fileId = '';
     if (data.fileBase64) {
       var blob = Utilities.newBlob(Utilities.base64Decode(data.fileBase64), 'application/pdf', data.filename || 'scan.pdf');
-      fileId = getOrCreateFolder_().createFile(blob).getId();
+      fileId = target.createFile(blob).getId();
     }
     sheet.appendRow([
       data.timestamp || new Date().toISOString(),
-      String(data.empId || ''),
+      empId,
       data.name || '',
       data.filename || '',
       data.pages || '',
       data.sizeKB || '',
       fileId,
       String(data.type || ''),
+      folderId,
+      folderName,
     ]);
     cleanupOldEntries_(sheet);
-    return json_({ ok: true, fileId: fileId });
+    return json_({ ok: true, fileId: fileId, folderId: folderId, folderName: folderName });
   } catch (err) {
     return json_({ ok: false, error: String(err) });
   }
 }
 
 // GET ?action=ping                        -> เช็กว่า deploy เวอร์ชันไหนอยู่
+// GET ?action=folders&empId=123           -> { ok:true, folders:[...] } โฟลเดอร์ที่คนนี้เห็นได้
 // GET ?empId=123                          -> { ok:true, rows:[...] } ประวัติของตัวเอง ใหม่สุดก่อน สูงสุด 30
 // GET ?action=file&fileId=X&empId=123     -> { ok:true, fileBase64, filename } เฉพาะเมื่อ empId ตรงกับเจ้าของแถวนั้น
 //                                            ของคนอื่นดึงไม่ได้แม้จะเดา fileId ถูก
@@ -127,7 +370,16 @@ function doGet(e) {
 
     if (params.action === 'ping') {
       var sheetP = getSheet_();
-      return json_({ ok: true, rowCount: Math.max(0, sheetP.getLastRow() - 1), lastColumn: sheetP.getLastColumn() });
+      return json_({ ok: true, rowCount: Math.max(0, sheetP.getLastRow() - 1), lastColumn: sheetP.getLastColumn(), folders: true });
+    }
+
+    // ทุก endpoint ต้องมี empId เสมอ — เปิด URL เปล่า ๆ ต้องไม่เห็นเอกสารของใครเลย
+    var empId = String(params.empId || '').trim();
+    if (!empId) return json_({ ok: false, error: 'empId required' });
+
+    if (params.action === 'folders') {
+      var added = syncDriveFolders_(empId, params.name);
+      return json_({ ok: true, folders: visibleFolders_(empId), picked: added });
     }
 
     var sheet = getSheet_();
@@ -135,7 +387,6 @@ function doGet(e) {
 
     if (params.action === 'file') {
       var fileId = String(params.fileId || '');
-      var empId = String(params.empId || '');
       var hit = null;
       for (var i = 0; i < rows.length; i++) {
         if (String(rows[i][C_FILEID - 1]) === fileId && fileId) { hit = rows[i]; break; }
@@ -145,10 +396,9 @@ function doGet(e) {
       return json_({ ok: true, fileBase64: Utilities.base64Encode(file.getBlob().getBytes()), filename: String(hit[C_FILENAME - 1] || 'scan.pdf') });
     }
 
-    var empId2 = String(params.empId || '');
     var out = rows
       .map(rowToObj_)
-      .filter(function (r) { return !empId2 || r.empId === empId2; })
+      .filter(function (r) { return r.empId === empId; })
       .sort(function (a, b) { return new Date(b.timestamp) - new Date(a.timestamp); })
       .slice(0, 30);
     return json_({ ok: true, rows: out });
