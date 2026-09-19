@@ -152,6 +152,7 @@ function deviceVerifyLabel_(v) {
   switch (String(v || '').trim()) {
     case '1':  return 'finger';
     case '15': return 'face';
+    case '16': return 'face';  // ZMM220 ส่ง 16 ตอนสแกนหน้า (เดิมไม่รู้จัก เลยขึ้น device:v16)
     case '0':  return 'password';
     case '2':  return 'finger';   // บางรุ่นใช้ 2 = นิ้ว
     case '3':  return 'card';

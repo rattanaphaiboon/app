@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.72</title>
+<title>HR Rattana v5.73</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -1293,6 +1293,21 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
 
     <!-- Login View -->
     <div id="loginGoogleView">
+      <!-- v12.73: สแกนหน้าเข้าระบบ — โผล่เฉพาะเครื่องที่เคย login และมีใบหน้าลงทะเบียนแล้ว -->
+      <div id="faceLoginCard" style="display:none;margin-bottom:14px">
+        <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:16px;padding:14px 16px;text-align:center">
+          <img id="flAvatar" alt="" style="display:none;width:56px;height:56px;border-radius:50%;object-fit:cover;margin:0 auto 8px;border:2px solid var(--gold)">
+          <div style="font-size:14.5px;font-weight:700;color:var(--text);margin-bottom:10px">สวัสดี <span id="flName"></span></div>
+          <button class="btn btn-primary btn-lg" style="width:100%" onclick="startFaceLogin_()">🙂 สแกนหน้าเข้าระบบ</button>
+          <div class="text-sm text-center" style="margin-top:8px"><a href="#" onclick="forgetFaceLogin_();return false" style="color:var(--muted);text-decoration:underline">ไม่ใช่คุณ? ลบบัญชีที่จำไว้</a></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;margin:14px 0 4px">
+          <div style="flex:1;height:1px;background:var(--border)"></div>
+          <span class="text-sm text-muted">หรือเข้าด้วยรหัส</span>
+          <div style="flex:1;height:1px;background:var(--border)"></div>
+        </div>
+      </div>
+
       <!-- เข้าด้วยรหัสพนักงาน/รหัสผ่าน -->
       <div class="input-group" style="text-align:left;margin-bottom:10px">
         <label>ชื่อผู้ใช้งาน / รหัสพนักงาน</label>
@@ -1405,6 +1420,15 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
 </div>
 
 <!-- ============== APP ============== -->
+<!-- v12.73: กล้องสแกนหน้าเข้าระบบ -->
+<div id="faceLoginModal" style="display:none;position:fixed;inset:0;z-index:9300;background:rgba(10,16,32,.96);flex-direction:column;align-items:center;justify-content:center;gap:14px">
+  <div style="width:min(78vw,320px);aspect-ratio:3/4;border-radius:20px;overflow:hidden;border:3px solid var(--gold);background:#000">
+    <video id="flVideo" playsinline muted style="width:100%;height:100%;object-fit:cover;transform:scaleX(-1)"></video>
+  </div>
+  <div id="flStatus" style="color:#fff;font-size:14.5px;min-height:20px">กำลังเปิดกล้อง...</div>
+  <button class="btn btn-outline" style="min-width:160px;color:#fff;border-color:rgba(255,255,255,.4)" onclick="closeFaceLogin_()">ยกเลิก</button>
+</div>
+
 <div id="appScreen" style="display:none">
 
   <!-- Hamburger Drawer -->
@@ -3621,7 +3645,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.72';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.73';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -4130,6 +4154,101 @@ async function doSheetLogin() {
   }
 }
 
+/* ── v12.73: สแกนหน้าเข้าระบบ (เหมือนแอปธนาคาร — จำบัญชีล่าสุดของเครื่องนี้ไว้ 1 คน) ──
+   การ์ดโผล่เมื่อ: เคย login บนเครื่องนี้ + มีใบหน้าลงทะเบียน (LS.faceDescriptor)
+   และ faceOwner ตรงกับคนที่จำไว้ · จับคู่กับคนเดียวที่จำไว้ ไม่ค้นหาจากทุกคน
+   เกณฑ์ระยะหน้าใช้ตัวเดียวกับสแกนลงเวลา (settings.faceThr) */
+let _flStream = null, _flTimer = null, _flBusy = false;
+
+function faceLoginProfile_() {
+  const p = LS.get('faceLoginProfile', null);
+  const desc = LS.get('faceDescriptor', null);
+  if (!p || !p.u || !p.u.empId || !desc) return null;
+  const owner = LS.get('faceOwner', '');
+  if (owner && empKey_(p.u.empId) !== owner) return null;   // ใบหน้าในเครื่องเป็นของอีกคน
+  return p;
+}
+function renderFaceLoginCard_() {
+  const card = document.getElementById('faceLoginCard');
+  if (!card) return;
+  const p = faceLoginProfile_();
+  if (!p) { card.style.display = 'none'; return; }
+  const nm = document.getElementById('flName');
+  if (nm) nm.textContent = p.u.nickname ? (p.u.name + ' (' + p.u.nickname + ')') : (p.u.name || p.u.empId);
+  const img = document.getElementById('flAvatar');
+  const photo = LS.get('facePhoto', '');
+  if (img) {
+    if (photo) { img.src = String(photo).indexOf('data:') === 0 ? photo : ('data:image/jpeg;base64,' + photo); img.style.display = 'block'; }
+    else img.style.display = 'none';
+  }
+  card.style.display = 'block';
+}
+function forgetFaceLogin_() {
+  if (!confirm('ลบบัญชีที่จำไว้บนเครื่องนี้?')) return;
+  LS.del('faceLoginProfile');
+  renderFaceLoginCard_();
+}
+async function startFaceLogin_() {
+  const p = faceLoginProfile_(); if (!p) return;
+  const okM = await loadFaceModels(false);
+  if (!okM) { toast('โหลดโมเดลสแกนหน้าไม่ได้ — เข้าด้วยรหัสไปก่อน', 'warning'); return; }
+  const ov = document.getElementById('faceLoginModal');
+  ov.style.display = 'flex';
+  document.getElementById('flStatus').textContent = 'กำลังเปิดกล้อง...';
+  try {
+    _flStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 } }, audio: false });
+    const v = document.getElementById('flVideo');
+    v.srcObject = _flStream;
+    await v.play();
+    document.getElementById('flStatus').textContent = 'หันหน้าเข้ากล้อง...';
+    _flTimer = setInterval(faceLoginTick_, 700);
+  } catch (e) {
+    document.getElementById('flStatus').textContent = 'เปิดกล้องไม่ได้: ' + (e && (e.message || e.name) || '');
+  }
+}
+function closeFaceLogin_() {
+  clearInterval(_flTimer); _flTimer = null; _flBusy = false;
+  if (_flStream) { try { _flStream.getTracks().forEach(t => t.stop()); } catch (_) {} _flStream = null; }
+  const ov = document.getElementById('faceLoginModal'); if (ov) ov.style.display = 'none';
+}
+async function faceLoginTick_() {
+  if (_flBusy) return; _flBusy = true;
+  try {
+    const v = document.getElementById('flVideo');
+    if (!v || v.readyState < 2) return;
+    const det = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }))
+      .withFaceLandmarks().withFaceDescriptor();
+    const st = document.getElementById('flStatus');
+    if (!det) { if (st) st.textContent = 'หันหน้าเข้ากล้อง...'; return; }
+    const d1 = LS.get('faceDescriptor', null), d2 = LS.get('faceDescriptor2', null);
+    const dist = bestFaceDist_(det.descriptor, [d1 ? new Float32Array(d1) : null, d2 ? new Float32Array(d2) : null]);
+    const thr = (settings && settings.faceThr) || 0.5;
+    if (dist <= thr) {
+      if (st) st.textContent = '✓ ยืนยันตัวตนสำเร็จ';
+      clearInterval(_flTimer); _flTimer = null;
+      setTimeout(faceLoginSuccess_, 350);
+    } else if (st) {
+      st.textContent = 'ยังไม่ตรง — ขยับหน้าให้ชัด แสงให้พอ';
+    }
+  } catch (e) { console.warn('faceLoginTick', e); }
+  finally { _flBusy = false; }
+}
+function faceLoginSuccess_() {
+  const p = faceLoginProfile_();
+  closeFaceLogin_();
+  if (!p) return;
+  currentUser = Object.assign({}, p.u, { loginAt: Date.now(), sheetLogin: true, faceLogin: true });
+  sessionStorage.setItem('rfc3_user', JSON.stringify(currentUser));
+  sessionStorage.setItem('rfc3_idToken', 'SHEET:' + currentUser.empId);
+  try { saveSharedSession(Object.assign({}, currentUser)); } catch (_) {}
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('appScreen').style.display = 'block';
+  if (currentUser.role === 'supervisor' || isPTTManager()) buildTeamFromSheet();
+  else if (currentUser.role === 'hr') team = [];
+  initApp();
+  toast('✓ เข้าระบบด้วยใบหน้าแล้ว', 'success');
+}
+
 /* ── ลงทะเบียนผู้ใช้ใหม่ (ลงชีท User slip) ── */
 function openRegisterView(prefillUser) {
   document.getElementById('loginGoogleView').style.display = 'none';
@@ -4415,6 +4534,16 @@ function adoptMyFace_(tag) {
   // (เดิมประทับรหัสแถว → ไม่ตรงกับคน login → โดนล้าง/กู้วนไม่รู้จบ กดบันทึกไม่ได้เลย)
   LS.set('faceOwner', empKey_(currentUser && currentUser.empId));
   if (myFace.descriptor2) LS.set('faceDescriptor2', Array.from(myFace.descriptor2)); else LS.del('faceDescriptor2');
+  // v12.73: จำโปรไฟล์ให้ "สแกนหน้าเข้าระบบ" ที่หน้า Login รอบถัดไป
+  try {
+    if (currentUser && currentUser.empId) LS.set('faceLoginProfile', { u: {
+      empId: currentUser.empId, name: currentUser.name || '', email: currentUser.email || '',
+      nickname: currentUser.nickname || '', branch: currentUser.branch || '',
+      role: currentUser.role || 'employee', userRoleInt: currentUser.userRoleInt || 1,
+      department: currentUser.department || '', company: currentUser.company || '',
+      slipSheet: currentUser.slipSheet || '',
+    }, savedAt: Date.now() });
+  } catch (_) {}
   console.log('[face] ' + tag + ': โหลดใบหน้าตัวเองจาก FaceData แล้ว (' + empKey_(myFace.empId) + ')');
   try { renderFaceReg(); evaluateAction(); } catch (_) {}
   return true;
@@ -5070,6 +5199,7 @@ function checkSession() {
     sessionStorage.removeItem('rfc3_user');
     sessionStorage.removeItem('rfc3_idToken');
     sessionStorage.removeItem('rfc3_idTokenExp');
+    try { renderFaceLoginCard_(); } catch (_) {}   // v12.73
     setTimeout(initGoogleSignIn, 200);
     return;
   }
@@ -5104,6 +5234,7 @@ function checkSession() {
     initApp();
   } else {
     if (s && !idToken) sessionStorage.removeItem('rfc3_user');
+    try { renderFaceLoginCard_(); } catch (_) {}   // v12.73: การ์ดสแกนหน้าเข้าระบบ
     setTimeout(initGoogleSignIn, 200);
   }
 }
