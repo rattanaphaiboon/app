@@ -3,9 +3,9 @@
 //         (Execute as: Me / Who has access: Anyone)
 //
 // เช็กว่า deploy เวอร์ชันใหม่แล้วจริงไหม: เปิด URL ต่อท้าย ?action=ping
-//   ต้องเห็น {"ok":true,"version":"5.2", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
+//   ต้องเห็น {"ok":true,"version":"5.3", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
 
-var VERSION = '5.2';
+var VERSION = '5.3';
 var FOLDER_NAME = 'Rattana Scanner Files';
 var SHARED_FOLDER_NAME = 'ส่วนกลาง (ทุกคนเห็นได้)';
 var RETENTION_DAYS = 90;
@@ -23,11 +23,12 @@ var HEADERS = ['เวลา', 'รหัสพนักงาน', 'ชื่�
                'Drive File ID', 'หมวดงาน', 'รหัสโฟลเดอร์', 'ชื่อโฟลเดอร์'];
 
 // ทะเบียนโฟลเดอร์ (แท็บ Folders) — เก็บว่าใครเป็นเจ้าของ สร้างเมื่อไหร่ ใครเห็นได้บ้าง
-var F_ID = 1, F_NAME = 2, F_OWNER_ID = 3, F_OWNER_NAME = 4, F_CREATED = 5, F_VISIBILITY = 6, F_DRIVE_ID = 7, F_LINK = 8;
-var F_COLS = 8;
+var F_ID = 1, F_NAME = 2, F_OWNER_ID = 3, F_OWNER_NAME = 4, F_CREATED = 5, F_VISIBILITY = 6, F_DRIVE_ID = 7, F_LINK = 8, F_LINKED = 9;
+var F_COLS = 9;
 // หัวตารางเขียนเป็นภาษาคนอ่านได้ เพราะโค้ดอ้างด้วยเลขคอลัมน์ ไม่ได้พึ่งข้อความหัวตาราง
 var F_HEADERS = ['รหัสโฟลเดอร์', 'ชื่อโฟลเดอร์', 'รหัสเจ้าของ', 'ชื่อเจ้าของ', 'สร้างเมื่อ',
-                 'สิทธิ (private=เฉพาะเจ้าของ / all=ทุกคนเห็น)', 'Drive ID', 'เปิดโฟลเดอร์'];
+                 'สิทธิ (private=เฉพาะเจ้าของ / all=ทุกคนเห็น)', 'Drive ID', 'เปิดโฟลเดอร์',
+                 'ชนิด (linked = โฟลเดอร์เดิมใน Drive ที่เอามาเชื่อม)'];
 
 function json_(obj) {
   obj.version = VERSION;
@@ -102,17 +103,18 @@ function formatFolderSheet_(sheet) {
   try {
     sheet.setFrozenRows(1);
     sheet.getRange(1, 1, 1, F_COLS).setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
-    var widths = [150, 200, 180, 170, 160, 250, 190, 110];
+    var widths = [150, 200, 180, 170, 160, 250, 190, 110, 260];
     for (var i = 0; i < widths.length; i++) sheet.setColumnWidth(i + 1, widths[i]);
   } catch (e) { /* จัดรูปแบบไม่ได้ก็ไม่เป็นไร ข้อมูลสำคัญกว่า */ }
 }
 
 // แถวทะเบียน 1 แถว — คอลัมน์สุดท้ายเป็นลิงก์กดเปิดโฟลเดอร์ใน Drive ได้เลย
-function folderRowValues_(id, name, ownerId, ownerName, createdAt, visibility, driveId) {
+function folderRowValues_(id, name, ownerId, ownerName, createdAt, visibility, driveId, linked) {
   return [id, name, ownerId, ownerName, createdAt, visibility, driveId,
     // เขียน URL ตรง ๆ ไม่ใช้สูตร HYPERLINK เพราะตัวคั่นอาร์กิวเมนต์ (, หรือ ;) ต่างกันตามภาษาของชีต
     // แล้วจะกลายเป็นสูตรพัง · ชีตแปลง URL เป็นลิงก์กดได้ให้เองอยู่แล้ว
-    driveId ? 'https://drive.google.com/drive/folders/' + driveId : ''];
+    driveId ? 'https://drive.google.com/drive/folders/' + driveId : '',
+    linked ? 'linked' : ''];
 }
 
 function readFolderRows_(sheet) {
@@ -130,6 +132,7 @@ function folderRowToObj_(r) {
     createdAt: r[F_CREATED - 1] instanceof Date ? r[F_CREATED - 1].toISOString() : String(r[F_CREATED - 1] || ''),
     visibility: String(r[F_VISIBILITY - 1] || 'private'),
     driveFolderId: String(r[F_DRIVE_ID - 1] || ''),
+    linked: String(r[F_LINKED - 1] || '') === 'linked',
   };
 }
 
@@ -156,6 +159,45 @@ function folderById_(id) {
 // ใช้เก็บไฟล์ได้ไหม — ของตัวเอง หรือของส่วนกลางที่ทุกคนเห็นได้
 function canUseFolder_(f, empId) {
   return !!f && (f.ownerEmpId === empId || f.visibility === 'all');
+}
+
+// รับได้ทั้งลิงก์เต็ม (.../folders/XXX?usp=...) ลิงก์แบบ ?id=XXX หรือวาง id มาเปล่า ๆ
+function parseDriveFolderId_(s) {
+  var t = String(s || '').trim();
+  var m = t.match(/\/folders\/([A-Za-z0-9_-]{10,})/) ||
+          t.match(/[?&]id=([A-Za-z0-9_-]{10,})/) ||
+          t.match(/^([A-Za-z0-9_-]{10,})$/);
+  return m ? m[1] : '';
+}
+
+// เชื่อมโฟลเดอร์ที่มีอยู่แล้วใน Drive เข้ามาใช้ในแอป (ไม่ได้ย้ายหรือก๊อปอะไร แค่ชี้ไป)
+function linkFolder_(empId, ownerName, rawUrl, visibility) {
+  var driveId = parseDriveFolderId_(rawUrl);
+  if (!driveId) return { ok: false, error: 'ลิงก์ไม่ถูกต้อง — ต้องเป็นลิงก์โฟลเดอร์ของ Google Drive' };
+
+  var folder;
+  try {
+    folder = DriveApp.getFolderById(driveId);
+    if (folder.isTrashed()) return { ok: false, error: 'โฟลเดอร์นี้อยู่ในถังขยะ' };
+  } catch (e) {
+    // สคริปต์ทำงานในนามบัญชีที่ deploy ไว้ ถ้าโฟลเดอร์ไม่ได้แชร์ให้บัญชีนั้นก็เปิดไม่ได้
+    var who = '';
+    try { who = Session.getEffectiveUser().getEmail(); } catch (e2) {}
+    return { ok: false, error: 'เปิดโฟลเดอร์นี้ไม่ได้ — แชร์โฟลเดอร์ให้ ' + (who || 'บัญชีที่ deploy สคริปต์') + ' (สิทธิ Editor) ก่อน แล้วลองใหม่' };
+  }
+
+  var dup = allFolders_();
+  for (var i = 0; i < dup.length; i++) {
+    if (dup[i].driveFolderId === driveId) return { ok: false, error: 'โฟลเดอร์นี้ถูกเพิ่มไว้แล้ว ("' + dup[i].name + '")' };
+  }
+
+  var vis = visibility === 'all' ? 'all' : 'private';
+  var id = newFolderId_();
+  var created;
+  try { created = folder.getDateCreated().toISOString(); } catch (e3) { created = new Date().toISOString(); }
+  getFolderSheet_().appendRow(folderRowValues_(id, folder.getName(), empId, String(ownerName || ''), created, vis, driveId, true));
+  return { ok: true, folder: { id: id, name: folder.getName(), ownerEmpId: empId, ownerName: String(ownerName || ''),
+    createdAt: created, visibility: vis, driveFolderId: driveId, linked: true } };
 }
 
 function newFolderId_() {
@@ -188,7 +230,7 @@ function syncDriveFolders_(empId, name) {
       var f = it.next();
       if (f.isTrashed() || known[f.getId()]) continue;
       // โฟลเดอร์ส่วนกลางที่สร้างมือไม่รู้ว่าใครทำ จึงไม่ผูกเจ้าของ = ลบจากในแอปไม่ได้ (ลบใน Drive เอา)
-      sheet.appendRow(folderRowValues_(newFolderId_(), f.getName(), ownerId, ownerName, f.getDateCreated().toISOString(), visibility, f.getId()));
+      sheet.appendRow(folderRowValues_(newFolderId_(), f.getName(), ownerId, ownerName, f.getDateCreated().toISOString(), visibility, f.getId(), false));
       known[f.getId()] = true;
       added++;
     }
@@ -216,7 +258,7 @@ function createFolder_(empId, ownerName, rawName, visibility) {
   var driveFolder = parent.createFolder(driveName);
 
   var id = newFolderId_();
-  getFolderSheet_().appendRow(folderRowValues_(id, name, empId, String(ownerName || ''), new Date().toISOString(), vis, driveFolder.getId()));
+  getFolderSheet_().appendRow(folderRowValues_(id, name, empId, String(ownerName || ''), new Date().toISOString(), vis, driveFolder.getId(), false));
   return { ok: true, folder: { id: id, name: name, ownerEmpId: empId, ownerName: String(ownerName || ''), createdAt: new Date().toISOString(), visibility: vis, driveFolderId: driveFolder.getId() } };
 }
 
@@ -228,6 +270,8 @@ function deleteFolder_(id, empId) {
     if (String(rows[i][F_ID - 1]) !== id) continue;
     var f = folderRowToObj_(rows[i]);
     if (f.ownerEmpId !== empId) return { ok: false, error: 'not authorized' };
+    // โฟลเดอร์ที่เอามาเชื่อมเป็นของเดิมใน Drive ของผู้ใช้ — เอาออกจากทะเบียนเฉย ๆ ห้ามลบไฟล์เด็ดขาด
+    if (f.linked) { sheet.deleteRow(i + 2); return { ok: true, deleted: id, unlinked: true }; }
     if (f.driveFolderId) {
       try {
         var df = DriveApp.getFolderById(f.driveFolderId);
@@ -315,6 +359,12 @@ function doPost(e) {
       var made = createFolder_(empId, data.name, data.folderName, data.visibility);
       if (!made.ok) return json_(made);
       return json_({ ok: true, folder: made.folder, folders: visibleFolders_(empId) });
+    }
+
+    if (data.action === 'linkFolder') {
+      var linked = linkFolder_(empId, data.name, data.folderUrl, data.visibility);
+      if (!linked.ok) return json_(linked);
+      return json_({ ok: true, folder: linked.folder, folders: visibleFolders_(empId) });
     }
 
     if (data.action === 'deleteFolder') {
