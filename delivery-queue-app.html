@@ -802,7 +802,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.196</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.197</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -6295,7 +6295,8 @@ const KEEPDATA_HEADERS=[
   'น้ำหนัก (กก.)','ปริมาตร (m³)','มูลค่า (บาท)','สถานะ','วันที่อัปเดต',     // T U V W X
   'ลำดับร้าน'                                                                 // Y (v8.26)
   ,'คลัง'                                                                     // Z (v9.39)
-];  // 26 คอลัมน์ (A–Z) ตรงกับ GAS sheet
+  ,'ยอดบุหรี่ (บาท)'                                                          // AA (v9.197)
+];  // 27 คอลัมน์ (A–AA) ตรงกับ GAS sheet · GAS เขียนหัวคอลัมน์ใหม่ทุกครั้ง (v1.1) เพิ่มคอลัมน์ท้ายได้เลย
 
 // ── Delivery Date state ──
 let _deliveryDate=''; // "DD/MM/YYYY" เช่น "13/05/2026"
@@ -6464,11 +6465,12 @@ async function doSave(silent){
         _rs.codeByRef[b.ref]||'', b.routeCode||'', b.days||'',   // L: สรุปรูท (v9.15 · เดิม b.route)
         queue[b.ref]||'', tripMap[b.ref]||1, (t?getDriverNick(t)||t.nick:''), (t?getDriver(t):''), t?.type||'',
         b.totalW.toFixed(0), b.totalV.toFixed(3),
-        Math.round(b.totalAmt||0),
+        Math.round(_netOfBill(b)),     // V: มูลค่า — v9.197: ไม่รวมบุหรี่แล้ว (ยอดบุหรี่อยู่คอลัมน์ AA)
         queue[b.ref]?'จัดแล้ว':'รอจัด',
         now,
         seqMap[b.ref]||''              // Y: ลำดับร้าน (v8.26)
         ,currentWarehouse||''          // Z: คลัง (v9.39)
+        ,Math.round(_cigOfBill(b))     // AA: ยอดบุหรี่ (v9.197)
       ];
     });
 
@@ -6488,6 +6490,23 @@ async function doSave(silent){
       // POST ล้มทุกครั้ง → GET fallback ได้เฉพาะ payload เล็ก (URL ยาวเกินไม่ได้)
       if(payload.length<6000){ try{ const rGet=await fetch(scriptUrl+'?action=save&data='+encodeURIComponent(payload)); result=await rGet.json(); _done=true; }catch(e){ _lastErr=e; } }
       if(!_done) throw new Error('เชื่อมต่อไม่สำเร็จ (เน็ต/สคริปต์) — ข้อมูลยังไม่ถูกบันทึก · กดบันทึกอีกครั้ง'+(_lastErr&&_lastErr.message?' ['+_lastErr.message+']':''));
+    }
+    // ══ v9.197: ชีท Keepdata อาจมีแค่ 26 คอลัมน์ (A–Z) → GAS เขียนคอลัมน์ AA "ยอดบุหรี่" ไม่ได้ (range invalid) ══
+    //   GAS เขียนหัวคอลัมน์ก่อนแตะข้อมูล ถ้าพังคือพังตั้งแต่ยังไม่แก้อะไร → ถอยไปบันทึกแบบเดิม 26 คอลัมน์ (มูลค่า = ยอดเต็ม) ทันที
+    //   ข้อมูลจึงไม่หาย แล้วค่อยบอกวิธีเปิดคอลัมน์ให้ user
+    if(result&&!result.ok&&/range|column|invalid|bounds|dimension/i.test(String(result.message||''))){
+      const _r26=rows.map(r=>{ const c=r.slice(0,26); c[21]=Math.round((+c[21]||0)+(+r[26]||0)); return c; });   // คืนยอดบุหรี่กลับเข้าคอลัมน์ V
+      const _p26=JSON.stringify({action:'save',deliveryDate:_deliveryDate,warehouse:currentWarehouse,headers:KEEPDATA_HEADERS.slice(0,26),rows:_r26});
+      try{
+        const _rs=await fetch(scriptUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:_p26});
+        const _j=await _rs.json();
+        if(_j&&_j.ok){
+          result=_j;
+          console.warn('[save] v9.197 ชีทรับได้แค่ 26 คอลัมน์ — บันทึกแบบเดิม (มูลค่ารวมบุหรี่) แทน');
+          if(typeof showToast==='function')showToast('บันทึกแล้ว แต่ชีทยังไม่มีคอลัมน์ "ยอดบุหรี่" — ลงเป็นยอดรวมบุหรี่ไปก่อน','warn');
+          if(!silent&&typeof dqAlert==='function')dqAlert('ชีท Keepdata มีแค่ 26 คอลัมน์ (ถึงคอลัมน์ "คลัง") เลยยังเพิ่มคอลัมน์ยอดบุหรี่ไม่ได้\nรอบนี้บันทึก "มูลค่า (บาท)" เป็นยอดรวมบุหรี่แบบเดิมไปก่อน ข้อมูลไม่หาย\n\nเปิดคอลัมน์ยอดบุหรี่:\n1) เปิดชีท Keepdata\n2) คลิกขวาที่หัวคอลัมน์ Z ("คลัง") → แทรก 1 คอลัมน์ทางขวา\n3) กลับมากดบันทึกอีกครั้ง — แอปจะใส่หัวคอลัมน์ "ยอดบุหรี่ (บาท)" ให้เอง',{title:'⚠️ ยังไม่มีคอลัมน์ยอดบุหรี่'});
+        }
+      }catch(e){}
     }
     if(!result.ok)throw new Error(result.message||'Script ตอบผิดพลาด: '+JSON.stringify(result));
 
@@ -6652,7 +6671,9 @@ async function loadKeepdata(silent=false){
       amount      : parseFloat(r['มูลค่า (บาท)']||'0')||0,
       status      : r['สถานะ']||'',
       seq         : parseInt(r['ลำดับร้าน']||'0')||0, // v8.26: ลำดับร้านที่บันทึกไว้
-      warehouse   : (r['คลัง']||'').trim()            // v9.39: คลังของแถวนี้
+      warehouse   : (r['คลัง']||'').trim(),           // v9.39: คลังของแถวนี้
+      // v9.197: ยอดบุหรี่ — มีค่า = แถวใหม่ (คอลัมน์ "มูลค่า" ไม่รวมบุหรี่แล้ว) · null = แถวเก่า (มูลค่าเป็นยอดเต็ม)
+      cigAmount   : (r['ยอดบุหรี่ (บาท)']==null||String(r['ยอดบุหรี่ (บาท)']).trim()==='')?null:(parseFloat(r['ยอดบุหรี่ (บาท)'])||0)
     })).filter(r=>r.plate&&r.deliveryDate&&(!r.warehouse||r.warehouse===currentWarehouse));  // v9.39: กรองเฉพาะคลังปัจจุบัน (แถวเก่าไม่มีคลัง=เก็บไว้ก่อน)
     // v9.90: แยกแถว "เที่ยวขนของกลับ" (เลขบิลขึ้นต้น PU-) ออกจากบิลจริง ไม่งั้นจะถูกนับเป็นร้าน/หน่วยจัดรถ
     keepPickups=keepData.filter(r=>String(r.ref||'').indexOf(PU_PREFIX)===0);
@@ -7515,7 +7536,7 @@ function mapBillsForRoute(){
         ref:r.ref, arName:r.arName, arCode:r.arCode,
         province:r.province, district:r.district,
         lat:r.lat, lng:r.lng,
-        totalW:r.weight, totalV:r.volume, totalAmt:r.amount,
+        totalW:r.weight, totalV:r.volume, totalAmt:_amtRow(r).gross, cigAmt:_amtRow(r).cig,   // v9.197
         route:r.route, routeCode:r.routeCode, days:r.days,
         _saved:true
       }));
@@ -7534,7 +7555,7 @@ function mapBillsForRoute(){
         ref:r.ref, arName:r.arName, arCode:r.arCode,
         province:r.province, district:r.district,
         lat:r.lat, lng:r.lng,
-        totalW:r.weight, totalV:r.volume, totalAmt:r.amount,
+        totalW:r.weight, totalV:r.volume, totalAmt:_amtRow(r).gross, cigAmt:_amtRow(r).cig,   // v9.197
         route:r.route, routeCode:r.routeCode, days:r.days,
         _saved:true
       });
@@ -8771,7 +8792,10 @@ function _netOfBill(b){ return Math.max(0,((b&&b.totalAmt)||0)-_cigOfBill(b)); }
 function _amtRefs(refs){ let g=0,c=0; (refs||[]).forEach(r=>{ const b=(typeof billMap!=='undefined')&&billMap[r]; if(!b)return; g+=b.totalAmt||0; c+=b.cigAmt||0; }); return {net:Math.max(0,g-c),cig:c,gross:g}; }
 function _amtBills(list){ let g=0,c=0; (list||[]).forEach(b=>{ if(!b)return; g+=b.totalAmt||0; c+=b.cigAmt||0; }); return {net:Math.max(0,g-c),cig:c,gross:g}; }
 // แถวจากชีท Keepdata (หน้าบันทึก/สรุปไลน์โหมดดึง) — ยอดบุหรี่เอาจาก billMap ถ้าบิลยังโหลดอยู่
-function _amtRow(r){ const b=(typeof billMap!=='undefined')&&billMap[r&&r.ref]; const g=(r&&r.amount)||0, c=b?(b.cigAmt||0):0;
+function _amtRow(r){
+  const g=(r&&r.amount)||0;
+  if(r&&r.cigAmount!=null){ const c=(+r.cigAmount)||0; return {net:g,cig:c,gross:g+c}; }   // v9.197: แถวใหม่ — ยอดในชีทไม่รวมบุหรี่อยู่แล้ว
+  const b=(typeof billMap!=='undefined')&&billMap[r&&r.ref], c=b?(b.cigAmt||0):0;          // แถวเก่า (ก่อน v9.197) — ยอดเต็ม หักเอาเองจากบิลที่โหลดอยู่
   return {net:Math.max(0,g-c),cig:c,gross:g}; }
 function _amtRows(rows){ let n=0,c=0; (rows||[]).forEach(r=>{ const x=_amtRow(r); n+=x.net; c+=x.cig; }); return {net:n,cig:c}; }
 const _fmtB=n=>'฿'+((typeof fmtN==='function')?fmtN(Math.round(n||0)):Math.round(n||0).toLocaleString('en-US'));
@@ -12227,7 +12251,7 @@ function _jrReconstructSaved(dd){
     Object.keys(queue).forEach(r=>{ if(!keep.has(r)){ delete queue[r]; delete tripMap[r]; } }); }
   // 1) เติม billMap + queue/tripMap จากแถวที่บันทึกไว้ (ให้เอนจินคำนวณต่อได้)
   rows.forEach(r=>{ if(!r.ref)return;
-    if(!billMap[r.ref])billMap[r.ref]={ref:r.ref,arName:r.arName||'',arCode:r.arCode||'',province:r.province||'',district:r.district||'',lat:r.lat||0,lng:r.lng||0,route:r.route||'',days:r.days||'',totalW:r.weight||0,totalV:r.volume||0,totalAmt:r.amount||0,slmnCode:''};
+    if(!billMap[r.ref])billMap[r.ref]={ref:r.ref,arName:r.arName||'',arCode:r.arCode||'',province:r.province||'',district:r.district||'',lat:r.lat||0,lng:r.lng||0,route:r.route||'',days:r.days||'',totalW:r.weight||0,totalV:r.volume||0,totalAmt:_amtRow(r).gross,cigAmt:_amtRow(r).cig,slmnCode:''};   // v9.197
     queue[r.ref]=r.plate; tripMap[r.ref]=r.trip||1; });
   if(typeof saveQ==='function')saveQ();
   isDirty=false; if(typeof updateSyncBadge==='function')updateSyncBadge();   // v9.182: คิว = แผนในชีทพอดี ยังไม่มีอะไรค้างบันทึก
