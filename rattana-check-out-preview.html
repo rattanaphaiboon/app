@@ -3332,7 +3332,8 @@ function coGotIdx(){ return coCache('GOT', ()=>{
     Object.keys(g.legacy||{}).forEach(bc=>{ const v=+g.legacy[bc]||0; if(v<=0) return;
       /* v9.245: ของที่ไม่รู้ว่าลงบิลไหน นับเฉพาะรอบที่เลือกกลุ่มเดียวกัน */
       try{ const S=coSelGrpSet(), gs=(g.legacyG&&g.legacyG[bc])||null;
-        if(S.size && !(gs && gs.size && [...gs].some(x=>S.has(String(x))))) return; }catch(e){}
+        if(S.size && gs && gs.size && ![...gs].some(x=>S.has(String(x)))) return;   /* รู้กลุ่มและไม่ตรง = ไม่นับ · ไม่รู้กลุ่ม = นับเหมือนเดิม */
+      }catch(e){}
       const k=coProdKey({barcode:bc, product:prodOf[bc]||''}); leg[k]=(+leg[k]||0)+v; });
   });
   return {byRef:byRef, leg:leg}; }); }
@@ -4547,6 +4548,7 @@ function coLogDerive(evs){
         const k=skuOf(bc, e.product); Object.keys(PP).forEach(R=>{ if(skuOf(R, PP[R].product)===k) delete PP[R]; }); });
       return; }
     const o=stOf(tgt, bc, e), per=Math.max(1,+e.ea_per||1), lv=String(e.level||'EA');
+    if(o.leg===undefined) o.leg=0;   /* v9.245: ยอดที่ยิงแบบไม่ผูกบิล */
     const ba=(e.bill_alloc && typeof e.bill_alloc==='object')?e.bill_alloc:null;
     const whK=String(e.wh_from||'').toUpperCase()||'W4', q=(+e.qty||0);
     if(Array.isArray(e.refs)) e.refs.forEach(r=>o.refs.add(String(r)));
@@ -4555,11 +4557,13 @@ function coLogDerive(evs){
       if(Array.isArray(_g.sel) && _g.sel.length) o.gsel=_g.sel.map(v=>String(v||'').trim()).filter(Boolean); } }catch(x){}   /* v9.227: กลุ่มของรอบที่ยิงล่าสุด ไม่สะสมข้ามรอบ */   /* v9.221: ทุกกลุ่มที่เลือกตอนยิง */   /* v9.219 */
     if(e.op==='add'){
       const u=o.units[sb]=o.units[sb]||{l:lv, p:per, q:0}; u.q=(+u.q||0)+q; u.l=lv; u.p=per;
+      if(!ba) o.leg=(+o.leg||0)+Math.round(q*per);   /* v9.245 */
       if(ba){ const m=o.ua[sb]=o.ua[sb]||{}; Object.keys(ba).forEach(r=>{ m[r]=(+m[r]||0)+(+ba[r]||0); if(e.sel_sig) o.sel[r]=e.sel_sig; }); }
       const w=o.wh[sb]=o.wh[sb]||{}; w[whK]=(+w[whK]||0)+q*per;
     } else if(e.op==='set'){
-      if(sb==='*'){ o.units={}; o.ua={}; o.wh={}; }
+      if(sb==='*'){ o.units={}; o.ua={}; o.wh={}; o.leg=0; }   /* v9.245 */
       if(q>0){ o.units[sb]={l:lv, p:per, q:q}; o.wh[sb]={[whK]:q*per};
+        o.leg=ba?0:Math.round(q*per);   /* v9.245: ตั้งค่าใหม่ทั้งรายการ */
         if(ba){ o.ua[sb]=Object.assign({}, ba); Object.keys(ba).forEach(r=>{ if(e.sel_sig) o.sel[r]=e.sel_sig; }); } else delete o.ua[sb]; }
       else { delete o.units[sb]; delete o.wh[sb]; delete o.ua[sb]; }
     }
@@ -4576,7 +4580,8 @@ function coLogDerive(evs){
     Object.keys(o.ua).forEach(k=>{ if(!units[k]) return; Object.keys(o.ua[k]).forEach(r=>{ const v=Math.round(+o.ua[k][r]||0);
       if(v>0){ alloc[r]=(+alloc[r]||0)+v; (uall[r]=uall[r]||{})[k]=(+((uall[r]||{})[k])||0)+v; } }); });
     const aSum=Object.keys(alloc).reduce((s,r)=>s+alloc[r],0);
-    if(Math.abs(aSum-ea)>0.5){   /* ยอดต่อใบไม่ลงรอย (บรรทัดจากเวอร์ชันเก่า) → แบ่งใหม่ตามบิลที่เลือกตอนยิง */
+    const _leg=Math.max(0, Math.min(Math.round(+o.leg||0), ea-aSum));   /* v9.245: ส่วนที่ไม่เคยผูกบิล */
+    if(Math.abs(aSum-ea)>0.5 && !(_leg>0 && Math.abs((aSum+_leg)-ea)<=0.5)){   /* ยอดต่อใบไม่ลงรอย (บรรทัดจากเวอร์ชันเก่า) → แบ่งใหม่ตามบิลที่เลือกตอนยิง */
       try{
         const k0=skuOf(R, o.product), refs=o.refs.size?o.refs:null, m={};
         coLines().forEach(x=>{ if(skuOf(x.barcode, x.product)!==k0) return; if(refs && !refs.has(String(x.ref))) return;
@@ -4595,7 +4600,7 @@ function coLogDerive(evs){
     const li=lineInfo[R]||null, per0=Math.max(1,(li&&+li.eaPer)||1), d=dm[R]||null;
     out.push({ barcode:R, product:o.product||(li&&li.product)||'', unit:(li&&li.unit)||'', qty:Math.floor((ea+0.001)/per0), ea:ea,
       need:(d?d.need:0), by:P, ts:tsBKK(o.ts), device:o.device, alloc:o.sub||'', billAlloc:alloc, sunits:units, suall:uall,
-      sumeta:Object.keys(units).reduce((mm,k)=>{ mm[k]={l:units[k].l, p:units[k].p}; return mm; },{}), swh:o.wh, susel:o.sel, sgrp:o.grp, sgsel:o.gsel, _fromLog:true });   /* v9.221: sgsel */   /* v9.219: sgrp */
+      sumeta:Object.keys(units).reduce((mm,k)=>{ mm[k]={l:units[k].l, p:units[k].p}; return mm; },{}), swh:o.wh, susel:o.sel, sgrp:o.grp, sgsel:o.gsel, legEa:_leg, _fromLog:true });   /* v9.245: legEa */   /* v9.221: sgsel */   /* v9.219: sgrp */
   }); });
   return out; }
 /* แถวของคนที่ใช้เครื่องนี้ → รูปแบบ coPicked */
@@ -6142,6 +6147,10 @@ function coTeamCalc(){
   (coSheetRows||[]).forEach(r=>{ const bc=String(r.barcode||'').trim(); if(!bc) return;
     /* v9.235: แถวที่มียอดต่อบิล = นับเสมอ (บิลที่เลือกเป็นตัวจำกัดอยู่แล้ว) · ของไม่ผูกบิลของกลุ่มอื่น กรองที่ coTeamEaForRefs */
     const ea=rowEa(r); const ba=r.billAlloc; if(ea<=0 && !ba) return; const g=ensure(r.by);
+    const _lg=Math.round(+r.legEa||0);   /* v9.245 */
+    if(_lg>0){ g.legacy[bc]=(g.legacy[bc]||0)+_lg;
+      try{ const _gs=(r.sgsel&&r.sgsel.length)?r.sgsel:((r.sgrp)?Object.values(r.sgrp):[]);
+        if(_gs&&_gs.length){ const st=g.legacyG[bc]=g.legacyG[bc]||new Set(); _gs.forEach(v=>{ v=String(v||'').trim(); if(v) st.add(v); }); } }catch(e){} }
     if(ba){ const a=g.alloc[bc]=g.alloc[bc]||{}; Object.keys(ba).forEach(ref=>{ a[ref]=(a[ref]||0)+(+ba[ref]||0); }); }
     else { g.legacy[bc]=(g.legacy[bc]||0)+ea;
       try{ const _gs=(r.sgsel&&r.sgsel.length)?r.sgsel:((r.sgrp)?Object.values(r.sgrp):[]);
