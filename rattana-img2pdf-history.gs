@@ -3,9 +3,9 @@
 //         (Execute as: Me / Who has access: Anyone)
 //
 // เช็กว่า deploy เวอร์ชันใหม่แล้วจริงไหม: เปิด URL ต่อท้าย ?action=ping
-//   ต้องเห็น {"ok":true,"version":"5.3", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
+//   ต้องเห็น {"ok":true,"version":"5.4", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
 
-var VERSION = '5.3';
+var VERSION = '5.4';
 var FOLDER_NAME = 'Rattana Scanner Files';
 var SHARED_FOLDER_NAME = 'ส่วนกลาง (ทุกคนเห็นได้)';
 var RETENTION_DAYS = 90;
@@ -23,12 +23,13 @@ var HEADERS = ['เวลา', 'รหัสพนักงาน', 'ชื่�
                'Drive File ID', 'หมวดงาน', 'รหัสโฟลเดอร์', 'ชื่อโฟลเดอร์'];
 
 // ทะเบียนโฟลเดอร์ (แท็บ Folders) — เก็บว่าใครเป็นเจ้าของ สร้างเมื่อไหร่ ใครเห็นได้บ้าง
-var F_ID = 1, F_NAME = 2, F_OWNER_ID = 3, F_OWNER_NAME = 4, F_CREATED = 5, F_VISIBILITY = 6, F_DRIVE_ID = 7, F_LINK = 8, F_LINKED = 9;
-var F_COLS = 9;
+var F_ID = 1, F_NAME = 2, F_OWNER_ID = 3, F_OWNER_NAME = 4, F_CREATED = 5, F_VISIBILITY = 6, F_DRIVE_ID = 7, F_LINK = 8, F_LINKED = 9, F_MEMBERS = 10;
+var F_COLS = 10;
 // หัวตารางเขียนเป็นภาษาคนอ่านได้ เพราะโค้ดอ้างด้วยเลขคอลัมน์ ไม่ได้พึ่งข้อความหัวตาราง
 var F_HEADERS = ['รหัสโฟลเดอร์', 'ชื่อโฟลเดอร์', 'รหัสเจ้าของ', 'ชื่อเจ้าของ', 'สร้างเมื่อ',
                  'สิทธิ (private=เฉพาะเจ้าของ / all=ทุกคนเห็น)', 'Drive ID', 'เปิดโฟลเดอร์',
-                 'ชนิด (linked = โฟลเดอร์เดิมใน Drive ที่เอามาเชื่อม)'];
+                 'ชนิด (linked = โฟลเดอร์เดิมใน Drive ที่เอามาเชื่อม)',
+                 'คนที่เห็นได้ (เฉพาะสิทธิ some — คั่นด้วยจุลภาค)'];
 
 function json_(obj) {
   obj.version = VERSION;
@@ -103,18 +104,19 @@ function formatFolderSheet_(sheet) {
   try {
     sheet.setFrozenRows(1);
     sheet.getRange(1, 1, 1, F_COLS).setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
-    var widths = [150, 200, 180, 170, 160, 250, 190, 110, 260];
+    var widths = [150, 200, 180, 170, 160, 250, 190, 110, 260, 300];
     for (var i = 0; i < widths.length; i++) sheet.setColumnWidth(i + 1, widths[i]);
   } catch (e) { /* จัดรูปแบบไม่ได้ก็ไม่เป็นไร ข้อมูลสำคัญกว่า */ }
 }
 
 // แถวทะเบียน 1 แถว — คอลัมน์สุดท้ายเป็นลิงก์กดเปิดโฟลเดอร์ใน Drive ได้เลย
-function folderRowValues_(id, name, ownerId, ownerName, createdAt, visibility, driveId, linked) {
+function folderRowValues_(id, name, ownerId, ownerName, createdAt, visibility, driveId, linked, members) {
   return [id, name, ownerId, ownerName, createdAt, visibility, driveId,
     // เขียน URL ตรง ๆ ไม่ใช้สูตร HYPERLINK เพราะตัวคั่นอาร์กิวเมนต์ (, หรือ ;) ต่างกันตามภาษาของชีต
     // แล้วจะกลายเป็นสูตรพัง · ชีตแปลง URL เป็นลิงก์กดได้ให้เองอยู่แล้ว
     driveId ? 'https://drive.google.com/drive/folders/' + driveId : '',
-    linked ? 'linked' : ''];
+    linked ? 'linked' : '',
+    membersToText_(members)];
 }
 
 function readFolderRows_(sheet) {
@@ -133,6 +135,7 @@ function folderRowToObj_(r) {
     visibility: String(r[F_VISIBILITY - 1] || 'private'),
     driveFolderId: String(r[F_DRIVE_ID - 1] || ''),
     linked: String(r[F_LINKED - 1] || '') === 'linked',
+    members: textToMembers_(r[F_MEMBERS - 1]),
   };
 }
 
@@ -140,10 +143,38 @@ function allFolders_() {
   return readFolderRows_(getFolderSheet_()).map(folderRowToObj_).filter(function (f) { return !!f.id; });
 }
 
-// เห็นได้ = โฟลเดอร์ของตัวเอง (ไม่ว่าตั้งสิทธิอะไร) + โฟลเดอร์ของคนอื่นที่ตั้งเป็น "ทุกคนเห็นได้"
+// รายชื่อคนที่เห็นได้ เก็บเป็นรหัสพนักงานคั่นด้วยจุลภาค — ตัดซ้ำและตัดช่องว่างให้เรียบร้อย
+function textToMembers_(v) {
+  return String(v || '').split(',').map(function (s) { return s.trim(); }).filter(function (s) { return !!s; });
+}
+function membersToText_(list) {
+  if (!list) return '';
+  var arr = Array.isArray(list) ? list : textToMembers_(list);
+  var seen = {}, out = [];
+  for (var i = 0; i < arr.length; i++) {
+    var v = String(arr[i] || '').trim();
+    if (!v || seen[v]) continue;
+    seen[v] = true; out.push(v);
+  }
+  return out.join(',');
+}
+
+// สิทธิมี 3 แบบ: private = เฉพาะเจ้าของ · some = เฉพาะคนในรายชื่อ · all = ทุกคน
+function normVisibility_(v) {
+  return v === 'all' ? 'all' : (v === 'some' ? 'some' : 'private');
+}
+
+function folderAllows_(f, empId) {
+  if (f.ownerEmpId === empId) return true;
+  if (f.visibility === 'all') return true;
+  if (f.visibility === 'some') return f.members.indexOf(empId) >= 0;
+  return false;
+}
+
+// เห็นได้ = โฟลเดอร์ของตัวเอง + ของคนอื่นที่เปิดให้ทุกคน หรือที่ใส่ชื่อเราไว้
 function visibleFolders_(empId) {
   return allFolders_().filter(function (f) {
-    return f.ownerEmpId === empId || f.visibility === 'all';
+    return folderAllows_(f, empId);
   }).sort(function (a, b) {
     if (a.visibility !== b.visibility) return a.visibility === 'all' ? 1 : -1;
     return a.name.localeCompare(b.name, 'th');
@@ -156,9 +187,9 @@ function folderById_(id) {
   return null;
 }
 
-// ใช้เก็บไฟล์ได้ไหม — ของตัวเอง หรือของส่วนกลางที่ทุกคนเห็นได้
+// ใช้เก็บไฟล์ได้ไหม — กติกาเดียวกับการมองเห็น
 function canUseFolder_(f, empId) {
-  return !!f && (f.ownerEmpId === empId || f.visibility === 'all');
+  return !!f && folderAllows_(f, empId);
 }
 
 // รับได้ทั้งลิงก์เต็ม (.../folders/XXX?usp=...) ลิงก์แบบ ?id=XXX หรือวาง id มาเปล่า ๆ
@@ -171,7 +202,7 @@ function parseDriveFolderId_(s) {
 }
 
 // เชื่อมโฟลเดอร์ที่มีอยู่แล้วใน Drive เข้ามาใช้ในแอป (ไม่ได้ย้ายหรือก๊อปอะไร แค่ชี้ไป)
-function linkFolder_(empId, ownerName, rawUrl, visibility) {
+function linkFolder_(empId, ownerName, rawUrl, visibility, members) {
   var driveId = parseDriveFolderId_(rawUrl);
   if (!driveId) return { ok: false, error: 'ลิงก์ไม่ถูกต้อง — ต้องเป็นลิงก์โฟลเดอร์ของ Google Drive' };
 
@@ -191,13 +222,15 @@ function linkFolder_(empId, ownerName, rawUrl, visibility) {
     if (dup[i].driveFolderId === driveId) return { ok: false, error: 'โฟลเดอร์นี้ถูกเพิ่มไว้แล้ว ("' + dup[i].name + '")' };
   }
 
-  var vis = visibility === 'all' ? 'all' : 'private';
+  var vis = normVisibility_(visibility);
+  var mem = vis === 'some' ? membersToText_(members) : '';
+  if (vis === 'some' && !mem) return { ok: false, error: 'เลือกคนที่จะให้เห็นอย่างน้อย 1 คน' };
   var id = newFolderId_();
   var created;
   try { created = folder.getDateCreated().toISOString(); } catch (e3) { created = new Date().toISOString(); }
-  getFolderSheet_().appendRow(folderRowValues_(id, folder.getName(), empId, String(ownerName || ''), created, vis, driveId, true));
+  getFolderSheet_().appendRow(folderRowValues_(id, folder.getName(), empId, String(ownerName || ''), created, vis, driveId, true, mem));
   return { ok: true, folder: { id: id, name: folder.getName(), ownerEmpId: empId, ownerName: String(ownerName || ''),
-    createdAt: created, visibility: vis, driveFolderId: driveId, linked: true } };
+    createdAt: created, visibility: vis, driveFolderId: driveId, linked: true, members: textToMembers_(mem) } };
 }
 
 function newFolderId_() {
@@ -230,7 +263,7 @@ function syncDriveFolders_(empId, name) {
       var f = it.next();
       if (f.isTrashed() || known[f.getId()]) continue;
       // โฟลเดอร์ส่วนกลางที่สร้างมือไม่รู้ว่าใครทำ จึงไม่ผูกเจ้าของ = ลบจากในแอปไม่ได้ (ลบใน Drive เอา)
-      sheet.appendRow(folderRowValues_(newFolderId_(), f.getName(), ownerId, ownerName, f.getDateCreated().toISOString(), visibility, f.getId(), false));
+      sheet.appendRow(folderRowValues_(newFolderId_(), f.getName(), ownerId, ownerName, f.getDateCreated().toISOString(), visibility, f.getId(), false, ''));
       known[f.getId()] = true;
       added++;
     }
@@ -240,15 +273,17 @@ function syncDriveFolders_(empId, name) {
   return added;
 }
 
-function createFolder_(empId, ownerName, rawName, visibility) {
+function createFolder_(empId, ownerName, rawName, visibility, members) {
   var name = safeFolderName_(rawName);
   if (!name) return { ok: false, error: 'ชื่อโฟลเดอร์ใช้ไม่ได้' };
-  var vis = visibility === 'all' ? 'all' : 'private';
+  var vis = normVisibility_(visibility);
+  var mem = vis === 'some' ? membersToText_(members) : '';
+  if (vis === 'some' && !mem) return { ok: false, error: 'เลือกคนที่จะให้เห็นอย่างน้อย 1 คน' };
 
   // ชื่อซ้ำ: ของตัวเองห้ามซ้ำกับของตัวเอง · ส่วนกลางห้ามซ้ำกับส่วนกลาง
   var dup = allFolders_().filter(function (f) {
     if (f.name !== name) return false;
-    return vis === 'all' ? f.visibility === 'all' : f.ownerEmpId === empId && f.visibility === 'private';
+    return vis === 'all' ? f.visibility === 'all' : f.ownerEmpId === empId && f.visibility !== 'all';
   });
   if (dup.length) return { ok: false, error: 'มีโฟลเดอร์ชื่อนี้อยู่แล้ว' };
 
@@ -258,8 +293,26 @@ function createFolder_(empId, ownerName, rawName, visibility) {
   var driveFolder = parent.createFolder(driveName);
 
   var id = newFolderId_();
-  getFolderSheet_().appendRow(folderRowValues_(id, name, empId, String(ownerName || ''), new Date().toISOString(), vis, driveFolder.getId(), false));
-  return { ok: true, folder: { id: id, name: name, ownerEmpId: empId, ownerName: String(ownerName || ''), createdAt: new Date().toISOString(), visibility: vis, driveFolderId: driveFolder.getId() } };
+  getFolderSheet_().appendRow(folderRowValues_(id, name, empId, String(ownerName || ''), new Date().toISOString(), vis, driveFolder.getId(), false, mem));
+  return { ok: true, folder: { id: id, name: name, ownerEmpId: empId, ownerName: String(ownerName || ''), createdAt: new Date().toISOString(), visibility: vis, driveFolderId: driveFolder.getId(), linked: false, members: textToMembers_(mem) } };
+}
+
+// เปลี่ยนสิทธิ / แก้รายชื่อคนที่เห็นได้ ภายหลัง — เจ้าของเท่านั้น
+function setFolderAccess_(id, empId, visibility, members) {
+  var sheet = getFolderSheet_();
+  var rows = readFolderRows_(sheet);
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i][F_ID - 1]) !== id) continue;
+    var f = folderRowToObj_(rows[i]);
+    if (f.ownerEmpId !== empId) return { ok: false, error: 'not authorized' };
+    var vis = normVisibility_(visibility);
+    var mem = vis === 'some' ? membersToText_(members) : '';
+    if (vis === 'some' && !mem) return { ok: false, error: 'เลือกคนที่จะให้เห็นอย่างน้อย 1 คน' };
+    sheet.getRange(i + 2, F_VISIBILITY).setValue(vis);
+    sheet.getRange(i + 2, F_MEMBERS).setValue(mem);
+    return { ok: true, folderId: id, visibility: vis, members: textToMembers_(mem) };
+  }
+  return { ok: false, error: 'not found' };
 }
 
 // ลบได้เฉพาะเจ้าของ และเฉพาะโฟลเดอร์ที่ว่างเปล่า กันเผลอลบไฟล์ทั้งกอง
@@ -356,15 +409,21 @@ function doPost(e) {
     }
 
     if (data.action === 'newFolder') {
-      var made = createFolder_(empId, data.name, data.folderName, data.visibility);
+      var made = createFolder_(empId, data.name, data.folderName, data.visibility, data.members);
       if (!made.ok) return json_(made);
       return json_({ ok: true, folder: made.folder, folders: visibleFolders_(empId) });
     }
 
     if (data.action === 'linkFolder') {
-      var linked = linkFolder_(empId, data.name, data.folderUrl, data.visibility);
+      var linked = linkFolder_(empId, data.name, data.folderUrl, data.visibility, data.members);
       if (!linked.ok) return json_(linked);
       return json_({ ok: true, folder: linked.folder, folders: visibleFolders_(empId) });
+    }
+
+    if (data.action === 'setFolderAccess') {
+      var acc = setFolderAccess_(String(data.folderId || ''), empId, data.visibility, data.members);
+      if (!acc.ok) return json_(acc);
+      return json_({ ok: true, folderId: acc.folderId, folders: visibleFolders_(empId) });
     }
 
     if (data.action === 'deleteFolder') {
