@@ -3,9 +3,9 @@
 //         (Execute as: Me / Who has access: Anyone)
 //
 // เช็กว่า deploy เวอร์ชันใหม่แล้วจริงไหม: เปิด URL ต่อท้าย ?action=ping
-//   ต้องเห็น {"ok":true,"version":"5.0", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
+//   ต้องเห็น {"ok":true,"version":"5.2", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
 
-var VERSION = '5.0';
+var VERSION = '5.2';
 var FOLDER_NAME = 'Rattana Scanner Files';
 var SHARED_FOLDER_NAME = 'ส่วนกลาง (ทุกคนเห็นได้)';
 var RETENTION_DAYS = 90;
@@ -18,12 +18,16 @@ var FOLDER_SHEET_NAME = 'Folders';
 var C_TIMESTAMP = 1, C_EMPID = 2, C_NAME = 3, C_FILENAME = 4, C_PAGES = 5, C_SIZEKB = 6,
     C_FILEID = 7, C_TYPE = 8, C_FOLDERID = 9, C_FOLDERNAME = 10;
 var N_COLS = 10;
-var HEADERS = ['timestamp', 'empId', 'name', 'filename', 'pages', 'sizeKB', 'fileId', 'type', 'folderId', 'folderName'];
+// หัวตารางเขียนเป็นภาษาคนอ่านได้ เพราะโค้ดอ้างด้วยเลขคอลัมน์ ไม่ได้พึ่งข้อความหัวตาราง
+var HEADERS = ['เวลา', 'รหัสพนักงาน', 'ชื่อผู้ทำ', 'ชื่อไฟล์', 'จำนวนหน้า', 'ขนาด (KB)',
+               'Drive File ID', 'หมวดงาน', 'รหัสโฟลเดอร์', 'ชื่อโฟลเดอร์'];
 
 // ทะเบียนโฟลเดอร์ (แท็บ Folders) — เก็บว่าใครเป็นเจ้าของ สร้างเมื่อไหร่ ใครเห็นได้บ้าง
-var F_ID = 1, F_NAME = 2, F_OWNER_ID = 3, F_OWNER_NAME = 4, F_CREATED = 5, F_VISIBILITY = 6, F_DRIVE_ID = 7;
-var F_COLS = 7;
-var F_HEADERS = ['folderId', 'name', 'ownerEmpId', 'ownerName', 'createdAt', 'visibility', 'driveFolderId'];
+var F_ID = 1, F_NAME = 2, F_OWNER_ID = 3, F_OWNER_NAME = 4, F_CREATED = 5, F_VISIBILITY = 6, F_DRIVE_ID = 7, F_LINK = 8;
+var F_COLS = 8;
+// หัวตารางเขียนเป็นภาษาคนอ่านได้ เพราะโค้ดอ้างด้วยเลขคอลัมน์ ไม่ได้พึ่งข้อความหัวตาราง
+var F_HEADERS = ['รหัสโฟลเดอร์', 'ชื่อโฟลเดอร์', 'รหัสเจ้าของ', 'ชื่อเจ้าของ', 'สร้างเมื่อ',
+                 'สิทธิ (private=เฉพาะเจ้าของ / all=ทุกคนเห็น)', 'Drive ID', 'เปิดโฟลเดอร์'];
 
 function json_(obj) {
   obj.version = VERSION;
@@ -89,8 +93,26 @@ function getFolderSheet_() {
   var sheet = ss.getSheetByName(FOLDER_SHEET_NAME) || ss.insertSheet(FOLDER_SHEET_NAME);
   var current = sheet.getRange(1, 1, 1, F_COLS).getValues()[0];
   var same = F_HEADERS.every(function (h, i) { return current[i] === h; });
-  if (!same) sheet.getRange(1, 1, 1, F_COLS).setValues([F_HEADERS]);
+  if (!same) { sheet.getRange(1, 1, 1, F_COLS).setValues([F_HEADERS]); formatFolderSheet_(sheet); }
   return sheet;
+}
+
+// จัดหน้าตาแท็บให้อ่านรู้เรื่องตอนเปิดดูในชีต (ทำครั้งเดียวตอนเขียนหัวตาราง)
+function formatFolderSheet_(sheet) {
+  try {
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, F_COLS).setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+    var widths = [150, 200, 180, 170, 160, 250, 190, 110];
+    for (var i = 0; i < widths.length; i++) sheet.setColumnWidth(i + 1, widths[i]);
+  } catch (e) { /* จัดรูปแบบไม่ได้ก็ไม่เป็นไร ข้อมูลสำคัญกว่า */ }
+}
+
+// แถวทะเบียน 1 แถว — คอลัมน์สุดท้ายเป็นลิงก์กดเปิดโฟลเดอร์ใน Drive ได้เลย
+function folderRowValues_(id, name, ownerId, ownerName, createdAt, visibility, driveId) {
+  return [id, name, ownerId, ownerName, createdAt, visibility, driveId,
+    // เขียน URL ตรง ๆ ไม่ใช้สูตร HYPERLINK เพราะตัวคั่นอาร์กิวเมนต์ (, หรือ ;) ต่างกันตามภาษาของชีต
+    // แล้วจะกลายเป็นสูตรพัง · ชีตแปลง URL เป็นลิงก์กดได้ให้เองอยู่แล้ว
+    driveId ? 'https://drive.google.com/drive/folders/' + driveId : ''];
 }
 
 function readFolderRows_(sheet) {
@@ -137,7 +159,43 @@ function canUseFolder_(f, empId) {
 }
 
 function newFolderId_() {
-  return 'f' + Date.now() + Math.floor(Math.random() * 1000);
+  return 'f' + Date.now() + '_' + Math.floor(Math.random() * 1000000);
+}
+
+// ---------- ดึงโฟลเดอร์ที่คนไปสร้างเองใน Google Drive เข้าทะเบียน ----------
+// ถ้าไม่ทำ คนที่เข้าไปสร้างโฟลเดอร์ใน Drive เองแล้วกลับมาเปิดแอปจะไม่เห็นโฟลเดอร์นั้นเลย
+// (เจอปัญหานี้จริงตอนใช้งานรอบแรก) · เรียกทุกครั้งที่ขอรายการโฟลเดอร์
+function pruneDeadFolders_(sheet) {
+  var rows = readFolderRows_(sheet);
+  for (var i = rows.length - 1; i >= 0; i--) {
+    var did = String(rows[i][F_DRIVE_ID - 1] || '');
+    if (!did) continue;
+    var gone = false;
+    try { if (DriveApp.getFolderById(did).isTrashed()) gone = true; } catch (e) { gone = true; }
+    if (gone) sheet.deleteRow(i + 2);   // โฟลเดอร์ถูกลบใน Drive แล้ว เอาออกจากทะเบียนด้วย
+  }
+}
+
+function syncDriveFolders_(empId, name) {
+  var sheet = getFolderSheet_();
+  pruneDeadFolders_(sheet);
+  var known = {};
+  readFolderRows_(sheet).forEach(function (r) { known[String(r[F_DRIVE_ID - 1])] = true; });
+  var added = 0;
+  function scan(parent, visibility, ownerId, ownerName) {
+    var it = parent.getFolders();
+    while (it.hasNext()) {
+      var f = it.next();
+      if (f.isTrashed() || known[f.getId()]) continue;
+      // โฟลเดอร์ส่วนกลางที่สร้างมือไม่รู้ว่าใครทำ จึงไม่ผูกเจ้าของ = ลบจากในแอปไม่ได้ (ลบใน Drive เอา)
+      sheet.appendRow(folderRowValues_(newFolderId_(), f.getName(), ownerId, ownerName, f.getDateCreated().toISOString(), visibility, f.getId()));
+      known[f.getId()] = true;
+      added++;
+    }
+  }
+  scan(getUserFolder_(empId, name), 'private', empId, String(name || ''));
+  scan(getSharedRoot_(), 'all', '', 'สร้างใน Google Drive');
+  return added;
 }
 
 function createFolder_(empId, ownerName, rawName, visibility) {
@@ -158,7 +216,7 @@ function createFolder_(empId, ownerName, rawName, visibility) {
   var driveFolder = parent.createFolder(driveName);
 
   var id = newFolderId_();
-  getFolderSheet_().appendRow([id, name, empId, String(ownerName || ''), new Date().toISOString(), vis, driveFolder.getId()]);
+  getFolderSheet_().appendRow(folderRowValues_(id, name, empId, String(ownerName || ''), new Date().toISOString(), vis, driveFolder.getId()));
   return { ok: true, folder: { id: id, name: name, ownerEmpId: empId, ownerName: String(ownerName || ''), createdAt: new Date().toISOString(), visibility: vis, driveFolderId: driveFolder.getId() } };
 }
 
@@ -320,7 +378,8 @@ function doGet(e) {
     if (!empId) return json_({ ok: false, error: 'empId required' });
 
     if (params.action === 'folders') {
-      return json_({ ok: true, folders: visibleFolders_(empId) });
+      var added = syncDriveFolders_(empId, params.name);
+      return json_({ ok: true, folders: visibleFolders_(empId), picked: added });
     }
 
     var sheet = getSheet_();
