@@ -3,9 +3,9 @@
 //         (Execute as: Me / Who has access: Anyone)
 //
 // เช็กว่า deploy เวอร์ชันใหม่แล้วจริงไหม: เปิด URL ต่อท้าย ?action=ping
-//   ต้องเห็น {"ok":true,"version":"5.5", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
+//   ต้องเห็น {"ok":true,"version":"5.6", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
 
-var VERSION = '5.5';
+var VERSION = '5.6';
 var FOLDER_NAME = 'Rattana Scanner Files';
 var SHARED_FOLDER_NAME = 'ส่วนกลาง (ทุกคนเห็นได้)';
 var RETENTION_DAYS = 90;
@@ -338,6 +338,42 @@ function deleteFolder_(id, empId) {
   return { ok: false, error: 'not found' };
 }
 
+// ไฟล์ในโฟลเดอร์ร่วม ไม่ได้อยู่ในประวัติของคนที่กดดู จึงต้องเช็กสิทธิจาก "โฟลเดอร์แม่" แทน
+function fileInAllowedFolder_(fileId, empId) {
+  var allowed = {};
+  try { allowed[getUserFolder_(empId, '').getId()] = true; } catch (e) {}
+  var vis = visibleFolders_(empId);
+  for (var i = 0; i < vis.length; i++) if (vis[i].driveFolderId) allowed[vis[i].driveFolderId] = true;
+  try {
+    var parents = DriveApp.getFileById(fileId).getParents();
+    while (parents.hasNext()) if (allowed[parents.next().getId()]) return true;
+  } catch (e) {}
+  return false;
+}
+
+// รายการไฟล์ในโฟลเดอร์ — ใหม่สุดก่อน · folderId ว่าง = โฟลเดอร์หลักของตัวเอง
+function listFolderFiles_(empId, ownerName, folderId) {
+  var target = null, fname = 'โฟลเดอร์หลักของฉัน';
+  if (folderId) {
+    var fo = folderById_(folderId);
+    if (!canUseFolder_(fo, empId)) return { ok: false, error: 'not allowed' };
+    fname = fo.name;
+    try { target = DriveApp.getFolderById(fo.driveFolderId); } catch (e) { target = null; }
+  } else {
+    try { target = getUserFolder_(empId, ownerName); } catch (e) { target = null; }
+  }
+  if (!target) return { ok: false, error: 'not found' };
+  var it = target.getFiles(), out = [];
+  while (it.hasNext() && out.length < 150) {
+    var f = it.next();
+    var size = 0;
+    try { size = Math.round(f.getSize() / 1024); } catch (e) {}
+    out.push({ id: f.getId(), name: f.getName(), sizeKB: size, createdAt: f.getDateCreated().toISOString() });
+  }
+  out.sort(function (a, b) { return new Date(b.createdAt) - new Date(a.createdAt); });
+  return { ok: true, folderName: fname, files: out };
+}
+
 // ---------- ประวัติ ----------
 function getSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -486,6 +522,10 @@ function doGet(e) {
     var empId = String(params.empId || '').trim();
     if (!empId) return json_({ ok: false, error: 'empId required' });
 
+    if (params.action === 'files') {
+      return json_(listFolderFiles_(empId, params.name, String(params.folderId || '')));
+    }
+
     if (params.action === 'folders') {
       var added = syncDriveFolders_(empId, params.name);
       return json_({ ok: true, folders: visibleFolders_(empId), picked: added });
@@ -500,9 +540,12 @@ function doGet(e) {
       for (var i = 0; i < rows.length; i++) {
         if (String(rows[i][C_FILEID - 1]) === fileId && fileId) { hit = rows[i]; break; }
       }
-      if (!hit || String(hit[C_EMPID - 1]) !== empId) return json_({ ok: false, error: 'not found or not authorized' });
+      // ไฟล์ของตัวเองในประวัติ → ผ่าน · ไม่ใช่ → ต้องอยู่ในโฟลเดอร์ที่คนนี้เข้าถึงได้
+      var mine = hit && String(hit[C_EMPID - 1]) === empId;
+      if (!mine && !fileInAllowedFolder_(fileId, empId)) return json_({ ok: false, error: 'not found or not authorized' });
       var file = DriveApp.getFileById(fileId);
-      return json_({ ok: true, fileBase64: Utilities.base64Encode(file.getBlob().getBytes()), filename: String(hit[C_FILENAME - 1] || 'scan.pdf') });
+      var fname2 = mine ? String(hit[C_FILENAME - 1] || 'scan.pdf') : file.getName();
+      return json_({ ok: true, fileBase64: Utilities.base64Encode(file.getBlob().getBytes()), filename: fname2 });
     }
 
     var out = rows
