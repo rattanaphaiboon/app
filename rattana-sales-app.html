@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.634</title>
+<title>Rattana Sales — v8.635</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -6835,7 +6835,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.634 · 2026-09-19</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.635 · 2026-09-20</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -6846,7 +6846,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.634</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.635</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -11441,6 +11441,32 @@ function applyPriceOverrides() {
   }
 }
 window.applyPriceOverrides = applyPriceOverrides;
+
+/* v8.635 (Surat 20/9 "ดึงข้อมูลจาก 2 เครื่องแล้วราคาขายไม่เหมือนกัน") — ประตูเดียวของการเปลี่ยน products
+   ทุกจุดที่ดึง PDDT ชุดใหม่ต้องผ่านตัวนี้ ❌ ห้าม assign SHEET_DATA.products ตรงๆ แล้วจบ
+   เพราะ PDDT เป็น "ราคาดิบ" — ราคาที่จัดซื้อปรับแล้วอยู่ในชีท Price Override คนละที่
+   assign ทับเฉยๆ = ราคาที่ปรับไว้หายเงียบ ไม่มี error ไม่มีอะไรฟ้อง เซลเห็นราคาเก่าแล้วขายจริงตามนั้น
+   🔴 fail-closed: ดึงชีท override ไม่ได้ → ใช้ชุดเดิมที่ค้างในเครื่องทับต่อ
+      ❌ ห้ามปล่อยราคาดิบขึ้นจอเพราะ "ดึงไม่ได้" — ผิดทางเงิน ไม่ใช่แค่ผิดทาง UI */
+async function _setProductsFresh(rows, tag) {
+  if (!Array.isArray(rows) || !rows.length) return SHEET_DATA.products || [];
+  SHEET_DATA.products = rows;
+  try {
+    const ovr = await fetchSheet(CONFIG.priceOverrideSheetId, CONFIG.priceOverrideTab);
+    if (Array.isArray(ovr) && ovr.length) {
+      SHEET_DATA.priceOverrides = ovr;
+      try { cacheSet('priceOverrides', ovr); } catch (e) {}
+    }
+  } catch (e) {
+    console.warn('[' + (tag || 'products') + '] ดึงชีท Price Override ไม่ได้ — ใช้ชุดเดิม:', e.message);
+  }
+  try { applyPriceOverrides(); } catch (e) { console.warn('applyPriceOverrides:', e); }
+  try { cacheSet('products', SHEET_DATA.products); } catch (e) {}
+  window._focusIssuesCache = null;
+  window._promoIssuesCache = null;
+  return SHEET_DATA.products;
+}
+window._setProductsFresh = _setProductsFresh;
 
 // VAT rate (7% — Thai standard) — kept for backend compat only
 const VAT_RATE = 0.07;
@@ -47956,7 +47982,7 @@ async function _demandReloadAndRerender() {
       await loadAll();
     } else if (typeof fetchSheet === 'function' && typeof CONFIG !== 'undefined') {
       const d = await fetchSheet(CONFIG.productSheetId, CONFIG.productTab);
-      SHEET_DATA.products = d || [];
+      await _setProductsFresh(d || [], 'demand');   // v8.635: ต้องทับราคา override ด้วย ไม่งั้นรายงานใช้ราคาดิบ
     }
   } catch (e) {
     console.error('[demand reload]', e);
@@ -48945,8 +48971,11 @@ async function checkForStockUpdate() {
         SHEET_DATA.syncStatus = rows;
         try { cacheSet('syncStatus', rows); } catch (e) {}
         const d = await fetchSheet(CONFIG.productSheetId, CONFIG.productTab);
-        SHEET_DATA.products = d;
-        cacheSet('products', d);
+        /* v8.635: เดิมบรรทัดนี้คือ `SHEET_DATA.products = d; cacheSet('products', d);` เฉยๆ
+           StockSync เขียน timestamp ใหม่ทุก 15 นาที → ทุกเครื่องที่เปิดแอปค้างไว้จะวิ่งเข้าบล็อกนี้
+           แล้วราคาที่ทับด้วยชีท Price Override หายทุก 15 นาที (เครื่องที่เพิ่งเปิดแอปถึงไม่เป็น)
+           = สาเหตุที่ 2 เครื่องโชว์ราคาไม่เท่ากัน */
+        await _setProductsFresh(d, 'heartbeat');
         console.log('[heartbeat] products refetched:', d.length);
         rerenderCurrentScreen();
         // v6.5.226: show timestamp in toast so user knows EXACTLY when purchase team synced
