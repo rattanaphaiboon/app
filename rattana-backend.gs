@@ -1,6 +1,9 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.30 — diagDocApproval() ตรวจ "ใบขอเอกสารไม่เข้าคิวผู้อนุมัติ" (เคสวีระพงษ์ 68073
+ *          → วุฒินันท์ไม่เห็น) — ไล่ทีละด่าน: มีแถวใน Users มั้ย · คอลัมน์ N ตรงชื่อหัวหน้า
+ *          เป๊ะมั้ย · ทีมมีใครบ้าง · มีผู้อนุมัติเฉพาะมั้ย · แล้วยิง getPendingAll จริงพิสูจน์
  * v9.29 — ★ เจอแล้วว่าทำไม deleteRows ไม่ลบ: "ฟิลเตอร์" คลุม A1:Z1890 ทั้งชีท
  *          ลบแถวท้ายชีท (นอกฟิลเตอร์) ได้ · ลบแถวกลางชีท (ในฟิลเตอร์) เงียบ ไม่มี error
  *          fixBlankShiftRows() ถอดฟิลเตอร์ → ลบ → ใส่กลับพร้อมเงื่อนไขเดิม
@@ -195,7 +198,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.29', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.30', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -6393,5 +6396,115 @@ function fixBlankShiftRows() {
   L.push(left.length === 0 && real === 1683
     ? '✅ ชีทจัดกะสะอาดแล้ว'
     : '❌ ยังไม่เรียบร้อย — ส่งผลนี้ให้ Claude');
+  Logger.log(L.join('\n'));
+}
+
+/* ============================================================
+   v9.30 · diag: ทำไมใบขอเอกสารไม่เข้าคิวผู้อนุมัติ
+   เคส: วีระพงษ์ (68073) ยื่นหนังสือรับรองเงินเดือน 07/09 — วุฒินันท์ไม่เห็นในหน้าอนุมัติ
+   ตัวตรวจนี้ไล่ทีละด่านของ getPendingAll แล้วบอกว่าใบตกที่ด่านไหน
+   แก้ 2 ค่านี้ได้ถ้าจะตรวจเคสอื่น แล้วกด Run
+   ============================================================ */
+const DIAG_DOC_EMP  = '68073';        // รหัสผู้ยื่น
+const DIAG_SUP_FIND = 'วุฒินันท์';     // ชื่อผู้อนุมัติ (ค้นบางส่วนในชีท Users)
+
+function diagDocApproval() {
+  const L = [];
+  const show = v => '[' + String(v == null ? '' : v) + ']';   // ใส่วงเล็บให้เห็นช่องว่างหัวท้าย
+
+  /* 1) หาแถวในชีท Users */
+  const uSS = SpreadsheetApp.openById(CFG.usersSheetId);
+  const uSh = uSS.getSheetByName('Sheet1');
+  const uData = uSh.getDataRange().getValues();
+
+  L.push('===== 1) ชีท Users =====');
+  const sups = [];
+  for (let i = 1; i < uData.length; i++) {
+    if (String(uData[i][4] || '').indexOf(DIAG_SUP_FIND) >= 0) {
+      sups.push({ row: i + 1, empId: String(uData[i][2]).trim(), name: String(uData[i][4]).trim() });
+    }
+  }
+  if (!sups.length) L.push('❌ ไม่พบชื่อที่มีคำว่า "' + DIAG_SUP_FIND + '" ในคอลัมน์ E เลย');
+  sups.forEach(x => L.push('ผู้อนุมัติ: แถว ' + x.row + ' · รหัส ' + x.empId + ' · ชื่อ ' + show(x.name)));
+
+  let emp = null;
+  for (let i = 1; i < uData.length; i++) {
+    if (String(uData[i][2]).trim() === DIAG_DOC_EMP) {
+      emp = { row: i + 1, name: String(uData[i][4] || ''), supN: String(uData[i][13] || '') };
+      break;
+    }
+  }
+  if (!emp) {
+    L.push('❌ ไม่พบรหัส ' + DIAG_DOC_EMP + ' ในชีท Users คอลัมน์ C เลย ← นี่แหละสาเหตุ');
+    L.push('   (คนไม่มีแถวใน Users = ไม่อยู่ในทีมของหัวหน้าคนไหน)');
+    Logger.log(L.join('\n')); return;
+  }
+  L.push('ผู้ยื่น: แถว ' + emp.row + ' · ชื่อ ' + show(emp.name.trim()));
+  L.push('   คอลัมน์ N หัวหน้างาน = ' + show(emp.supN.trim()));
+
+  /* 2) เทียบชื่อ — ด่านที่ getPendingAll ใช้จริงคือ "ตรงเป๊ะ" */
+  L.push('');
+  L.push('===== 2) เทียบชื่อ (ด่านจริงคือเทียบตรงเป๊ะ) =====');
+  sups.forEach(x => {
+    const exact = emp.supN.trim() === x.name;
+    const loose = normNameTh_(emp.supN) === normNameTh_(x.name);
+    L.push('เทียบกับ ' + x.name + ' : ตรงเป๊ะ=' + exact + ' · ตรงแบบหลวม=' + loose +
+           (!exact && loose ? '  ← สะกดเหมือนแต่ช่องว่าง/อักขระต่าง!' : ''));
+  });
+
+  /* 3) สร้างทีมแบบเดียวกับ getPendingAll แล้วดูว่า 68073 อยู่มั้ย */
+  L.push('');
+  L.push('===== 3) ทีมของผู้อนุมัติ (ตามสูตร getPendingAll) =====');
+  const ovrMap = approverOverrideMap_();
+  sups.forEach(x => {
+    const team = [];
+    for (let i = 1; i < uData.length; i++) {
+      if (String(uData[i][13]).trim() === x.name) team.push(String(uData[i][2]).trim());
+    }
+    Object.keys(ovrMap).forEach(id => {
+      if (normNameTh_(ovrMap[id]) === normNameTh_(x.name)) team.push(String(id).trim() + '(เฉพาะ)');
+    });
+    L.push(x.name + ' : ทีม ' + team.length + ' คน · มี ' + DIAG_DOC_EMP + ' มั้ย = ' +
+           (team.some(t => t.indexOf(DIAG_DOC_EMP) === 0) ? '✅ มี' : '❌ ไม่มี'));
+    if (team.length && team.length <= 25) L.push('   สมาชิก: ' + team.join(', '));
+  });
+
+  /* 4) ผู้อนุมัติเฉพาะของผู้ยื่น */
+  L.push('');
+  L.push('===== 4) ผู้อนุมัติเฉพาะ =====');
+  const ovr = ovrMap[DIAG_DOC_EMP] || '';
+  L.push(ovr ? ('รหัส ' + DIAG_DOC_EMP + ' ถูกกำหนดผู้อนุมัติเฉพาะ = ' + show(ovr) +
+                ' ← ใบเข้าคิวคนนี้เท่านั้น (กับ HR)')
+             : 'ไม่มีผู้อนุมัติเฉพาะ (ใช้หัวหน้าตามคอลัมน์ N ปกติ)');
+
+  /* 5) ใบในชีท เอกสารApp */
+  L.push('');
+  L.push('===== 5) ใบขอในชีท เอกสารApp =====');
+  const dSh = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName('เอกสารApp');
+  const dData = dSh ? dSh.getDataRange().getValues() : [];
+  let found = 0;
+  for (let i = 1; i < dData.length; i++) {
+    const r = dData[i];
+    if (String(r[1]).trim() !== DIAG_DOC_EMP) continue;
+    found++;
+    L.push('แถว ' + (i + 1) + ' · ' + r[0] + ' · ' + r[4] + ' · สถานะ ' + show(String(r[6]).trim()) +
+           ' · เลขที่ ' + (r[9] || '-'));
+  }
+  if (!found) L.push('❌ ไม่พบใบของรหัส ' + DIAG_DOC_EMP + ' ในชีทเลย');
+
+  /* 6) ยิง getPendingAll จริงในนามผู้อนุมัติ — ตัวชี้ขาด */
+  L.push('');
+  L.push('===== 6) เรียก getPendingAll จริงในนามผู้อนุมัติ =====');
+  sups.forEach(x => {
+    try {
+      const res = getPendingAll({ supervisorId: x.empId },
+                                { empId: x.empId, name: x.name, role: 'supervisor' });
+      const mine = (res.items || []).filter(it => it.sheet === 'เอกสารApp' &&
+                                                  String(it.empId).trim() === DIAG_DOC_EMP);
+      L.push(x.name + ' (' + x.empId + ') : เห็นทั้งหมด ' + (res.items || []).length +
+             ' ใบ · ใบของ ' + DIAG_DOC_EMP + ' = ' + (mine.length ? '✅ เห็น' : '❌ ไม่เห็น'));
+    } catch (e) { L.push(x.name + ' : เรียกไม่ได้ — ' + e.message); }
+  });
+
   Logger.log(L.join('\n'));
 }
