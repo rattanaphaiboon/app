@@ -189,7 +189,7 @@ function t5MapName_(names, bqName, code) {
 
 function t5Write_(out) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sh = ss.getSheetByName(T5_TAB) || ss.insertSheet(T5_TAB);
+  var sh = ss.getSheetByName(T5_TAB) || ss.insertSheet(T5_TAB, ss.getNumSheets());   // ต่อท้ายสุด — ห้ามแทรกเป็นแท็บแรก (gviz ชื่อแท็บผิดจะคืนแท็บแรก)
   var w = T5_HEADERS.length, n = out.length + 1;
   sh.clearContents();
   if (sh.getMaxRows() < n) sh.insertRowsAfter(sh.getMaxRows(), n - sh.getMaxRows());
