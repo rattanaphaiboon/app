@@ -489,6 +489,8 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
 /* v9.199: หน้าเทียบรูปตู้ */
 .pv-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;background:#fff;border:1.5px solid #E6EAF1;border-radius:14px;padding:12px;margin-bottom:14px;box-shadow:0 2px 10px rgba(11,42,74,.06)}
 .pv-row.miss{border-color:#F3D5AE;background:#FFFDF7}
+.pv-row.swap{border-color:#FDBA74}
+.pv-swap{background:#FFEDD5;color:#9A3412;border:1px solid #FDBA74;border-radius:8px;padding:5px 10px;font-size:12px;font-weight:600;margin-bottom:6px;font-family:Kanit}
 @media(max-width:900px){.pv-row{grid-template-columns:1fr}}
 .pv-h{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-family:Kanit;font-weight:700;font-size:13.5px;color:#0B2A4A;margin-bottom:5px}
 .pv-plate{font-family:ui-monospace,monospace;font-size:11.5px;color:#5B6B7D;font-weight:600}
@@ -825,7 +827,7 @@ body.dragging .trip-drop{border-style:dashed!important;animation:pulse-glow 1.2s
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.202</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.203</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -9515,14 +9517,15 @@ async function pvLoad(force){
   _pvLoading=true; _pvErr=''; renderPhotoView();
   try{
     const rows=await fetchSheet(PV_TAB,PAY_SHEET_ID,{timeoutMs:45000,retries:1,
-      tq:`SELECT C,D,F,V,AE,AF,AO,AP,AQ,AR,AS,AL,AM,B WHERE V='${ORDER_WL}' ORDER BY AE DESC LIMIT 500`});
+      tq:`SELECT C,D,F,V,AE,AF,AO,AP,AQ,AR,AS,AL,AM,B,E WHERE V='${ORDER_WL}' ORDER BY AE DESC LIMIT 500`});   // v9.203: +E ร้านค้า
     _pvRows=(rows||[]).map(r=>{
       const dt=_pvParseDT(r['วันเวลาที่รับงาน'])||_pvParseDT(r['วันเวลาปิดงาน']);
       const n=k=>{ const v=String(r[k]||'').replace(/,/g,'').trim(); return v===''?null:(parseFloat(v)||0); };
       return {plate:_pvNorm(r['ทะเบียน']), plateRaw:String(r['ทะเบียน']||'').trim(), ticket:String(r['รหัสใบคุม']||'').trim(),
         driver:String(r['ชื่อคนขับ']||'').trim(), dt, day:_pvDayKey(dt), photo:String(r['รูปสินค้าในตู้']||'').trim(),
         cs:{rice:n('ข้าว(CS)'),sugar:n('น้ำตาล(CS)'),cig:n('บุหรี่(CS)'),other:n('อื่นๆ(CS)'),total:n('รวม(CS)')},
-        chk:String(r['ผลตรวจรูปตู้']||'').trim(), chkBy:String(r['ผู้ตรวจรูปตู้']||'').trim()};
+        chk:String(r['ผลตรวจรูปตู้']||'').trim(), chkBy:String(r['ผู้ตรวจรูปตู้']||'').trim(),
+        stores:String(r['ร้านค้า']||'').trim(), storesN:_pvStoreKey(r['ร้านค้า'])};   // v9.203: รายชื่อร้านในใบคุม
     }).filter(x=>x.plate&&x.dt);
     _pvWl=ORDER_WL;
     console.log(`📸 เทียบรูปตู้: ใบคุม ${_pvRows.length} ใบ (${ORDER_WL}) · มีรูป ${_pvRows.filter(x=>x.photo).length}`);
@@ -9530,6 +9533,32 @@ async function pvLoad(force){
     console.warn('[เทียบรูปตู้] โหลดไม่ได้',e); _pvRows=[]; _pvWl=ORDER_WL; _pvErr=String((e&&e.message)||e);
   }
   _pvLoading=false; renderPhotoView();
+}
+// ══ v9.203: จับคู่ด้วยชื่อร้านด้วย — user: "บางรอบมีเปลี่ยนรถ ให้ดูจากชื่อร้านด้วย" ══
+//   ใบคุม D-Man คอลัมน์ E "ร้านค้า" = ชื่อร้านคั่นด้วยจุลภาค ชื่อตรงกับ arName ในแผน (Keepdata)
+//   เทียบแบบ "ชื่อร้านในแผนอยู่ในข้อความร้านของใบคุมไหม" (ตัดช่องว่าง) — ไม่ split ด้วย , เพราะบางชื่อมี , เอง
+//   ลำดับจับ: ① ทะเบียนตรง + ร้านตรง ≥30% (คันเดียวหลายเที่ยว → จับตามร้าน ไม่ใช่ตามเวลา)
+//            ② ทะเบียนไม่ตรง แต่ร้านตรง ≥50% = เปลี่ยนรถ
+//            ③ ทะเบียนตรงที่เหลือ จับตามเวลารับงานเหมือนเดิม (ชื่อร้านไม่มี/ไม่ตรง)
+function _pvStoreKey(s){ return String(s||'').replace(/\s+/g,'').toLowerCase(); }
+function _pvStoreHit(stores,tk){
+  const n=(stores||[]).length, txt=(tk&&tk.storesN)||'';
+  if(!n||!txt)return {hit:0,n};
+  let hit=0; stores.forEach(x=>{ const k=_pvStoreKey(x); if(k&&txt.indexOf(k)>=0)hit++; });
+  return {hit,n};
+}
+function _pvMatch(trips,tks){
+  const res=new Map(), usedT=new Set(), cand=[];
+  trips.forEach((x,i)=>tks.forEach((t,j)=>{ const sc=_pvStoreHit(x.tp.stores,t);
+    cand.push({i,j,same:x.plate===t.plate,r:sc.n?sc.hit/sc.n:0,hit:sc.hit,n:sc.n}); }));
+  const take=(c,how)=>{ if(res.has(c.i)||usedT.has(c.j))return; res.set(c.i,{t:tks[c.j],how,hit:c.hit,n:c.n}); usedT.add(c.j); };
+  const byScore=(a,b)=>(b.r-a.r)||(b.hit-a.hit)||(tks[a.j].dt-tks[b.j].dt);
+  cand.filter(c=>c.same&&c.r>=0.3).sort(byScore).forEach(c=>take(c,'plate'));    // ①
+  cand.filter(c=>!c.same&&c.r>=0.5).sort(byScore).forEach(c=>take(c,'swap'));    // ②
+  trips.forEach((x,i)=>{ if(res.has(i))return;                                   // ③
+    const j=tks.findIndex((t,jj)=>!usedT.has(jj)&&t.plate===x.plate);
+    if(j>=0){ const sc=_pvStoreHit(x.tp.stores,tks[j]); take({i,j,hit:sc.hit,n:sc.n},'time'); } });
+  return {res,usedT};
 }
 function pvRefresh(){ _pvRows=null; pvLoad(true); }
 function pvSetDate(d){ _pvDate=d; renderPhotoView(); }
@@ -9585,7 +9614,7 @@ function _pvPlanCardPlain(r,tp,ls){
     <div class="pv-stores">${(tp.stores||[]).map((s,j)=>`<div class="r"><span class="n">${j+1}.</span><span class="s">${_pvEsc(s)}</span><span class="c">${_pvEsc((tp.scs||[])[j]||'')}</span></div>`).join('')}</div>
   </div>`;
 }
-function _pvPhotoCard(t,planCs,ls){
+function _pvPhotoCard(t,planCs,ls,m,r){
   if(!t)return `<div class="pv-none">ยังไม่มีใบคุมของคันนี้ในวันที่เลือก<br><span style="font-size:11px;color:#9BAAB8">คนขับยังไม่รับงาน หรือใบคุมลงคนละวัน</span></div>`;
   const th=_pvThumb(t.photo), alt=_pvAlt(t.photo);
   // เทียบกับ "ยอดที่ควรได้" = แผน − ของไม่พอ (สต็อกไม่พอตั้งแต่แรก ไม่ใช่ของขาดตอนขึ้นรถ)
@@ -9596,11 +9625,14 @@ function _pvPhotoCard(t,planCs,ls){
     diff=Math.abs(d)<=tol?`<span class="pv-ok">ตรงกับแผน${d?` (${d>0?'+':''}${d})`:''}</span>`
       :`<span class="${Math.abs(d)/pt>0.1?'pv-bad':'pv-kv'}" style="${Math.abs(d)/pt>0.1?'':'font-weight:700'}" title="เทียบกับยอดที่ควรได้ ${pt.toLocaleString('en-US')} ลัง${lost?` (แผน ${Math.round(pt0).toLocaleString('en-US')} − ของไม่พอ ${Math.round(lost).toLocaleString('en-US')})`:''}">${d>0?'มากกว่าแผน +':'น้อยกว่าแผน '}${d.toLocaleString('en-US')} ลัง</span>`; }
   return `<div>
-    <div class="pv-h">📸 รูปในตู้ <span class="pv-plate">${_pvEsc(t.ticket||'')}</span>
+    ${(m&&m.how==='swap')?`<div class="pv-swap">🔁 เปลี่ยนรถ · แผน <b>${_pvEsc((r&&r.nick)||'')} ${_pvEsc((r&&r.plate)||'')}</b> → ใช้จริง <b>${_pvEsc(t.plateRaw)}</b></div>`:''}
+    <div class="pv-h">📸 รูปในตู้ <span class="pv-plate">${_pvEsc(t.ticket||'')}</span>${(m&&m.how==='swap')?`<span class="pv-chip" style="background:#FFEDD5;color:#C2410C">${_pvEsc(t.plateRaw)}</span>`:''}
       <span style="margin-left:auto;font-size:11px;color:#6B7A90">รับงาน ${_pvHm(t.dt)}</span></div>
     ${th?`<a href="${_pvEsc(alt)}" target="_blank" rel="noopener" title="กดเพื่อเปิดรูปเต็ม"><img class="pv-img" loading="lazy" src="${_pvEsc(th)}" alt="รูปสินค้าในตู้ ${_pvEsc(t.ticket)}" onerror="if(!this.dataset.f){this.dataset.f=1;this.src='${_pvEsc(alt)}';}else{this.style.display='none';}"></a>`
         :`<div class="pv-none">ยังไม่ได้ถ่ายรูปสินค้าในตู้</div>`}
     <div class="pv-cs">${t.cs.total!=null?`<span class="pv-kv">📦 จริง <b>${Math.round(t.cs.total).toLocaleString('en-US')}</b> ลัง</span>`:'<span class="pv-kv">ยังไม่ได้นับลัง</span>'}${diff}${_pvCats(t.cs)}</div>
+    ${(m&&m.n)?(()=>{ const q=m.hit/m.n, col=q>=0.999?'pv-ok':(q>=0.5?'pv-kv':'pv-bad');
+        return `<div class="pv-cs"><span class="${col}" style="font-weight:700" title="ชื่อร้านในแผนที่เจอในรายชื่อร้านของใบคุม">🏪 ร้านตรง ${m.hit}/${m.n}</span>${(m.how==='time'&&q<0.3)?'<span class="pv-bad">⚠ ร้านไม่ตรงแผน — อาจสลับเที่ยว/สลับคัน</span>':''}</div>`; })():''}
     <div class="pv-st">🧑‍✈️ ${_pvEsc(t.driver||'—')}${t.chk?` · ✅ ตรวจรูปแล้ว: ${_pvEsc(t.chk)}${t.chkBy?' ('+_pvEsc(t.chkBy)+')':''}`:''}</div>
   </div>`;
 }
@@ -9621,9 +9653,7 @@ function renderPhotoView(){
   if(!_pvRows&&_pvLoading){ host.innerHTML='<div class="pv-none">⏳ กำลังโหลดรูปสินค้าในตู้จาก D-Man…</div>'; return; }
   // ── ใบคุมของวันที่เลือก (เรียงตามเวลารับงาน) ──
   const wantDay=_pvDayKey(parseAnyDate(_pvDate));
-  const tkt={}; (_pvRows||[]).filter(x=>x.day===wantDay).sort((a,b)=>a.dt-b.dt)
-    .forEach(x=>{ (tkt[x.plate]=tkt[x.plate]||[]).push(x); });
-  const used=new Set();
+  const tks=(_pvRows||[]).filter(x=>x.day===wantDay).sort((a,b)=>a.dt-b.dt);   // ใบคุมของวันนั้นทั้งคลัง
   // ── แผนของวันนั้น (ใช้ตัวเดียวกับหน้าบันทึก) ──
   const _keep=dashFilterDate; dashFilterDate=_pvDate;
   let d=null; try{ d=_lineSummaryDataSaved(); }catch(e){ console.warn('[เทียบรูปตู้]',e); }
@@ -9632,19 +9662,18 @@ function renderPhotoView(){
   let LOSS={}; try{ LOSS=((typeof _currentTripLoss==='function')?_currentTripLoss(_pvDate):null)||{}; }catch(e){}
   const BOX=_pvTripBoxes();   // v9.200: กล่องเที่ยวหน้าตาเดียวกับหน้าบันทึก
   const rows=(d&&d.rows)||[];
-  let h='', nPair=0, nMiss=0;
-  rows.forEach(r=>{
-    const list=tkt[_pvNorm(r.plate)]||[];
-    (r.trips||[]).forEach((tp,i)=>{
-      const t=list[i]||null; if(t)used.add(t.ticket+'|'+t.dt.getTime());
-      if(t)nPair++; else nMiss++;
-      const ls=LOSS[r.plate+'||'+tp.tr]||null;
-      const box=BOX[_pvNorm(r.plate)+'||'+tp.tr]||'';
-      h+=`<div class="pv-row${t?'':' miss'}">${_pvPlanCard(r,tp,ls,box)}${_pvPhotoCard(t,tp.tcat,ls)}</div>`;
-    });
+  let h='', nPair=0, nMiss=0, nSwap=0;
+  const trips=[]; rows.forEach(r=>(r.trips||[]).forEach(tp=>trips.push({r,tp,plate:_pvNorm(r.plate)})));
+  const MM=_pvMatch(trips,tks);
+  trips.forEach((x,i)=>{
+    const {r,tp}=x, m=MM.res.get(i)||null, t=m?m.t:null;
+    if(t)nPair++; else nMiss++; if(m&&m.how==='swap')nSwap++;
+    const ls=LOSS[r.plate+'||'+tp.tr]||null;
+    const box=BOX[_pvNorm(r.plate)+'||'+tp.tr]||'';
+    h+=`<div class="pv-row${t?'':' miss'}${(m&&m.how==='swap')?' swap':''}">${_pvPlanCard(r,tp,ls,box)}${_pvPhotoCard(t,tp.tcat,ls,m,r)}</div>`;
   });
   // ── ใบคุมที่ไม่มีในแผน (จัดรถไม่ได้บันทึก / คนละวัน) ──
-  const extra=[]; Object.keys(tkt).forEach(p=>tkt[p].forEach(t=>{ if(!used.has(t.ticket+'|'+t.dt.getTime()))extra.push(t); }));
+  const extra=tks.filter((t,j)=>!MM.usedT.has(j));
   if(extra.length){
     h+=`<div class="pv-sec">🚩 ใบคุมที่ไม่มีในแผนของวันนี้ ${extra.length} ใบ (รับงานวันนี้แต่ไม่พบคัน/เที่ยวในแผนที่บันทึก)</div>`;
     extra.sort((a,b)=>a.dt-b.dt).forEach(t=>{
@@ -9652,12 +9681,13 @@ function renderPhotoView(){
         <div class="pv-h">🚛 <span class="pv-plate">${_pvEsc(t.plateRaw)}</span><span class="pv-chip" style="background:#FEF3C7;color:#92400E">ไม่มีในแผน</span></div>
         <div class="pv-st">🧑‍✈️ ${_pvEsc(t.driver||'—')}</div>
         <div class="pv-st">ใบคุม ${_pvEsc(t.ticket||'—')} · รับงาน ${_pvHm(t.dt)}</div>
-        <div class="pv-st" style="color:#8795A6">คันนี้ไม่ได้อยู่ในแผนที่บันทึกของวัน ${_pvDate} — อาจจัดรถแล้วไม่ได้กดบันทึก หรือเป็นงานที่เพิ่มหน้างาน</div>
+        ${t.stores?`<div class="pv-st">🏪 ${_pvEsc(t.stores.length>220?t.stores.slice(0,220)+'…':t.stores)}</div>`:''}
+        <div class="pv-st" style="color:#8795A6">ไม่พบคัน/ร้านที่ตรงกันในแผนที่บันทึกของวัน ${_pvDate}</div>
       </div>${_pvPhotoCard(t,null,null)}</div>`;
     });
   }
   if(!h)h=`<div class="pv-none">วันที่ ${_pvDate} ยังไม่มีแผนจัดรถหรือใบคุมให้เทียบ</div>`;
-  else h=`<div style="font-size:12px;color:#6B7A90;margin-bottom:10px">วันส่ง <b>${_pvDate}</b> · เทียบได้ ${nPair} เที่ยว${nMiss?` · ยังไม่มีใบคุม ${nMiss} เที่ยว`:''}${extra.length?` · ใบคุมนอกแผน ${extra.length} ใบ`:''}</div>`+h;
+  else h=`<div style="font-size:12px;color:#6B7A90;margin-bottom:10px">วันส่ง <b>${_pvDate}</b> · เทียบได้ ${nPair} เที่ยว${nSwap?` · <b style="color:#C2410C">เปลี่ยนรถ ${nSwap}</b>`:''}${nMiss?` · ยังไม่มีใบคุม ${nMiss} เที่ยว`:''}${extra.length?` · ใบคุมนอกแผน ${extra.length} ใบ`:''}</div>`+h;
   host.innerHTML=h;
 }
 // ══ v9.40: จัดการค้างส่ง (เลือกใบที่ให้ขึ้นค้างส่ง) ══
