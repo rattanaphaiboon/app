@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.82</title>
+<title>HR Rattana v5.83</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3698,7 +3698,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.82';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.83';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -11711,40 +11711,70 @@ async function teamPickList_(fallbackList) {
 let _approvalsLoadPromise = null;   // รอบดึงของสดที่ค้างอยู่ — admDecide รอตัวนี้ก่อนบันทึก กันชี้แถวผิด
 function approvalsCacheKey_() { return 'approvalsCache_' + (currentUser ? currentUser.empId : ''); }
 
+/* v12.83: คิวอนุมัติเสถียร + เร็วขึ้น (surat แจ้ง "เดี๋ยวขึ้นเดี๋ยวไม่ขึ้น โหลดช้า")
+   ต้นเหตุเดิม 3 อย่าง:
+     (ก) เซิร์ฟเวอร์กรองทีมให้แล้ว แต่แอปกรองซ้ำด้วย resolveMyTeam() ซึ่งพึ่งชีท Users (gviz CSV)
+         + คำขอ getPTTStaff อีกตัว — ถ้าสองอย่างนั้นมาช้า/ล้ม ทีมจะว่าง → ใบโดนกรองทิ้งหมด
+     (ข) ยิงเรียงกัน 2 รอบ (getPendingAll → getPTTStaff) กว่าจะวาดได้
+     (ค) การ์ดหน้าแรกยิง getPendingAll ของตัวเองอีกรอบ = คำขอหนักซ้ำซ้อน
+   แก้: เชื่อผลเซิร์ฟเวอร์ (backend v9.33 ติดธง canDecide มาให้) · ยิงรอบเดียวแล้วแชร์กัน
+        · แคชพร้อมเวลาอัปเดต · พลาดแล้ว retry ให้เอง 1 ครั้ง */
+let _apLastAt = 0;
+function apCacheRead_() {
+  try {
+    const c = JSON.parse(localStorage.getItem(approvalsCacheKey_()) || 'null');
+    if (Array.isArray(c)) return { items: c, at: 0 };                 // แคชรูปแบบเก่า
+    if (c && Array.isArray(c.items)) return { items: c.items, at: c.at || 0 };
+  } catch (_) {}
+  return null;
+}
+function apCacheWrite_(items) {
+  _apLastAt = Date.now();
+  try { localStorage.setItem(approvalsCacheKey_(), JSON.stringify({ items, at: _apLastAt })); } catch (_) {}
+}
+/* ยิง getPendingAll รอบเดียว แล้วแชร์ให้ทั้งหน้าอนุมัติและการ์ดหน้าแรก */
+function apFetch_(opts) {
+  if (_approvalsLoadPromise) return _approvalsLoadPromise;
+  const withDone = !opts || opts.withDone !== false;
+  _approvalsLoadPromise = (async () => {
+    let res;
+    try {
+      res = await callAppsScript('getPendingAll', { supervisorId: currentUser.empId, withDone: withDone ? 1 : 0 });
+    } catch (e1) {
+      await new Promise(r => setTimeout(r, 1200));   // v12.83: เน็ตสะดุด/สคริปต์ตื่น — ลองอีกครั้งเดียว
+      res = await callAppsScript('getPendingAll', { supervisorId: currentUser.empId, withDone: withDone ? 1 : 0 });
+    }
+    // เซิร์ฟเวอร์ตัดสินขอบเขตให้แล้ว (canDecide) — แอปกันแค่ "ใบของตัวเอง" เป็นชั้นสำรอง
+    const items = (res.items || []).filter(notMyOwnReq_);
+    _approvalItems = items;
+    apCacheWrite_(items);
+    updateApproveAlert(items.filter(it => (it.status || 'pending') === 'pending'));
+    return items;
+  })();
+  _approvalsLoadPromise.finally(() => { _approvalsLoadPromise = null; });
+  return _approvalsLoadPromise;
+}
 async function loadApprovals() {
   const el = document.getElementById('approvalsList');
   if (!el) return;
-  // 1) มีของเก่า (ในหน่วยความจำ หรือแคชเครื่อง) → วาดทันที + ป้าย ⏳ ว่ากำลังอัปเดต
+  // 1) มีของเก่า → วาดทันที (ป้าย ⏳ กำลังอัปเดต) ไม่ต้องรอเน็ต
   if (!_approvalItems.length) {
-    let cached = null;
-    try { cached = JSON.parse(localStorage.getItem(approvalsCacheKey_()) || 'null'); } catch (_) {}
-    if (Array.isArray(cached) && cached.length) _approvalItems = cached;
+    const c = apCacheRead_();
+    if (c && c.items.length) { _approvalItems = c.items; _apLastAt = c.at; }
   }
   if (_approvalItems.length) renderApprovalsList_(true);
   else el.innerHTML = '<div class="text-sm text-muted">กำลังโหลด...</div>';
 
   // 2) ดึงของจริงเบื้องหลัง แล้ววาดทับ (คงตำแหน่งเลื่อนเดิม)
-  if (_approvalsLoadPromise) return _approvalsLoadPromise;   // มีรอบค้างอยู่ — ไม่ยิงซ้อน
-  _approvalsLoadPromise = (async () => {
-    try {
-      const res = await callAppsScript('getPendingAll', { supervisorId: currentUser.empId, withDone: 1 });   // v12.38: เอาประวัติอนุมัติ/ไม่อนุมัติมาด้วย
-      const all = res.items || [];
-      // v12.44: ทุกคน (รวม HR) กรองเป็นลูกทีมตัวเอง + ใบที่ถูกกำหนดผู้อนุมัติเฉพาะ
-      const team = await resolveMyTeam();
-      // v12.44 (surat เคาะ): HR ก็เห็นเฉพาะลูกทีมตัวเองเหมือนหัวหน้าคนอื่น — เดิม HR เห็นทุกใบทั้งบริษัท
-      const items = all.filter(it => it.assigned || inMyTeam(team, it.empId, it.name)).filter(notMyOwnReq_);
-      _approvalItems = items;
-      try { localStorage.setItem(approvalsCacheKey_(), JSON.stringify(items)); } catch (_) {}
-      updateApproveAlert(items.filter(it => (it.status || 'pending') === 'pending'));   // v12.38: การ์ด/ป้ายนับเฉพาะที่รอ
-      const y = window.scrollY;
-      renderApprovalsList_(false);
-      window.scrollTo(0, y);
-    } catch (e) {
-      if (!_approvalItems.length) el.innerHTML = `<div class="alert alert-warn">โหลดไม่ได้: ${e.message}</div>`;
-      else toast('รีเฟรชรายการไม่สำเร็จ — แสดงข้อมูลรอบก่อน', 'warning');
-    } finally { _approvalsLoadPromise = null; }
-  })();
-  return _approvalsLoadPromise;
+  try {
+    await apFetch_({ withDone: true });
+    const y = window.scrollY;
+    renderApprovalsList_(false);
+    window.scrollTo(0, y);
+  } catch (e) {
+    if (!_approvalItems.length) el.innerHTML = `<div class="alert alert-warn">โหลดไม่ได้: ${escH_(e.message)}<br><button class="btn btn-outline" style="margin-top:10px" onclick="loadApprovals()">ลองใหม่</button></div>`;
+    else { renderApprovalsList_(true); toast('รีเฟรชไม่สำเร็จ — แสดงข้อมูลรอบก่อน', 'warning'); }
+  }
 }
 
 /* v12.38: แท็บสถานะ — รออนุมัติ (ค่าเริ่มต้น) / อนุมัติ / ไม่อนุมัติ */
@@ -11776,6 +11806,13 @@ function _apPeriod(it) {
   return `${from}${dTxt}`;
 }
 
+/* v12.83: บอกว่าของที่เห็นอยู่เก่าแค่ไหน — จะได้รู้ว่ากำลังดูของเก่าหรือของสด */
+function apAgeText_() {
+  if (!_apLastAt) return '';
+  const mins = Math.round((Date.now() - _apLastAt) / 60000);
+  if (mins < 1) return '';
+  return mins < 60 ? ` (ข้อมูล ${mins} นาทีที่แล้ว)` : ` (ข้อมูล ${new Date(_apLastAt).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.)`;
+}
 function renderApprovalsList_(stale) {
   const el = document.getElementById('approvalsList');
   const kpi = document.getElementById('approvalsKpi');
@@ -11791,7 +11828,7 @@ function renderApprovalsList_(stale) {
   const items = _approvalItems.filter(it => stOf(it) === _approvalsTab);
   const isHR = false;   // v12.44: ทุกคนเห็นเฉพาะลูกทีมตัวเอง — ป้ายบอก "· ลูกทีม" เสมอ
   if (kpi) {
-    kpi.innerHTML = `<div class="kpi"><div class="num">${items.length}</div><div class="label">${TAB_LABEL[_approvalsTab]}${isHR ? '' : ' · ลูกทีม'}${stale ? ' · ⏳ กำลังอัปเดต' : ''}</div></div>`;
+    kpi.innerHTML = `<div class="kpi"><div class="num">${items.length}</div><div class="label">${TAB_LABEL[_approvalsTab]}${isHR ? '' : ' · ลูกทีม'}${stale ? ' · ⏳ กำลังอัปเดต' + apAgeText_() : ''}</div></div>`;
   }
   if (!items.length) {
     const hasAnyStatus = _approvalItems.some(it => it.status);
@@ -11934,21 +11971,13 @@ async function updateApproveAlert(preItems) {
       if (Date.now() - _approveAlertAt < 60000) { renderApproveAlert_(); return; }
       _approveAlertBusy = true;
       try {
-        const res = await callAppsScript('getPendingAll', { supervisorId: currentUser.empId });
-        const all = res.items || [];
-        const team = await resolveMyTeam();
-        // v12.23: หัวหน้าที่ทีมว่างเพราะ allUsers ยังไม่โหลด (วินาทีแรกหลังเปิดแอป) — อย่าเพิ่งสรุปว่า 0 รอรอบถัดไป
-        if (!team.isHR && !team.members.length && !(allUsers && allUsers.length)) return;
-        items = all.filter(it => it.assigned || inMyTeam(team, it.empId, it.name)).filter(notMyOwnReq_);   // v12.44: HR เห็นเฉพาะลูกทีมตัวเอง
-        // v12.31/38: แชร์ผลให้หน้าอนุมัติเฉพาะตอนหน้ายังว่าง — ถ้ามีชุดเต็ม (รวมประวัติ) อยู่แล้ว อย่าทับด้วยชุดที่มีแต่รายการรอ
-        if (!_approvalItems.length) {
-          _approvalItems = items;
-          try { localStorage.setItem(approvalsCacheKey_(), JSON.stringify(items)); } catch (_) {}
-          try {
-            const pg = document.getElementById('page-approvals');
-            if (pg && pg.classList.contains('active')) { const y = window.scrollY; renderApprovalsList_(false); window.scrollTo(0, y); }
-          } catch (_) {}
-        }
+        // v12.83: ใช้คำขอชุดเดียวกับหน้าอนุมัติ (apFetch_ รวมรอบให้) — เดิมยิง getPendingAll ซ้ำอีกตัว
+        const all = await apFetch_({ withDone: true });
+        items = all.filter(it => (it.status || 'pending') === 'pending');
+        try {
+          const pg = document.getElementById('page-approvals');
+          if (pg && pg.classList.contains('active')) { const y = window.scrollY; renderApprovalsList_(false); window.scrollTo(0, y); }
+        } catch (_) {}
       } finally { _approveAlertBusy = false; }
     }
     _approveAlertAt = Date.now();

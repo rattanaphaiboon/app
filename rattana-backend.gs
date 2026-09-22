@@ -1,6 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.33 — ★ คิวอนุมัติ "เดี๋ยวขึ้นเดี๋ยวไม่ขึ้น" + ช้า (★ ต้อง Deploy · คู่แอป v12.83):
+ *          getPendingAll ใช้ approverScope_/canDecide_ ชุดเดียวกับตอนกดอนุมัติ (เลิกสร้างทีมซ้ำ)
+ *          ติดธง canDecide ไปกับทุกใบ → แอปเลิกกรองซ้ำด้วย resolveMyTeam ที่พึ่ง gviz+getPTTStaff
+ *          (สองตัวนั้นมาช้า/ล้ม = ใบหายทั้งหน้า) · cache scope ต่อ execution · p.pendingOnly=1
  * v9.32 — 6 ฟีเจอร์ใหม่ (surat เคาะ 22/09 · คู่แอป v12.82 · ★ ต้อง Deploy):
  *          แจ้งเตือนในแอป (แท็บ "แจ้งเตือน" — ยื่นคำขอ→เตือนหัวหน้า, ตัดสิน→เตือนผู้ยื่น, HR ตอบ→เตือน)
  *          ปฏิทินลาทีม getTeamLeaveCalendar · ติดต่อ HR (แท็บ "ติดต่อHR") · ความยินยอม PDPA
@@ -206,7 +210,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.32', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.33', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -4053,43 +4057,21 @@ function getTimeIssues(p, user) {
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
+/* v9.33: คิวอนุมัติใช้ "ขอบเขตชุดเดียวกับตอนกดอนุมัติ" (approverScope_/canDecide_ ของ v9.31)
+   เดิมสร้างทีมเองในนี้อีกชุด แล้วฝั่งแอปยังกรองซ้ำอีกชั้นด้วย resolveMyTeam() ที่อาศัย
+   ชีท Users (gviz CSV) + คำขอ getPTTStaff — ถ้าสองอย่างนั้นมาช้า/ล้ม ใบจะถูกกรองทิ้งหมด
+   = อาการ "เดี๋ยวขึ้นเดี๋ยวไม่ขึ้น" · ตอนนี้เซิร์ฟเวอร์ตัดสินที่เดียว ติดธง canDecide ไปให้
+   p.pendingOnly = ไม่ต้องแนบประวัติ (เข้าหน้าครั้งแรกเร็วขึ้น) */
 function getPendingAll(p, user) {
   try {
     const ss = SpreadsheetApp.openById(CFG.attendanceSheetId);
     const items = [];
-    const teamEmpIds = new Set();
-    let mySupName = '';                          // v6.2: ชื่อของ "ผู้เปิดหน้าอนุมัติ" (ใช้เทียบกับตารางผู้อนุมัติเฉพาะ)
-    const ovrMap = approverOverrideMap_();       // v6.2: {รหัสพนักงาน: ชื่อผู้อนุมัติเฉพาะ}
-    const iAmHR = isHR(user);
-    if (p.supervisorId) {
-      try {
-        const uSS  = SpreadsheetApp.openById(CFG.usersSheetId);
-        const uSh  = uSS.getSheetByName('Sheet1');
-        if (uSh) {
-          const uData = uSh.getDataRange().getValues();
-          let supName = '';
-          for (let i = 1; i < uData.length; i++) {
-            if (String(uData[i][2]).trim() === String(p.supervisorId).trim()) {
-              supName = String(uData[i][4]).trim();
-              break;
-            }
-          }
-          if (supName) {
-            for (let i = 1; i < uData.length; i++) {
-              if (String(uData[i][13]).trim() === supName)
-                teamEmpIds.add(String(uData[i][2]).trim());
-            }
-          }
-          mySupName = supName;
-        }
-      } catch(_) {}
-      // ชื่อจาก session (เผื่อผู้อนุมัติไม่มีแถวในชีท Users เช่นบัญชี PTT)
-      if (!mySupName) mySupName = cleanName_(String(user.name || ''));
-      // v6.2: คนที่ถูกกำหนดให้ "เรา" เป็นผู้อนุมัติเฉพาะ → ใส่เข้าทีมที่เราเห็น
-      Object.keys(ovrMap).forEach(id => {
-        if (normNameTh_(ovrMap[id]) === normNameTh_(mySupName)) teamEmpIds.add(String(id).trim());
-      });
-    }
+    const scope = approverScope_(user);
+    const ovrMap = scope.ovr;
+    const iAmHR = scope.hr;
+    const teamEmpIds = scope.team;
+    const mySupName = scope.myName;
+    const pendingOnly = String(p.pendingOnly || '') === '1';
     Object.keys(APPROVE_CFG).forEach(name => {
       let cfg = APPROVE_CFG[name];
       const sh = ss.getSheetByName(name);
@@ -4106,17 +4088,12 @@ function getPendingAll(p, user) {
         const stKey = (!raw || raw === 'pending') ? 'pending'
                     : (raw.indexOf('approve') === 0 ? 'approved'
                     : (raw.indexOf('reject') === 0 ? 'rejected' : 'other'));
-        if (stKey !== 'pending' && !p.withDone) continue;
+        if (stKey !== 'pending' && (!p.withDone || pendingOnly)) continue;
         if (stKey === 'other') continue;   // สถานะแปลกๆ ที่กรอกมือ — ไม่เอาเข้าแท็บ
-        if (teamEmpIds.size > 0 && !teamEmpIds.has(String(r[1]).trim())) continue;
-        // v6.2: คนที่มี "ผู้อนุมัติเฉพาะ" — คำขอไปเข้าคิวของคนนั้นเท่านั้น (HR ยังเห็นทุกใบตามปกติ)
+        // v9.33: ด่านเดียว — ตรงกับตอนกดอนุมัติเป๊ะ (ครอบ ทีม/ผู้อนุมัติเฉพาะ/PTT/ห้ามใบตัวเอง)
+        if (!canDecide_(scope, r[1]).ok) continue;
         const ovrName = ovrMap[String(r[1]).trim()] || '';
         const assigned = !!(ovrName && normNameTh_(ovrName) === normNameTh_(mySupName));
-        if (ovrName && !assigned && !iAmHR) continue;
-        // v6.1: ห้ามเห็น/อนุมัติคำขอของตัวเอง — ต้องให้หัวหน้าของคนนั้นอนุมัติ
-        // (เคสจริง: จิรวรรณ หัวหน้า PTT เห็นคำขอเปลี่ยนวันหยุดของตัวเองในคิวตัวเอง เพราะทีม PTT รวมตัวเธอด้วย)
-        // คนอื่นที่มีสิทธิ์อนุมัติ (หัวหน้าของเธอ / HR) ยังเห็นตามปกติ — ไม่มีคำขอตกหล่น
-        if (p.supervisorId && String(r[1]).trim() === String(p.supervisorId).trim()) continue;
         const info = cfg.info.map(ci => String(r[ci] || '')).filter(Boolean).join(' · ');
         const it = {
           sheet: name, row: i + 1,
@@ -4125,6 +4102,7 @@ function getPendingAll(p, user) {
           status: stKey,
           approver: (cfg.approver != null) ? String(r[cfg.approver] || '') : '',
           assigned: assigned,   // v6.2: ใบนี้ถูกกำหนดให้เราเป็นผู้อนุมัติเฉพาะ (แอปข้ามการกรองทีม)
+          canDecide: true,      // v9.33: ผ่านด่านขอบเขตฝั่งเซิร์ฟเวอร์แล้ว — แอปไม่ต้องกรองซ้ำ
           photo: (cfg.photo != null) ? photoDirectUrl_(r[cfg.photo]) : '',   // v8.9: รูปแนบ (ลิงก์รูปตรง ใส่ <img> ได้เลย)
         };
         // v7.4: ส่งช่วงวันลา + ชั่วโมง มาด้วย เพื่อให้หน้าอนุมัติโชว์ "ลาตั้งแต่–ถึง กี่วัน"
@@ -4136,9 +4114,9 @@ function getPendingAll(p, user) {
         if (stKey === 'pending') items.push(it);
         else doneRows.push(it);
       }
-      doneRows.slice(-60).forEach(it => items.push(it));   // v5.7: ประวัติเอาท้ายสุด 60 รายการ/ชีท
+      if (!pendingOnly) doneRows.slice(-60).forEach(it => items.push(it));   // v5.7: ประวัติเอาท้ายสุด 60 รายการ/ชีท
     });
-    return { ok: true, items: items };
+    return { ok: true, items: items, scope: { hr: iAmHR, team: teamEmpIds.size, name: mySupName }, pendingOnly: pendingOnly };
   } catch(e) { return { ok: false, error: e.message }; }
 }
 
@@ -4222,8 +4200,10 @@ function revokeApproval(p, user) {
      · ใบที่มีผู้อนุมัติเฉพาะ → เฉพาะคนนั้น (หรือ HR)
      · ใบของตัวเอง   → ไม่ได้ ไม่ว่าระดับไหน
    ใช้ตัวตนจาก token (user.empId) เท่านั้น ไม่รับรหัสหัวหน้าจากฝั่งแอป */
+let _scopeCache = null;   // v9.33: cache ต่อ execution — getPendingAll/canDecide_ เรียกซ้ำ
 function approverScope_(user) {
   const me = String((user && user.empId) || '').trim();
+  if (_scopeCache && _scopeCache.me === me) return _scopeCache;
   const team = new Set();
   let myName = cleanName_(String((user && user.name) || ''));
   try {
@@ -4240,7 +4220,8 @@ function approverScope_(user) {
       Object.keys(pm).forEach(id => { const t = pm[id]; if (t && t.saka === mine.saka && t.khlang === mine.khlang) team.add(String(id).trim()); });
     }
   } catch (_) {}
-  return { me, myName, team, ovr, hr: isHR(user) };
+  _scopeCache = { me, myName, team, ovr, hr: isHR(user) };
+  return _scopeCache;
 }
 function canDecide_(scope, rowEmpId) {
   const id = String(rowEmpId || '').trim();
