@@ -1,6 +1,9 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.36 — เร็วขึ้นตอนกดส่งฟอร์ม (คู่แอป v12.85): reqSeen_ ดู CacheService ก่อน
+ *          ถ้าพลาดค่อยค้นชีทเฉพาะ 500 แถวท้าย (เดิมค้นทั้งแท็บได้ถึง 3000 แถวทุกคำขอ)
+ *          + ตัวตัด _reqLog ตรวจว่าตัดได้จริง (กันเคสฟิลเตอร์บล็อก deleteRows เงียบๆ)
  * v9.35 — วันที่ได้รับเอกสารนับ "รวมวันอนุมัติเป็นวันที่ 1" (surat ยืนยัน 22/09):
  *          อนุมัติ 23/09 → ได้รับ 29/09 · v9.34 บวก 7 ตรงๆ ได้ 30/09 ซึ่งเกินไป 1 วัน
  * v9.34 — ขอเอกสาร: โชว์ "วันที่ได้รับเอกสาร" = วันอนุมัติ + 7 วัน (surat เคาะ 22/09
@@ -216,7 +219,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.35', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.36', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -388,21 +391,41 @@ function reqLogTab_() {
   }
   return sh;
 }
+/* v9.36: เดิม reqSeen_ ค้นทั้งแท็บ (ได้ถึง 3000 แถว) ทุกครั้งที่มีคนกดส่งฟอร์ม
+   ตอนนี้ดู CacheService ก่อน (retry เกิดภายในไม่กี่วินาที–นาที ครอบด้วย TTL 6 ชม.สบายๆ)
+   ถ้าไม่เจอค่อยค้นชีท "เฉพาะ 500 แถวท้าย" — reqId ที่เก่ากว่านั้นไม่มีทางถูก retry แล้ว
+   ชีทยังเก็บครบเหมือนเดิมเพื่อไว้ตรวจย้อนหลัง */
+const REQ_CACHE_SEC  = 6 * 3600;
+const REQ_SCAN_ROWS  = 500;
+function reqCache_() { try { return CacheService.getScriptCache(); } catch (e) { return null; } }
 function reqSeen_(reqId) {
   try {
+    const c = reqCache_();
+    if (c && c.get('req_' + reqId)) return true;          // ทางด่วน
     const sh = reqLogTab_();
-    if (sh.getLastRow() < 2) return false;
-    const hit = sh.getRange(2, 1, sh.getLastRow() - 1, 1).createTextFinder(reqId).matchEntireCell(true).findNext();
+    const last = sh.getLastRow();
+    if (last < 2) return false;
+    const from = Math.max(2, last - REQ_SCAN_ROWS + 1);
+    const hit = sh.getRange(from, 1, last - from + 1, 1)
+                  .createTextFinder(reqId).matchEntireCell(true).findNext();
     return !!hit;
   } catch (e) { return false; }
 }
 function reqMark_(reqId, action, user) {
   try {
+    const c = reqCache_();
+    if (c) { try { c.put('req_' + reqId, '1', REQ_CACHE_SEC); } catch (e2) {} }
     const sh = reqLogTab_();
     sh.appendRow([reqId, action, String((user && user.empId) || ''), new Date()]);
     // เก็บย้อนหลังพอประมาณ — เกิน 3000 แถวตัดหัวทิ้ง 1000 (reqId เก่ากว่านั้นไม่มีทาง retry แล้ว)
+    // v9.36: ตรวจว่าตัดได้จริง (บทเรียนจากแท็บ จัดกะ — ฟิลเตอร์ทำให้ deleteRows เงียบๆ ไม่ลบ)
     const last = sh.getLastRow();
-    if (last > 3000) sh.deleteRows(2, 1000);
+    if (last > 3000) {
+      const before = sh.getMaxRows();
+      sh.deleteRows(2, 1000);
+      SpreadsheetApp.flush();
+      if (sh.getMaxRows() >= before) console.warn('[_reqLog] ตัดแถวไม่สำเร็จ — เช็คว่ามีฟิลเตอร์คลุมแท็บนี้อยู่หรือเปล่า');
+    }
   } catch (e) {}
 }
 
