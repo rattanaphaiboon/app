@@ -1,6 +1,8 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.35 — วันที่ได้รับเอกสารนับ "รวมวันอนุมัติเป็นวันที่ 1" (surat ยืนยัน 22/09):
+ *          อนุมัติ 23/09 → ได้รับ 29/09 · v9.34 บวก 7 ตรงๆ ได้ 30/09 ซึ่งเกินไป 1 วัน
  * v9.34 — ขอเอกสาร: โชว์ "วันที่ได้รับเอกสาร" = วันอนุมัติ + 7 วัน (surat เคาะ 22/09
  *          คู่แอป v12.84 · ★ ต้อง Deploy) — เพิ่ม stampAt ให้ชีท เอกสารApp ด้วย
  *          เพราะเดิมคอลัมน์ I ค้างเป็นเวลาที่ยื่น ไม่มีที่ไหนเก็บวันอนุมัติเลย
@@ -214,7 +216,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.34', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.35', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -6809,6 +6811,8 @@ function getMyConsent(p, user) {
    คอลัมน์ I ของชีท เอกสารApp อาจเป็นสตริง 'dd/MM/yyyy HH:mm:ss' หรือ Date object
    (Sheets แปลงให้เองตอนเขียน) — ต้องรับได้ทั้งสองแบบ เหมือนบทเรียนจากแท็บ จัดกะ
    ============================================================ */
+/* v9.35 (surat ยืนยัน 22/09): นับแบบ "รวมวันอนุมัติเป็นวันที่ 1"
+   อนุมัติ 23/09 → 23,24,25,26,27,28,29 = ครบ 7 วันที่ 29/09 (ไม่ใช่ 30/09) */
 const DOC_READY_DAYS = 7;
 function docParseStamp_(v) {
   if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
@@ -6830,6 +6834,6 @@ function docDateText_(v) {
 function docReceiveDate_(v) {
   const d = docParseStamp_(v);
   if (!d) return '';
-  const r = new Date(d.getFullYear(), d.getMonth(), d.getDate() + DOC_READY_DAYS);
+  const r = new Date(d.getFullYear(), d.getMonth(), d.getDate() + DOC_READY_DAYS - 1);   // v9.35: รวมวันอนุมัติ
   return Utilities.formatDate(r, 'Asia/Bangkok', 'dd/MM/yyyy');
 }
