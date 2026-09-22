@@ -1,6 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.32 — 6 ฟีเจอร์ใหม่ (surat เคาะ 22/09 · คู่แอป v12.82 · ★ ต้อง Deploy):
+ *          แจ้งเตือนในแอป (แท็บ "แจ้งเตือน" — ยื่นคำขอ→เตือนหัวหน้า, ตัดสิน→เตือนผู้ยื่น, HR ตอบ→เตือน)
+ *          ปฏิทินลาทีม getTeamLeaveCalendar · ติดต่อ HR (แท็บ "ติดต่อHR") · ความยินยอม PDPA
+ *          (แท็บ "ความยินยอมPDPA") · ช่องทางเด้งเข้ามือถือ (LINE/push) ยังไม่ต่อ — รอเคาะ
  * v9.31 — ★ ปิดช่อง "หัวหน้าอนุมัติใบของทีมอื่นได้ถ้ายิง API ตรง" (★ ต้อง Deploy):
  *          approverScope_() + canDecide_() บังคับขอบเขตตอนอนุมัติ/ไม่อนุมัติ/ถอน
  *          กติกาเดียวกับคิวที่โชว์ (Users คอลัมน์ N · ผู้อนุมัติเฉพาะ · PTT) + ห้ามใบตัวเอง
@@ -202,7 +206,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.31', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.32', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -267,6 +271,16 @@ function handle(e, method) {
       case 'approveRequest':       return actionApproveRequest(p, user);
       case 'getFaceData':          return actionGetFaceData(user);
       case 'getBootstrap':         return getBootstrap(p, user);   // v9.25: รวม 5 คำขอตอนเปิดแอป
+      // v9.32: แจ้งเตือน · ปฏิทินลาทีม · ติดต่อ HR · ความยินยอม PDPA
+      case 'getMyNotifications':   return jsonOut(getMyNotifications(p, user));
+      case 'markNotifRead':        return jsonOut(markNotifRead(p, user));
+      case 'getTeamLeaveCalendar': return jsonOut(getTeamLeaveCalendar(p, user));
+      case 'submitHrTicket':       return jsonOut(submitHrTicket(p, user));
+      case 'getMyHrTickets':       return jsonOut(getMyHrTickets(p, user));
+      case 'getHrTickets':         return jsonOut(getHrTickets(p, user));
+      case 'replyHrTicket':        return jsonOut(replyHrTicket(p, user));
+      case 'recordConsent':        return jsonOut(recordConsent(p, user));
+      case 'getMyConsent':         return jsonOut(getMyConsent(p, user));
       case 'getSettings':          return actionGetSettings(user);
       case 'getLocations':         return actionGetLocations(user);
       case 'getLocationQR':        return jsonOut(getLocationQR(p, user));   // v5.5: HR พิมพ์ QR ประจำจุด
@@ -334,6 +348,13 @@ function handle(e, method) {
         if (String(_out.getContent()).indexOf('"ok":true') >= 0) reqMark_(String(p.reqId), action, user);
       } catch (e) {}
     }
+    // v9.32: คำขอใหม่เขียนสำเร็จ → แจ้งเตือนหัวหน้าที่ต้องอนุมัติ (ไม่กระทบผลลัพธ์เดิม)
+    try {
+      if (NOTIFY_ON_SUBMIT[action] && String(_out.getContent()).indexOf('"ok":true') >= 0 &&
+          String(_out.getContent()).indexOf('"dup":true') < 0) {
+        notifyApproversOf_(user, NOTIFY_ON_SUBMIT[action]);
+      }
+    } catch (e) {}
     return _out;
   } catch (err) {
     return jsonOut({ ok:false, error:String(err), stack:err && err.stack });
@@ -347,6 +368,7 @@ const REQ_DEDUPE_ACTIONS = {
   submitLeaveApp:1, submitLeave:1, submitTimeAdjust:1, submitOfficeEquip:1, submitDocRequest:1,
   submitReimburse:1, submitFoodOrder:1, submitWelfare:1, submitWarning:1, submitHrApp:1,
   submitSalaryAdjust:1, submitAmazonOrder:1, submitShift:1, saveDayFix:1,
+  submitHrTicket:1, recordConsent:1,   // v9.32
 };
 function reqLogTab_() {
   let sh = getTab('_reqLog');
@@ -4182,6 +4204,7 @@ function revokeApproval(p, user) {
     if (cfg.approver != null) {
       sh.getRange(row, cfg.approver + 1).setValue('ถอนการอนุมัติโดย ' + who + (p.reason ? ' · ' + String(p.reason).slice(0, 120) : ''));
     }
+    try { notify_(sh.getRange(row, 2).getValue(), '↩ ถอนการอนุมัติ', (APPROVE_SHEET_LABEL_[p.sheet] || p.sheet) + ' · โดย ' + who, 'feed', 'revoke'); } catch (e) {}   // v9.32
     if (cfg.stampAt != null) {
       sh.getRange(row, cfg.stampAt + 1).setValue(Utilities.formatDate(new Date(), 'Asia/Bangkok', 'dd/MM/yyyy HH:mm:ss'));
     }
@@ -4248,10 +4271,17 @@ function approveAny(p, user) {
     const row = parseInt(p.row, 10);
     if (!(row >= 2) || row > sh.getLastRow()) return { ok: false, error: 'ไม่พบรายการ' };
     // v9.31: ใบต้องอยู่ในขอบเขตของผู้ตัดสิน (คอลัมน์ B = รหัสผู้ยื่น ทุกชีทใน APPROVE_CFG)
-    const dec = canDecide_(approverScope_(user), sh.getRange(row, 2).getValue());
+    const rowEmp = sh.getRange(row, 2).getValue();
+    const dec = canDecide_(approverScope_(user), rowEmp);
     if (!dec.ok) return { ok: false, error: dec.why };
     const status = p.decision === 'approved' ? 'approved' : 'rejected';
     sh.getRange(row, cfg.status + 1).setValue(status);
+    // v9.32: แจ้งผู้ยื่นทันทีที่ตัดสิน
+    try {
+      notify_(rowEmp, status === 'approved' ? '✅ คำขอได้รับอนุมัติ' : '❌ คำขอไม่ได้รับอนุมัติ',
+              (APPROVE_SHEET_LABEL_[p.sheet] || p.sheet) + ' · โดย ' + (cleanName_((user && user.name) || '') || 'หัวหน้า') +
+              (p.note ? ' · ' + String(p.note).slice(0, 80) : ''), 'feed', 'approve');
+    } catch (e) {}
     // v4.3: ประทับเวลา "อนุมัติเมื่อ" (เฉพาะชีทที่ประกาศ stampAt)
     if (cfg.stampAt != null) {
       sh.getRange(row, cfg.stampAt + 1).setValue(Utilities.formatDate(new Date(), 'Asia/Bangkok', 'dd/MM/yyyy HH:mm:ss'));
@@ -6562,4 +6592,221 @@ function diagDocApproval() {
   });
 
   Logger.log(L.join('\n'));
+}
+
+/* ============================================================
+   v9.32 · แจ้งเตือนในแอป (outbox) — ช่องทางเด้งเข้ามือถือ (LINE / push) ต่อทีหลังจากแท็บนี้ได้เลย
+   แท็บ "แจ้งเตือน": A วันที่ · B รหัสผู้รับ · C หัวข้อ · D ข้อความ · E หน้าในแอป · F อ่านแล้ว · G ที่มา
+   ============================================================ */
+const NOTIFY_TAB = 'แจ้งเตือน';
+const NOTIFY_ON_SUBMIT = {
+  submitLeaveApp: 'ใบลา / เปลี่ยนวันหยุด / แก้เวลา', submitLeave: 'ใบลา', submitTimeAdjust: 'แก้เวลาย้อนหลัง',
+  submitDocRequest: 'ขอเอกสาร', submitReimburse: 'ขอตกเบิก', submitOfficeEquip: 'ขออุปกรณ์',
+  submitWelfare: 'ขอสวัสดิการ', submitHrApp: 'แบบฟอร์ม HR', submitSalaryAdjust: 'ขอปรับเงินเดือน',
+};
+const APPROVE_SHEET_LABEL_ = {
+  'การลาApp': 'ใบลา/เปลี่ยนวันหยุด/แก้เวลา', 'ขอตกเบิก': 'ขอตกเบิก', 'อุปกรณ์App': 'ขออุปกรณ์',
+  'เอกสารApp': 'ขอเอกสาร', 'สั่งข้าว': 'สั่งข้าว', 'สวัสดิการApp': 'สวัสดิการ', 'โอนย้ายApp': 'โอนย้าย',
+  'ผ่านทดลองApp': 'ผ่านทดลองงาน', 'ปรับเงินเดือนApp': 'ปรับเงินเดือน', 'ขอกำลังคนApp': 'ขอกำลังคน',
+};
+function notifyTab_() {
+  return getOrCreateTab(NOTIFY_TAB, ['วันที่', 'รหัสผู้รับ', 'หัวข้อ', 'ข้อความ', 'หน้าในแอป', 'อ่านแล้ว', 'ที่มา']);
+}
+function notify_(empId, title, body, page, source) {
+  const id = String(empId || '').trim();
+  if (!id) return false;
+  notifyTab_().appendRow([new Date(), id, String(title || ''), String(body || '').slice(0, 300), String(page || ''), '', String(source || '')]);
+  return true;
+}
+/* หัวหน้าของคนนี้ = คนที่ชื่ออยู่ในคอลัมน์ N ของเขา + คนที่ถูกตั้งเป็นผู้อนุมัติเฉพาะ */
+function approversOf_(empId) {
+  const out = new Set();
+  try {
+    const u = SpreadsheetApp.openById(CFG.usersSheetId).getSheetByName('Sheet1').getDataRange().getValues();
+    let supName = '';
+    for (let i = 1; i < u.length; i++) if (String(u[i][2]).trim() === String(empId).trim()) { supName = String(u[i][13] || '').trim(); break; }
+    const ovr = approverOverrideMap_()[String(empId).trim()] || '';
+    const wanted = [supName, ovr].filter(Boolean).map(normNameTh_);
+    if (wanted.length) for (let i = 1; i < u.length; i++) {
+      if (wanted.indexOf(normNameTh_(String(u[i][4] || ''))) >= 0) out.add(String(u[i][2]).trim());
+    }
+  } catch (_) {}
+  return Array.from(out);
+}
+function notifyApproversOf_(user, label) {
+  const me = String((user && user.empId) || '').trim();
+  const who = cleanName_((user && user.name) || '') || me;
+  approversOf_(me).forEach(id => { if (id !== me) notify_(id, '📝 มีคำขอใหม่รออนุมัติ', who + ' ยื่น' + label, 'approvals', 'submit'); });
+}
+function hrEmpIds_() {
+  const out = [];
+  try {
+    const u = SpreadsheetApp.openById(CFG.usersSheetId).getSheetByName('Sheet1').getDataRange().getValues();
+    for (let i = 1; i < u.length; i++) {
+      const dept = String(u[i][17] || ''), role = String(u[i][15] || '').trim(), st = String(u[i][11] || '').toLowerCase();
+      if (st && st !== 'active') continue;
+      if (dept.indexOf('ทรัพยากรบุคคล') >= 0 || role === '7') out.push(String(u[i][2]).trim());
+    }
+  } catch (_) {}
+  return out;
+}
+function getMyNotifications(p, user) {
+  try {
+    const me = String(user.empId || '').trim();
+    const sh = notifyTab_();
+    const data = sh.getDataRange().getValues();
+    const items = [];
+    let unread = 0;
+    for (let i = data.length - 1; i >= 1 && items.length < 60; i--) {
+      const r = data[i];
+      if (String(r[1]).trim() !== me) continue;
+      const read = String(r[5] || '').trim() === '1';
+      if (!read) unread++;
+      items.push({ row: i + 1, ts: (r[0] instanceof Date) ? r[0].toISOString() : String(r[0]),
+                   title: r[2], body: r[3], page: r[4], read, source: r[6] });
+    }
+    return { ok: true, items, unread };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+function markNotifRead(p, user) {
+  try {
+    const me = String(user.empId || '').trim();
+    const sh = notifyTab_();
+    const data = sh.getDataRange().getValues();
+    const rows = Array.isArray(p.rows) ? p.rows.map(Number) : (p.rows ? String(p.rows).split(',').map(Number) : []);
+    let n = 0;
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][1]).trim() !== me) continue;
+      if (rows.length && rows.indexOf(i + 1) < 0) continue;
+      if (String(data[i][5] || '').trim() === '1') continue;
+      sh.getRange(i + 1, 6).setValue('1'); n++;
+    }
+    return { ok: true, marked: n };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+/* ============================================================
+   v9.32 · ปฏิทินลาทีม — ใครลาวันไหน (approved + pending) ในเดือนที่ขอ ตามขอบเขตผู้อนุมัติ
+   อ่านจาก การลาApp โครงใหม่: A วันที่เริ่ม · B รหัส · C ชื่อ · F ประเภท · I สถานะ · N ถึงวันที่
+   ============================================================ */
+function getTeamLeaveCalendar(p, user) {
+  try {
+    const m = String(p.month || '').match(/^(\d{4})-(\d{2})$/);
+    const now = new Date();
+    const y = m ? +m[1] : now.getFullYear(), mo = m ? +m[2] - 1 : now.getMonth();
+    const from = new Date(y, mo, 1), to = new Date(y, mo + 1, 0, 23, 59, 59);
+    const scope = approverScope_(user);
+    const allowed = id => scope.hr || scope.team.has(id) || id === scope.me;
+    const toD = v => (v instanceof Date) ? v : (parseDDMMYYYY(String(v || '')) || null);
+    const key = d => Utilities.formatDate(d, 'Asia/Bangkok', 'dd/MM/yyyy');
+    const sh = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName('การลาApp');
+    if (!sh || !leaveSheetIsNew_(sh)) return { ok: true, items: [], month: y + '-' + ('0' + (mo + 1)).slice(-2) };
+    const data = sh.getDataRange().getValues();
+    const items = [];
+    for (let i = 1; i < data.length; i++) {
+      const r = data[i], id = String(r[1] || '').trim();
+      if (!id || !allowed(id)) continue;
+      const st = String(r[8] || '').toLowerCase().trim();
+      const stKey = (!st || st === 'pending') ? 'pending' : (st.indexOf('approve') === 0 ? 'approved' : 'other');
+      if (stKey === 'other') continue;
+      const type = String(r[5] || '');
+      if (/แก้เวลา|ปรับปรุงเวลา/.test(type)) continue;   // แก้เวลาไม่ใช่การหยุด
+      const sd = toD(r[0]), ed = toD(r[13]) || sd;
+      if (!sd) continue;
+      if (ed < from || sd > to) continue;
+      items.push({ empId: id, name: String(r[2] || ''), type, status: stKey, from: key(sd), to: key(ed), hours: r[12] || '' });
+    }
+    return { ok: true, items, month: y + '-' + ('0' + (mo + 1)).slice(-2), teamSize: scope.hr ? null : scope.team.size };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+/* ============================================================
+   v9.32 · ติดต่อ HR — แท็บ "ติดต่อHR"
+   A วันที่ · B รหัส · C ชื่อ · D หมวด · E เรื่อง · F รายละเอียด · G สถานะ · H ผู้ตอบ · I คำตอบ · J ตอบเมื่อ · K เลขที่
+   ============================================================ */
+const HRT_TAB = 'ติดต่อHR';
+function hrtTab_() {
+  return getOrCreateTab(HRT_TAB, ['วันที่', 'รหัสพนักงาน', 'ชื่อ-สกุล', 'หมวด', 'เรื่อง', 'รายละเอียด', 'สถานะ', 'ผู้ตอบ', 'คำตอบ', 'ตอบเมื่อ', 'เลขที่']);
+}
+function hrtRow_(r, i) {
+  return { row: i + 1, ts: (r[0] instanceof Date) ? r[0].toISOString() : String(r[0]), empId: r[1], name: r[2],
+           category: r[3], subject: r[4], detail: r[5], status: String(r[6] || 'open'), by: r[7], answer: r[8],
+           answeredAt: (r[9] instanceof Date) ? r[9].toISOString() : String(r[9] || ''), no: r[10] };
+}
+function submitHrTicket(p, user) {
+  try {
+    const subject = String(p.subject || '').trim(), detail = String(p.detail || '').trim();
+    if (!subject) return { ok: false, error: 'กรอกเรื่องที่ต้องการติดต่อ' };
+    const sh = hrtTab_();
+    const now = new Date();
+    const ym = Utilities.formatDate(now, 'Asia/Bangkok', 'yyMM');
+    let seq = 1;
+    const data = sh.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) { const no = String(data[i][10] || ''); if (no.indexOf('HRT' + ym) === 0) seq = Math.max(seq, parseInt(no.slice(7), 10) + 1 || 1); }
+    const no = 'HRT' + ym + ('00' + seq).slice(-3);
+    sh.appendRow([now, String(user.empId || ''), cleanName_(user.name || ''), String(p.category || 'อื่นๆ'), subject, detail.slice(0, 2000), 'open', '', '', '', no]);
+    hrEmpIds_().forEach(id => notify_(id, '💬 คำถามใหม่ถึง HR', cleanName_(user.name || '') + ': ' + subject, 'hrticket', 'hrticket'));
+    return { ok: true, no };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+function getMyHrTickets(p, user) {
+  try {
+    const me = String(user.empId || '').trim();
+    const data = hrtTab_().getDataRange().getValues();
+    const items = [];
+    for (let i = data.length - 1; i >= 1; i--) if (String(data[i][1]).trim() === me) items.push(hrtRow_(data[i], i));
+    return { ok: true, items };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+function getHrTickets(p, user) {
+  try {
+    if (!isHR(user)) return { ok: false, error: 'เฉพาะ HR' };
+    const data = hrtTab_().getDataRange().getValues();
+    const items = [];
+    for (let i = data.length - 1; i >= 1; i--) items.push(hrtRow_(data[i], i));
+    items.sort((a, b) => (a.status === 'open' ? 0 : 1) - (b.status === 'open' ? 0 : 1));
+    return { ok: true, items: items.slice(0, 200) };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+function replyHrTicket(p, user) {
+  try {
+    if (!isHR(user)) return { ok: false, error: 'เฉพาะ HR' };
+    const sh = hrtTab_();
+    const row = parseInt(p.row, 10);
+    if (!(row >= 2) || row > sh.getLastRow()) return { ok: false, error: 'ไม่พบรายการ' };
+    const status = p.close ? 'closed' : 'answered';
+    const answer = String(p.answer || '').trim();
+    const who = cleanName_(user.name || '') || String(user.empId || '');
+    sh.getRange(row, 7, 1, 4).setValues([[status, who, answer, new Date()]]);
+    const target = sh.getRange(row, 2).getValue();
+    notify_(target, status === 'closed' ? '✅ HR ปิดเรื่องแล้ว' : '💬 HR ตอบคำถามของคุณแล้ว', answer.slice(0, 200) || ('โดย ' + who), 'hrticket', 'hrticket');
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+/* ============================================================
+   v9.32 · ความยินยอม PDPA (ก่อนลงทะเบียนใบหน้า) — แท็บ "ความยินยอมPDPA"
+   A วันที่ · B รหัส · C ชื่อ · D เวอร์ชันข้อความ · E ยินยอม · F อุปกรณ์
+   ============================================================ */
+const PDPA_TAB = 'ความยินยอมPDPA';
+function recordConsent(p, user) {
+  try {
+    const sh = getOrCreateTab(PDPA_TAB, ['วันที่', 'รหัสพนักงาน', 'ชื่อ-สกุล', 'เวอร์ชันข้อความ', 'ยินยอม', 'อุปกรณ์']);
+    sh.appendRow([new Date(), String(user.empId || ''), cleanName_(user.name || ''), String(p.version || ''), p.agree ? '1' : '0', String(p.ua || '').slice(0, 200)]);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+function getMyConsent(p, user) {
+  try {
+    const sh = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName(PDPA_TAB);
+    if (!sh) return { ok: true, version: '' };
+    const data = sh.getDataRange().getValues();
+    const me = String(user.empId || '').trim();
+    for (let i = data.length - 1; i >= 1; i--) {
+      if (String(data[i][1]).trim() === me && String(data[i][4]) === '1') {
+        return { ok: true, version: String(data[i][3] || ''), at: (data[i][0] instanceof Date) ? data[i][0].toISOString() : String(data[i][0]) };
+      }
+    }
+    return { ok: true, version: '' };
+  } catch (e) { return { ok: false, error: e.message }; }
 }
