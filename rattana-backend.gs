@@ -1,6 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.31 — ★ ปิดช่อง "หัวหน้าอนุมัติใบของทีมอื่นได้ถ้ายิง API ตรง" (★ ต้อง Deploy):
+ *          approverScope_() + canDecide_() บังคับขอบเขตตอนอนุมัติ/ไม่อนุมัติ/ถอน
+ *          กติกาเดียวกับคิวที่โชว์ (Users คอลัมน์ N · ผู้อนุมัติเฉพาะ · PTT) + ห้ามใบตัวเอง
+ *          ใช้ตัวตนจาก token เท่านั้น · ปฏิเสธพร้อมบอกเหตุผล (ไม่ใช่ลูกทีม / มีผู้อนุมัติเฉพาะ)
  * v9.30 — diagDocApproval() ตรวจ "ใบขอเอกสารไม่เข้าคิวผู้อนุมัติ" (เคสวีระพงษ์ 68073
  *          → วุฒินันท์ไม่เห็น) — ไล่ทีละด่าน: มีแถวใน Users มั้ย · คอลัมน์ N ตรงชื่อหัวหน้า
  *          เป๊ะมั้ย · ทีมมีใครบ้าง · มีผู้อนุมัติเฉพาะมั้ย · แล้วยิง getPendingAll จริงพิสูจน์
@@ -198,7 +202,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.30', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.31', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -2748,7 +2752,8 @@ function actionApproveRequest(p, user) {
   const data = sh.getDataRange().getValues();
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][0]) === String(p.id)) {
-      if (!canSeeUser(user, data[i][2])) return jsonOut({ ok:false, error:'นอกขอบเขตทีม' });
+      const dec = canDecide_(approverScope_(user), data[i][2]);   // v9.31: ทีมจริง ไม่ใช่แค่สาขาเดียวกัน
+      if (!dec.ok) return jsonOut({ ok:false, error: dec.why });
       sh.getRange(i + 1, statusCol + 1).setValue(p.decision || 'approved');
       sh.getRange(i + 1, approverCol + 1).setValue(user.empId + ' ' + user.name);
       sh.getRange(i + 1, approvedAtCol + 1).setValue(new Date());
@@ -4164,6 +4169,9 @@ function revokeApproval(p, user) {
     const row = parseInt(p.row, 10);
     if (!(row >= 2) || row > sh.getLastRow()) return { ok:false, error:'ไม่พบรายการ' };
 
+    // v9.31: ถอนได้เฉพาะใบในขอบเขตเดียวกับที่อนุมัติได้
+    const dec = canDecide_(approverScope_(user), sh.getRange(row, 2).getValue());
+    if (!dec.ok) return { ok:false, error: dec.why };
     const cur = String(sh.getRange(row, cfg.status + 1).getValue() || '').trim();
     if (!cur || cur.toLowerCase() === 'pending') return { ok:false, error:'ใบนี้ยังไม่ถูกพิจารณา — ไม่ต้องถอน' };
     if (cur.toLowerCase().indexOf('cancel') === 0 || cur.indexOf('ยกเลิก') >= 0) {
@@ -4181,6 +4189,49 @@ function revokeApproval(p, user) {
   } catch (e) { return { ok:false, error:e.message }; }
 }
 
+/* ── v9.31: ขอบเขตผู้อนุมัติ — บังคับตอน "ตัดสิน" (อนุมัติ/ไม่อนุมัติ/ถอน) ไม่ใช่แค่ตอนโชว์คิว ──
+   เดิมเซิร์ฟเวอร์เช็คแค่ "เป็นหัวหน้าระดับไหนก็ได้" → ยิง API ตรงอนุมัติใบของทีมอื่นได้
+   (หน้าจอกรองให้เห็นเฉพาะทีมตัวเองอยู่แล้ว แต่เซิร์ฟเวอร์ไม่ได้บังคับ — surat เคาะ 22/09 ให้ปิดช่อง)
+   กติกาชุดเดียวกับ getPendingAll + getTimeIssues:
+     · HR            = ทุกใบ (ยกเว้นของตัวเอง)
+     · หัวหน้า        = ลูกทีมตามชีท Users คอลัมน์ N + คนที่ตั้ง "ผู้อนุมัติเฉพาะ" มาหาเรา
+     · หัวหน้า PTT เต็มระบบ = พนักงาน PTT ทุกคน · ผู้จัดการ PTT = สาขา+คลังเดียวกัน
+     · ใบที่มีผู้อนุมัติเฉพาะ → เฉพาะคนนั้น (หรือ HR)
+     · ใบของตัวเอง   → ไม่ได้ ไม่ว่าระดับไหน
+   ใช้ตัวตนจาก token (user.empId) เท่านั้น ไม่รับรหัสหัวหน้าจากฝั่งแอป */
+function approverScope_(user) {
+  const me = String((user && user.empId) || '').trim();
+  const team = new Set();
+  let myName = cleanName_(String((user && user.name) || ''));
+  try {
+    const u = SpreadsheetApp.openById(CFG.usersSheetId).getSheetByName('Sheet1').getDataRange().getValues();
+    for (let i = 1; i < u.length; i++) if (String(u[i][2]).trim() === me) { myName = String(u[i][4]).trim() || myName; break; }
+    if (myName) for (let i = 1; i < u.length; i++) if (String(u[i][13]).trim() === myName) team.add(String(u[i][2]).trim());
+  } catch (_) {}
+  const ovr = approverOverrideMap_();
+  Object.keys(ovr).forEach(id => { if (normNameTh_(ovr[id]) === normNameTh_(myName)) team.add(String(id).trim()); });
+  try {
+    const pm = pttMap_(), mine = pm[me];
+    if (PTT_ALL_SUPERVISORS.indexOf(me) >= 0) Object.keys(pm).forEach(id => team.add(String(id).trim()));
+    else if (mine && /^ผู้จัดการ/.test(String(mine.position || ''))) {
+      Object.keys(pm).forEach(id => { const t = pm[id]; if (t && t.saka === mine.saka && t.khlang === mine.khlang) team.add(String(id).trim()); });
+    }
+  } catch (_) {}
+  return { me, myName, team, ovr, hr: isHR(user) };
+}
+function canDecide_(scope, rowEmpId) {
+  const id = String(rowEmpId || '').trim();
+  if (!id) return { ok: false, why: 'ใบนี้ไม่มีรหัสพนักงาน' };
+  if (id === scope.me) return { ok: false, why: 'อนุมัติใบของตัวเองไม่ได้ — ต้องให้หัวหน้าของคุณอนุมัติ' };
+  const ovrName = scope.ovr[id] || '';
+  if (ovrName) {
+    if (scope.hr || normNameTh_(ovrName) === normNameTh_(scope.myName)) return { ok: true };
+    return { ok: false, why: 'ใบนี้กำหนดผู้อนุมัติเฉพาะเป็น ' + ovrName };
+  }
+  if (scope.hr || scope.team.has(id)) return { ok: true };
+  return { ok: false, why: 'ไม่ใช่ลูกทีมของคุณ (รหัส ' + id + ')' };
+}
+
 function approveAny(p, user) {
   try {
     // v2.7: เดิมไม่เช็คสิทธิ์เลย — พนักงานยิง API ตรงอนุมัติคำขอตัวเองได้
@@ -4195,6 +4246,10 @@ function approveAny(p, user) {
       cfg = { status: 9, approver: 10, name: 2, info: [6, 12] };
     }
     const row = parseInt(p.row, 10);
+    if (!(row >= 2) || row > sh.getLastRow()) return { ok: false, error: 'ไม่พบรายการ' };
+    // v9.31: ใบต้องอยู่ในขอบเขตของผู้ตัดสิน (คอลัมน์ B = รหัสผู้ยื่น ทุกชีทใน APPROVE_CFG)
+    const dec = canDecide_(approverScope_(user), sh.getRange(row, 2).getValue());
+    if (!dec.ok) return { ok: false, error: dec.why };
     const status = p.decision === 'approved' ? 'approved' : 'rejected';
     sh.getRange(row, cfg.status + 1).setValue(status);
     // v4.3: ประทับเวลา "อนุมัติเมื่อ" (เฉพาะชีทที่ประกาศ stampAt)
