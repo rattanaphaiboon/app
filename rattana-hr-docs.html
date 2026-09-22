@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana HR Docs — ออกเอกสารบุคคลอัตโนมัติ v10.9</title>
+<title>Rattana HR Docs — ออกเอกสารบุคคลอัตโนมัติ v11.0</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
@@ -1987,7 +1987,7 @@ body.dark .chip.t-memo{color:#d7aef0}
    สิทธิ์: ฝ่ายทรัพยากรบุคคลเท่านั้นที่เห็นข้อมูล/ออกเอกสาร · หัวหน้างานเห็นแค่รายการเอกสารของทีม + PDF + ส่งเอกสารกลับ
    เลขที่เอกสารรันที่หลังบ้านตอนกดออกเอกสาร (SA69-001 / S.E.B.2609/001) · รูปประกอบสวัสดิการจากคอลัมน์ "รูปภาพ" (v2.6)
    ══════════════════════════════════════════════════════════════ */
-const APP_VER = '10.9';
+const APP_VER = '11.0';
 
 /* localStorage แบบกันพัง — โหมดส่วนตัว / data: URL จะ throw ทำให้ทั้งสคริปต์ตายได้ */
 const LS = {
@@ -2814,6 +2814,7 @@ function buildCertifyFromReq(req) {
   const d = buildCertifyDoc({ empId: req.empId, purpose: req.purpose });
   d.docNo = docNoOf(req); d.ref = req.key; d.ctKey = req.ctKey; d.manual = false;
   d.certKind = req.certKind; d.reqDate = iso(req.date); d.eff = iso(req.date);
+  d.ctReq = { row: req.row, empId: req.empId, status: req.status, statusRaw: req.statusRaw, isSlip: req.isSlip, certKind: req.certKind };
   d.checks = validateCertify(d, req);
   return d;
 }
@@ -2826,8 +2827,10 @@ function validateCertify(doc, req) {
   if (!clean(doc.purpose)) err('ไม่ได้ระบุ "ใช้สำหรับ" ในชีต (แถวที่ ' + req.row + ')');
   if (!doc.position) warn('ทะเบียนไม่มีตำแหน่ง');
   if (!doc.start) warn('ทะเบียนไม่มีวันที่เริ่มงาน');
-  if (!doc.salary) err('ไม่พบเงินเดือนในแท็บเงินเดือน — ใส่เองในช่องแก้ไขก่อนออกเอกสาร');
-  if (!ck.some(c => c.l === 'err')) ok(`พร้อมออกเอกสาร — เงินเดือน ${moneyAuto(doc.salary)}${doc.other ? ' + อื่น ๆ ' + moneyAuto(doc.other) : ''} บาท/เดือน`);
+  /* พนักงานปั๊ม (PTT) ไม่มีแถวในแท็บเงินเดือน — ให้ HR พิมพ์เองได้ จึงเป็นคำเตือน ไม่ใช่ตัวบล็อก
+     (เดิมตั้งเป็น err เลยกดออกเอกสารไม่ได้ ทั้งที่ข้อความบอกให้ใส่เอง — user แจ้ง 2026-09-22) */
+  if (!num(doc.salary)) warn('ไม่พบเงินเดือนในแท็บเงินเดือน — กด ✏️ แก้ไขข้อความในเอกสาร แล้วพิมพ์เงินเดือนเองก่อนออกเอกสาร');
+  if (!ck.some(c => c.l === 'err') && num(doc.salary)) ok(`พร้อมออกเอกสาร — เงินเดือน ${moneyAuto(doc.salary)}${doc.other ? ' + อื่น ๆ ' + moneyAuto(doc.other) : ''} บาท/เดือน`);
   return ck;
 }
 const BUILDERS = { salary: buildSalaryDoc, welfare: buildWelfareDoc, warning: buildWarningDoc, backpay: buildBackpayDoc, probation: buildProbationDoc, transfer: buildTransferDoc, clearance: buildClearanceDoc, certify: buildCertifyFromReq };
@@ -4880,6 +4883,7 @@ function onEdit(e) {
     const ta = document.querySelector('#edBody [data-k="clause"]'); if (ta) ta.value = curDoc.clause;
   }
   if (curDoc.type === 'salary' && curDoc.autoTotals && /^(items\.|payOld|payNew)/.test(k)) syncTotals();
+  if (curDoc.type === 'certify' && curDoc.ctReq) { curDoc.checks = validateCertify(curDoc, curDoc.ctReq); renderChecks(curDoc); }
   clearTimeout(prevTimer); prevTimer = setTimeout(renderPreview, 120);
 }
 function syncTotals() {
@@ -5334,7 +5338,9 @@ async function pdfAndMail(d, wantMail) {
 /* บันทึกลงชีต (รันเลขที่) → PDF + เมล → เปิดหน้าพิมพ์ */
 async function issueDocs(docs) {
   if (!docs.length) return false;
-  docs.forEach(d => { d.issuedBy = currentUser ? currentUser.name : ''; delete d.checks; });
+  const noPay = docs.filter(d => d.type === 'certify' && !num(d.salary));
+  if (noPay.length) { showToast('ยังไม่ได้ใส่เงินเดือน — กด ✏️ แก้ไขข้อความในเอกสาร แล้วพิมพ์เงินเดือนก่อน', 'warning', 6000); return false; }
+  docs.forEach(d => { d.issuedBy = currentUser ? currentUser.name : ''; delete d.checks; delete d.ctReq; });
   showSpinner('กำลังบันทึกและรันเลขที่เอกสาร...');
   let out;
   try { out = await api('log', { docs }); }
