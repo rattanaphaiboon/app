@@ -1,6 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.34 — ขอเอกสาร: โชว์ "วันที่ได้รับเอกสาร" = วันอนุมัติ + 7 วัน (surat เคาะ 22/09
+ *          คู่แอป v12.84 · ★ ต้อง Deploy) — เพิ่ม stampAt ให้ชีท เอกสารApp ด้วย
+ *          เพราะเดิมคอลัมน์ I ค้างเป็นเวลาที่ยื่น ไม่มีที่ไหนเก็บวันอนุมัติเลย
+ *          ★ ใบที่อนุมัติไปก่อน v9.34 จะไม่มีวันอนุมัติจริง — แอปจึงไม่โชว์วันรับให้ใบเก่า
  * v9.33 — ★ คิวอนุมัติ "เดี๋ยวขึ้นเดี๋ยวไม่ขึ้น" + ช้า (★ ต้อง Deploy · คู่แอป v12.83):
  *          getPendingAll ใช้ approverScope_/canDecide_ ชุดเดียวกับตอนกดอนุมัติ (เลิกสร้างทีมซ้ำ)
  *          ติดธง canDecide ไปกับทุกใบ → แอปเลิกกรองซ้ำด้วย resolveMyTeam ที่พึ่ง gviz+getPTTStaff
@@ -210,7 +214,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.33', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.34', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -3635,11 +3639,17 @@ function actionGetMyDocRequests(p, user) {
     if (data.length < 2) return { ok: true, items: [] };
     const items = data.slice(1).reverse()
       .filter(r => String(r[1]).trim() === String(p.empId).trim())
-      .map(r => ({
-        date: r[0], empId: r[1], name: r[2], nickname: r[3],
-        docType: r[4], purpose: r[5], status: r[6],
-        approver: r[7], updatedAt: r[8],
-      }));
+      .map(r => {
+        // v9.34: อนุมัติแล้ว → คอลัมน์ I คือเวลาอนุมัติ (stampAt) · คิดวันรับเอกสาร = +7 วัน
+        const appr = String(r[6] || '').toLowerCase().indexOf('approve') === 0;
+        return {
+          date: r[0], empId: r[1], name: r[2], nickname: r[3],
+          docType: r[4], purpose: r[5], status: r[6],
+          approver: r[7], updatedAt: r[8], docNo: r[9] || '',
+          approvedAt: appr ? docDateText_(r[8]) : '',
+          receiveDate: appr ? docReceiveDate_(r[8]) : '',
+        };
+      });
     return { ok: true, items };
   } catch(e) { return { ok: false, error: e.message }; }
 }
@@ -3912,7 +3922,9 @@ const APPROVE_CFG = {
   'การลาApp':   { status: 8,  approver: 9, stampAt: 10, name: 2, info: [5, 11], photo: 14 },
   'ขอตกเบิก':   { status: 9,  approver: 10, name: 2, info: [6, 12] },
   'อุปกรณ์App': { status: 14, approver: null, name: 2, info: [4, 5, 7] },
-  'เอกสารApp':  { status: 6,  approver: 7,  name: 2, info: [4, 5] },
+  // v9.34: เพิ่ม stampAt — เดิมคอลัมน์ I ค้างเป็น "เวลาที่ยื่น" ตลอด ไม่มีที่ไหนเก็บวันอนุมัติ
+  //        ทำให้คิด "วันที่ได้รับเอกสาร (อนุมัติ + 7 วัน)" ไม่ได้
+  'เอกสารApp':  { status: 6,  approver: 7,  stampAt: 8, name: 2, info: [4, 5] },
   'สั่งข้าว':    { status: 5,  approver: null, name: 2, info: [4] },
   'สวัสดิการApp': { status: 8,  approver: null, name: 2, info: [4, 6] },
   'โอนย้ายApp':     { status: 7, approver: 8, name: 2, info: [4, 5] },
@@ -6790,4 +6802,34 @@ function getMyConsent(p, user) {
     }
     return { ok: true, version: '' };
   } catch (e) { return { ok: false, error: e.message }; }
+}
+
+/* ============================================================
+   v9.34 · วันที่ได้รับเอกสาร = วันอนุมัติ + DOC_READY_DAYS วัน (นับวันตามปฏิทิน)
+   คอลัมน์ I ของชีท เอกสารApp อาจเป็นสตริง 'dd/MM/yyyy HH:mm:ss' หรือ Date object
+   (Sheets แปลงให้เองตอนเขียน) — ต้องรับได้ทั้งสองแบบ เหมือนบทเรียนจากแท็บ จัดกะ
+   ============================================================ */
+const DOC_READY_DAYS = 7;
+function docParseStamp_(v) {
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
+  const s = String(v == null ? '' : v).trim();
+  if (!s) return null;
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) {
+    let y = parseInt(m[3], 10); if (y > 2400) y -= 543;
+    const d = new Date(y, parseInt(m[2], 10) - 1, parseInt(m[1], 10));
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const d2 = new Date(s);
+  return isNaN(d2.getTime()) ? null : d2;
+}
+function docDateText_(v) {
+  const d = docParseStamp_(v);
+  return d ? Utilities.formatDate(d, 'Asia/Bangkok', 'dd/MM/yyyy') : '';
+}
+function docReceiveDate_(v) {
+  const d = docParseStamp_(v);
+  if (!d) return '';
+  const r = new Date(d.getFullYear(), d.getMonth(), d.getDate() + DOC_READY_DAYS);
+  return Utilities.formatDate(r, 'Asia/Bangkok', 'dd/MM/yyyy');
 }
