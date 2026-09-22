@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.78</title>
+<title>HR Rattana v5.79</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3645,7 +3645,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.78';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.79';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -4162,24 +4162,36 @@ let _flStream = null, _flTimer = null, _flBusy = false;
 
 /* v12.74: จำโปรไฟล์ทุกครั้งที่เข้าแอปสำเร็จ — เดิม (12.73) จำเฉพาะตอน adoptMyFace_
    ซึ่งเครื่องที่ใบหน้า cache อยู่แล้วไม่ผ่านจังหวะนั้น การ์ดสแกนหน้าเลยไม่โผล่ */
+/* v12.79: เก็บ descriptor ไว้ในโปรไฟล์เอง — เดิมพึ่ง LS.faceDescriptor ซึ่งโดนล้างได้
+   (สลับคนใช้เครื่องเดียวกัน = owner mismatch → ล้างทิ้ง) ทำให้ไอคอนหายแบบไม่มีคำอธิบาย
+   คืนค่าเป็นเหตุผลเพื่อเอาไปโชว์ในหน้า "ข้อมูลระบบ" ให้ผู้ใช้เห็นเองว่าทำไมยังไม่พร้อม */
 function refreshFaceLoginProfile_() {
-  if (!currentUser || !currentUser.empId) return;
-  if (!LS.get('faceDescriptor', null)) return;                       // ยังไม่มีใบหน้าในเครื่อง
+  if (!currentUser || !currentUser.empId) return 'ยังไม่ได้เข้าระบบ';
+  const d1 = LS.get('faceDescriptor', null);
+  if (!d1) return 'เครื่องนี้ยังไม่มีใบหน้าของคุณ — ลงทะเบียนใบหน้าก่อน';
   const owner = LS.get('faceOwner', '');
-  if (owner && owner !== empKey_(currentUser.empId)) return;         // หน้าในเครื่องเป็นของคนอื่น
-  LS.set('faceLoginProfile', { u: {
+  if (owner && owner !== empKey_(currentUser.empId)) return 'ใบหน้าในเครื่องเป็นของคนอื่น';
+  const ok = LS.set('faceLoginProfile', { u: {
     empId: currentUser.empId, name: currentUser.name || '', email: currentUser.email || '',
     nickname: currentUser.nickname || '', branch: currentUser.branch || '',
     role: currentUser.role || 'employee', userRoleInt: currentUser.userRoleInt || 1,
     department: currentUser.department || '', company: currentUser.company || '',
     slipSheet: currentUser.slipSheet || '',
-  }, savedAt: Date.now() });
+  }, d1: d1, d2: LS.get('faceDescriptor2', null), savedAt: Date.now() });
+  return ok === false ? 'พื้นที่เก็บข้อมูลในเครื่องเต็ม' : '';
+}
+/* เหตุผลที่ไอคอนสแกนหน้ายังไม่โผล่ — ใช้โชว์ในหน้าข้อมูลระบบ */
+function faceLoginWhy_() {
+  if (faceLoginProfile_()) return '';
+  return refreshFaceLoginProfile_() || 'ยังไม่พร้อม';
 }
 
 function faceLoginProfile_() {
   const p = LS.get('faceLoginProfile', null);
-  const desc = LS.get('faceDescriptor', null);
-  if (!p || !p.u || !p.u.empId || !desc) return null;
+  if (!p || !p.u || !p.u.empId) return null;
+  // v12.79: ใช้ descriptor ในโปรไฟล์ก่อน ถ้าไม่มีค่อยดูตัวที่ cache แยกไว้
+  const desc = p.d1 || LS.get('faceDescriptor', null);
+  if (!desc) return null;
   const owner = LS.get('faceOwner', '');
   if (owner && empKey_(p.u.empId) !== owner) return null;   // ใบหน้าในเครื่องเป็นของอีกคน
   return p;
@@ -4233,7 +4245,9 @@ async function faceLoginTick_() {
       .withFaceLandmarks().withFaceDescriptor();
     const st = document.getElementById('flStatus');
     if (!det) { if (st) st.textContent = 'หันหน้าเข้ากล้อง...'; return; }
-    const d1 = LS.get('faceDescriptor', null), d2 = LS.get('faceDescriptor2', null);
+    const pf = faceLoginProfile_() || {};   // v12.79: descriptor จากโปรไฟล์ก่อน
+    const d1 = pf.d1 || LS.get('faceDescriptor', null);
+    const d2 = pf.d2 || LS.get('faceDescriptor2', null);
     const dist = bestFaceDist_(det.descriptor, [d1 ? new Float32Array(d1) : null, d2 ? new Float32Array(d2) : null]);
     const thr = (settings && settings.faceThr) || 0.5;
     if (dist <= thr) {
@@ -8101,7 +8115,8 @@ function renderSystemInfo() {
     <div class="status-row"><div class="icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div><div class="label">ทีม</div><div class="value">${team.length} คน</div></div></div>
     <div class="status-row"><div class="icon">📍</div><div><div class="label">สาขา</div><div class="value">${locations.length} แห่ง</div></div></div>
     <div class="status-row"><div class="icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></div><div><div class="label">บันทึก</div><div class="value">${logs.length} รายการ</div></div></div>
-    <div class="status-row"><div class="icon">🛡</div><div><div class="label">Liveness</div><div class="value">${settings.liveness}</div></div></div>`;
+    <div class="status-row"><div class="icon">🛡</div><div><div class="label">Liveness</div><div class="value">${settings.liveness}</div></div></div>
+    <div class="status-row"><div class="icon">🙂</div><div><div class="label">สแกนหน้าเข้าระบบ</div><div class="value">${(function(){ try { const w = faceLoginWhy_(); return w ? ('ยังไม่พร้อม — ' + w) : '✓ พร้อม (ออกจากระบบแล้วจะเห็นไอคอน)'; } catch(_) { return '-'; } })()}</div></div></div>`;
   renderConfigInfo();
   // Show GPS calib card for HR
   const calibCard = document.getElementById('gpsCalibCard');
