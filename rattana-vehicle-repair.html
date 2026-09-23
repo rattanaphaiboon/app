@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Vehicle Repair v9.5</title>
+<title>Rattana Vehicle Repair v9.6</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
@@ -531,7 +531,7 @@ body.dark .check-status-btn:hover{background:#243b73}
 <div class="login-screen" id="loginScreen">
   <div class="login-card">
     <div class="login-logo">RATTANA<span> · </span>REPAIR</div>
-    <div class="login-title">ระบบแจ้งซ่อมรถบริษัท · v9.5</div>
+    <div class="login-title">ระบบแจ้งซ่อมรถบริษัท · v9.6</div>
     <div id="inAppWarn" class="hidden"></div>
     <div id="g_id_onload"
          data-client_id="615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com"
@@ -924,7 +924,7 @@ body.dark .check-status-btn:hover{background:#243b73}
     </div>
     <div class="modal-foot">
       <button class="btn btn-outline" onclick="closeCheckDo()">ยกเลิก</button>
-      <button class="btn btn-gold" onclick="submitCheck()">✓ บันทึกเช็ครถ</button>
+      <button class="btn btn-gold" id="checkSubmitBtn" onclick="submitCheck()">✓ บันทึกเช็ครถ</button>
     </div>
   </div>
 </div>
@@ -1062,6 +1062,16 @@ let allFilterState  = 'all';
 let byVehicleFilterState = 'repaired';
 let pendingApproveAction = null;
 let pendingApproveId = null;
+
+// รหัสกันส่งซ้ำ — 1 ค่าต่อการกรอกฟอร์ม 1 ครั้ง (v9.6)
+// ถ้าส่งแล้วเน็ตหลุด/Apps Script ตอบช้าจนแอพขึ้น "ส่งไม่สำเร็จ" ทั้งที่แถวลงชีทไปแล้ว
+// การกดส่งซ้ำจะใช้รหัสเดิม → backend คืนใบเดิมให้ ไม่เกิดใบซ้ำอีก
+let repairSubmitToken = null;
+let checkSubmitToken  = null;
+function newSubmitToken() {
+  try { if (crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
+  return 'tk-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+}
 
 // ═════════════════════════════════════════════════════════════════════
 // UTILITIES
@@ -1340,7 +1350,9 @@ async function handleGoogleLogin(r) {
     safeStore.set('rattanaRepairUser', JSON.stringify({
       data: currentUser, exp: Date.now() + 30*24*60*60*1000
     }));
-    enterApp();
+    // ต้อง await — ไม่งั้น finally ปิด spinner ทั้งที่ข้อมูลยังโหลดไม่เสร็จ
+    // ผู้ใช้จะเห็นแอพเปล่าๆ กดได้ 3-10 วิ และ error ใน enterApp จะหลุดเป็น unhandled rejection
+    await enterApp();
   } catch (e) {
     console.error(e);
     showLoginError('เกิดข้อผิดพลาด กรุณาลองใหม่');
@@ -1354,6 +1366,9 @@ function checkSession() {
     const raw = safeStore.get('rattanaRepairUser');
     if (!raw) return false;
     const { data, exp } = JSON.parse(raw);
+    // ตรวจรูปร่างของข้อมูลที่เก็บไว้ด้วย — ถ้า exp หาย session จะไม่มีวันหมดอายุ
+    // และถ้า data หาย enterApp จะซ่อนหน้า login แล้วค่อยพัง = ผู้ใช้ค้างหน้าเปล่าเข้าไม่ได้เลย
+    if (!data || !data.email || !exp) { safeStore.del('rattanaRepairUser'); return false; }
     if (Date.now() > exp) { safeStore.del('rattanaRepairUser'); return false; }
     currentUser = data;
     return true;
@@ -1416,10 +1431,13 @@ async function loadAllData() {
     renderApprove();
     renderTabAll();
     renderByVehicle();
+    updateChecksBadge();
     if (currentTab === 'dashboard') renderDashboard();
     if (currentTab === 'home') renderHome();
     if (currentTab === 'checks') renderChecksTab();
     if (currentTab === 'vehicles') renderVehiclesTab();
+    // แท็บนี้เคยตกหล่น — กด ↻ แล้วขึ้น "อัพเดทเรียบร้อย ✓" ทั้งที่ตารางยังเป็นข้อมูลเก่า
+    if (currentTab === 'approved-list') renderApprovedList();
   } catch (e) {
     console.error(e);
     showToast('โหลดข้อมูลไม่สำเร็จ: ' + e.message, 'error');
@@ -1618,10 +1636,23 @@ function getVehicleCheckStatus(plate) {
   return { status: 'ok', lastDate: last.timestamp, daysAgo, lastCheck: last };
 }
 
+// ตัวเลขสีแดงบนเมนู "เช็ครถ" — ต้องคำนวณทุกครั้งที่โหลดข้อมูล ไม่ใช่เฉพาะตอนเปิดแท็บ
+// เดิมอยู่ใน renderChecksTab อย่างเดียว → ผู้ใช้ล็อกอินมาอยู่หน้าหลัก badge ไม่เคยขึ้น
+// ทั้งที่หน้าที่ของมันคือดึงคนเข้าไปที่แท็บนั้น
+function updateChecksBadge() {
+  const badge = $('checksBadge');
+  if (!badge || !currentUser) return;
+  const neverCount = getAllowedVehicles()
+    .filter(v => getVehicleCheckStatus(v.plate).status === 'never').length;
+  badge.textContent = neverCount;
+  badge.classList.toggle('hidden', neverCount === 0);
+}
+
 function renderChecksTab() {
   const allowed = getAllowedVehicles();
   const userWh = currentUser ? cleanCode(currentUser.warehouse) : '';
-  const isHQ = userWh === 'HQ' || userWh.includes('HQ');
+  // ใครเห็นรถหลายคลัง = ต้องได้ตัวกรองคลัง + ชื่อคลังบนการ์ดด้วย ไม่ใช่เฉพาะคนที่คลัง = HQ
+  const isHQ = isAdminUser();
 
   // Read filter values (จาก header dropdowns)
   const q = ($('checksSearch')?.value || '').toLowerCase().trim();
@@ -1678,11 +1709,7 @@ function renderChecksTab() {
   ].map(s => `<div class="stat-card ${s.cls}"><div class="s-label">${s.lbl}</div><div class="s-value">${s.val}</div></div>`).join('');
 
   // Update badge on tab bar — ใช้ neverCount แทน overdue
-  const badge = $('checksBadge');
-  if (badge) {
-    badge.textContent = neverCount;
-    badge.classList.toggle('hidden', neverCount === 0);
-  }
+  updateChecksBadge();
 
   const badgeMap = {
     ok: `<span class="check-badge ok">🟢 เช็คครบ</span>`,
@@ -1748,17 +1775,21 @@ function openCheckDo(plate) {
   checkItemStates = {};
   checkPhotosData = [];
   maintCardPhoto = null;
+  checkSubmitToken = null;   // เปิดฟอร์มเช็คใหม่ = รหัสกันส่งซ้ำชุดใหม่
   $('checkDoTitle').innerHTML = `🔍 เช็ครถรายเดือน ${escapeHtml(v.plate)} <span style="font-size:12px;color:var(--muted);font-weight:400">${escapeHtml(v.warehouse||'-')}</span>`;
   $('checkMileage').value = '';
   $('checkTireYear').value = '';
   $('checkNotes').value = '';
 
-  // Populate dropdown ผู้รับผิดชอบ — filter ตามคลังของ user (ยกเว้น HQ เห็นทุกคน)
+  // Populate dropdown ผู้รับผิดชอบ — filter ตามคลังของ user (แอดมิน/ผู้บริหารเห็นทุกคน)
+  // ⚠️ ต้องใช้ isAdminUser() ตัวเดียวกับที่ตัดสินว่าเห็นรถคันไหนได้ (getAllowedVehicles)
+  // เดิมเช็คแค่ "HQ" → ผู้บริหารคลัง W1 เห็นรถ W3 แต่ dropdown ไม่มีคน W3 = บันทึกเช็คไม่ได้เลย
   const respSel = $('checkResponsible');
   if (respSel) {
     const userWh = currentUser ? cleanCode(currentUser.warehouse) : '';
-    const isHQ = userWh === 'HQ' || userWh.includes('HQ');
-    let sameWhUsers = isHQ ? users.slice() : users.filter(u => cleanCode(u.warehouse) === userWh);
+    let sameWhUsers = isAdminUser() ? users.slice() : users.filter(u => cleanCode(u.warehouse) === userWh);
+    // กันกรณี filter แล้วว่างเปล่า (คลังตั้งค่าไม่ตรงกัน) — ยอมโชว์ทุกคนดีกว่าบันทึกไม่ได้
+    if (!sameWhUsers.length) sameWhUsers = users.slice();
     sameWhUsers.sort((a,b) => (a.name||'').localeCompare(b.name||'', 'th'));
     respSel.innerHTML = '<option value="">-- เลือกผู้รับผิดชอบ --</option>' +
       sameWhUsers.map(u => {
@@ -1803,6 +1834,9 @@ function renderCheckItems() {
 function setCheckStatus(name, status) {
   if (!checkItemStates[name]) checkItemStates[name] = {};
   checkItemStates[name].status = status;
+  // เปลี่ยนกลับเป็น "ผ่าน" → ต้องลบหมายเหตุเดิมทิ้งด้วย ช่องหมายเหตุหายไปจากจอแล้ว
+  // แต่ข้อความเดิมยังถูกส่งขึ้นชีท กลายเป็น "✓ ผ่าน — ยางแตกด้านใน"
+  if (status === 'pass') checkItemStates[name].note = '';
   // วาดใหม่เฉพาะหัวข้อที่กด — เดิม re-render ทั้ง 11 หัวข้อ
   // ทำให้ช่องหมายเหตุที่กำลังพิมพ์อยู่โดนสร้างใหม่ เคอร์เซอร์เด้งหลุดทุกครั้ง
   const idx = CHECK_ITEMS.findIndex(it => it.name === name);
@@ -1825,10 +1859,13 @@ async function handleCheckPhotoUpload(ev) {
   // ⚠️ ต้องย่อรูปก่อนเสมอ — รูปจากมือถือใบละ 5-10 MB ถ้าส่งดิบ 5 ใบ payload จะทะลุ 40 MB
   //    แล้ว fetch จะตายกลางทางเป็น "Load failed" (บั๊กเดียวกับที่เคยเจอตอนแนบบิล)
   showSpinner('กำลังเตรียมรูป...');
-  const photos = (await Promise.all(accept.map(f => compressImage(f)))).filter(Boolean);
+  const results = await Promise.all(accept.map(f => compressImage(f)));
   hideSpinner();
-  photos.forEach(p => checkPhotosData.push(p));
+  const photos = results.filter(Boolean);
+  photos.forEach(p => { if (checkPhotosData.length < 5) checkPhotosData.push(p); });
   renderCheckPhotos();
+  const failed = results.length - photos.length;
+  if (failed > 0) showToast(failed + ' รูปเปิดไม่ได้ ไม่ถูกแนบ — ลองถ่ายใหม่', 'warning');
   if (files.length > remaining) showToast('แนบได้สูงสุด 5 รูป — ใช้เฉพาะ ' + remaining + ' รูปแรก', 'warning');
 }
 function renderCheckPhotos() {
@@ -1931,6 +1968,7 @@ async function submitCheck() {
 
   const payload = {
     action: 'createCheck',
+    clientToken: (checkSubmitToken = checkSubmitToken || newSubmitToken()),
     plate: currentCheckVehicle.plate,
     warehouse: currentCheckVehicle.warehouse || '',
     checkType: 'monthly',
@@ -1948,11 +1986,17 @@ async function submitCheck() {
   };
 
   showSpinner('กำลังบันทึก...');
+  // กันกดซ้ำ — ส่งรูปหลายใบผ่าน 4G ใช้เวลา 5-15 วิ ถ้ากดสองทีจะได้ 2 แถวและอัพรูปซ้ำทั้งชุด
+  // (ฟอร์มแจ้งซ่อมกันไว้แล้วตั้งแต่ v8.7 แต่ฟอร์มเช็ครถยังไม่ได้กัน)
+  const checkBtn = $('checkSubmitBtn');
+  if (checkBtn) checkBtn.disabled = true;
   try {
     const r = await fetch(GAS_URL, { method: 'POST', body: JSON.stringify(payload) });
     const j = await gasJson(r);
     if (!j.ok) throw new Error(j.error || 'save failed');
-    showToast('บันทึกเช็ครถสำเร็จ ✓', 'success');
+    showToast(j.data && j.data.duplicate ? 'เช็ครถคันนี้บันทึกไปแล้ว ✓ ไม่ได้บันทึกซ้ำ' : 'บันทึกเช็ครถสำเร็จ ✓', 'success');
+    if (j.data && j.data.rowWarning) setTimeout(() => showToast('⚠ ' + j.data.rowWarning, 'warning'), 1500);
+    checkSubmitToken = null;   // สำเร็จแล้ว ครั้งหน้าเป็นใบใหม่
     closeCheckDo();
     await loadChecks();
     renderChecksTab();
@@ -1962,6 +2006,7 @@ async function submitCheck() {
     showToast(friendlyError(e, 'บันทึกไม่สำเร็จ: '), 'error');
   } finally {
     hideSpinner();
+    if (checkBtn) checkBtn.disabled = false;
   }
 }
 
@@ -2115,26 +2160,29 @@ function renderPlateList() {
     const warehousesClean = [...new Set(vehicles.map(v => cleanCode(v.warehouse)))].filter(Boolean);
     ul.innerHTML = `<li class="no-result" style="font-size:12px;text-align:left;line-height:1.8;padding:14px;font-style:normal">
       <strong style="color:var(--danger)">⚠ ไม่พบรถ — Diagnostic info:</strong><br>
-      • User: ${currentUser?.email || '-'}<br>
-      • Warehouse: <code>"${currentUser?.warehouse}"</code> → cleaned: <code>"${cleanCode(currentUser?.warehouse)}"</code><br>
-      • Role: ${currentUser?.role || 0}<br>
+      • User: ${escapeHtml(currentUser?.email || '-')}<br>
+      • Warehouse: <code>"${escapeHtml(currentUser?.warehouse)}"</code> → cleaned: <code>"${escapeHtml(cleanCode(currentUser?.warehouse))}"</code><br>
+      • Role: ${escapeHtml(currentUser?.role || 0)}<br>
       • Admin? <strong style="color:${isAdminUser()?'var(--success)':'var(--danger)'}">${isAdminUser() ? 'YES' : 'NO'}</strong><br>
       • รถทั้งหมดใน vehicles: <strong>${vehicles.length}</strong> คัน<br>
-      • Warehouses (raw): ${warehouses.length ? warehouses.map(w=>`<code>"${w}"</code>`).join(', ') : '<em>(ว่างเปล่า — column "คลัง" ไม่มีข้อมูล)</em>'}<br>
-      • Warehouses (cleaned): ${warehousesClean.join(', ') || '(ว่าง)'}
+      • Warehouses (raw): ${warehouses.length ? warehouses.map(w=>`<code>"${escapeHtml(w)}"</code>`).join(', ') : '<em>(ว่างเปล่า — column "คลัง" ไม่มีข้อมูล)</em>'}<br>
+      • Warehouses (cleaned): ${escapeHtml(warehousesClean.join(', ')) || '(ว่าง)'}
     </li>`;
     return;
   }
 
   // ปกติ
+  // ⚠️ ข้อมูลรถมาจากชีทที่คนกรอกเอง — ต้อง escape ทุกช่องก่อนยัดลง innerHTML
+  // (เคยเจอจริง: ค่าในคอลัมน์ "รุ่นรถ" ที่มี < > ทำให้ทั้งแถวหาย และ <img onerror> รันได้)
+  // ทะเบียนอ่านจาก data-plate แทนการยัดลง onclick เพื่อไม่ต้องพึ่งการ escape ไวยากรณ์ JS
   ul.innerHTML = allowed.map(v => `
-    <li onclick="selectPlate('${v.plate.replace(/'/g,"\\'")}')">
-      <span><strong>${v.plate}</strong> <span class="li-meta">· ${v.warehouse||'-'} · ${v.vehicleType||v.model||'-'}</span></span>
-      <span class="li-meta">${v.driver || ''}</span>
+    <li data-plate="${escapeHtml(v.plate)}" onclick="selectPlate(this.dataset.plate)">
+      <span><strong>${escapeHtml(v.plate)}</strong> <span class="li-meta">· ${escapeHtml(v.warehouse||'-')} · ${escapeHtml(v.vehicleType||v.model||'-')}</span></span>
+      <span class="li-meta">${escapeHtml(v.driver || '')}</span>
     </li>`).join('');
 
   if (!isAdminUser() && currentUser) {
-    const note = `<li class="no-result" style="font-size:11px;color:var(--muted);font-style:normal;background:rgba(201,168,76,.06);border-top:1px solid var(--border)">📍 แสดงเฉพาะรถใน ${currentUser.warehouse} (${allowed.length} คัน)</li>`;
+    const note = `<li class="no-result" style="font-size:11px;color:var(--muted);font-style:normal;background:rgba(201,168,76,.06);border-top:1px solid var(--border)">📍 แสดงเฉพาะรถใน ${escapeHtml(currentUser.warehouse)} (${allowed.length} คัน)</li>`;
     ul.insertAdjacentHTML('beforeend', note);
   }
 }
@@ -2181,7 +2229,7 @@ function selectPlate(plate) {
     ['ผู้ดูแล/คนขับ', v.driver],
     ['แผนก', v.vehicleDept]
   ].filter(([,val]) => val)
-   .map(([label, val]) => `<div class="autofill-item"><span class="a-label">${label}</span><span class="a-value">${val}</span></div>`)
+   .map(([label, val]) => `<div class="autofill-item"><span class="a-label">${label}</span><span class="a-value">${escapeHtml(val)}</span></div>`)
    .join('');
 }
 
@@ -2209,7 +2257,7 @@ function renderVendorList() {
   ul.innerHTML = otherOption + vendors.map((v, idx) => `
     <li onclick="selectVendor(${idx})">
       <span><strong>${escapeHtml(v.name)}</strong></span>
-      <span class="li-meta">${v.phone || ''}</span>
+      <span class="li-meta">${escapeHtml(v.phone || '')}</span>
     </li>`).join('');
 }
 
@@ -2296,10 +2344,14 @@ async function handleBillUpload(ev) {
   ev.target.value = '';
   // ย่อรูปแบบขนานทุกใบ (ไม่มีลิมิต 8 MB แล้ว เพราะย่อก่อนส่งอยู่แล้ว)
   showSpinner('กำลังเตรียมรูป...');
-  const photos = (await Promise.all(accept.map(f => compressImage(f)))).filter(Boolean);
+  const results = await Promise.all(accept.map(f => compressImage(f)));
   hideSpinner();
-  photos.forEach(p => billPhotosData.push(p));
+  const photos = results.filter(Boolean);
+  // เช็คโควตาอีกรอบหลัง await — ระหว่างย่อรูป ผู้ใช้เลือกรูปชุดที่สองได้ ทั้งสองชุดเห็น remaining ค่าเดิม
+  photos.forEach(p => { if (billPhotosData.length < MAX_BILL_PHOTOS) billPhotosData.push(p); });
   renderBillThumbs();
+  const failed = results.length - photos.length;
+  if (failed > 0) showToast(failed + ' รูปเปิดไม่ได้ ไม่ถูกแนบ — ลองถ่ายใหม่', 'warning');
   if (files.length > remaining) showToast('แนบได้สูงสุด ' + MAX_BILL_PHOTOS + ' รูป — ใช้เฉพาะ ' + remaining + ' รูปแรก', 'warning');
 }
 
@@ -2339,15 +2391,19 @@ async function handleDamageUpload(ev) {
   const accept = files.slice(0, remaining);
   ev.target.value = '';
   showSpinner('กำลังเตรียมรูป...');
-  const photos = (await Promise.all(accept.map(f => compressImage(f)))).filter(Boolean);
+  const results = await Promise.all(accept.map(f => compressImage(f)));
   hideSpinner();
-  photos.forEach(p => damagePhotosData.push(p));
+  const photos = results.filter(Boolean);
+  photos.forEach(p => { if (damagePhotosData.length < 5) damagePhotosData.push(p); });
   renderDamageThumbs();
+  const failed = results.length - photos.length;
+  if (failed > 0) showToast(failed + ' รูปเปิดไม่ได้ ไม่ถูกแนบ — ลองถ่ายใหม่', 'warning');
   if (files.length > remaining) showToast('แนบได้สูงสุด 5 รูป — ใช้เฉพาะ ' + remaining + ' รูปแรก', 'warning');
 }
 
 function renderDamageThumbs() {
   const wrap = $('damageThumbs');
+  if (!wrap) return;
   const thumbsHtml = damagePhotosData.map((p, idx) => `
     <div class="damage-thumb">
       <img src="${p.dataUrl}" alt="ความเสียหาย ${idx+1}">
@@ -2370,13 +2426,21 @@ function removeDamagePhoto(idx) {
 }
 
 function updateApprovalHint() {
-  const amt = parseFloat($('inAmount').value) || 0;
+  const amtEl = $('inAmount');
   const h = $('approvalHint');
+  if (!amtEl || !h) return;
+  const amt = parseFloat(amtEl.value) || 0;
   if (amt <= 0) { h.textContent = ''; return; }
   if (amt <= 1000) {
     h.innerHTML = '<span style="color:var(--success)">✓ ยอดไม่เกิน 1,000 บาท — ผ่านอัตโนมัติ ไม่ต้องรออนุมัติ</span>';
   } else {
     h.innerHTML = '<span style="color:var(--warning)">⚠ ยอดเกิน 1,000 บาท — ต้องผ่านการอนุมัติจาก หัวหน้า/ฝ่ายทรัพยากรบุคคล → ผู้บริหาร</span>';
+  }
+  // เตือนเมื่อราคาย่อยที่กรอกรวมแล้วไม่เท่ายอดบิล — เดิมสองค่านี้ไม่เคยถูกเทียบกันเลย
+  // ทำให้กรอกราคารายการรวม 9,000 แต่ใส่ยอดบิล 900 แล้วผ่านอัตโนมัติได้
+  const priceSum = Object.values(selectedItemPrices).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+  if (priceSum > 0 && Math.abs(priceSum - amt) >= 1) {
+    h.innerHTML += `<br><span style="color:var(--danger)">⚠ ราคารายการรวม ฿${fmtMoney(priceSum)} ไม่ตรงกับยอดเงินทั้งบิล ฿${fmtMoney(amt)} — ตรวจอีกครั้ง</span>`;
   }
 }
 
@@ -2411,6 +2475,13 @@ function escapeAttr(s) {
     .split('>').join('&gt;');
 }
 function escapeHtml(s) { return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ลิงก์ที่มาจากชีท (สำเนารถ/ประกัน) — อนุญาตเฉพาะ http/https
+// กัน javascript: หรือ data: ที่ใครใส่ในชีทแล้วกลายเป็นลิงก์กดได้ในแอพ
+function safeUrl(u) {
+  const s = String(u || '').trim();
+  return /^https?:\/\//i.test(s) ? escapeHtml(s) : '';
+}
 
 // เทียบชื่อรายการซ่อมว่า "ซ้ำกับที่มีอยู่แล้วไหม"
 // ⚠️ ต้องตรงกับ _normItemKey() ฝั่ง .gs เป๊ะ ไม่งั้นลิสต์กลางจะบวมด้วยของซ้ำ
@@ -2510,6 +2581,7 @@ function setItemPrice(item, val) {
     const sum = Object.values(selectedItemPrices).reduce((s, v) => s + v, 0);
     sumEl.textContent = sum > 0 ? 'รวมราคาที่กรอก: ฿' + fmtMoney(sum) : '';
   }
+  updateApprovalHint();   // ให้คำเตือน "ราคารายการรวมไม่ตรงยอดบิล" อัพเดตทันทีที่พิมพ์ราคา
 }
 
 // ── ผูก event แบบ delegation ──
@@ -2554,7 +2626,7 @@ function syncRepairUI() {
   const sum = Object.values(selectedItemPrices).reduce((s, v) => s + v, 0);
   bar.innerHTML = [...selectedRepairItems].map(item => `
     <span class="chip" data-item="${escapeHtml(item)}">${escapeHtml(item)}
-      <input type="number" class="chip-price" inputmode="decimal" min="0" step="0.01" placeholder="฿ราคา" value="${selectedItemPrices[item] || ''}">
+      <input type="number" class="chip-price" inputmode="decimal" min="0" step="0.01" placeholder="฿ราคา" value="${selectedItemPrices[item] ?? ''}">
       <span class="chip-x" title="เอาออก">×</span>
     </span>`
   ).join('')
@@ -2629,9 +2701,12 @@ async function submitRepair() {
   showSpinner('กำลังส่งคำขอ...');
   const submitBtn = $('submitBtn');
   if (submitBtn) submitBtn.disabled = true;
+  // ใช้รหัสเดิมถ้าครั้งก่อนส่งแล้วพลาด — backend จะคืนใบเดิมแทนการสร้างใบใหม่
+  if (!repairSubmitToken) repairSubmitToken = newSubmitToken();
   try {
     const payload = {
       action: 'createRepair',
+      clientToken: repairSubmitToken,
       requesterEmail: currentUser.email,
       requesterName:  currentUser.name,
       requesterDept:  currentUser.dept,
@@ -2667,11 +2742,18 @@ async function submitRepair() {
     const j = await gasJson(r);
     if (!j.ok) throw new Error(j.error || 'submit failed');
 
-    if (j.data.status === 'auto_approved') {
+    if (j.data.duplicate) {
+      showToast('ใบนี้ส่งไปแล้ว ✓ ระบบไม่ได้สร้างใบซ้ำให้', 'success');
+    } else if (j.data.status === 'auto_approved') {
       showToast('ส่งคำขอสำเร็จ ✓ ยอดไม่เกิน 1,000 บาท — อนุมัติอัตโนมัติ', 'success');
     } else {
       showToast('ส่งคำขอสำเร็จ ✓ รออนุมัติจาก หัวหน้า/ฝ่ายทรัพยากรบุคคล', 'success');
     }
+    // backend ไม่แน่ใจว่าเขียนแถวสำเร็จ — ต้องบอก ไม่ใช่ปล่อยให้เข้าใจว่าเรียบร้อย
+    if (j.data.rowWarning) {
+      setTimeout(() => showToast('⚠ ' + j.data.rowWarning, 'warning'), 1500);
+    }
+    repairSubmitToken = null;   // สำเร็จแล้ว ครั้งหน้าเป็นใบใหม่
     // backend v8.7 บันทึกแถวก่อนอัพรูป — ถ้าอัพรูปพลาด ใบแจ้งซ่อมยังอยู่ครบ แค่รูปไม่ขึ้น
     // ต้องบอกพนักงานให้รู้ ไม่งั้นจะไม่มีใครรู้ว่าต้องกลับมาแนบรูปใหม่
     if (j.data.photoWarning) {
@@ -2714,6 +2796,7 @@ function clearRepairForm() {
   if (!filled.length) { showToast('ฟอร์มว่างอยู่แล้ว ไม่มีข้อมูลให้ล้าง', 'info'); return; }
   // เตือนให้เห็นชัดๆ ว่ากำลังจะทิ้งอะไรบ้าง — โดยเฉพาะรูปที่ถ่ายมาแล้ว ถ่ายใหม่เสียเวลา
   if (!confirm('ล้างข้อมูลที่กรอกไว้ทั้งหมด?\n\nจะหายไป:\n• ' + filled.join('\n• ') + '\n\nกู้คืนไม่ได้')) return;
+  repairSubmitToken = null;   // ล้างฟอร์ม = เริ่มใบใหม่ ต้องได้รหัสกันซ้ำชุดใหม่
   resetForm();
   showToast('ล้างข้อมูลแล้ว เริ่มกรอกใหม่ได้เลย', 'success');
 }
@@ -2989,22 +3072,26 @@ function positionReportsPanel() {
 }
 
 // Reposition เมื่อ resize / scroll
-window.addEventListener('resize', () => {
-  const panel = document.getElementById('reportsMenuPanel');
-  if (panel && !panel.classList.contains('hidden')) positionReportsPanel();
-});
-window.addEventListener('scroll', () => {
-  const panel = document.getElementById('reportsMenuPanel');
-  if (panel && !panel.classList.contains('hidden')) positionReportsPanel();
-}, true);
+// ⚠️ #reportsMenuPanel / #tabReportsBtn ไม่มีอยู่ใน HTML แล้ว (ทางเข้ารายงานย้ายไปการ์ดในหน้าหลัก)
+// จึงผูก listener เฉพาะเมื่อ element มีจริง — ของเดิมยิง getElementById ทุกครั้งที่ scroll เปล่าๆ
+if (document.getElementById('reportsMenuPanel')) {
+  window.addEventListener('resize', () => {
+    const panel = document.getElementById('reportsMenuPanel');
+    if (panel && !panel.classList.contains('hidden')) positionReportsPanel();
+  });
+  window.addEventListener('scroll', () => {
+    const panel = document.getElementById('reportsMenuPanel');
+    if (panel && !panel.classList.contains('hidden')) positionReportsPanel();
+  }, true);
 
-// ปิด dropdown เมื่อคลิกข้างนอก trigger + panel
-document.addEventListener('click', e => {
-  const panel = document.getElementById('reportsMenuPanel');
-  if (!panel || panel.classList.contains('hidden')) return;
-  if (e.target.closest('#tabReportsBtn') || e.target.closest('#reportsMenuPanel')) return;
-  panel.classList.add('hidden');
-});
+  // ปิด dropdown เมื่อคลิกข้างนอก trigger + panel
+  document.addEventListener('click', e => {
+    const panel = document.getElementById('reportsMenuPanel');
+    if (!panel || panel.classList.contains('hidden')) return;
+    if (e.target.closest('#tabReportsBtn') || e.target.closest('#reportsMenuPanel')) return;
+    panel.classList.add('hidden');
+  });
+}
 
 // ═════════════════════════════════════════════════════════════════════
 // STATUS HELPERS
@@ -3017,7 +3104,9 @@ function statusBadge(s) {
     pending_executive:  { txt: '⏳ รอผู้บริหาร',        cls: 'badge-warn' },
     rejected:           { txt: '✗ ปฏิเสธ',             cls: 'badge-danger' }
   };
-  const m = map[s] || { txt: s, cls: 'badge-info' };
+  // สถานะที่ไม่รู้จัก (เช่น มีคนแก้ช่องสถานะในชีทเอง) ต้อง escape ก่อนแสดง
+  // ไม่งั้นข้อความในชีทกลายเป็น HTML — ยืนยันแล้วว่ารันสคริปต์ได้จริง
+  const m = map[s] || { txt: escapeHtml(s), cls: 'badge-info' };
   return `<span class="badge ${m.cls}">${m.txt}</span>`;
 }
 
@@ -3239,8 +3328,11 @@ function renderVehiclesTab() {
   const allowed = getAllowedVehicles();
 
   // เตรียม filter dropdowns ครั้งแรก
+  // ⚠️ เช็ค allowed.length ด้วย — ถ้าโหลดข้อมูลรถไม่สำเร็จตอนเข้าแอพ dropdown จะถูกสร้างเป็นกล่องว่าง
+  // แล้ว children.length = 1 ทำให้ไม่มีวันสร้างใหม่อีกเลย กด ↻ ก็ไม่กลับมา ต้องรีโหลดหน้าทั้งหน้า
   const filtersEl = $('vehiclesColFilters');
-  if (filtersEl && !filtersEl.children.length) {
+  if (filtersEl && allowed.length && (!filtersEl.children.length || !filtersEl.dataset.built)) {
+    filtersEl.dataset.built = '1';
     filtersEl.innerHTML = VEHICLE_FILTER_FIELDS.map(f => {
       const values = [...new Set(allowed.map(v => v[f.key]).filter(Boolean))]
         .sort((a,b) => String(a).localeCompare(String(b), 'th'));
@@ -3366,11 +3458,11 @@ function openVehicleDetail(plate) {
       const id = (url.match(/\/d\/([a-zA-Z0-9_-]+)/) || [])[1];
       if (id) {
         html += `<div style="background:#f0f0f0;border-radius:8px;overflow:hidden;border:1px solid var(--border)">
-          <div style="padding:6px 10px;background:var(--card-bg);border-bottom:1px solid var(--border);font-size:12px;font-weight:600">${label} <a href="${url}" target="_blank" style="float:right;font-weight:400;color:var(--info);text-decoration:none;font-size:11px">เปิดเต็มจอ →</a></div>
+          <div style="padding:6px 10px;background:var(--card-bg);border-bottom:1px solid var(--border);font-size:12px;font-weight:600">${label} <a href="${safeUrl(url)}" target="_blank" rel="noopener noreferrer" style="float:right;font-weight:400;color:var(--info);text-decoration:none;font-size:11px">เปิดเต็มจอ →</a></div>
           <iframe src="https://drive.google.com/file/d/${id}/preview" style="width:100%;height:380px;border:0;display:block" loading="lazy" allowfullscreen></iframe>
         </div>`;
       } else {
-        html += `<div><a href="${url}" target="_blank">${label}</a></div>`;
+        html += `<div><a href="${safeUrl(url)}" target="_blank" rel="noopener noreferrer">${label}</a></div>`;
       }
     });
 
@@ -3469,11 +3561,11 @@ function printVehicleDoc(kind) {
 </head><body>
   <div class="header">
     <h1>${label}</h1>
-    <div class="meta">ทะเบียน <strong>${docs.plate}</strong> · คลัง ${docs.warehouse||'-'}</div>
+    <div class="meta">ทะเบียน <strong>${escapeHtml(docs.plate)}</strong> · คลัง ${escapeHtml(docs.warehouse||'-')}</div>
   </div>
   <div class="btn-bar">
     <button class="btn-print" onclick="window.print()">🖨 พิมพ์</button>
-    <a class="btn-open" href="${url}" target="_blank" rel="noopener">🔗 เปิดใน Google Drive</a>
+    <a class="btn-open" href="${safeUrl(url)}" target="_blank" rel="noopener">🔗 เปิดใน Google Drive</a>
   </div>
   <div class="hint">💡 ถ้าเอกสารโหลดไม่ขึ้น กดปุ่ม "เปิดใน Google Drive" ด้านบนแล้วใช้ปุ่มดาวน์โหลด/พิมพ์ของ Drive</div>
   <div class="doc-wrap">
@@ -3538,16 +3630,16 @@ function renderByVehicle() {
   $('byVehicleList').innerHTML = list.map(s => {
     const v = s.vehicle;
     const lastTxt = s.lastRepair
-      ? `${formatThaiDate(s.lastRepair.timestamp)} · ${(s.lastRepair.issueDescription||'').replace(/\n/g,' ').substring(0,80)}`
+      ? `${formatThaiDate(s.lastRepair.timestamp)} · ${escapeHtml((s.lastRepair.issueDescription||'').replace(/\n/g,' ').substring(0,80))}`
       : '<span style="color:var(--muted)">— ยังไม่มีประวัติซ่อม —</span>';
     const noRepair = s.totalCount === 0 ? 'no-repair' : '';
     const pendingBadge = s.pendingCount > 0
       ? `<span class="badge badge-warn" style="margin-left:6px">⏳ ${s.pendingCount} รออนุมัติ</span>` : '';
     return `
-      <div class="vsum-card ${noRepair}" onclick="openVehicleHistory('${v.plate.replace(/'/g,"\\'")}')">
+      <div class="vsum-card ${noRepair}" data-plate="${escapeHtml(v.plate)}" onclick="openVehicleHistory(this.dataset.plate)">
         <div class="vsum-info">
-          <div class="vsum-plate">${v.plate} ${pendingBadge}</div>
-          <div class="vsum-meta">${v.warehouse||'-'} · ${v.vehicleType||v.model||'-'} ${v.driver?'· '+v.driver:''}</div>
+          <div class="vsum-plate">${escapeHtml(v.plate)} ${pendingBadge}</div>
+          <div class="vsum-meta">${escapeHtml(v.warehouse||'-')} · ${escapeHtml(v.vehicleType||v.model||'-')} ${v.driver?'· '+escapeHtml(v.driver):''}</div>
           <div class="vsum-last">${lastTxt}</div>
         </div>
         <div class="vsum-stats">
@@ -3565,7 +3657,7 @@ function openVehicleHistory(plate) {
   if (!s) return;
   const v = s.vehicle;
 
-  $('detailTitle').innerHTML = `🚛 ${v.plate} <span style="font-size:11px;color:var(--muted);font-weight:400">${v.warehouse||''}</span>`;
+  $('detailTitle').innerHTML = `🚛 ${escapeHtml(v.plate)} <span style="font-size:11px;color:var(--muted);font-weight:400">${escapeHtml(v.warehouse||'')}</span>`;
 
   let html = `
     <div class="hist-summary">
@@ -3574,10 +3666,10 @@ function openVehicleHistory(plate) {
       <div class="hs-item"><div class="hs-label">ยอดรวม (฿)</div><div class="hs-value">${fmtMoney(s.totalAmount)}</div></div>
     </div>
     <div style="margin-bottom:14px">
-      <div class="det-row"><span class="det-label">รุ่น/ประเภท</span><span class="det-value">${v.model||'-'} · ${v.vehicleType||'-'}</span></div>
-      <div class="det-row"><span class="det-label">ปี · เชื้อเพลิง</span><span class="det-value">${v.year||'-'} · ${v.fuel||'-'}</span></div>
-      <div class="det-row"><span class="det-label">ผู้ดูแล/คนขับ</span><span class="det-value">${v.driver||'-'}</span></div>
-      <div class="det-row"><span class="det-label">แผนก</span><span class="det-value">${v.vehicleDept||'-'}</span></div>
+      <div class="det-row"><span class="det-label">รุ่น/ประเภท</span><span class="det-value">${escapeHtml(v.model||'-')} · ${escapeHtml(v.vehicleType||'-')}</span></div>
+      <div class="det-row"><span class="det-label">ปี · เชื้อเพลิง</span><span class="det-value">${escapeHtml(v.year||'-')} · ${escapeHtml(v.fuel||'-')}</span></div>
+      <div class="det-row"><span class="det-label">ผู้ดูแล/คนขับ</span><span class="det-value">${escapeHtml(v.driver||'-')}</span></div>
+      <div class="det-row"><span class="det-label">แผนก</span><span class="det-value">${escapeHtml(v.vehicleDept||'-')}</span></div>
     </div>
   `;
 
@@ -3673,7 +3765,7 @@ function renderDashboard() {
   // Stats
   const totalAmount = data.reduce((s,r) => s + (parseFloat(r.billAmount)||0), 0);
   const totalCount = data.length;
-  const uniqueVehicles = new Set(data.map(r => r.plate)).size;
+  const uniqueVehicles = new Set(data.map(r => cleanCode(r.plate)).filter(Boolean)).size;
   const avgPerRepair = totalCount > 0 ? totalAmount / totalCount : 0;
 
   $('dashStats').innerHTML = [
@@ -3781,10 +3873,13 @@ function renderDashboard() {
   });
 
   // ── Chart 4: Top 10 รถ (horizontal bar) ──
+  // รวมยอดด้วย cleanCode — ทะเบียนเดียวกันที่พิมพ์เว้นวรรคต่างกัน ("1กก 1234" กับ "1กก1234")
+  // เคยถูกนับเป็นคนละคัน ทำให้รถคันนั้นถูกหารครึ่งจนหลุด Top 10
   const byPlate = {};
   data.forEach(r => {
     if (!r.plate) return;
-    byPlate[r.plate] = (byPlate[r.plate] || 0) + (parseFloat(r.billAmount) || 0);
+    const key = cleanCode(r.plate);
+    byPlate[key] = (byPlate[key] || 0) + (parseFloat(r.billAmount) || 0);
   });
   const topVehicles = Object.entries(byPlate)
     .sort((a,b) => b[1] - a[1])
@@ -4075,13 +4170,18 @@ function openDetail(id) {
   const myStage = currentUser.approvalStage;
   // Stage 1 — เฉพาะ MGT (approvalStage === 1) เท่านั้น
   // Stage 2 — เฉพาะ All / ผู้บริหาร (approvalStage === 2) เท่านั้น
-  const canApproveStage1 = (r.status === 'pending_supervisor') && (myStage === 1);
-  const canApproveStage2 = (r.status === 'pending_executive')  && (myStage === 2);
+  // ห้ามอนุมัติใบของตัวเอง — หัวหน้า/ผู้บริหารที่แจ้งซ่อมเองเคยกดอนุมัติใบตัวเองได้
+  const isOwnRequest = normalizeEmail(r.requesterEmail) === normalizeEmail(currentUser.email);
+  const canApproveStage1 = (r.status === 'pending_supervisor') && (myStage === 1) && !isOwnRequest;
+  const canApproveStage2 = (r.status === 'pending_executive')  && (myStage === 2) && !isOwnRequest;
   if (canApproveStage1 || canApproveStage2) {
     const stage = canApproveStage1 ? 1 : 2;
+    // id อ่านจาก data-rid ไม่ยัดลงสตริงใน onclick — id ที่มี ' หรือ " เคยทำให้ปุ่มกดไม่ติดเงียบๆ
     foot.innerHTML +=
-      `<button class="btn btn-danger" onclick="askNote('reject',${stage},'${r.id}')">✗ ปฏิเสธ</button>` +
-      `<button class="btn btn-success" onclick="askNote('approve',${stage},'${r.id}')">✓ อนุมัติ</button>`;
+      `<button class="btn btn-danger" data-rid="${escapeHtml(r.id)}" onclick="askNote('reject',${stage},this.dataset.rid)">✗ ปฏิเสธ</button>` +
+      `<button class="btn btn-success" data-rid="${escapeHtml(r.id)}" onclick="askNote('approve',${stage},this.dataset.rid)">✓ อนุมัติ</button>`;
+  } else if (isOwnRequest && isPending(r.status) && (myStage === 1 || myStage === 2)) {
+    foot.innerHTML += `<span style="font-size:12px;color:var(--muted);align-self:center;padding:0 6px">ใบของคุณเอง — ต้องให้คนอื่นอนุมัติ</span>`;
   }
 
   $('detailModal').classList.add('open');
@@ -4154,6 +4254,11 @@ async function confirmNoteAction() {
 // ═════════════════════════════════════════════════════════════════════
 function exportAllExcel() {
   if (!repairs.length) { showToast('ไม่มีข้อมูลให้ export', 'warning'); return; }
+  // SheetJS มาจาก CDN — เน็ตมือถือบล็อก/ช้า แล้วกดปุ่มนี้จะเงียบสนิทเหมือนปุ่มเสีย
+  if (typeof XLSX === 'undefined') {
+    showToast('ตัวสร้างไฟล์ Excel ยังโหลดไม่เสร็จ — รอสักครู่แล้วลองใหม่', 'warning');
+    return;
+  }
   const data = repairs.map(r => ({
     'ID': r.id,
     'วันที่แจ้ง': formatThaiDateTime(r.timestamp),
@@ -4193,7 +4298,17 @@ function boot() {
   renderRepairItemList();
   renderBillThumbs();     // ให้ตัวนับ 0/3 กับ 0/5 ขึ้นตั้งแต่เปิดหน้า
   renderDamageThumbs();
-  if (checkSession()) enterApp();
+  if (checkSession()) {
+    // ถ้า enterApp พัง ต้องพาผู้ใช้กลับไปหน้า login ไม่ใช่ปล่อยค้างหน้าเปล่า
+    enterApp().catch(e => {
+      console.error('enterApp:', e);
+      safeStore.del('rattanaRepairUser');
+      $('loginScreen').classList.remove('hidden');
+      $('appScreen').classList.add('hidden');
+      $('bottomNav').classList.add('hidden');
+      showLoginError('เปิดแอพไม่สำเร็จ กรุณาเข้าสู่ระบบใหม่');
+    });
+  }
   else renderInAppWarning();   // เตือนก่อนที่ผู้ใช้จะกดล็อกอินแล้วเจอหน้าขาว
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
