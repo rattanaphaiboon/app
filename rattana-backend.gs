@@ -1,6 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.40 — auditFaceThresholds() ตารางเทียบเกณฑ์จากข้อมูลจริง (maxDist x margin)
+ *          + อันดับคนที่เสี่ยงโดนแต่ละกฎ + รายชื่อคนที่มีรูปเดียว
+ *          ข้อมูลจาก v9.39: หน้าคนเดียวกัน กลาง 0.243 / p90 0.320 · คนละคนใกล้สุด 0.315
+ *          → แยกกันได้จริง · "ผ่านเฉียดฉิว 0 คน" แปลว่ากฎเทียบคนอื่นแบบเข้มก็ไม่บล็อกใคร
  * v9.39 — auditFaceSelfTest ฉบับแก้: v9.38 เอาเทมเพลตเทียบกับตัวมันเอง ระยะได้ 0 เสมอ
  *          ผลเลยขึ้น "ไม่มีใครถูกบล็อก" โดยไม่ได้พิสูจน์อะไรจริง
  *          ฉบับนี้ใช้ "รูปที่ 2" ของแต่ละคน (ตอนลงทะเบียนถ่าย 2 รูป) แทนการสแกนครั้งใหม่
@@ -237,7 +241,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.39', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.40', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -7071,6 +7075,61 @@ function auditFaceSelfTest() {
   L.push(risk === 0
     ? '✅ ไม่มีใครถูกบล็อก — เกณฑ์นี้ปลอดภัยกับข้อมูลจริง' + (tight.length ? ' (แต่มี ' + tight.length + ' คนเฉียดฉิว ควรถ่ายใหม่)' : '')
     : '★ ' + risk + ' คนข้างบนจะสแกนไม่ผ่าน — ต้องให้ HR ลงทะเบียนใบหน้าใหม่ก่อน (แสงพอ · ถ่ายตรงหน้า · ไม่ใส่แมสก์/แว่นดำ)');
+  Logger.log(L.join('\n'));
+}
+
+/* ══════════════════════════════════════════════════════════════
+   v9.40 · ตารางเทียบเกณฑ์ — เลือกค่าจากตัวเลขจริง ไม่ใช่เดา
+   แต่ละแถวบอกว่า ถ้าใช้เกณฑ์นั้น จะมีคนถูกบล็อกกี่คน (จากที่จำลองได้)
+   · maxDist = ระยะถึงตัวเองสูงสุดที่ยอมรับ
+   · margin  = เจ้าของบัญชีต้องใกล้กว่าคนอื่นเท่าไหร่ (ติดลบ = ยอมให้คนอื่นใกล้กว่าได้นิดหน่อย)
+   ══════════════════════════════════════════════════════════════ */
+function auditFaceThresholds() {
+  const idx = faceIndex_();
+  const rows = [];
+  let single = 0;
+  idx.forEach(me => {
+    if (me.descs.length < 2) { single++; return; }
+    const probe = me.descs[1];
+    const dSelf = faceDist_(probe, me.descs[0]);
+    let dOther = Infinity, who = '';
+    idx.forEach(f => {
+      if (f.empId === me.empId) return;
+      f.descs.forEach(t => { const x = faceDist_(probe, t); if (x < dOther) { dOther = x; who = f.name || f.empId; } });
+    });
+    rows.push({ me: me, dSelf: dSelf, dOther: dOther, who: who });
+  });
+  const L = ['===== ตารางเทียบเกณฑ์ตรวจใบหน้า (จากข้อมูลจริง) ====='];
+  L.push('จำลองได้ ' + rows.length + ' คน · มีรูปเดียว ' + single + ' คน (จำลองไม่ได้ — เสี่ยงที่วัดไม่ถึง)');
+  L.push('');
+  L.push('เกณฑ์ปัจจุบัน: maxDist ' + FACE_MAX_DIST + ' · ปฏิเสธเมื่อ dOther < dSelf - ' + FACE_AMBIG_GAP);
+  L.push('');
+  L.push('maxDist  margin   บล็อก(ไกลเกิน)  บล็อก(เหมือนคนอื่น)  รวม');
+  [0.40, 0.45, 0.50, 0.55].forEach(md => {
+    [-0.03, 0.00, 0.03, 0.06].forEach(mg => {
+      let far = 0, amb = 0;
+      rows.forEach(r => {
+        if (r.dSelf > md) far++;
+        else if (r.dOther < r.dSelf + mg) amb++;
+      });
+      L.push('  ' + md.toFixed(2) + '    ' + (mg >= 0 ? '+' : '') + mg.toFixed(2) + '        ' +
+             String(far).padStart(2) + '              ' + String(amb).padStart(2) + '             ' + (far + amb));
+    });
+  });
+  L.push('');
+  L.push('===== คนที่ระยะถึงตัวเองสูงสุด 10 อันดับ (เสี่ยงโดนเพดาน maxDist) =====');
+  rows.slice().sort((a, b) => b.dSelf - a.dSelf).slice(0, 10).forEach(r =>
+    L.push('  ' + r.dSelf.toFixed(3) + '  ' + r.me.name + ' (' + r.me.empId + ')' +
+           '  · ใกล้สุดคนอื่น ' + (isFinite(r.dOther) ? r.dOther.toFixed(3) : '-') + ' = ' + r.who));
+  L.push('');
+  L.push('===== คนที่เฉียดคนอื่นมากสุด 10 อันดับ (เสี่ยงโดนกฎเทียบคนอื่น) =====');
+  rows.slice().sort((a, b) => (a.dOther - a.dSelf) - (b.dOther - b.dSelf)).slice(0, 10).forEach(r =>
+    L.push('  ห่าง ' + (r.dOther - r.dSelf).toFixed(3) + '  ' + r.me.name + ' (' + r.me.empId + ')' +
+           '  ตัวเอง ' + r.dSelf.toFixed(3) + ' / ' + r.who + ' ' + (isFinite(r.dOther) ? r.dOther.toFixed(3) : '-')));
+  L.push('');
+  L.push('===== คนที่มีรูปเดียว (ควรให้ลงทะเบียนใหม่ให้ครบ 2 รูป) =====');
+  const ones = idx.filter(f => f.descs.length < 2);
+  L.push('จำนวน ' + ones.length + ' คน: ' + ones.slice(0, 40).map(f => f.name + ' (' + f.empId + ')').join(' · '));
   Logger.log(L.join('\n'));
 }
 
