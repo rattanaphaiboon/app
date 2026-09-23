@@ -966,7 +966,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.337';
+const APP_VERSION='3.338';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -2402,7 +2402,8 @@ function unbackedCreditList_(){
       if(b.savedAt && b.savedAt<cutoff) return;          // เก่ากว่า 120 วัน → ข้าม
       if(String(p.creditNoteRef||'').trim()) return;     // มี CN จากระบบ IS (แท็ก [CN:]) → รองรับแล้ว
       const doc=String(b.doc||'').trim().toUpperCase();
-      const hasAppCN=(state.cnHistory||[]).some(c=>String(c.docNo||'').trim().toUpperCase()===doc&&c.returnType!=='คืนเต็มทั้งบิล');
+      // ★ v3.338: ใบที่คลัง "ไม่อนุมัติ" (ยกเลิกแล้ว) และใบส่งซ้ำ ไม่นับเป็น CN ที่รองรับยอดหักอีกต่อไป
+      const hasAppCN=(state.cnHistory||[]).some(c=>String(c.docNo||'').trim().toUpperCase()===doc&&c.returnType!=='คืนเต็มทั้งบิล'&&!cnVoided(c)&&!c._dupOnly);
       if(hasAppCN) return;                               // มี CN ในแอป (คืนบางส่วน) docNo ตรง → รองรับแล้ว
       out.push({jobId:j.id,doc:b.doc,name:b.name,cn,when:b.savedAt||0,
         plate:(j.team&&j.team.plate)||'',driver:(j.team&&j.team.driver)||j.driver||'',warehouse:j.warehouse||''});
@@ -7081,11 +7082,41 @@ function applyCNCredit(idx){
     // ★ v3.229: ใบที่คลัง "ไม่อนุมัติ" = ยกเลิกแล้ว → ไม่นับเป็น CN ของบิลนี้อีก (คืนทั้งบิลก็ต้องกลับมาเก็บเงิน)
     const voided=_all.filter(cnVoided), matches=_all.filter(c=>!cnVoided(c));
     const voidSum=voided.reduce((s,c)=>s+cnAmt_(c),0);
-    // แถบเตือน (ไม่ล็อก — ยังบันทึก/ปิดงานได้ตามปกติ) ให้คนขับแก้ยอดหักเอง
+    const credit=matches.filter(c=>c.returnType!=='คืนเต็มทั้งบิล').reduce((s,c)=>s+cnAmt_(c),0);   // ★ v3.338: ย้ายขึ้นมาก่อน ใช้ตอนคิดยอดที่ต้องตัด
+    /* ★★ v3.338: CN ที่คลังกด "ไม่อนุมัติ" (ยกเลิกใบ) → ตัดยอดออกจากช่อง "ใบลดหนี้" ให้เลย
+       (user 2026-09-23 "อันไหนที่ยกเลิกให้เอายอดเงินออกไปจากหน้าบันทึกเก็บเงินเลย")
+       เดิม v3.229 ขึ้นแค่แถบเตือนให้คนขับแก้ยอดเอง → ลืมแก้ = เก็บเงินขาดจริง
+       กันตัดผิด/ตัดซ้ำ 3 ชั้น:
+         1) ตัดเฉพาะส่วนที่ยังไม่เคยตัด — paint() ถูกเรียกใหม่ทุกครั้งที่วาดฟอร์ม/โหลด CN เสร็จ
+            จำยอดที่ตัดไปแล้วไว้ที่ b.payment._cnVoidCut (คีย์ local เหมือน _cnPicked ไม่ได้ลงชีท)
+         2) ตัดเมื่อยอดในช่อง "คลุมใบที่ถูกยกเลิกอยู่จริง" เท่านั้น (≥ ยอดใบ IS ที่ติ๊ก + CN ที่ใช้ได้ + ส่วนที่จะตัด)
+            → บิลที่คนขับแก้ยอดเองไปแล้ว หรือยอดมาจากใบ IS ล้วน จะไม่ถูกแตะ
+         3) บิลที่ติ๊กใบ IS ไว้แต่รายการ IS ยังโหลดไม่เสร็จ = ไม่แตะ (ไม่รู้ยอด IS จริง เดาแล้วตัดผิด)
+       ใบถูกปลดกลับมาใช้ได้ (คลังกดยกเลิกอนุมัติ) → ล้างตัวจำ ให้เติมยอดใหม่ได้ตามปกติ */
+    let _voidCut=0;
+    if(!ro&&voidSum<=0.005&&b.payment._cnVoidCut!==undefined){ delete b.payment._cnVoidCut; persistJobs(); }
+    if(!ro&&voidSum>0.005){
+      const cur=parseFloat(b.payment.creditNote)||0;
+      const done=parseFloat(b.payment._cnVoidCut)||0;
+      const need=Math.round((voidSum-done)*100)/100;
+      const _isList=_cnPickList_(b.code), _picked=b.payment._cnPicked||{};
+      const _isReady=!String(b.payment.creditNoteRef||'').trim()||_isList.length>0;
+      const isSum=_isList.filter(c=>_picked[c.cnDoc]).reduce((s,c)=>s+(parseFloat(c.amount)||0),0);
+      if(need>0.005&&cur>0.005&&_isReady&&cur+0.005>=isSum+credit+need){
+        const left=Math.max(0,Math.round((cur-need)*100)/100);
+        b.payment.creditNote=left||'';
+        b.payment._cnVoidCut=voidSum;
+        const el=$('p_creditNote'); if(el) el.value=left||'';
+        recalcPayTotal(); persistJobs();
+        _voidCut=need;
+        showToast('CN ใบนี้ถูกยกเลิก — ตัดยอดใบลดหนี้ออก '+fmt(need)+' ฿ ให้แล้ว','warning');
+      }
+    }
+    // แถบเตือน (ไม่ล็อก — ยังบันทึก/ปิดงานได้ตามปกติ)
     const voidWarn=voided.length?`<div style="margin-top:6px;padding:9px 11px;border-radius:10px;border:1px solid var(--danger);background:rgba(239,68,68,.12);color:var(--danger);font-size:12px;line-height:1.5">
         ❌ <b>CN ของบิลนี้ถูกคลัง "ไม่อนุมัติ" ${voided.length} ใบ รวม ${fmt(voidSum)} ฿</b><br>
         ${voided.map(c=>'• '+esc(c.approveNote||'ไม่ระบุเหตุผล')).join('<br>')}<br>
-        👉 ถ้าช่อง "ใบลดหนี้" ยังหักยอดนี้อยู่ <b>กรุณาแก้ยอดให้ถูกต้อง</b> (บันทึก/ปิดงานได้ตามปกติ)
+        ${_voidCut?`✅ <b>ตัดยอด ${fmt(_voidCut)} ฿ ออกจากช่อง "ใบลดหนี้" ให้แล้ว</b> — ยอดที่ต้องเก็บเปลี่ยนแล้ว กดบันทึกบิลนี้ใหม่ด้วย`:'👉 ถ้าช่อง "ใบลดหนี้" ยังหักยอดนี้อยู่ <b>กรุณาแก้ยอดให้ถูกต้อง</b> (บันทึก/ปิดงานได้ตามปกติ)'}
       </div>`:'';
     if(matches.some(c=>c.returnType==='คืนเต็มทั้งบิล')){   // v2.22: คืนทั้งบิล → มาร์คบิลเป็น CN ไม่ต้องเก็บเงิน
       if(!ro&&b.status!=='cn'){
@@ -7099,7 +7130,6 @@ function applyCNCredit(idx){
       b.status='pending'; b.isCN=false; b.failReason=''; b.nextResp=''; b.savedAt=null; persistJobs();
       if(typeof openBillForm==='function' && _billIdx===idx){ openBillForm(idx); return; }   // re-render ปลดล็อกฟอร์มเก็บเงิน
     }
-    const credit=matches.filter(c=>c.returnType!=='คืนเต็มทั้งบิล').reduce((s,c)=>s+cnAmt_(c),0);
     if(credit>0){
       // เติมให้ถ้ายังว่าง (แก้ได้) — ไม่ทับค่าที่กรอกไว้แล้ว
       if(!ro&&!(parseFloat(b.payment.creditNote)>0)){
