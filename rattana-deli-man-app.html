@@ -966,7 +966,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.339';
+const APP_VERSION='3.340';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -7591,6 +7591,7 @@ function togglePayType(key){
     if(p._types.some(k=>PAY_EXCLUSIVE.includes(k))){ showToast('ยกเลิก "ไม่ชำระ/ไม่ได้จัดส่ง" ก่อน','warning'); return; }
     p._types.push(key);
   }
+  p._editedAt=Date.now();   // ★ v3.340: นับการเลือกประเภทการจ่ายเป็นการแก้ในเครื่องด้วย
   renderPayBox(); recalcPayTotal();
   // v2.65: defer persistJobs หลัง paint — localStorage.setItem + JSON.stringify state ใหญ่ block main thread (สีปุ่มไม่ขึ้นทันที)
   requestAnimationFrame(()=>setTimeout(persistJobs,0));
@@ -7729,6 +7730,7 @@ function onPayInput(){
     const v=parseFloat($('p_'+k)?.value)||0;
     b.payment[k]=v;
   });
+  b.payment._editedAt=Date.now();   // ★ v3.340: เวลาที่แก้ล่าสุดในเครื่อง — ใช้เทียบกับเวลาบันทึกในชีทตอน sync
   recalcPayTotal();
   try{ if(typeof applyIssuedCN_==='function') applyIssuedCN_(_billIdx); }catch(e){}   // v3.166: อัปเดตสรุป มี CN/นอก CN เมื่อพิมพ์ยอดหัก
   persistJobs();
@@ -7904,6 +7906,7 @@ async function _saveBillInner_(idx,saveBtn){
   await ensureGeoAtSave_(j,b);   // เก็บพิกัดแบบ best-effort ไม่บล็อกการบันทึก
   b.status='done';
   b.savedAt=Date.now();
+  delete b._delLocal;   // ★ v3.340: บันทึกใหม่แล้ว = ไม่ใช่บิลที่เพิ่งลบอีกต่อไป
   // v1.80: บิลที่เลือกจ่ายรวม → มาร์คว่าจ่ายแล้ว (รวมกับบิลหลัก) เพื่อส่งเข้าชีทด้วย
   if(types.includes('combined')&&p.combinedRef){
     p.combinedRef.split(',').map(s=>s.trim()).filter(Boolean).forEach(doc=>{
@@ -7911,6 +7914,7 @@ async function _saveBillInner_(idx,saveBtn){
       if(ob&&ob.doc!==b.doc){
         ob.status='done';
         ob.savedAt=Date.now();
+        delete ob._delLocal;   // ★ v3.340
         ob.note='จ่ายรวมกับ '+b.doc;
         ob.payment=ob.payment||{};
         ob.payment._types=['combined'];
@@ -7979,6 +7983,7 @@ function deleteBillFromSheet(jobId,doc){
 }
 function resetBill(b){
   b.status='pending'; b.payment={}; b.note=''; b.failReason=''; b.nextResp=''; b.isCN=false; b.savedAt=null;
+  b._delLocal=Date.now();   // ★ v3.340: เพิ่งลบในเครื่องนี้ — กัน sync ดึงแถวที่ยังลบไม่ทันในชีทกลับมา (10 นาที)
 }
 /* v1.81: ลบข้อมูลบิลที่บันทึกผิด → รีเซ็ตเป็นยังไม่บันทึก + ลบแถวออกจากชีท
    v1.89: ถ้าเป็นบิลจ่ายรวม → คืนบิลที่ผูกไว้เป็น "ยังไม่บันทึก" ด้วย (กันบิลค้าง) */
@@ -10636,7 +10641,20 @@ async function syncJobsFromSheet(opts){
           // v2.70: preserve local's in-progress payment (ยังกรอกอยู่ ยังไม่กด "บันทึก" — sheet ไม่มี → ไม่ทับ)
           // เกิดเมื่อ user refresh หน้าตอนกรอกอยู่: state ถูกโหลดจาก localStorage แล้ว
           // แต่ syncJobsFromSheet เอา bill จาก sheet มาแทนที่ → payment เก่าใน local หายทั้งก้อน
-          if(lb.status==='pending' && hasLocalPaymentEdits_(lb.payment)){
+          /* ★★ v3.340: เดิมกฎ v2.70 ใช้กับ "ทุกกรณีที่เครื่องยัง pending + มีร่องรอยกรอก" → เครื่องที่ค้างของเก่าไว้
+             (เคยกรอกค้าง แต่บิลถูกบันทึกจริงไปแล้ว) จะขึ้น "รอส่ง" ค้างถาวร ต่อให้ชีทมีข้อมูลครบ
+             เคสจริง 23/09 CVMW1/006342 บิล DC536909/00482: ลงชีท 14:57 (โอน 8,346 + สลิป · Status 🟢 เรียบร้อย)
+             แต่จอคนขับยังขึ้น "รอส่ง 0.00" ตอน 15:25 → ปิดงานแล้วนับ 36/37 และยอดเก็บได้ขาดไป 8,346
+             กติกาใหม่ (เรียงตามลำดับ):
+               1. เพิ่งกด "ลบข้อมูลบิล" ในเครื่องนี้ < 10 นาที → คงเป็นยังไม่บันทึก (คำขอลบยังเดินทางไปชีท)
+               2. ชีทยังไม่มีข้อมูลบิลนี้ (sb.status==='pending' = บิลจากใบคุม ยังไม่ลง Cin) → คงของที่กรอกค้างไว้
+               3. กรอกค้างหลังชีทบันทึก (_editedAt ใหม่กว่า savedAt ของชีท) → คงของที่กรอกค้างไว้
+               นอกนั้น = ชีทชนะ (ข้อมูลจริงที่บันทึกแล้ว) */
+          const _justDel=lb._delLocal&&(Date.now()-lb._delLocal)<10*60000;
+          const _localNewer=lb.payment&&lb.payment._editedAt&&sb.savedAt&&lb.payment._editedAt>sb.savedAt;
+          if(_justDel&&sb.status!=='pending'){
+            sb.status='pending'; sb.payment={}; sb.note=''; sb.savedAt=null; sb._delLocal=lb._delLocal;
+          } else if(lb.status==='pending' && hasLocalPaymentEdits_(lb.payment) && (sb.status==='pending'||_localNewer)){
             sb.payment=lb.payment;
             sb.status=lb.status;
             sb.note=lb.note;
