@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v5.85</title>
+<title>HR Rattana v5.86</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3709,7 +3709,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '12.85';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '12.86';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -3809,6 +3809,37 @@ let registeredDescriptor2 = null;  // v9.1: เทมเพลตที่ 2 (�
 
 /* v9.1: ระยะที่ใกล้สุดจากทุกเทมเพลตของคนคนนั้น (รองรับ 1 หรือ 2 เทมเพลต)
    descList = array ของ Float32Array (ตัว null/undefined ถูกข้าม) */
+/* v12.86: แปลง descriptor เป็น array ตัวเลขสำหรับส่งให้เซิร์ฟเวอร์ตรวจ (ทศนิยม 5 ตำแหน่งเท่าตอนลงทะเบียน) */
+/* v12.86: ข้อความเตือนใต้กรอบกล้อง (ใช้ช่องเดิมของสถานะใบหน้า ถ้ามี) */
+function setFaceHint_(msg) {
+  try {
+    const el = document.getElementById('faceCheckSub') || document.getElementById('empFaceStatus');
+    if (el) el.textContent = msg;
+  } catch (_) {}
+}
+function faceDescOut_(match) {
+  try {
+    const d = match && match.descriptor;
+    if (!d) return null;
+    return (d instanceof Float32Array ? Array.from(d) : d).map(n => +(+n).toFixed(5));
+  } catch (_) { return null; }
+}
+/* v12.86: เตือนล่วงหน้าที่เครื่อง ถ้าหน้าที่สแกนใกล้ "คนอื่น" มากกว่าเจ้าของบัญชี
+   ทำได้เฉพาะเครื่องที่มี descriptor ของคนอื่นอยู่ (หัวหน้า/HR) — พนักงานทั่วไปไม่มี
+   ด่านจริงอยู่ที่เซิร์ฟเวอร์ (verifyFace_) ซึ่งมีข้อมูลครบทุกคน */
+function faceAmbiguous_(probe) {
+  try {
+    if (!probe || !Array.isArray(remoteFaceData) || remoteFaceData.length < 2) return null;
+    const me = empKey_(currentUser && currentUser.empId);
+    let dOther = Infinity, who = '';
+    remoteFaceData.forEach(f => {
+      if (!f.descriptor || empKey_(f.empId) === me) return;
+      const d = bestFaceDist_(probe, [f.descriptor, f.descriptor2]);
+      if (d < dOther) { dOther = d; who = f.name || f.empId; }
+    });
+    return isFinite(dOther) ? { dOther, who } : null;
+  } catch (_) { return null; }
+}
 function bestFaceDist_(probe, descList) {
   let best = Infinity;
   for (const d of descList) {
@@ -4322,9 +4353,22 @@ async function faceLoginTick_() {
     const dist = bestFaceDist_(det.descriptor, [d1 ? new Float32Array(d1) : null, d2 ? new Float32Array(d2) : null]);
     const thr = (settings && settings.faceThr) || 0.5;
     if (dist <= thr) {
-      if (st) st.textContent = '✓ ยืนยันตัวตนสำเร็จ';
+      // v12.86 ★ ให้เซิร์ฟเวอร์ตัดสินซ้ำ — เครื่องมี descriptor ของคนที่จำไว้คนเดียว
+      //   จึงบอกไม่ได้ว่าหน้านี้เหมือนพนักงานคนอื่นมากกว่ารึเปล่า (เคส เจนจิรา → ฝนทิพย์)
       clearInterval(_flTimer); _flTimer = null;
-      setTimeout(faceLoginSuccess_, 350);
+      if (st) st.textContent = 'กำลังยืนยันตัวตน...';
+      const pf2 = faceLoginProfile_() || {};
+      let pass = false, why = '';
+      try {
+        const r = await apiPost(config.appsScriptUrl, { action: 'verifyFace',
+          empId: (pf2.u && pf2.u.empId) || '', faceDesc: Array.from(det.descriptor).map(n => +n.toFixed(5)) });
+        pass = !!(r && r.ok && r.pass); why = (r && r.msg) || '';
+      } catch (e) { pass = false; why = 'เชื่อมต่อไม่ได้ — ลองใหม่หรือเข้าด้วยรหัส'; }
+      if (pass) { if (st) st.textContent = '✓ ยืนยันตัวตนสำเร็จ'; setTimeout(faceLoginSuccess_, 350); }
+      else {
+        if (st) st.textContent = '❌ ' + (why || 'ยืนยันตัวตนไม่ผ่าน');
+        setTimeout(() => { if (document.getElementById('faceLoginModal').style.display !== 'none') _flTimer = setInterval(faceLoginTick_, 700); }, 2500);
+      }
     } else if (st) {
       st.textContent = 'ยังไม่ตรง — ขยับหน้าให้ชัด แสงให้พอ';
     }
@@ -5605,7 +5649,11 @@ async function empMatchTick() {
     return;
   }
   const dist = bestFaceDist_(det.descriptor, [registeredDescriptor, registeredDescriptor2]);  // v9.1: เทียบ 2 เทมเพลต (ยิ้ม/ไม่ยิ้ม) เอาใกล้สุด
-  const ok = dist <= settings.faceThr;
+  // v12.86 ★ ไม่พอแค่ "เหมือนเจ้าของบัญชี" — ต้องไม่เหมือนคนอื่นมากกว่าด้วย
+  const amb = faceAmbiguous_(det.descriptor);
+  const tooClose = !!(amb && amb.dOther < dist + 0.06);
+  const ok = dist <= settings.faceThr && !tooClose;
+  if (tooClose) setFaceHint_('ใบหน้าใกล้เคียงกับพนักงานอีกคน — ขยับเข้ากล้อง แสงให้พอ');
   document.getElementById('empCamWrap').className = 'camera-wrap home-cam ' + (ok ? 'success' : 'matching');
   lastFaceMatch = { found:true, ok, distance:dist, descriptor:det.descriptor, time:Date.now() };
   updateFaceCheck({found:true, registered:true, ok, distance:dist});
@@ -6627,6 +6675,9 @@ async function doSelfCheckIn() {
     lat: lastGps.lat, lng: lastGps.lng, accuracy: lastGps.accuracy,
     distance: lastGps.distance, locCode: lastGps.locCode, locName: lastGps.locName,
     faceDist: (lastFaceMatch && lastFaceMatch.distance != null) ? +lastFaceMatch.distance.toFixed(3) : null,
+    // v12.86 ★ ส่งค่าใบหน้าให้เซิร์ฟเวอร์ตรวจเอง — เดิมส่งแค่ตัวเลข faceDist ที่แอปคิดเอง
+    //   เซิร์ฟเวอร์จึงไม่มีทางรู้ว่าหน้าที่สแกนเข้ามาเหมือน "คนอื่น" มากกว่าเจ้าของบัญชีรึเปล่า
+    faceDesc: faceDescOut_(lastFaceMatch),
     photo,
     // v12.19: หลักฐาน QR ประจำจุด (ตอนระบบใบหน้าไม่พร้อม) — เซิร์ฟเวอร์ตรวจ token ก่อนบันทึก
     scannedBy: _qrProofValid_() ? ('qr:' + _qrProof.loc) : 'self',

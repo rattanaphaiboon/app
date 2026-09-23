@@ -1,6 +1,13 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.37 — ★ ความปลอดภัยการสแกนหน้า (surat เจอ 23/09 · คู่แอป v12.86 · ★ ต้อง Deploy):
+ *          เคสจริง "เจนจิรา สแกนหน้าเข้าบัญชี ฝนทิพย์ ได้" — เดิมแอปถามแค่
+ *          "หน้าเหมือนเจ้าของบัญชีมั้ย (<= faceThr)" ไม่เคยถามว่า "เหมือนคนอื่นมากกว่ามั้ย"
+ *          และเซิร์ฟเวอร์เชื่อเลข faceDist ที่แอปส่งมาโดยไม่ตรวจเอง
+ *          แก้: verifyFace_() ที่เซิร์ฟเวอร์ — ต้องใกล้ตัวเอง <= FACE_MAX_DIST
+ *          และต้องใกล้กว่าคนที่ใกล้รองลงมาอย่างน้อย FACE_MARGIN ไม่งั้นปฏิเสธ
+ *          ใช้ทั้งตอน checkin และตอนสแกนหน้าเข้าระบบ (action verifyFace ไม่ต้องมี token)
  * v9.36 — เร็วขึ้นตอนกดส่งฟอร์ม (คู่แอป v12.85): reqSeen_ ดู CacheService ก่อน
  *          ถ้าพลาดค่อยค้นชีทเฉพาะ 500 แถวท้าย (เดิมค้นทั้งแท็บได้ถึง 3000 แถวทุกคำขอ)
  *          + ตัวตัด _reqLog ตรวจว่าตัดได้จริง (กันเคสฟิลเตอร์บล็อก deleteRows เงียบๆ)
@@ -219,7 +226,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.36', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.37', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -236,6 +243,12 @@ function handle(e, method) {
       return HtmlService.createHtmlOutput(
         '<!doctype html><body style="margin:0;background:#111;display:flex;align-items:center;justify-content:center;min-height:100vh">' +
         '<img src="' + u.replace(/"/g, '&quot;') + '" style="max-width:96vw;max-height:96vh;border-radius:10px"></body>');
+    }
+
+    // v9.37: ตรวจใบหน้าก่อนเข้าระบบ (สแกนหน้า login ยังไม่มี token) — คืนแค่ผ่าน/ไม่ผ่าน
+    //        ไม่คืนข้อมูลใคร ไม่เปิดเผย descriptor จึงเปิดให้เรียกก่อน auth ได้
+    if (action === 'verifyFace') {
+      return jsonOut(verifyFaceApi_(p));
     }
 
     if (action === 'debug') {
@@ -953,6 +966,15 @@ function linkifyCheckinPhotos(daysBack) {
 
 function actionCheckin(p, user) {
   const empId = String(p.empId || user.empId);
+  // v9.37 ★ ยืนยันใบหน้าที่เซิร์ฟเวอร์ — เดิมเชื่อเลข faceDist ที่แอปคิดมาให้ล้วนๆ
+  //   และแอปเทียบแค่ "หน้าเหมือนเจ้าของบัญชีมั้ย" ไม่ได้ถามว่า "เหมือนคนอื่นมากกว่ารึเปล่า"
+  //   → คนหน้าคล้ายสแกนผ่านได้ (เคสจริง เจนจิรา สแกนเข้าบัญชี ฝนทิพย์ 23/09)
+  if (p.faceDesc) {
+    const v = verifyFace_(empId, p.faceDesc);
+    if (!v.ok && v.reason !== 'nodata') {
+      return jsonOut({ ok: false, code: 'face_mismatch', error: v.msg });
+    }
+  }
   if (empId !== user.empId && !isSupervisor(user)) {
     return jsonOut({ ok:false, error:'ไม่มีสิทธิ์เช็คอินแทนคนอื่น' });
   }
@@ -1580,6 +1602,7 @@ function actionRegisterFace(p, user) {
   ];
   if (rowIdx === -1) sh.appendRow(newRow);
   else sh.getRange(rowIdx + 1, 1, 1, 6).setValues([newRow]);
+  try { faceIndexClear_(); } catch (e9) {}   // v9.37: ทะเบียนหน้าเปลี่ยน → ล้าง index ที่ cache ไว้
 
   // v1.6: dual-write → Supabase (ตาราง face_data + รูปใน Storage ใต้ faces/ — cron ลบรูปเก่าไม่แตะโฟลเดอร์นี้)
   let sbOk = false;
@@ -1615,6 +1638,7 @@ function actionDeleteFace(p, user) {
     if (String(data[i][0]) === empId) { sh.deleteRow(i + 1); removed++; }
   }
   sbDeleteFace_(empId);   // v1.6: ลบใน Supabase ด้วย
+  try { faceIndexClear_(); } catch (e9) {}   // v9.37
   return jsonOut({ ok:true, removed, msg: removed ? undefined : 'ไม่พบข้อมูลใบหน้า' });
 }
 
@@ -6859,4 +6883,132 @@ function docReceiveDate_(v) {
   if (!d) return '';
   const r = new Date(d.getFullYear(), d.getMonth(), d.getDate() + DOC_READY_DAYS - 1);   // v9.35: รวมวันอนุมัติ
   return Utilities.formatDate(r, 'Asia/Bangkok', 'dd/MM/yyyy');
+}
+
+/* ============================================================
+   v9.37 · ยืนยันใบหน้าที่เซิร์ฟเวอร์ — กันคนหน้าคล้ายสแกนแทนกัน
+   กติกา 2 ชั้น (ต้องผ่านทั้งคู่):
+     1) ระยะถึงเทมเพลตของ "เจ้าของบัญชี" ต้อง <= FACE_MAX_DIST
+     2) ต้องใกล้กว่า "คนอื่นที่ใกล้ที่สุด" อย่างน้อย FACE_MARGIN
+   ชั้น 2 คือตัวที่กันเคสหน้าคล้าย — ถ้าหน้าที่สแกนเข้าใกล้คนอื่นมากกว่า/พอๆ กัน = ปฏิเสธ
+   ============================================================ */
+const FACE_MAX_DIST = 0.45;   // ยอมรับว่าเป็นคนเดียวกันได้ไม่เกินระยะนี้ (face-api euclidean)
+const FACE_MARGIN   = 0.06;   // ต้องชนะคนที่ใกล้รองลงมาอย่างน้อยเท่านี้
+const FACE_CACHE_SEC = 1800;  // เก็บ index ไว้ 30 นาที (ลงทะเบียนหน้าใหม่รอไม่เกินครึ่งชม.)
+
+function faceParseDescs_(raw) {
+  try {
+    const arr = (typeof raw === 'string') ? JSON.parse(raw || 'null') : raw;
+    if (!Array.isArray(arr) || !arr.length) return [];
+    return Array.isArray(arr[0]) ? arr.filter(a => Array.isArray(a) && a.length) : [arr];
+  } catch (_) { return []; }
+}
+function faceDist_(a, b) {
+  const n = Math.min(a.length, b.length);
+  if (!n) return Infinity;
+  let sum = 0;
+  for (let i = 0; i < n; i++) { const d = a[i] - b[i]; sum += d * d; }
+  return Math.sqrt(sum);
+}
+/* index ทุกคน: [{empId, name, descs:[[128],...]}] — cache ต่อ execution + ข้าม execution */
+let _faceIndexMem = null;
+function faceIndex_() {
+  if (_faceIndexMem) return _faceIndexMem;
+  try {
+    const c = CacheService.getScriptCache();
+    const n = parseInt(c.get('fidx_n') || '0', 10);
+    if (n > 0) {
+      const keys = []; for (let i = 0; i < n; i++) keys.push('fidx_' + i);
+      const got = c.getAll(keys);
+      let txt = '';
+      for (let i = 0; i < n; i++) { const part = got['fidx_' + i]; if (part == null) { txt = ''; break; } txt += part; }
+      if (txt) { _faceIndexMem = JSON.parse(txt); return _faceIndexMem; }
+    }
+  } catch (_) {}
+  const out = [];
+  try {
+    const sh = getOrCreateTab(T.FACE);
+    const last = sh.getLastRow();
+    if (last > 1) {
+      const data = sh.getRange(2, 1, last - 1, 3).getValues();   // A รหัส · B ชื่อ · C descriptor
+      data.forEach(r => {
+        const id = String(r[0] || '').trim(); if (!id) return;
+        const descs = faceParseDescs_(r[2]);
+        if (descs.length) out.push({ empId: id, name: String(r[1] || ''), descs: descs });
+      });
+    }
+  } catch (e) { return []; }
+  _faceIndexMem = out;
+  try {
+    const c = CacheService.getScriptCache();
+    const txt = JSON.stringify(out), CH = 90000, parts = [];
+    for (let i = 0; i < txt.length; i += CH) parts.push(txt.slice(i, i + CH));
+    const put = { fidx_n: String(parts.length) };
+    parts.forEach((v, i) => { put['fidx_' + i] = v; });
+    c.putAll(put, FACE_CACHE_SEC);
+  } catch (_) {}
+  return out;
+}
+function faceIndexClear_() { _faceIndexMem = null; try { CacheService.getScriptCache().remove('fidx_n'); } catch (_) {} }
+
+/* ตรวจว่า descriptor ที่สแกนมา เป็นของ empId นี้จริงมั้ย */
+function verifyFace_(empId, rawDesc) {
+  const id = String(empId || '').trim();
+  const probe = faceParseDescs_(rawDesc)[0];
+  if (!id || !probe || !probe.length) return { ok: true, reason: 'nodata', msg: '' };
+  const idx = faceIndex_();
+  if (!idx.length) return { ok: true, reason: 'nodata', msg: '' };   // อ่านทะเบียนหน้าไม่ได้ — ไม่บล็อกการลงเวลา
+  let dSelf = Infinity, dOther = Infinity, otherName = '', hasSelf = false;
+  idx.forEach(f => {
+    let d = Infinity;
+    f.descs.forEach(t => { const x = faceDist_(probe, t); if (x < d) d = x; });
+    if (f.empId === id) { hasSelf = true; if (d < dSelf) dSelf = d; }
+    else if (d < dOther) { dOther = d; otherName = f.name || f.empId; }
+  });
+  if (!hasSelf) return { ok: true, reason: 'nodata', msg: '' };      // คนนี้ยังไม่ได้ลงทะเบียนหน้า
+  if (dSelf > FACE_MAX_DIST) {
+    return { ok: false, reason: 'far', dSelf: dSelf, dOther: dOther,
+             msg: 'ใบหน้าไม่ตรงกับที่ลงทะเบียนไว้ (ระยะ ' + dSelf.toFixed(2) + ') — ลองใหม่ในที่แสงสว่างพอ' };
+  }
+  if (dOther < dSelf + FACE_MARGIN) {
+    return { ok: false, reason: 'ambiguous', dSelf: dSelf, dOther: dOther,
+             msg: 'ใบหน้านี้ใกล้เคียงกับพนักงานอีกคนมากเกินไป — ระบบไม่อนุญาตให้ลงเวลาแทนกัน ติดต่อ HR ถ้าเป็นหน้าของคุณจริง' };
+  }
+  return { ok: true, reason: 'ok', dSelf: dSelf, dOther: dOther };
+}
+
+/* action verifyFace — เรียกได้ก่อน login (ใช้ตอนสแกนหน้าเข้าระบบ) คืนแค่ผ่าน/ไม่ผ่าน */
+function verifyFaceApi_(p) {
+  try {
+    const v = verifyFace_(p.empId, p.faceDesc);
+    return { ok: true, pass: !!v.ok, reason: v.reason || '', msg: v.ok ? '' : v.msg };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+/* เครื่องมือ HR: ไล่ดูว่ามีคู่ไหนหน้าใกล้กันจนเสี่ยงสแกนแทนกันบ้าง (รันจากตัวแก้ไข) */
+function auditFaceLookalikes() {
+  const idx = faceIndex_();
+  const L = ['===== คู่ใบหน้าที่ใกล้กันเกินเกณฑ์ (เสี่ยงสแกนแทนกัน) ====='];
+  L.push('เกณฑ์: ระยะ <= ' + FACE_MAX_DIST + ' · ต้องห่างคนอื่น > ' + FACE_MARGIN);
+  L.push('ลงทะเบียนใบหน้าแล้ว ' + idx.length + ' คน');
+  const pairs = [];
+  for (let i = 0; i < idx.length; i++) {
+    for (let j = i + 1; j < idx.length; j++) {
+      let d = Infinity;
+      idx[i].descs.forEach(a => idx[j].descs.forEach(b => { const x = faceDist_(a, b); if (x < d) d = x; }));
+      if (d <= FACE_MAX_DIST + FACE_MARGIN) pairs.push({ d: d, a: idx[i], b: idx[j] });
+    }
+  }
+  pairs.sort((x, y) => x.d - y.d);
+  L.push('');
+  L.push('คู่ที่ใกล้กัน : ' + pairs.length + ' คู่');
+  pairs.slice(0, 40).forEach(p => {
+    L.push('  ' + p.d.toFixed(3) + '  ' + p.a.name + ' (' + p.a.empId + ')  ↔  ' + p.b.name + ' (' + p.b.empId + ')' +
+           (p.d <= FACE_MAX_DIST ? '   ⚠ ใกล้มาก' : ''));
+  });
+  if (!pairs.length) L.push('  ✅ ไม่มีคู่ไหนใกล้กันจนน่ากังวล');
+  L.push('');
+  L.push('หมายเหตุ: คู่ที่ขึ้น ⚠ = ถ้าคนหนึ่งสแกน ระบบจะปฏิเสธทั้งคู่ (กันสแกนแทนกัน)');
+  L.push('           ควรให้ทั้งคู่ลงทะเบียนใบหน้าใหม่ให้ชัดขึ้น (แสงพอ ไม่ใส่แมสก์ ถ่ายตรงหน้า)');
+  Logger.log(L.join('\n'));
 }
