@@ -1115,7 +1115,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.237</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.238</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -7937,7 +7937,8 @@ async function _vhRouteChunk(pts,truckType){
   const coords=[];
   legs.forEach(lg=>{decodePolyline6(lg.shape).forEach(c=>coords.push(c));});
   if(!coords.length)throw new Error('shape ว่าง');
-  return{coords,duration:d.trip.summary.time,distance:d.trip.summary.length*1000};
+  const legKm=legs.map(lg=>(lg.summary&&lg.summary.length>=0)?lg.summary.length:-1);   // v9.238: กม.ต่อช่วง (Valhalla ขอหน่วยเป็น กม.)
+  return{coords,duration:d.trip.summary.time,distance:d.trip.summary.length*1000,legKm};
 }
 
 // เส้นทางสำหรับวาดบนแผนที่ — Valhalla truck ก่อน · พังเมื่อไหร่ตกไป OSRM (กันแผนที่ว่าง)
@@ -7949,16 +7950,17 @@ async function fetchOsrmRoute(wpts,truckType){
     // หั่นท่อน — ท่อนถัดไปเริ่มที่จุดสุดท้ายของท่อนก่อน (ซ้อน 1 จุด) เส้นจะได้ต่อกันสนิท
     const chunks=[];
     for(let i=0;i<pts.length-1;i+=VH_ROUTE_MAX-1)chunks.push(pts.slice(i,i+VH_ROUTE_MAX));
-    const coords=[];let dur=0,dist=0;
+    const coords=[];let dur=0,dist=0;const legKm=[];
     for(let ci=0;ci<chunks.length;ci++){
       const c=await _vhRouteChunk(chunks[ci],truckType);
       // ท่อนที่ 2+ ตัดจุดแรกทิ้ง (ซ้ำกับจุดสุดท้ายของท่อนก่อน)
       c.coords.forEach((p,i)=>{if(ci>0&&i===0)return;coords.push(p);});
       dur+=c.duration;dist+=c.distance;
+      if(c.legKm)c.legKm.forEach(k=>legKm.push(k));   // v9.238: ท่อนซ้อน 1 จุด → legs ต่อกันพอดี
     }
     if(coords.length){
       _vhOk();
-      return{coords,duration:dur,distance:dist,src:'valhalla-truck'};
+      return{coords,duration:dur,distance:dist,src:'valhalla-truck',legKm};
     }
     _vhFail('route','เส้นว่าง');
   }catch(e){_vhFail('route',e);}
@@ -7970,7 +7972,8 @@ async function fetchOsrmRoute(wpts,truckType){
     const r=await fetch(`https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`,{signal:ctrl.signal});
     const d=await r.json();
     if(d.code!=='Ok'||!d.routes?.length)return null;
-    return{coords:d.routes[0].geometry.coordinates.map(([lng,lat])=>[lat,lng]),duration:d.routes[0].duration,distance:d.routes[0].distance,src:'osrm-car'};
+    return{coords:d.routes[0].geometry.coordinates.map(([lng,lat])=>[lat,lng]),duration:d.routes[0].duration,distance:d.routes[0].distance,src:'osrm-car',
+      legKm:(d.routes[0].legs||[]).map(l=>(l.distance>=0)?l.distance/1000:-1)};   // v9.238
   }catch(e){return null;}
 }
 
@@ -8240,6 +8243,52 @@ function setRoutesDate(d){
   renderRoutesView();
 }
 
+// ══ v9.238: ระยะห่างระหว่างร้าน = ระยะถนนจริง (ไม่ใช่เส้นตรง) ══
+//   user แคปเส้นประแดงระหว่างจุด 2→3: "ระยะห่างให้คำนวณจากเส้นถนนจริงแบบเส้นที่ไม่ใช่สีแดง"
+//   เอาระยะถนนจาก 2 แหล่งที่แอปยิงอยู่แล้ว (ไม่ได้ยิงเพิ่มเอง):
+//     1) matrix ถนน (Valhalla truck / OSRM) ที่ prefetch ต่อคัน×เที่ยว — ได้ครบทุกคู่ในเที่ยวนั้น
+//     2) legs ของเส้นทางที่วาดบนแผนที่ (เส้นสีที่ user ชี้) — ได้คู่ที่ส่งติดกันจริง
+//   ยังไม่มีข้อมูลถนน = ใช้เส้นตรงไปก่อน โชว์ "≈" นำหน้า พอข้อมูลมาถึงค่อยวาดใหม่เป็นเลขถนนจริง
+//   เก็บแบบมีทิศทาง (A→B ไม่เท่ากับ B→A เพราะวันเวย์) ตรงกับลำดับส่งจริง
+const _rdPair=new Map();
+const _rdK=(aLat,aLng,bLat,bLng)=>aLat.toFixed(5)+','+aLng.toFixed(5)+'>'+bLat.toFixed(5)+','+bLng.toFixed(5);
+function _rdRoad(aLat,aLng,bLat,bLng){ const v=_rdPair.get(_rdK(aLat,aLng,bLat,bLng)); return (v==null)?null:v; }
+// ระยะที่เอาไปใช้: {km, road} — road=true คือระยะถนนจริง · false คือเส้นตรง (ยังไม่มีข้อมูลถนน)
+function _rdKm(aLat,aLng,bLat,bLng){
+  const r=_rdRoad(aLat,aLng,bLat,bLng);
+  return (r==null)?{km:haversine(aLat,aLng,bLat,bLng),road:false}:{km:r,road:true};
+}
+function _rdFromMatrix(coords,dist){   // matrix เป็นเมตร (ทั้ง Valhalla และ OSRM ถูกแปลงเป็นเมตรแล้ว)
+  if(!coords||!dist||dist.length!==coords.length)return;
+  for(let i=0;i<coords.length;i++){ const row=dist[i]; if(!row)continue;
+    for(let j=0;j<coords.length;j++){ if(i===j)continue; const m=row[j];
+      if(m==null||!(m>=0))continue;
+      _rdPair.set(_rdK(coords[i][0],coords[i][1],coords[j][0],coords[j][1]),m/1000); } }
+}
+function _rdFromLegs(pts,legKm){       // legKm เป็นกิโลเมตร ทีละช่วงตามลำดับจุด
+  if(!pts||!legKm||legKm.length<pts.length-1)return false;
+  let added=false;
+  for(let i=0;i<pts.length-1;i++){
+    const km=legKm[i]; if(!(km>=0))continue;
+    const k=_rdK(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1]);
+    if(!_rdPair.has(k)){ _rdPair.set(k,km); added=true; }
+  }
+  return added;
+}
+let _rdT=null;
+function _rdSoon(fn){ if(_rdT)clearTimeout(_rdT); _rdT=setTimeout(()=>{_rdT=null;try{fn();}catch(e){}},600); }   // ได้ระยะถนนใหม่ → วาดหน้าใหม่รอบเดียว
+// ยิง matrix ถนนให้เที่ยวที่ยังไม่มีข้อมูล (ทีละ 3 เหมือน prefetchTspMatrices) แล้ววาดใหม่
+const _rdWarmOn=new Set();
+function _rdWarm(tag,groups,after){
+  const need=(groups||[]).filter(g=>g&&g.coords&&g.coords.length>=2&&g.coords.length<=50&&!_osrmMatrixCache.has(_coordsKey(g.coords)));
+  if(!need.length||_rdWarmOn.has(tag))return false;
+  _rdWarmOn.add(tag);
+  (async()=>{ const CONC=3;
+    for(let i=0;i<need.length;i+=CONC)await Promise.all(need.slice(i,i+CONC).map(g=>fetchOsrmMatrix(g.coords,g.type).catch(()=>null)));
+    _rdWarmOn.delete(tag); _rdSoon(after);
+  })();
+  return true;
+}
 // ── Road-distance matrix (v8.21: Valhalla truck → fallback OSRM car) ──
 // ใช้จัดลำดับจุดส่ง (TSP) — ต้องเป็นระยะถนนของ "รถบรรทุก" ไม่ใช่รถเก๋ง
 // Valhalla รับได้ ~50 จุด (เทสต์: 90 จุด → 400) · เกินนั้นตกไป OSRM ที่รับได้ถึง 90
@@ -8271,7 +8320,7 @@ async function fetchOsrmMatrix(coords,truckType){
           const dist=st.map(row=>row.map(x=>(x&&x.distance!=null)?x.distance*1000:null));
           console.log('[matrix]','%c✓ Valhalla truck','color:#0a0;font-weight:700',coords.length,'coords in',Math.round(performance.now()-t0),'ms');
           _vhOk();
-          _osrmMatrixCache.set(key,dist);
+          _osrmMatrixCache.set(key,dist); _rdFromMatrix(coords,dist);   // v9.238
           return dist;
         }
       }
@@ -8288,7 +8337,7 @@ async function fetchOsrmMatrix(coords,truckType){
     const j=await r.json();
     if(j.code!=='Ok'||!j.distances){console.warn('[matrix] OSRM bad response',j.code);_osrmMatrixCache.set(key,null);return null;}
     console.log('[matrix]','%c✓ OSRM car (fallback)','color:#a60;font-weight:700',coords.length,'coords in',Math.round(performance.now()-t0),'ms');
-    _osrmMatrixCache.set(key,j.distances);
+    _osrmMatrixCache.set(key,j.distances); _rdFromMatrix(coords,j.distances);   // v9.238
     return j.distances;
   }catch(e){console.warn('[matrix] OSRM error',e?.message||e);_osrmMatrixCache.set(key,null);return null;}
 }
@@ -8738,9 +8787,9 @@ function rUpdateMap(){
       // v8.21: warning check — consecutive stop pairs in tb (skip HQ leg)
       if(_warnThresh>0){
         for(let i=1;i<tb.length;i++){
-          const d=haversine(tb[i-1].lat,tb[i-1].lng,tb[i].lat,tb[i].lng);
+          const _d=_rdKm(tb[i-1].lat,tb[i-1].lng,tb[i].lat,tb[i].lng), d=_d.km;   // v9.238: ระยะถนนจริง
           if(d>_warnThresh){
-            _warnings.push({plate:t.plate,col,trip:tr,km:d,from:tb[i-1],to:tb[i],fromNum:i+_stopBase-tb.length,toNum:i+1+_stopBase-tb.length});
+            _warnings.push({plate:t.plate,col,trip:tr,km:d,road:_d.road,from:tb[i-1],to:tb[i],fromNum:i+_stopBase-tb.length,toNum:i+1+_stopBase-tb.length});
           }
         }
       }
@@ -8752,6 +8801,7 @@ function rUpdateMap(){
       fetchOsrmRoute(wpts,t.type).then(rd=>{
         if(!rd)return;
         if(line._map)line.setLatLngs(rd.coords);
+        if(rd.legKm&&_rdFromLegs(wpts,rd.legKm))_rdSoon(rUpdateMap);   // v9.238: ได้ระยะถนนรายช่วง → วาดใหม่รอบเดียว
         _sumKmReal+=(rd.distance||0)/1000;
         _sumMinReal+=(rd.duration||0)/60;
         _realCount++;
@@ -11949,7 +11999,7 @@ function _mbSheet(c,cut,farKm){
   const dv=_mbDeliv(), dow=dv?dv.getDay():-1;
   const dvTx=dv?`${_MB_DOW[dow]} ${String(dv.getDate()).padStart(2,'0')}/${String(dv.getMonth()+1).padStart(2,'0')}`:'—';
   const top={}; rows.map(x=>({k:x.u.key,a:_prAmt(x.u)})).filter(x=>x.a>0).sort((a,b)=>b.a-a.a).slice(0,5).forEach((x,i)=>{ top[x.k]=i+1; });
-  const farTo={}; { let pv=null; c.units.forEach(u=>{ if(!_prHasGps(u))return; if(pv){ const km=haversine(pv.lat,pv.lng,u.lat,u.lng); if(km>farKm)farTo[u.key]=km; } pv=u; }); }
+  const farTo={}; { let pv=null; c.units.forEach(u=>{ if(!_prHasGps(u))return; if(pv){ const km=_rdKm(pv.lat,pv.lng,u.lat,u.lng).km; if(km>farKm)farTo[u.key]=km; } pv=u; }); }   // v9.238: ระยะถนนจริงถ้ามี
   let amt=0,cig=0,cs=0,kg=0,n=0,nOut=0,nNo=0,cutN=0,cutAmt=0,seq=0;
   const pxJ=_prJs(c.px);
   const tr=rows.map(x=>{ const u=x.u, a=_prAmt(u), g=_prCig(u), refs=u.bills||[], c0=_catCsOfRefs(refs).total||0;
@@ -12420,6 +12470,10 @@ function renderCarsView(){
   const _carLoss=_carLossLast;       // v9.73: ของที่คัน+เที่ยวนั้นจะไม่ได้ (เที่ยว 1 ได้ของก่อน) · v9.190: คิดไว้ข้างบนแล้ว
   const _farKm=(function(){const e=document.getElementById('carFarKm'); const v=parseFloat(e&&e.value); return (isNaN(v)||v<0)?10:v;})(); // v9.145
   const _ksv=_ksView();   // v9.213: สถานะบันทึกต่อคัน (ยังไม่บันทึก / บันทึกแล้ว / มีคนแก้ในชีท)
+  // v9.238: เที่ยวไหนยังไม่มีระยะถนน → ยิง matrix ถนนให้ (ทีละ 3) แล้ววาดหน้านี้ใหม่รอบเดียว
+  try{ const _g=[]; list.forEach(t=>[1,2,3].forEach(tr=>{ const tb=orderedTripBills(t.plate,tr).filter(b=>b.lat&&b.lng);
+      if(tb.length>=2)_g.push({coords:[[HQ.lat,HQ.lng],...tb.map(b=>[b.lat,b.lng])],type:t.type}); }));
+    _rdWarm('cars',_g,renderCarsView); }catch(e){}
   host.innerHTML=list.map(t=>{
     const ld=truckLoad(t.plate), pct=truckPct(t.plate,t);
     let _carAmt=0,_carCig=0; // v9.68: ยอดเงินรวมทั้งคัน (v9.196: แยกยอดบุหรี่)
@@ -12429,10 +12483,10 @@ function renderCarsView(){
       const _far=[], _farTo={};
       { let _pv=null,_pi=0;
         tb.forEach((b,j)=>{ if(!(b.lat&&b.lng))return;
-          if(_pv){ const km=haversine(_pv.lat,_pv.lng,b.lat,b.lng);
-            if(km>_farKm){ _far.push({fn:_pi+1,fN:_pv.arName||'',tn:j+1,tN:b.arName||'',km}); _farTo[j+1]=km; } }
+          if(_pv){ const _d=_rdKm(_pv.lat,_pv.lng,b.lat,b.lng), km=_d.km;   // v9.238: ระยะถนนจริง
+            if(km>_farKm){ _far.push({fn:_pi+1,fN:_pv.arName||'',tn:j+1,tN:b.arName||'',km,road:_d.road}); _farTo[j+1]={km,road:_d.road}; } }
           _pv=b; _pi=j; }); }
-      const _farHtml=_far.length?`<div class="car-far">⚠ ร้านห่างเกิน ${_farKm} กม. <b>${_far.length} คู่</b>${_far.map(f=>`<div>#${f.fn} ${f.fN} → #${f.tn} ${f.tN} · <b>${f.km.toFixed(1)} กม.</b></div>`).join('')}</div>`:'';
+      const _farHtml=_far.length?`<div class="car-far" title="วัดตามถนนจริงของรถบรรทุก · ≈ = ยังไม่ได้ระยะถนน ใช้เส้นตรงไปก่อน">⚠ ร้านห่างเกิน ${_farKm} กม. <b>${_far.length} คู่</b>${_far.map(f=>`<div>#${f.fn} ${f.fN} → #${f.tn} ${f.tN} · <b>${f.road?'':'≈'}${f.km.toFixed(1)} กม.</b></div>`).join('')}</div>`:'';
       const tw=ld['w'+tr]||0, tv=ld['v'+tr]||0, twp=pct['wp'+tr]||0, tvp=pct['vp'+tr]||0;
       // v9.73: สถานะ/กรอบสีคิดจากน้ำหนักหลังหักของที่จะไม่ได้ — รถที่ดูพอดีแต่ของขาดจะกลายเป็น "ควรเติม"
       const _ls=_carLoss[t.plate+'||'+tr]||{lostW:0,lostV:0,items:[]};
@@ -12453,7 +12507,7 @@ function renderCarsView(){
         const _noGps=!(b.lat&&b.lng);
         const sub=`${_cs?`<span style="color:${CS_TOT_COL};font-weight:700">${_cs}</span>${_ck?`<span style="color:${CS_CAT_COL}"> · ${_ck}</span>`:''}`:'<span style="color:#C3CCD8">—</span>'}`
           +`${_noGps?'<span style="color:#FCA5A5;font-weight:700"> · ⚠ ไม่มี GPS</span>':''}`
-          +`${_farTo[j+1]?`<span class="car-farb" title="ห่างจากร้านก่อนหน้า ${_farTo[j+1].toFixed(1)} กม.">⚠ ${_farTo[j+1].toFixed(1)} กม.</span>`:''}`;
+          +`${_farTo[j+1]?`<span class="car-farb" title="ห่างจากร้านก่อนหน้า ${_farTo[j+1].km.toFixed(1)} กม. — ${_farTo[j+1].road?'วัดตามถนนจริง':'ยังไม่ได้ระยะถนน ใช้เส้นตรงไปก่อน'}">⚠ ${_farTo[j+1].road?'':'≈'}${_farTo[j+1].km.toFixed(1)} กม.</span>`:''}`;
         return `<div style="display:flex;align-items:center;gap:5px;padding:3px 4px;${j?'border-top:1px solid #EEF1F6':''};font-size:11px"><span style="color:#A0ABBB;min-width:14px;font-size:10px">${j+1}.</span><div style="flex:1;min-width:0"><div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500" title="${String(b.arName||'').replace(/"/g,'')}">${b.arName}</div><div style="font-size:9.5px;line-height:1.4" title="${_csTitle([b.ref])}">${sub}</div></div><div style="text-align:right;flex-shrink:0;font-size:9.5px;line-height:1.3;font-variant-numeric:tabular-nums;padding-left:4px"><div style="font-weight:700;color:#1A5FA5">⚖ ${fmtKg(b.totalW||0)}</div><div style="color:#6B7A90">📦 ${fmtM3(b.totalV||0)}</div></div><button type="button" class="car-x" title="เอาบิลนี้ออกจากรถ (กลับไปอยู่กล่องบิลค้าง)" onclick="event.stopPropagation();carDropBill('${b.ref}')">✕</button></div>`;}).join('');
       return `<div class="td-hit" title="กดดูรายละเอียดสินค้าของเที่ยวนี้ · ลากบิลค้างมาวางตรงนี้เพื่อใส่เที่ยวนี้" onclick="carTripDetail('${t.plate}',${tr})" ondragover="cbDragOver(event)" ondragleave="cbDragLeave(event)" ondrop="cbDrop(event,'${t.plate}',${tr})" style="border:${st.emph?'2.5px':'2px'} solid ${st.col};border-radius:11px;padding:9px 10px;margin-bottom:10px;cursor:pointer;${st.tint?`background:${st.tint};`:''}">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:8px">
@@ -14764,15 +14818,18 @@ function jrDrawMap(){
     if(ord.length){
       const line=L.polyline(wpts,{color:col,weight:4,opacity:.85,lineJoin:'round'}).addTo(_jrMap); _jrLayers.push(line);
       const ttype=(selG.assign&&selG.assign.plate)?((TRUCKS.find(t=>t.plate===selG.assign.plate)||{}).type||''):(selG.seg==='big'?'6 ล้อ':'กระบะ');
-      if(typeof fetchOsrmRoute==='function')fetchOsrmRoute(wpts,ttype).then(rd=>{if(rd&&rd.coords&&line._map)line.setLatLngs(rd.coords);}).catch(()=>{});
+      if(typeof fetchOsrmRoute==='function')fetchOsrmRoute(wpts,ttype).then(rd=>{
+        if(rd&&rd.coords&&line._map)line.setLatLngs(rd.coords);
+        if(rd&&rd.legKm&&_rdFromLegs(wpts,rd.legKm))_rdSoon(jrDrawMap);   // v9.238: ได้ระยะถนนรายช่วงแล้ว → วาดตัวเลขใหม่
+      }).catch(()=>{});
     }
     ord.forEach((u,i)=>{pts.push([u.lat,u.lng]);
       const m=L.marker([u.lat,u.lng],{icon:_pin(col,String(i+1),30)}).bindPopup(`<b>${u.name}</b><br>⚖ ${_mgFmtW(u.w)} · 📦 ${_mgFmtV(u.v)}<br><span style="color:#6B7A90">📍 ${u.district||''} ${u.province||''}</span>`).addTo(_jrMap);
       m.bindTooltip(`<span style="font-weight:700;color:${col}">${i+1}. </span>${u.name}`,{permanent:true,direction:'right',offset:[14,0],className:'route-label',opacity:.95});
       _jrLayers.push(m);});
     // v8.63: เตือนจุดติดกันห่างเกิน N กม. (วัดเส้นตรงตามลำดับส่ง) + ขีดเส้นแดง
-    if(warnKm>0)for(let i=1;i<ord.length;i++){const dkm=haversine(ord[i-1].lat,ord[i-1].lng,ord[i].lat,ord[i].lng);
-      if(dkm>warnKm)warns.push({fromNum:i,toNum:i+1,fromN:ord[i-1].name,toN:ord[i].name,km:dkm,a:ord[i-1],b:ord[i]});}
+    if(warnKm>0)for(let i=1;i<ord.length;i++){const d=_rdKm(ord[i-1].lat,ord[i-1].lng,ord[i].lat,ord[i].lng);   // v9.238: ระยะถนนจริง (ไม่มีข้อมูลถนนค่อยตกไปเส้นตรง)
+      if(d.km>warnKm)warns.push({fromNum:i,toNum:i+1,fromN:ord[i-1].name,toN:ord[i].name,km:d.km,road:d.road,a:ord[i-1],b:ord[i]});}
     warns.forEach(w=>{const wl=L.polyline([[w.a.lat,w.a.lng],[w.b.lat,w.b.lng]],{color:'#DC3545',weight:3,opacity:.75,dashArray:'6 5'}).addTo(_jrMap);_jrLayers.push(wl);});
   } else {
     // v8.82: ยังไม่เลือกกลุ่ม → วงกลมคลัสเตอร์ต่อกลุ่ม (รัศมี=กว้างจากศูนย์กลาง) + เลขจุด + หมุดสีตามกลุ่ม
@@ -14804,7 +14861,7 @@ function jrDrawMap(){
   }
   const wEl=document.getElementById('jrWarn');
   if(wEl){ if(selG&&warns.length){wEl.style.display='block';
-      wEl.innerHTML=`⚠ พบ ${warns.length} จุดติดกันห่างเกิน ${warnKm} กม.<br>`+warns.slice(0,12).map(w=>`#${w.fromNum} ${w.fromN} → #${w.toNum} ${w.toN} · <b>${w.km.toFixed(1)} กม.</b>`).join('<br>')+(warns.length>12?`<br>… อีก ${warns.length-12} คู่`:'');
+      wEl.innerHTML=`⚠ พบ ${warns.length} จุดติดกันห่างเกิน ${warnKm} กม. <span style="font-weight:400;opacity:.8">(ระยะถนนจริง · ≈ = ยังไม่ได้ระยะถนน ใช้เส้นตรงไปก่อน)</span><br>`+warns.slice(0,12).map(w=>`#${w.fromNum} ${w.fromN} → #${w.toNum} ${w.toN} · <b>${w.road?'':'≈'}${w.km.toFixed(1)} กม.</b>`).join('<br>')+(warns.length>12?`<br>… อีก ${warns.length-12} คู่`:'');
     } else {wEl.style.display='none';wEl.innerHTML='';} }
   const hint=document.getElementById('jrMapHint'); if(hint)hint.textContent=selG?('· '+selG.zoneName.split(' · ')[0]+' — เส้นทางตามถนน · คลิกซ้ำดูทั้งหมด'):'· คลิกกลุ่มขวาเพื่อดูเส้นทาง';
   const _mp=document.getElementById('jrMap'); if(_mp)_mp.classList.toggle('jr-nolabels',!_jrShowLabels); // v8.65: คงสถานะซ่อนชื่อหลัง redraw
