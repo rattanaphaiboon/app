@@ -1,6 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.39 — auditFaceSelfTest ฉบับแก้: v9.38 เอาเทมเพลตเทียบกับตัวมันเอง ระยะได้ 0 เสมอ
+ *          ผลเลยขึ้น "ไม่มีใครถูกบล็อก" โดยไม่ได้พิสูจน์อะไรจริง
+ *          ฉบับนี้ใช้ "รูปที่ 2" ของแต่ละคน (ตอนลงทะเบียนถ่าย 2 รูป) แทนการสแกนครั้งใหม่
+ *          + รายงานการกระจายระยะ เพื่อดูว่าเกณฑ์ 0.50 เหมาะกับข้อมูลจริงมั้ย
  * v9.38 — ★ แก้ด่วน: เกณฑ์ v9.37 เข้มเกินไปสำหรับข้อมูลจริง (★ ต้อง Deploy ทับ v9.37)
  *          auditFaceLookalikes เผย 68 คนมีคู่ใกล้กัน 235 คู่ (บางคู่แค่ 0.31) = รูปที่
  *          ลงทะเบียนไว้แยกกันไม่ค่อยออก · กฎ "ต้องชนะคนอื่น 0.06" จะบล็อกคนถูกตัวเพียบ
@@ -233,7 +237,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.38', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.39', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -7020,40 +7024,53 @@ function faceLogVerify_(empId, result, dSelf, dOther, otherName) {
   } catch (e) {}
 }
 
-/* v9.38 · ทำนายว่าใครจะสแกนไม่ผ่านด้วยเกณฑ์ปัจจุบัน
-   วิธี: เอา "เทมเพลตของแต่ละคน" มาเป็นตัวทดสอบเสมือนการสแกนที่สมบูรณ์แบบที่สุด
-   ถ้าขนาดตัวเองยังไม่ผ่าน = ของจริงยิ่งไม่ผ่าน → ต้องลงทะเบียนใบหน้าใหม่ก่อน */
+/* v9.39 · ทำนายว่าใครจะสแกนไม่ผ่าน — ฉบับแก้ให้สมจริง
+   v9.38 ผิด: เอาเทมเพลตมาเทียบกับตัวมันเอง ระยะได้ 0 เสมอ → ผ่านหมดโดยไม่พิสูจน์อะไร
+   ฉบับนี้: ตอนลงทะเบียนถ่าย 2 รูป (ปกติ/ยิ้ม) จึงใช้ "รูปที่ 2" แทนการสแกนครั้งใหม่
+            แล้วเทียบกับ "รูปที่ 1" ของตัวเอง — ได้ระยะเหมือนสแกนจริง
+   คนที่มีรูปเดียวจำลองไม่ได้ (รายงานแยกไว้ให้เห็น) */
 function auditFaceSelfTest() {
   const idx = faceIndex_();
-  const L = ['===== ทำนายผลสแกนด้วยเกณฑ์ปัจจุบัน ====='];
+  const L = ['===== ทำนายผลสแกนด้วยเกณฑ์ปัจจุบัน (v9.39 — จำลองด้วยรูปที่ 2) ====='];
   L.push('เกณฑ์: ระยะถึงตัวเอง <= ' + FACE_MAX_DIST + ' · ปฏิเสธเมื่อคนอื่นใกล้กว่าเกิน ' + FACE_AMBIG_GAP);
   L.push('ลงทะเบียนใบหน้าแล้ว ' + idx.length + ' คน');
-  const bad = [], tight = [];
+  const bad = [], tight = [], far = [], dists = [];
+  let single = 0;
   idx.forEach(me => {
-    me.descs.forEach(probe => {
-      let dSelf = Infinity, dOther = Infinity, who = '';
-      idx.forEach(f => {
-        let d = Infinity;
-        f.descs.forEach(t => { const x = faceDist_(probe, t); if (x < d) d = x; });
-        if (f.empId === me.empId) { if (d < dSelf) dSelf = d; }
-        else if (d < dOther) { dOther = d; who = f.name || f.empId; }
-      });
-      if (dOther < dSelf - FACE_AMBIG_GAP) bad.push({ me: me, d: dOther, who: who, dSelf: dSelf });
-      else if (dOther < dSelf + 0.06) tight.push({ me: me, d: dOther, who: who, dSelf: dSelf });
+    if (me.descs.length < 2) { single++; return; }            // มีรูปเดียว จำลองไม่ได้
+    const probe = me.descs[1];                                 // รูปที่ 2 = "การสแกนครั้งใหม่"
+    const dSelf = faceDist_(probe, me.descs[0]);               // เทียบกับรูปที่ 1 เท่านั้น
+    let dOther = Infinity, who = '';
+    idx.forEach(f => {
+      if (f.empId === me.empId) return;
+      f.descs.forEach(t => { const x = faceDist_(probe, t); if (x < dOther) { dOther = x; who = f.name || f.empId; } });
     });
+    dists.push(dSelf);
+    const row = { me: me, dSelf: dSelf, dOther: dOther, who: who };
+    if (dSelf > FACE_MAX_DIST) far.push(row);
+    else if (dOther < dSelf - FACE_AMBIG_GAP) bad.push(row);
+    else if (dOther < dSelf + 0.06) tight.push(row);
   });
+  dists.sort((a, b) => a - b);
+  const pct = q => dists.length ? dists[Math.min(dists.length - 1, Math.floor(dists.length * q))].toFixed(3) : '-';
+  L.push('จำลองได้ ' + dists.length + ' คน (มีรูปเดียว ' + single + ' คน — จำลองไม่ได้)');
+  L.push('ระยะ "หน้าตัวเองคนละรูป": กลาง ' + pct(0.5) + ' · แย่สุด 10% ' + pct(0.9) + ' · สูงสุด ' + pct(0.999));
+  const show = (r) => '   ' + r.me.name + ' (' + r.me.empId + ') — ตัวเอง ' + r.dSelf.toFixed(3) +
+                      ' / ใกล้สุดคนอื่น ' + (isFinite(r.dOther) ? r.dOther.toFixed(3) : '-') + ' = ' + r.who;
   L.push('');
-  L.push('❌ จะสแกนไม่ผ่าน : ' + bad.length + ' คน');
-  bad.slice(0, 30).forEach(b => L.push('   ' + b.me.name + ' (' + b.me.empId + ') — ระบบมองว่าเป็น ' + b.who +
-                                       ' (ตัวเอง ' + b.dSelf.toFixed(3) + ' / คนนั้น ' + b.d.toFixed(3) + ')'));
+  L.push('❌ ระยะถึงตัวเองเกิน ' + FACE_MAX_DIST + ' (สแกนไม่ผ่านแน่) : ' + far.length + ' คน');
+  far.slice(0, 25).forEach(r => L.push(show(r)));
   L.push('');
-  L.push('⚠ ผ่านแบบเฉียดฉิว : ' + tight.length + ' คน (ยังสแกนได้ แต่ควรลงทะเบียนหน้าใหม่)');
-  tight.slice(0, 20).forEach(b => L.push('   ' + b.me.name + ' (' + b.me.empId + ') ↔ ' + b.who +
-                                         ' (ตัวเอง ' + b.dSelf.toFixed(3) + ' / คนนั้น ' + b.d.toFixed(3) + ')'));
+  L.push('❌ ระบบมองว่าเป็นคนอื่น : ' + bad.length + ' คน');
+  bad.slice(0, 25).forEach(r => L.push(show(r)));
   L.push('');
-  L.push(bad.length === 0
-    ? '✅ ไม่มีใครถูกบล็อกจากเกณฑ์นี้ — ปลอดภัยที่จะใช้งานจริง'
-    : '★ ' + bad.length + ' คนข้างบนต้องให้ HR ลงทะเบียนใบหน้าใหม่ (แสงพอ · ถ่ายตรงหน้า · ไม่ใส่แมสก์/แว่นดำ)');
+  L.push('⚠ ผ่านแบบเฉียดฉิว (ควรลงทะเบียนหน้าใหม่) : ' + tight.length + ' คน');
+  tight.slice(0, 25).forEach(r => L.push(show(r)));
+  L.push('');
+  const risk = far.length + bad.length;
+  L.push(risk === 0
+    ? '✅ ไม่มีใครถูกบล็อก — เกณฑ์นี้ปลอดภัยกับข้อมูลจริง' + (tight.length ? ' (แต่มี ' + tight.length + ' คนเฉียดฉิว ควรถ่ายใหม่)' : '')
+    : '★ ' + risk + ' คนข้างบนจะสแกนไม่ผ่าน — ต้องให้ HR ลงทะเบียนใบหน้าใหม่ก่อน (แสงพอ · ถ่ายตรงหน้า · ไม่ใส่แมสก์/แว่นดำ)');
   Logger.log(L.join('\n'));
 }
 
