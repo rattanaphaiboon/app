@@ -1,6 +1,11 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.41 — ★ เกณฑ์สุดท้าย (ตั้งจากตาราง v9.40 · คู่แอป v12.88 · ★ ต้อง Deploy):
+ *          maxDist 0.50 (ไม่ลดตามตาราง เพราะตารางจำลองจากรูปถ่ายห่างกันไม่กี่วินาที
+ *          ของจริงระยะกว้างกว่า) · margin +0.03 (เจ้าของบัญชีต้องใกล้กว่าคนอื่น)
+ *          วัดแล้ว: บล็อก "เหมือนคนอื่น" 0 คน · ตัวเดียวที่ติดคือทิพวัลย์ (รูปลงทะเบียนเสีย)
+ *          + resetFaceRegistration() ปลดล็อกให้ลงทะเบียนใบหน้าใหม่ (แก้ FACE_RESET_IDS)
  * v9.40 — auditFaceThresholds() ตารางเทียบเกณฑ์จากข้อมูลจริง (maxDist x margin)
  *          + อันดับคนที่เสี่ยงโดนแต่ละกฎ + รายชื่อคนที่มีรูปเดียว
  *          ข้อมูลจาก v9.39: หน้าคนเดียวกัน กลาง 0.243 / p90 0.320 · คนละคนใกล้สุด 0.315
@@ -241,7 +246,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.40', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.41', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -6904,7 +6909,7 @@ function docReceiveDate_(v) {
    v9.37 · ยืนยันใบหน้าที่เซิร์ฟเวอร์ — กันคนหน้าคล้ายสแกนแทนกัน
    กติกา 2 ชั้น (ต้องผ่านทั้งคู่):
      1) ระยะถึงเทมเพลตของ "เจ้าของบัญชี" ต้อง <= FACE_MAX_DIST
-     2) ต้องไม่มีคนอื่นที่ใกล้กว่าอย่างชัดเจน (dOther < dSelf - FACE_AMBIG_GAP = ปฏิเสธ)
+     2) เจ้าของบัญชีต้องใกล้กว่าคนอื่น (dOther < dSelf + FACE_MARGIN = ปฏิเสธ)
    ชั้น 2 คือตัวที่กันเคสหน้าคล้าย — ถ้าหน้าที่สแกนเข้าใกล้คนอื่นมากกว่า/พอๆ กัน = ปฏิเสธ
    ============================================================ */
 /* v9.38 (แก้ด่วน 23/09 หลังเห็นผล auditFaceLookalikes): ใบหน้าที่ลงทะเบียนไว้ "แยกกันไม่ค่อยออก"
@@ -6912,11 +6917,18 @@ function docReceiveDate_(v) {
    แปลว่ารูปที่ลงทะเบียนคุณภาพไม่พอ (แสง/มุม/ความคมชัด) ไม่ใช่คนหน้าเหมือนกันจริงๆ ทั้งหมด
    เกณฑ์ v9.37 (ต้องชนะคนอื่น 0.06) จะบล็อกคนถูกตัวจำนวนมาก → เปลี่ยนเป็น:
      · ระยะถึงตัวเอง <= FACE_MAX_DIST (กลับไป 0.50 เท่าเดิม ไม่เพิ่มการปฏิเสธจากชั้นนี้)
-     · ปฏิเสธเฉพาะเมื่อ "คนอื่นใกล้กว่าอย่างชัดเจน" คือ dOther < dSelf - FACE_AMBIG_GAP
+     · v9.41 ปรับเป็น: เจ้าของบัญชีต้องใกล้กว่าคนอื่น (dOther < dSelf + FACE_MARGIN = ปฏิเสธ)
    เคสเจนจิรา→ฝนทิพย์ ยังโดนจับ เพราะหน้าตัวเองใกล้กว่ามาก (ห่างกันหลายสิบจุด)
    ส่วนคนถูกตัวที่ descriptor หยาบ (dSelf 0.38 / dOther 0.37) จะไม่โดนบล็อก */
-const FACE_MAX_DIST  = 0.50;   // ระยะสูงสุดที่ยอมรับว่าเป็นคนเดียวกัน (เท่าเกณฑ์เดิมของแอป)
-const FACE_AMBIG_GAP = 0.03;   // คนอื่นต้องใกล้กว่าเกินเท่านี้ถึงจะถือว่า "ไม่ใช่เจ้าของบัญชี"
+/* v9.41 — เกณฑ์สุดท้าย ตั้งจากตาราง auditFaceThresholds (46 คนที่จำลองได้):
+     · ทุกค่า maxDist 0.40-0.55 บล็อกเท่ากันหมด = 1 คน (ทิพวัลย์ ซึ่งรูปลงทะเบียนเสีย)
+     · margin ทุกค่า -0.03 ถึง +0.06 บล็อก "เหมือนคนอื่น" = 0 คน
+   เลือก maxDist 0.50 (ไม่ลดตามตาราง) เพราะตารางจำลองจากรูป 2 รูปที่ถ่ายห่างกันไม่กี่วินาที
+   แสง/มุมเหมือนกันเป๊ะ — ของจริงตอนสแกนเช้าตรู่ระยะจะกว้างกว่านี้ ลดเพดานแล้วเสี่ยงบล็อกคนจริง
+   เลือก margin +0.03 (เจ้าของบัญชีต้องใกล้กว่าคนอื่น) — วัดแล้วไม่บล็อกใคร และจับคนสวมรอยได้
+   สบายๆ เพราะคนสวมรอยจะห่างจากเจ้าของบัญชี ~0.45 แต่ใกล้หน้าตัวเอง ~0.25 (ห่างกัน 0.2) */
+const FACE_MAX_DIST = 0.50;   // ระยะสูงสุดที่ยอมรับว่าเป็นคนเดียวกัน
+const FACE_MARGIN   = 0.03;   // เจ้าของบัญชีต้องใกล้กว่าคนอื่นอย่างน้อยเท่านี้
 const FACE_CACHE_SEC = 1800;  // เก็บ index ไว้ 30 นาที (ลงทะเบียนหน้าใหม่รอไม่เกินครึ่งชม.)
 
 function faceParseDescs_(raw) {
@@ -6994,14 +7006,14 @@ function verifyFace_(empId, rawDesc) {
     return { ok: false, reason: 'far', dSelf: dSelf, dOther: dOther,
              msg: 'ใบหน้าไม่ตรงกับที่ลงทะเบียนไว้ (ระยะ ' + dSelf.toFixed(2) + ') — ลองใหม่ในที่แสงสว่างพอ' };
   }
-  // v9.38: ปฏิเสธเฉพาะตอน "คนอื่นใกล้กว่าอย่างชัดเจน" (ไม่ใช่แค่ใกล้พอๆ กัน)
-  if (dOther < dSelf - FACE_AMBIG_GAP) {
+  // v9.41: เจ้าของบัญชีต้องใกล้กว่าคนอื่น ไม่งั้นถือว่าไม่ใช่เจ้าของ
+  if (dOther < dSelf + FACE_MARGIN) {
     faceLogVerify_(id, 'other', dSelf, dOther, otherName);
     return { ok: false, reason: 'ambiguous', dSelf: dSelf, dOther: dOther,
              msg: 'ใบหน้านี้ตรงกับพนักงานอีกคนมากกว่าเจ้าของบัญชี — ระบบไม่อนุญาตให้ลงเวลาแทนกัน ถ้าเป็นหน้าของคุณจริงให้ติดต่อ HR ลงทะเบียนใบหน้าใหม่' };
   }
   // ผ่าน แต่เฉียดฉิว — เก็บไว้ดูย้อนหลังว่าควรให้ลงทะเบียนหน้าใหม่มั้ย
-  if (dOther < dSelf + 0.06) faceLogVerify_(id, 'close', dSelf, dOther, otherName);
+  if (dOther < dSelf + FACE_MARGIN + 0.05) faceLogVerify_(id, 'close', dSelf, dOther, otherName);   // v9.41: เฉียด = เก็บไว้ดู
   return { ok: true, reason: 'ok', dSelf: dSelf, dOther: dOther };
 }
 
@@ -7036,7 +7048,7 @@ function faceLogVerify_(empId, result, dSelf, dOther, otherName) {
 function auditFaceSelfTest() {
   const idx = faceIndex_();
   const L = ['===== ทำนายผลสแกนด้วยเกณฑ์ปัจจุบัน (v9.39 — จำลองด้วยรูปที่ 2) ====='];
-  L.push('เกณฑ์: ระยะถึงตัวเอง <= ' + FACE_MAX_DIST + ' · ปฏิเสธเมื่อคนอื่นใกล้กว่าเกิน ' + FACE_AMBIG_GAP);
+  L.push('เกณฑ์: ระยะถึงตัวเอง <= ' + FACE_MAX_DIST + ' · เจ้าของบัญชีต้องใกล้กว่าคนอื่น ' + FACE_MARGIN);
   L.push('ลงทะเบียนใบหน้าแล้ว ' + idx.length + ' คน');
   const bad = [], tight = [], far = [], dists = [];
   let single = 0;
@@ -7052,8 +7064,8 @@ function auditFaceSelfTest() {
     dists.push(dSelf);
     const row = { me: me, dSelf: dSelf, dOther: dOther, who: who };
     if (dSelf > FACE_MAX_DIST) far.push(row);
-    else if (dOther < dSelf - FACE_AMBIG_GAP) bad.push(row);
-    else if (dOther < dSelf + 0.06) tight.push(row);
+    else if (dOther < dSelf + FACE_MARGIN) bad.push(row);
+    else if (dOther < dSelf + FACE_MARGIN + 0.05) tight.push(row);
   });
   dists.sort((a, b) => a - b);
   const pct = q => dists.length ? dists[Math.min(dists.length - 1, Math.floor(dists.length * q))].toFixed(3) : '-';
@@ -7075,6 +7087,48 @@ function auditFaceSelfTest() {
   L.push(risk === 0
     ? '✅ ไม่มีใครถูกบล็อก — เกณฑ์นี้ปลอดภัยกับข้อมูลจริง' + (tight.length ? ' (แต่มี ' + tight.length + ' คนเฉียดฉิว ควรถ่ายใหม่)' : '')
     : '★ ' + risk + ' คนข้างบนจะสแกนไม่ผ่าน — ต้องให้ HR ลงทะเบียนใบหน้าใหม่ก่อน (แสงพอ · ถ่ายตรงหน้า · ไม่ใส่แมสก์/แว่นดำ)');
+  Logger.log(L.join('\n'));
+}
+
+/* ══════════════════════════════════════════════════════════════
+   v9.41 · ปลดล็อกให้ลงทะเบียนใบหน้าใหม่ (ระบบล็อกไว้ให้ลงได้ครั้งเดียว)
+   ใส่รหัสพนักงานที่ต้องการในลิสต์ แล้ว Run — ลบเฉพาะแถวใน FaceData ของคนเหล่านั้น
+   จากนั้นให้เขาเปิดแอปแล้วกด "ลงทะเบียนใบหน้า" ใหม่ได้เลย
+   ══════════════════════════════════════════════════════════════ */
+const FACE_RESET_IDS = ['670030'];   // ★ ทิพวัลย์ เสือสมิง — รูป 2 รูปห่างกัน 0.556 (เสีย)
+
+function resetFaceRegistration() { return faceReset_(false); }
+function resetFaceRegistrationApply() { return faceReset_(true); }
+function faceReset_(apply) {
+  const want = FACE_RESET_IDS.map(x => String(x).trim()).filter(Boolean);
+  const L = ['===== ปลดล็อกลงทะเบียนใบหน้าใหม่ ====='];
+  if (!want.length) { L.push('❌ ยังไม่ได้ใส่รหัสใน FACE_RESET_IDS'); Logger.log(L.join('\n')); return; }
+  const sh = getOrCreateTab(T.FACE);
+  const data = sh.getDataRange().getValues();
+  const hits = [];
+  for (let i = 1; i < data.length; i++) {
+    const id = String(data[i][0] || '').trim();
+    if (want.indexOf(id) >= 0) hits.push({ row: i + 1, id: id, name: String(data[i][1] || '') });
+  }
+  L.push('รหัสที่ขอ : ' + want.join(', '));
+  L.push('เจอในทะเบียนหน้า : ' + hits.length + ' แถว');
+  hits.forEach(h => L.push('   แถว ' + h.row + ' · ' + h.id + ' · ' + h.name));
+  want.forEach(id => { if (!hits.some(h => h.id === id)) L.push('   ⚠ ' + id + ' — ไม่มีในทะเบียนหน้า (ลงทะเบียนใหม่ได้เลย)'); });
+  if (!apply) {
+    L.push('');
+    L.push('>>> พรีวิวเท่านั้น · ถ้าถูกต้องให้ Run resetFaceRegistrationApply()');
+    Logger.log(L.join('\n')); return;
+  }
+  const before = sh.getMaxRows();
+  hits.map(h => h.row).sort((a, b) => b - a).forEach(r => sh.deleteRow(r));
+  SpreadsheetApp.flush();
+  const gone = before - sh.getMaxRows();
+  faceIndexClear_();
+  L.push('');
+  L.push('ลบไป ' + gone + ' แถว (สั่งลบ ' + hits.length + ')');
+  L.push(gone === hits.length
+    ? '✅ ปลดล็อกแล้ว — ให้คนเหล่านี้เปิดแอปแล้วกด "ลงทะเบียนใบหน้า" ใหม่'
+    : '❌ ลบไม่ครบ — เช็คว่ามีฟิลเตอร์คลุมแท็บ FaceData อยู่หรือเปล่า');
   Logger.log(L.join('\n'));
 }
 
@@ -7102,7 +7156,9 @@ function auditFaceThresholds() {
   const L = ['===== ตารางเทียบเกณฑ์ตรวจใบหน้า (จากข้อมูลจริง) ====='];
   L.push('จำลองได้ ' + rows.length + ' คน · มีรูปเดียว ' + single + ' คน (จำลองไม่ได้ — เสี่ยงที่วัดไม่ถึง)');
   L.push('');
-  L.push('เกณฑ์ปัจจุบัน: maxDist ' + FACE_MAX_DIST + ' · ปฏิเสธเมื่อ dOther < dSelf - ' + FACE_AMBIG_GAP);
+  L.push('เกณฑ์ปัจจุบัน: maxDist ' + FACE_MAX_DIST + ' · ปฏิเสธเมื่อ dOther < dSelf + ' + FACE_MARGIN);
+  L.push('⚠ ตารางนี้จำลองจากรูป 2 รูปที่ถ่ายห่างกันไม่กี่วินาที (แสง/มุมเหมือนกัน)');
+  L.push('  ของจริงตอนสแกนระยะจะกว้างกว่านี้ — อย่าลดเพดาน maxDist ตามตารางตรงๆ');
   L.push('');
   L.push('maxDist  margin   บล็อก(ไกลเกิน)  บล็อก(เหมือนคนอื่น)  รวม');
   [0.40, 0.45, 0.50, 0.55].forEach(md => {
@@ -7137,7 +7193,7 @@ function auditFaceThresholds() {
 function auditFaceLookalikes() {
   const idx = faceIndex_();
   const L = ['===== คู่ใบหน้าที่ใกล้กันเกินเกณฑ์ (เสี่ยงสแกนแทนกัน) ====='];
-  L.push('เกณฑ์: ระยะ <= ' + FACE_MAX_DIST + ' · ปฏิเสธเมื่อคนอื่นใกล้กว่าเกิน ' + FACE_AMBIG_GAP);
+  L.push('เกณฑ์: ระยะ <= ' + FACE_MAX_DIST + ' · เจ้าของบัญชีต้องใกล้กว่าคนอื่น ' + FACE_MARGIN);
   L.push('ลงทะเบียนใบหน้าแล้ว ' + idx.length + ' คน');
   const pairs = [];
   for (let i = 0; i < idx.length; i++) {
