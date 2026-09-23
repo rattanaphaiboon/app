@@ -966,7 +966,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.335';
+const APP_VERSION='3.337';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -3733,10 +3733,15 @@ async function loadCNHistoryNow_(){
     const jobId=r['รหัสใบคุม']||'';
     const docNo=r['เลขที่บิล DS']||'';
     if(!docNo&&!jobId) return;
-    const key=jobId+'|'+docNo;
+    /* ★★ v3.337: แยก CN ตามเลข cnId (user 2026-09-22 "CN ทำ 2 ครั้งร้านเดียวกันแล้วขึ้นรวม ให้แยกตาม ID")
+       เดิมจับกลุ่มแค่ ใบคุม+บิล → บิลเดียวมี CN 2 ใบ (ขนส่งเก็บเองคนละครั้ง = cnId คนละเลข) กลายเป็นใบเดียว:
+       สถานะเอาของแถวแรก (ใบหนึ่งรออนุมัติ อีกใบไม่อนุมัติ → ยอดหักผิดทั้งก้อน) · อนุมัติ/ยกเลิกทีเดียวทั้ง 2 ใบ
+       แถวเก่าที่ไม่มี cnId ยังรวมกันแบบเดิม (cnId ว่าง) */
+    const cnId=String(r['cnId']||'').trim();
+    const key=jobId+'|'+docNo+'|'+cnId;
     if(!groups[key]){
       groups[key]={
-        jobId, docNo,
+        jobId, docNo, cnId,
         date:r['วันที่คืน']||r['วัน เวลา']||'',
         customerName:r['ชื่อร้าน']||'', customerCode:r['รหัสร้าน']||'',
         warehouse:r['คลัง']||'',
@@ -3777,18 +3782,35 @@ async function loadCNHistoryNow_(){
             เคสจริง DC596908/00145: เบอร์ดี้+เมจิกฟาร์มเฟรช 2,210 สองใบเหมือนกัน = 2,210 ไม่ใช่ 4,420
      ลายเซ็นใบ = (บาร์โค้ด|ชื่อ):จำนวน:ราคา เรียงแล้ว + ยอดรวมทั้งใบ — แนวเดียวกับ markCNDupOnSource_ ฝั่ง GAS
      ⚠️ v3.253 บวกทุกใบโดยไม่ดูเนื้อหา → นับใบซ้ำเกิน แก้เป็นแบบนี้แล้ว */
-  state.cnHistory.forEach(g=>{
-    const seen={}; let total=0, n=0, dup=0; const items=[];
-    (g._order||[]).forEach(bk=>{
-      const b=g._b[bk];
-      const sig=b.items.map(it=>[(it.barcode||it.name),it.qty,it.price].join(':')).sort().join('|')+'#'+b.total;
-      if(seen[sig]){ dup++; return; }
-      seen[sig]=1; n++; total+=b.total;
-      b.items.forEach(it=>items.push(it));
+  /* ★★ v3.337: การ์ดแยกตาม cnId แล้ว → ใบซ้ำจากกดส่งซ้ำ (ได้ cnId ใหม่ทุกครั้ง) ไปอยู่คนละการ์ด
+     ถ้าไม่เทียบข้ามการ์ด ยอดจะเบิ้ล — เคสจริง DSW46908/00281 ส่ง 5 ครั้ง (ของจริง 2 ใบ · เลขเอกสาร CN เดียวกันทั้งหมด ISK6908/327)
+     = ต้องนับ 7,018 ไม่ใช่ 20,536 · DC596908/00145 (เคสในคอมเมนต์ข้างบน) ต้องยัง 2,210
+     กติกาเดิม v3.254 ทุกอย่าง แค่เทียบ "ทั้งบิล" (ใบคุม+บิล) ข้ามการ์ด:
+       · ใบที่ได้นับยอด = อนุมัติแล้ว ก่อน → รออนุมัติ/ตีกลับ → ไม่อนุมัติ · สถานะเท่ากัน = ใบที่มาก่อน
+       · การ์ดยังโชว์ครบทุกใบตาม ID (รายการ/ยอดของใบนั้นเอง = c.total) + ป้าย "ใบส่งซ้ำ ไม่นับยอดซ้ำ"
+       · ยอดที่ใช้คิดเงิน = cnAmt_(c) (c._amt) · c._dupOnly = ทั้งใบเป็นใบซ้ำ → ไม่นับยอด ไม่บล็อกปิดงาน */
+  const _sigOf=b=>b.items.map(it=>[(it.barcode||it.name),it.qty,it.price].join(':')).sort().join('|')+'#'+b.total;
+  const _rank=g=>cnApproved(g)?0:(cnVoided(g)?2:1);
+  const _byBill={};
+  state.cnHistory.forEach((g,i)=>{ g._i=i; const k=g.jobId+'|'+g.docNo; (_byBill[k]=_byBill[k]||[]).push(g); });
+  Object.keys(_byBill).forEach(k=>{
+    const counted={};   // ลายเซ็นใบ → การ์ดที่นับยอดของใบนั้นไปแล้ว
+    _byBill[k].slice().sort((a,b)=>_rank(a)-_rank(b)||a._i-b._i).forEach(g=>{
+      const own={}; let total=0, amt=0, n=0, dup=0, dupX=0; const items=[];
+      (g._order||[]).forEach(bk=>{
+        const b=g._b[bk], sig=_sigOf(b);
+        if(own[sig]){ dup++; return; }                   // ซ้ำในการ์ดเดียวกัน (แบบเดิม v3.254)
+        own[sig]=1; n++; total+=b.total;
+        b.items.forEach(it=>items.push(it));
+        const h=counted[sig];
+        if(h&&h!==g){ dupX++; if(!g._dupOf) g._dupOf={cnId:h.cnId||'',date:h.date||'',status:cnStatusOf(h)}; return; }   // ซ้ำกับใบที่การ์ดอื่นนับไปแล้ว
+        counted[sig]=g; amt+=b.total;
+      });
+      g.total=total; g.items=items; g._amt=amt; g._cnCount=n; g._cnDup=dup;
+      g._dupOnly=!!(n&&dupX===n);
     });
-    g.total=total; g.items=items; g._cnCount=n; g._cnDup=dup;
-    delete g._b; delete g._order;
   });
+  state.cnHistory.forEach(g=>{ delete g._b; delete g._order; delete g._i; });
   // ★ v3.231: จำ cnLineId ที่มีในชีท CN ของ D-Man แล้ว → ใช้กันซ้ำตอนดึงของจากชีท Sale App มาต่อท้าย
   const seen={}; rows.forEach(r=>{ const k=String(r['cnLineId']||'').trim(); if(k) seen[k]=1; });
   state._cnLineSeen=seen;
@@ -3853,6 +3875,9 @@ function cnFromCollect_(c){
   if(Array.isArray(c.lineIds)&&c.lineIds.length) return true;
   return String(c.returnType||'').trim()==='ขนส่งเก็บ';
 }
+/* ★ v3.337: ยอด CN ที่ใช้ "คิดเงิน" — ใบส่งซ้ำ (เนื้อหาเดียวกับใบอื่นของบิลเดียวกัน) = 0 · ดู loadCNHistoryNow_
+   จุดที่คิดเงินทุกจุดต้องใช้ตัวนี้ ห้ามใช้ c.total ตรงๆ (c.total = ยอดของใบนั้นเอง ไว้โชว์บนการ์ด) */
+function cnAmt_(c){ return (c&&typeof c._amt==='number')?c._amt:(parseFloat(c&&c.total)||0); }
 /* ★ v3.229: ยอด CN ในแอปของบิลนี้ — แยก "ใช้ได้" กับ "ถูกคลังไม่อนุมัติ (ยกเลิกแล้ว)" */
 function cnAmtForBill_(doc){
   const d=String(doc||'').trim().toUpperCase();
@@ -3860,7 +3885,7 @@ function cnAmtForBill_(doc){
   (state.cnHistory||[]).forEach(c=>{
     if(String(c.docNo||'').trim().toUpperCase()!==d) return;
     if(c.returnType==='คืนเต็มทั้งบิล') return;
-    const t=parseFloat(c.total)||0;
+    const t=cnAmt_(c);   // ★ v3.337: ใบส่งซ้ำ = 0
     if(cnVoided(c)) voided+=t; else ok+=t;
   });
   return {ok:ok,voided:voided};
@@ -3900,6 +3925,7 @@ async function cancelOwnCN(i){
     {title:'ยืนยันยกเลิก CN?',danger:true,okLabel:'ยกเลิกใบนี้',icon:'🚫'})) return;
   showToast('กำลังส่งเข้าชีท…','info');
   const r=await postSyncGAS_({action:'void_cn',jobId:c.jobId,docNo:c.docNo,
+    cnId:c.cnId||'',cnScope:(c.cnId?'id':'blank'),   // ★ v3.337: ยกเลิกเฉพาะใบนี้ — ไม่ส่ง = GAS ยกเลิกทุกใบของบิล (CN อีกใบของบิลเดียวกันโดนด้วย)
     approver:currentUserName_(),note:'ขนส่งยกเลิกเอง: '+String(reason).trim()});
   if(!r||!r.ok){ showToast('❌ ยกเลิกไม่สำเร็จ: '+((r&&r.error)||'ลองใหม่ได้'),'error'); return; }
   c.status='ไม่อนุมัติ'; c.approver=currentUserName_(); c.approveNote='ขนส่งยกเลิกเอง: '+String(reason).trim();
@@ -4013,7 +4039,7 @@ function cnCardHTML(c,i){
   const apprLine=(approved||rejected)?`<div class="txt-xs" style="margin-top:4px;color:${rejected?'var(--danger)':'var(--success)'}">${approved?'✅ อนุมัติ':(cnVoided(c)?'❌ ไม่อนุมัติ (ยกเลิกใบนี้)':'↩️ ตีกลับ')}${c.approver?' โดย '+esc(c.approver):''}${approved&&c.cnDocNo?' · เลขที่เอกสาร CN: '+esc(c.cnDocNo):''}${rejected&&c.approveNote?' — '+esc(c.approveNote):''}</div>`
     +(approved&&c.approvePhoto?`<div style="margin-top:4px"><img src="${imgSrc(c.approvePhoto)}" onerror="this.style.display='none'" style="max-height:72px;border-radius:6px;border:1px solid var(--border)"></div>`:''):'';
   // v2.61: default collapsed — คลิกที่ card เพื่อขยาย/ยุบ, chevron บอกสถานะ
-  const cardKey='cn_'+(c.jobId||'')+'_'+(c.docNo||'');
+  const cardKey='cn_'+(c.jobId||'')+'_'+(c.docNo||'')+'_'+(c.cnId||'');   // ★ v3.337: 2 ใบบิลเดียวกัน พับ/กางแยกกัน
   return `<div class="cn-card" data-cnkey="${esc(cardKey)}" onclick="toggleCNCard(this)" style="background:var(--card-bg);border:1px solid var(--border);border-left:3px solid var(--gold);border-radius:var(--radius-md);padding:12px;margin-bottom:10px;cursor:pointer">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px">
       <div><span class="num txt-bold" style="font-size:15px">${esc(c.docNo)}</span> <span class="badge">${esc(c.billType||'-')}</span></div>
@@ -4021,8 +4047,9 @@ function cnCardHTML(c,i){
     </div>
     <div class="txt-bold" style="font-size:13px">${esc(c.customerName||'-')} <span class="txt-muted txt-xs">${esc(c.customerCode||'')}</span></div>
     <div class="txt-xs txt-muted" style="display:flex;gap:12px;flex-wrap:wrap;margin:4px 0">
-      <span>🗓 ${esc(fmtCNDate(c.date))}</span><span>📦 ${c.items.length} รายการ</span><span>💰 ${fmt(c.total)} ฿</span>
+      <span>🗓 ${esc(fmtCNDate(c.date))}</span><span>📦 ${c.items.length} รายการ</span><span>💰 ${fmt(c.total)} ฿</span>${c.cnId?`<span title="${esc(c.cnId)}">🆔 ${esc(cnShortId_(c.cnId))}</span>`:''}
     </div>
+    ${cnDupNoteHtml_(c)}
     <div class="txt-xs txt-muted">${esc(c.returnType||'')}${c.reason?' · '+esc(c.reason):''}${c.driver?' · 🚚 '+esc(c.driver):''}</div>
     <div class="cn-details" style="display:none">
       ${itemsHtml?`<div style="margin-top:6px">${itemsHtml}</div>`:''}
@@ -4032,7 +4059,16 @@ function cnCardHTML(c,i){
     ${actions?`<div style="display:flex;gap:6px;justify-content:flex-end;margin-top:8px;flex-wrap:wrap">${actions}</div>`:''}
   </div>`;
 }
+/* ★ v3.337: เลข CN แบบสั้นบนการ์ด (เลขเต็มอยู่ใน title) — ใบเดียวกัน = เลขเดียวกัน */
+function cnShortId_(id){ const s=String(id||'').trim(); if(!s) return ''; if(s.indexOf(',')>=0) return s.length>18?s.slice(0,18)+'…':s; return s.length>9?('CN…'+s.slice(-6)):s; }
+/* ★ v3.337: ป้ายใบส่งซ้ำ — รายการเหมือนใบอื่นของบิลเดียวกันเป๊ะ (กดส่งซ้ำ/ทำซ้ำ) → โชว์ให้เห็นแต่ไม่นับยอดซ้ำ */
+function cnDupNoteHtml_(c){
+  const r=c&&c._dupOf; if(!r) return '';
+  const ref=(r.cnId?cnShortId_(r.cnId):('ใบวันที่ '+fmtCNDate(r.date)))+' ('+(r.status||'รออนุมัติ')+')';
+  return `<div class="txt-xs" style="margin:2px 0 4px;padding:5px 9px;border-radius:8px;border:1px dashed var(--warning);background:rgba(243,156,18,.12)">♻️ ${c._dupOnly?'ใบส่งซ้ำ — รายการเหมือน':'บางรายการซ้ำกับ'} ${esc(ref)} · <b>${c._dupOnly?'ไม่นับยอดซ้ำ':('นับยอด '+fmt(c._amt)+' ฿')}</b></div>`;
+}
 function toggleCNCard(card){
+
   const details=card.querySelector('.cn-details');
   const chev=card.querySelector('.cn-chev');
   if(!details) return;
@@ -4103,7 +4139,7 @@ function editCN(i){
     items:(c.items&&c.items.length)
       ? c.items.map(it=>({productId:'',productName:it.name,unit:it.unit||'ชิ้น(EA)',qty:String(it.qty),price:String(it.price),barcode:it.barcode||''}))
       : [{productId:'',productName:'',unit:'ชิ้น(EA)',qty:'',price:''}],
-    _draftChecked:true, _editing:c.jobId+'|'+c.docNo, _view:'form'
+    _draftChecked:true, _editing:cnKey_(c), _view:'form'
   });
   switchTab('sec-returns');   // v2.6: CN card อยู่หน้าประวัติ → เด้งไปหน้ารับคืนพร้อมข้อมูล
   showToast('แก้ไข CN '+c.docNo+' — แก้แล้วกด "บันทึกการรับคืน"','info');
@@ -4118,11 +4154,13 @@ async function deleteCN(i){
     try{ await fetch(url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action:'save_return',jobId:c.jobId,docNo:c.docNo,items:[],photo:''})}); }
     catch(e){ console.warn('delete cn',e); }
   }
-  state.cnHistory=(state.cnHistory||[]).filter(x=>!(x.jobId===c.jobId&&x.docNo===c.docNo));
+  // ★ v3.337: เอาออกจากจอให้ตรงกับที่ GAS ลบจริง (save_return ลบทุกแถวของเลขบิล ยกเว้นแถว "ขนส่งเก็บ") — การ์ดแยกตาม ID แล้ว ใบที่ขนส่งเก็บเองของบิลเดียวกันต้องไม่หายไปด้วย
+  state.cnHistory=(state.cnHistory||[]).filter(x=>!(String(x.docNo||'').trim()===String(c.docNo||'').trim()&&!cnIsOwnCollect_(x)));
   showToast('ลบ CN '+c.docNo+' แล้ว','success');
   refreshCNViews();
 }
-function findCN(key){ return (state.cnHistory||[]).find(c=>(c.jobId+'|'+c.docNo)===key); }
+function cnKey_(c){ return String((c&&c.jobId)||'')+'|'+String((c&&c.docNo)||'')+'|'+String((c&&c.cnId)||''); }   // ★ v3.337: กุญแจ CN รวมเลข cnId
+function findCN(key){ return (state.cnHistory||[]).find(c=>cnKey_(c)===key); }
 /* v2.20: ชื่อผู้ใช้ปัจจุบัน — มี fallback กันค่าว่าง (displayName → ชื่อเล่น → ชื่อ → อีเมล) */
 function currentUserName_(){
   const u=state.user||{};
@@ -4138,7 +4176,8 @@ async function cnPostSale_(c,decision,reason,cnDoc,photo){
 }
 async function cnPostAction_(action,c,note,extra){
   // v2.42: async + verify — คืน {ok, error}
-  const body=Object.assign({action,jobId:c.jobId,docNo:c.docNo,approver:currentUserName_(),note:note||''},extra||{});
+  // ★ v3.337: บอก GAS ว่าทำกับ CN ใบไหน — cnScope 'id' = เฉพาะแถว cnId นี้ · 'blank' = เฉพาะแถวเก่าที่ไม่มี cnId (เดิมทั้งบิล)
+  const body=Object.assign({action,jobId:c.jobId,docNo:c.docNo,cnId:c.cnId||'',cnScope:(c.cnId?'id':'blank'),approver:currentUserName_(),note:note||''},extra||{});
   return await postSyncGAS_(body);
 }
 // v2.11: คลังอนุมัติ CN ต้องใส่เลขที่เอกสาร CN + แนบรูปก่อน
@@ -7038,10 +7077,10 @@ function applyCNCredit(idx){
   const paint=()=>{
     if(_billIdx!==idx) return;            // ออกจากบิลนี้ไปแล้ว
     const note=$('cnLinkNote'); if(!note) return;
-    const _all=cnMatchesForBill(b,jobDocs,allowStore,j.id);   // v3.37: จับเฉพาะ CN ในใบคุมเดียวกัน
+    const _all=cnMatchesForBill(b,jobDocs,allowStore,j.id).filter(c=>!c._dupOnly);   // v3.37: จับเฉพาะ CN ในใบคุมเดียวกัน · ★ v3.337: ตัดใบส่งซ้ำ ไม่งั้นเติมยอดหักเบิ้ล
     // ★ v3.229: ใบที่คลัง "ไม่อนุมัติ" = ยกเลิกแล้ว → ไม่นับเป็น CN ของบิลนี้อีก (คืนทั้งบิลก็ต้องกลับมาเก็บเงิน)
     const voided=_all.filter(cnVoided), matches=_all.filter(c=>!cnVoided(c));
-    const voidSum=voided.reduce((s,c)=>s+(parseFloat(c.total)||0),0);
+    const voidSum=voided.reduce((s,c)=>s+cnAmt_(c),0);
     // แถบเตือน (ไม่ล็อก — ยังบันทึก/ปิดงานได้ตามปกติ) ให้คนขับแก้ยอดหักเอง
     const voidWarn=voided.length?`<div style="margin-top:6px;padding:9px 11px;border-radius:10px;border:1px solid var(--danger);background:rgba(239,68,68,.12);color:var(--danger);font-size:12px;line-height:1.5">
         ❌ <b>CN ของบิลนี้ถูกคลัง "ไม่อนุมัติ" ${voided.length} ใบ รวม ${fmt(voidSum)} ฿</b><br>
@@ -7060,7 +7099,7 @@ function applyCNCredit(idx){
       b.status='pending'; b.isCN=false; b.failReason=''; b.nextResp=''; b.savedAt=null; persistJobs();
       if(typeof openBillForm==='function' && _billIdx===idx){ openBillForm(idx); return; }   // re-render ปลดล็อกฟอร์มเก็บเงิน
     }
-    const credit=matches.filter(c=>c.returnType!=='คืนเต็มทั้งบิล').reduce((s,c)=>s+(parseFloat(c.total)||0),0);
+    const credit=matches.filter(c=>c.returnType!=='คืนเต็มทั้งบิล').reduce((s,c)=>s+cnAmt_(c),0);
     if(credit>0){
       // เติมให้ถ้ายังว่าง (แก้ได้) — ไม่ทับค่าที่กรอกไว้แล้ว
       if(!ro&&!(parseFloat(b.payment.creditNote)>0)){
@@ -8206,7 +8245,7 @@ async function confirmCannot(idx){
     showToast('กำลังลบ CN เดิมออกจากชีท…','info');
     try{ await postSyncGAS_({action:'save_return',jobId:j.id,docNo:b.doc,items:[],photo:''}); }
     catch(e){ console.warn('del CN on switch',e); }
-    state.cnHistory=(state.cnHistory||[]).filter(x=>!(String(x.jobId)===String(j.id)&&String(x.docNo)===String(b.doc)));
+    state.cnHistory=(state.cnHistory||[]).filter(x=>!(String(x.docNo||'').trim()===String(b.doc||'').trim()&&!cnIsOwnCollect_(x)));   // ★ v3.337: ตรงกับที่ GAS ลบจริง (เว้นใบขนส่งเก็บ)
   }
   // v3.43: "เปลี่ยนคนไปส่ง" → เข้าคิวส่งซ้ำ (ให้คนอื่นรับไปส่งได้) ทันที
   if(action==='เปลี่ยนคนไปส่ง'){ queueRedelivery_(j,b,reason); }
@@ -8481,6 +8520,9 @@ async function submitForApproval(){
   j._submitting=true;
   j.status='pending_approval';
   j.submittedAt=Date.now();
+  j._submitLocal=j.submittedAt;   // ★ v3.336: เครื่องนี้เป็นคนกดปิดงาน — กันดึงกลับตอนชีทยังไม่ทัน ใช้เฉพาะเครื่องที่กดเท่านั้น
+  j._unsubmitLocal=null;
+  j.rejectedAt=null; j.rejectedBy=''; j.rejectReason='';   // ★ v3.336: ส่งใหม่หลังถูกตีกลับ = ไม่พกข้อมูลตีกลับเก่าไปกับคำขอ
   j._notifiedSubmit=0;        // v3.41: reset ให้ยิงแจ้งเตือนรอบนี้ได้ (การส่งใหม่)
   persistJobs();
   showToast('ส่งหัวหน้าอนุมัติแล้ว ✓','success');
@@ -8564,8 +8606,11 @@ async function cancelApproval(){
   const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
   if(j.status!=='pending_approval'){ showToast('ยกเลิกได้เฉพาะงานที่รออนุมัติ','warning'); return; }
   if(!await showConfirm(`งานจะกลับมาแก้ไขได้ (ต้องส่งอนุมัติใหม่)\n\nงาน: ${j.id}`,{title:'ยกเลิกการขออนุมัติ?',okLabel:'ยกเลิกอนุมัติ',icon:'↩️'})) return;
+  const _prevSub=j.submittedAt||0;
   j.status='in_progress';
   j.submittedAt=null;
+  j._submitLocal=null;
+  j._unsubmitLocal={at:Date.now(),sub:_prevSub};   // ★ v3.336: กันเด้งกลับเป็น "ปิดงานแล้ว" ตอนชีทยังไม่ได้รับคำขอยกเลิก
   persistJobs();
   syncToSheets(j,{queue:true,label:'unsubmit',clearSubmit:true}).catch(e=>console.warn('cancel approval sync:',e)); // เคลียร์ "วันเวลาปิดงาน" ในชีท · ★ v3.312 ผ่านคิว + บอก GAS ชัดๆ ว่าตั้งใจล้าง
   showToast('ยกเลิกขออนุมัติแล้ว — แก้ไขต่อได้','info');
@@ -8927,7 +8972,7 @@ async function renderSupSummary(){
   if(!Array.isArray(state.cnHistory)){ try{ await loadCNHistory(); }catch(e){} }
   const _dayJobIds=new Set(myJobs.map(j=>normJobId(j.id)));
   const _dayCNDocs=new Set(dayBills.map(b=>String(b.doc||'').trim().toUpperCase()).filter(Boolean));
-  const pCN=(state.cnHistory||[]).reduce((s,c)=>(_dayJobIds.has(normJobId(c.jobId))||_dayCNDocs.has(String(c.docNo||'').trim().toUpperCase()))?s+(parseFloat(c.total)||0):s,0);
+  const pCN=(state.cnHistory||[]).reduce((s,c)=>(_dayJobIds.has(normJobId(c.jobId))||_dayCNDocs.has(String(c.docNo||'').trim().toUpperCase()))?s+cnAmt_(c):s,0);   // ★ v3.337: cnAmt_
   const pCash=pB+pC+pT+pQ;   // เงินรับจริง (ไม่รวม CN)
   const _pRow=(ic,lb,v)=>`<div class="flex-between" style="padding:7px 0"><span>${ic} ${lb}</span><span style="font-variant-numeric:tabular-nums${v?'':';color:var(--muted)'}">${fmtInt(v)}</span></div>`;
   const bd=$('sumBreakdown');
@@ -8957,7 +9002,7 @@ async function renderSupSummary(){
           });
         });
         const _cnh=state.cnHistory||[];
-        const _cnFor=(jobIds,docNos)=>_cnh.reduce((s,c)=>(jobIds.has(normJobId(c.jobId))||docNos.has(String(c.docNo||'').trim().toUpperCase()))?s+(parseFloat(c.total)||0):s,0);
+        const _cnFor=(jobIds,docNos)=>_cnh.reduce((s,c)=>(jobIds.has(normJobId(c.jobId))||docNos.has(String(c.docNo||'').trim().toUpperCase()))?s+cnAmt_(c):s,0);   // ★ v3.337: cnAmt_
         Object.values(byDrv).forEach(g=>{ g.cnAmt=_cnFor(g.jobIds,g.docNos); });
         const dlist=Object.values(byDrv).sort((a,b)=>b.col-a.col);
         if(pdc) pdc.textContent=dlist.length+' คน · แตะเพื่อดูรายละเอียด';
@@ -9210,6 +9255,7 @@ async function pendingCNBlockers(j){
     const d=String(c.docNo||'').trim().toUpperCase();
     if(!d||!docs.has(d)) return;
     if(cnApproved(c)) return;                       // อนุมัติแล้ว — ผ่าน
+    if(c._dupOnly) return;                          // ★ v3.337: ใบส่งซ้ำ (เนื้อหาเดียวกับใบอื่นของบิลนี้) ไม่บล็อกปิดงาน
     // ★ v3.255: คลังกด '❌ ไม่อนุมัติ' = ยกเลิก CN ใบนั้นไปแล้ว → ไม่ต้องบล็อกการปิดงาน
     //   (ตกหล่นมาตั้งแต่ v3.229 ที่สั่งไว้ว่า 'ไม่อนุมัติ ... แต่ไม่ล็อกให้ปิดงาน ยังปิดงานได้เหมือนเดิม')
     //   ส่วน 'ตีกลับ' ยังบล็อกต่อ เพราะแปลว่าให้ขนส่งแก้แล้วส่งใหม่ (ยืนยัน 2026-08-15)
@@ -9690,6 +9736,11 @@ function outboxCount(){ return loadOutbox().length; }
 function outboxHasJob_(jobId){
   const k=normJobId(jobId||''); if(!k) return false;
   try{ return loadOutbox().some(x=>normJobId((x&&x.payload&&x.payload.jobId)||'')===k); }catch(e){ return false; }
+}
+/* ★ v3.336: คิวส่งของเครื่องนี้มี "คำขอปิดงาน" ของใบคุมนี้ (เวลาปิดงานตรงกัน) ค้างอยู่ไหม */
+function outboxHasSubmit_(jobId,submittedAt){
+  const k=normJobId(jobId||''); if(!k||!submittedAt) return false;
+  try{ return loadOutbox().some(x=>{ const p=(x&&x.payload)||{}; return normJobId(p.jobId||'')===k&&p.status==='pending_approval'&&Number(p.submittedAt)===Number(submittedAt); }); }catch(e){ return false; }
 }
 /* ★ v3.203: เตือนเมื่อข้อมูลค้างส่งนานเกินไป — ถ้าเครื่องโดนล้าง/พังตอนยังไม่เข้าชีท ข้อมูลหาย
    → ป้ายแดงชัดๆ + สั่น + เตือนซ้ำทุก 5 นาที ให้คนขับรู้ตัวไปหาสัญญาณ */
@@ -10604,10 +10655,22 @@ async function syncJobsFromSheet(opts){
          (หรือหายกลางทาง) ถูก sync รอบถัดไปทับทิ้ง → คนขับเห็น "งานค้างข้ามวัน" ทั้งที่กดปิดไปแล้ว (CVMW1/004380 4 ก.ย.)
          คงไว้เฉพาะตอนที่คำขอ "ยังค้างอยู่ในคิวส่ง" หรือกดปิดมาไม่เกิน 30 นาที (ตาข่าย Supabase พาเข้าชีทภายใน 5 นาที)
          → ยกเลิกขออนุมัติจากเครื่องอื่นยังตามมาถึงเครื่องนี้ได้ภายในครึ่งชั่วโมง ไม่ค้าง "รออนุมัติ" ตลอดกาล */
-      if(local.status==='pending_approval'&&(sj.status==='in_progress'||sj.status==='rejected')&&(local.submittedAt||0)>sheetLast
+      /* ★★ v3.336: กฎนี้เดิมใช้กับ "ทุกเครื่อง" ที่ถือสถานะรออนุมัติไว้ รวมเครื่องที่แค่ "อ่านมาจากชีท"
+         → กดยกเลิกขออนุมัติแล้ว ชีทว่างแล้ว แต่เครื่องอื่นยังขึ้น "ปิดงานแล้ว" ต่ออีกถึง 30 นาทีหลังเวลาปิดงานเดิม
+         (user แจ้ง 2026-09-22 · TSW1/011761) → ใช้เฉพาะเครื่องที่กดปิดงานเองและชีทยังไม่ยืนยัน (_submitLocal)
+         หรือยังมีคำขอปิดงานใบนี้ค้างในคิวส่งของเครื่องนี้จริง · ชีทยืนยันแล้ว = เครื่องหมายหายไปเอง (sj ใหม่ไม่มีค่านี้) */
+      const _mySubmit=(local._submitLocal&&local._submitLocal===local.submittedAt)||outboxHasSubmit_(local.id,local.submittedAt);
+      if(local.status==='pending_approval'&&_mySubmit&&(sj.status==='in_progress'||sj.status==='rejected')&&(local.submittedAt||0)>sheetLast
          &&(outboxHasJob_(local.id)||(Date.now()-(local.submittedAt||0))<30*60000)){
-        sj.status='pending_approval'; sj.submittedAt=local.submittedAt;
+        sj.status='pending_approval'; sj.submittedAt=local.submittedAt; sj._submitLocal=local._submitLocal;
         if(!sj.ret&&local.ret) sj.ret=local.ret;
+      }
+      /* ★ v3.336: เพิ่งกด "ยกเลิกขออนุมัติ" ในเครื่องนี้ แต่ชีทยังเห็นการปิดงานรอบเดิม (คำขอยกเลิกยังเดินทาง) → อย่าเด้งกลับเป็น "ปิดงานแล้ว"
+         ชีทมีการปิดงานรอบใหม่กว่า (ส่งใหม่จากเครื่องอื่น) = เชื่อชีท · ชีทว่างแล้ว = เครื่องหมายหายไปเอง */
+      const _un=local._unsubmitLocal;
+      if(_un&&local.status==='in_progress'&&sj.status==='pending_approval'&&(sj.submittedAt||0)<=(_un.sub||0)+1000
+         &&(outboxHasJob_(local.id)||(Date.now()-(_un.at||0))<10*60000)){
+        sj.status='in_progress'; sj.submittedAt=null; sj._unsubmitLocal=_un;
       }
       state.jobs[idx[key]]=sj;
     } else {
@@ -11087,7 +11150,7 @@ async function saveOwnCN_(){
   else showToast('บันทึกไม่สำเร็จ: '+((r&&r.error)||'ลองใหม่'),'error');
 }
 
-const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.335 (v3.335 ตีกลับลงชีทใบคุมให้ทุกเครื่องเห็น · v3.322 เร่งความเร็วตอนบันทึก/อนุมัติ: แคชหัวคอลัมน์ต่อคำขอ (headerMap_ เดิมยิงอ่านหัวตารางใหม่ ~20 รอบต่อ save_job) + จัดรูปแบบคอลัมน์ครั้งเดียวพอ (fmtColsOnce_ · ล้างธงเมื่อ ensureHeaders_ เพิ่มคอลัมน์จริง) — ไม่เปลี่ยนข้อมูลที่เขียนลงชีทเลย | v3.321 cancel_job ห้ามลบใบคุมที่ปิดงาน/อนุมัติไปแล้ว — เดิมลบทั้งแถวทุกชีท (INPUT+Cin+CN+พิกัด) ตามคำขอจากเครื่องที่สถานะค้าง = งานที่อนุมัติแล้วหายทั้งใบโดยไม่เหลือร่องรอย | v3.320 save_job ไม่ล้าง "ผู้อนุมัติปิดงาน"/"วันเวลาอนุมัติ" อีกต่อไปเมื่อคำขอไม่มี approvedAt — เขียนเมื่อมีค่า · ล้างเฉพาะ data.clearApprove===true · ชีท Cin เขียน 3 ช่องอนุมัติเฉพาะรอบที่รู้สถานะจริง (อนุมัติ/ตีกลับ/กดส่งอนุมัติ) — เดิมคำขอเก่าที่ตามมาทีหลังลบการอนุมัติทิ้งเงียบๆ = "กดอนุมัติแล้วพอมาอีกวันหายไป" (บั๊กเดียวกับ v3.312 ที่ตกไป 2 บรรทัด) | v3.316 Status จ่าย = "ใบลดหนี้" เมื่อหักยอด CN/ลดหนี้ครอบคลุมทั้งบิลพอดีและไม่มีเงินจริง (เดิม v3.181 ลง "ไม่ชำระ" — บิลที่จ่ายครบด้วย CN ถูกมองว่าค้าง) · Status บิล "เรียบร้อย" อยู่แล้ว · backfillStatusColumns ใช้กติกาเดียวกัน | v3.315 ระยะทาง(กม.) คำนวณฝั่งชีทเสมอจากเลขไมล์เริ่ม/ปิดที่อยู่ในแถว (ไม่พึ่ง odoDist จากแอป — คำขอปิดงานที่มาทางกล่องสำรองไม่มีค่านี้ ช่องเลยว่าง) + odoDistBackfill_ พ่วง sbSyncTick ทุก 5 นาที เติมย้อนหลัง | v3.314 คอลัมน์ "อีเมลผู้รับงาน" ท้ายชีทบันทึกเที่ยวส่ง = อีเมลบัญชีที่กด "รับงาน" (setOrFix_: assign ตั้งค่า · บันทึกบิลเติมเฉพาะช่องว่าง · แก้ทีมไม่ทับ) — เผื่อกรอกชื่อคนขับเป็นคนอื่น | v3.312 save_job ไม่ล้าง "วันเวลาปิดงาน" อีกต่อไปเมื่อคำขอไม่มี submittedAt — เขียนเมื่อมีค่า · ล้างเฉพาะ data.clearSubmit===true (แอปส่งจาก "ยกเลิกขออนุมัติ") — เดิมเครื่องที่ยังไม่รู้ว่าปิดงานแล้วมาบันทึกบิล = ปลดสถานะปิดงานทั้งระบบ | v3.308 backfillCatCS รับพารามิเตอร์ silent + เพิ่ม backfillCatCSNow() รันจากหน้า Apps Script ได้โดยไม่ต้องกดเมนู (ใช้ตอนหน้าชีทหนักจนคลิกไม่ติด) | v3.303 แก้ชื่อแท็บชีทสินค้า Sheet1 → PDDT (ไฟล์ Stocksync ไม่มีแท็บ Sheet1 · gviz fallback ให้แต่ getSheetByName ไม่ให้) | v3.302 เมนู "🧮 เติมจำนวน CS ย้อนหลัง" (backfillCatCS): หาแถวที่ รวม(CS) ว่าง → อ่าน DS_DC (ไฟล์ Order) + CAT TYPE (ไฟล์สินค้า คอลัมน์ BB) → เติมชีท Cin แล้วรวมยอดต่อใบคุมเติมชีทบันทึกเที่ยวส่ง · รายงานก่อนถามยืนยัน · แตะเฉพาะ 5 คอลัมน์ CS | v3.299 ค่าพาเลท: action void_pallet = "ไม่อนุมัติ" (ปิดจบ ไม่จ่าย) แยกจาก reject_pallet = "ตีกลับ" (คนขับแก้แล้วส่งใหม่ได้) — เขียนคอลัมน์ สถานะพาเลท เดิม | v3.298 เลขไมล์รถ: คอลัมน์ใหม่ท้ายชีทบันทึกเที่ยวส่ง "เลขไมล์เริ่มงาน"(setOrFix_) "เลขไมล์ปิดงาน"+"ระยะทาง(กม.)"(setIf_ แก้ได้ตอนปิดงานใหม่) + ensureHeaders_ + fmtColsOpen_ 0.## | v3.297 จำนวน CS แยกหมวด ข้าว/น้ำตาล/บุหรี่/อื่นๆ/รวม "ต่อร้าน" ลงชีทบันทึกบิลและการชำระ (ensureHeaders_ ต่อท้าย + เขียนเฉพาะเมื่อแอปนับมาได้ + fmtColsOpen_ 0.## กันติดรูปแบบวันที่) — ระดับใบคุมทั้งใบอยู่ชีทบันทึกเที่ยวส่งแล้ว v3.293 | v3.270 รูปสินค้าในตู้ตอนรับใบคุม: คอลัมน์ใหม่ "รูปสินค้าในตู้" ต่อท้ายชีทบันทึกเที่ยวส่ง (ensureHeaders_) + save_job รับ data.loadPhoto (ลิงก์ Drive จากแอป หรือ base64 ถ้าออฟไลน์ → uploadPaymentPhoto_) · เขียนแบบ set-once ไม่ถูกลบตอน re-save | v3.261 create_cn_own กันซ้ำชั้นที่ 2 แบบ "เนื้อหาเดียวกัน" (บิล+รายการ+ยอด ตรงเป๊ะ ในวันเดียวกัน) — reqId กันได้แค่กดส่งซ้ำของคำขอเดิม พอแอปค้างแล้วทำใหม่ตั้งแต่ต้นจะได้ reqId ใหม่แล้วเล็ดลอด | v3.252 เมนูกู้แถว "บันทึกเที่ยวส่ง" ที่หายไป จากข้อมูลบิลในชีท Cin (ผู้ส่งสินค้า→ชื่อคนขับ · ทะเบียนรถ · Warehouse · U_ADD→วันเวลาที่รับงาน) แก้อาการงานผี คนขับ/ทะเบียน "–" คลัง W1 โผล่ในกล่องช่วยบันทึก · รายงานก่อน–ถามยืนยันแล้วค่อยต่อท้าย ไม่แก้/ไม่ลบแถวเดิม | v3.250 Sync ใบคุมอัตโนมัติเพิ่มเป็น 5 รอบ/วัน: 0:00 · 8:00 · 9:00 · 15:00 · 21:00 (setupJadRotTriggers · เดิม 9/15/21) | v3.246 sbCell_ ต้องคืนข้อความเหมือน gviz เป๊ะ: ปัดเป็นวินาที (Sheets เก็บทศนิยมของวัน gviz ปัด แต่ formatDate ตัดทิ้ง = ต่าง 1 วิ 3,399 ช่อง) + เที่ยงคืน = คืนวันที่ล้วน ไม่เติม 00:00:00 (3,281 ช่อง) — เทียบครบ 3,268 บิลแล้ว | v3.244 ★ นำร่อง Supabase: มิเรอร์ชีท Cin+INPUT ขึ้นตาราง dman_bills/dman_jobs (jsonb ทั้งแถว ไม่ต้องแก้ตารางเวลาชีทเพิ่มคอลัมน์) ผ่าน sbSyncNow_/sbSyncTick + เมนู ⚡ + trigger 5 นาที · โหมด delta ใช้คอลัมน์ "แก้ไขเมื่อ" · ตั้งค่าใน Script properties SB_URL/SB_SERVICE_KEY (ลบ SB_URL = ปิดทันที) · ทางเขียนเดิมไม่ถูกแตะเลย ชีทยังเป็นตัวจริง 100% | v3.241 กัน CN ซ้ำจาก timeout: create_cn_own รับ reqId (idempotency) → เจอ reqId เดิมในชีท = ไม่สร้างใบใหม่ คืนใบเดิม + เขียนคอลัมน์ reqId ต่อท้าย CN-Sale-dman | v3.237 เมนูจัดการบิลซ้ำในชีท Cin แบบปลอดภัย: 🔍 ตรวจ (รายงานอย่างเดียว) + 🗑 ล้าง (ถามยืนยัน · ลบเฉพาะแถวเก่า เก็บแถวล่างสุด · deleteRows เป็นช่วง ไม่ clearContents) | v3.236 ★ ใส่ LockService ครอบ "บันทึกใบคุม/บิล" (เดิมเป็น action เดียวที่ไม่มีล็อก) — batchUpsertByHeader_ เป็น read-modify-write พอ 2 คำขอของใบคุมเดียวกันคาบเกี่ยวกัน ต่างฝ่ายอ่านชีทก่อนอีกฝ่ายเขียนเสร็จ → เห็นว่ายังไม่มีแถว → ต่อท้ายทั้งคู่ = บิลเบิ้ลบรรทัด | v3.234 เมนู "📤 มิเรอร์ CN เก่า (รออนุมัติ) → ชีท Sale App" (backfillReturnToSale_) ไล่ใบที่ยังไม่มี cnLineId ลง CN-Sale-dman ย้อนหลัง + เติม cnLineId กลับ | v3.233 "ลง 2 ที่": save_return (ฟอร์มรับคืนเดิม) มิเรอร์ลงชีท CN-Sale-dman ด้วย ผ่าน saleCNMirrorFromReturn_ (cnId ขึ้นต้น CNR · ที่มา=ขนส่ง · เก็บแล้ว/รออนุมัติ) + เขียน cnLineId กลับลงชีท CN ของ D-Man ให้จับคู่กัน · re-save/ลบ CN = ลบเฉพาะแถว CNR ของบิลนั้น ไม่แตะแถว Sales App · approve_cn มิเรอร์ผลอนุมัติด้วยเกณฑ์ "มี cnLineId" (ครอบคลุมทั้ง CNT/CNR) · cancel_job มาร์กแถวที่ถูกลบเป็นปฏิเสธฝั่ง Sale App | v3.229 action void_cn: คลัง "ไม่อนุมัติ" = ยกเลิก CN ใบนั้นทันที (สถานะคืน="ไม่อนุมัติ" · ล้างเลขที่เอกสาร CN/ภาพอนุมัติ) ต่างจาก reject_cn ที่ตีกลับให้คนขับแก้ · แถวขนส่งเก็บเองมิเรอร์ไป CN-Sale-dman เป็น "ปฏิเสธ" + เหตุผล "❌ ไม่อนุมัติ (ยกเลิก CN)" | v3.226 คลังอนุมัติ/ตีกลับ/ยกเลิกอนุมัติ CN จากหน้าอนุมัติ D-Man → มิเรอร์กลับชีทต้นทาง CN-Sale-dman (ไฟล์ Sale App) เฉพาะแถวขนส่งเก็บเอง จับด้วย cnLineId (เดิมลงแต่ชีท CN ของ D-Man ฝั่งเซลล์ไม่เห็นว่าอนุมัติแล้ว) + เมนู "🔁 ซิงก์ผลอนุมัติ CN" ไล่ย้อนหลัง | v3.224 คอลัมน์ ชื่อ-สกุล ลงชื่อจริงอย่างเดียว ตัดชื่อเล่นในวงเล็บออก (ให้ตรงรูปแบบ Sale App) | v3.223 undo_cn_collect เขียนคอลัมน์ "ยกเลิกการเก็บ" ในชีท CN-Sale-dman (วันเวลา+ชื่อคนกด) ให้ฝั่งเซลล์รู้ว่ายกเลิก · เก็บใหม่แล้วล้างข้อความออก | v3.221 create_cn_own ลงชีท 'CN' ของ D-Man ทันทีที่กดบันทึก (สถานะคืน="รออนุมัติ") ไม่ต้องรอคลังอนุมัติ · อนุมัติ/ปฏิเสธค่อยอัปเดตแถวเดิม (idempotent ตาม cnLineId) | v3.215 เก็บเองบังคับเลขที่บิล → ชีท CN D-Man เก็บ "เลขที่บิล DS" ด้วย · กันข้อมูลหาย: save_return + cancel_job(delCNForJobExcept_) ข้ามแถว ประเภทคืน="ขนส่งเก็บ" ไม่ลบ | v3.213 เลิกก๊อปชีท CN ลง CNSaleapp — แอปอ่าน CN-Sale-dman (ไฟล์ Sale App) ตรงๆ อยู่แล้ว · ย้าย "ตรวจซ้ำ" ไปเขียนคอลัมน์ท้ายชีทต้นทางเอง (markCNDupOnSource_ + เมนู/trigger 30 นาที · ลบ trigger ก๊อปเก่าให้) | v3.198 INPUT บันทึกเที่ยว: เขียนทีม (คนขับ/ผู้ช่วย/ทะเบียน/การส่ง) เฉพาะเมื่อ editTeam:true (assign/แก้ทีม) เท่านั้น → บันทึกบิล/ช่วยบันทึกไม่ทับทีม กันชื่อคนขับ↔ผู้ช่วยสลับ | v3.197 create_cn_own รับช่องเพิ่มจากฟอร์มเต็ม (ประเภทคืน/ประเภทบิล/เลขที่บิล DS/ชื่อเซลล์/ผิดพลาดจาก) → เก็บใน CN-Sale-dman · ชีท CN D-Man พาประเภทบิลมาด้วย เลขที่บิล DS คงว่างกันชน save_return | v3.196 create_cn_own cnId เติมสุ่ม 3 หลักต่อท้าย CNT+timestamp กันชนกันเองในมิลลิวินาทีเดียว | v3.195 create_cn_own → ตอนคลังอนุมัติเก็บ ลงชีท 'CN' ของ D-Man ด้วย (2 ชีท) · idempotent ตาม cnLineId · reject/undo = มาร์กแถว CN D-Man เป็น "ยกเลิก" ไม่ลบ · เฉพาะที่มา=ขนส่ง | v3.194 action create_cn_own: ขนส่งเก็บเอง (ไม่มีใบสั่งเซลล์) เพิ่มแถวลง CN-Sale-dman ที่มา=ขนส่ง+หมายเหตุ"ขนส่งเก็บ"+เก็บแล้ว/รออนุมัติ (append) | v3.191 undo_cn_collect reset ครบ: รวมเลขที่เอกสาร CN + ภาพอนุมัติ CN (AE/AF) | v3.190 อนุมัติ CN: กรอกเลขที่เอกสาร CN + ภาพอนุมัติ CN ตอนคลังอนุมัติ (เขียนคอลัมน์เดิม AE/AF เฉพาะเมื่อกรอก) | v3.189 action approve_cn_collect: คลังอนุมัติ/ปฏิเสธรอบเก็บ CN (สถานะอนุมัติเก็บ/รหัสรอบเก็บ) + save_cn_collect ใส่รหัสรอบเก็บ+รออนุมัติ + undo ล็อกที่อนุมัติแล้ว | v3.188 action undo_cn_collect: ยกเลิกการเก็บ—เคลียร์เฉพาะคอลัมน์ระบบตาม cnLineId ไม่ลบแถว/ไม่แตะข้อมูลเดิม | v3.183 action save_cn_collect: ขนส่งเก็บของคืน CN → เขียนกลับ CN-Sale-dman ตาม cnLineId + คอลัมน์ ภาพเก็บขนส่ง/เวลาเก็บ | v3.182 Status บิล: ขาดโดยไม่มีเงินจริง (มีแต่ CN/ลดหนี้หัก) → "ยังไม่ชำระ" | v3.181 Status จ่าย: ไม่มีเงินจริงแม้มี CN/ลดหนี้หัก → "ไม่ชำระ" ไม่ปล่อยว่าง | CN: คอลัมน์ cnId + ชื่อเซลล์=เซลล์สั่งคืน จาก cnRef | รวมช่องหักยอด: creditNote รวม CN+นอกCN, ลดหนี้=ส่วนนอกCN subset ไม่บวกซ้ำ + เหตุผลลดหนี้ ชีท Cin | เมนู Sync CN-Sale-dman → CNSaleapp + trigger 5 นาที + มาร์ก CN ซ้ำ เนื้อหาทั้งใบ | คอลัมน์ "วันเครดิต" ชีท Cin จาก b.creditDays, ไม่มีวัน=0 | ขอสินค้าเพิ่มขึ้นรถ: request_load + approve/reject/delete_load_req + ชีท "ขอสินค้าเพิ่ม" + Discord | v3.130 CN คืนเต็มบิล → คอลัมน์ "ใบลดหนี้" ชีท Cin | v3.124 cancel_job เก็บ CN คนอื่น | v3.122 fixCinSalesmanColumn | v3.120 SLMN | v3.90 แท็ก [CN: ...]) */
+const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.337 (v3.337 อนุมัติ/ตีกลับ/ยกเลิก CN แยกตามเลข cnId · v3.336 ยกเลิกขออนุมัติล้างสถานะในชีทบิล · กันยกเลิกหลังอนุมัติ · v3.335 ตีกลับลงชีทใบคุมให้ทุกเครื่องเห็น · v3.322 เร่งความเร็วตอนบันทึก/อนุมัติ: แคชหัวคอลัมน์ต่อคำขอ (headerMap_ เดิมยิงอ่านหัวตารางใหม่ ~20 รอบต่อ save_job) + จัดรูปแบบคอลัมน์ครั้งเดียวพอ (fmtColsOnce_ · ล้างธงเมื่อ ensureHeaders_ เพิ่มคอลัมน์จริง) — ไม่เปลี่ยนข้อมูลที่เขียนลงชีทเลย | v3.321 cancel_job ห้ามลบใบคุมที่ปิดงาน/อนุมัติไปแล้ว — เดิมลบทั้งแถวทุกชีท (INPUT+Cin+CN+พิกัด) ตามคำขอจากเครื่องที่สถานะค้าง = งานที่อนุมัติแล้วหายทั้งใบโดยไม่เหลือร่องรอย | v3.320 save_job ไม่ล้าง "ผู้อนุมัติปิดงาน"/"วันเวลาอนุมัติ" อีกต่อไปเมื่อคำขอไม่มี approvedAt — เขียนเมื่อมีค่า · ล้างเฉพาะ data.clearApprove===true · ชีท Cin เขียน 3 ช่องอนุมัติเฉพาะรอบที่รู้สถานะจริง (อนุมัติ/ตีกลับ/กดส่งอนุมัติ) — เดิมคำขอเก่าที่ตามมาทีหลังลบการอนุมัติทิ้งเงียบๆ = "กดอนุมัติแล้วพอมาอีกวันหายไป" (บั๊กเดียวกับ v3.312 ที่ตกไป 2 บรรทัด) | v3.316 Status จ่าย = "ใบลดหนี้" เมื่อหักยอด CN/ลดหนี้ครอบคลุมทั้งบิลพอดีและไม่มีเงินจริง (เดิม v3.181 ลง "ไม่ชำระ" — บิลที่จ่ายครบด้วย CN ถูกมองว่าค้าง) · Status บิล "เรียบร้อย" อยู่แล้ว · backfillStatusColumns ใช้กติกาเดียวกัน | v3.315 ระยะทาง(กม.) คำนวณฝั่งชีทเสมอจากเลขไมล์เริ่ม/ปิดที่อยู่ในแถว (ไม่พึ่ง odoDist จากแอป — คำขอปิดงานที่มาทางกล่องสำรองไม่มีค่านี้ ช่องเลยว่าง) + odoDistBackfill_ พ่วง sbSyncTick ทุก 5 นาที เติมย้อนหลัง | v3.314 คอลัมน์ "อีเมลผู้รับงาน" ท้ายชีทบันทึกเที่ยวส่ง = อีเมลบัญชีที่กด "รับงาน" (setOrFix_: assign ตั้งค่า · บันทึกบิลเติมเฉพาะช่องว่าง · แก้ทีมไม่ทับ) — เผื่อกรอกชื่อคนขับเป็นคนอื่น | v3.312 save_job ไม่ล้าง "วันเวลาปิดงาน" อีกต่อไปเมื่อคำขอไม่มี submittedAt — เขียนเมื่อมีค่า · ล้างเฉพาะ data.clearSubmit===true (แอปส่งจาก "ยกเลิกขออนุมัติ") — เดิมเครื่องที่ยังไม่รู้ว่าปิดงานแล้วมาบันทึกบิล = ปลดสถานะปิดงานทั้งระบบ | v3.308 backfillCatCS รับพารามิเตอร์ silent + เพิ่ม backfillCatCSNow() รันจากหน้า Apps Script ได้โดยไม่ต้องกดเมนู (ใช้ตอนหน้าชีทหนักจนคลิกไม่ติด) | v3.303 แก้ชื่อแท็บชีทสินค้า Sheet1 → PDDT (ไฟล์ Stocksync ไม่มีแท็บ Sheet1 · gviz fallback ให้แต่ getSheetByName ไม่ให้) | v3.302 เมนู "🧮 เติมจำนวน CS ย้อนหลัง" (backfillCatCS): หาแถวที่ รวม(CS) ว่าง → อ่าน DS_DC (ไฟล์ Order) + CAT TYPE (ไฟล์สินค้า คอลัมน์ BB) → เติมชีท Cin แล้วรวมยอดต่อใบคุมเติมชีทบันทึกเที่ยวส่ง · รายงานก่อนถามยืนยัน · แตะเฉพาะ 5 คอลัมน์ CS | v3.299 ค่าพาเลท: action void_pallet = "ไม่อนุมัติ" (ปิดจบ ไม่จ่าย) แยกจาก reject_pallet = "ตีกลับ" (คนขับแก้แล้วส่งใหม่ได้) — เขียนคอลัมน์ สถานะพาเลท เดิม | v3.298 เลขไมล์รถ: คอลัมน์ใหม่ท้ายชีทบันทึกเที่ยวส่ง "เลขไมล์เริ่มงาน"(setOrFix_) "เลขไมล์ปิดงาน"+"ระยะทาง(กม.)"(setIf_ แก้ได้ตอนปิดงานใหม่) + ensureHeaders_ + fmtColsOpen_ 0.## | v3.297 จำนวน CS แยกหมวด ข้าว/น้ำตาล/บุหรี่/อื่นๆ/รวม "ต่อร้าน" ลงชีทบันทึกบิลและการชำระ (ensureHeaders_ ต่อท้าย + เขียนเฉพาะเมื่อแอปนับมาได้ + fmtColsOpen_ 0.## กันติดรูปแบบวันที่) — ระดับใบคุมทั้งใบอยู่ชีทบันทึกเที่ยวส่งแล้ว v3.293 | v3.270 รูปสินค้าในตู้ตอนรับใบคุม: คอลัมน์ใหม่ "รูปสินค้าในตู้" ต่อท้ายชีทบันทึกเที่ยวส่ง (ensureHeaders_) + save_job รับ data.loadPhoto (ลิงก์ Drive จากแอป หรือ base64 ถ้าออฟไลน์ → uploadPaymentPhoto_) · เขียนแบบ set-once ไม่ถูกลบตอน re-save | v3.261 create_cn_own กันซ้ำชั้นที่ 2 แบบ "เนื้อหาเดียวกัน" (บิล+รายการ+ยอด ตรงเป๊ะ ในวันเดียวกัน) — reqId กันได้แค่กดส่งซ้ำของคำขอเดิม พอแอปค้างแล้วทำใหม่ตั้งแต่ต้นจะได้ reqId ใหม่แล้วเล็ดลอด | v3.252 เมนูกู้แถว "บันทึกเที่ยวส่ง" ที่หายไป จากข้อมูลบิลในชีท Cin (ผู้ส่งสินค้า→ชื่อคนขับ · ทะเบียนรถ · Warehouse · U_ADD→วันเวลาที่รับงาน) แก้อาการงานผี คนขับ/ทะเบียน "–" คลัง W1 โผล่ในกล่องช่วยบันทึก · รายงานก่อน–ถามยืนยันแล้วค่อยต่อท้าย ไม่แก้/ไม่ลบแถวเดิม | v3.250 Sync ใบคุมอัตโนมัติเพิ่มเป็น 5 รอบ/วัน: 0:00 · 8:00 · 9:00 · 15:00 · 21:00 (setupJadRotTriggers · เดิม 9/15/21) | v3.246 sbCell_ ต้องคืนข้อความเหมือน gviz เป๊ะ: ปัดเป็นวินาที (Sheets เก็บทศนิยมของวัน gviz ปัด แต่ formatDate ตัดทิ้ง = ต่าง 1 วิ 3,399 ช่อง) + เที่ยงคืน = คืนวันที่ล้วน ไม่เติม 00:00:00 (3,281 ช่อง) — เทียบครบ 3,268 บิลแล้ว | v3.244 ★ นำร่อง Supabase: มิเรอร์ชีท Cin+INPUT ขึ้นตาราง dman_bills/dman_jobs (jsonb ทั้งแถว ไม่ต้องแก้ตารางเวลาชีทเพิ่มคอลัมน์) ผ่าน sbSyncNow_/sbSyncTick + เมนู ⚡ + trigger 5 นาที · โหมด delta ใช้คอลัมน์ "แก้ไขเมื่อ" · ตั้งค่าใน Script properties SB_URL/SB_SERVICE_KEY (ลบ SB_URL = ปิดทันที) · ทางเขียนเดิมไม่ถูกแตะเลย ชีทยังเป็นตัวจริง 100% | v3.241 กัน CN ซ้ำจาก timeout: create_cn_own รับ reqId (idempotency) → เจอ reqId เดิมในชีท = ไม่สร้างใบใหม่ คืนใบเดิม + เขียนคอลัมน์ reqId ต่อท้าย CN-Sale-dman | v3.237 เมนูจัดการบิลซ้ำในชีท Cin แบบปลอดภัย: 🔍 ตรวจ (รายงานอย่างเดียว) + 🗑 ล้าง (ถามยืนยัน · ลบเฉพาะแถวเก่า เก็บแถวล่างสุด · deleteRows เป็นช่วง ไม่ clearContents) | v3.236 ★ ใส่ LockService ครอบ "บันทึกใบคุม/บิล" (เดิมเป็น action เดียวที่ไม่มีล็อก) — batchUpsertByHeader_ เป็น read-modify-write พอ 2 คำขอของใบคุมเดียวกันคาบเกี่ยวกัน ต่างฝ่ายอ่านชีทก่อนอีกฝ่ายเขียนเสร็จ → เห็นว่ายังไม่มีแถว → ต่อท้ายทั้งคู่ = บิลเบิ้ลบรรทัด | v3.234 เมนู "📤 มิเรอร์ CN เก่า (รออนุมัติ) → ชีท Sale App" (backfillReturnToSale_) ไล่ใบที่ยังไม่มี cnLineId ลง CN-Sale-dman ย้อนหลัง + เติม cnLineId กลับ | v3.233 "ลง 2 ที่": save_return (ฟอร์มรับคืนเดิม) มิเรอร์ลงชีท CN-Sale-dman ด้วย ผ่าน saleCNMirrorFromReturn_ (cnId ขึ้นต้น CNR · ที่มา=ขนส่ง · เก็บแล้ว/รออนุมัติ) + เขียน cnLineId กลับลงชีท CN ของ D-Man ให้จับคู่กัน · re-save/ลบ CN = ลบเฉพาะแถว CNR ของบิลนั้น ไม่แตะแถว Sales App · approve_cn มิเรอร์ผลอนุมัติด้วยเกณฑ์ "มี cnLineId" (ครอบคลุมทั้ง CNT/CNR) · cancel_job มาร์กแถวที่ถูกลบเป็นปฏิเสธฝั่ง Sale App | v3.229 action void_cn: คลัง "ไม่อนุมัติ" = ยกเลิก CN ใบนั้นทันที (สถานะคืน="ไม่อนุมัติ" · ล้างเลขที่เอกสาร CN/ภาพอนุมัติ) ต่างจาก reject_cn ที่ตีกลับให้คนขับแก้ · แถวขนส่งเก็บเองมิเรอร์ไป CN-Sale-dman เป็น "ปฏิเสธ" + เหตุผล "❌ ไม่อนุมัติ (ยกเลิก CN)" | v3.226 คลังอนุมัติ/ตีกลับ/ยกเลิกอนุมัติ CN จากหน้าอนุมัติ D-Man → มิเรอร์กลับชีทต้นทาง CN-Sale-dman (ไฟล์ Sale App) เฉพาะแถวขนส่งเก็บเอง จับด้วย cnLineId (เดิมลงแต่ชีท CN ของ D-Man ฝั่งเซลล์ไม่เห็นว่าอนุมัติแล้ว) + เมนู "🔁 ซิงก์ผลอนุมัติ CN" ไล่ย้อนหลัง | v3.224 คอลัมน์ ชื่อ-สกุล ลงชื่อจริงอย่างเดียว ตัดชื่อเล่นในวงเล็บออก (ให้ตรงรูปแบบ Sale App) | v3.223 undo_cn_collect เขียนคอลัมน์ "ยกเลิกการเก็บ" ในชีท CN-Sale-dman (วันเวลา+ชื่อคนกด) ให้ฝั่งเซลล์รู้ว่ายกเลิก · เก็บใหม่แล้วล้างข้อความออก | v3.221 create_cn_own ลงชีท 'CN' ของ D-Man ทันทีที่กดบันทึก (สถานะคืน="รออนุมัติ") ไม่ต้องรอคลังอนุมัติ · อนุมัติ/ปฏิเสธค่อยอัปเดตแถวเดิม (idempotent ตาม cnLineId) | v3.215 เก็บเองบังคับเลขที่บิล → ชีท CN D-Man เก็บ "เลขที่บิล DS" ด้วย · กันข้อมูลหาย: save_return + cancel_job(delCNForJobExcept_) ข้ามแถว ประเภทคืน="ขนส่งเก็บ" ไม่ลบ | v3.213 เลิกก๊อปชีท CN ลง CNSaleapp — แอปอ่าน CN-Sale-dman (ไฟล์ Sale App) ตรงๆ อยู่แล้ว · ย้าย "ตรวจซ้ำ" ไปเขียนคอลัมน์ท้ายชีทต้นทางเอง (markCNDupOnSource_ + เมนู/trigger 30 นาที · ลบ trigger ก๊อปเก่าให้) | v3.198 INPUT บันทึกเที่ยว: เขียนทีม (คนขับ/ผู้ช่วย/ทะเบียน/การส่ง) เฉพาะเมื่อ editTeam:true (assign/แก้ทีม) เท่านั้น → บันทึกบิล/ช่วยบันทึกไม่ทับทีม กันชื่อคนขับ↔ผู้ช่วยสลับ | v3.197 create_cn_own รับช่องเพิ่มจากฟอร์มเต็ม (ประเภทคืน/ประเภทบิล/เลขที่บิล DS/ชื่อเซลล์/ผิดพลาดจาก) → เก็บใน CN-Sale-dman · ชีท CN D-Man พาประเภทบิลมาด้วย เลขที่บิล DS คงว่างกันชน save_return | v3.196 create_cn_own cnId เติมสุ่ม 3 หลักต่อท้าย CNT+timestamp กันชนกันเองในมิลลิวินาทีเดียว | v3.195 create_cn_own → ตอนคลังอนุมัติเก็บ ลงชีท 'CN' ของ D-Man ด้วย (2 ชีท) · idempotent ตาม cnLineId · reject/undo = มาร์กแถว CN D-Man เป็น "ยกเลิก" ไม่ลบ · เฉพาะที่มา=ขนส่ง | v3.194 action create_cn_own: ขนส่งเก็บเอง (ไม่มีใบสั่งเซลล์) เพิ่มแถวลง CN-Sale-dman ที่มา=ขนส่ง+หมายเหตุ"ขนส่งเก็บ"+เก็บแล้ว/รออนุมัติ (append) | v3.191 undo_cn_collect reset ครบ: รวมเลขที่เอกสาร CN + ภาพอนุมัติ CN (AE/AF) | v3.190 อนุมัติ CN: กรอกเลขที่เอกสาร CN + ภาพอนุมัติ CN ตอนคลังอนุมัติ (เขียนคอลัมน์เดิม AE/AF เฉพาะเมื่อกรอก) | v3.189 action approve_cn_collect: คลังอนุมัติ/ปฏิเสธรอบเก็บ CN (สถานะอนุมัติเก็บ/รหัสรอบเก็บ) + save_cn_collect ใส่รหัสรอบเก็บ+รออนุมัติ + undo ล็อกที่อนุมัติแล้ว | v3.188 action undo_cn_collect: ยกเลิกการเก็บ—เคลียร์เฉพาะคอลัมน์ระบบตาม cnLineId ไม่ลบแถว/ไม่แตะข้อมูลเดิม | v3.183 action save_cn_collect: ขนส่งเก็บของคืน CN → เขียนกลับ CN-Sale-dman ตาม cnLineId + คอลัมน์ ภาพเก็บขนส่ง/เวลาเก็บ | v3.182 Status บิล: ขาดโดยไม่มีเงินจริง (มีแต่ CN/ลดหนี้หัก) → "ยังไม่ชำระ" | v3.181 Status จ่าย: ไม่มีเงินจริงแม้มี CN/ลดหนี้หัก → "ไม่ชำระ" ไม่ปล่อยว่าง | CN: คอลัมน์ cnId + ชื่อเซลล์=เซลล์สั่งคืน จาก cnRef | รวมช่องหักยอด: creditNote รวม CN+นอกCN, ลดหนี้=ส่วนนอกCN subset ไม่บวกซ้ำ + เหตุผลลดหนี้ ชีท Cin | เมนู Sync CN-Sale-dman → CNSaleapp + trigger 5 นาที + มาร์ก CN ซ้ำ เนื้อหาทั้งใบ | คอลัมน์ "วันเครดิต" ชีท Cin จาก b.creditDays, ไม่มีวัน=0 | ขอสินค้าเพิ่มขึ้นรถ: request_load + approve/reject/delete_load_req + ชีท "ขอสินค้าเพิ่ม" + Discord | v3.130 CN คืนเต็มบิล → คอลัมน์ "ใบลดหนี้" ชีท Cin | v3.124 cancel_job เก็บ CN คนอื่น | v3.122 fixCinSalesmanColumn | v3.120 SLMN | v3.90 แท็ก [CN: ...]) */
 const SHEET_INPUT='บันทึกเที่ยวส่ง';
 const SHEET_CIN='บันทึกบิลและการชำระ';
 const SHEET_CN='CN';
@@ -11144,7 +11207,7 @@ const HEADERS_CIN=['เลขใบคุม','Doc_Date','Doc_No','Customer_Code
 function doGet(e){
   let drive='unknown';
   try{ DriveApp.getRootFolder().getName(); drive='OK'; }catch(err){ drive='NOT_AUTHORIZED'; }
-  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.335',drive:drive}))
+  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.337',drive:drive}))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -11711,6 +11774,10 @@ function doPost(e){
       try{
         const jobId=String(data.jobId||''), docNo=String(data.docNo||'');
         const cnSh=ss.getSheetByName(SHEET_CN);
+        /* ★★ v3.337: แยก CN ตามเลข cnId — เดิมอนุมัติ/ตีกลับ/ไม่อนุมัติ "ทุกแถวของบิล" (รหัสใบคุม+เลขที่บิล)
+           → บิลเดียวมี CN 2 ใบ (ทำ 2 ครั้ง) โดนทำพร้อมกันทั้งคู่ · แอป v3.337 ส่ง cnScope มา:
+           'id' = เฉพาะแถวที่ cnId ตรง · 'blank' = เฉพาะแถวที่ไม่มี cnId (ใบเก่า) · ไม่ส่ง (แอปรุ่นเก่า) = ทุกแถวแบบเดิม */
+        const cnScope=String(data.cnScope||''), cnIdSel=String(data.cnId||'').trim();
         if(cnSh) ensureHeaders_(cnSh,['เลขที่เอกสาร CN','ภาพอนุมัติ CN']);   // v3.19: เพิ่มคอลัมน์ถ้ายังไม่มี
         // ★ v3.226: จำ cnLineId ของแถว "ขนส่งเก็บ" (CN ที่ขนส่งทำเอง) ที่กำลังอนุมัติไว้ก่อน → ท้ายฟังก์ชันมิเรอร์กลับชีทต้นทาง CN-Sale-dman
         var ownLines=[];
@@ -11725,6 +11792,7 @@ function doPost(e){
               for(var zz=1;zz<dvCN.length;zz++){
                 if(String(dvCN[zz][cJn]).trim()!==jobId) continue;
                 if(String(dvCN[zz][cDn]).trim()!==docNo) continue;
+                if(cnScope==='id'||cnScope==='blank'){ var _cc=hmapCN['cnId']?String(dvCN[zz][hmapCN['cnId'][0]]||'').trim():''; if(cnScope==='id'&&_cc!==cnIdSel) continue; if(cnScope==='blank'&&_cc!=='') continue; }   // ★ v3.337
                 // ★ v3.233: เกณฑ์เดียว = "มี cnLineId" (แถวไหนมี แปลว่ามีคู่อยู่ในชีท Sale App)
                 //   ครอบคลุมทั้งขนส่งเก็บเอง (CNT) และรับคืนแบบเดิมที่มิเรอร์แล้ว (CNR) — เดิมเช็ค ประเภทคืน='ขนส่งเก็บ' จับได้แค่แบบแรก
                 var _lid=String(dvCN[zz][cLi]||'').trim(); if(_lid) ownLines.push(_lid);
@@ -11753,7 +11821,11 @@ function doPost(e){
             if(apUrl) fields['ภาพอนุมัติ CN']=apUrl;
           }
         }
-        const updated=updateRowsByHeader_(ss,SHEET_CN,['รหัสใบคุม','เลขที่บิล DS'],[jobId,docNo],fields);
+        const _byId=(cnScope==='id'||cnScope==='blank');   // ★ v3.337
+        const updated=_byId
+          ? updateRowsByHeader_(ss,SHEET_CN,['รหัสใบคุม','เลขที่บิล DS','cnId'],[jobId,docNo,(cnScope==='id'?cnIdSel:'')],fields)
+          : updateRowsByHeader_(ss,SHEET_CN,['รหัสใบคุม','เลขที่บิล DS'],[jobId,docNo],fields);
+        if(_byId&&!updated) return ContentService.createTextOutput(JSON.stringify({ok:false,error:'ไม่พบ CN ใบนี้ในชีท (เลข '+(cnIdSel||'ไม่มีเลข')+') — กด ↻ รีเฟรชแล้วลองใหม่'})).setMimeType(ContentService.MimeType.JSON);   // ★ v3.337: ไม่เจอแถว = แจ้ง ไม่เงียบ
         // ★ v3.226: มิเรอร์ผลอนุมัติกลับชีทต้นทาง CN-Sale-dman (ไฟล์ Sale App) — เดิมลงแค่ชีท CN ของ D-Man ฝั่งเซลล์เลยไม่เห็นว่าอนุมัติแล้ว
         var srcCN=0;
         try{
@@ -11946,6 +12018,7 @@ function doPost(e){
     /* ★★ v3.279: "เติมซ่อมเฉพาะช่องที่ว่าง" — ค่าที่มีอยู่แล้วในชีทไม่แตะ (กติกา v3.198 คงเดิม 100%)
        ทำไม: ทีม/รูปตู้/จำนวนที่นำไป เขียนได้ครั้งเดียวตอนรับใบคุม พอคำขอนั้นหายกลางทาง = ว่างถาวร */
     const cur_=rowValsByHeader_(inSh,'🔒 Row ID',String(data.jobId))||{};
+    var _curApproved=!!(String(cur_['วันเวลาอนุมัติ']||'').trim()||String(cur_['ผู้อนุมัติปิดงาน']||'').trim());   // ★ v3.336: แถวนี้อนุมัติไปแล้วหรือยัง (กันยกเลิกขออนุมัติที่มาช้า)
     const blank_=function(k){ return String(cur_[k]===undefined?'':cur_[k]).trim()===''; };
     const fixIf_=function(k,v){ if(blank_(k)) setIf_(k,v); };
     const setOrFix_=function(k,v){ if(data.editTeam===true) setIf_(k,v); else fixIf_(k,v); };
@@ -12006,7 +12079,7 @@ function doPost(e){
        เดิม save_job ทุกครั้งที่ไม่มี submittedAt จะล้างช่องนี้ทิ้ง → เครื่องไหนบันทึกบิลโดยยังไม่รู้ว่าปิดงานแล้ว
        (บัญชีช่วยบันทึก / เครื่องที่ sync ไม่ทัน) = ปลดสถานะ "ปิดงาน" ของคนขับทั้งระบบโดยไม่มีใครตั้งใจ */
     if(data.submittedAt) inObj['วันเวลาปิดงาน']=new Date(data.submittedAt);
-    else if(data.clearSubmit===true) inObj['วันเวลาปิดงาน']='';
+    else if(data.clearSubmit===true&&!_curApproved) inObj['วันเวลาปิดงาน']='';   // ★ v3.336: อนุมัติไปแล้ว = คำขอยกเลิกที่มาช้าไม่มีผล
     /* ★★ v3.320: "ผู้อนุมัติปิดงาน"/"วันเวลาอนุมัติ" — บั๊กพันธุ์เดียวกับ v3.312 ที่ตกไป 2 บรรทัด
        เดิมเขียนทับทุกครั้ง → คำขอ save_job ที่ไม่มี approvedAt = ล้างการอนุมัติทิ้งเงียบๆ
        (บิลที่ค้างคิวไว้ก่อนอนุมัติแล้วเพิ่งส่งได้ / คำขอเก่าที่ตาข่าย Supabase พาเข้าทีหลัง / เครื่องที่ยังไม่รู้ว่าอนุมัติแล้ว)
@@ -12069,14 +12142,15 @@ function doPost(e){
       // สรุปสถานะอนุมัติของทั้งใบคุม (ใช้เขียนทุกแถวบิลใต้ใบคุมนี้)
       var jobApprovalStatus='';
       if(data.status==='approved'||data.approvedAt||data.approvedBy) jobApprovalStatus='อนุมัติแล้ว';
-      else if(data.status==='rejected'||data.rejectedAt) jobApprovalStatus='ตีกลับ';
+      else if(data.status==='rejected') jobApprovalStatus='ตีกลับ';   // ★ v3.336: ดูสถานะปัจจุบัน (เดิมดู rejectedAt ด้วย → ส่งใหม่หลังตีกลับ ชีทบิลขึ้น "ตีกลับ" ทั้งที่รออนุมัติ)
       else if(data.status==='pending_approval'||data.submittedAt) jobApprovalStatus='รออนุมัติ';
       var jobApprovedByVal=data.approvedBy||'';
       var jobApprovedAtVal=data.approvedAt?new Date(data.approvedAt):'';
       /* ★ v3.320: รอบนี้ "รู้สถานะอนุมัติจริง" ไหม — อนุมัติ/ตีกลับ/กดส่งอนุมัติ/สั่งล้าง เท่านั้น
          รอบบันทึกบิลธรรมดาที่ไม่มีข้อมูลอนุมัติมาด้วย = ไม่แตะ 3 ช่องนี้ (batchUpsertByHeader_ คงค่าเดิมให้)
          กัน "อนุมัติแล้ว" ถูกปัดกลับเป็น "รออนุมัติ"/ว่าง โดยคำขอเก่าที่ตามมาทีหลัง */
-      var _apprKnown=!!(data.approvedAt||data.approvedBy||data.rejectedAt||data.clearApprove===true||(data.status==='pending_approval'&&data.submittedAt));
+      var _apprKnown=!!(data.approvedAt||data.approvedBy||data.rejectedAt||data.clearApprove===true||(data.status==='pending_approval'&&data.submittedAt)
+        ||(data.clearSubmit===true&&!_curApproved));   // ★ v3.336: ยกเลิกขออนุมัติ = ล้าง "รออนุมัติ" ในชีทบิลด้วย (เดิมค้าง — เคส TSW1/011761)
       data.bills.forEach(b=>{
         const p=b.payment||{};
         // v3.66: แยก "เงินจริง" (เงินสด/โอน/เช็ค) กับ "ใบลดหนี้" ออกจากกัน
