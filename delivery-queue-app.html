@@ -1115,7 +1115,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.238</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.239</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -7934,11 +7934,11 @@ async function _vhRouteChunk(pts,truckType){
   const d=await r.json();
   const legs=d?.trip?.legs;
   if(!legs||!legs.length)throw new Error('ไม่มี legs');
-  const coords=[];
-  legs.forEach(lg=>{decodePolyline6(lg.shape).forEach(c=>coords.push(c));});
+  const coords=[], legCoords=[];   // v9.239: เก็บรูปเส้นแยกรายช่วง (ใช้วาดเส้นประแดงให้แนบถนน)
+  legs.forEach(lg=>{ const c=decodePolyline6(lg.shape); legCoords.push(c); c.forEach(x=>coords.push(x)); });
   if(!coords.length)throw new Error('shape ว่าง');
   const legKm=legs.map(lg=>(lg.summary&&lg.summary.length>=0)?lg.summary.length:-1);   // v9.238: กม.ต่อช่วง (Valhalla ขอหน่วยเป็น กม.)
-  return{coords,duration:d.trip.summary.time,distance:d.trip.summary.length*1000,legKm};
+  return{coords,duration:d.trip.summary.time,distance:d.trip.summary.length*1000,legKm,legCoords};
 }
 
 // เส้นทางสำหรับวาดบนแผนที่ — Valhalla truck ก่อน · พังเมื่อไหร่ตกไป OSRM (กันแผนที่ว่าง)
@@ -7950,17 +7950,18 @@ async function fetchOsrmRoute(wpts,truckType){
     // หั่นท่อน — ท่อนถัดไปเริ่มที่จุดสุดท้ายของท่อนก่อน (ซ้อน 1 จุด) เส้นจะได้ต่อกันสนิท
     const chunks=[];
     for(let i=0;i<pts.length-1;i+=VH_ROUTE_MAX-1)chunks.push(pts.slice(i,i+VH_ROUTE_MAX));
-    const coords=[];let dur=0,dist=0;const legKm=[];
+    const coords=[];let dur=0,dist=0;const legKm=[],legCoords=[];
     for(let ci=0;ci<chunks.length;ci++){
       const c=await _vhRouteChunk(chunks[ci],truckType);
       // ท่อนที่ 2+ ตัดจุดแรกทิ้ง (ซ้ำกับจุดสุดท้ายของท่อนก่อน)
       c.coords.forEach((p,i)=>{if(ci>0&&i===0)return;coords.push(p);});
       dur+=c.duration;dist+=c.distance;
       if(c.legKm)c.legKm.forEach(k=>legKm.push(k));   // v9.238: ท่อนซ้อน 1 จุด → legs ต่อกันพอดี
+      if(c.legCoords)c.legCoords.forEach(x=>legCoords.push(x));   // v9.239
     }
     if(coords.length){
       _vhOk();
-      return{coords,duration:dur,distance:dist,src:'valhalla-truck',legKm};
+      return{coords,duration:dur,distance:dist,src:'valhalla-truck',legKm,legCoords};
     }
     _vhFail('route','เส้นว่าง');
   }catch(e){_vhFail('route',e);}
@@ -7969,11 +7970,15 @@ async function fetchOsrmRoute(wpts,truckType){
     const coords=pts.map(p=>`${p[1].toFixed(6)},${p[0].toFixed(6)}`).join(';');
     const ctrl=new AbortController();
     setTimeout(()=>ctrl.abort(),8000);
-    const r=await fetch(`https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`,{signal:ctrl.signal});
+    const r=await fetch(`https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=true`,{signal:ctrl.signal});   // v9.239: steps = ได้รูปเส้นรายช่วง
     const d=await r.json();
     if(d.code!=='Ok'||!d.routes?.length)return null;
+    const _legShapes=(d.routes[0].legs||[]).map(lg=>{ const out=[];
+      (lg.steps||[]).forEach(st=>{ const g=st.geometry&&st.geometry.coordinates; if(!g)return;
+        g.forEach(([lng,lat])=>{ const last=out[out.length-1]; if(last&&last[0]===lat&&last[1]===lng)return; out.push([lat,lng]); }); });
+      return out; });
     return{coords:d.routes[0].geometry.coordinates.map(([lng,lat])=>[lat,lng]),duration:d.routes[0].duration,distance:d.routes[0].distance,src:'osrm-car',
-      legKm:(d.routes[0].legs||[]).map(l=>(l.distance>=0)?l.distance/1000:-1)};   // v9.238
+      legKm:(d.routes[0].legs||[]).map(l=>(l.distance>=0)?l.distance/1000:-1),legCoords:_legShapes};   // v9.238 · v9.239
   }catch(e){return null;}
 }
 
@@ -8265,13 +8270,17 @@ function _rdFromMatrix(coords,dist){   // matrix เป็นเมตร (ท�
       if(m==null||!(m>=0))continue;
       _rdPair.set(_rdK(coords[i][0],coords[i][1],coords[j][0],coords[j][1]),m/1000); } }
 }
-function _rdFromLegs(pts,legKm){       // legKm เป็นกิโลเมตร ทีละช่วงตามลำดับจุด
+const _rdShape=new Map();   // v9.239: รูปเส้นถนนของช่วงนั้น (ไว้วาดเส้นประแดงให้แนบถนน)
+function _rdShapeOf(aLat,aLng,bLat,bLng){ return _rdShape.get(_rdK(aLat,aLng,bLat,bLng))||null; }
+function _rdFromLegs(pts,legKm,legCoords){   // legKm เป็นกิโลเมตร ทีละช่วงตามลำดับจุด · legCoords = รูปเส้นของช่วงนั้น
   if(!pts||!legKm||legKm.length<pts.length-1)return false;
   let added=false;
   for(let i=0;i<pts.length-1;i++){
-    const km=legKm[i]; if(!(km>=0))continue;
+    const km=legKm[i];
     const k=_rdK(pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1]);
-    if(!_rdPair.has(k)){ _rdPair.set(k,km); added=true; }
+    if(km>=0&&!_rdPair.has(k)){ _rdPair.set(k,km); added=true; }
+    const sh=legCoords&&legCoords[i];
+    if(sh&&sh.length>=2&&!_rdShape.has(k)){ _rdShape.set(k,sh); added=true; }   // v9.239
   }
   return added;
 }
@@ -8801,7 +8810,7 @@ function rUpdateMap(){
       fetchOsrmRoute(wpts,t.type).then(rd=>{
         if(!rd)return;
         if(line._map)line.setLatLngs(rd.coords);
-        if(rd.legKm&&_rdFromLegs(wpts,rd.legKm))_rdSoon(rUpdateMap);   // v9.238: ได้ระยะถนนรายช่วง → วาดใหม่รอบเดียว
+        if(rd.legKm&&_rdFromLegs(wpts,rd.legKm,rd.legCoords))_rdSoon(rUpdateMap);   // v9.238/9.239
         _sumKmReal+=(rd.distance||0)/1000;
         _sumMinReal+=(rd.duration||0)/60;
         _realCount++;
@@ -14820,7 +14829,7 @@ function jrDrawMap(){
       const ttype=(selG.assign&&selG.assign.plate)?((TRUCKS.find(t=>t.plate===selG.assign.plate)||{}).type||''):(selG.seg==='big'?'6 ล้อ':'กระบะ');
       if(typeof fetchOsrmRoute==='function')fetchOsrmRoute(wpts,ttype).then(rd=>{
         if(rd&&rd.coords&&line._map)line.setLatLngs(rd.coords);
-        if(rd&&rd.legKm&&_rdFromLegs(wpts,rd.legKm))_rdSoon(jrDrawMap);   // v9.238: ได้ระยะถนนรายช่วงแล้ว → วาดตัวเลขใหม่
+        if(rd&&rd.legKm&&_rdFromLegs(wpts,rd.legKm,rd.legCoords))_rdSoon(jrDrawMap);   // v9.238/9.239: ได้ระยะ+รูปเส้นรายช่วง → วาดใหม่
       }).catch(()=>{});
     }
     ord.forEach((u,i)=>{pts.push([u.lat,u.lng]);
@@ -14830,7 +14839,14 @@ function jrDrawMap(){
     // v8.63: เตือนจุดติดกันห่างเกิน N กม. (วัดเส้นตรงตามลำดับส่ง) + ขีดเส้นแดง
     if(warnKm>0)for(let i=1;i<ord.length;i++){const d=_rdKm(ord[i-1].lat,ord[i-1].lng,ord[i].lat,ord[i].lng);   // v9.238: ระยะถนนจริง (ไม่มีข้อมูลถนนค่อยตกไปเส้นตรง)
       if(d.km>warnKm)warns.push({fromNum:i,toNum:i+1,fromN:ord[i-1].name,toN:ord[i].name,km:d.km,road:d.road,a:ord[i-1],b:ord[i]});}
-    warns.forEach(w=>{const wl=L.polyline([[w.a.lat,w.a.lng],[w.b.lat,w.b.lng]],{color:'#DC3545',weight:3,opacity:.75,dashArray:'6 5'}).addTo(_jrMap);_jrLayers.push(wl);});
+    // v9.239: เส้นประแดงเดินตามถนนจริงของช่วงนั้น — user: "เส้นประให้แนบไปกับเส้นถนนด้วย"
+    //   ยังไม่ได้รูปเส้นถนน (เส้นทางยังโหลดไม่เสร็จ) ค่อยลากตรงไปก่อน แล้ววาดใหม่ตอนได้
+    warns.forEach(w=>{
+      const shp=_rdShapeOf(w.a.lat,w.a.lng,w.b.lat,w.b.lng);
+      const path=(shp&&shp.length>=2)?shp:[[w.a.lat,w.a.lng],[w.b.lat,w.b.lng]];
+      const wl=L.polyline(path,{color:'#DC3545',weight:shp?4:3,opacity:shp?.9:.75,dashArray:'6 5',lineJoin:'round'}).addTo(_jrMap);
+      if(wl.bringToFront)try{wl.bringToFront();}catch(e){}
+      _jrLayers.push(wl);});
   } else {
     // v8.82: ยังไม่เลือกกลุ่ม → วงกลมคลัสเตอร์ต่อกลุ่ม (รัศมี=กว้างจากศูนย์กลาง) + เลขจุด + หมุดสีตามกลุ่ม
     _manualGroups.forEach((g,idx)=>{
