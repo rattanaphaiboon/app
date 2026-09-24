@@ -827,6 +827,9 @@ function lookupProductsGas(codes,cb){
 function findBarcodeAny(bc,cb){
   bc=String(bc||'').trim();
   if(PDDT[bc]){cb(null,PDDT[bc]);return;}
+  /* มาสเตอร์ของใบนี้กำลังโหลดอยู่ — อย่ายิงคำขอซ้อน รอให้รอบนั้นจบก่อน
+     ถ้าบาร์โค้ดนี้อยู่ในนั้น openCount จะเด้งเป็นหน้าใส่จำนวนให้เอง */
+  if(cur&&cur.pdLoading){cb(null,null);return;}
   loadProductsFromSheet([{name:'',codes:[{bc:bc}]}],function(err){
     if(PDDT[bc]){cb(null,PDDT[bc]);return;}
     if(!err){cb(null,null);return;}            /* ชีทอ่านได้ แต่ไม่มีบาร์โค้ดนี้จริง ๆ */
@@ -1287,9 +1290,17 @@ function callIn(id){var v=VIS.filter(function(x){return x.id===id;})[0];v.tCall=
   showToast(v.plate+' เริ่มลงของ '+thTime(v.tCall)+' น. (รอคิว '+nf(mins(v.tIn,v.tCall))+' นาที)','info');}
 /* ลงเสร็จ — ต้องกรอกค่าพาเลทก่อน ถึงจะย้ายไปคิวรอตรวจนับ */
 var palId=null;
+/* โหลดมาสเตอร์สินค้าของใบนี้ล่วงหน้าแบบเงียบ ๆ — กว่าจะกรอกค่าพาเลทเสร็จแล้วเข้าหน้าตรวจนับ
+   ข้อมูลมักมาถึงพอดี ไม่ต้องยืนรอหน้าจอ 15-20 วินาที (ชีทมาสเตอร์ใหญ่ ค้นนาน) */
+function prefetchMaster(v){
+  var lines=[];
+  (v.pos||[]).forEach(function(ref){var p=po(ref);if(p)p.lines.forEach(function(l){lines.push(l);});});
+  if(lines.length)loadProductsFromSheet(lines,function(){});
+}
 function markDone(id){
   palId=id;
   var v=VIS.filter(function(x){return x.id===id;})[0];
+  prefetchMaster(v);
   var p0=po(v.pos[0]);
   document.getElementById('palWho').innerHTML=
      '<div class="tk-vendor">'+esc(p0?p0.vendor:'')+'</div>'
@@ -1511,10 +1522,19 @@ function openCount(id){
   /* ดึงมาสเตอร์สินค้าเฉพาะบาร์โค้ดของใบนี้ — ต้องมี ไม่งั้นรู้จักแค่บาร์โค้ดหน่วยที่สั่ง
      ยิงบาร์โค้ดชิ้นหรือแพ็คจะหาไม่เจอทั้งที่เป็นสินค้าตัวเดียวกัน */
   if(cur.fromMaster<cur.lines.length){
+    cur.pdLoading=true;scanGate();
     var after=function(err){
-      if(err){PD_ERR=String(err);document.getElementById('inspSrc').textContent=srcLabel();return;}
+      cur.pdLoading=false;
+      if(err){PD_ERR=String(err);document.getElementById('inspSrc').textContent=srcLabel();scanGate();return;}
       PD_ERR='';buildLines();renderLines();renderSim();renderSum();
-      document.getElementById('inspSrc').textContent=srcLabel();
+      document.getElementById('inspSrc').textContent=srcLabel();scanGate();
+      /* ยิงไปตอนมาสเตอร์ยังไม่มา แล้วขึ้นว่า "ไม่อยู่ในใบสั่งซื้อ" — พอมาสเตอร์มาถึงให้เด้งเป็นหน้าใส่จำนวนเอง */
+      if(pendHit&&pendHit.mode==='map'&&cur.idx[pendHit.bc]){
+        var h=cur.idx[pendHit.bc];
+        pendHit={mode:'qty',line:h.line,code:h.code,bc:pendHit.bc,sub:h.sub||null};
+        renderHit();showToast('ข้อมูลสินค้ามาแล้ว — '+pendHit.code.lb,'success');
+        setTimeout(function(){var q=document.getElementById('hitQty');if(q){q.focus();q.select();}},50);
+      }
     };
     /* ชีทมาสเตอร์เป็นทางหลัก · Apps Script เป็นทางสำรอง */
     loadProductsFromSheet(cur.lines.slice(),function(err,n){
@@ -1579,7 +1599,9 @@ function scanGate(){
   var ok=!!(cur&&cur.v.insp&&cur.v.insp.name);
   var s=document.getElementById('scanIn'), g=document.getElementById('scanLock');
   s.disabled=!ok;
-  s.placeholder=ok?'ยิงบาร์โค้ด':'เลือกผู้รับเข้าก่อน';
+  /* ยิงได้เลยระหว่างโหลดมาสเตอร์ แค่บอกไว้ว่ายังโหลดไม่เสร็จ ถ้ายิงหน่วยอื่นอาจยังไม่รู้จัก */
+  s.placeholder=!ok?'เลือกผู้รับเข้าก่อน'
+    :(cur&&cur.pdLoading?'ยิงบาร์โค้ด (กำลังโหลดข้อมูลสินค้า...)':'ยิงบาร์โค้ด');
   g.style.display=ok?'none':'block';
   document.getElementById('simBox').style.opacity=ok?'1':'.35';
   document.getElementById('simBox').style.pointerEvents=ok?'':'none';
