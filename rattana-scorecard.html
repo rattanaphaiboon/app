@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Scorecard v2.1</title>
+<title>Rattana Scorecard v2.2</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 <style>
@@ -193,7 +193,7 @@ body.dark .spinner-box{background:var(--card-bg)}
 
 <header>
   <span class="logo-text">RATTANA <span>SCORECARD</span></span>
-  <span class="ver-badge">v2.1</span>
+  <span class="ver-badge">v2.2</span>
   <div style="flex:1"></div>
   <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌓</button>
   <a href="https://rattanaphaiboon.github.io/app/rattana-hub.html" class="hub-btn" title="กลับ Hub"><span class="hub-btn-icon"></span><span class="hub-btn-text">Hub</span></a>
@@ -394,7 +394,7 @@ body.dark .spinner-box{background:var(--card-bg)}
 </div><!-- /content -->
 
 <footer style="text-align:center;padding:16px;color:var(--muted);font-size:12px;padding-bottom:max(16px,env(safe-area-inset-bottom))">
-  Rattana Scorecard v2.1 · บริษัท รัตนไพบูลย์ สเตชั่น จำกัด · ข้อมูลประมวลผลในเครื่อง ไม่มีการอัปโหลดขึ้นเซิร์ฟเวอร์
+  Rattana Scorecard v2.2 · บริษัท รัตนไพบูลย์ สเตชั่น จำกัด · ข้อมูลประมวลผลในเครื่อง ไม่มีการอัปโหลดขึ้นเซิร์ฟเวอร์
 </footer>
 </div><!-- /page -->
 
@@ -456,6 +456,12 @@ const state={
   absentDetail:{},   // id -> [{y,m,d}]
   absentSrc:{},      // id -> 'master' | 'scan'  (ที่มาของกรอบวันจ้างงาน)
   master:{},         // id -> {startNum,quitNum,start,quit,pos,branch,klang} จากชีต Q-U
+  scanDates:{},      // id -> [{y,m,d}] วันที่มีสแกน (ใช้คิดวันทำงานแบบเศษวัน)
+  leaveByDate:{},    // id -> {'y-m-d': สัดส่วนวันลา 0-1}
+  workDays:{},       // 'id|ym' -> วันทำงานจริง (หักเศษวันลาแล้ว)
+  holidays:null,     // Set('y-m-d') วันหยุดนักขัตฤกษ์จากชีตบริษัท
+  holidayNames:{},   // 'y-m-d' -> ชื่อวันหยุด
+  holidaySkip:0, sundaySkip:0,
   suggest:{},        // id -> 'HH:MM,HH:MM'
   docFiles:0, timeFiles:0, docRows:0, timeRows:0, skippedStatus:0,
   unknownTypes:{},
@@ -589,7 +595,7 @@ async function loadBoard(force){
     if(!board.rows.length)throw new Error('ไม่พบข้อมูลในชีต');
     /* ดึง เริ่มงาน/ลาออก มาใช้เป็นกรอบคำนวณขาดงาน แล้วคิดใหม่ถ้าโหลดไฟล์ไว้แล้ว */
     buildMasterFromBoard();
-    if(state.timeRows){computeAbsent();if(!$('tab-summary').classList.contains('hidden'))renderSummary();}
+    if(state.timeRows){computeWorkDays();computeAbsent();if(!$('tab-summary').classList.contains('hidden'))renderSummary();}
     $('boardLoading').classList.add('hidden');
     $('boardMain').classList.remove('hidden');
     buildBoardFilters();
@@ -816,7 +822,8 @@ async function readFiles(fileList,expected){
       else wrong++;
       if(kind&&kind!==expected)showToast(`"${f.name}" เป็นไฟล์คนละประเภท — จัดเข้า${kind==='doc'?'รายงานขอเอกสาร':'เวลาการทำงาน'}ให้แล้ว`,'warning');
     }
-    buildSuggestions();recalcLate();computeAbsent();refreshBadges();buildFilters();renderUploadSummary();
+    await loadHolidays();
+    buildSuggestions();recalcLate();computeWorkDays();computeAbsent();refreshBadges();buildFilters();renderUploadSummary();
     if(ok)showToast(`อ่านไฟล์สำเร็จ ${ok} ไฟล์ ✓`,'success');
     if(wrong)showToast(`${wrong} ไฟล์ไม่ตรงรูปแบบที่รู้จัก`,'error');
   }catch(err){console.error(err);showToast('อ่านไฟล์ไม่สำเร็จ: '+err.message,'error');}
@@ -865,6 +872,8 @@ function parseTimeFile(rows){
       state.scans[id].push({y:dt.y,m:dt.m,d:dt.d,inMin,outMin:(outMin!==null&&outMin>inMin)?outMin:null});
     }
     if(hasScan){
+      if(!state.scanDates[id])state.scanDates[id]=[];
+      state.scanDates[id].push({y:dt.y,m:dt.m,d:dt.d});
       state.scanDays[k]=(state.scanDays[k]||0)+1;
       state.presentMonths[k]=true;
       const dnum=dt.y*10000+dt.m*100+dt.d;
@@ -926,6 +935,17 @@ function parseDocFile(rows){
       if(hv)dayVal=parseFloat(hv[1]);
       if(!(dayVal>0))continue;
       const totalDays=Math.round((end-t1)/86400000)+1;
+      /* บันทึกสัดส่วนวันลาของแต่ละวัน เพื่อหักออกจากวันทำงาน (ลาครึ่งวันแล้วมาทำงานต่อ) */
+      {
+        if(!state.leaveByDate[id])state.leaveByDate[id]={};
+        const per=dayVal/totalDays;
+        let cv=new Date(t1),guard=0;
+        while(cv<=end&&guard<400){
+          const dk=cv.getFullYear()+'-'+(cv.getMonth()+1)+'-'+cv.getDate();
+          state.leaveByDate[id][dk]=(state.leaveByDate[id][dk]||0)+per;
+          cv=new Date(cv.getFullYear(),cv.getMonth(),cv.getDate()+1);guard++;
+        }
+      }
       let cursor=new Date(t1);
       while(cursor<=end){
         const mEnd=new Date(cursor.getFullYear(),cursor.getMonth()+1,0);
@@ -1014,6 +1034,67 @@ function recalcLate(){
   }
 }
 
+/* ================= วันหยุดนักขัตฤกษ์ (จากชีตบริษัท แท็บ "วันหยุด") ================= */
+const HOLIDAY_SHEET_ID="1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ";
+const HOLIDAY_GID="754670798";
+const HOLIDAY_CACHE="rattana_holidays_v1";
+function applyHolidays(rows){
+  const set=new Set(),names={};
+  for(let i=1;i<rows.length;i++){
+    const raw=clean(rows[i]&&rows[i][0]);
+    if(!raw)continue;
+    let y,mo,d;
+    let m=raw.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
+    if(m){y=+m[1];mo=+m[2];d=+m[3];}
+    else{
+      m=raw.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+      if(!m)continue;
+      d=+m[1];mo=+m[2];y=+m[3];
+    }
+    if(y>2400)y-=543;
+    if(!(mo>=1&&mo<=12&&d>=1&&d<=31))continue;
+    const key=y+"-"+mo+"-"+d;
+    set.add(key); names[key]=clean(rows[i][1])||"วันหยุด";
+  }
+  state.holidays=set; state.holidayNames=names;
+  return set;
+}
+async function loadHolidays(force){
+  if(state.holidays&&!force)return state.holidays;
+  if(!force){
+    try{
+      const c=JSON.parse(store.get(HOLIDAY_CACHE)||"null");
+      if(c&&Date.now()-c.ts<24*3600*1000&&Array.isArray(c.rows))return applyHolidays(c.rows);
+    }catch{}
+  }
+  try{
+    const url=`https://docs.google.com/spreadsheets/d/${HOLIDAY_SHEET_ID}/export?format=csv&gid=${HOLIDAY_GID}&_=${Date.now()}`;
+    const res=await fetch(url);
+    if(!res.ok)throw new Error("HTTP "+res.status);
+    const rows=parseCsv(await res.text());
+    try{store.set(HOLIDAY_CACHE,JSON.stringify({ts:Date.now(),rows}));}catch{}
+    return applyHolidays(rows);
+  }catch(e){
+    console.warn("โหลดวันหยุดนักขัตฤกษ์ไม่สำเร็จ",e);
+    if(!state.holidays)state.holidays=new Set();
+    return state.holidays;
+  }
+}
+
+/* วันทำงานจริง = จำนวนวันที่มาสแกน หักสัดส่วนวันลาของวันนั้น
+   เช่น ลาครึ่งเช้า 0.5 แล้วกลับมาทำบ่าย -> วันนั้นนับเป็นวันทำงาน 0.5 */
+function computeWorkDays(){
+  state.workDays={};
+  for(const id in state.scanDates){
+    const lv=state.leaveByDate[id]||{};
+    for(const d of state.scanDates[id]){
+      const frac=Math.min(1,lv[d.y+"-"+d.m+"-"+d.d]||0);
+      const k=id+"|"+ymKey(d.y,d.m);
+      state.workDays[k]=(state.workDays[k]||0)+(1-frac);
+    }
+  }
+}
+
 /* ================= ABSENT (ตามระเบียบบริษัท) =================
    ขาดงาน = วันที่ไม่มีสแกนนิ้วเลย และไม่มีเอกสารอนุมัติใด ๆ ครอบวันนั้น
    กรอบวันที่นับ = ช่วงจ้างงานจริง (เริ่มงาน..ลาออก จากชีต) — ถ้าไม่มีข้อมูลในชีต
@@ -1037,7 +1118,7 @@ function buildMasterFromBoard(){
 }
 function computeAbsent(){
   state.absentCount={};state.absentDetail={};state.absentSrc={};
-  state.sundaySkip=0;
+  state.sundaySkip=0; state.holidaySkip=0;
   for(const id in state.noScanList){
     const w=state.scanWindow[id];
     const m=state.master[id];
@@ -1052,6 +1133,7 @@ function computeAbsent(){
       if(dnum<lo)continue;
       if(hi&&dnum>hi)continue;
       if(new Date(nd.y,nd.m-1,nd.d).getDay()===0){state.sundaySkip++;continue;}
+      if(state.holidays&&state.holidays.has(nd.y+'-'+nd.m+'-'+nd.d)){state.holidaySkip++;continue;}
       if(cover&&cover.has(nd.y+'-'+nd.m+'-'+nd.d))continue;
       const k=id+'|'+ymKey(nd.y,nd.m);
       state.absentCount[k]=(state.absentCount[k]||0)+1;
@@ -1083,7 +1165,7 @@ function buildRows(){
     vals['ขาดงาน']=(manual!==undefined&&manual!=='')?(+manual||0):computedAbs;
     const lateCnt=state.lateCount[k]||0;
     /* เช็คสถานะ: วันทำงาน + วันลาทุกประเภท + ขาดงาน ต้องไม่เกินจำนวนวันในเดือน */
-    const work=state.scanDays[k]||0;
+    const work=(k in state.workDays)?state.workDays[k]:(state.scanDays[k]||0);
     const leaveSum=DAY_COLS.reduce((s,c)=>s+(+vals[c]||0),0)+(+vals['ขาดงาน']||0);
     const dim=new Date(y,m,0).getDate();
     const dayTotal=work+leaveSum;
@@ -1145,8 +1227,8 @@ function renderSummary(){
   $('summaryNote').innerHTML=
     `นับเฉพาะเอกสารสถานะ <b>อนุมัติ</b> (ข้าม ${state.skippedStatus} รายการ) · คอลัมน์ลา = จำนวน<b>วัน</b>, ปรับปรุงเวลา/เปลี่ยนวันหยุด/สาย = จำนวน<b>ครั้ง</b> · `+
     `<b>สาย</b> = เข้าช้ากว่าเวลากะ (จับกะอัตโนมัติจากสแกนเข้า-ออกเทียบตารางกะบริษัท 9 ชม.) · <b>นาทีสาย</b> = เฉพาะที่เกิน 15 นาที ปัดขึ้นบล็อก 30 นาที · <b>หัก 20฿</b> = ครั้งที่ 4 ขึ้นไปในเดือน · `+
-    `<b>ขาดงาน</b> = วันที่ไม่มีสแกนเลยและไม่มีเอกสาร (สลับวันหยุด/ใบลา/เพิ่มเวลา) ครอบ · <b>ไม่นับวันอาทิตย์</b> (วันหยุดบริษัท) · นับเฉพาะช่วงจ้างงานจริง <b>เริ่มงาน–ลาออก</b> จากชีต (${srcNote}${state.sundaySkip?` · ตัดวันอาทิตย์ออก ${state.sundaySkip} วัน`:``}) — คลิกตัวเลขดูรายวัน, กรอกทับได้ในช่อง ✏️ · `+
-    `<b>วันทำงาน</b> = จำนวนวันที่มาทำงานจริง (มีสแกนนิ้วอย่างน้อย 1 ครั้งในวันนั้น) ไม่รวมวันลา/วันหยุด/ขาดงาน`+
+    `<b>ขาดงาน</b> = วันที่ไม่มีสแกนเลยและไม่มีเอกสาร (สลับวันหยุด/ใบลา/เพิ่มเวลา) ครอบ · <b>ไม่นับวันอาทิตย์และวันหยุดนักขัตฤกษ์</b> (ตามชีตวันหยุดบริษัท) · นับเฉพาะช่วงจ้างงานจริง <b>เริ่มงาน–ลาออก</b> จากชีต (${srcNote}${state.sundaySkip?` · ตัดวันอาทิตย์ ${state.sundaySkip} วัน`:``}${state.holidaySkip?` · ตัดวันหยุดนักขัตฤกษ์ ${state.holidaySkip} วัน`:``}) — คลิกตัวเลขดูรายวัน, กรอกทับได้ในช่อง ✏️ · `+
+    `<b>วันทำงาน</b> = จำนวนวันที่มาทำงานจริง (มีสแกนนิ้ว) <b>หักสัดส่วนวันลาของวันนั้นแล้ว</b> — ลาครึ่งวันแล้วกลับมาทำงานต่อ วันนั้นนับ 0.5 ไม่ใช่ 1`+
     (unk.length?` · <span class="txt-danger">ประเภทที่ไม่รู้จัก (ไม่ได้นับ): ${esc(unk.join(', '))}</span>`:'');
 
   const body=$('sumBody');
@@ -1228,7 +1310,7 @@ function showAbsentDetail(id,ym){
       <tbody>${list.map((x,i)=>`<tr><td class="num">${i+1}</td>
         <td>${String(x.d).padStart(2,'0')}/${String(x.m).padStart(2,'0')}/${x.y+543}</td></tr>`).join('')}</tbody>
     </table>`:'<p class="txt-muted">ไม่มีรายการ</p>')+
-    `<p class="txt-sm txt-muted mt-8">เกณฑ์: ไม่มีสแกนนิ้วทั้งวัน และไม่มีเอกสารอนุมัติ (สลับวันหยุด/ใบลา/เพิ่มเวลา) ครอบวันนั้น · ไม่นับวันอาทิตย์ (วันหยุดบริษัท) · ช่วงที่นับ: ${esc(wTxt)} · ถ้าไม่ถูกต้อง กรอกทับได้ในช่อง ✏️ ของคอลัมน์ขาดงาน</p>`;
+    `<p class="txt-sm txt-muted mt-8">เกณฑ์: ไม่มีสแกนนิ้วทั้งวัน และไม่มีเอกสารอนุมัติ (สลับวันหยุด/ใบลา/เพิ่มเวลา) ครอบวันนั้น · ไม่นับวันอาทิตย์และวันหยุดนักขัตฤกษ์ · ช่วงที่นับ: ${esc(wTxt)} · ถ้าไม่ถูกต้อง กรอกทับได้ในช่อง ✏️ ของคอลัมน์ขาดงาน</p>`;
   $('lateModal').classList.add('open');
 }
 function closeModal(){$('lateModal').classList.remove('open');}
@@ -1363,6 +1445,7 @@ function resetAll(){
 
 /* init */
 refreshBadges();
+loadHolidays();
 loadBoard();
 </script>
 </body>
