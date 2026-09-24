@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Scorecard v2.2</title>
+<title>Rattana Scorecard v2.3</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
 <style>
@@ -193,7 +193,7 @@ body.dark .spinner-box{background:var(--card-bg)}
 
 <header>
   <span class="logo-text">RATTANA <span>SCORECARD</span></span>
-  <span class="ver-badge">v2.2</span>
+  <span class="ver-badge">v2.3</span>
   <div style="flex:1"></div>
   <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌓</button>
   <a href="https://rattanaphaiboon.github.io/app/rattana-hub.html" class="hub-btn" title="กลับ Hub"><span class="hub-btn-icon"></span><span class="hub-btn-text">Hub</span></a>
@@ -394,7 +394,7 @@ body.dark .spinner-box{background:var(--card-bg)}
 </div><!-- /content -->
 
 <footer style="text-align:center;padding:16px;color:var(--muted);font-size:12px;padding-bottom:max(16px,env(safe-area-inset-bottom))">
-  Rattana Scorecard v2.2 · บริษัท รัตนไพบูลย์ สเตชั่น จำกัด · ข้อมูลประมวลผลในเครื่อง ไม่มีการอัปโหลดขึ้นเซิร์ฟเวอร์
+  Rattana Scorecard v2.3 · บริษัท รัตนไพบูลย์ สเตชั่น จำกัด · ข้อมูลประมวลผลในเครื่อง ไม่มีการอัปโหลดขึ้นเซิร์ฟเวอร์
 </footer>
 </div><!-- /page -->
 
@@ -462,6 +462,7 @@ const state={
   holidays:null,     // Set('y-m-d') วันหยุดนักขัตฤกษ์จากชีตบริษัท
   holidayNames:{},   // 'y-m-d' -> ชื่อวันหยุด
   holidaySkip:0, sundaySkip:0,
+  empMaster:{},      // id -> {startNum,quitNum,start,quit,name} จากชีตทะเบียนพนักงาน
   suggest:{},        // id -> 'HH:MM,HH:MM'
   docFiles:0, timeFiles:0, docRows:0, timeRows:0, skippedStatus:0,
   unknownTypes:{},
@@ -822,7 +823,7 @@ async function readFiles(fileList,expected){
       else wrong++;
       if(kind&&kind!==expected)showToast(`"${f.name}" เป็นไฟล์คนละประเภท — จัดเข้า${kind==='doc'?'รายงานขอเอกสาร':'เวลาการทำงาน'}ให้แล้ว`,'warning');
     }
-    await loadHolidays();
+    await Promise.all([loadHolidays(),loadEmpMaster()]);
     buildSuggestions();recalcLate();computeWorkDays();computeAbsent();refreshBadges();buildFilters();renderUploadSummary();
     if(ok)showToast(`อ่านไฟล์สำเร็จ ${ok} ไฟล์ ✓`,'success');
     if(wrong)showToast(`${wrong} ไฟล์ไม่ตรงรูปแบบที่รู้จัก`,'error');
@@ -1107,6 +1108,52 @@ function parseMasterDate(s){
   return d;
 }
 const dnumOf=s=>{const d=parseMasterDate(s);return d?d.y*10000+d.m*100+d.d:null;};
+
+/* ================= ทะเบียนพนักงาน (ชีตบริษัท แท็บหลัก) =================
+   ใช้ "เริ่มงาน/ลาออก" เป็นกรอบวันที่นับขาดงาน — ครอบคลุมพนักงานทุกคน
+   รวมคนใหม่ที่ยังไม่มีแถวในชีตสกอร์การ์ด */
+const EMP_GID="0";
+const EMP_CACHE="rattana_empmaster_v1";
+function applyEmpMaster(rows){
+  if(!rows||rows.length<2)return 0;
+  const H={};
+  rows[0].forEach((h,i)=>{const k=clean(h).replace(/\s+/g," ");if(k&&!(k in H))H[k]=i;});
+  const find=re=>{for(const k in H)if(re.test(k))return H[k];return -1;};
+  const iId=find(/^รหัสพนักงาน$/), iStart=find(/^เริ่มงาน$/),
+        iQuit=find(/ลาออก/), iName=find(/^ชื่อ - สกุล$/);
+  if(iId<0||iStart<0)return 0;
+  const m={};let n=0;
+  for(let i=1;i<rows.length;i++){
+    const c=rows[i];if(!c)continue;
+    const id=clean(c[iId]);
+    if(!/^\d+$/.test(id))continue;
+    const start=clean(c[iStart]),quit=iQuit>=0?clean(c[iQuit]):"";
+    const sn=dnumOf(start);
+    if(!sn)continue;
+    m[id]={start,quit,startNum:sn,quitNum:dnumOf(quit),name:iName>=0?clean(c[iName]):""};
+    n++;
+  }
+  state.empMaster=m;
+  return n;
+}
+async function loadEmpMaster(force){
+  if(Object.keys(state.empMaster).length&&!force)return state.empMaster;
+  if(!force){
+    try{
+      const c=JSON.parse(store.get(EMP_CACHE)||"null");
+      if(c&&Date.now()-c.ts<24*3600*1000&&Array.isArray(c.rows)){applyEmpMaster(c.rows);return state.empMaster;}
+    }catch{}
+  }
+  try{
+    const url=`https://docs.google.com/spreadsheets/d/${HOLIDAY_SHEET_ID}/export?format=csv&gid=${EMP_GID}&_=${Date.now()}`;
+    const res=await fetch(url);
+    if(!res.ok)throw new Error("HTTP "+res.status);
+    const rows=parseCsv(await res.text());
+    try{store.set(EMP_CACHE,JSON.stringify({ts:Date.now(),rows}));}catch{}
+    applyEmpMaster(rows);
+  }catch(e){console.warn("โหลดทะเบียนพนักงานไม่สำเร็จ",e);}
+  return state.empMaster;
+}
 function buildMasterFromBoard(){
   const m={};
   for(const r of board.rows){
@@ -1121,9 +1168,11 @@ function computeAbsent(){
   state.sundaySkip=0; state.holidaySkip=0;
   for(const id in state.noScanList){
     const w=state.scanWindow[id];
+    const e=state.empMaster[id];
     const m=state.master[id];
     let lo,hi,src;
-    if(m&&m.startNum){lo=m.startNum;hi=m.quitNum||null;src='master';}
+    if(e&&e.startNum){lo=e.startNum;hi=e.quitNum||null;src='emp';}
+    else if(m&&m.startNum){lo=m.startNum;hi=m.quitNum||null;src='master';}
     else if(w){lo=w.min;hi=w.max;src='scan';}
     else continue;
     state.absentSrc[id]=src;
@@ -1220,10 +1269,12 @@ function renderSummary(){
 
   const unk=Object.keys(state.unknownTypes);
   const srcVals=Object.values(state.absentSrc);
-  const nMaster=srcVals.filter(v=>v==='master').length,nScan=srcVals.filter(v=>v==='scan').length;
-  const srcNote=nMaster
-    ? `ใช้วันจ้างงานจากชีต ${nMaster} คน${nScan?` · อีก ${nScan} คนไม่มีในชีต ใช้ช่วงสแกนแทน`:''}`
-    : 'ยังไม่ได้โหลดข้อมูลจากชีต — ใช้ช่วงสแกนแรก–สุดท้ายแทน';
+  const nEmp=srcVals.filter(v=>v==='emp').length,nMaster=srcVals.filter(v=>v==='master').length,nScan=srcVals.filter(v=>v==='scan').length;
+  const srcNote=(nEmp||nMaster)
+    ? [nEmp?`ใช้วันเริ่มงานจากทะเบียนพนักงาน ${nEmp} คน`:'',
+       nMaster?`จากชีตสกอร์การ์ด ${nMaster} คน`:'',
+       nScan?`อีก ${nScan} คนไม่พบในทะเบียน ใช้ช่วงสแกนแทน`:''].filter(Boolean).join(' · ')
+    : 'ยังไม่ได้โหลดทะเบียนพนักงาน — ใช้ช่วงสแกนแรก–สุดท้ายแทน';
   $('summaryNote').innerHTML=
     `นับเฉพาะเอกสารสถานะ <b>อนุมัติ</b> (ข้าม ${state.skippedStatus} รายการ) · คอลัมน์ลา = จำนวน<b>วัน</b>, ปรับปรุงเวลา/เปลี่ยนวันหยุด/สาย = จำนวน<b>ครั้ง</b> · `+
     `<b>สาย</b> = เข้าช้ากว่าเวลากะ (จับกะอัตโนมัติจากสแกนเข้า-ออกเทียบตารางกะบริษัท 9 ชม.) · <b>นาทีสาย</b> = เฉพาะที่เกิน 15 นาที ปัดขึ้นบล็อก 30 นาที · <b>หัก 20฿</b> = ครั้งที่ 4 ขึ้นไปในเดือน · `+
@@ -1298,10 +1349,10 @@ function showAbsentDetail(id,ym){
   const e=state.emp[id]||{name:''};
   const list=(state.absentDetail[id]||[]).filter(x=>!ym||ymKey(x.y,x.m)===ym).sort((a,b)=>a.y-b.y||a.m-b.m||a.d-b.d);
   $('lateModalTitle').textContent=`ขาดงาน: ${e.name} (${id}) ${ym?'· '+THAI_MONTHS[+ym.slice(5,7)]:''}`;
-  const m=state.master[id],w=state.scanWindow[id];
+  const m=state.empMaster[id]||state.master[id],w=state.scanWindow[id];
   const beTxt=s=>{const d=parseMasterDate(s);return d?`${String(d.d).padStart(2,'0')}/${String(d.m).padStart(2,'0')}/${d.y+543}`:'-';};
   const dnumTxt=n=>`${String(n%100).padStart(2,'0')}/${String(Math.floor(n/100)%100).padStart(2,'0')}/${Math.floor(n/10000)+543}`;
-  const wTxt=(state.absentSrc[id]==='master'&&m)
+  const wTxt=((state.absentSrc[id]==='emp'||state.absentSrc[id]==='master')&&m)
     ? `เริ่มงาน ${beTxt(m.start)}${m.quit?` – ลาออก ${beTxt(m.quit)}`:' – ปัจจุบัน'} (จากชีต)`
     : (w?`${dnumTxt(w.min)} – ${dnumTxt(w.max)} (ประมาณจากวันสแกน)`:'-');
   $('lateModalBody').innerHTML=(list.length?`
@@ -1437,7 +1488,7 @@ function renderUploadSummary(){
 }
 function resetAll(){
   if(!confirm('ล้างข้อมูลไฟล์ที่อ่านมาทั้งหมด? (ค่าตั้งเวลากะและขาดงานที่กรอกไว้จะยังอยู่)'))return;
-  for(const k of['emp','scans','scanDays','noScanDays','noScanList','scanWindow','docCover','docAgg','docMonths','presentMonths','lateCount','lateMinutes','lateDetail','absentCount','absentDetail','absentSrc','suggest','unknownTypes'])state[k]={};
+  for(const k of['emp','scans','scanDays','noScanDays','noScanList','scanWindow','docCover','docAgg','docMonths','presentMonths','lateCount','lateMinutes','lateDetail','absentCount','absentDetail','absentSrc','scanDates','leaveByDate','workDays','suggest','unknownTypes'])state[k]={};
   state.docFiles=state.timeFiles=state.docRows=state.timeRows=state.skippedStatus=0;
   refreshBadges();renderUploadSummary();buildFilters();renderSummary();renderLateCfg();
   showToast('ล้างข้อมูลแล้ว','info');
@@ -1446,6 +1497,7 @@ function resetAll(){
 /* init */
 refreshBadges();
 loadHolidays();
+loadEmpMaster();
 loadBoard();
 </script>
 </body>
