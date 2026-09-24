@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.650</title>
+<title>Rattana Sales — v8.651</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -6875,7 +6875,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.650 · 2026-09-23</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.651 · 2026-09-24</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -6886,7 +6886,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.650</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.651</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -43548,7 +43548,7 @@ window._giftDecide = async function (oid, bc, decision, qty) {
   /* v8.647: ไม่อนุมัติแล้วหลังบ้านไม่ได้ยกเลิกบรรทัดให้ (รุ่นก่อน v8.254 · ตอบกลับไม่มี cancelled) → ยกเลิกเองด้วยคำสั่งเดิมของแอป
      ไม่ยกเลิก = แอปจัดของเห็นสถานะ "ปฏิเสธแถม" แล้วล็อกทั้งบิล ของที่ขายจริงจัดไม่ได้ · ยิงซ้ำได้ (หลังบ้านข้ามแถวที่ยกเลิกแล้ว) */
   if (!_gone && decision !== 'approve' && !(res && res.cancelled) && _gLid) {
-    try { await postToAppsScript({ action: 'updateOrderCancel', orderId: String(oid).trim(), cancelLineIds: [_gLid] }); }
+    try { await postToAppsScript({ action: 'updateOrderCancel', orderId: String(oid).trim(), cancelLineIds: [_gLid], giftRule: 2 }); }
     catch (e) { showToast('ยกเลิกบรรทัดของแถมไม่สำเร็จ — แจ้งแอดมินยกเลิกแถว ' + _gLid + ' ไม่งั้นบิลจะค้างที่คลัง', 'warning'); }
   }
   // อัปเดตในเครื่องทันที ไม่ต้องรอ refetch (pattern เดียวกับ _applyApprovalLocal)
@@ -47089,7 +47089,7 @@ window.viewSheetOrderDetail = function(orderId) {
   const isRowCancelled = r => isCancelledRow(r) || oldCancelledBarcodes.has(String(r['Barcode']||'').trim());
 
   const saleRows = allRows.filter(r => String(r['รูปแบบ']||'ขาย').trim() === 'ขาย');
-  const freeRows = allRows.filter(r => String(r['รูปแบบ']||'').trim() === 'แถม' && !isRowCancelled(r));
+  const freeRows = allRows.filter(r => String(r['รูปแบบ']||'').trim() === 'แถม');   // v8.651: โชว์ของแถมที่ถูกยกเลิกด้วย (ขีดฆ่า) — Surat "Cancel โปรไปก็ควรขึ้นว่า Cancel"
 
   const total = saleRows
     .filter(r => !isRowCancelled(r))
@@ -47168,119 +47168,107 @@ function openModal({ title, subtitle, body, showAdd = false }) {
   document.body.style.overflow = 'hidden';
 }
 
-// v6.5.20: Recalculate promotion from remaining active ขาย rows
-// Called after a line is cancelled to compute new แถม qty and append fresh row(s)
-// v6.5.127: more robust matching + debug log so we can see what got skipped
-function recalcPromoForRows(remainingRows, templateRow) {
-  if (!remainingRows.length) return [];
-  const promos = SHEET_DATA.promotions || [];
-  if (!promos.length) { console.warn('[recalcPromo] no promotions loaded'); return []; }
-
-  console.log('[recalcPromo] start — remaining:', remainingRows.length, 'promos:', promos.length);
-  const now = new Date();
-  const newPromoRows = [];
-
-  for (const promo of promos) {
-    const measureBy  = String(promo['วิธีวัด']     || '').trim();
-    const matchValue = String(promo['ชื่อ']         || '').trim();
-    const threshold  = numv(promo['จำนวน']);
-    const sellMode   = String(promo['รูปแบบขาย']   || '').trim().toUpperCase();
-    const giftName   = String(promo['แถมสินค้า']   || '').trim();
-    const giftQtyPer = numv(promo['จำนวนแถม'])  || 1;
-    const giftUnit   = 'ชิ้น';   // v8.136: ของแถม = EA เสมอ (จำนวนแถม เก็บเป็น EA · ไม่มีคอลัมน์ หน่วยแถม)
-    const giftBarcode= String(promo['Barcode สินค้าแถม'] || promo['บาร์โค้ดแถม'] || '').trim();
-    if (!measureBy || !matchValue || !threshold || !giftName) continue;
-
-    let totalQty = 0;
-    let matchedCount = 0;
-    for (const row of remainingRows) {
-      const bc = String(row['Barcode']||'').trim();
-      const p  = (SHEET_DATA.products||[]).find(x =>
-        String(x['CODE EA']||'')===bc || String(x['CODE CS']||'')===bc ||
-        String(x['CODE PA']||'')===bc || String(x['CODE BP']||'')===bc
-      );
-      if (!p) continue;
-
-      let matched = false;
-      // v6.5.127: comprehensive measureBy support — covers everything the promo sheet can use
-      const mv = matchValue.toLowerCase();
-      if (measureBy==='CAT BU')        matched = String(p['CAT BU']    ||'').toLowerCase().includes(mv);
-      else if (measureBy==='CAT BRAND')   matched = String(p['CAT BRAND'] ||'').toLowerCase().includes(mv);
-      else if (measureBy==='CAT TYPE')    matched = String(p['CAT TYPE']  ||'').toLowerCase().includes(mv);
-      else if (measureBy==='CAT GROUP')   matched = String(p['CAT GROUP'] ||'').toLowerCase().includes(mv);
-      else if (measureBy==='CAT VENDOR')  matched = String(p['CAT VENDOR']||'').toLowerCase().includes(mv);
-      else if (measureBy==='CAT SIZE')    matched = String(p['CAT SIZE']  ||'').toLowerCase().includes(mv);
-      else if (measureBy==='BARCODE') {
-        // v6.5.127: match against ALL barcodes of the product (not just row's recorded one)
-        const allBc = [p['CODE EA'], p['CODE PA'], p['CODE BP'], p['CODE CS']].map(x => String(x||'').trim()).filter(Boolean);
-        matched = allBc.includes(matchValue.trim());
-      }
-      else if (measureBy==='PRODUCT NAME' || measureBy==='ชื่อสินค้า') {
-        matched = String(p['PRODUCT NAME']||p.name||'').toLowerCase().includes(mv);
-      }
-      else if (measureBy==='SHORT NAME') {
-        matched = String(p['SHORT NAME']||'').toLowerCase().includes(mv);
-      }
-      // Fallback: any column with exact name as measureBy
-      else if (p[measureBy] != null) {
-        matched = String(p[measureBy]||'').toLowerCase().includes(mv);
-      }
-      if (!matched) continue;
-      matchedCount++;
-
-      const qty     = numv(row['จำนวน']);
-      const unitStr = String(row['หน่วย']||'');
-      if (sellMode === 'บาท') {
-        totalQty += numv(row['ยอดเงินรวม']);
-      } else if (sellMode === 'CS') {
-        totalQty += qty; // qty already in CS for CS rows
-      } else if (sellMode === 'EA') {
-        const m = unitStr.match(/[xX×](\d+)/);
-        const size = m ? parseInt(m[1]) : 1;
-        totalQty += qty * size;
-      } else {
-        totalQty += qty;
-      }
-    }
-
-    const tiersEarned = threshold > 0 ? Math.floor(totalQty / threshold) : 0;
-    console.log(`[recalcPromo] ${measureBy}="${matchValue}" → ${matchedCount} matched, totalQty=${totalQty}, threshold=${threshold} (${sellMode}), tiersEarned=${tiersEarned}`);
-    if (tiersEarned <= 0) continue;
-
-    // v6.5.226: use PDDT product name when barcode resolves — matches confirmOrderWithPromos behavior
-    // (was: just took giftName from promo sheet, causing name mismatch between original promo row and recalc row)
-    let giftProductName = giftName;
-    if (giftBarcode && SHEET_DATA.products) {
-      const giftProd = SHEET_DATA.products.find(x =>
-        String(x['CODE EA']||'')===giftBarcode || String(x['CODE PA']||'')===giftBarcode ||
-        String(x['CODE BP']||'')===giftBarcode || String(x['CODE CS']||'')===giftBarcode
-      );
-      if (giftProd) giftProductName = String(giftProd['PRODUCT NAME']||'').trim() || giftName;
-    }
-
-    // v6.5.226: generate unique lineId for recalc promo rows (suffix R-### to distinguish from original lines)
-    const _recalcOrderId = String(templateRow['orderId']||'').trim();
-    const _recalcLineId = _recalcOrderId
-      ? _recalcOrderId + '-R' + String(newPromoRows.length + 1).padStart(3, '0')
-      : '';
-    newPromoRows.push({
-      ...templateRow,
-      'รูปแบบ':     'แถม',
-      'Barcode':     giftBarcode,
-      'ชื่อสินค้า':  giftProductName,
-      'จำนวน':       tiersEarned * giftQtyPer,
-      'หน่วย':       giftUnit,
-      'ราคา':        _giftEa03(giftBarcode),   // v8.83: มูลค่าของแถม EA03
-      'ยอดเงินรวม':  0,
-      'เวลา':        formatTimeThai(now),
-      'หมายเหตุ':    `คำนวณใหม่หลังยกเลิก (${tiersEarned} ชุด × ${giftQtyPer})`,
-      'ยกเลิก':      '',
-      'lineId':      _recalcLineId,
-    });
-    console.log(`[recalcPromo] → APPENDED gift "${giftProductName}" qty=${tiersEarned*giftQtyPer}`);
+/* ══ 🔴 v8.651 (Surat 24/9 ด่วน "ยกเลิกรายการอะไรก็ตาม ระบบลบของแถมแล้วแถมใหม่ แต่แถมผิด แถมเพิ่มมากขึ้น บริษัทเสียหาย") ══
+   เดิม (v6.5.20–v8.650): ยกเลิกบรรทัดไหนก็ตาม → recalcPromoForRows คิดของแถม "ทุกโปร" ใหม่จากบรรทัดที่เหลือ
+     แล้วยกเลิกของแถมเดิมที่ไม่ตรง + เขียนชุดใหม่ต่อท้าย (-R###)
+     สูตรนั้นคนละตัวกับตอนกดส่ง (cartMatchesPromo): เทียบชื่อแบบ includes · ไม่ดูหน่วย · เอาทุกขั้นทุกโปรพร้อมกัน · ไม่รู้ว่าเซลเลือกโปรไหน
+     ของจริง 14/8–24/9 = 27 บิล · ORD1781564 ช้าง 48 → 120 · ORD6752870 เบลนน์ 5 → 125 · ORD2159052 นิสชิน 10 → 380
+   ✅ กติกา Surat: "ถ้าลบคนละตัวไม่ต้องไปลบของแถม · ถ้าตัวที่มีโปรก็ลบตัวแถมออกไปเลย ไม่ต้องไปเด้งใหม่ · จะเอาใหม่ให้เค้าไปคีย์ใหม่เอง"
+     → ของแถมบรรทัดไหนมาจากโปรที่บรรทัดที่ยกเลิก "นับเข้า" (ด่านเดียวกับตอนกดส่ง: วิธีวัด/ชื่อ + หน่วยตามรูปแบบขาย) = ยกเลิกตาม · นอกนั้นไม่แตะ
+     → ❌ ไม่มีการคำนวณ/เพิ่มของแถมใหม่อีกแล้ว (หลังบ้าน v8.256 ก็ไม่ยอมเขียนต่อท้ายแล้ว)
+     ตัดสินไม่ได้ (หาโปรไม่เจอ + ไม่มีลิงก์ 'แถมเพราะซื้อ') = ยกเลิกไว้ก่อน แล้วบอกในป๊อปอัป — แถมขาดเซลคีย์ใหม่ได้ · แถมเกินบริษัทเสีย */
+function _orderRowUnitCode(r) {
+  const m = String((r && r['หน่วย']) || '').match(/\((EA|PA|BP|CS)\)/i);
+  return m ? m[1].toUpperCase() : '';
+}
+/* true = บรรทัดขาย t นับเข้าโปร pr · false = ไม่เกี่ยว · null = ตัดสินไม่ได้ */
+function _saleRowInPromoScope(t, pr) {
+  const by = String((pr && pr['วิธีวัด']) || '').trim();
+  const val = _promoNorm((pr && pr['ชื่อ']) || '');
+  if (!by || !val) return null;
+  const hit = _promoProductByBarcode(t && t['Barcode']);
+  if (!hit || !hit.p) return null;
+  const s = hit.p._sheet || hit.p;
+  const pv = (by === 'PRODUCT NAME') ? (s['PRODUCT NAME'] || hit.p.name || '') : (s[by] || '');
+  if (!_promoMatches(by, _promoNorm(pv), val)) return false;
+  const mode = String(pr['รูปแบบขาย'] || '').trim().toUpperCase();
+  if (mode === 'EA' || mode === 'PA' || mode === 'BP' || mode === 'CS') {
+    const u = _orderRowUnitCode(t) || hit.unit || '';
+    if (u && u !== mode) return false;   // คนละหน่วยกับโปร = บรรทัดนี้ไม่ได้นับเข้าโปรตั้งแต่แรก (ด่านเดียวกับ cartMatchesPromo)
   }
-  console.log('[recalcPromo] done — newPromoRows:', newPromoRows.length);
-  return newPromoRows;
+  return true;
+}
+function _giftBcOfPromo(pr) {
+  return String((pr && (pr['Barcode สินค้าแถม'] || pr['Barcode สินค้าแถมEA'] || pr['บาร์โค้ดแถม'])) || '').trim();
+}
+/* แถวโปรที่ออกของแถมบรรทัดนี้ — จาก 'โปรที่ใช้' ก่อน · หาไม่เจอ (จัดซื้อแก้ชื่อ/ลบแถว) = ทุกโปรที่แถมของตัวนี้ (กว้างไว้ = ปลอดภัยฝั่งบริษัท) */
+function _giftRowPromoCands(g) {
+  const bc = String((g && g['Barcode']) || '').trim();
+  let c = (typeof _giftPromoCands === 'function') ? _giftPromoCands(g) : [];
+  if (c.length > 1 && bc) { const f = c.filter(function (pr) { return _giftBcOfPromo(pr) === bc; }); if (f.length) c = f; }
+  if (!c.length && bc) {
+    const list = (SHEET_DATA.promotionsRaw && SHEET_DATA.promotionsRaw.length) ? SHEET_DATA.promotionsRaw : (SHEET_DATA.promotions || []);
+    c = list.filter(function (pr) { return _giftBcOfPromo(pr) === bc; });
+  }
+  return c;
+}
+/* true = ของแถม g มาจากโปรที่บรรทัด t นับเข้า · false = ไม่เกี่ยว · null = ตัดสินไม่ได้ */
+function _giftRelatedToSale(g, t) {
+  let decided = false;
+  const cands = _giftRowPromoCands(g);
+  for (let i = 0; i < cands.length; i++) {
+    const v = _saleRowInPromoScope(t, cands[i]);
+    if (v === true) return true;
+    if (v === false) decided = true;
+  }
+  if (decided) return false;
+  const tn = _promoNorm((t && t['ชื่อสินค้า']) || '');
+  const why = _promoNorm((g && g['แถมเพราะซื้อ']) || '');
+  if (tn && why && why.indexOf(tn) >= 0) return true;   // v8.628: ลิงก์ที่บันทึกไว้ตอนกดส่ง
+  return null;
+}
+/* แผนยกเลิก = บรรทัดเป้าหมาย + ของแถมที่ต้องยกเลิกตาม · ป๊อปอัปยืนยันกับตอนยิงจริงใช้ตัวเดียวกัน = เห็นอะไรได้อย่างนั้น */
+function _cancelGiftPlanFor(orderId, barcode, lineId) {
+  const oid = String(orderId || '').trim(), lid = String(lineId || '').trim(), bc = String(barcode || '').trim();
+  const rows = (SHEET_DATA.orders || []).filter(function (r) { return String(r['orderId'] || '').trim() === oid; });
+  const target = lid
+    ? rows.find(function (r) { return String(r['lineId'] || '').trim() === lid && !isCancelledRow(r); })
+    : rows.find(function (r) { return String(r['Barcode'] || '').trim() === bc && String(r['รูปแบบ'] || 'ขาย').trim() === 'ขาย' && !isCancelledRow(r); });
+  const plan = { target: target || null, cancel: [], keep: [], unsure: [] };
+  if (!target || String(target['รูปแบบ'] || '').trim() === 'แถม') return plan;   // ยกเลิกบรรทัดของแถมเอง = บรรทัดเดียว
+  rows.forEach(function (g) {
+    if (g === target || String(g['รูปแบบ'] || '').trim() !== 'แถม' || isCancelledRow(g)) return;
+    const v = _giftRelatedToSale(g, target);
+    if (v === true) plan.cancel.push(g);
+    else if (v === false) plan.keep.push(g);
+    else { plan.cancel.push(g); plan.unsure.push(g); }
+  });
+  return plan;
+}
+window._cancelGiftPlanFor = _cancelGiftPlanFor;
+function _cancelGiftLineTxt(g) {
+  const u = String((g && g['หน่วย']) || '').replace(/x\d+\(\w+\)$/i, '').trim();
+  return String((g && (g['ชื่อสินค้า'] || g['Barcode'])) || 'ของแถม').trim() + ' ' + numv(g && g['จำนวน']) + (u ? ' ' + u : '');
+}
+/* บล็อกในป๊อปอัปยืนยัน — บอกก่อนกดว่ามีของแถมอะไรถูกยกเลิกตาม (บิลไม่มีของแถม = ไม่โชว์อะไร) */
+function _cancelGiftPlanHtml(plan) {
+  if (!plan || !plan.target) return '';
+  const nAll = plan.cancel.length + plan.keep.length;
+  if (!nAll) return '';
+  const one = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0';
+  if (!plan.cancel.length) {
+    return '<div style="font-size:12px;color:var(--muted);margin-bottom:14px;' + one + '">ของแถมในบิลไม่เกี่ยวกับสินค้านี้ — ไม่ถูกยกเลิก</div>';
+  }
+  const lines = plan.cancel.map(function (g) {
+    const t = _cancelGiftLineTxt(g) + (plan.unsure.indexOf(g) >= 0 ? ' · ตรวจโปรไม่ได้' : '');
+    return '<div style="font-size:12.5px;font-weight:700;color:var(--text);padding:2px 0;' + one + '" title="' + escapeAttr(t) + '">' + escapeHtml(t) + '</div>';
+  }).join('');
+  return '<div style="background:rgba(220,38,38,.1);border-left:3px solid #DC2626;padding:10px 14px;border-radius:8px;margin-bottom:14px;min-width:0">'
+    + '<div style="font-size:12px;font-weight:800;color:var(--text);margin-bottom:4px;' + one + '">ยกเลิกของแถมด้วย ' + plan.cancel.length + ' รายการ</div>'
+    + lines
+    + '<div style="font-size:11px;color:var(--muted);margin-top:4px;' + one + '">ไม่คำนวณใหม่ · ยังได้โปรอยู่ให้คีย์ของแถมใหม่เอง</div>'
+    + (plan.keep.length ? '<div style="font-size:11px;color:var(--muted);' + one + '">ของแถมอื่น ' + plan.keep.length + ' รายการไม่ถูกแตะ</div>' : '')
+    + '</div>';
 }
 
 // v6.5.226: Execute pending cancel — invoked by hold-to-confirm after user holds button 1s.
@@ -47373,7 +47361,7 @@ window.confirmCancelLine = function(btnEl, orderId, barcode, productName, lineId
       </div>
     </div>
     <div class="modal-body" style="padding:18px">
-      <div style="background:#fef2f2;border-left:3px solid #DC2626;padding:12px 14px;border-radius:8px;margin-bottom:14px">
+      <div style="background:rgba(220,38,38,.1);border-left:3px solid #DC2626;padding:12px 14px;border-radius:8px;margin-bottom:14px">
         <div style="font-size:14px;font-weight:800;color:var(--text);margin-bottom:4px">${escapeHtml(productName)}</div>
         <div style="font-size:11px;color:var(--muted)">${escapeHtml(barcode)}${lineId ? ' · '+escapeHtml(lineId) : ''}</div>
       </div>
@@ -47417,6 +47405,8 @@ window.confirmDeleteOrderRow = function(btnEl, orderId, barcode, productName, li
   // Stash params on window for the confirm button
   window._pendingCancelBtn = btnEl;
   window._pendingCancelArgs = { orderId, barcode, productName, lineId };
+  let _gpHtml = '';   // v8.651: ของแถมที่จะถูกยกเลิกตาม (ตัวเดียวกับที่ deleteOrderRow ใช้จริง)
+  try { _gpHtml = _cancelGiftPlanHtml(_cancelGiftPlanFor(orderId, barcode, lineId)); } catch (e) { _gpHtml = ''; }
   mc.innerHTML = `
     <button type="button" class="modal-close-x" onclick="closeModal()">✕</button>
     <div class="modal-head" style="background:linear-gradient(135deg,#DC2626,#991B1B);color:#fff">
@@ -47426,10 +47416,11 @@ window.confirmDeleteOrderRow = function(btnEl, orderId, barcode, productName, li
       </div>
     </div>
     <div class="modal-body" style="padding:18px">
-      <div style="background:#fef2f2;border-left:3px solid #DC2626;padding:12px 14px;border-radius:8px;margin-bottom:14px">
+      <div style="background:rgba(220,38,38,.1);border-left:3px solid #DC2626;padding:12px 14px;border-radius:8px;margin-bottom:14px">
         <div style="font-size:14px;font-weight:800;color:var(--text);margin-bottom:4px">${escapeHtml(productName)}</div>
         <div style="font-size:11px;color:var(--muted)">${escapeHtml(barcode)}${lineId ? ' · '+escapeHtml(lineId) : ''}</div>
       </div>
+      ${_gpHtml}
       <div style="display:flex;gap:8px">
         <button class="btn btn-outline" style="flex:1" onclick="closeModal()">ไม่ยกเลิก</button>
         <button class="btn-destructive btn-destructive-lg" style="flex:2" onclick="window._executeConfirmedCancel()">✓ ยืนยันยกเลิก</button>
@@ -47462,81 +47453,29 @@ window.deleteOrderRow = async function(btnEl, orderId, barcode, productName, lin
     btnEl.style.opacity = '.7';
   }
   try {
-    const allRows = (SHEET_DATA.orders || []).filter(r => String(r['orderId']||'').trim() === orderId);
-    const _lineIdStr = String(lineId||'').trim();
-    const targetRow = _lineIdStr
-      ? allRows.find(r => String(r['lineId']||'').trim() === _lineIdStr && !isCancelledRow(r))
-      : allRows.find(r =>
-          String(r['Barcode']  ||'').trim() === barcode &&
-          String(r['รูปแบบ']  ||'ขาย').trim() === 'ขาย' &&
-          !isCancelledRow(r)
-        );
+    /* 🔴 v8.651 (Surat 24/9 ด่วน): ❌ ไม่คำนวณของแถมใหม่แล้ว — ยกเลิกเฉพาะของแถมที่มาจากโปรของบรรทัดนี้ (ดูหัว _orderRowUnitCode) */
+    const _plan = _cancelGiftPlanFor(orderId, barcode, lineId);
+    const targetRow = _plan.target;
     if (!targetRow) throw new Error('ไม่พบข้อมูล row เดิม');
+    const _lineIdStr = String(lineId||'').trim();
+    const giftCancel = _plan.cancel;
 
-    /* 🔴 v8.649 (รีวิวบั๊ค 23/9): แถวของแถมพิเศษไม่ได้มาจากการคำนวณโปร → recalcPromoForRows ไม่มีทางใส่คืน
-       เดิมนับรวมเป็น "ของแถมโปร" → ยกเลิกสินค้าตัวไหนก็ตาม ของแถมพิเศษทั้งใบโดนยกเลิกตาม คิวผู้อนุมัติหายเงียบ
-       ✅ แยกออก: คงไว้ถ้ายังเหลือสินค้าที่เข้าขอบเขตของโปรนั้น · ไม่เหลือแล้ว = ยกเลิกด้วย + บอกเซล */
-    const _isGiftReq = r => (typeof _giftReqRow === 'function') && _giftReqRow(r);
-    const activePromoRows = allRows.filter(r =>
-      String(r['รูปแบบ']||'').trim() === 'แถม' &&
-      !isCancelledRow(r) &&
-      !_isGiftReq(r)
-    );
-    const remainingRows = allRows.filter(r => {
-      if (String(r['รูปแบบ']||'ขาย').trim() !== 'ขาย') return false;
-      if (isCancelledRow(r)) return false;
-      if (_lineIdStr) return String(r['lineId']||'').trim() !== _lineIdStr;
-      return String(r['Barcode']||'').trim() !== barcode;
-    });
-
-    const newPromoRows = recalcPromoForRows(remainingRows, targetRow);
-    const giftReqDrop = allRows.filter(r =>
-      String(r['รูปแบบ']||'').trim() === 'แถม' && !isCancelledRow(r) && _isGiftReq(r) &&
-      !_giftReqStillFits(r, remainingRows));
-
-    // v6.5.226: STRONGER promo diff — normalize barcode (strip leading zeros + whitespace)
-    // so sigs match correctly across sheet-read vs JS-generated rows.
-    // Surat: "you still have to cancel all promotion and add it again" — old logic's cancelAllPromos
-    // legacy fallback killed even unchanged promos when ANY old row lacked lineId.
-    // NEW: send promo cancel via surgical signatures (barcode+qty) AND lineIds — Apps Script
-    // resolves both. NO more cancelAllPromos broad sweep.
-    const _normBarcode = bc => String(bc||'').trim().replace(/^0+/, '');
-    const sigOf = r => `${_normBarcode(r['Barcode'])}|${Number(r['จำนวน'])||0}`;
-    const oldSigs = new Set(activePromoRows.map(sigOf));
-    const newSigs = new Set(newPromoRows.map(sigOf));
-    const sameSet = oldSigs.size === newSigs.size && [...oldSigs].every(s => newSigs.has(s));
-
-    let promosToCancel = [];
-    let promosToAdd    = [];
-    if (sameSet) {
-      console.log('[deleteOrderRow] promos unchanged — skipping cancel+add churn');
-    } else {
-      // Cancel ONLY old promos whose sig is NOT in new set
-      // Add ONLY new promos whose sig is NOT in old set
-      promosToCancel = activePromoRows.filter(r => !newSigs.has(sigOf(r)));
-      promosToAdd    = newPromoRows.filter(r => !oldSigs.has(sigOf(r)));
-      console.log(`[deleteOrderRow] diff: cancel ${promosToCancel.length}, add ${promosToAdd.length} (active=${activePromoRows.length}, recalc=${newPromoRows.length})`);
-    }
-
-    // Build cancellation payload — lineId for new orders, barcode+qty for legacy
     const allCancelLineIds = [];
     if (_lineIdStr) allCancelLineIds.push(_lineIdStr);
-    const cancelPromoSigs = [];   // for legacy promos without lineId
-    promosToCancel.forEach(r => {
+    const cancelPromoSigs = [];   // แถวเก่ามากที่ไม่มี lineId (ก่อน v6.5.176)
+    giftCancel.forEach(r => {
       const lid = String(r['lineId']||'').trim();
       if (lid) allCancelLineIds.push(lid);
       else cancelPromoSigs.push({ barcode: String(r['Barcode']||'').trim(), qty: Number(r['จำนวน'])||0 });
     });
-    giftReqDrop.forEach(r => { const lid = String(r['lineId']||'').trim(); if (lid) allCancelLineIds.push(lid); });   // v8.649
 
     const res = await postToAppsScript({
       action:            'updateOrderCancel',
       orderId,
       cancelLineIds:     allCancelLineIds.length ? allCancelLineIds : undefined,
       cancelledBarcodes: _lineIdStr ? undefined : [barcode],
-      cancelPromoSigs:   cancelPromoSigs.length ? cancelPromoSigs : undefined,  // v6.5.226
-      cancelAllPromos:   false,    // NEVER use broad sweep anymore
-      newPromoRows:      promosToAdd,
+      cancelPromoSigs:   cancelPromoSigs.length ? cancelPromoSigs : undefined,
+      giftRule:          2,   // v8.651: หลังบ้าน v8.256 รับของแถมที่แอปเลือกตามกติกาใหม่ · ไม่มีธงนี้ = แอปเก่า ปฏิเสธในบิลที่มีของแถม
     });
     if (!res || res.ok === false) {
       throw new Error(res?.error || 'Apps Script ตอบกลับไม่สำเร็จ — อาจยังไม่ deploy handler ใหม่');
@@ -47544,14 +47483,9 @@ window.deleteOrderRow = async function(btnEl, orderId, barcode, productName, lin
 
     // Update in-memory — row stays cancelled
     targetRow['ยกเลิก'] = CANCEL_VALUE;
-    promosToCancel.forEach(r => { r['ยกเลิก'] = CANCEL_VALUE; });
-    giftReqDrop.forEach(r => { r['ยกเลิก'] = CANCEL_VALUE; });
-    // v8.649: ปกติการยกเลิกเงียบ (Surat) แต่ของแถมพิเศษถูกยกเลิกตามไปด้วย = คิวผู้อนุมัติเปลี่ยน ❌ ห้ามตัดเงียบ
-    if (giftReqDrop.length) showToast('ยกเลิกของแถมพิเศษด้วย ' + giftReqDrop.length + ' รายการ — ไม่เหลือสินค้าที่เข้าเงื่อนไขในใบ', 'info');
-    if (promosToAdd.length) {
-      SHEET_DATA.orders = SHEET_DATA.orders || [];
-      SHEET_DATA.orders.push(...promosToAdd);
-    }
+    giftCancel.forEach(r => { r['ยกเลิก'] = CANCEL_VALUE; });
+    // v8.651: ของแถมถูกยกเลิกตาม = บอกเสมอ (Surat "Cancel โปรไปก็ควรขึ้นว่า Cancel ไปด้วย") · ยกเลิกสินค้าเฉยๆ ยังเงียบเหมือนเดิม
+    if (giftCancel.length) showToast('ยกเลิกของแถมด้วย ' + giftCancel.length + ' รายการ: ' + giftCancel.map(_cancelGiftLineTxt).join(' · '), 'info');
     try { localStorage.removeItem('rsa_orders'); } catch {}
 
     // SILENT: no toast, no popup. Just re-render so the row picks up cancelled state.
