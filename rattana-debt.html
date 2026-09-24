@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v6.11</title>
+<title>Rattana ยอดหนี้คงค้าง v6.12</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -811,7 +811,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v6.11</span>
+      <span class="app-ver">v6.12</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -1841,6 +1841,7 @@ function closeLoginDiag(e){
 function enterApp(){
   $('loginScreen').style.display = 'none';
   $('appScreen').classList.add('show');
+  setTimeout(warmBillItemsSheet, 2500);   // v6.12: อุ่นชีทรายการสินค้าไว้ก่อน — กดบิลครั้งแรกจะไม่ต้องรอ Google โหลดชีท
 
   // Display user info — dept overrides role label
   const normDeptUI = s => String(s||'').replace(/\s+/g,' ').trim();
@@ -2931,7 +2932,7 @@ function renderTable(){
       <td>${escapeHtml(r.custName)}</td>
       <td class="num">${fmtBaht(r.amount)}</td>
       <td class="aging">${agingBadge(r.overdue)}${excludeBadge}${pendingBadge}${partialBadge}${planBadge}</td>
-      <td class="code"><span class="doc-link" onclick="openBillItems('${escapeAttr(r.docNo)}')" title="ดูรายการสินค้าในบิล">${escapeHtml(r.docNo)}</span></td>
+      <td class="code"><span class="doc-link" onclick="openBillItems('${escapeAttr(r.docNo)}','${escapeAttr(r.docDate)}')" title="ดูรายการสินค้าในบิล">${escapeHtml(r.docNo)}</span></td>
       <td>${escapeHtml(r.docDate)}</td>
       <td class="num" style="text-align:center">${r.aging}</td>
       <td class="num" style="text-align:center">${r.credit}</td>
@@ -3938,7 +3939,7 @@ function openQR({title, subtitle, amount, bills, customer}){
     $('qrDetailCount').textContent = bills.length;
     $('qrDetails').innerHTML = bills.map(b => `
       <div class="qd-item">
-        <span class="doc doc-link" onclick="openBillItems('${escapeAttr(b.docNo)}')" title="ดูรายการสินค้าในบิล">${escapeHtml(b.docNo)} · ${escapeHtml(b.docDate)}</span>
+        <span class="doc doc-link" onclick="openBillItems('${escapeAttr(b.docNo)}','${escapeAttr(b.docDate)}')" title="ดูรายการสินค้าในบิล">${escapeHtml(b.docNo)} · ${escapeHtml(b.docDate)}</span>
         <span class="amt ${b.amount < 0 ? 'cn' : ''}">${fmtBaht(b.amount)}</span>
       </div>
     `).join('');
@@ -5490,23 +5491,60 @@ function closePlanModal(e){
    อ่านจากชีท CONFIG.itemsSheetId ผ่าน gviz where (ค้นฝั่ง Google ทีละบิล ไม่ต้องโหลดทั้งแท็บ 1 แสนแถว)
    ======================== */
 const billItemsCache = new Map();
+let billItemsMinDate = null;   // v6.12: วันที่บิลเก่าสุดที่มีในชีท (Date) — รู้แล้วไม่ต้องยิงค้นบิลที่เก่ากว่านั้น
 function billItemsTab(docNo){ return /^IS/i.test(String(docNo||'').trim()) ? 'IS' : 'DS_DC'; }
+function billItemsUrl(tab, tq, range){
+  return `https://docs.google.com/spreadsheets/d/${CONFIG.itemsSheetId}/gviz/tq?sheet=${encodeURIComponent(tab)}`
+       + (range ? `&range=${range}&headers=1` : '') + `&tqx=out:csv&tq=${encodeURIComponent(tq)}`;
+}
+async function billItemsQuery(tab, tq, range){
+  const res = await fetch(billItemsUrl(tab, tq, range), { cache: 'no-store' });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return parseCsv(await res.text());
+}
+// d/m/yyyy (ชีทหนี้) หรือ yyyy/mm/dd (ชีทรายการ) → Date · อ่านไม่ออก = null
+function billItemsParseDate(s){
+  s = String(s || '').trim();
+  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return new Date(+m[3], +m[2]-1, +m[1]);
+  m = s.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (m) return new Date(+m[1], +m[2]-1, +m[3]);
+  return null;
+}
+// v6.12: ยิงตอนเปิดแอป — ให้ Google โหลดชีท 1 แสนแถวไว้ในแคชก่อน (ครั้งแรกของวันช้า 10-20 วิ หลังจากนั้น 1-3 วิ) + จำวันที่เก่าสุด
+async function warmBillItemsSheet(){
+  try {
+    const rows = await billItemsQuery('DS_DC', 'select min(A)');
+    const v = rows[0] && Object.values(rows[0])[0];
+    const d = billItemsParseDate(v);
+    if (d) billItemsMinDate = d;
+  } catch (e){ /* เงียบ — แค่อุ่นแคช */ }
+}
 
-async function openBillItems(docNo){
+async function openBillItems(docNo, docDate){
   docNo = String(docNo || '').trim();
   if (!docNo) return;
   $('billItemsTitle').textContent = docNo;
   $('billItemsInfo').textContent = '';
-  $('billItemsBody').innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted)">⏳ กำลังดึงรายการสินค้า... (บิลขายอาจใช้เวลา 10-20 วินาที)</div>';
+  $('billItemsBody').innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted)">⏳ กำลังดึงรายการสินค้า...</div>';
   $('billItemsModal').classList.add('show');
   try {
     let items = billItemsCache.get(docNo);
     if (!items){
+      // บิลเก่ากว่าที่ชีทมี → บอกเลย ไม่ต้องรอค้น
+      const bd = billItemsParseDate(docDate);
+      if (billItemsMinDate && bd && bd < billItemsMinDate){
+        const md = billItemsMinDate;
+        $('billItemsBody').innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted)">บิลนี้ลงวันที่ ${escapeHtml(docDate)} เก่ากว่าข้อมูลในชีท<br>ชีทรายการสินค้ามีเฉพาะบิลตั้งแต่ ${md.getDate()}/${md.getMonth()+1}/${md.getFullYear()} เป็นต้นไป</div>`;
+        return;
+      }
+      const tab = billItemsTab(docNo);
       const tq  = `select A,B,C,D,F,G,I,J,K,L,M,N,O where B='${docNo.replace(/'/g, "\\'")}'`;
-      const url = `https://docs.google.com/spreadsheets/d/${CONFIG.itemsSheetId}/gviz/tq?sheet=${encodeURIComponent(billItemsTab(docNo))}&tqx=out:csv&tq=${encodeURIComponent(tq)}`;
-      const res = await fetch(url, { cache: 'no-store' });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      items = parseCsv(await res.text());
+      // ยิง 2 ทางพร้อมกัน: ช่วง 20,000 แถวบนสุด (บิลล่าสุด ~1 วิ) และทั้งแท็บ (~3 วิ) — ได้อันไหนก่อนใช้อันนั้น
+      const fullQ = billItemsQuery(tab, tq);
+      const fastQ = billItemsQuery(tab, tq, 'A1:O20000').catch(() => null);
+      items = await fastQ;
+      if (!items || !items.length) items = await fullQ;
       billItemsCache.set(docNo, items);
     }
     renderBillItems(docNo, items);
