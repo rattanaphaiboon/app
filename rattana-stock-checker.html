@@ -345,6 +345,15 @@
     /* Spinner */
     .spinner-overlay{display:none;position:fixed;inset:0;background:rgba(13,27,62,.55);align-items:center;justify-content:center;z-index:99999;backdrop-filter:blur(3px)}
     .spinner-overlay.show{display:flex}
+    /* v4.71: แถบเตือน "ส่งแล้วแต่ยังตรวจไม่พบในชีท" — ค้างไว้จนกว่าจะยืนยันได้หรือผู้ใช้กดปิด */
+    #saveVerifyBar{position:fixed;left:8px;right:8px;bottom:max(12px,env(safe-area-inset-bottom));z-index:9500;
+      max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:10px;
+      background:#fff8e6;border:1.5px solid #e0b93c;border-left:5px solid var(--danger);
+      border-radius:12px;padding:12px 14px;box-shadow:0 8px 24px rgba(13,27,62,.28);
+      font-size:13px;line-height:1.5;color:#4a3a1c}
+    #saveVerifyBar .svb-btns{display:flex;gap:8px;justify-content:flex-end}
+    body.dark #saveVerifyBar{background:#33291a;border-color:#8a6d1f;color:#f0e2bf}
+    body.dark #saveVerifyBar .svb-dismiss{color:#f0e2bf}
     .spinner-box{background:var(--card-bg);border-radius:var(--radius-lg);padding:32px 40px;text-align:center;border-top:4px solid var(--gold);min-width:220px}
     .spinner-ring{width:48px;height:48px;border:5px solid #dde3f0;border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 14px}
 
@@ -950,6 +959,15 @@
 
 <button class="sum-fab" id="sumFab" onclick="openSummaryModal()" type="button">📊 สรุป &amp; บันทึก <span class="sum-fab-n" id="sumFabN"></span></button>
 <button id="backToTop" onclick="window.scrollTo({top:0,behavior:'smooth'})">↑</button>
+
+<!-- v4.71: ส่งลงชีทแล้วแต่ยังตรวจไม่พบ — เตือนค้างไว้ ห้ามล้างรายการจนกว่าจะยืนยันได้ -->
+<div id="saveVerifyBar" style="display:none">
+  <div id="svbTxt"></div>
+  <div class="svb-btns">
+    <button class="btn btn-sm btn-gold" onclick="retryVerify()">ตรวจสอบอีกครั้ง</button>
+    <button class="btn btn-sm btn-outline svb-dismiss" onclick="dismissVerifyBar()">ปิด</button>
+  </div>
+</div>
 </div><!-- /appScreen -->
 
 <script src="https://unpkg.com/@zxing/browser@0.1.5/umd/zxing-browser.min.js"></script>
@@ -964,7 +982,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.70';
+const APP_VERSION = 'v4.71';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -3791,6 +3809,107 @@ function exportCountExcel() {
   showToast('ดาวน์โหลด Excel แล้ว', 'success');
 }
 
+// ══════════ v4.71: ยืนยันว่าข้อมูลถึงชีทจริง "ก่อน" ล้างรายการ ══════════
+// ปัญหาเดิม: ส่งด้วย mode:'no-cors' → fetch สำเร็จเสมอ แม้ GAS จะพัง/หมดเวลา/เขียนชีทไม่ผ่าน
+//   (จะ throw เฉพาะตอนเน็ตหลุดสนิท) แล้วโค้ดล้าง localStorage + draft ใน Supabase ทิ้งทันที
+//   = นับมาทั้งวันหายถาวร กู้ไม่ได้ — บทเรียนเดียวกับ D-MAN v3.279 (รับใบคุมแล้วไม่ลงชีท หายเงียบ)
+// วิธีแก้: ส่งเสร็จ "อ่านประวัติกลับมาดู" ว่าแถวขึ้นจริงไหม (action=history / scraphistory ที่มีอยู่แล้ว)
+//   เจอ → ล้างตามปกติ · ไม่เจอ → ไม่ล้างอะไรเลย + ขึ้นแถบเตือนให้กดตรวจซ้ำ (กันส่งซ้ำจนข้อมูลเบิ้ล)
+
+const VERIFY_SKEW_MS = 10 * 60 * 1000;   // เผื่อนาฬิกาเครื่อง vs เขตเวลาของสคริปต์คลาดกัน
+
+// ชีทเก็บเวลาเป็น "yyyy-MM-dd HH:mm:ss" (เขตเวลาสคริปต์) — แปลงกลับเป็น ms
+function parseSheetDT(s) {
+  if (!s) return NaN;
+  const d = new Date(String(s).trim().replace(' ', 'T'));
+  return isNaN(d.getTime()) ? NaN : d.getTime();
+}
+
+// ลองอ่านซ้ำหลายรอบ — GAS เขียนชีทเสร็จช้ากว่าที่ fetch คืนค่า (no-cors คืนทันที)
+async function verifySaved(action, check, delays) {
+  for (const wait of (delays || [1500, 3000, 5000])) {
+    if (wait) await new Promise(r => setTimeout(r, wait));
+    try {
+      const res  = await fetch(COUNT_SAVE_URL + '?action=' + action, { cache: 'no-store' });
+      const json = await res.json();
+      const rows = (json && json.rows) || [];
+      if (check(rows)) {
+        // ได้ของสดมาแล้ว เก็บเข้าแคชเลย — เปิดแท็บประวัติเห็นรอบที่เพิ่งส่งทันที ไม่ต้องดึงซ้ำ
+        if (action === 'history') {
+          historyCache = rows; historyLoaded = true; historyCacheTs = Date.now(); saveHistoryToLS();
+        } else {
+          scrapHistCache = rows;
+        }
+        return true;
+      }
+    } catch (_) {}   // อ่านประวัติไม่ได้รอบนี้ = ยังไม่สรุปว่าพัง ลองรอบถัดไป
+  }
+  return false;
+}
+
+// นับสต็อก: จับคู่ด้วย sessionStart (เวลาเริ่มรอบนับ = แทบไม่ซ้ำ) + คลัง + ชื่อผู้นับ
+function countSavedCheck(whParent, sessionStartIso, counter) {
+  const wh  = String(whParent || '').toUpperCase();
+  const who = String(counter || '').trim();
+  const t   = new Date(sessionStartIso).getTime();
+  return rows => rows.some(r =>
+    String(r.warehouse || '').toUpperCase() === wh &&
+    String(r.counterName || '').trim() === who &&
+    Math.abs(parseSheetDT(r.sessionStart) - t) < VERIFY_SKEW_MS);
+}
+
+// นับเศษ: ไม่มี sessionStart ในชีท → ใช้ savedAt + ผู้นับ และต้องเจอ "ครบทุกคลัง" ที่ส่งไป
+// (ส่งแยกคำขอต่อคลัง — บางคลังอาจตกหล่นได้ ถ้าเช็คแค่คลังเดียวจะล้างทิ้งทั้งที่ยังไม่ครบ)
+function scrapSavedCheck(whParents, counter, sentMs) {
+  const need = new Set(whParents.map(w => String(w).toUpperCase()));
+  const who  = String(counter || '').trim();
+  return rows => {
+    const got = new Set();
+    rows.forEach(r => {
+      if (String(r.counterName || '').trim() !== who) return;
+      if (Math.abs(parseSheetDT(r.savedAt) - sentMs) > VERIFY_SKEW_MS) return;
+      got.add(String(r.warehouse || '').toUpperCase());
+    });
+    return [...need].every(w => got.has(w));
+  };
+}
+
+// ── แถบเตือน "ส่งแล้วแต่ยังตรวจไม่พบ" ──
+let pendingVerify = null;   // { action, check, onOk, what }
+
+function showVerifyBar(what) {
+  const bar = document.getElementById('saveVerifyBar');
+  const txt = document.getElementById('svbTxt');
+  if (!bar || !txt) return;
+  txt.innerHTML = `<b>⚠️ ส่ง${what}แล้ว แต่ยังตรวจไม่พบในชีท</b><br>` +
+    `<span style="opacity:.9">ยังไม่ล้างรายการให้ — ข้อมูลยังอยู่ครบ · <b>อย่าเพิ่งกดส่งซ้ำ</b> ให้กดตรวจสอบก่อน</span>`;
+  bar.style.display = 'flex';
+}
+function hideVerifyBar() {
+  const bar = document.getElementById('saveVerifyBar');
+  if (bar) bar.style.display = 'none';
+}
+function dismissVerifyBar() { pendingVerify = null; hideVerifyBar(); }
+
+async function retryVerify() {
+  if (!pendingVerify) { hideVerifyBar(); return; }
+  const p = pendingVerify;
+  showSpinner('กำลังตรวจสอบในชีท...');
+  try {
+    const ok = await verifySaved(p.action, p.check, [0, 2500, 5000]);
+    if (ok) {
+      pendingVerify = null;
+      hideVerifyBar();
+      p.onOk();
+      showToast(`พบข้อมูลในชีทแล้ว ✓ ล้างรายการ${p.what}ให้เรียบร้อย`, 'success');
+    } else {
+      showToast('ยังไม่พบในชีท — รออีกสักครู่แล้วกดตรวจสอบใหม่ หรือเปิดแท็บประวัติดูเอง', 'warning');
+    }
+  } catch (e) {
+    showToast('ตรวจสอบไม่สำเร็จ: ' + (e.message || e), 'error');
+  } finally { hideSpinner(); }
+}
+
 async function saveCountToSheet() {
   if (!COUNT_SAVE_URL) {
     showToast('ยังไม่ได้ตั้งค่า Google Sheet — ดู Excel ไปก่อน หรือแจ้งผู้ดูแลตั้งค่า', 'warning');
@@ -3860,6 +3979,27 @@ async function saveCountToSheet() {
       });
     }),
   };
+  // เก็บค่าที่ต้องใช้ตอนล้างไว้ก่อน — การล้างอาจถูกเลื่อนไปทำตอนกด "ตรวจสอบอีกครั้ง"
+  const wh = countSession.warehouse;
+  const sessionStartIso = countSession.startedAt;
+  const doClear = () => {
+    recentlySavedAt[wh] = Date.now();   // block re-adoption from a stale remote draft
+    // Cancel any pending draft sync so a stale items={} POST doesn't race the clear
+    if (draftSyncTimer) { clearTimeout(draftSyncTimer); draftSyncTimer = null; }
+    try { localStorage.removeItem(countStoreKey(wh)); } catch {}
+    // ลบ draft ใน Supabase ให้ขาด (ยืนยันผล res.ok + retry) — กดส่งลงชีทแล้วต้องหายจาก Supabase เลย
+    clearRemoteDraft(wh).then(cleared => {
+      if (!cleared) setTimeout(() => clearRemoteDraft(wh), 3000);   // เน็ตสะดุด → ลองอีกครั้งเบื้องหลัง
+    });
+    const now = new Date().toISOString();
+    countSession = { warehouse: wh, startedAt: now, items: {}, lastEdit: now, mirrored: false };
+    try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
+    closeSummaryModal();   // ปิด modal สรุปหลังบันทึกสำเร็จ
+    renderCountList();
+    renderSummary();
+    setMode('count');
+  };
+
   showSpinner('กำลังบันทึกลง Google Sheet...');
   try {
     await fetch(COUNT_SAVE_URL, {
@@ -3867,24 +4007,20 @@ async function saveCountToSheet() {
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(payload),
     });
-    // Clear the local count session — start fresh for the next round
-    const wh = countSession.warehouse;
-    recentlySavedAt[wh] = Date.now();   // block re-adoption from a stale remote draft
-    // Cancel any pending draft sync so a stale items={} POST doesn't race the clear
-    if (draftSyncTimer) { clearTimeout(draftSyncTimer); draftSyncTimer = null; }
-    try { localStorage.removeItem(countStoreKey(wh)); } catch {}
-    // ลบ draft ใน Supabase ให้ขาด (ยืนยันผล res.ok + retry) — กดส่งลงชีทแล้วต้องหายจาก Supabase เลย
-    const cleared = await clearRemoteDraft(wh);
-    if (!cleared) setTimeout(() => clearRemoteDraft(wh), 3000);   // เน็ตสะดุด → ลองอีกครั้งเบื้องหลัง
-    const now = new Date().toISOString();
-    countSession = { warehouse: wh, startedAt: now, items: {}, lastEdit: now, mirrored: false };
-    try { localStorage.setItem(countStoreKey(wh), JSON.stringify(countSession)); } catch {}
-    closeSummaryModal();   // ปิด modal สรุปหลังบันทึกสำเร็จ
-    renderCountList();
-    renderSummary();
-    historyLoaded = false; historyCacheTs = 0;  // invalidate cache (+ กันถือว่า "สด") ให้ดึงใหม่หลังบันทึก
-    showToast('บันทึกลง Google Sheet แล้ว ✓ เคลียร์รายการนับแล้ว', 'success');
-    setMode('count');
+    // v4.71: no-cors บอกไม่ได้ว่าถึงชีทจริงไหม → อ่านประวัติกลับมายืนยันก่อนล้าง
+    showSpinner('กำลังตรวจสอบว่าข้อมูลขึ้นชีทแล้ว...');
+    const check = countSavedCheck(payload.warehouse, sessionStartIso, payload.counterName);
+    if (await verifySaved('history', check)) {
+      pendingVerify = null; hideVerifyBar();
+      doClear();
+      showToast('บันทึกลง Google Sheet แล้ว ✓ เคลียร์รายการนับแล้ว', 'success');
+    } else {
+      // ไม่ยืนยัน = ไม่ล้างอะไรทั้งสิ้น ข้อมูลยังอยู่ครบทั้งในเครื่องและใน Supabase
+      pendingVerify = { action: 'history', check, onOk: doClear, what: 'รายการนับ' };
+      closeSummaryModal();
+      showVerifyBar('รายการนับ');
+      showToast('ส่งแล้วแต่ยังตรวจไม่พบในชีท — ยังไม่ล้างรายการให้', 'warning');
+    }
   } catch (e) {
     showToast('บันทึกไม่สำเร็จ: ' + e, 'error');
   } finally {
@@ -4223,6 +4359,12 @@ async function saveScrapToSheet() {
   if (!scrapItems.length) { showToast('ยังไม่มีรายการนับเศษ', 'warning'); return; }
   const byWh = {};
   scrapItems.forEach(it => { (byWh[it.warehouse] = byWh[it.warehouse] || []).push(it); });
+  const sentMs = Date.now();
+  const sentWh = [];              // คลังแม่ที่ส่งไปจริง — ใช้ตรวจว่าขึ้นชีทครบทุกคลัง
+  const doClearScrap = () => {
+    scrapSavedAtMs = Date.now(); clearRemoteScrap();
+    scrapItems = []; saveScrapQuiet(); scrapMirrored = false; renderScrapList(); renderScrapSyncBar();
+  };
   showSpinner('กำลังส่งนับเศษลงชีท...');
   try {
     for (const wh of Object.keys(byWh)) {
@@ -4242,10 +4384,20 @@ async function saveScrapToSheet() {
       };
       await fetch(COUNT_SAVE_URL, { method:'POST', mode:'no-cors',
         headers:{ 'Content-Type':'text/plain;charset=utf-8' }, body: JSON.stringify(payload) });
+      sentWh.push(payload.warehouse);
     }
-    scrapSavedAtMs = Date.now(); clearRemoteScrap();
-    scrapItems = []; saveScrapQuiet(); scrapMirrored = false; renderScrapList(); renderScrapSyncBar();
-    showToast('ส่งนับเศษลงชีทแล้ว ✓', 'success');
+    // v4.71: ยืนยันก่อนล้าง เหมือนฝั่งนับสต็อก — ต้องเจอครบทุกคลังที่ส่งไป
+    showSpinner('กำลังตรวจสอบว่าข้อมูลขึ้นชีทแล้ว...');
+    const check = scrapSavedCheck(sentWh, counterDisplayName(), sentMs);
+    if (await verifySaved('scraphistory', check)) {
+      pendingVerify = null; hideVerifyBar();
+      doClearScrap();
+      showToast('ส่งนับเศษลงชีทแล้ว ✓', 'success');
+    } else {
+      pendingVerify = { action: 'scraphistory', check, onOk: doClearScrap, what: 'รายการนับเศษ' };
+      showVerifyBar('รายการนับเศษ');
+      showToast('ส่งแล้วแต่ยังตรวจไม่พบในชีท — ยังไม่ล้างรายการให้', 'warning');
+    }
   } catch (e) {
     showToast('ส่งไม่สำเร็จ: ' + e, 'error');
   } finally { hideSpinner(); }
