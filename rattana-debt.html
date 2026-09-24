@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v6.21</title>
+<title>Rattana ยอดหนี้คงค้าง v6.22</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -836,7 +836,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v6.21</span>
+      <span class="app-ver">v6.22</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -1867,6 +1867,8 @@ function enterApp(){
   $('loginScreen').style.display = 'none';
   $('appScreen').classList.add('show');
   setTimeout(warmBillItemsSheet, 2500);   // v6.12: อุ่นชีทรายการสินค้าไว้ก่อน — กดบิลครั้งแรกจะไม่ต้องรอ Google โหลดชีท
+  biLoadLS();                                          // v6.22: โหลดรายการที่เคยเปิดไว้ (จำ 7 วัน)
+  setInterval(keepBillItemsWarm, 3 * 60 * 1000);       // v6.22: อุ่นชีทต่อเนื่องทุก 3 นาที ระหว่างเปิดแอปค้างไว้
 
   // Display user info — dept overrides role label
   const normDeptUI = s => String(s||'').replace(/\s+/g,' ').trim();
@@ -3974,6 +3976,7 @@ function openQR({title, subtitle, amount, bills, customer}){
 
   const ltb = $('qrLineTextBtn'); if (ltb) ltb.style.display = 'none';
   $('qrModal').classList.add('show');
+  if (bills && bills.length) prefetchBillItems(bills.map(b => [b.docNo, b.docDate]));   // v6.22: ดึงรายการสินค้าล่วงหน้า
 }
 
 function regenerateQRCode(amount){
@@ -4558,6 +4561,7 @@ function loadCustomerBills(code){
 
   collectSelectedCust = allBills[0];
   collectBills = allBills; // เก็บทั้งหมดเพื่อแสดง
+  prefetchBillItems(allBills.map(b => [b.docNo, b.docDate]));   // v6.22: ดึงรายการสินค้าล่วงหน้าตั้งแต่กดเลือกร้าน
   // Pre-select เฉพาะบิลที่นับได้
   collectSelected = new Set(
     allBills.map((_, i) => i).filter(i => rowShouldCount(allBills[i]))
@@ -5523,10 +5527,88 @@ function billItemsUrl(tab, tq, range){
   return `https://docs.google.com/spreadsheets/d/${CONFIG.itemsSheetId}/gviz/tq?sheet=${encodeURIComponent(tab)}`
        + (range ? `&range=${range}&headers=1` : '') + `&tqx=out:csv&tq=${encodeURIComponent(tq)}`;
 }
-async function billItemsQuery(tab, tq, range){
-  const res = await fetch(billItemsUrl(tab, tq, range), { cache: 'no-store' });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  return parseCsv(await res.text());
+async function billItemsQuery(tab, tq, range, timeoutMs){
+  // v6.22: มี timeout — ชีทช่วงรีเฟรชจาก ERP เคยค้างเกิน 100 วิ ไม่ให้แอปแขวนไปเรื่อยๆ
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs || 90000);
+  try {
+    const res = await fetch(billItemsUrl(tab, tq, range), { cache: 'no-store', signal: ctrl.signal });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return parseCsv(await res.text());
+  } catch (e){
+    if (e && e.name === 'AbortError') throw new Error('ชีทตอบช้าเกิน 90 วินาที (อาจกำลังรีเฟรชข้อมูลจาก ERP)');
+    throw e;
+  } finally { clearTimeout(timer); }
+}
+
+/* v6.22: ทำให้เร็วขึ้น 4 ทาง
+   1) จำผลไว้ในเครื่อง 7 วัน (localStorage) — บิลออกแล้วรายการไม่เปลี่ยน เปิดซ้ำวันหลังก็ทันที
+   2) ดึงล่วงหน้า (prefetch) ทันทีที่เห็นบิล: เปิดสลิป / เปิด QR / กดเลือกร้านในหน้าเก็บเงิน — พอกดปุ่มมักได้เลย
+   3) กดซ้ำระหว่างกำลังดึง ใช้คำขอเดิม ไม่ยิงซ้ำ
+   4) อุ่นชีททุก 3 นาทีตอนเปิดแอปค้างไว้ — แคชฝั่ง Google หมดอายุใน ~4 นาที ถ้าปล่อยเย็นครั้งถัดไปช้า 10-70 วิ */
+const billItemsInflight = new Map();      // docNo → Promise ที่กำลังดึงอยู่
+const billItemsCacheTime = new Map();     // docNo → เวลาที่ได้ข้อมูล (ไว้หมดอายุ)
+const BI_LS_KEY = 'rattanaBillItems.v1', BI_LS_TTL = 7 * 24 * 3600 * 1000, BI_LS_MAX = 150;
+function biLoadLS(){
+  try {
+    const o = JSON.parse(localStorage.getItem(BI_LS_KEY) || '{}');
+    const now = Date.now();
+    Object.entries(o).forEach(([k, v]) => {
+      if (v && v.t && now - v.t < BI_LS_TTL && Array.isArray(v.items) && v.items.length){
+        billItemsCache.set(k, v.items); billItemsCacheTime.set(k, v.t);
+      }
+    });
+  } catch (e){ /* localStorage ใช้ไม่ได้ก็แค่ไม่จำข้ามรอบ */ }
+}
+function biSaveLS(){
+  try {
+    const keys = [...billItemsCache.keys()].slice(-BI_LS_MAX);
+    const o = {};
+    keys.forEach(k => { o[k] = { t: billItemsCacheTime.get(k) || Date.now(), items: billItemsCache.get(k) }; });
+    localStorage.setItem(BI_LS_KEY, JSON.stringify(o));
+  } catch (e){ /* เต็ม/ปิดไว้ — ข้าม */ }
+}
+// ดึงรายการของบิล 1 ใบ (ใช้แคช/คำขอที่ค้างอยู่ก่อน) → Promise<items[]>
+function fetchBillItems(docNo){
+  docNo = String(docNo || '').trim();
+  if (billItemsCache.has(docNo)) return Promise.resolve(billItemsCache.get(docNo));
+  if (billItemsInflight.has(docNo)) return billItemsInflight.get(docNo);
+  const tab = billItemsTab(docNo);
+  const tq  = `select A,B,C,D,F,G,I,J,K,L,M,N,O where B='${docNo.replace(/'/g, "\\'")}'`;
+  const p = (async () => {
+    // ยิง 2 ทางพร้อมกัน: ช่วง 20,000 แถวบนสุด (บิลล่าสุด ~1 วิ) และทั้งแท็บ (~3-13 วิ) — ได้อันไหนก่อนใช้อันนั้น
+    const fullQ = billItemsQuery(tab, tq);
+    fullQ.catch(() => {});
+    const fastQ = billItemsQuery(tab, tq, 'A1:O20000').catch(() => null);
+    let items = await fastQ;
+    if (!items || !items.length) items = await fullQ;
+    // ไม่แคชผลว่าง — ชีทกำลังรีเฟรชอาจค้นไม่เจอชั่วคราว
+    if (items && items.length){ billItemsCache.set(docNo, items); billItemsCacheTime.set(docNo, Date.now()); biSaveLS(); }
+    return items || [];
+  })().finally(() => billItemsInflight.delete(docNo));
+  billItemsInflight.set(docNo, p);
+  return p;
+}
+// ดึงล่วงหน้าเงียบๆ — pairs = [[docNo, docDate], ...] · ข้ามบิลที่มีแคช/กำลังดึง/เก่ากว่าชีท · ครั้งละไม่เกิน 6 ใบ
+function prefetchBillItems(pairs){
+  const seen = new Set();
+  const list = [];
+  (pairs || []).forEach(p => {
+    const d = String((Array.isArray(p) ? p[0] : p) || '').trim();
+    const dt = Array.isArray(p) ? p[1] : '';
+    if (!d || seen.has(d) || billItemsCache.has(d) || billItemsInflight.has(d)) return;
+    const bd = billItemsParseDate(dt);
+    if (billItemsMinDate && bd && bd < billItemsMinDate) return;
+    seen.add(d); list.push(d);
+  });
+  list.slice(0, 6).forEach(d => fetchBillItems(d).catch(() => {}));
+}
+let biWarmBusy = false;
+async function keepBillItemsWarm(){
+  if (biWarmBusy || document.hidden) return;
+  biWarmBusy = true;
+  try { await billItemsQuery('DS_DC', 'select I limit 1', '', 120000); } catch (e){ /* เงียบ */ }
+  finally { biWarmBusy = false; }
 }
 // d/m/yyyy (ชีทหนี้) หรือ yyyy/mm/dd (ชีทรายการ) → Date · อ่านไม่ออก = null
 function billItemsParseDate(s){
@@ -5557,39 +5639,48 @@ async function billItemsShowSheetRange(docNo){
   } catch (e){ /* เงียบ — แค่ข้อมูลเสริม */ }
 }
 
+let billItemsOpenSeq = 0;   // v6.22: กันผลของบิลที่กดก่อนหน้า มาทับบิลที่เปิดอยู่ตอนนี้
 async function openBillItems(docNo, docDate){
   docNo = String(docNo || '').trim();
   if (!docNo) return;
+  const seq = ++billItemsOpenSeq;
   $('billItemsTitle').textContent = docNo;
   $('billItemsInfo').textContent = '';
   $('billItemsSearch').value = ''; $('billItemsSearch').style.display = 'none'; $('billItemsCount').style.display = 'none';
   billItemsCurrent = null; $('billItemsSaveBtn').style.display = 'none';   // v6.17: ยังไม่มีข้อมูล = ยังกดบันทึกรูปไม่ได้
-  $('billItemsBody').innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted)">⏳ กำลังดึงรายการสินค้า...</div>';
   $('billItemsModal').classList.add('show');
-  try {
-    let items = billItemsCache.get(docNo);
-    if (!items){
-      // บิลเก่ากว่าที่ชีทมี → บอกเลย ไม่ต้องรอค้น
-      const bd = billItemsParseDate(docDate);
-      if (billItemsMinDate && bd && bd < billItemsMinDate){
-        const md = billItemsMinDate;
-        $('billItemsBody').innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted)">บิลนี้ลงวันที่ ${escapeHtml(docDate)} เก่ากว่าข้อมูลในชีท<br>ชีทรายการสินค้ามีเฉพาะบิลตั้งแต่ ${md.getDate()}/${md.getMonth()+1}/${md.getFullYear()} เป็นต้นไป</div>`;
-        return;
-      }
-      const tab = billItemsTab(docNo);
-      const tq  = `select A,B,C,D,F,G,I,J,K,L,M,N,O where B='${docNo.replace(/'/g, "\\'")}'`;
-      // ยิง 2 ทางพร้อมกัน: ช่วง 20,000 แถวบนสุด (บิลล่าสุด ~1 วิ) และทั้งแท็บ (~3 วิ) — ได้อันไหนก่อนใช้อันนั้น
-      const fullQ = billItemsQuery(tab, tq);
-      const fastQ = billItemsQuery(tab, tq, 'A1:O20000').catch(() => null);
-      items = await fastQ;
-      if (!items || !items.length) items = await fullQ;
-      // v6.18: ไม่แคชผลว่าง — ถ้าชีทกำลังรีเฟรชอยู่แล้วค้นไม่เจอ กดใหม่อีกครั้งต้องค้นซ้ำ ไม่ใช่จำว่า "ไม่มี" ไปทั้งรอบ
-      if (items && items.length) billItemsCache.set(docNo, items);
+
+  // บิลเก่ากว่าที่ชีทมี → บอกเลย ไม่ต้องรอค้น
+  if (!billItemsCache.has(docNo)){
+    const bd = billItemsParseDate(docDate);
+    if (billItemsMinDate && bd && bd < billItemsMinDate){
+      const md = billItemsMinDate;
+      $('billItemsBody').innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted)">บิลนี้ลงวันที่ ${escapeHtml(docDate)} เก่ากว่าข้อมูลในชีท<br>ชีทรายการสินค้ามีเฉพาะบิลตั้งแต่ ${md.getDate()}/${md.getMonth()+1}/${md.getFullYear()} เป็นต้นไป</div>`;
+      return;
     }
+  }
+
+  // v6.22: บอกเวลาที่รอ + ถ้าเกิน 8 วิ บอกว่าเป็นที่ชีท ไม่ใช่แอปค้าง
+  const t0 = Date.now();
+  $('billItemsBody').innerHTML = `<div style="padding:24px;text-align:center;color:var(--muted)">⏳ กำลังดึงรายการสินค้า... <span id="biElapsed"></span>
+    <div id="biSlowNote" style="display:none;font-size:12px;margin-top:8px;line-height:1.6;color:var(--gold)">ชีทรายการสินค้าตอบช้า (อาจกำลังรีเฟรชข้อมูลจาก ERP อยู่)<br>รอต่อได้ หรือปิดแล้วกลับมากดใหม่อีกสักครู่</div></div>`;
+  const timer = setInterval(() => {
+    const el = document.getElementById('biElapsed');
+    if (!el || seq !== billItemsOpenSeq){ clearInterval(timer); return; }
+    const s = Math.round((Date.now() - t0) / 1000);
+    el.textContent = s >= 3 ? `(${s} วิ)` : '';
+    if (s >= 8){ const n = document.getElementById('biSlowNote'); if (n) n.style.display = 'block'; }
+  }, 1000);
+
+  try {
+    const items = await fetchBillItems(docNo);
+    if (seq !== billItemsOpenSeq) return;
     renderBillItems(docNo, items);
   } catch (e){
-    $('billItemsBody').innerHTML = `<div style="padding:20px;text-align:center;color:var(--danger)">ดึงรายการไม่ได้: ${escapeHtml(e.message || '')}<br><span style="font-size:11px;color:var(--muted)">ลองปิดแล้วกดใหม่อีกครั้ง</span></div>`;
-  }
+    if (seq !== billItemsOpenSeq) return;
+    $('billItemsBody').innerHTML = `<div style="padding:20px;text-align:center;color:var(--danger);line-height:1.7">ดึงรายการไม่ได้: ${escapeHtml(e.message || '')}<br>
+      <button type="button" class="items-btn" style="margin:8px 0 0" onclick="openBillItems('${escapeAttr(docNo)}','${escapeAttr(docDate || '')}')">🔄 ลองใหม่</button></div>`;
+  } finally { clearInterval(timer); }
 }
 
 function renderBillItems(docNo, items){
@@ -5957,6 +6048,7 @@ function openSlipModal(idx){
     $('slipModalInfo').innerHTML += `<div class="si-row"><span class="si-label"></span><span class="si-val" style="display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end">${
       slipBillDocs.map(d => `<button type="button" class="items-btn" style="margin:0" onclick="openBillItems('${escapeAttr(d)}')" title="ดูรายการสินค้าในบิล ${escapeAttr(d)}">🧾 แสดงรายการสินค้า${slipBillDocs.length > 1 ? ' ' + escapeHtml(d) : ''}</button>`).join('')
     }</span></div>`;
+    prefetchBillItems(slipBillDocs.map(d => [d, '']));   // v6.22: ดึงรายการสินค้าล่วงหน้าตั้งแต่เปิดสลิป
   }
 
   // Assign section (บัญชี and Role > 5 only, and only if no doc yet) — v6.7: คนนอกไม่ได้เลย
