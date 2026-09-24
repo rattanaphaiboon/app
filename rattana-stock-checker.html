@@ -366,6 +366,22 @@
     .inst-steps li{margin-bottom:2px}
     .inst-note{font-size:12px;color:var(--muted);background:var(--row-alt);
       border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;line-height:1.5}
+    /* v4.73: dropdown ของเราเอง — Zebra WebView แตะเลือก option ของ <select> เนทีฟไม่ติด */
+    .zs{position:relative;display:block}
+    .zs-btn{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;
+      min-height:38px;text-align:left;cursor:pointer;font:inherit;color:var(--text);background:var(--card-bg)}
+    .zs-btn::after{content:'▾';font-size:11px;color:var(--muted);flex:0 0 auto;line-height:1}
+    .zs-lab{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+    /* list เป็น position:fixed — ไม่โดน .pb-card (overflow-y:auto) หรือกรอบอื่นตัด */
+    .zs-list{position:fixed;z-index:9600;display:none;background:var(--card-bg);
+      border:1.5px solid var(--border);border-radius:var(--radius-sm);box-shadow:var(--shadow-lg);
+      max-height:52vh;overflow-y:auto;overscroll-behavior:contain;padding:4px}
+    .zs-list.open{display:block}
+    .zs-opt{display:flex;align-items:center;min-height:44px;padding:11px 14px;font-size:14px;
+      border-radius:9px;cursor:pointer;white-space:nowrap;color:var(--text)}
+    .zs-opt:hover,.zs-opt:active{background:var(--row-alt)}
+    .zs-opt.sel{background:var(--gold);color:#fff;font-weight:700}
+    .wh-bar.need-pick .zs-btn{border-color:#cf8400 !important;background:#fff}
     .spinner-box{background:var(--card-bg);border-radius:var(--radius-lg);padding:32px 40px;text-align:center;border-top:4px solid var(--gold);min-width:220px}
     .spinner-ring{width:48px;height:48px;border:5px solid #dde3f0;border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 14px}
 
@@ -1021,7 +1037,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.72';
+const APP_VERSION = 'v4.73';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -1368,6 +1384,144 @@ function showLogin() {
   document.getElementById('appScreen').classList.remove('show');
 }
 
+// ══════════ v4.73: dropdown ของเราเอง (Zebra แตะ <select> เนทีฟไม่ติด) ══════════
+// อาการ: บน Zebra (Android System WebView) <select> กางรายการได้ แต่แตะเลือกไม่ติด onchange ไม่ยิง
+// วิธี: เก็บ <select> เดิมไว้ทั้งดุ้น (ซ่อน) ใช้เป็นที่เก็บค่า → โค้ดทั้งแอปที่อ่าน .value / เติม
+//   innerHTML ใช้ต่อได้เหมือนเดิมไม่ต้องแก้สักจุด · วาดปุ่ม div/button + รายการเองทับไว้
+//   เลือกแล้ว set .value + dispatch 'change' → onchange เดิม (onCountWhChange ฯลฯ) ทำงานปกติ
+// รายการใช้ position:fixed วางตำแหน่งด้วย JS — กันโดน .pb-card (overflow-y:auto) ตัด (บทเรียน delivery-queue v9.89)
+let _zsOpen = null;
+const ZS_LAYOUT_CLASSES = ['wh-bar-sel', 'w-full'];   // class ที่คุมขนาด → ย้ายไปไว้ที่กรอบนอก
+
+function zsInit(id) {
+  const sel = document.getElementById(id);
+  if (!sel || sel.dataset.zs === '1') return;
+  sel.dataset.zs = '1';
+  const cls = [...sel.classList];
+  const wrap = document.createElement('div');
+  wrap.className = ['zs', ...cls.filter(c => ZS_LAYOUT_CLASSES.includes(c))].join(' ');
+  if (sel.getAttribute('style')) wrap.setAttribute('style', sel.getAttribute('style'));
+  sel.parentNode.insertBefore(wrap, sel);
+  wrap.appendChild(sel);
+  sel.style.display = 'none';
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = id + '_btn';
+  btn.className = ['zs-btn', ...cls.filter(c => !ZS_LAYOUT_CLASSES.includes(c))].join(' ');
+  const lab = document.createElement('span');
+  lab.className = 'zs-lab';
+  btn.appendChild(lab);
+  btn.addEventListener('click', ev => { ev.preventDefault(); ev.stopPropagation(); zsToggle(id); });
+  wrap.appendChild(btn);
+
+  // ตัวเลือกถูกเติมทีหลัง (initCountMode / renderDashboard ฯลฯ) → เฝ้า DOM แล้วอัปเดตป้ายเอง
+  // ต้องเฝ้าเพราะ "setter ต้อง re-render label" ไม่งั้นป้ายค้างค่าเก่า
+  try { new MutationObserver(() => zsSync(id)).observe(sel, { childList: true, subtree: true }); } catch {}
+  zsSync(id);
+}
+
+function zsSync(id) {
+  const sel = document.getElementById(id), btn = document.getElementById(id + '_btn');
+  if (!sel || !btn) return;
+  const o = sel.options[sel.selectedIndex];
+  const lab = btn.querySelector('.zs-lab');
+  if (lab) lab.textContent = o ? o.text : '—';
+  if (_zsOpen === id) zsRenderList(id);
+}
+
+function zsListEl() {
+  let l = document.getElementById('zsList');
+  if (!l) {
+    l = document.createElement('div');
+    l.id = 'zsList';
+    l.className = 'zs-list';
+    l.addEventListener('click', ev => ev.stopPropagation());
+    document.body.appendChild(l);
+  }
+  return l;
+}
+
+function zsToggle(id) { if (_zsOpen === id) zsClose(); else { _zsOpen = id; zsRenderList(id); } }
+
+function zsRenderList(id) {
+  const sel = document.getElementById(id), btn = document.getElementById(id + '_btn');
+  if (!sel || !btn) return;
+  const list = zsListEl();
+  list.innerHTML = '';
+  [...sel.options].forEach((o, i) => {
+    const d = document.createElement('div');
+    d.className = 'zs-opt' + (i === sel.selectedIndex ? ' sel' : '');
+    d.textContent = o.text;                      // textContent = ไม่ต้อง escape
+    d.addEventListener('click', ev => { ev.preventDefault(); ev.stopPropagation(); zsPick(id, i); });
+    list.appendChild(d);
+  });
+  list.classList.add('open');
+  zsPlace(id);
+}
+
+// วางตำแหน่งเอง: กว้างพอดีเนื้อหาแต่ไม่แคบกว่าปุ่ม (บทเรียน Check Out v3.3 ตัวเลือกยาวโดนตัด)
+function zsPlace(id) {
+  const btn = document.getElementById(id + '_btn'), list = document.getElementById('zsList');
+  if (!btn || !list) return;
+  const r = btn.getBoundingClientRect();
+  list.style.left = '0px'; list.style.top = '0px'; list.style.width = 'auto';
+  list.style.minWidth = r.width + 'px';
+  const vw = window.innerWidth || document.documentElement.clientWidth || 360;
+  const vh = window.innerHeight || document.documentElement.clientHeight || 640;
+  const lw = Math.min(Math.max(list.offsetWidth, r.width), vw - 16);
+  list.style.width = lw + 'px';
+  let left = Math.min(r.left, vw - lw - 8);
+  if (left < 8) left = 8;
+  const below = vh - r.bottom - 8;
+  const lh = list.offsetHeight;
+  let top = r.bottom + 4;
+  if (lh > below && r.top > below) top = Math.max(8, r.top - lh - 4);   // ข้างล่างไม่พอ → กางขึ้นบน
+  list.style.left = left + 'px';
+  list.style.top = top + 'px';
+}
+
+// เลื่อนจอ/คีย์บอร์ดเด้ง → ขยับรายการตามปุ่ม ไม่ใช่ปิดทิ้ง
+// ⚠️ บน Android/Zebra การแตะปุ่มตอนคีย์บอร์ดเปิดอยู่ = คีย์บอร์ดยุบ = resize ทันที
+//    ถ้าปิดทิ้งตอน resize รายการจะวูบหายทุกครั้งบนเครื่องที่ตั้งใจจะแก้ให้พอดี
+function zsFollow() {
+  if (!_zsOpen) return;
+  const btn = document.getElementById(_zsOpen + '_btn');
+  if (!btn) { zsClose(); return; }
+  const r = btn.getBoundingClientRect();
+  if (!r.width && !r.height) { zsClose(); return; }                                 // ปุ่มถูกซ่อน (สลับแท็บ)
+  if (r.bottom < 0 || r.top > (window.innerHeight || 640)) { zsClose(); return; }   // ปุ่มพ้นจอแล้ว
+  zsPlace(_zsOpen);
+}
+
+function zsPick(id, i) {
+  const sel = document.getElementById(id);
+  zsClose();
+  if (sel && sel.options[i]) {
+    sel.selectedIndex = i;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));   // ให้ onchange เดิมทำงานเหมือน select จริง
+  }
+  zsSync(id);
+}
+
+function zsClose() {
+  const l = document.getElementById('zsList');
+  if (l) { l.classList.remove('open'); l.innerHTML = ''; }
+  _zsOpen = null;
+}
+
+document.addEventListener('click', () => { if (_zsOpen) zsClose(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && _zsOpen) zsClose(); });
+window.addEventListener('resize', zsFollow);
+// ⚠️ ดักแบบ capture จะจับ scroll ของ "ตัวรายการเอง" ด้วย (list มี overflow-y:auto)
+//    ถ้าไม่ยกเว้น = รายการยาวเลื่อนดูไม่ได้เลย เด้งกลับทุกครั้งที่นิ้วขยับ
+window.addEventListener('scroll', e => {
+  if (!_zsOpen) return;
+  const l = document.getElementById('zsList');
+  if (l && e.target && e.target.nodeType && l.contains(e.target)) return;
+  zsFollow();
+}, true);
+
 // ══════════ v4.72: ปุ่มติดตั้งแอปลงเครื่อง (PWA) ══════════
 // แอปมี manifest (stock-manifest.json · display:standalone · ไอคอน PNG จริง 192/512) + service worker
 // อยู่แล้ว = ติดตั้งได้มานานแล้ว แต่ปุ่มซ่อนอยู่ในเมนูเบราว์เซอร์ ไม่มีใครหาเจอ → ทำปุ่มเรียกตรง ๆ
@@ -1447,6 +1601,8 @@ function paintInstallUI() {
 
 function enterApp() {
   paintInstallUI();   // v4.72
+  // v4.73: แปลง <select> ทุกตัวเป็น dropdown ของเราเอง (Zebra แตะเนทีฟไม่ติด)
+  ['countWh', 'scrapWh', 'putawayWh', 'dashWh', 'dashCounter', 'dashStatus'].forEach(zsInit);
   // Compute visible warehouses
   if (currentUser.role >= ALL_WAREHOUSE_ROLE) {
     visibleWh = [...WH_LIST];
@@ -2419,6 +2575,7 @@ function counterTag() {
 const countStoreKey = wh => `rattana_count_${wh}_${counterTag()}`;
 
 function setMode(mode) {
+  zsClose();   // v4.73: เปิด dropdown ค้างแล้วสลับแท็บ รายการจะลอยทับแท็บใหม่
   // แท็บ summary รวมอยู่กับ count (ต่อท้าย); history แยกเป็นแท็บของตัวเอง
   if (mode === 'summary') mode = 'count';
   currentMode = mode;
@@ -4383,6 +4540,7 @@ function renderScrapPending() {
     <button class="btn btn-primary btn-block" style="margin-top:14px" onclick="confirmScrap()" type="button">✓ เพิ่มเข้ารายการ</button>
     <button class="btn btn-outline btn-block" style="margin-top:8px" onclick="cancelScrap()" type="button">ยกเลิก</button>
   </div></div>`;
+  zsInit('scrapUnit');   // v4.73: การ์ดนี้วาดใหม่ทุกครั้ง → ต้องแปลง dropdown ใหม่ทุกครั้งด้วย
   // เจอ → โฟกัสช่องจำนวน (เด้งคีย์บอร์ดตัวเลข) · ไม่เจอ → โฟกัสช่องชื่อให้พิมพ์ก่อน
   setTimeout(() => {
     if (sp.found) { const q = document.getElementById('scrapQty'); if (q) { q.focus(); q.select(); } }
