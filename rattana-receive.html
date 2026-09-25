@@ -82,6 +82,9 @@ header{background:var(--navy);color:#fff;padding:12px 16px;position:sticky;top:0
 .po-item-n{flex:1;min-width:0;line-height:1.35}
 .po-item-q{text-align:right;white-space:nowrap;line-height:1.35}
 .po-item-q span{display:block;font-size:11px;color:var(--muted);font-weight:400}
+.ln-price{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;font-size:12px;color:var(--muted);margin-top:8px;padding-top:8px;border-top:1px dashed var(--border)}
+.ln-price b{color:var(--text);font-size:13px;font-variant-numeric:tabular-nums}
+.ln-price .muted{opacity:.75}
 
 .card{background:var(--card-bg);border-radius:var(--radius-md);border:1px solid var(--border);box-shadow:var(--shadow-md)}
 .card-gold{border-top:3px solid var(--gold)}
@@ -786,6 +789,66 @@ function loadProductsFromSheet(lines,cb){
     });
   });
 }
+/* ═══ ราคาที่รับของเข้าล่าสุด — อ่านจากแท็บ IB1Y (ใบรับจริงย้อนหลัง) ═══
+   IB1Y.UNIT_PRICE เป็นราคาต่อหน่วย **รวม VAT แล้ว** (= TOTALBAHT / BUY) เทียบกับ PO ได้ตรง ๆ
+   DOC_DATE มาเป็น "D-2026/09/19" เรียงเป็นสตริงได้เลยเพราะรูปแบบคงที่
+   ดูย้อนหลัง 1 ปีพอ ถ้าไม่เคยรับเลยก็ไม่ต้องเทียบ */
+var LASTP={}, LP_ERR='';
+function loadLastPrices(lines,cb){
+  var want=[],seen={};
+  (lines||[]).forEach(function(L){
+    (L.codes||[]).forEach(function(c){
+      var b=String(c.bc||'').trim();
+      if(b&&!seen[b]){seen[b]=1;if(LASTP[b]===undefined)want.push(b);}
+    });
+  });
+  if(!want.length){cb&&cb();return;}
+  var d=new Date();d.setFullYear(d.getFullYear()-1);
+  var from='D-'+d.getFullYear()+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+String(d.getDate()).padStart(2,'0');
+  var rx=want.map(function(b){return b.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');}).join('|');
+  gvizQuery(POIB.id,{gid:'1019394038'},
+    "select M,E,T,O where M matches '"+rx+"' and E >= '"+from+"' order by E desc",
+    function(res,err){
+      if(err){LP_ERR=err;cb&&cb(err);return;}
+      LP_ERR='';
+      /* เรียงใหม่→เก่าแล้ว ตัวแรกที่เจอของแต่ละบาร์โค้ดคือครั้งล่าสุด */
+      res.rows.forEach(function(r){
+        var bc=String(r[0]||'').trim();
+        if(!bc||LASTP[bc])return;
+        LASTP[bc]={price:Number(String(r[2]||'0').replace(/,/g,''))||0,
+                   date:String(r[1]||'').replace(/^D-/,''),unit:String(r[3]||'')};
+      });
+      want.forEach(function(b){if(LASTP[b]===undefined)LASTP[b]=null;});   /* ไม่เคยรับ = จำไว้ ไม่ต้องถามซ้ำ */
+      cb&&cb();
+    });
+}
+/* เทียบราคา PO (รวม VAT) กับราคาที่รับเข้าครั้งล่าสุดของสินค้าตัวนั้น */
+function lastPriceOf(L){
+  for(var i=0;i<(L.codes||[]).length;i++){
+    var r=LASTP[String(L.codes[i].bc||'').trim()];
+    if(r)return r;
+  }
+  return null;
+}
+function priceRow(L){
+  var poP=Number(L.priceVat||0);
+  if(!poP)return '';
+  var lp=lastPriceOf(L);
+  var head='<span>PO รวม VAT <b>'+nf(Math.round(poP*100)/100)+'</b>/'+esc(L.unit)+'</span>';
+  if(!lp)return '<div class="ln-price">'+head+'<span class="muted">ไม่เคยรับเข้าใน 1 ปี — ไม่มีราคาเทียบ</span></div>';
+  var d=Math.round((poP-lp.price)*100)/100;
+  /* PO คิดราคาต่อหน่วยจาก TOTAL/จำนวน ส่วน IB1Y ปัดมาให้แล้ว ต่างกันระดับสตางค์เป็นเรื่องปัดเศษ
+     ไม่ใช่ราคาเปลี่ยน — ถ้าเตือนทุกสตางค์เดี๋ยวคนเลิกเชื่อ */
+  var impact=Math.round(d*(L.openU||0));
+  var tag=Math.abs(d)<0.05
+    ?'<span class="badge badge-ok">ราคาตรงกัน</span>'
+    :(d>0?'<span class="badge badge-danger">แพงขึ้น '+nf(d)+'/'+esc(L.unit)+(impact?' · ทั้งใบ +'+nf(impact)+' บาท':'')+'</span>'
+         :'<span class="badge badge-ok">ถูกลง '+nf(-d)+'/'+esc(L.unit)+(impact?' · ทั้งใบ '+nf(impact)+' บาท':'')+'</span>');
+  return '<div class="ln-price">'+head
+    +'<span>รับล่าสุด <b>'+nf(Math.round(lp.price*100)/100)+'</b>'
+    +(lp.unit&&parseUnit(lp.unit).unit!==L.unit?' /'+esc(parseUnit(lp.unit).unit):'')
+    +' <span class="muted">'+esc(lp.date)+'</span></span>'+tag+'</div>';
+}
 /* SKU_USAGE เก็บเป็นลิงก์ Drive บ้าง เป็น id เปล่า ๆ บ้าง */
 function driveId(v){
   var s=String(v||'').trim(); if(!s)return '';
@@ -840,15 +903,19 @@ function docToPO(d){
     var k=String(l.bc||l.name);
     if(!byBc[k]){
       var u=parseUnit(l.unit);
-      byBc[k]={name:l.name||k,unit:u.unit,f:u.f,ord:0,rcv:0,price:0,
+      byBc[k]={name:l.name||k,unit:u.unit,f:u.f,ord:0,rcv:0,price:0,buy:0,total:0,
                codes:[{bc:String(l.bc||''),lb:u.unit+(u.f>1?' x'+u.f:''),f:u.f}]};
       order.push(k);
     }
     var row=byBc[k];
     row.ord+=(Number(l.qty)||0)+(Number(l.free)||0);   /* ซื้อ + แถม = ของที่ต้องนับจริง */
+    row.buy+=(Number(l.qty)||0);                       /* ของแถมไม่คิดเงิน ราคาต่อหน่วยต้องหารด้วยตัวนี้ */
+    row.total+=(Number(l.total)||0);
     if((Number(l.qty)||0)>0&&!row.price)row.price=Number(l.price)||0;
     if(!row.price)row.price=Number(l.price)||0;
   });
+  /* ราคาต่อหน่วย "รวม VAT" ตามใบสั่งซื้อ */
+  Object.keys(byBc).forEach(function(k){var r=byBc[k];r.priceVat=r.buy?r.total/r.buy:0;});
   return {ref:d.ref,wh:d.wh||'',vendor:d.vendor||'',due:d.due||'',remark:d.remark||'',
           lines:order.map(function(k){return byBc[k];}).filter(function(x){return x.ord>0;})};
 }
@@ -858,7 +925,7 @@ function docToPO(d){
    ขั้นที่ 3 ดึง OR6M เฉพาะคอลัมน์ที่ใช้ แล้วตัดใบที่อยู่ในชุดข้อ 2 ออก */
 var POIB={id:'1MGQ8DrVE2u4KvsDmiTVY6jdcenT4WyMcQs2m7GUF8OQ',po:'OR6M',ib:'IB1Y'};
 var PO_NEED=['DI_DATE','DI_REF','WL_CODE','AP_CODE','AP_NAME','GOODS_CODE','SKU_NAME',
-             'TRD_UTQNAME','TRD_QTY','TRD_Q_FREE','TRD_U_PRC','TRH_SHIP_DATE','DI_REMARK'];
+             'TRD_UTQNAME','TRD_QTY','TRD_Q_FREE','TRD_U_PRC','TOTAL','TRH_SHIP_DATE','DI_REMARK'];
 
 function loadPOFromSheet(cb){
   gvizQuery(POIB.id,POIB.ib,'select * limit 1',function(peek,e1){
@@ -904,7 +971,9 @@ function loadPOFromSheet(cb){
             }
             byRef[ref].lines.push({bc:String(r[ix['GOODS_CODE']]||'').trim(),
               name:r[ix['SKU_NAME']]||'',unit:r[ix['TRD_UTQNAME']]||'',
-              qty:qty,free:free,price:Number(String(r[ix['TRD_U_PRC']]||'0').replace(/,/g,''))||0});
+              qty:qty,free:free,price:Number(String(r[ix['TRD_U_PRC']]||'0').replace(/,/g,''))||0,
+              /* TRD_U_PRC เป็นราคา "ไม่รวม VAT" · TOTAL รวม VAT แล้ว → หารด้วยจำนวนซื้อได้ราคาต่อหน่วยรวม VAT */
+              total:Number(String(r[ix['TOTAL']]||'0').replace(/,/g,''))||0});
           });
           var docs=order.map(function(k){return byRef[k];});
           docs.sort(function(a,b){return String(a.due).localeCompare(String(b.due));});
@@ -1338,7 +1407,9 @@ var palId=null;
 function prefetchMaster(v){
   var lines=[];
   (v.pos||[]).forEach(function(ref){var p=po(ref);if(p)p.lines.forEach(function(l){lines.push(l);});});
-  if(lines.length)loadProductsFromSheet(lines,function(){});
+  if(!lines.length)return;
+  loadProductsFromSheet(lines,function(){});
+  loadLastPrices(lines,function(){});   /* ราคาที่รับเข้าล่าสุด ยิง IB1Y ~10 วิ โหลดล่วงหน้าไว้เลย */
 }
 function markDone(id){
   palId=id;
@@ -1597,6 +1668,8 @@ function openCount(id){
         setTimeout(function(){var q=document.getElementById('hitQty');if(q){q.focus();q.select();}},50);
       }
     };
+    /* ราคาที่รับเข้าล่าสุด — ถ้า prefetch ไว้แล้วจะคืนทันที */
+    loadLastPrices(cur.lines.slice(),function(){renderLines();});
     /* ชีทมาสเตอร์เป็นทางหลัก · Apps Script เป็นทางสำรอง */
     loadProductsFromSheet(cur.lines.slice(),function(err,n){
       if(!err||!hasGas()){after(err);return;}
@@ -1624,7 +1697,7 @@ function buildLines(){
     /* บาร์โค้ดทุกหน่วย + รูป เอาจากมาสเตอร์ก่อน ถ้ายังไม่มาใช้ของ PO ไปพลาง */
     var codes=l.codes, img='', m=pddtFind(l.codes,l.name);
     if(m&&m.units.length){codes=m.units;img=m.img||'';fromMaster++;}
-    var li={po:ref,name:l.name,unit:l.unit,f:l.f,price:l.price,codes:codes,img:img,
+    var li={po:ref,name:l.name,unit:l.unit,f:l.f,price:l.price,priceVat:l.priceVat||0,codes:codes,img:img,
             needEa:openU*l.f,openU:openU,gotEa:keep[ref+'|'+l.name]||0};
     cur.lines.push(li);
     /* ตรงตัวอย่างเดียวเท่านั้น — เดิมมี index แบบตัด 0 นำหน้าด้วย ทำให้ยิงบาร์โค้ดผิดตัวแล้วผ่าน
@@ -1827,6 +1900,7 @@ function renderLines(){
       +'<div class="ln-need">ต้องรับ<br><b style="font-size:15px;color:var(--text)">'+nf(L.openU)+' '+L.unit+'</b>'
       +'<br>('+nf(L.needEa)+' ชิ้น)</div></div>'
       +'<div class="bar"><div class="bar-i '+(cls==='full'?'':cls)+'" style="width:'+Math.min(100,pct)+'%"></div></div>'
+      +priceRow(L)
       +'<div class="ln-foot">'+tag+'<span class="ln-scans">'+(uTxt||'ยังไม่ได้ยิง')+'</span></div></div>';
   }).join('');
   document.getElementById('progNote').textContent=full+' / '+cur.lines.length+' รายการครบ';
