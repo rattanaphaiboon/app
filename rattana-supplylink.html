@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>SupplyLink — คู่ค้ารัตนไพบูลย์ v1.18.0</title>
+<title>SupplyLink — คู่ค้ารัตนไพบูลย์ v1.20.0</title>
 <meta name="theme-color" content="#0A1F47">
 <link rel="icon" type="image/png" sizes="64x64" href="icons/rattana-supplylink-64.png">
 <link rel="icon" type="image/png" sizes="256x256" href="icons/rattana-supplylink.png">
@@ -756,6 +756,16 @@ button{cursor:pointer}
 .dlist{display:flex;flex-direction:column;gap:var(--sp-4)}
 .whdot{width:9px;height:9px;flex-shrink:0;border-radius:3px;display:block}
 .dfrow{display:flex;align-items:center;gap:var(--sp-2);min-width:0;min-height:60px;padding:6px var(--pad-card) 6px 4px}
+.rvrow{display:flex;align-items:stretch;gap:0;padding:0;overflow:hidden}
+.rvrow.on{box-shadow:inset 0 0 0 2px var(--sel)}
+.rvrow > .tick{align-self:center;margin-left:4px}
+.rvrow > .open{flex:1 1 auto;min-width:0;border:0;background:none;text-align:left;color:inherit;font:inherit;padding:14px 14px 14px 6px;cursor:pointer}
+.rvrow > .open.full{padding-left:14px}
+.rvbar{flex-shrink:0;display:flex;align-items:center;gap:10px;padding:10px var(--pad-screen) calc(10px + env(safe-area-inset-bottom));
+  background:var(--card);border-top:1px solid var(--line-2);box-shadow:0 -6px 18px rgba(10,31,71,.08);z-index:var(--z-sticky)}
+.rvbar .grow{min-width:0}
+.rvbar b{display:block;font-size:var(--fs-md)}
+.rvbar span{display:block;font-size:var(--fs-meta);color:var(--ink-3)}
 .dfrow.on{background:var(--card-2)}
 .dfrow .open{display:flex;align-items:center;gap:var(--sp-2);flex:1 1 auto;min-width:0;min-height:var(--tap);
   border:0;background:none;padding:0;color:inherit;text-align:left}
@@ -1541,7 +1551,7 @@ button{cursor:pointer}
 
 /* ══ ตั้งค่า — แก้ตรงนี้ที่เดียว ══ */
 var CONFIG = {
-  APP_VERSION: 'v1.18.0',
+  APP_VERSION: 'v1.20.0',
   /* LIFF ของแอปนี้: LINE Developers → provider RTNPurchase → channel "RTNPurchase Supplier" (2011693023) → แท็บ LIFF
      ต้องอยู่ channel เดียวกับระบบลงทะเบียนเดิม ถึงจะได้ LINE User ID ตรงกับแท็บ Login Users · ว่าง = ยังไม่เปิดใช้จริง */
   LIFF_ID: '2011693023-xbdsN1K7',
@@ -1912,36 +1922,47 @@ function freeVal(a){
 function freeMatch(po, a){ return paidLines(po).filter(function (l) { return l.p === a.p; }); }
 /* ปันทุน: ข. ของแถมตัวเดียวกัน → บรรทัดนั้นได้ของเพิ่ม (หารจำนวนลังที่ได้จริง) · ก. ของแถมตัวอื่น → หักมูลค่าจากทุกบรรทัดตามสัดส่วนยอดเงิน
    คืน ทุน/ลัง ก่อนปัน (หลังส่วนลดท้ายบิล) กับหลังปัน ของทุกบรรทัดที่คิดเงิน */
+/* ปันทุนอัตโนมัติ — ของแถมทุกตัวในใบ (ที่จัดซื้อเปิดมา + ที่ซัพเพิ่ม) · ส่วนลดรายการ · ส่วนลดท้ายบิล (rate)
+   ของแถมแต่ละตัว: ตัวเดียวกับที่ซื้อ → หารจำนวนลังที่ได้จริง (ข.) · ไม่มี แต่ไซส์เดียวกัน → หักมูลค่าจากรายการไซส์นั้นตามยอดเงิน
+   · ไม่มีทั้งคู่ → หักมูลค่าจากทุกรายการตามยอดเงิน (ก.) · มูลค่า = ที่ซัพใส่ หรือทุนล่าสุดของสินค้านั้น */
 function poAlloc(po, rate){
   var rows = paidLines(po).map(function (l) {
     var p = P[l.p], cs = toCSk(p, l.u, lineQty(po, l)), amt = lineAmt(po, l) * (1 - (rate || 0));
     var sf = l.add ? null : lineSameFree(po, l);
-    return { l:l, cs:cs, amt:amt, free:sf ? toCSk(p, sf.u, sf.q) : 0, cut:0 };
+    return { l:l, p:p, cs:cs, amt:amt, free:sf ? toCSk(p, sf.u, sf.q) : 0, cut:0 };
   });
-  var tot = 0, pool = 0, same = 0, byVal = 0, noVal = [];
-  rows.forEach(function (r) { tot += r.amt; if (r.free) same++; });
-  addFrees(po).forEach(function (a) {
-    var q = numIn(a.x.q); if (!(q > 0)) return;
-    var hit = rows.filter(function (r) { return r.l.p === a.p && r.cs > 0; });
+  var same = 0, bySize = 0, byVal = 0, pool = 0, noVal = [], how = {};
+  rows.forEach(function (r) { if (r.free) same++; });
+  var frees = poFree(po).map(function (f, i) { return { key:fkey(po, i), p:f.p, u:freeUnit(f), q:freeQty(po, f, i), po:true }; })
+    .concat(addFrees(po).map(function (a) { return { key:a.key, p:a.p, u:a.u, q:numIn(a.x.q), a:a }; }));
+  frees.forEach(function (fr) {
+    if (!(fr.q > 0) || !P[fr.p]) return;
+    var fp = P[fr.p], hit = rows.filter(function (r) { return r.l.p === fr.p && r.cs > 0; });
     if (hit.length) {
       var hcs = 0; hit.forEach(function (r) { hcs += r.cs; });
-      var fcs = toCSk(P[a.p], a.u, q);
-      hit.forEach(function (r) { r.free += fcs * r.cs / hcs; }); same++;
-    } else {
-      var v = freeVal(a); if (!(v > 0)) { noVal.push(a.key); return; }
-      pool += v * q; byVal++;
+      var fcs = toCSk(fp, fr.u, fr.q);
+      hit.forEach(function (r) { r.free += fcs * r.cs / hcs; }); same++; how[fr.key] = 'same';
+      return;
     }
+    var v = fr.a ? freeVal(fr.a) : lastUnitCost(fp, fr.u);
+    if (!(v > 0)) { if (fr.a) noVal.push(fr.key); else how[fr.key] = 'none'; return; }
+    var val = v * fr.q, sz = String(fp.size || '').trim();
+    var grp = sz ? rows.filter(function (r) { return String(r.p.size || '').trim() === sz; }) : [];
+    if (grp.length) { bySize++; how[fr.key] = 'size'; } else { grp = rows; byVal++; pool += val; how[fr.key] = 'val'; }
+    var tot = 0; grp.forEach(function (r) { tot += r.amt; });
+    if (tot > 0) grp.forEach(function (r) { r.cut += val * r.amt / tot; });
   });
-  if (pool > 0 && tot > 0) rows.forEach(function (r) { r.cut = Math.min(r.amt, pool * r.amt / tot); });
-  var out = { by:{}, same:same, byVal:byVal, pool:round2(pool), noVal:noVal };
+  var out = { by:{}, same:same, bySize:bySize, byVal:byVal, pool:round2(pool), noVal:noVal, how:how };
   rows.forEach(function (r) {
     if (!(r.cs > 0)) return;
-    out.by[ckey(po, r.l)] = { before:r.amt / r.cs, after:(r.amt - r.cut) / (r.cs + r.free), freeCS:r.free, cut:r.cut };
+    var cut = Math.min(r.amt, r.cut);
+    out.by[ckey(po, r.l)] = { before:r.amt / r.cs, after:(r.amt - cut) / (r.cs + r.free), freeCS:r.free, cut:cut };
   });
   return out;
 }
+function lastUnitCost(p, u){ var c = lastCost(p); return c ? round2(c.ex / (perCS(p, u) || 1)) : 0; }
 function toCSk(p, u, q){ if (u === 'CS') return q; var n = perCS(p, u); return n ? q / n : 0; }   /* ไม่รู้ว่าหน่วยนี้กี่ชิ้น = 0 (ไม่ปัน ไม่เตือนผิด) */
-function allocOn(po){ var a = poAlloc(po, 0); return a.same + a.byVal > 0 || po.lines.some(function (l) { return lineDisc(po, l) > 0; }); }
+function allocOn(po){ var a = poAlloc(po, 0); return a.same + a.bySize + a.byVal > 0 || po.lines.some(function (l) { return lineDisc(po, l) > 0; }); }
 /* ยอดก่อน VAT · VAT · รวมทั้งสิ้น — บรรทัดที่ไม่มี VAT (เช่น นมโรงเรียน ข้าวสาร) ไม่คิด VAT */
 function sums_(po, amt){
   var net = 0, vatBase = 0;
@@ -3778,21 +3799,33 @@ V.review = function () {
   if (sel) return rvDetail(sel);
   var wait = items.filter(function (x) { return !rvDone(x); }).sort(rvSort);
   var done = items.filter(rvDone).sort(function (a, b) { return String(b.at || b.time).localeCompare(String(a.at || a.time)); });
-  var list = r.tab === 'done' ? done : wait;
+  var list = r.tab === 'done' ? done : wait, pick = r.pick || (r.pick = {}), canPick = r.tab !== 'done';
+  Object.keys(pick).forEach(function (k) { if (!wait.some(function (x) { return x.po === k; })) delete pick[k]; });
+  var sel = wait.filter(function (x) { return pick[x.po]; }), selDiff = 0;
+  sel.forEach(function (x) { selDiff += x.gross - x.headGross; });
+  var allSt = sel.length && sel.length === wait.length ? 'true' : sel.length ? 'mixed' : 'false';
   return '<div class="scr" id="s-review">'+hdr('ตรวจ PO ที่ซัพแก้','home')+
     '<div style="flex-shrink:0;padding:10px var(--pad-screen) 0;background:var(--paper)"><div class="filters">'+
       '<button class="tag" aria-pressed="'+(r.tab !== 'done')+'" data-act="rvtab:wait">รอตรวจ '+wait.length+'</button>'+
       '<button class="tag" aria-pressed="'+(r.tab === 'done')+'" data-act="rvtab:done">ตรวจแล้ว '+done.length+'</button>'+
       '<span class="sp"></span><button class="btn sm ghost" data-act="rvreload"'+(r.loading ? ' disabled' : '')+'>'+ic('refresh',15)+'โหลดใหม่</button></div></div>'+
     '<div class="body" style="padding-top:var(--sp-4);gap:var(--sp-3)" data-tweak="ตรวจ PO">'+
+      (canPick && wait.length > 1 ? '<div class="selall" data-tweak-card="แถบเลือกทั้งหมด">'+
+        '<button class="tick" type="button" aria-pressed="'+allSt+'" aria-label="เลือกทั้งหมด" data-act="rvall">'+
+          '<i><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg><b class="mx"></b></i></button>'+
+        '<b class="grow one">เลือกทั้งหมด '+wait.length+' ใบ</b><span class="t one" style="flex-shrink:0">ลากที่ช่องติ๊กได้</span></div>' : '')+
       (r.loading && !r.items ? '<div class="empty">กำลังโหลด…</div>' : r.err ? '<div class="empty">'+esc(r.err)+'</div>' :
        !list.length ? '<div class="empty">'+(r.tab === 'done' ? 'ยังไม่มีใบที่ตรวจใน 14 วัน' : 'ไม่มีใบรอตรวจ')+'</div>' :
-       list.map(function (x) {
+       '<div id="rvlist" style="display:flex;flex-direction:column;gap:var(--sp-3)">'+list.map(function (x) {
          var over = x.due ? -daysFromToday(x.due) : 0, diff = round2(x.gross - x.headGross);
          var chip = rvDone(x) ? '<span class="chip '+(x.status === 'อนุมัติ' ? 'teal' : 'clay')+'" style="height:22px">'+esc(x.status)+'</span>'
                   : over > 0 ? '<span class="chip clay" style="height:22px">เลยกำหนด '+over+' วัน</span>'
                   : x.due ? '<span class="chip goldsoft" style="height:22px">ส่ง '+esc(thShort(x.due))+'</span>' : '';
-         return '<button class="card '+(over > 0 && !rvDone(x) ? 'acc-clay' : 'acc-gold')+'" style="padding:14px;text-align:left;width:100%;border:0;display:block" data-act="rvopen:'+esc(x.po)+'" data-tweak-card="การ์ดรอตรวจ">'+
+         var on = canPick && !!pick[x.po];
+         return '<div class="card rvrow '+(over > 0 && !rvDone(x) ? 'acc-clay' : 'acc-gold')+(on ? ' on' : '')+'"'+(canPick ? ' data-rms="'+esc(x.po)+'"' : '')+' data-tweak-card="การ์ดรอตรวจ">'+
+           (canPick ? '<button class="tick" type="button" aria-pressed="'+on+'" aria-label="เลือก '+esc(x.po)+'" data-rtick>'+
+             '<i><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg><b class="mx"></b></i></button>' : '')+
+           '<button class="open'+(canPick ? '' : ' full')+'" type="button" data-act="rvopen:'+esc(x.po)+'">'+
            '<div class="flexrow" style="gap:8px;min-width:0">'+(x.wh ? whChip(x.wh) : '')+'<span class="sp"></span>'+chip+'</div>'+
            '<div class="flexrow" style="margin-top:9px;gap:9px;min-width:0"><span class="grow" style="min-width:0">'+
              '<span class="one bb" style="display:block;font-size:16px">'+esc(x.po)+'</span>'+
@@ -3800,10 +3833,54 @@ V.review = function () {
              '<span style="flex-shrink:0;text-align:right"><b class="bb" style="display:block;font-size:15px">'+baht2(x.gross)+'</b>'+
              '<span style="display:block;font-size:11.5px;color:'+(diff ? 'var(--clay)' : 'var(--ink-4)')+'">'+(diff ? (diff > 0 ? '+' : '−') + baht2(Math.abs(diff)) : 'ยอดเท่าเดิม')+'</span></span></div>'+
            '<div class="one dim" style="font-size:11.5px;margin-top:6px">แก้ '+x.edits+' จุด'+(x.added ? ' · เพิ่ม '+x.added+' รายการ' : '')+(x.alloc ? ' · ปันทุน' : '')+' · ส่ง '+esc(thDT(x.time))+'</div>'+
-         '</button>';
-       }).join(''))+
-    '</div></div>';
+         '</button></div>';
+       }).join('')+'</div>')+
+    '</div>'+
+    (canPick && sel.length ? '<div class="rvbar" data-tweak="แถบอนุมัติหลายใบ">'+
+      '<span class="grow"><b class="one">เลือก '+sel.length+' ใบ</b><span class="one">ยอดต่างจาก PO รวม '+(selDiff ? (selDiff > 0 ? '+' : '−') + baht2(Math.abs(selDiff)) : '฿0.00')+'</span></span>'+
+      '<button class="btn sm ghost" data-act="rvclear">ล้าง</button>'+
+      '<button class="btn gold" style="width:auto;padding:0 18px" data-act="rvbatch"'+(S.sending ? ' disabled' : '')+'>'+ic('check',18,'var(--navy)')+'อนุมัติ '+sel.length+' ใบ</button></div>' : '')+
+  '</div>';
 };
+/* ลากติ๊กหลายใบ (ui-kit RK.multiselect) — จับที่ช่องติ๊ก ส่วนอื่นของการ์ดกดเปิดรายละเอียดได้ปกติ */
+var RVMS = null;
+function bindReviewPick(host){
+  if (RVMS) { RVMS.destroy(); RVMS = null; }
+  var list = host.querySelector('#rvlist');
+  if (!list || !window.RK || !RK.multiselect || S.route !== 'review') return;
+  var r = rvState(); r.pick = r.pick || {};
+  RVMS = RK.multiselect(list, {
+    row:'[data-rms]', handle:'[data-rtick]', scroller:host.querySelector('.body'),
+    key:function (el) { return el.getAttribute('data-rms'); },
+    isOn:function (k) { return !!r.pick[k]; },
+    apply:function (k, on) {
+      if (on) r.pick[k] = true; else delete r.pick[k];
+      [].forEach.call(list.querySelectorAll('[data-rms]'), function (row) {
+        if (row.getAttribute('data-rms') !== k) return;
+        row.classList.toggle('on', on);
+        var t = row.querySelector('[data-rtick]'); if (t) t.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+    },
+    onDone:function () { setTimeout(render, 0); }
+  });
+}
+function rvBatch(){
+  var r = rvState(), sel = (r.items || []).filter(function (x) { return !rvDone(x) && r.pick && r.pick[x.po]; });
+  if (!sel.length) return;
+  var diff = 0; sel.forEach(function (x) { diff += x.gross - x.headGross; });
+  openSheet({ title:'อนุมัติ ' + sel.length + ' ใบ?', ok:'อนุมัติ ' + sel.length + ' ใบ', cancel:'ยังก่อน',
+    text:sel.map(function (x) { return x.po; }).slice(0, 6).join(' · ') + (sel.length > 6 ? ' และอีก ' + (sel.length - 6) + ' ใบ' : '') +
+         ' — ยอดต่างจาก PO รวม ' + (diff > 0 ? '+' : diff < 0 ? '−' : '') + baht2(Math.abs(diff)) + ' · อย่าลืมแก้ PO ใน Bplus ให้ตรง',
+    onOk:function () {
+      sendWith('reviewDecide', { ok:1, note:'', items:sel.map(function (x) { return { po:x.po, time:x.time }; }) }).then(function (res) {
+        var done = res.done || [], stale = res.stale || [];
+        sel.forEach(function (x) { if (done.indexOf(x.po) >= 0) { x.status = 'อนุมัติ'; x.at = res.at || ''; x.by = res.by || ''; } delete r.pick[x.po]; });
+        toast('อนุมัติแล้ว ' + done.length + ' ใบ' + (stale.length ? ' · ' + stale.length + ' ใบซัพส่งใหม่หรือตรวจไปแล้ว' : ''));
+        if (stale.length) rvLoad(true);
+        render(); refresh(true);
+      }).catch(function () {});
+    } });
+}
 function rvDetail(x){
   var r = rvState(), done = rvDone(x), note = r.note[x.po] || '', over = x.due ? -daysFromToday(x.due) : 0;
   var groups = {}, order = [];
@@ -4186,7 +4263,8 @@ function poAddBody(po, t, al){
         var p = P[a.p], x = a.x, units = ['EA','PA','BP','CS'].filter(function (u) { return u === 'CS' || eaOf(p, u); }), uth = unitTh(a.u);
         var match = a.kind === 'free' ? freeMatch(po, a) : [], loss = a.kind === 'buy' ? lineLoss(po, a, t.rate, al) : [];
         var bq = junkIn(x.q), bx = junkIn(x.ex), bv = junkIn(x.val), lc = lastCost(p);
-        var sub = a.kind === 'buy' ? 'สินค้าคิดเงิน' : match.length ? 'ของแถม · ปันให้ตัวเดียวกันในใบ' : 'ของแถม · เฉลี่ยให้ทุกรายการตามยอดเงิน';
+        var hw = al.how[a.key];
+        var sub = a.kind === 'buy' ? 'สินค้าคิดเงิน' : hw === 'same' ? 'ของแถม · ปันให้ตัวเดียวกันในใบ' : hw === 'size' ? 'ของแถม · ปันให้ไซส์เดียวกันตามยอดเงิน' : 'ของแถม · เฉลี่ยให้ทุกรายการตามยอดเงิน';
         return '<div class="card padd" data-tweak-card="รายการที่ซัพเพิ่ม">'+
           '<div class="ph"><span class="thumb" style="width:44px;height:44px;background:'+p.bg+'">'+art(p,23)+'</span>'+
             '<span class="grow" style="min-width:0"><span class="one bb" style="display:block;font-size:var(--fs-md)" title="'+esc(p.full || p.name)+'">'+esc(p.name)+'</span>'+
@@ -4258,12 +4336,18 @@ function poLossBox(po, l, p, loss, t){
         '<i>'+esc(per.slice(1))+' · '+vw+(t.rate > 0 ? ' · หักส่วนลดแล้ว' : '')+'</i></div>'+
       '<div title="'+esc(x.tier + ' ' + x.unit)+'"><span>รัตนขายต่อ</span><b class="lo">'+baht2(x.sell * m)+'</b>'+
         '<i>'+esc(x.tier)+'</i></div></div>'+
-    '<div class="one plq">ช่วยรัตนตั้งราคาขาย · ใส่ราคารวม VAT</div>'+
+    (l.add || S.aldOpen[k] ? '' : '<div class="flexrow" style="gap:8px;min-width:0"><span class="grow one" style="font-size:var(--fs-meta);color:var(--clay-deep)" title="มีส่วนลดหรือของแถม กดแล้วปันทุน คิดขาดทุนใหม่ทันที">ลดขาดทุนด้วย</span>'+
+      '<button class="btn sm lb2" data-act="aldquick:'+esc(k)+'|disc">ส่วนลด</button><button class="btn sm lb2" data-act="aldquick:'+esc(k)+'|free">ของแถม</button></div>')+
+    '<div class="one plq">หรือช่วยรัตนตั้งราคาขาย · ใส่ราคารวม VAT</div>'+
     '<label class="pf"><span>ราคาแนะนำขายปลีก / ชิ้น</span><input class="pin" inputmode="decimal" value="'+esc(a.rec || '')+'" data-adv="'+esc(k)+'|rec" aria-label="ราคาแนะนำขายปลีกต่อชิ้น รวม VAT"><i>'+esc(nowEA)+'</i></label>'+
     '<div class="pgrid" style="grid-template-columns:minmax(0,1.25fr) minmax(0,1fr)">'+
       '<label class="pf"><span>ราคาต่ำสุด / ลัง</span><input class="pin" inputmode="decimal" value="'+esc(a.low || '')+'" data-adv="'+esc(k)+'|low" aria-label="ราคาต่ำสุดต่อลัง รวม VAT"><i>'+esc(nowCS)+'</i></label>'+
       '<label class="pf"><span>ต้องซื้อขั้นต่ำ (ลัง)</span><input class="pin r" inputmode="numeric" value="'+esc(a.min || '')+'" data-adv="'+esc(k)+'|min" aria-label="ต้องซื้อขั้นต่ำกี่ลังถึงได้ราคาต่ำสุด"><i>ถึงได้ราคาต่ำสุด</i></label>'+
     '</div></div>';
+}
+function freeHowTxt(po, key){
+  var h = poAlloc(po, poTotals(po).rate).how[key];
+  return h === 'same' ? ' · ปันทุนตัวเดียวกันแล้ว' : h === 'size' ? ' · ปันทุนไซส์เดียวกันแล้ว' : h === 'val' ? ' · ปันทุนทุกรายการแล้ว' : h === 'none' ? ' · ไม่รู้มูลค่า ไม่ได้ปัน' : '';
 }
 function poFreeEdit(po, free){
   return '<div class="sect" style="gap:9px">'+
@@ -4276,7 +4360,7 @@ function poFreeEdit(po, free){
         '<span class="thumb" style="width:44px;height:44px;background:'+p.bg+'">'+art(p,23)+'</span>'+
         '<span class="grow" style="min-width:0"><span class="one bb" style="display:block;font-size:var(--fs-md)" title="'+esc(p.full || p.name)+'">'+esc(p.name)+'</span>'+
           '<span class="one" style="display:block;font-size:var(--fs-meta);color:'+(bf != null ? 'var(--clay)' : 'var(--gold-deep)')+';margin-top:2px">'+
-            (bf != null ? 'ใส่เป็นตัวเลข · ' : ch ? 'เดิม ' : 'ตามใบสั่งซื้อ ')+'แถม '+fmtN(f.qty)+' '+esc(uth)+'</span></span>'+
+            (bf != null ? 'ใส่เป็นตัวเลข · ' : ch ? 'เดิม ' : 'ตามใบสั่งซื้อ ')+'แถม '+fmtN(f.qty)+' '+esc(uth)+esc(freeHowTxt(po, fkey(po, i)))+'</span></span>'+
         '<label class="pf" style="width:92px;flex-shrink:0"><span>แถม ('+esc(uth)+')</span>'+
           '<input class="pin'+(bf != null ? ' bad' : ch ? ' ch' : '')+'" inputmode="decimal" value="'+esc(bf != null ? bf : String(round2(q)))+'" data-ff="'+esc(fkey(po, i))+'" aria-label="ของแถม '+esc(p.name)+' เป็น'+esc(uth)+'"'+(bf != null ? ' aria-invalid="true"' : '')+'></label>'+
       '</div>';
@@ -5352,6 +5436,7 @@ function render(){
   }
   if (window.RK && RK.selectifyAll) RK.selectifyAll(host);
   bindDefectPick(host);
+  bindReviewPick(host);
   var toTop = $('toTop'); if (toTop) toTop.classList.remove('on');
   syncTrap();
 }
@@ -5857,6 +5942,11 @@ function readDoc(file, i){
 /* ══ events ══ */
 var notifyTmr;
 document.addEventListener('click', function (e) {
+  var rtk = e.target.closest && e.target.closest('[data-rtick]');
+  if (rtk) {                                                   /* แตะ/ลากจัดการโดย RK.multiselect · ตรงนี้เฉพาะคีย์บอร์ด */
+    if (e.detail === 0) { var rr = rtk.closest('[data-rms]'), rk = rr && rr.getAttribute('data-rms'), rs = rvState(); rs.pick = rs.pick || {}; if (rk) { if (rs.pick[rk]) delete rs.pick[rk]; else rs.pick[rk] = true; render(); } }
+    return;
+  }
   var tk = e.target.closest && e.target.closest('[data-tick]');
   if (tk) {                                                   /* แตะ/ลากจัดการโดย RK.multiselect แล้ว · ตรงนี้เฉพาะกด Enter/Space จากคีย์บอร์ด */
     if (e.detail === 0) { var tr = tk.closest('[data-ms]'), tkey = tr && tr.getAttribute('data-ms'); if (tkey) { if (S.dsel[tkey]) delete S.dsel[tkey]; else S.dsel[tkey] = true; render(); } }
@@ -5892,6 +5982,13 @@ document.addEventListener('click', function (e) {
   if (k === 'doctab')  { S.docTab = v; return render(); }
   if (k === 'missprod'){ S.pfilter = 'miss'; S.pq = ''; return go('products'); }
   if (k === 'rvtab') { rvState().tab = v; return render(); }
+  if (k === 'rvall') {
+    var ra = rvState(), wl = (ra.items || []).filter(function (x) { return !rvDone(x); }), allOn = wl.length && wl.every(function (x) { return ra.pick && ra.pick[x.po]; });
+    ra.pick = {}; if (!allOn) wl.forEach(function (x) { ra.pick[x.po] = true; });
+    return render();
+  }
+  if (k === 'rvclear') { rvState().pick = {}; return render(); }
+  if (k === 'rvbatch') return rvBatch();
   if (k === 'rvopen') { rvState().sel = v; return render(); }
   if (k === 'rvback') { rvState().sel = ''; return render(); }
   if (k === 'rvreload') { rvLoad(true); return render(); }
@@ -5904,6 +6001,14 @@ document.addEventListener('click', function (e) {
     var ax = S.ald[akey] = Object.assign({ mode:'disc', dm:'pct', dv:'', fq:'', fu:'' }, S.ald[akey] || {});
     if (k === 'aldmode') ax.mode = aval; else if (k === 'alddm') ax.dm = aval; else ax.fu = aval;
     return render();
+  }
+  if (k === 'aldquick') {
+    var aq = v.split('|'), aqm = aq.pop(), aqk = aq.join('|');
+    markEdit(poById(S.poId));
+    S.ald[aqk] = Object.assign({ dm:'pct', dv:'', fq:'', fu:'' }, S.ald[aqk] || {}, { mode:aqm });
+    S.aldOpen[aqk] = true; render();
+    var fi = document.querySelector('[data-ald="' + aqk + '|' + (aqm === 'free' ? 'fq' : 'dv') + '"]'); if (fi) fi.focus({ preventScroll:true });
+    return;
   }
   if (k === 'aldclear') { delete S.ald[v]; delete S.aldOpen[v]; return render(); }
   if (k === 'addpick') return openAddPick(v === 'free' ? 'free' : 'buy');
@@ -6051,7 +6156,7 @@ document.addEventListener('click', function (e) {
                   ['ยอดรวม', baht2(ps.gross) + ' รวม VAT'], ['ผู้ยืนยัน', S.signer]],
             btn:{ label:'จองคิวส่งของ', r:'book', extra:'po=' + encodeURIComponent(poS.id) } }
         : { title:'ซัพแก้ใบสั่งซื้อ · รอจัดซื้อตรวจ', big:poS.id, alt:'ซัพแก้ใบสั่งซื้อ ' + poS.id + ' · ' + VENDOR.name + ' · รอจัดซื้อตรวจ',
-            rows:[['แก้ไว้', ps.edits + ' จุด'], ['เพิ่มรายการ', ps.added ? ps.added + ' รายการ' : ''], ['ปันทุน', stS.al.same + stS.al.byVal ? 'มี' : ''],
+            rows:[['แก้ไว้', ps.edits + ' จุด'], ['เพิ่มรายการ', ps.added ? ps.added + ' รายการ' : ''], ['ปันทุน', stS.al.same + stS.al.bySize + stS.al.byVal ? 'มี' : ''],
                   ['ยอดตาม PO', baht2(poBaseSums(poS).gross) + ' รวม VAT'], ['ยอดที่แจ้ง', baht2(ps.gross) + ' รวม VAT'],
                   ['ส่วนลดท้ายบิล', ps.disc > 0 ? baht2(ps.disc) + ' ก่อน VAT' : ''],
                   ['ราคาแนะนำ', ps.advice ? ps.advice + ' รายการ' : ''], ['หมายเหตุ', payload.note || ''], ['ผู้ยืนยัน', S.signer]],
@@ -6257,6 +6362,7 @@ document.addEventListener('input', function (e) {
   if (t.getAttribute('data-rvnote')) { rvState().note[t.getAttribute('data-rvnote')] = t.value; return; }
   if (t.hasAttribute('data-signer')) { S.signer = t.value; paintSums(poById(S.poId)); return; }
   if (t.getAttribute('data-ff')) {
+    S.dirty = true;
     var fk = t.getAttribute('data-ff'), fpo = poById(S.poId), fi = +fk.split('|f').pop(), ff = fpo && poFree(fpo)[fi];
     if (ff) {
       var fv = numIn(t.value);
