@@ -1,6 +1,9 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.44 — ไม่มีลูกทีม = ไม่เห็นปุ่ม "ทุกคน" (คู่แอป v12.95 · ★ ต้อง Deploy)
+ *          + getQuotaScope: แอปถามว่า HR/มีลูกทีมกี่คน (เบา ไม่คิดโควต้า) แล้วค่อยโชว์ปุ่ม
+ *          + getQuotaAll ปฏิเสธคนไม่มีลูกทีม (เดิมให้รายการว่าง) · role 5 ไม่มีลูกทีม 21 คน ไม่เห็นปุ่มแล้ว
  * v9.43 — โควต้า "ทุกคน": หัวหน้าเห็นแค่ลูกทีมตัวเอง (คู่แอป v12.94 · ★ ต้อง Deploy)
  *          เดิมกว้างเกิน 3 ทาง: เห็นทั้งสาขา · ผู้จัดการเห็นทั้งบริษัท · เห็นตัวเองด้วย
  *          ลูกทีม = คนที่เราอนุมัติใบให้ (approverScope_ ตัวเดียวกับหน้าอนุมัติ) · HR เห็นทุกคน
@@ -259,7 +262,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.43', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.44', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -353,6 +356,7 @@ function handle(e, method) {
       case 'getApprovals':         return actionGetApprovals(user);
       case 'getLeaveQuota':        return actionGetLeaveQuota(p, user);
       case 'getQuotaAll':          return jsonOut(getQuotaAll(p, user));   // v9.42: โควต้าคงเหลือทุกคน (HR/หัวหน้า)
+      case 'getQuotaScope':        return jsonOut(getQuotaScope(p, user)); // v9.44: แอปถามว่าควรโชว์ปุ่ม "ทุกคน" ไหม
       case 'getHolidays':          return actionGetHolidays(user);
       case 'getAllUsers':          return actionGetAllUsers(user);
       case 'getIncompletePairs':   return actionGetIncompletePairs(p, user);
@@ -2753,10 +2757,20 @@ function quotaTeamOf_(user) {
   sc.team.forEach(id => { id = String(id || '').trim(); if (id && canDecide_(sc, id).ok) team.add(id); });
   return team;
 }
+/* v9.44 (surat เคาะ 25/09): role หัวหน้าแต่ไม่มีลูกทีม = ไม่เห็นปุ่ม "ทุกคน" (เดิมเห็นแล้วเจอรายการว่าง 21 คน)
+   แอปรู้แค่ role ไม่รู้ว่าใครมีลูกทีม → ถามที่นี่ (เบา: ไม่คิดโควต้า แค่นับลูกทีมที่ยังทำงานอยู่) */
+function getQuotaScope(p, user) {
+  if (isHR(user)) return { ok: true, hr: true, team: 0 };
+  const team = quotaTeamOf_(user);
+  const active = quotaPeople_();
+  let n = 0;
+  team.forEach(id => { if (active[id]) n++; });
+  return { ok: true, hr: false, team: n };
+}
 function getQuotaAll(p, user) {
   const hr = isHR(user);
   const team = hr ? null : quotaTeamOf_(user);
-  if (!hr && !isSupervisor(user) && !team.size) return { ok: false, error: 'ดูโควต้าทุกคนได้เฉพาะหัวหน้างาน/HR' };
+  if (!hr && !team.size) return { ok: false, error: 'ดูโควต้าทุกคนได้เฉพาะ HR และหัวหน้างานที่มีลูกทีม' };
   const pack = quotaAll_(String((p && p.fresh) || '') === '1');           // เช็คสิทธิ์ก่อน ค่อยคิดของแพง
   if (hr) return { ok: true, at: pack.at, scope: 'all', types: QR_TYPES, rows: pack.rows };
   const rows = pack.rows.filter(r => team.has(String(r.empId)));
@@ -2810,7 +2824,7 @@ function auditQuotaScope() {
 
   const byName = (a, b) => String((a.u || a).name).localeCompare(String((b.u || b).name), 'th');
   const L = ['===== ใครเห็นโควต้า "ทุกคน" บ้าง (ข้อมูลจริง ณ ตอนรัน) ====='];
-  L.push('กติกา: HR เห็นทุกคน · หัวหน้างานเห็นเฉพาะลูกทีม (คนที่เขาอนุมัติใบให้) · ไม่เห็นตัวเอง · พนักงานทั่วไปไม่เห็นปุ่ม');
+  L.push('กติกา: HR เห็นทุกคน · หัวหน้างานที่มีลูกทีมเห็นเฉพาะลูกทีม (คนที่เขาอนุมัติใบให้) · ไม่มีลูกทีม = ไม่เห็นปุ่ม · ไม่เห็นตัวเอง');
   L.push('พนักงานในรายการโควต้า ' + Object.keys(active).length + ' คน');
   L.push('');
   L.push('── HR (เห็นทุกคน) : ' + hrs.length + ' คน ──');
@@ -2830,9 +2844,9 @@ function auditQuotaScope() {
   noBtn.sort(byName).forEach(h => L.push('   ' + h.u.name + ' (' + h.u.empId + ') · role ' + h.u.role + ' · มีลูกทีม ' + h.vis.length + ' คน'));
   if (noBtn.length) L.push('   → ถ้าเป็นหัวหน้าจริง ให้แก้ role เป็น 5 (หน้าอนุมัติในแอปก็จะขึ้นด้วย)');
   L.push('');
-  L.push('⚠ เห็นปุ่มแต่ไม่มีลูกทีม (เปิดแล้วจะเจอรายการว่าง) : ' + empty.length + ' คน');
+  L.push('role หัวหน้าแต่ยังไม่มีลูกทีม → ไม่เห็นปุ่ม (v9.44) : ' + empty.length + ' คน');
   empty.sort(byName).forEach(h => L.push('   ' + h.u.name + ' (' + h.u.empId + ') · role ' + h.u.role));
-  if (empty.length) L.push('   → ใส่ชื่อเขาในคอลัมน์ N ของลูกทีม หรือถ้าไม่ใช่หัวหน้าให้ลด role ลง');
+  if (empty.length) L.push('   (คนไหนควรมีลูกทีม ให้ใส่ชื่อเขาในคอลัมน์ N ของลูกทีม — ปุ่มจะขึ้นเองครั้งหน้าที่เปิดหน้าโควต้า)');
   L.push('');
   L.push('พนักงานทั่วไป (ไม่เห็นปุ่ม) : ' + plain + ' คน');
   Logger.log(L.join('\n'));
