@@ -1,6 +1,12 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.42 — ดูโควต้าคงเหลือ "ทุกคน" ได้ 2 ทาง (คู่แอป v12.92 · ★ ต้อง Deploy):
+ *          · ในแอป: หน้าโควต้าวันลา แท็บ "ทุกคน" (HR เห็นหมด · หัวหน้าเห็นลูกทีม)
+ *          · ในชีท: แท็บ "โควต้าคงเหลือ" 1 คน 1 แถว — Run buildQuotaRemainSheet()
+ *            แล้ว setupQuotaRemainTrigger() ให้อัปเดตเองทุกเช้า 05:00
+ *          ทั้งสองทางใช้ leaveQuotaFor_() ตัวเดียวกัน → เลขตรงกันเสมอ
+ *          + countUsedLeave เร็วขึ้น: จัดกลุ่มใบลาตามรหัสครั้งเดียว (เดิมวนทุกแถวต่อ 1 คน)
  * v9.41 — ★ เกณฑ์สุดท้าย (ตั้งจากตาราง v9.40 · คู่แอป v12.88 · ★ ต้อง Deploy):
  *          maxDist 0.50 (ไม่ลดตามตาราง เพราะตารางจำลองจากรูปถ่ายห่างกันไม่กี่วินาที
  *          ของจริงระยะกว้างกว่า) · margin +0.03 (เจ้าของบัญชีต้องใกล้กว่าคนอื่น)
@@ -163,6 +169,7 @@
  *     setupApproverOverride · setupLocationQR · setupPhotoCleanup · setupPhotoCellTrigger
  *     importQuotaHumanSoft2026 · migrateLeaveSheet · fixMaternityQuota98 · fixHolidayDates
  * ► ตัวตรวจ (อ่านอย่างเดียว ปลอดภัย): systemHealthCheck · auditLeaveQuota · traceLeaveQuota
+ * ► โควต้าคงเหลือทุกคนลงชีท: buildQuotaRemainSheet · setupQuotaRemainTrigger (v9.42)
  *     auditScanPhotos · auditScanPhotosAfterFix · auditInOutPairs · auditDuplicateScans
  *     auditLeaveDates · auditSalaryAdjustRows · previewTimeIssues
  * ► ตัวแก้ข้อมูล (ดู audit คู่กันก่อนเสมอ): fixInOutPairsApply · fixLeaveDatesApply
@@ -246,7 +253,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.41', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.42', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -339,6 +346,7 @@ function handle(e, method) {
       case 'getMyWarnings':        return actionGetMyWarnings(p, user);
       case 'getApprovals':         return actionGetApprovals(user);
       case 'getLeaveQuota':        return actionGetLeaveQuota(p, user);
+      case 'getQuotaAll':          return jsonOut(getQuotaAll(p, user));   // v9.42: โควต้าคงเหลือทุกคน (HR/หัวหน้า)
       case 'getHolidays':          return actionGetHolidays(user);
       case 'getAllUsers':          return actionGetAllUsers(user);
       case 'getIncompletePairs':   return actionGetIncompletePairs(p, user);
@@ -2632,6 +2640,201 @@ function quotaRemain_(q, u) {
   return Math.max(0, (parseFloat(q) || 0) - (parseFloat(u) || 0));
 }
 
+/* ══════════════════════════════════════════════════════════════
+   v9.42 · โควต้าคงเหลือ "ทุกคน" — แกนเดียว ใช้ทั้งในแอปและในชีท
+     · getQuotaAll()            → หน้า "โควต้าวันลา" ในแอป แท็บ "ทุกคน" (HR/หัวหน้า)
+     · buildQuotaRemainSheet()  → แท็บ "โควต้าคงเหลือ" 1 คน 1 แถว (อัปเดตเองทุกเช้า)
+   ทั้งสองทางเรียก leaveQuotaFor_() ตัวเดิม → เลขในแอปกับในชีทตรงกันเสมอ
+   (แท็บ "ตรวจโควต้า" ยังอยู่ — ไว้ไล่ดูรายใบว่าหักจากไหน)
+   ══════════════════════════════════════════════════════════════ */
+const QR_TAB = 'โควต้าคงเหลือ';
+const QR_TYPES = [
+  ['personal',       'ลากิจ'],
+  ['sickWithCert',   'ป่วยมีใบ'],
+  ['sickNoCert',     'ป่วยไม่มีใบ'],
+  ['vacation',       'พักร้อน'],
+  ['unpaidPersonal', 'กิจไม่รับค่าจ้าง'],
+  ['maternity',      'ลาคลอด'],
+  ['training',       'ฝึกอบรม'],
+];
+const QR_CACHE_SEC = 900;      // 15 นาที — เปิดหน้าซ้ำไม่ต้องคิดใหม่ทั้งบริษัท
+
+/* แคชก้อนใหญ่ข้าม execution · CacheService จำกัด 100KB/key → หั่นเป็นท่อน
+   ท่อนละ 20,000 ตัวอักษร เพราะภาษาไทยตัวละ 3 ไบต์ (90,000 อย่าง faceIndex จะเกินลิมิต) */
+function cacheGetBig_(prefix) {
+  try {
+    const c = CacheService.getScriptCache();
+    const n = parseInt(c.get(prefix + '_n') || '0', 10);
+    if (!(n > 0)) return null;
+    const keys = []; for (let i = 0; i < n; i++) keys.push(prefix + '_' + i);
+    const got = c.getAll(keys);
+    let txt = '';
+    for (let i = 0; i < n; i++) { const part = got[prefix + '_' + i]; if (part == null) return null; txt += part; }
+    return txt ? JSON.parse(txt) : null;
+  } catch (e) { return null; }
+}
+function cachePutBig_(prefix, obj, sec) {
+  try {
+    const c = CacheService.getScriptCache();
+    const txt = JSON.stringify(obj), CH = 20000, parts = [];
+    for (let i = 0; i < txt.length; i += CH) parts.push(txt.slice(i, i + CH));
+    const put = {}; put[prefix + '_n'] = String(parts.length);
+    parts.forEach((v, i) => { put[prefix + '_' + i] = v; });
+    c.putAll(put, sec || 600);
+  } catch (e) {}
+}
+function cacheDelBig_(prefix) { try { CacheService.getScriptCache().remove(prefix + '_n'); } catch (e) {} }
+
+/* รายชื่อพนักงานที่ยังทำงานอยู่ — แหล่งเดียวกับ setupLeaveQuota (Users active + ทะเบียน PTT) */
+function quotaPeople_() {
+  const people = {};
+  try {
+    usersData_().slice(1).forEach(r => {
+      if (String(r[U_COL.status] || '').trim().toLowerCase() !== 'active') return;
+      const id = String(r[U_COL.empId] || '').trim(); if (!id) return;
+      people[id] = { id: id, name: cleanName_(r[U_COL.name]), branch: String(r[U_COL.branch] || '').trim() };
+    });
+  } catch (e) { console.error('quotaPeople_ users', e); }
+  try {
+    const pm = pttMap_();
+    Object.keys(pm).forEach(id => {
+      if (people[id]) return;
+      people[id] = { id: id, name: pm[id].name || id, branch: pm[id].saka || '' };
+    });
+  } catch (e) {}
+  return people;
+}
+
+/* ตารางโควต้าทุกคน → { at, rows:[{empId,name,branch,stage,cycle,q,u,r,noStart}] }
+   q/u/r: null = ไม่จำกัด · ไม่มีคีย์ = ประเภทนั้นไม่มีข้อมูล */
+function quotaAll_(fresh) {
+  if (!fresh) { const hit = cacheGetBig_('qtall'); if (hit && hit.rows) return hit; }
+  const people = quotaPeople_();
+  const rows = [];
+  Object.keys(people).forEach(id => {
+    const p = people[id];
+    const o = { empId: id, name: p.name || id, branch: khlangOf_(id) || p.branch || '' };
+    let q = null;
+    try { q = leaveQuotaFor_(id); } catch (e) {}
+    if (!q) { o.noStart = true; rows.push(o); return; }     // ไม่มีวันเริ่มงาน = คิดโควต้าไม่ได้
+    o.stage = q.quota.stageLabel || '';
+    o.cycle = formatDate(q.cycleStart) + ' – ' + formatDate(q.cycleEnd);
+    o.q = {}; o.u = {}; o.r = {};
+    QR_TYPES.forEach(t => {
+      const k = t[0];
+      o.q[k] = q.quota[k];
+      o.u[k] = Math.round((q.used[k] || 0) * 100) / 100;
+      o.r[k] = q.remaining[k] == null ? q.remaining[k] : Math.round(q.remaining[k] * 100) / 100;
+    });
+    rows.push(o);
+  });
+  rows.sort((a, b) => String(a.name).localeCompare(String(b.name), 'th'));
+  const pack = { at: Utilities.formatDate(new Date(), 'Asia/Bangkok', 'dd/MM/yyyy HH:mm'), rows: rows };
+  cachePutBig_('qtall', pack, QR_CACHE_SEC);
+  return pack;
+}
+
+/* HR เห็นทุกคน · หัวหน้าเห็นเฉพาะลูกทีม/สาขาตัวเอง (ขอบเขตเดียวกับหน้าอนุมัติ) */
+function getQuotaAll(p, user) {
+  if (!isSupervisor(user) && !isHR(user)) return { ok: false, error: 'ดูโควต้าทุกคนได้เฉพาะหัวหน้า/HR' };
+  const pack = quotaAll_(String((p && p.fresh) || '') === '1');
+  const all = isHR(user) || canSeeAllBranches(user);
+  let rows = pack.rows;
+  if (!all) {
+    const scope = approverScope_(user);
+    rows = rows.filter(r => scope.team.has(r.empId) || canSeeUser(user, r.empId));
+  }
+  return { ok: true, at: pack.at, scope: all ? 'all' : 'team', types: QR_TYPES, rows: rows };
+}
+
+/* แท็บ "โควต้าคงเหลือ" — 1 คน 1 แถว · บล็อก คงเหลือ / ใช้ไป / สิทธิเต็ม
+   Run มือได้ทุกเมื่อ · หรือให้ทำเองทุกเช้าด้วย setupQuotaRemainTrigger() */
+function buildQuotaRemainSheet() {
+  const pack = quotaAll_(true);                     // ในชีทเอาเลขสดเสมอ
+  const ss = getSS();
+  let sh = ss.getSheetByName(QR_TAB);
+  if (!sh) sh = ss.insertSheet(QR_TAB);
+  const ID = ['รหัสพนักงาน', 'ชื่อ-นามสกุล', 'คลัง/สาขา', 'ช่วงอายุงาน', 'รอบโควต้า'];
+  const NT = QR_TYPES.length, W = ID.length + NT * 3, HROWS = 3;
+  const names = QR_TYPES.map(t => t[1]);
+  const cell = (v) => v === null ? 'ไม่จำกัด' : (v === undefined ? '-' : v);
+
+  const body = pack.rows.map(r => {
+    const row = [r.empId, r.name, r.branch || '',
+                 r.noStart ? '⚠ ไม่มีวันเริ่มงาน — เติมในแท็บ ' + LQ_TAB + ' คอลัมน์ D' : (r.stage || ''),
+                 r.cycle || ''];
+    QR_TYPES.forEach(t => row.push(r.noStart ? '' : cell(r.r[t[0]])));
+    QR_TYPES.forEach(t => row.push(r.noStart ? '' : (r.u[t[0]] || 0)));
+    QR_TYPES.forEach(t => row.push(r.noStart ? '' : cell(r.q[t[0]])));
+    return row;
+  });
+
+  if (sh.getMaxColumns() < W) sh.insertColumnsAfter(sh.getMaxColumns(), W - sh.getMaxColumns());
+  const need = HROWS + Math.max(body.length, 1);
+  if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
+  try { sh.getRange(1, 1, sh.getMaxRows(), W).breakApart(); } catch (e) {}
+  sh.clear();
+  try { sh.setConditionalFormatRules([]); } catch (e) {}
+
+  sh.getRange(1, 1, 1, W).merge()
+    .setValue('โควต้าคงเหลือวันลา · อัปเดตล่าสุด ' + pack.at +
+              '   (เลขชุดเดียวกับหน้า "โควต้าวันลา" ในแอป · แก้เพดานรายคนที่แท็บ "' + LQ_TAB + '")')
+    .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff').setVerticalAlignment('middle');
+  [[1, ID.length, 'ข้อมูลพนักงาน', '#1a2f5e'],
+   [ID.length + 1,          NT, 'คงเหลือ (วัน)',   '#0f766e'],
+   [ID.length + 1 + NT,     NT, 'ใช้ไปแล้ว (วัน)', '#b45309'],
+   [ID.length + 1 + NT * 2, NT, 'สิทธิเต็ม (วัน)', '#475467']].forEach(b => {
+    sh.getRange(2, b[0], 1, b[1]).merge().setValue(b[2])
+      .setFontWeight('bold').setBackground(b[3]).setFontColor('#ffffff').setHorizontalAlignment('center');
+  });
+  sh.getRange(3, 1, 1, W).setValues([ID.concat(names, names, names)])
+    .setFontWeight('bold').setBackground('#eef2f7').setFontColor('#0d1b3e').setWrap(true);
+  sh.setFrozenRows(HROWS);
+  try { sh.setFrozenColumns(2); } catch (e) {}
+  if (body.length) sh.getRange(HROWS + 1, 1, body.length, W).setValues(body);
+  sh.getRange(HROWS + 1, ID.length + 1, Math.max(body.length, 1), NT * 3).setHorizontalAlignment('center');
+
+  // ระบายช่อง "คงเหลือ" ให้เห็นด้วยตา: 0 = แดง · ไม่เกิน 1 วัน = เหลือง
+  const zone = sh.getRange(HROWS + 1, ID.length + 1, Math.max(body.length, 1), NT);
+  try {
+    sh.setConditionalFormatRules([
+      SpreadsheetApp.newConditionalFormatRule().whenNumberEqualTo(0)
+        .setBackground('#fde2e0').setFontColor('#a4251c').setRanges([zone]).build(),
+      SpreadsheetApp.newConditionalFormatRule().whenNumberBetween(0.01, 1)
+        .setBackground('#fdf3d8').setFontColor('#8a5a00').setRanges([zone]).build(),
+    ]);
+  } catch (e) {}
+
+  sh.setColumnWidth(1, 95); sh.setColumnWidth(2, 200); sh.setColumnWidth(3, 110);
+  sh.setColumnWidth(4, 210); sh.setColumnWidth(5, 165);
+  for (let c = ID.length + 1; c <= W; c++) sh.setColumnWidth(c, 80);
+  sh.setRowHeight(1, 30);
+  ss.setActiveSheet(sh);
+  const msg = 'อัปเดตแท็บ "' + QR_TAB + '" แล้ว · ' + body.length + ' คน · ' + pack.at;
+  Logger.log(msg);
+  try { ss.toast(msg, QR_TAB, 8); } catch (e) {}
+  return msg;
+}
+
+function quotaRemainScheduled_() { try { buildQuotaRemainSheet(); } catch (e) { console.error('quotaRemain', e); } }
+function setupQuotaRemainTrigger() {
+  const off = removeQuotaRemainTrigger();
+  ScriptApp.newTrigger('quotaRemainScheduled_').timeBased().everyDays(1).atHour(5).create();
+  const msg = 'ตั้งอัปเดตแท็บ "' + QR_TAB + '" อัตโนมัติแล้ว — ทุกวันประมาณ 05:00 น.' +
+              (off ? ' (ถอนตัวเก่า ' + off + ' ตัว)' : '') + '\n' +
+              'ต้องการเลขสดกลางวัน: Run buildQuotaRemainSheet() หรือกดรีเฟรชในแอป';
+  Logger.log(msg);
+  try { ss_toast_(msg); } catch (e) {}
+  return msg;
+}
+function removeQuotaRemainTrigger() {
+  let n = 0;
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'quotaRemainScheduled_') { ScriptApp.deleteTrigger(t); n++; }
+  });
+  return n;
+}
+
 function actionGetLeaveQuota(p, user) {
   const empId = String(p.empId || user.empId);
   if (!canSeeUser(user, empId)) return jsonOut({ ok:false, error:'ไม่มีสิทธิ์' });
@@ -2647,6 +2850,21 @@ function leaveRowsAll_() {
   const la = SpreadsheetApp.openById(CFG.attendanceSheetId).getSheetByName('การลาApp');
   _leaveRowsCache = (la && leaveSheetIsNew_(la)) ? la.getDataRange().getValues() : [];
   return _leaveRowsCache;
+}
+/* v9.42: จัดกลุ่มใบลาตามรหัสพนักงาน — เดิม countUsedLeave วนทุกแถวในชีท "ต่อ 1 คน"
+   ตารางโควต้าทุกคน (~250 คน) จึงวนซ้ำ 250 รอบ · ทำครั้งเดียวแล้วใช้ซ้ำได้ทั้ง execution */
+let _leaveByEmpCache = null;
+function leaveRowsByEmp_() {
+  if (_leaveByEmpCache) return _leaveByEmpCache;
+  const m = {};
+  const data = leaveRowsAll_();
+  for (let i = 1; i < data.length; i++) {
+    const id = String(data[i][1] == null ? '' : data[i][1]).trim();
+    if (!id) continue;
+    (m[id] = m[id] || []).push(data[i]);
+  }
+  _leaveByEmpCache = m;
+  return m;
 }
 /* ── v7.3: กติกาหักโควต้า (surat เคาะ 27/08) ──────────────────────────
    ลาไม่เต็มวัน: ไม่เกิน 4 ชม. = หัก 0.5 วัน · เกิน 4 ชม. = หัก 1 วัน
@@ -2683,10 +2901,9 @@ function countUsedLeave(empId, from, to) {
   // v5.0: นับจาก การลาApp — approveAny อนุมัติที่ชีทนี้ (แท็บ log เดิมสถานะค้าง pending ตลอด
   // ทำให้หน้าโควต้าเคยนับวันลาที่ใช้ไปได้ 0 เสมอ)
   if (leaveRowsAll_().length) {
-    const data = leaveRowsAll_();
-    for (let i = 1; i < data.length; i++) {
-      const r = data[i];
-      if (String(r[1] || '').trim() !== String(empId)) continue;
+    const mine = leaveRowsByEmp_()[String(empId).trim()] || [];   // v9.42: วนแค่แถวของคนนี้
+    for (let i = 0; i < mine.length; i++) {
+      const r = mine[i];
       if (!leaveIsApproved_(r[8])) continue;   // v9.0: รับ "อนุมัติ" ไทยด้วย · กัน "ไม่อนุมัติ" หลุดเข้ามา
       const sd = r[0] instanceof Date ? r[0] : parseDDMMYYYY(formatDate(r[0]));
       if (!sd || isNaN(sd.getTime())) continue;
