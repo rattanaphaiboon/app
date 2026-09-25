@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>SupplyLink — คู่ค้ารัตนไพบูลย์ v1.13.0</title>
+<title>SupplyLink — คู่ค้ารัตนไพบูลย์ v1.14.0</title>
 <meta name="theme-color" content="#0A1F47">
 <link rel="icon" type="image/png" sizes="64x64" href="icons/rattana-supplylink-64.png">
 <link rel="icon" type="image/png" sizes="256x256" href="icons/rattana-supplylink.png">
@@ -1509,7 +1509,7 @@ button{cursor:pointer}
 
 /* ══ ตั้งค่า — แก้ตรงนี้ที่เดียว ══ */
 var CONFIG = {
-  APP_VERSION: 'v1.13.0',
+  APP_VERSION: 'v1.14.0',
   /* LIFF ของแอปนี้: LINE Developers → provider RTNPurchase → channel "RTNPurchase Supplier" (2011693023) → แท็บ LIFF
      ต้องอยู่ channel เดียวกับระบบลงทะเบียนเดิม ถึงจะได้ LINE User ID ตรงกับแท็บ Login Users · ว่าง = ยังไม่เปิดใช้จริง */
   LIFF_ID: '2011693023-xbdsN1K7',
@@ -1537,7 +1537,8 @@ var VENDORS = [], TEAM = [], NOTIFY = { po:true, queue:true, product:false };
 var ADMIN = false;                                           /* โหมดแอดมิน = หลังบ้านตัดสิน (แท็บ Users ช่อง "แอดมิน (Y/N)") · VENDORS = ทุก Vendor */
 var PRODUCTS = [], P = {}, AVG60 = {}, DEFECT = {}, IBAT = {};
 var DEFS = [], AGING = { slow:[], risk:[] }, PDATA = {};   /* PDATA = ข้อมูลสินค้าที่ซัพส่งแล้ว รอจัดซื้อลงระบบ */                /* ของเสียรายสินค้า×คลัง (พร้อมสถานะนัด) · ของค้างสต็อก 2 กลุ่ม */
-var LATE = [], SHORT = [], DEAD = [], POS = [], REQS = [], DOCS = [], MYBK = [];
+var FOLLOW_DAYS = 30;                                          /* งานส่งที่ต้องตาม: เกิน 30 วัน = ไม่โชว์แล้ว */
+var LATE = [], SHORT = [], SENT = [], DEAD = [], POS = [], REQS = [], DOCS = [], MYBK = [];
 var BUNDLE = null;
 var CONDS_DEFAULT = [
   'ค่าแรกเข้า 1,500 บาท/SKU จ่าย CN วันส่งของ',
@@ -2090,10 +2091,13 @@ function applyBundle(b){
   AGING = { slow:[], risk:[] };
   PRODUCTS.forEach(function (p) { var a = agingOf(p); if (a) AGING[a.k].push(Object.assign({ p:p, cs:a.ea / p.ea }, a)); });
   POS = (b.pos || []).map(poDecor).filter(function (po) { return po.lines.length; });
-  LATE = (b.late || []).map(function (x) { return Object.assign({}, x, { dueTh:thShort(x.due) }); });
-  SHORT = (b.short || []).map(function (x) {
+  LATE = (b.late || []).filter(function (x) { return (+x.days || 0) <= FOLLOW_DAYS; })
+    .map(function (x) { return Object.assign({}, x, { dueTh:thShort(x.due) }); });
+  SHORT = (b.short || []).filter(function (x) { return withinFollow(x.d); }).map(function (x) {
     return Object.assign({}, x, { got:thShort(x.d), lines:(x.lines || []).filter(function (l) { return P[l.p]; }) });
   }).filter(function (x) { return shortLines(x).length; });
+  SENT = POS.filter(function (po) { return po.state === 'ส่งครบแล้ว' && withinFollow(sentDate(po)); })
+    .sort(function (a, b) { return String(sentDate(b)).localeCompare(String(sentDate(a))); });
   REQS = (b.reqs || []).map(reqDecor);
   DOCS = (b.docs || []).map(docDecor);
   MYBK = (b.myBookings || []).slice();
@@ -2596,12 +2600,14 @@ function placeChip(t){
 }
 
 /* ══ งานส่งที่ต้องตาม — เลยกำหนดส่ง · ส่งไม่ครบ ══ */
+function sentDate(po){ return (po.ibs && po.ibs[0] && po.ibs[0].date) || po.lastIbDate || ''; }
+function withinFollow(iso){ return !!iso && daysFromToday(iso) >= -FOLLOW_DAYS; }
 function followOf(id, kind){
   var f = ((BUNDLE && BUNDLE.follows) || []).filter(function (x) { return x.po === id && x.kind === kind; });
   return f.length ? f[f.length - 1] : null;
 }
 V.late = function () {
-  var tab = S.lateTab === 'short' ? 'short' : 'late';
+  var tab = S.lateTab === 'short' || S.lateTab === 'sent' ? S.lateTab : 'late';
   var lateList  = LATE.slice().sort(function (a, b) { return b.days - a.days; });      /* เลยกำหนดนานสุดขึ้นก่อน */
   var shortList = SHORT.slice().sort(function (a, b) { return String(b.d).localeCompare(String(a.d)); }); /* รับเข้าล่าสุดอยู่บน */
   var lateVal = 0; LATE.forEach(function (x) { lateVal += x.val; });
@@ -2615,6 +2621,27 @@ V.late = function () {
     if (po && po.booking) return '<button class="btn navy sm wide" style="flex:1.2 1 0;width:auto" data-act="ticketpo:'+esc(r.id)+'">ดูบัตรคิว</button>';
     return '<button class="btn line sm wide" style="flex:1.2 1 0;width:auto" data-act="openpo:'+esc(r.id)+'">ดูใบสั่งซื้อ</button>';
   }
+  function sentBody(){
+    if (!SENT.length) return '<div class="empty">ยังไม่มีใบสั่งซื้อที่ส่งครบใน '+FOLLOW_DAYS+' วัน</div>';
+    var val = 0; SENT.forEach(function (po) { val += po.total; });
+    return '<div class="kpis k2">'+
+        [ { n:SENT.length, l:'ใบที่ส่งครบแล้ว', t:'ใน '+FOLLOW_DAYS+' วันล่าสุด', ic:'check', tone:'green' },
+          { n:baht(val),   l:'ยอดที่ส่งแล้ว',   t:'ก่อน VAT', ic:'truck', tone:'blue' }
+        ].map(kpiCard).join('')+
+      '</div>'+
+      SENT.map(function (po) {
+        var ib = po.ibs && po.ibs[0];
+        return '<button class="card acc-teal" style="padding:14px;text-align:left;width:100%;border:0;display:block" data-act="openpo:'+esc(po.id)+'" data-tweak-card="การ์ดส่งแล้ว">'+
+          '<div class="flexrow" style="gap:8px">'+whChip(po.wh)+'<span class="sp"></span>'+
+            '<span class="chip teal" style="height:22px">ส่งครบแล้ว</span></div>'+
+          '<div class="flexrow" style="margin-top:10px;gap:9px">'+
+            '<span class="grow" style="min-width:0">'+
+              '<span class="one bb" style="display:block;font-size:16px">'+esc(po.id)+'</span>'+
+              '<span class="one dim" style="display:block;font-size:11.5px;margin-top:3px" title="'+esc(ib && ib.ref ? ib.ref : '')+'">รับเข้า '+esc(thShort(sentDate(po)))+' · '+po.lines.length+' รายการ'+(ib && ib.ref ? ' · '+esc(ib.ref) : '')+'</span></span>'+
+            '<span class="bb" style="flex-shrink:0;font-size:15px">'+baht(po.total)+'</span>'+ic('chev',18,'var(--ink-4)')+'</div>'+
+        '</button>';
+      }).join('');
+  }
   function fchip(f){ return f ? '<div class="one" style="font-size:11.5px;color:var(--teal);margin-top:6px">แจ้งจัดซื้อแล้ว ' + esc(thDT(f.time)) + ' · ' + esc(f.action) + '</div>' : ''; }
 
   return '<div class="scr" id="s-late">'+
@@ -2623,10 +2650,11 @@ V.late = function () {
       '<div class="filters">'+
         '<button class="tag" aria-pressed="'+(tab==='late')+'" data-act="latetab:late">เลยกำหนดส่ง '+LATE.length+'</button>'+
         '<button class="tag" aria-pressed="'+(tab==='short')+'" data-act="latetab:short">ส่งไม่ครบ '+sN+'</button>'+
+        '<button class="tag" aria-pressed="'+(tab==='sent')+'" data-act="latetab:sent">ส่งแล้ว '+SENT.length+'</button>'+
       '</div></div>'+
     '<div class="body" style="padding-top:var(--sp-4);gap:var(--sp-4)" data-tweak="งานส่งที่ต้องตาม">'+
 
-    (tab === 'late'
+    (tab === 'sent' ? sentBody() : tab === 'late'
       ? (lateList.length ?
         '<div class="kpis k2">'+
           [ { n:LATE.length,   l:'ใบที่เลยกำหนด', t:'ค้างนานสุด '+lateList[0].days+' วัน', ic:'clock', tone:'red' },
