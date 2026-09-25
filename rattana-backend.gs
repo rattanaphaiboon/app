@@ -1,6 +1,10 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.45 — ลูกทีม = ลูกน้องสายตรง (คอลัมน์ N) "รวม" คนที่เราอนุมัติให้ (คู่แอป v12.99 · ★ ต้อง Deploy)
+ *          เดิมตัดลูกน้องที่มีผู้อนุมัติเฉพาะเป็นคนอื่นออก → หัวหน้าสายตรงไม่เห็นโควต้าลูกน้องตัวเอง
+ *          และถ้าโดนตัดหมด จะถูกนับว่าไม่มีลูกน้อง แล้วเสียเมนูทีม/Kiosk/Dashboard
+ *          + buildQuotaRemainSheet: setActiveSheet ใน try (ทริกเกอร์ 05:00 ไม่มีหน้าจอ)
  * v9.44 — ไม่มีลูกทีม = ไม่เห็นปุ่ม "ทุกคน" (คู่แอป v12.95 · ★ ต้อง Deploy)
  *          + getQuotaScope: แอปถามว่า HR/มีลูกทีมกี่คน (เบา ไม่คิดโควต้า) แล้วค่อยโชว์ปุ่ม
  *          + getQuotaAll ปฏิเสธคนไม่มีลูกทีม (เดิมให้รายการว่าง) · role 5 ไม่มีลูกทีม 21 คน ไม่เห็นปุ่มแล้ว
@@ -262,7 +266,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.44', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.45', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -2752,9 +2756,11 @@ function quotaAll_(fresh) {
 function quotaTeamOf_(user) {
   const sc = approverScope_(user);
   const team = new Set();
-  // canDecide_ = ตัวตัดสินเดียวกับปุ่มอนุมัติ: ไม่ใช่ตัวเอง · ถ้ามี "ผู้อนุมัติเฉพาะ" ต้องเป็นเรา · อยู่ในทีม
-  //   (คนที่ใส่ชื่อเราในคอลัมน์ N แต่ HR กำหนดผู้อนุมัติเฉพาะเป็นคนอื่น = ไม่ใช่ลูกทีมเราแล้ว)
-  sc.team.forEach(id => { id = String(id || '').trim(); if (id && canDecide_(sc, id).ok) team.add(id); });
+  // v9.45: ลูกทีม = ลูกน้องสายตรง (ชื่อเราในคอลัมน์ N) "รวมกับ" คนที่เราอนุมัติให้ (ผู้อนุมัติเฉพาะ/PTT)
+  //   เดิม 9.43 กรองด้วย canDecide_ → ลูกน้องที่ HR ตั้งผู้อนุมัติเฉพาะเป็นคนอื่น หายจากหัวหน้าสายตรง
+  //   และถ้าหายหมดทุกคน หัวหน้าจะถูกนับว่า "ไม่มีลูกน้อง" แล้วเสียเมนูทีม/Kiosk/Dashboard ในแอปไปด้วย
+  //   (หน้านี้แค่ "ดู" โควต้า — ทั้งหัวหน้าสายตรงและผู้อนุมัติควรเห็น · ปุ่มอนุมัติยังใช้ canDecide_ เหมือนเดิม)
+  sc.team.forEach(id => { id = String(id || '').trim(); if (id && id !== sc.me) team.add(id); });
   return team;
 }
 /* v9.44 (surat เคาะ 25/09): role หัวหน้าแต่ไม่มีลูกทีม = ไม่เห็นปุ่ม "ทุกคน" (เดิมเห็นแล้วเจอรายการว่าง 21 คน)
@@ -2824,7 +2830,7 @@ function auditQuotaScope() {
 
   const byName = (a, b) => String((a.u || a).name).localeCompare(String((b.u || b).name), 'th');
   const L = ['===== ใครเห็นโควต้า "ทุกคน" บ้าง (ข้อมูลจริง ณ ตอนรัน) ====='];
-  L.push('กติกา: HR เห็นทุกคน · หัวหน้างานที่มีลูกทีมเห็นเฉพาะลูกทีม (คนที่เขาอนุมัติใบให้) · ไม่มีลูกทีม = ไม่เห็นปุ่ม · ไม่เห็นตัวเอง');
+  L.push('กติกา: HR เห็นทุกคน · หัวหน้างานเห็นเฉพาะลูกทีม (ลูกน้องสายตรงคอลัมน์ N + คนที่เขาอนุมัติให้) · ไม่มีลูกทีม = ไม่เห็นปุ่ม · ไม่เห็นตัวเอง');
   L.push('พนักงานในรายการโควต้า ' + Object.keys(active).length + ' คน');
   L.push('');
   L.push('── HR (เห็นทุกคน) : ' + hrs.length + ' คน ──');
@@ -2914,7 +2920,7 @@ function buildQuotaRemainSheet() {
   sh.setColumnWidth(4, 210); sh.setColumnWidth(5, 165);
   for (let c = ID.length + 1; c <= W; c++) sh.setColumnWidth(c, 80);
   sh.setRowHeight(1, 30);
-  ss.setActiveSheet(sh);
+  try { ss.setActiveSheet(sh); } catch (e) {}              // v9.45: ทริกเกอร์ 05:00 ไม่มีหน้าจอ
   const msg = 'อัปเดตแท็บ "' + QR_TAB + '" แล้ว · ' + body.length + ' คน · ' + pack.at;
   Logger.log(msg);
   try { ss.toast(msg, QR_TAB, 8); } catch (e) {}
