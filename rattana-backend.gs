@@ -1,6 +1,9 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.46 — fixNumericNames() / fixNumericNamesApply(): เติมชื่อย้อนหลังให้แถวสแกนที่ชื่อเป็นรหัส
+ *          (69151–69157 สแกนก่อนมีในชีท Users) — สรุปวันนับคนจากคู่ (รหัส, ชื่อ) จึงแตกเป็น 2 แถว
+ *          ใช้ deviceWho_ ตัวเดียวกับเครื่องสแกน · แก้ทั้งชีทและ Supabase · พรีวิวตรวจข้อมูลในชีท Users ให้ด้วย
  * v9.45 — ลูกทีม = ลูกน้องสายตรง (คอลัมน์ N) "รวม" คนที่เราอนุมัติให้ (คู่แอป v12.99 · ★ ต้อง Deploy)
  *          เดิมตัดลูกน้องที่มีผู้อนุมัติเฉพาะเป็นคนอื่นออก → หัวหน้าสายตรงไม่เห็นโควต้าลูกน้องตัวเอง
  *          และถ้าโดนตัดหมด จะถูกนับว่าไม่มีลูกน้อง แล้วเสียเมนูทีม/Kiosk/Dashboard
@@ -183,6 +186,7 @@
  * ► ตัวตรวจ (อ่านอย่างเดียว ปลอดภัย): systemHealthCheck · auditLeaveQuota · traceLeaveQuota
  * ► โควต้าคงเหลือทุกคนลงชีท: buildQuotaRemainSheet · setupQuotaRemainTrigger (v9.42)
  * ► ใครเห็นโควต้าทุกคน / หัวหน้าเห็นใคร: auditQuotaScope (v9.43 · อ่านอย่างเดียว)
+ * ► เติมชื่อย้อนหลังแถวที่ชื่อเป็นรหัส: fixNumericNames → fixNumericNamesApply (v9.46)
  *     auditScanPhotos · auditScanPhotosAfterFix · auditInOutPairs · auditDuplicateScans
  *     auditLeaveDates · auditSalaryAdjustRows · previewTimeIssues
  * ► ตัวแก้ข้อมูล (ดู audit คู่กันก่อนเสมอ): fixInOutPairsApply · fixLeaveDatesApply
@@ -266,7 +270,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.45', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.46', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -2944,6 +2948,159 @@ function removeQuotaRemainTrigger() {
     if (t.getHandlerFunction() === 'quotaRemainScheduled_') { ScriptApp.deleteTrigger(t); n++; }
   });
   return n;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   v9.46 · เติมชื่อย้อนหลัง — แถวสแกนที่ช่อง name เป็น "รหัส"
+   (ตอนสแกน รหัสนั้นยังไม่มีในชีท Users → เครื่องสแกนใส่รหัสแทนชื่อ)
+   ทำไมต้องแก้: สรุปวันนับคนจากคู่ (รหัส, ชื่อ) → คนเดียวกันแตกเป็น 2 แถว ("69154" กับชื่อจริง)
+               + ตัวเช็คกะดึกจับคู่ด้วยชื่อ → แถวที่ชื่อเป็นตัวเลขหากะไม่เจอ
+   วิธี: หาชื่อ/สาขาด้วย deviceWho_ ตัวเดียวกับเครื่องสแกน (ชื่อเก่า-ใหม่สะกดตรงกันเป๊ะ)
+        เขียนทับเฉพาะแถวที่ชื่อ = รหัส · สาขาแก้เฉพาะแถวที่เป็น "เครื่องสแกน" · แก้ Supabase ด้วย
+   ► Run fixNumericNames()       ดูก่อน (อ่านอย่างเดียว + ตรวจว่าข้อมูลในชีท Users ครบไหม)
+   ► Run fixNumericNamesApply()  เขียนจริง แล้วอ่านกลับมานับว่าแก้ได้จริงกี่แถว
+   ══════════════════════════════════════════════════════════════ */
+const DEVICE_BRANCH_PLACEHOLDER = 'เครื่องสแกน';
+function fixNumericNames() { return fixNumericNames_(false); }
+function fixNumericNamesApply() { return fixNumericNames_(true); }
+
+/* ชื่อ/สาขาปัจจุบันของรหัสนี้ — กติกาเดียวกับเครื่องสแกน · คืน null = ยังหาไม่เจอ */
+function whoById_(id) {
+  if (typeof deviceWho_ === 'function') {
+    const w = deviceWho_(id);
+    return (w && w.name && String(w.name) !== String(id)) ? w : null;   // deviceWho_ คืนรหัสกลับมา = ยังไม่รู้จัก
+  }
+  const u = findUserByEmpId(id);
+  if (u && u.name) return { name: u.name, branch: u.branch || DEVICE_BRANCH_PLACEHOLDER };
+  const pr = pttMap_()[id] || null;
+  if (pr && pr.name) return { name: pr.name, branch: pr.saka || DEVICE_BRANCH_PLACEHOLDER };
+  return null;
+}
+
+/* ตรวจแถวในชีท Users ว่าครบพอให้ระบบใช้งานได้ */
+function usersRowCheck_(id) {
+  const U = usersData_();
+  let r = null;
+  for (let i = 1; i < U.length; i++) if (String(U[i][U_COL.empId]).trim() === id) { r = U[i]; break; }
+  if (!r) return (pttMap_()[id]) ? ['มาจากทะเบียน PTT (ไม่มีในชีท Users)'] : ['⚠ ไม่มีในชีท Users'];
+  const out = [];
+  const st = String(r[U_COL.status] || '').trim();
+  out.push(st.toLowerCase() === 'active' ? 'Active ✓' : '⚠ Status = "' + st + '" (ต้องเป็น Active ถึงจะอยู่ในทีม/โควต้า)');
+  if (!String(r[U_COL.branch] || '').trim()) out.push('⚠ ไม่มีคลัง/สาขา (คอลัมน์ B) → สแกนแล้วสาขาขึ้น "เครื่องสแกน"');
+  const sup = String(r[U_COL.supervisorName] || '').trim();
+  if (!sup) out.push('⚠ ยังไม่มีหัวหน้า (คอลัมน์ N) → ใบลา/คำขอจะไม่เข้าคิวใคร');
+  else {
+    let found = false;
+    for (let i = 1; i < U.length; i++) if (String(U[i][U_COL.name] || '').trim() === sup) { found = true; break; }
+    out.push(found ? 'หัวหน้า: ' + sup + ' ✓' : '⚠ หัวหน้า "' + sup + '" ไม่ตรงกับชื่อใครในคอลัมน์ E (ต้องสะกดตรงเป๊ะ ไม่งั้นไม่มีใครอนุมัติ)');
+  }
+  const sd = r[U_COL.startDate];
+  const sdOk = (sd instanceof Date && !isNaN(sd.getTime())) || !!parseDDMMYYYY(String(sd || '').trim());
+  out.push(sdOk ? 'วันเริ่มงาน ✓' : '⚠ ไม่มีวันเริ่มงาน (คอลัมน์ K) → คิดโควต้าลาไม่ได้');
+  return out;
+}
+
+/* Supabase: แก้แถวที่ชื่อ = รหัส · คืนจำนวนแถวที่แก้ (-1 = ไม่ได้ตั้ง Supabase · -2 = ผิดพลาด) */
+function sbFixName_(id, name, branch) {
+  if (!sbReady_()) return -1;
+  const s = sb_();
+  try {
+    const url = s.url + '/rest/v1/checkin_log?emp_id=eq.' + encodeURIComponent(id) +
+                '&name=eq.' + encodeURIComponent(id) + '&select=id';
+    const res = UrlFetchApp.fetch(url, {
+      method: 'patch', contentType: 'application/json',
+      headers: { apikey: s.key, Authorization: 'Bearer ' + s.key, Prefer: 'return=representation' },
+      payload: JSON.stringify({ name: name, branch: branch }), muteHttpExceptions: true
+    });
+    if (res.getResponseCode() >= 300) { console.error('sbFixName ' + id + ' HTTP ' + res.getResponseCode() + ' ' + res.getContentText().slice(0, 200)); return -2; }
+    const arr = JSON.parse(res.getContentText() || '[]');
+    return Array.isArray(arr) ? arr.length : 0;
+  } catch (e) { console.error('sbFixName', e); return -2; }
+}
+
+function fixNumericNames_(apply) {
+  const sh = getOrCreateTab(T.LOG);
+  const last = sh.getLastRow();
+  const L = ['===== เติมชื่อย้อนหลัง: แถวสแกนที่ชื่อเป็นรหัส ====='];
+  if (last < 2) { L.push('ไม่มีข้อมูลใน CheckinLog'); Logger.log(L.join('\n')); return; }
+  const data = sh.getRange(2, 2, last - 1, 6).getValues();         // B รหัส · C ชื่อ · D วันที่ · E เวลา · F ชนิด · G สาขา
+  const byId = {};
+  for (let i = 0; i < data.length; i++) {
+    const id = String(data[i][0] == null ? '' : data[i][0]).trim();
+    const nm = String(data[i][1] == null ? '' : data[i][1]).trim();
+    if (!id || nm !== id) continue;                                  // ลายเซ็นของ "หาชื่อไม่เจอ" = ชื่อเท่ากับรหัสเป๊ะ
+    const g = byId[id] || (byId[id] = { rows: [], first: '', last: '' });
+    g.rows.push({ row: i + 2, branch: String(data[i][5] == null ? '' : data[i][5]).trim() });
+    const dv = data[i][2] instanceof Date ? Utilities.formatDate(data[i][2], 'Asia/Bangkok', 'dd/MM') : String(data[i][2] || '').slice(0, 5);
+    if (!g.first) g.first = dv;
+    g.last = dv;
+  }
+  const ids = Object.keys(byId).sort();
+  const total = ids.reduce((a, id) => a + byId[id].rows.length, 0);
+  L.push('พบ ' + total + ' แถว · ' + ids.length + ' รหัส');
+  if (!ids.length) { L.push('✅ ไม่มีแถวที่ชื่อเป็นรหัสแล้ว'); Logger.log(L.join('\n')); return; }
+
+  const plan = [];
+  ids.forEach(id => {
+    const g = byId[id];
+    const who = whoById_(id);
+    L.push('');
+    if (!who) {
+      L.push('  ' + id + ' · ' + g.rows.length + ' แถว (' + g.first + '–' + g.last + ') → ⚠ ยังไม่มีในชีท Users / ทะเบียน PTT — ข้าม');
+      return;
+    }
+    L.push('  ' + id + ' · ' + g.rows.length + ' แถว (' + g.first + '–' + g.last + ') → ' + who.name + ' · สาขา ' + who.branch);
+    L.push('     ชีท Users: ' + usersRowCheck_(id).join(' · '));
+    plan.push({ id: id, who: who, rows: g.rows });
+  });
+
+  if (!apply) {
+    L.push('');
+    L.push('>>> พรีวิวเท่านั้น · ถ้าชื่อถูกต้องให้ Run fixNumericNamesApply()');
+    L.push('    (ข้อที่มี ⚠ แก้ในชีท Users ได้ก่อนหรือหลังก็ได้ ไม่กระทบการเติมชื่อ)');
+    Logger.log(L.join('\n')); return;
+  }
+
+  // เขียนเฉพาะช่องที่เปลี่ยน — แถวติดกันรวมเป็นก้อนเดียว
+  const writeRuns = (col, list) => {
+    list.sort((a, b) => a.row - b.row);
+    let i = 0;
+    while (i < list.length) {
+      let j = i;
+      while (j + 1 < list.length && list[j + 1].row === list[j].row + 1) j++;
+      sh.getRange(list[i].row, col, j - i + 1, 1).setValues(list.slice(i, j + 1).map(x => [x.val]));
+      i = j + 1;
+    }
+  };
+  const nameCells = [], branchCells = [];
+  plan.forEach(p => p.rows.forEach(r => {
+    nameCells.push({ row: r.row, val: p.who.name });
+    if (r.branch === DEVICE_BRANCH_PLACEHOLDER || !r.branch) branchCells.push({ row: r.row, val: p.who.branch });
+  }));
+  writeRuns(3, nameCells);                                            // C = ชื่อ
+  writeRuns(7, branchCells);                                          // G = สาขา
+  SpreadsheetApp.flush();
+
+  // อ่านกลับมานับของจริง (บทเรียน 17/09: ห้ามรายงานจากจำนวนที่ "สั่ง")
+  const after = sh.getRange(2, 2, sh.getLastRow() - 1, 2).getValues();
+  let fixed = 0, want = 0;
+  plan.forEach(p => p.rows.forEach(r => {
+    want++;
+    const a = after[r.row - 2];
+    if (a && String(a[0]).trim() === p.id && String(a[1]).trim() === String(p.who.name).trim()) fixed++;
+  }));
+  let sbTotal = 0, sbNote = '';
+  plan.forEach(p => {
+    const n = sbFixName_(p.id, p.who.name, p.who.branch);
+    if (n === -1) sbNote = ' (ยังไม่ได้ตั้ง Supabase — ข้าม)';
+    else if (n === -2) sbNote = ' (⚠ บางรหัสแก้ใน Supabase ไม่สำเร็จ — ดู Executions)';
+    else sbTotal += n;
+  });
+  L.push('');
+  L.push('ชีท CheckinLog: แก้ชื่อได้จริง ' + fixed + '/' + want + ' แถว · สาขา ' + branchCells.length + ' แถว');
+  L.push('Supabase: แก้ ' + sbTotal + ' แถว' + sbNote);
+  L.push(fixed === want ? '✅ เสร็จ — สรุปวันจะรวมเป็นแถวเดียวต่อคน (สูตรคำนวณใหม่เอง)' : '❌ แก้ไม่ครบ — ส่งภาพนี้มาให้ดู');
+  Logger.log(L.join('\n'));
 }
 
 function actionGetLeaveQuota(p, user) {
