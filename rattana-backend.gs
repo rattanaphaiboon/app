@@ -1,6 +1,11 @@
 /**
  * ============================================================
  * RATTANA ATTENDANCE — APPS SCRIPT BACKEND
+ * v9.43 — โควต้า "ทุกคน": หัวหน้าเห็นแค่ลูกทีมตัวเอง (คู่แอป v12.94 · ★ ต้อง Deploy)
+ *          เดิมกว้างเกิน 3 ทาง: เห็นทั้งสาขา · ผู้จัดการเห็นทั้งบริษัท · เห็นตัวเองด้วย
+ *          ลูกทีม = คนที่เราอนุมัติใบให้ (approverScope_ ตัวเดียวกับหน้าอนุมัติ) · HR เห็นทุกคน
+ *          + auditQuotaScope() ตัวตรวจจากข้อมูลจริง: ใครเห็นปุ่ม · หัวหน้าแต่ละคนเห็นใคร
+ *          + approverScope_ อ่านชีท Users ผ่าน usersData_() (ชีทเดิม แต่อ่านครั้งเดียวต่อการรัน)
  * v9.42 — ดูโควต้าคงเหลือ "ทุกคน" ได้ 2 ทาง (คู่แอป v12.92 · ★ ต้อง Deploy):
  *          · ในแอป: หน้าโควต้าวันลา แท็บ "ทุกคน" (HR เห็นหมด · หัวหน้าเห็นลูกทีม)
  *          · ในชีท: แท็บ "โควต้าคงเหลือ" 1 คน 1 แถว — Run buildQuotaRemainSheet()
@@ -170,6 +175,7 @@
  *     importQuotaHumanSoft2026 · migrateLeaveSheet · fixMaternityQuota98 · fixHolidayDates
  * ► ตัวตรวจ (อ่านอย่างเดียว ปลอดภัย): systemHealthCheck · auditLeaveQuota · traceLeaveQuota
  * ► โควต้าคงเหลือทุกคนลงชีท: buildQuotaRemainSheet · setupQuotaRemainTrigger (v9.42)
+ * ► ใครเห็นโควต้าทุกคน / หัวหน้าเห็นใคร: auditQuotaScope (v9.43 · อ่านอย่างเดียว)
  *     auditScanPhotos · auditScanPhotosAfterFix · auditInOutPairs · auditDuplicateScans
  *     auditLeaveDates · auditSalaryAdjustRows · previewTimeIssues
  * ► ตัวแก้ข้อมูล (ดู audit คู่กันก่อนเสมอ): fixInOutPairsApply · fixLeaveDatesApply
@@ -253,7 +259,7 @@ function handle(e, method) {
 
     if (action === 'ping') {
       // v5.7: ใส่เลขเวอร์ชันไว้เช็คจากภายนอกได้ว่า deployment ล่าสุดคือตัวไหน (แก้ทุกครั้งที่ออกเวอร์ชันใหม่)
-      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.42', time:new Date().toISOString(), clientId:CFG.clientId });
+      return jsonOut({ ok:true, msg:'LOGINFIX-OK', v:'9.43', time:new Date().toISOString(), clientId:CFG.clientId });
     }
 
     // v3.0: ประตูเปิดรูปสแกน — คลิกจากตาราง Supabase (checkin_log_th) แล้วเห็นรูปเลย
@@ -2735,16 +2741,101 @@ function quotaAll_(fresh) {
 }
 
 /* HR เห็นทุกคน · หัวหน้าเห็นเฉพาะลูกทีม/สาขาตัวเอง (ขอบเขตเดียวกับหน้าอนุมัติ) */
+/* v9.43 (surat เคาะ 25/09): เห็นปุ่ม "ทุกคน" ได้แค่หัวหน้างานกับ HR · หัวหน้าเห็นแค่ลูกทีมตัวเอง
+   ลูกทีม = คนที่หัวหน้าคนนี้อนุมัติใบให้ (approverScope_ ตัวเดียวกับหน้าอนุมัติ):
+     ชื่อเราอยู่คอลัมน์ N ของเขาในชีท Users · แท็บผู้อนุมัติเฉพาะ · หัวหน้า PTT ตามสาขา/ทั้งระบบ
+   เดิม (9.42) กว้างเกิน 3 ทาง: หัวหน้าเห็นทั้งสาขา (canSeeUser) · ผู้จัดการเห็นทั้งบริษัท · เห็นตัวเองด้วย */
+function quotaTeamOf_(user) {
+  const sc = approverScope_(user);
+  const team = new Set();
+  // canDecide_ = ตัวตัดสินเดียวกับปุ่มอนุมัติ: ไม่ใช่ตัวเอง · ถ้ามี "ผู้อนุมัติเฉพาะ" ต้องเป็นเรา · อยู่ในทีม
+  //   (คนที่ใส่ชื่อเราในคอลัมน์ N แต่ HR กำหนดผู้อนุมัติเฉพาะเป็นคนอื่น = ไม่ใช่ลูกทีมเราแล้ว)
+  sc.team.forEach(id => { id = String(id || '').trim(); if (id && canDecide_(sc, id).ok) team.add(id); });
+  return team;
+}
 function getQuotaAll(p, user) {
-  if (!isSupervisor(user) && !isHR(user)) return { ok: false, error: 'ดูโควต้าทุกคนได้เฉพาะหัวหน้า/HR' };
-  const pack = quotaAll_(String((p && p.fresh) || '') === '1');
-  const all = isHR(user) || canSeeAllBranches(user);
-  let rows = pack.rows;
-  if (!all) {
-    const scope = approverScope_(user);
-    rows = rows.filter(r => scope.team.has(r.empId) || canSeeUser(user, r.empId));
+  const hr = isHR(user);
+  const team = hr ? null : quotaTeamOf_(user);
+  if (!hr && !isSupervisor(user) && !team.size) return { ok: false, error: 'ดูโควต้าทุกคนได้เฉพาะหัวหน้างาน/HR' };
+  const pack = quotaAll_(String((p && p.fresh) || '') === '1');           // เช็คสิทธิ์ก่อน ค่อยคิดของแพง
+  if (hr) return { ok: true, at: pack.at, scope: 'all', types: QR_TYPES, rows: pack.rows };
+  const rows = pack.rows.filter(r => team.has(String(r.empId)));
+  return { ok: true, at: pack.at, scope: 'team', types: QR_TYPES, rows: rows,
+           note: rows.length ? '' : 'ยังไม่มีลูกทีมในระบบ — ให้ HR ใส่ชื่อคุณในคอลัมน์ N (หัวหน้างาน) ของลูกทีม ในชีท Users' };
+}
+
+/* v9.43: ตัวตรวจ — ใครเห็นปุ่ม "ทุกคน" และหัวหน้าแต่ละคนเห็นใคร (รันจาก editor · อ่านอย่างเดียว)
+   คิดด้วยฟังก์ชันเดียวกับที่แอปใช้จริง (isHR / quotaTeamOf_) → ผลตรงกับที่แต่ละคนเห็นในแอป */
+function auditQuotaScope() {
+  const U = usersData_();
+  const pm = pttMap_();
+  const active = quotaPeople_();                          // คนที่อยู่ในรายการโควต้า (ยังทำงานอยู่)
+  const nm = id => (active[id] && active[id].name) || id;
+  const people = [], seen = {};
+  for (let i = 1; i < U.length; i++) {
+    const r = U[i];
+    const id = String(r[U_COL.empId] || '').trim();
+    if (!id || seen[id]) continue;
+    if (String(r[U_COL.status] || '').trim().toLowerCase() !== 'active') continue;
+    seen[id] = 1;
+    people.push({ empId: id, name: String(r[U_COL.name] || '').trim(),
+                  role: parseInt(r[U_COL.userRole], 10) || 1, department: String(r[U_COL.department] || '') });
   }
-  return { ok: true, at: pack.at, scope: all ? 'all' : 'team', types: QR_TYPES, rows: rows };
+  Object.keys(pm).forEach(id => {                          // PTT ที่ไม่มีแถวในชีท Users
+    if (seen[id]) return; seen[id] = 1;
+    people.push({ empId: id, name: pm[id].name || id, role: 1, department: '' });
+  });
+
+  const hrs = [], heads = [], noBtn = [], empty = [];
+  let plain = 0;
+  people.forEach(u => {
+    const pos = String((pm[u.empId] && pm[u.empId].position) || '');
+    const btn = u.role >= 5 || /^ผู้จัดการ/.test(pos);          // ตรงกับ canSeeTeam() ในแอป
+    if (isHR(u)) { hrs.push(u); return; }
+    _scopeCache = null;
+    const team = quotaTeamOf_(u);
+    const vis = [];
+    team.forEach(id => { if (active[id]) vis.push(id); });
+    const myName = (_scopeCache && _scopeCache.myName) || u.name;
+    const colN = {};
+    for (let i = 1; i < U.length; i++) if (String(U[i][13]).trim() === myName) colN[String(U[i][2]).trim()] = 1;
+    const direct = vis.filter(id => colN[id]).length;         // ที่เห็นเพราะใส่ชื่อเราในคอลัมน์ N
+    const row = { u: u, vis: vis, direct: direct, btn: btn, allPtt: PTT_ALL_SUPERVISORS.indexOf(u.empId) >= 0, pttMgr: /^ผู้จัดการ/.test(pos) };
+    if (vis.length && btn) heads.push(row);
+    else if (vis.length) noBtn.push(row);
+    else if (btn) empty.push(row);
+    else plain++;
+  });
+  _scopeCache = null;
+
+  const byName = (a, b) => String((a.u || a).name).localeCompare(String((b.u || b).name), 'th');
+  const L = ['===== ใครเห็นโควต้า "ทุกคน" บ้าง (ข้อมูลจริง ณ ตอนรัน) ====='];
+  L.push('กติกา: HR เห็นทุกคน · หัวหน้างานเห็นเฉพาะลูกทีม (คนที่เขาอนุมัติใบให้) · ไม่เห็นตัวเอง · พนักงานทั่วไปไม่เห็นปุ่ม');
+  L.push('พนักงานในรายการโควต้า ' + Object.keys(active).length + ' คน');
+  L.push('');
+  L.push('── HR (เห็นทุกคน) : ' + hrs.length + ' คน ──');
+  hrs.sort(byName).forEach(u => L.push('   ' + u.name + ' (' + u.empId + ') · role ' + u.role));
+  L.push('');
+  L.push('── หัวหน้างาน (เห็นปุ่ม · เห็นเฉพาะลูกทีม) : ' + heads.length + ' คน ──');
+  heads.sort(byName).forEach(h => {
+    const src = h.allPtt ? 'หัวหน้า PTT ทั้งระบบ' : (h.pttMgr ? 'ผู้จัดการ PTT (สาขา+คลังเดียวกัน)' : '');
+    const other = h.vis.length - h.direct;
+    L.push('   ' + h.u.name + ' (' + h.u.empId + ') · role ' + h.u.role + ' · เห็น ' + h.vis.length + ' คน' +
+           ' [คอลัมน์ N ' + h.direct + (other > 0 ? ' · ' + (src || 'ผู้อนุมัติเฉพาะ/PTT') + ' ' + other : '') + ']');
+    const names = h.vis.map(nm).sort((a, b) => a.localeCompare(b, 'th'));
+    L.push('      ' + names.slice(0, 12).join(' · ') + (names.length > 12 ? ' · …อีก ' + (names.length - 12) + ' คน' : ''));
+  });
+  L.push('');
+  L.push('⚠ มีลูกทีมแต่ไม่เห็นปุ่ม (role ในชีท Users คอลัมน์ P ต่ำกว่า 5) : ' + noBtn.length + ' คน');
+  noBtn.sort(byName).forEach(h => L.push('   ' + h.u.name + ' (' + h.u.empId + ') · role ' + h.u.role + ' · มีลูกทีม ' + h.vis.length + ' คน'));
+  if (noBtn.length) L.push('   → ถ้าเป็นหัวหน้าจริง ให้แก้ role เป็น 5 (หน้าอนุมัติในแอปก็จะขึ้นด้วย)');
+  L.push('');
+  L.push('⚠ เห็นปุ่มแต่ไม่มีลูกทีม (เปิดแล้วจะเจอรายการว่าง) : ' + empty.length + ' คน');
+  empty.sort(byName).forEach(h => L.push('   ' + h.u.name + ' (' + h.u.empId + ') · role ' + h.u.role));
+  if (empty.length) L.push('   → ใส่ชื่อเขาในคอลัมน์ N ของลูกทีม หรือถ้าไม่ใช่หัวหน้าให้ลด role ลง');
+  L.push('');
+  L.push('พนักงานทั่วไป (ไม่เห็นปุ่ม) : ' + plain + ' คน');
+  Logger.log(L.join('\n'));
 }
 
 /* แท็บ "โควต้าคงเหลือ" — 1 คน 1 แถว · บล็อก คงเหลือ / ใช้ไป / สิทธิเต็ม
@@ -4505,7 +4596,7 @@ function approverScope_(user) {
   const team = new Set();
   let myName = cleanName_(String((user && user.name) || ''));
   try {
-    const u = SpreadsheetApp.openById(CFG.usersSheetId).getSheetByName('Sheet1').getDataRange().getValues();
+    const u = usersData_();   // v9.43: ชีทเดียวกัน (CFG.usersTab = 'Sheet1') แต่อ่านครั้งเดียวต่อการรัน
     for (let i = 1; i < u.length; i++) if (String(u[i][2]).trim() === me) { myName = String(u[i][4]).trim() || myName; break; }
     if (myName) for (let i = 1; i < u.length; i++) if (String(u[i][13]).trim() === myName) team.add(String(u[i][2]).trim());
   } catch (_) {}
