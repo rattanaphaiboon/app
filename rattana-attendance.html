@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v6.02</title>
+<title>HR Rattana v6.03</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3774,7 +3774,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.02';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '13.03';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -3928,6 +3928,7 @@ function parseDescriptors_(raw) {
 /* Employee mode state */
 let empStream = null, empMatchInterval = null;
 let _checkinBusy = false;          // v7.4: กันปุ่มถูกเปิดใหม่/กดซ้ำระหว่างกำลังบันทึก
+let _ckSyncing = 0;                   // v13.03: กำลังส่งสแกนขึ้นระบบเบื้องหลัง (ห้ามรีโหลดอัปเดตกลางทาง)
 let lastFaceMatch = null;
 let lastGps = null;
 
@@ -4621,7 +4622,7 @@ async function loadUsersSheet() {
   if (!config.usersSheetId) return false;
   try {
     const url = `https://docs.google.com/spreadsheets/d/${config.usersSheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(config.sheetTabs.users)}`;
-    const res = await fetch(url);
+    const res = await fetchT_(url, {}, 45000);   // v13.03: เพดานเวลา
     if (!res.ok) throw new Error('fetch failed');
     const text = await res.text();
     allUsers = parseUsersSheet(text);
@@ -4676,7 +4677,7 @@ async function loadSheetTab(sheetId, tabName) {
   if (!sheetId) return null;
   try {
     const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`;
-    const res = await fetch(url);
+    const res = await fetchT_(url, {}, 45000);   // v13.03: เพดานเวลา
     if (!res.ok) throw new Error('fetch failed');
     const text = await res.text();
     return parseCsvToObjects(text);
@@ -4787,6 +4788,8 @@ async function loadSettingsSheet() {
   // Apply known settings
   if (remote.radius_default) settings.radius = +remote.radius_default || settings.radius;
   if (remote.face_threshold) settings.faceThr = +remote.face_threshold || settings.faceThr;
+  if (remote.face_max_dist) settings.faceThr = Math.min(settings.faceThr, +remote.face_max_dist || settings.faceThr);   // v13.03: ไม่หลวมกว่าเซิร์ฟเวอร์ (กัน "แอปบอกผ่าน แต่ระบบไม่รับ")
+  if (remote.face_checkin) { settings.faceCheckinMode = String(remote.face_checkin); try { LS.set('faceCheckinMode', settings.faceCheckinMode); } catch (_) {} }   // v13.03
   if (remote.start_time) settings.startTime = remote.start_time || settings.startTime;
   if (remote.liveness_level) settings.liveness = remote.liveness_level || settings.liveness;
   if (remote.late_grace_minutes) settings.lateGrace = +remote.late_grace_minutes || 0;
@@ -4880,21 +4883,45 @@ async function loadCheckinLogSheet() {
 /* v8.6 — POST แบบทน: Apps Script บางครั้งเด้ง redirect แล้วได้หน้า HTML error
    (โหลด/quota/สะดุดชั่วคราว) → res.json() พังด้วย "Unexpected token '<'".
    อ่านเป็น text ก่อน ถ้าไม่ใช่ JSON = retry สูงสุด 3 ครั้ง */
-async function apiPost(url, bodyObj, tries = 3) {
+/* v13.03: fetch ที่มีเพดานเวลา — เดิมไม่มีเลย ถ้าเน็ตค้าง/เซิร์ฟเวอร์ไม่ตอบ คำขอรอได้ไม่จำกัด
+   = วงกลม "กำลังบันทึก/โหลดข้อมูล" หมุนไม่หยุดจนต้องปิดแอป · อ่าน body จนจบภายในเพดานเดียวกัน
+   คืนของที่ใช้แทน Response ได้ (ok / status / text() / json()) · หมดเวลา = error ที่มี .timeout */
+const API_TIMEOUT_MS = 60000;
+function fetchT_(url, init, ms) {
+  const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+  let timer = null;
+  const work = (async () => {
+    const resp = await fetch(url, ctl ? Object.assign({}, init || {}, { signal: ctl.signal }) : (init || {}));
+    const body = await resp.text();
+    return { ok: resp.ok, status: resp.status, text: async () => body, json: async () => JSON.parse(body) };
+  })();
+  work.catch(() => {});
+  const limit = new Promise((_, rej) => {
+    timer = setTimeout(() => {
+      try { if (ctl) ctl.abort(); } catch (_) {}
+      const err = new Error('เซิร์ฟเวอร์ตอบช้าเกินไป — ลองใหม่อีกครั้ง'); err.timeout = true; rej(err);
+    }, ms || API_TIMEOUT_MS);
+  });
+  return Promise.race([work, limit]).finally(() => clearTimeout(timer));
+}
+async function apiPost(url, bodyObj, tries = 3, timeoutMs = API_TIMEOUT_MS) {
   let lastErr;
   for (let i = 0; i < tries; i++) {
     try {
-      const resp = await fetch(url, {
+      const resp = await fetchT_(url, {
         method: 'POST', mode: 'cors', redirect: 'follow',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify(bodyObj),
-      });
+      }, timeoutMs);
       const text = (await resp.text()).trim();
       if (text[0] === '{' || text[0] === '[') {
         try { return JSON.parse(text); } catch (_) {}
       }
       lastErr = new Error('เซิร์ฟเวอร์ขัดข้องชั่วคราว ลองใหม่อีกครั้ง');   // ได้ HTML → transient
-    } catch (e) { lastErr = e; }
+    } catch (e) {
+      lastErr = e;
+      if (e && e.timeout) break;   // v13.03: ช้าเกินเพดาน = คิวเซิร์ฟเวอร์ยาว — ยิงซ้ำทันทีมีแต่ซ้ำเติม ให้ผู้เรียกส่งซ้ำทีหลัง
+    }
     if (i < tries - 1) await new Promise(r => setTimeout(r, 600 * (i + 1)));
   }
   throw lastErr || new Error('เชื่อมต่อไม่สำเร็จ');
@@ -4932,7 +4959,10 @@ async function callAppsScript(action, payload = {}, opts = {}) {
     const json = await apiPost(config.appsScriptUrl, { action, idToken, ...payload });
     if (!json.ok) {
       // v2.4: แค่ throw error — ให้ caller แสดง toast เอง ไม่มี popup/banner
-      throw new Error(json.error || 'Apps Script error');
+      // v13.03: แนบรหัสไปด้วย (face_mismatch = ระบบตรวจหน้าแล้วไม่รับ ส่งซ้ำก็ไม่ผ่าน)
+      const err = new Error(json.error || 'Apps Script error');
+      if (json.code) err.code = json.code;
+      throw err;
     }
     // v12.93: อนุมัติ/ถอนอนุมัติสำเร็จ = ตัวเลขโควต้า "ทุกคน" ที่จำไว้เก่าแล้ว → ครั้งหน้าดึงสด
     //         (เดิมอนุมัติแล้วเปิดดูทันที ยังไม่หัก เพราะแคชในเครื่อง 10 นาที + server 15 นาที)
@@ -4976,6 +5006,11 @@ async function apiRegisterFace({ empId, name, descriptor, descriptor2, photo, ph
   });
 }
 
+/* v13.03: โหมดตรวจหน้าตอนลงเวลาที่เซิร์ฟเวอร์แจ้งมา ('dry' จดอย่างเดียว / 'enforce' บล็อกจริง / '' = เซิร์ฟเวอร์เก่า) */
+function faceCheckinMode_() {
+  if (settings && settings.faceCheckinMode) return settings.faceCheckinMode;
+  try { return LS.get('faceCheckinMode', '') || ''; } catch (_) { return ''; }
+}
 async function apiCheckin(logData) {
   return callAppsScript('checkin', {
     empId: logData.empId,
@@ -4993,12 +5028,22 @@ async function apiCheckin(logData) {
     photo: logData.photo || '',
     clientId: String(logData.id || ''),   // v8.7: กันบันทึกซ้ำตอน re-sync (backend dedupe)
     clientTs: logData.ts || '',           // v8.7: เวลาสแกนจริง (backend ใช้แทน now ตอน re-sync)
+    // v13.03 ★ ส่งค่าใบหน้าให้เซิร์ฟเวอร์ตรวจจริง — v12.86 เก็บไว้ใน log แต่ตรงนี้ไม่เคยส่งออกไป
+    //   เซิร์ฟเวอร์เลยไม่เคยได้ตรวจ "หน้าเหมือนคนอื่นมากกว่า" ตอนลงเวลา (ทำงานแค่ตอนเข้าระบบด้วยหน้า)
+    //   ส่งเฉพาะสแกนด้วยหน้าตัวเองที่ยังไม่เคยขึ้นระบบ — QR ประจำจุด = ใช้แทนหน้า · ส่งซ่อมรูป = ผ่านมาแล้ว
+    //   และส่งเมื่อเซิร์ฟเวอร์บอกว่ารองรับแล้ว (v9.51+: face_checkin) — Apps Script รุ่นเก่าจะบล็อกทันทีโดยไม่มีช่วงจดก่อน
+    faceDesc: (faceCheckinMode_() && logData.faceDesc && !logData.remote && String(logData.scannedBy || 'self') === 'self') ? logData.faceDesc : undefined,
   });
 }
 
 /* v8.7 — ดัน log ที่ sync ไม่สำเร็จ ขึ้น Sheet ซ้ำตอนเปิดแอป (idempotent ด้วย clientId) */
+let _resyncBusy = false;   // v13.03: กันวนซ้อน (เปิดแอป / เน็ตกลับ / ตั้งเวลา 2 นาที เรียกพร้อมกันได้)
 async function resyncPendingLogs() {
-  if (!config.appsScriptUrl) return;
+  if (!config.appsScriptUrl || _resyncBusy) return;
+  _resyncBusy = true;
+  try { await resyncPendingLogsOnce_(); } finally { _resyncBusy = false; }
+}
+async function resyncPendingLogsOnce_() {
   const cutoff = Date.now() - 3 * 24 * 3600 * 1000;   // ย้อนหลังไม่เกิน 3 วัน
   // v10.3: รวม log ที่ "รูปยังไม่ขึ้น" (photoPending) ด้วย — backend เส้นทาง dup จะเติมรูปให้
   const pending = logs.filter(l =>
@@ -5008,6 +5053,7 @@ async function resyncPendingLogs() {
   ).slice(0, 20);
   if (!pending.length) return;
   let ok = 0;
+  const rejected = []; let rejMsg = '';   // v13.03: ระบบไม่รับ (หน้าไม่ตรง) — เลิกวนส่ง + แจ้งเจ้าของ
   for (const l of pending) {
     try {
       const r = await apiCheckin(l);
@@ -5020,9 +5066,23 @@ async function resyncPendingLogs() {
         else { l.photoPending = false; }                                               // photoSaved ไม่มีในคำตอบ = SB ปิด/แบ็กเอนด์เก่า — เลิกวน
       }
     }
-    catch (_) { /* ยังส่งไม่ได้ — ไว้รอบหน้า */ }
+    catch (e) {
+      // v13.03: ระบบไม่รับ — เฉพาะสแกนที่ยังไม่เคยขึ้นระบบ (ที่ขึ้นแล้วแค่ส่งซ่อมรูป อย่าลบทิ้ง)
+      if (e && e.code === 'face_mismatch') {
+        if (!l.remote) { rejected.push(l); rejMsg = e.message || rejMsg; }
+        else { l.photoPending = false; delete l.photoTries; ok++; }
+        continue;
+      }
+      if (e && e.timeout) break;   // v13.03: เซิร์ฟเวอร์ช้า — พักไว้รอบหน้า ไม่ยิงต่อทั้งกอง
+      /* ยังส่งไม่ได้ — ไว้รอบหน้า */
+    }
   }
   if (ok) { saveLogs(); console.log('[resync] ดันขึ้นระบบ ' + ok + '/' + pending.length + ' รายการ'); }
+  if (rejected.length) {
+    dropRejectedLogs_(rejected);
+    const mine = rejected.filter(l => empKey_(l.empId) === empKey_(currentUser && currentUser.empId));
+    if (mine.length) showCheckinRejectedModal_(rejMsg, mine);
+  }
 }
 
 /* Read FaceData via Apps Script — ใส่ idToken ใน query string */
@@ -5031,7 +5091,7 @@ async function apiGetFaceData() {
   if (!getCurrentIdToken()) return null;
   { const b = bootTake_("faces"); if (b) return b.faces; }
   try {
-    const res = await fetch(buildApiUrl('getFaceData'), { redirect:'follow' });
+    const res = await fetchT_(buildApiUrl('getFaceData'), { redirect:'follow' });
     const json = await res.json();
     return json.ok ? json.faces : null;
   } catch (e) { console.error(e); return null; }
@@ -5042,7 +5102,7 @@ async function apiGetSettings() {
   if (!getCurrentIdToken()) return null;
   { const b = bootTake_("settings"); if (b) return b.settings; }
   try {
-    const res = await fetch(buildApiUrl('getSettings'), { redirect:'follow' });
+    const res = await fetchT_(buildApiUrl('getSettings'), { redirect:'follow' });
     const json = await res.json();
     return json.ok ? json.settings : null;
   } catch (e) { console.error(e); return null; }
@@ -5053,7 +5113,7 @@ async function apiGetLocations() {
   if (!getCurrentIdToken()) return null;
   { const b = bootTake_("locations"); if (b) return b.locations; }
   try {
-    const res = await fetch(buildApiUrl('getLocations'), { redirect:'follow' });
+    const res = await fetchT_(buildApiUrl('getLocations'), { redirect:'follow' });
     const json = await res.json();
     return json.ok ? json.locations : null;
   } catch (e) { console.error(e); return null; }
@@ -5065,7 +5125,7 @@ async function apiGetPersonalLocations(empId) {
   if (!empId) { const b = bootTake_("ploc"); if (b) return b.personalLocations; }
   try {
     const params = empId ? { empId } : {};
-    const res = await fetch(buildApiUrl('getPersonalLocations', params), { redirect:'follow' });
+    const res = await fetchT_(buildApiUrl('getPersonalLocations', params), { redirect:'follow' });
     const json = await res.json();
     return json.ok ? json.personalLocations : null;
   } catch (e) { console.error(e); return null; }
@@ -5076,7 +5136,7 @@ async function apiGetCheckinLog(filters = {}) {
   if (!getCurrentIdToken()) return null;
   if (!filters.date && !filters.month && !filters.empId) { const b = bootTake_("logs"); if (b) return b.logs; }
   try {
-    const res = await fetch(buildApiUrl('getCheckinLog', filters), { redirect:'follow' });
+    const res = await fetchT_(buildApiUrl('getCheckinLog', filters), { redirect:'follow' });
     const json = await res.json();
     return json.ok ? json.logs : null;
   } catch (e) { console.error(e); return null; }
@@ -5092,7 +5152,7 @@ async function primeBoot_() {
   _boot = null;
   if (!config.appsScriptUrl || !getCurrentIdToken()) return;
   try {
-    const res = await fetch(buildApiUrl('getBootstrap', { light: (typeof canSeeTeam === 'function' && canSeeTeam()) ? '0' : '1', limit: 500 }), { redirect: 'follow' });
+    const res = await fetchT_(buildApiUrl('getBootstrap', { light: (typeof canSeeTeam === 'function' && canSeeTeam()) ? '0' : '1', limit: 500 }), { redirect: 'follow' }, 90000);   // v13.03: เพดาน 90 วิ (รวม 5 อย่าง)
     const j = await res.json();
     if (j && j.ok) _boot = j;
   } catch (e) { console.warn('[boot] getBootstrap ไม่สำเร็จ ใช้วิธีเดิมแทน:', e.message); }
@@ -5167,6 +5227,8 @@ async function loadSettingsViaApi() {
   if (!remote) return false;
   if (remote.radius_default) settings.radius = +remote.radius_default || settings.radius;
   if (remote.face_threshold) settings.faceThr = +remote.face_threshold || settings.faceThr;
+  if (remote.face_max_dist) settings.faceThr = Math.min(settings.faceThr, +remote.face_max_dist || settings.faceThr);   // v13.03: ไม่หลวมกว่าเซิร์ฟเวอร์ (กัน "แอปบอกผ่าน แต่ระบบไม่รับ")
+  if (remote.face_checkin) { settings.faceCheckinMode = String(remote.face_checkin); try { LS.set('faceCheckinMode', settings.faceCheckinMode); } catch (_) {} }   // v13.03
   if (remote.start_time) settings.startTime = remote.start_time || settings.startTime;
   if (remote.liveness_level) settings.liveness = remote.liveness_level || settings.liveness;
   if (remote.late_grace_minutes) settings.lateGrace = +remote.late_grace_minutes || 0;
@@ -5488,9 +5550,18 @@ async function loadFaceModelsOnce_(silent) {
       const idx = (_faceModelHost + i) % FACE_MODEL_HOSTS.length;
       const url = FACE_MODEL_HOSTS[idx];
       try {
-        await faceapi.nets.tinyFaceDetector.loadFromUri(url); if(!silent) setProgress(40);
-        await faceapi.nets.faceLandmark68Net.loadFromUri(url); if(!silent) setProgress(70);
-        await faceapi.nets.faceRecognitionNet.loadFromUri(url); if(!silent) setProgress(100);
+        // v13.03: เพดานเวลาต่อไฟล์ — เดิมแหล่งไหนค้าง (เน็ตมือถือบางเจ้า) จะรอไม่จบ ไม่ขยับไปแหล่งสำรอง
+        //   และทุกจอที่รอโมเดลก็ค้างตาม ("กำลังเตรียมโมเดล" ไม่หาย) · ไฟล์ที่โหลดสำเร็จแล้วไม่โหลดซ้ำ
+        const withT = (p, ms, what) => new Promise((res, rej) => {
+          const t = setTimeout(() => rej(new Error(what + ' โหลดนานเกิน ' + Math.round(ms / 1000) + ' วิ')), ms);
+          p.then(v => { clearTimeout(t); res(v); }, e => { clearTimeout(t); rej(e); });
+        });
+        if (!faceapi.nets.tinyFaceDetector.isLoaded) await withT(faceapi.nets.tinyFaceDetector.loadFromUri(url), 45000, 'ตัวจับหน้า');
+        if(!silent) setProgress(40);
+        if (!faceapi.nets.faceLandmark68Net.isLoaded) await withT(faceapi.nets.faceLandmark68Net.loadFromUri(url), 45000, 'จุดบนใบหน้า');
+        if(!silent) setProgress(70);
+        if (!faceapi.nets.faceRecognitionNet.isLoaded) await withT(faceapi.nets.faceRecognitionNet.loadFromUri(url), 150000, 'ตัวจำใบหน้า');
+        if(!silent) setProgress(100);
         _faceModelHost = idx;
         faceapiReady = true;
         _faceLoadFailed = false;
@@ -5666,7 +5737,7 @@ async function startEmpCamera() {
     _empCamRetried = false;   // v12.89: เปิดได้แล้ว — เคลียร์ธงไว้ให้รอบหน้าลองซ้ำได้อีก
     _empCamBusy = false;   // v12.35: กล้องพร้อมแล้ว — งานที่เหลือ (จับหน้า/โหลดโมเดล) ไม่ใช่การเปิดกล้อง อย่าให้โหมด QR ต้องรอ
     startEmpMatching();                        // v12.15: เริ่มลูปก่อน — ลูปจะรอ/ลองโหลดโมเดลเอง
-    if (!faceapiReady) await loadFaceModels();
+    if (!faceapiReady) await loadFaceModels(true);   // v13.03: เงียบ — จอสแกนบอกสถานะโมเดลเองอยู่แล้ว (ไม่บังจอ)
   } catch (e) {
     console.error('[cam]', e && e.name, e && e.message, e);
     if (empStream) { try { empStream.getTracks().forEach(t => t.stop()); } catch (_) {} empStream = null; }
@@ -6191,7 +6262,7 @@ async function flushFaceQueue_() {
   if (reload) { try { await loadFaceDataViaApi(); } catch (_) {} }
   try { renderFaceSyncNote_(); } catch (_) {}
 }
-window.addEventListener('online', () => { try { flushFaceQueue_(); } catch (_) {} });
+window.addEventListener('online', () => { try { flushFaceQueue_(); } catch (_) {} try { resyncPendingLogs().catch(() => {}); } catch (_) {} });   // v13.03: สแกนค้างส่งทันทีที่เน็ตกลับ
 function renderFaceSyncNote_() {
   const el = document.getElementById('faceSyncNote');
   if (!el) return;
@@ -6579,6 +6650,37 @@ function showScanGapModal_(gap) {
     </div>`;
   document.body.appendChild(modal);
   modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+}
+/* v13.03: เอาสแกนที่ระบบไม่รับออกจากเครื่อง — หน้าแรก/ประวัติจะได้ไม่โชว์ว่าลงเวลาแล้ว และไม่วนส่งซ้ำ */
+function dropRejectedLogs_(arr) {
+  const ids = new Set((arr || []).map(l => l && l.id).filter(Boolean));
+  logs = logs.filter(l => !((arr || []).indexOf(l) >= 0 || (l && l.id && ids.has(l.id))));
+  saveLogs();
+  window._forceNextType = null;
+  try { renderTodayStatus(); renderTodayPage(); renderHistory(); renderDashboard(); renderHomeTodayCard(); evaluateAction(); checkScanPairAlert(); } catch (_) {}
+}
+/* v13.03: จอแจ้ง "ระบบไม่รับการสแกน" — ต้องเห็นชัด ไม่ใช่ toast ที่หายไปเอง */
+function showCheckinRejectedModal_(msg, arr) {
+  const old = document.getElementById('ckRejectModal'); if (old) old.remove();
+  const first = (arr && arr[0]) || {};
+  const d = first.ts ? new Date(first.ts) : new Date();
+  const sameDay = !first.dateKey || first.dateKey === todayKey();
+  const when = (sameDay ? '' : d.toLocaleDateString('th-TH', { day: 'numeric', month: 'short' }) + ' ') +
+               d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.';
+  const modal = document.createElement('div'); modal.id = 'ckRejectModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:650;display:flex;align-items:center;justify-content:center;padding:24px';
+  modal.innerHTML = `
+    <div style="background:var(--card-bg);border-radius:18px;padding:26px 22px;max-width:360px;width:100%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.3)">
+      <div style="width:64px;height:64px;border-radius:50%;background:#FDECEC;display:flex;align-items:center;justify-content:center;margin:0 auto 14px;font-size:30px">❌</div>
+      <div id="ckRejTitle" style="font-size:17px;font-weight:800;color:var(--text);margin-bottom:8px"></div>
+      <div id="ckRejMsg" style="font-size:13.5px;color:var(--text);line-height:1.65;margin-bottom:10px"></div>
+      <div style="font-size:12.5px;color:var(--muted);line-height:1.65">ยังไม่ได้ลงเวลา — สแกนใหม่ในที่สว่าง หน้าตรง <span style="white-space:nowrap">ไม่ใส่แมสก์</span><br>ถ้ายังไม่ผ่าน แจ้งหัวหน้า/HR ให้ลงทะเบียนใบหน้าใหม่ แล้วยื่น "แก้เวลา" ย้อนหลัง</div>
+      <button onclick="document.getElementById('ckRejectModal').remove()"
+        style="margin-top:18px;width:100%;padding:13px;border:none;border-radius:10px;background:var(--navy);color:#fff;font-weight:700;font-size:15px;cursor:pointer">รับทราบ</button>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.querySelector('#ckRejTitle').textContent = 'ระบบไม่รับการสแกน ' + when + (arr && arr.length > 1 ? ' (และอีก ' + (arr.length - 1) + ' ครั้ง)' : '');
+  modal.querySelector('#ckRejMsg').textContent = msg || 'ใบหน้าไม่ตรงกับที่ลงทะเบียนไว้';
 }
 /* v12.0 — สแกนแรกของวันหลังเที่ยง: ถามให้ชัวร์ว่า "เข้ากะบ่ายจริง" หรือ "ลืมสแกนเช้า"
    (เดิมสแกนเย็น 17:00 ทั้งที่ลืมสแกนเช้า → ระบบบันทึกเป็น "เข้างาน 17:00" ข้อมูลผิดทันที) */
@@ -6993,29 +7095,50 @@ async function doSelfCheckIn() {
   renderTodayStatus(); renderHomeTodayCard();
   toast(`${type === 'out' ? '✓ บันทึกออกงาน' : '✓ บันทึกเข้างาน'} ${timeStr} น. · กำลังส่งขึ้นระบบ...`, 'success');
 
+  // v13.03: บันทึกในเครื่อง + ปิดจอสแกนแล้ว → ปล่อยปุ่มทันที ไม่ต้องรอเน็ต
+  //   เดิมถือปุ่มไว้จนส่งขึ้นระบบเสร็จ — เน็ตค้าง = ปุ่มสแกนกดไม่ติด (เงียบ) จนกว่าจะปิดแอป
+  //   (กดซ้ำไม่ได้อยู่แล้ว: จอสแกนปิดแล้ว + ด่านเว้นช่วง 60 นาทีกันไว้)
+  _checkinBusy = false;
+  try { evaluateAction(); } catch (_) {}
+  _ckSyncing++;
   // 2) Send to Apps Script (real-time write to Sheet)
   let synced = false;
   let syncError = '';
   let syncRes = null;   // v10.2: ดูผล photoSaved จาก backend
-  if (config.appsScriptUrl) {
-    try {
-      syncRes = await apiCheckin(saved);
-      synced = true;
-    } catch (e) {
-      syncError = e.message || String(e);
-      console.error('Sheet sync failed:', syncError);
-      // v2.2: retry 1 ครั้งหลัง 2 วิ (กรณี network blip)
+  let rejected = false; // v13.03: เซิร์ฟเวอร์ตรวจหน้าแล้ว "ไม่รับ" — ส่งซ้ำกี่รอบก็ไม่ผ่าน
+  try {
+    if (config.appsScriptUrl) {
       try {
-        await new Promise(r => setTimeout(r, 2000));
         syncRes = await apiCheckin(saved);
         synced = true;
-        syncError = '';
-      } catch (e2) {
-        syncError = e2.message || String(e2);
-        console.error('Sheet sync retry failed:', syncError);
+      } catch (e) {
+        syncError = e.message || String(e);
+        console.error('Sheet sync failed:', syncError);
+        if (e && e.code === 'face_mismatch') rejected = true;
+        else if (!(e && e.timeout)) {
+          // v2.2: retry 1 ครั้งหลัง 2 วิ (กรณี network blip) — v13.03: ไม่ retry ถ้าระบบไม่รับ/ช้าเกินเพดาน
+          try {
+            await new Promise(r => setTimeout(r, 2000));
+            syncRes = await apiCheckin(saved);
+            synced = true;
+            syncError = '';
+          } catch (e2) {
+            syncError = e2.message || String(e2);
+            console.error('Sheet sync retry failed:', syncError);
+            if (e2 && e2.code === 'face_mismatch') rejected = true;
+          }
+        }
       }
     }
+  } finally { _ckSyncing = Math.max(0, _ckSyncing - 1); }
+  // v13.03 ★ ระบบไม่รับการสแกน — เดิมแอปขึ้น "✓ บันทึกเข้างาน" ค้างไว้ในเครื่องทั้งที่ระบบไม่มีเวลานี้
+  //   แล้ววนส่งซ้ำเงียบๆ 3 วัน → พนักงานเข้าใจว่าลงเวลาแล้ว แต่ HR ไม่เห็น
+  if (rejected) {
+    dropRejectedLogs_([saved]);
+    showCheckinRejectedModal_(syncError, [saved]);
+    return;
   }
+  if (!synced && config.appsScriptUrl) setTimeout(() => { resyncPendingLogs().catch(() => {}); }, 120000);   // v13.03: ส่งซ้ำเองใน 2 นาที ไม่ต้องรอเปิดแอปใหม่
   // v11.0: ตั้งธงรูปค้าง "ก่อน" saveLogs — ไม่งั้น pruneLogs_ เห็น remote+ไม่มีธง → ลบรูปทิ้งก่อนได้ส่งซ้ำ
   if (synced) {
     if (syncRes && syncRes.photoSaved === false) { saved.photoPending = true; saved.photoTries = 0; }
@@ -7389,14 +7512,20 @@ function startKiosk() {
 }
 async function startKioskCamera() {
   try {
-    if (!faceapiReady) await loadFaceModels();
-    kioskState.stream = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ facingMode:'user', width:{ideal:640}, height:{ideal:640} } });
-    const v = document.getElementById('kioskVideo'); v.srcObject = kioskState.stream; v.play().catch(()=>{}); await camWaitFrame_(v, 8000);
+    // v13.03: โมเดลโหลดไม่ได้ = บอกชัด (เดิมเปิดกล้องต่อ ขึ้น "มองตรงกล้อง" แต่ไม่จับหน้าเลย ดูเหมือนค้าง)
+    if (!faceapiReady && !(await loadFaceModels())) {
+      setKioskHeadline('⚠ โหลดระบบสแกนหน้าไม่ได้', 'เช็คเน็ต แล้วออกจากโหมดนี้แล้วเข้าใหม่', 'error');
+      return;
+    }
+    const v = document.getElementById('kioskVideo');
+    const st = await openFrontCamera_(v);   // v13.03: หมดเวลา 12 วิ + ลองซ้ำเอง 1 ครั้ง (เดิมรอกล้องได้ไม่จำกัด)
+    if (!kioskState.active) { try { st.getTracks().forEach(t => t.stop()); } catch (_) {} v.srcObject = null; return; }   // ออกจากโหมดไปแล้วระหว่างรอ
+    kioskState.stream = st;
     setKioskHeadline('มองตรงกล้อง', 'วางใบหน้าให้อยู่ในกรอบ', '');
     kioskState.detectInterval = setInterval(kioskDetectTick, 400);
   } catch (e) {
     console.error(e);
-    setKioskHeadline('⚠ เปิดกล้องไม่ได้', 'อนุญาตการใช้กล้องในเบราว์เซอร์', 'error');
+    setKioskHeadline('⚠ เปิดกล้องไม่ได้', camErrText_(e), 'error');
   }
 }
 function exitKiosk() {
@@ -7635,7 +7764,7 @@ function openAddMember(member) {
 }
 async function startAddCamera() {
   try {
-    addStream = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ facingMode:'user', width:{ideal:480}, height:{ideal:480} } });
+    addStream = await camTimeout_(navigator.mediaDevices.getUserMedia({ audio:false, video:{ facingMode:'user', width:{ideal:480}, height:{ideal:480} } }), 12000);   // v13.03: เพดาน 12 วิ
     const v = document.getElementById('addVideo'); v.srcObject = addStream; v.play().catch(()=>{}); await camWaitFrame_(v, 8000);
     document.getElementById('addCamOverlay').classList.add('hidden');
     if (!faceapiReady) await loadFaceModels();
@@ -8849,7 +8978,7 @@ async function loadLocationsFromSheet() {
   showSpinner('โหลดจาก Google Sheets...');
   try {
     const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv`;
-    const res = await fetch(url);
+    const res = await fetchT_(url, {}, 45000);   // v13.03: เพดานเวลา
     if (!res.ok) throw new Error('fetch failed');
     const rows = parseCsv(await res.text());
     const out = rows.map(r => ({
@@ -9841,7 +9970,7 @@ function startUpdateChecker() {
   // ปลอดภัย = อยู่หน้าแรก + ไม่มีกล้อง/kiosk/ลงทะเบียนหน้า/กำลังบันทึก/กำลังพิมพ์ฟอร์ม
   function updateSafe_() {
     try {
-      if (_checkinBusy) return false;
+      if (_checkinBusy || _ckSyncing) return false;
       if (empStream) return false;
       // v12.90 ★ จอสแกนที่ "กล้องเปิดไม่ได้" = ปลอดภัยที่จะอัปเดต (ไม่มีอะไรจะเสีย)
       //   เดิมบังคับว่าต้องอยู่หน้าแรกเท่านั้น → เครื่องที่กล้องพังจะค้างอยู่จอนั้น
@@ -9988,8 +10117,9 @@ function initApp() {
   setInterval(() => { updateApproveAlert(); updateTimeIssues(); }, 10 * 60 * 1000);   // v12.21: รีเฟรชเลขรออนุมัติ
 
   // Preload face models in background (so first scan ไวกว่า) — แต่ไม่เปิดกล้อง
+  // v13.03: โหลดเงียบ — เดิมขึ้นจอหมุนบังทั้งแอปจนโมเดลมาครบ (~6 MB) เน็ตช้า = เปิดแอปแล้วค้างรอ
   setTimeout(async () => {
-    await loadFaceModels();
+    await loadFaceModels(true);
   }, 600);
 
   // Auto-stop camera + GPS เมื่อสลับไป tab อื่น
@@ -10227,7 +10357,7 @@ async function startCheckinScan_(mode) {
   setTimeout(() => getGps(), 300);
   if (!faceapiReady) {
     toast('กำลังโหลดโมเดลใบหน้า...', 'info');
-    await loadFaceModels();
+    await loadFaceModels(true);   // v13.03: ไม่บังจอ — จอสแกนบอกสถานะเอง
     if (faceapiReady && empStream) startEmpMatching();
   }
 }
