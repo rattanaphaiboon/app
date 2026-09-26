@@ -1195,7 +1195,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.253</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.254</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -3688,6 +3688,7 @@ async function loadData(){
     loadKeepdata().catch(e=>console.warn('Keepdata load failed:',e.message));
     loadDrivers().catch(e=>console.warn('Drivers load failed:',e.message));
     setTimeout(()=>{ if(typeof _t5Load==='function')_t5Load(); },1500);   // v9.208: Top 5 ร้าน (แท็บ Top5ร้าน) — ครั้งเดียวต่อคลัง
+    if(typeof _dqCostCfgLoad==='function')_dqCostCfgLoad();   // v9.254: ค่าคำนวณต้นทุนจากแท็บ "ต้นทุน"
 
     renderAll();
     showToast(`โหลดสำเร็จ — ${bills.length} บิล`,'ok');
@@ -12475,9 +12476,9 @@ const DQ_COST_VEH={
   '12wheel':{name:'12 ล้อ',       kmpl:2.7, wear:11.00, common:700},
   trailer  :{name:'รถพ่วง',       kmpl:2.2, wear:14.00, common:700}
 };
-const DQ_LABOR_DRIVER=700, DQ_LABOR_WORKER=400, DQ_WORKERS=2;
+let DQ_LABOR_DRIVER=700, DQ_LABOR_WORKER=400, DQ_WORKERS=2;   // v9.254: ค่าตั้งต้น — แท็บ "ต้นทุน" ในชีททับได้
 const DQ_MARGIN={retail:0.03, wholesale:0.01};
-const DQ_FUEL_DEFAULT=42.90;
+let DQ_FUEL_DEFAULT=42.90;   // v9.254: แท็บ "ต้นทุน" ทับได้
 function _dqVehId(t){
   if(!t)return null;
   if(t.trailer)return 'trailer';                        // ต่อหางพ่วงอยู่ (v9.178)
@@ -12497,15 +12498,64 @@ function dqTripCost(km,vehId,o){
   const total=fuel+wear+labor;
   return {km,liters,fuel,wear,labor,total,minRevenue:total/DQ_MARGIN[mode],mode,vehId,price,trips,workers};
 }
+// ══ v9.254: ค่าคำนวณต้นทุนอ่านจากชีท — แท็บ "ต้นทุน" ไฟล์จัดรถส่งสินค้า (SHEET_ID) คอลัมน์ A หลัก | B ค่า (C หน่วย · D คำอธิบาย แอปไม่อ่าน) ══
+//   user: "อยากให้มีคอลัมน์หลักกับคอลัมน์ค่า สามารถเข้าไปแก้ไขค่าได้ตลอด"
+//   โหลดทุกครั้งที่เปิดแอป/กด 🔄 รีเฟรช · ไม่มีแท็บ / ไม่มีหลักไหน / ค่าอ่านไม่ออก = ใช้ค่าในแอป (ค่าเดิมจาก FUEL-COST-SPEC.md)
+//   ชื่อหลักเทียบแบบตัดช่องว่าง · % รับได้ทั้ง "3%" / 0.03 / 3 · ⚠️ gviz: แท็บที่ไม่มีจริงคืนแท็บแรกมาแทน → เช็คหัวคอลัมน์ก่อน
+//   ราคาดีเซล: พิมพ์เองในเครื่อง > "ราคาดีเซล (กำหนดเอง)" ในชีท > ดึง PTT อัตโนมัติ > "ราคาดีเซลตั้งต้น"
+const DQ_COST_TAB='ต้นทุน';
+const _DQ_VEH_TH={pickup:'กระบะ', jumbo:'จัมโบ้ 4 ล้อ', '6wheel':'6 ล้อ', '10wheel':'10 ล้อ', '12wheel':'12 ล้อ', trailer:'รถพ่วง'};
+let _dqCfg={fuel:0, n:0, at:0}, _dqCfgDef=null;
+function _dqCfgNum(v,pct){
+  let s=String(v==null?'':v).replace(/,/g,'').trim(); if(!s)return null;
+  const isP=/%$/.test(s); s=s.replace(/%$/,'').trim();
+  let n=parseFloat(s); if(!isFinite(n))return null;
+  if(pct&&(isP||n>=1))n=n/100;
+  return n;
+}
+async function _dqCostCfgLoad(){
+  if(!_dqCfgDef)_dqCfgDef={driver:DQ_LABOR_DRIVER, worker:DQ_LABOR_WORKER, workers:DQ_WORKERS, fuel:DQ_FUEL_DEFAULT,
+    margin:Object.assign({},DQ_MARGIN), veh:JSON.parse(JSON.stringify(DQ_COST_VEH))};
+  let rows=null;
+  try{ rows=await fetchSheet(DQ_COST_TAB,SHEET_ID,{timeoutMs:15000,retries:1,tq:'SELECT A, B'}); }
+  catch(e){ console.warn('[ต้นทุน] อ่านแท็บ "'+DQ_COST_TAB+'" ไม่ได้ — ใช้ค่าเดิม',(e&&e.message)||e); return; }
+  if(!(rows&&rows.length&&('หลัก' in rows[0])&&('ค่า' in rows[0]))){ console.log('⛽ ต้นทุน: ยังไม่มีแท็บ "'+DQ_COST_TAB+'" (คอลัมน์ หลัก | ค่า) — ใช้ค่าในแอป'); return; }
+  // กลับไปค่าตั้งต้นก่อน แล้วค่อยทับด้วยชีท (ลบหลักไหนออกจากชีท = กลับเป็นค่าเดิม)
+  const D=_dqCfgDef; DQ_LABOR_DRIVER=D.driver; DQ_LABOR_WORKER=D.worker; DQ_WORKERS=D.workers; DQ_FUEL_DEFAULT=D.fuel;
+  Object.assign(DQ_MARGIN,D.margin); Object.keys(D.veh).forEach(k=>Object.assign(DQ_COST_VEH[k],D.veh[k]));
+  const N=x=>String(x==null?'':x).replace(/\s+/g,'').toLowerCase();
+  const m={}; rows.forEach(r=>{ const k=N(r['หลัก']); if(k)m[k]=r['ค่า']; });
+  let n=0; const bad=[];
+  const set=(key,fn,o)=>{ o=o||{}; const raw=m[N(key)]; if(raw==null||String(raw).trim()==='')return;
+    const v=_dqCfgNum(raw,o.pct); if(v==null||v<0||(o.pos&&!(v>0))){ bad.push(key); return; } fn(v); n++; };
+  set('ค่าแรงคนขับ',v=>{ DQ_LABOR_DRIVER=v; });
+  set('ค่าแรงพนักงานยก',v=>{ DQ_LABOR_WORKER=v; });
+  set('จำนวนพนักงานยกต่อคัน',v=>{ DQ_WORKERS=Math.round(v); });
+  set('กำไรขั้นต่ำ พรีปลีก',v=>{ DQ_MARGIN.retail=v; },{pct:1,pos:1});
+  set('กำไรขั้นต่ำ พรีส่ง',v=>{ DQ_MARGIN.wholesale=v; },{pct:1,pos:1});
+  set('ราคาดีเซลตั้งต้น',v=>{ DQ_FUEL_DEFAULT=v; },{pos:1});
+  Object.keys(_DQ_VEH_TH).forEach(id=>{ const th=_DQ_VEH_TH[id], V=DQ_COST_VEH[id]; if(!V)return;
+    set(th+' กม./ลิตร',v=>{ V.kmpl=v; },{pos:1});
+    set(th+' ค่าเสื่อม/บำรุง',v=>{ V.wear=v; });
+    set(th+' ค่าส่วนกลาง',v=>{ V.common=v; }); });
+  const fp=_dqCfgNum(m[N('ราคาดีเซล (กำหนดเอง)')]);
+  _dqCfg={fuel:(fp>=10&&fp<=100)?fp:0, n, at:Date.now()};
+  console.log(`⛽ ต้นทุน: อ่านจากแท็บ "${DQ_COST_TAB}" ${n} ค่า${_dqCfg.fuel?' · ดีเซลกำหนดเอง '+_dqCfg.fuel:''}${bad.length?' · อ่านไม่ออก: '+bad.join(', '):''}`);
+  if(typeof _dqFuelSyncUi==='function')_dqFuelSyncUi();
+  if(typeof _dqCostRerender==='function')_dqCostRerender();
+}
 // ── ราคาดีเซล: ดึงเอง (PTT ดีเซล B7) · เก็บในเครื่องไว้โชว์ก่อน · พิมพ์ทับได้ พิมพ์เองแล้วไม่ดึงมาทับ ──
 let _dqFuel=(function(){ try{ return JSON.parse(localStorage.getItem('dq_v4_fuel')||'null'); }catch(e){ return null; } })();
 let _dqFuelBusy=false, _dqFuelTried=false;
-function dqFuelPrice(){ return (_dqFuel&&_dqFuel.price>0)?_dqFuel.price:DQ_FUEL_DEFAULT; }
+function dqFuelPrice(){   // v9.254: พิมพ์เองในเครื่อง > กำหนดในชีท "ต้นทุน" > ดึงอัตโนมัติ > ค่าตั้งต้น
+  if(_dqFuel&&_dqFuel.src==='user'&&_dqFuel.price>0)return _dqFuel.price;
+  if(_dqCfg.fuel>0)return _dqCfg.fuel;
+  return (_dqFuel&&_dqFuel.price>0)?_dqFuel.price:DQ_FUEL_DEFAULT; }
 function _dqFuelSave(){ try{ localStorage.setItem('dq_v4_fuel',JSON.stringify(_dqFuel)); }catch(e){} }
 function _dqFuelSyncUi(){
   const inp=document.getElementById('dqFuelInp'), src=document.getElementById('dqFuelSrc');
   if(inp&&document.activeElement!==inp)inp.value=dqFuelPrice().toFixed(2);
-  if(src)src.textContent=!_dqFuel?'ค่าตั้งต้น':_dqFuel.src==='user'?'พิมพ์เอง':_dqFuel.src==='api'?('PTT '+(_dqFuel.date||'')):'ค่าตั้งต้น (ดึงราคาไม่ได้)';
+  if(src)src.textContent=(_dqFuel&&_dqFuel.src==='user')?'พิมพ์เอง':(_dqCfg.fuel>0)?'จากชีท ต้นทุน':!_dqFuel?'ค่าตั้งต้น':_dqFuel.src==='user'?'พิมพ์เอง':_dqFuel.src==='api'?('PTT '+(_dqFuel.date||'')):'ค่าตั้งต้น (ดึงราคาไม่ได้)';
 }
 async function dqFuelRefresh(force){
   if(!force&&_dqFuel&&_dqFuel.src==='user')return;
