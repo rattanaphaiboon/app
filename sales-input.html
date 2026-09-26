@@ -259,7 +259,7 @@ input[type=number] { -moz-appearance: textfield; }
     <h1>Sales Plan</h1>
     <div class="sub" id="dateDisplay"></div>
   </div>
-  <span class="ver-badge">v5.39.0</span>
+  <span class="ver-badge">v5.40.0</span>
   <button class="btn btn-ghost" onclick="clearAll()">ล้าง</button>
   <button class="btn btn-primary" onclick="saveAll()">บันทึก</button>
 </header>
@@ -435,6 +435,7 @@ function onInput(el) {
   const v = raw===''?undefined:parseFloat(raw);
   state[cat][key] = isNaN(v)?undefined:v;
   updateSummary(); updateSection(cat);
+  if (SAVE_KEYS.includes(key)) markEdited(cat, key);
 }
 function onFocusNum(el) {
   el.value = el.value.replace(/,/g, '');
@@ -455,6 +456,7 @@ function onPctInput(el) {
     const inp = document.querySelector(`[data-cat="${catId}"][data-key="plan_buy"]`);
     if (inp) inp.value = fmtNum(qty, false);
     updateSection(catId); updateSummary();
+    markEdited(catId, 'plan_buy');
   }
 }
 
@@ -663,69 +665,70 @@ function updateSummary() {
 
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbxJHoWpBliWExQ9FuMWKI96R5pol-Afz8hgL0ZcVM6R-MQF_yxr9R4e9587Fzii7yDv/exec';
 const SAVE_KEYS = ['plan_buy','plan_sell'];
-let _gasBlocked = false;
+const _pending = {};   // 'cat|key' → version ของค่าที่แก้ในเครื่องแต่ GAS ยังไม่ยืนยันว่าบันทึก
+const _editedAt = {};  // 'cat|key' → version ล่าสุดที่แก้ในเครื่อง
+let _editVer = 0, _loaded = false, _saveTimer, _gasSeq = 0;
 
+function gasCall(params, onData, onError) {
+  const cb = '_gasCb' + (++_gasSeq);
+  const s = document.createElement('script');
+  window[cb] = data => { delete window[cb]; s.remove(); onData(data); };
+  s.onerror = () => { delete window[cb]; s.remove(); if (onError) onError(); };
+  s.src = GAS_URL + '?callback=' + cb + params;
+  document.head.appendChild(s);
+}
+function markEdited(cat, key) {
+  const id = cat + '|' + key;
+  _editedAt[id] = _pending[id] = ++_editVer;
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(saveAll, 1000);
+}
 function clearAll() {
-  categories.forEach(c=>{ delete state[c.id].plan_buy; delete state[c.id].plan_sell; });
-  _gasBlocked = true;
+  categories.forEach(c=>{
+    SAVE_KEYS.forEach(k=>{ delete state[c.id][k]; markEdited(c.id, k); });
+  });
   renderSections(); switchTab(activeTab); updateSummary();
-  saveAll();
 }
 function saveAll() {
+  // บันทึกก่อนโหลดค่าจาก GAS เสร็จจะเขียนค่าว่างทับแผนของหมวดอื่น
+  if (!_loaded) { showToast('กำลังโหลดข้อมูล รอสักครู่'); return; }
+  const sent = { ..._pending };
   const payload = {};
   categories.forEach(c=>{
     const d = state[c.id]; const vals = {};
     SAVE_KEYS.forEach(k=>{ vals[k] = (d[k]!=null && d[k]!=='') ? d[k] : ''; });
     payload[c.id] = vals;
   });
-  const cbName = '_gasSave' + Date.now();
-  window[cbName] = function() {
-    delete window[cbName];
-    const s = document.getElementById('_gasSaveScript'); if(s) s.remove();
-    _gasBlocked = false;
-    showToast('บันทึกแล้ว ✓');
-  };
-  const script = document.createElement('script');
-  script.id = '_gasSaveScript';
-  script.src = GAS_URL + '?callback=' + cbName + '&save=' + encodeURIComponent(JSON.stringify(payload));
-  script.onerror = () => { delete window[cbName]; script.remove(); _gasBlocked = false; showToast('บันทึกไม่สำเร็จ'); };
-  document.head.appendChild(script);
-}
-function loadFromGAS(data) {
-  if (_gasBlocked) return;
-  categories.forEach(c=>{
-    const d = data[c.id]; if(!d) return;
-    SAVE_KEYS.forEach(k=>{ if(d[k]!=null && d[k]!=='') state[c.id][k] = Number(d[k])||0; });
-  });
-  renderSections(); switchTab(activeTab); updateSummary();
+  gasCall('&save=' + encodeURIComponent(JSON.stringify(payload)),
+    () => {
+      for (const id in sent) if (_pending[id] === sent[id]) delete _pending[id];
+      showToast('บันทึกแล้ว ✓');
+    },
+    () => showToast('บันทึกไม่สำเร็จ'));
 }
 function loadSaved() {
-  const cbName = '_gasLoad' + Date.now();
-  window[cbName] = function(data) {
-    delete window[cbName];
-    const s = document.getElementById('_gasScript'); if(s) s.remove();
-    loadFromGAS(data);
-  };
-  const script = document.createElement('script');
-  script.id = '_gasScript';
-  script.src = GAS_URL + '?callback=' + cbName + '&t=' + Date.now();
-  script.onerror = () => { delete window[cbName]; script.remove(); };
-  document.head.appendChild(script);
+  const ver = _editVer, pendingAtSend = { ..._pending };
+  gasCall('&t=' + Date.now(), data => {
+    categories.forEach(c=>{
+      const d = data && data[c.id]; if(!d) return;
+      SAVE_KEYS.forEach(k=>{
+        const id = c.id + '|' + k;
+        // ค่าที่ยังบันทึกไม่เสร็จตอนส่งคำขอ หรือแก้หลังส่ง — ข้อมูลที่ได้กลับมาอาจเก่ากว่าในเครื่อง
+        if (pendingAtSend[id] || (_editedAt[id] || 0) > ver) return;
+        const v = (d[k]!=null && d[k]!=='') ? Number(d[k])||0 : undefined;
+        if (state[c.id][k] === v) return;
+        if (v === undefined) delete state[c.id][k]; else state[c.id][k] = v;
+        const inp = document.querySelector(`[data-cat="${c.id}"][data-key="${k}"]`);
+        if (inp) inp.value = fmtNum(v, false);
+        updateSection(c.id);
+      });
+    });
+    updateSummary();
+    if (!_loaded) { _loaded = true; if (Object.keys(_pending).length) saveAll(); }
+  });
 }
 function startPolling() {
-  setInterval(()=>{
-    const cbName = '_gasPoll' + Date.now();
-    window[cbName] = function(data) {
-      delete window[cbName];
-      const s = document.getElementById('_gasPollScript'); if(s) s.remove();
-      loadFromGAS(data);
-    };
-    const script = document.createElement('script');
-    script.id = '_gasPollScript';
-    script.src = GAS_URL + '?callback=' + cbName + '&t=' + Date.now();
-    script.onerror = () => { delete window[cbName]; script.remove(); };
-    document.head.appendChild(script);
-  }, 30000);
+  setInterval(() => (_loaded && Object.keys(_pending).length ? saveAll() : loadSaved()), 30000);
 }
 function fmtNum(v, keepDec) {
   if (v == null || v === '') return '';
