@@ -1,4 +1,4 @@
-// Rattana 360 — หลังบ้าน (Google Apps Script) v1.0
+// Rattana 360 — หลังบ้าน (Google Apps Script) v1.1
 // ประเมินพนักงานโดยบุคคลภายนอก (ลูกค้า / ขนส่ง / ซัพพลายเออร์ / เซลล์)
 //
 // ══════════════ วิธีติดตั้ง (ทำครั้งเดียว) ══════════════
@@ -11,12 +11,12 @@
 //  5. คัดลอก URL ที่ลงท้าย /exec ส่งให้ Claude ใส่ใน CONFIG.gasUrl ของ rattana-360.html
 //     (ถ้า URL มี /a/macros/rattanaphaiboon.com/ ให้ตัดส่วนนั้นออก เหลือ script.google.com/macros/s/…/exec)
 //  แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ Version: New version ▸ Deploy (URL เดิม)
-//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น {"ok":true,"version":"1.0",…}
+//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น {"ok":true,"version":"1.1",…}
 //
 //  ตัวเลือกเพิ่มเติม (Project Settings ▸ Script Properties):
 //    ALERT_EMAILS = hr@rattanaphaiboon.com, manager@…   ← ส่งอีเมลเตือนเมื่อได้คะแนนต่ำ (เว้นว่าง = ไม่ส่ง)
 
-var VERSION = '1.0';
+var VERSION = '1.1';
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน (ชีตบริษัท แท็บหลัก)
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 var RESP_SHEET = 'ประเมิน';
@@ -24,7 +24,7 @@ var SESSION_TTL = 21600;           // อายุ session ของหน้า
 var APP_URL = 'https://rattanaphaiboon.github.io/app/rattana-360.html';
 
 var TYPES = ['ลูกค้า', 'ขนส่ง / คนส่งของ', 'ซัพพลายเออร์', 'เซลล์ / ผู้เสนอสินค้า', 'อื่นๆ'];
-var BRANCH = { HQ: 'สำนักงานใหญ่', W1: 'สมุทรสงคราม', W2: 'สุพรรณบุรี', W3: 'ราชบุรี', W4: 'นครปฐม' };
+var BRANCH = { HQ: 'สำนักงานใหญ่', W1: 'สมุทรสงคราม', W2: 'สุพรรณบุรี', W3: 'ราชบุรี', W4: 'นครปฐม', C4: 'รัตนมาร์ท ดอนตูม' };
 
 // ตำแหน่งคอลัมน์ตายตัว (1-based) ของแท็บ "ประเมิน" — โค้ดอ้างด้วยเลข ไม่พึ่งข้อความหัวตาราง
 var C_ID = 1, C_TS = 2, C_CODE = 3, C_NAME = 4, C_NICK = 5, C_W = 6, C_DEPT = 7, C_TYPE = 8,
@@ -101,6 +101,10 @@ function findEmp_(code) {
 // ข้อมูลพนักงานที่ปล่อยให้คนนอกเห็นได้ — ชื่อ ชื่อเล่น แผนก สาขา รูป เท่านั้น
 function publicEmp_(e) {
   return { code: e.code, name: e.name, nick: e.nick, w: e.w, wName: wName_(e.w), dept: e.dept, photo: e.photo };
+}
+// "ไม่ทราบชื่อพนักงาน" → ประเมินสาขาโดยรวม ใช้รหัสสาขา (W1/W2/W3/W4/C4/HQ) แทนรหัสพนักงาน
+function branchEmp_(w) {
+  return { code: w, name: 'สาขา' + wName_(w) + ' (ไม่ระบุพนักงาน)', nick: '', w: w, wName: wName_(w), dept: '', photo: '', active: true };
 }
 function findUserByEmail_(email) {
   email = norm_(email);
@@ -214,7 +218,8 @@ function findRowById_(sheet, id) {
 // ───────────────────────── รับผลประเมิน (สาธารณะ) ─────────────────────────
 function submit_(p) {
   if (clean_(p.hp)) return { ok: true, id: 'x' };            // honeypot: บอทกรอกช่องซ่อน → ทำเป็นรับไว้เฉย ๆ
-  var emp = findEmp_(p.code);
+  var bw = clean_(p.code).toUpperCase();
+  var emp = BRANCH[bw] ? branchEmp_(bw) : findEmp_(p.code);
   if (!emp) return { ok: false, error: 'ไม่พบรหัสพนักงาน' };
   if (!emp.active) return { ok: false, error: 'พนักงานคนนี้ไม่ได้อยู่ในทะเบียนแล้ว' };
   var type = clean_(p.type);
@@ -282,7 +287,16 @@ function doGet(e) {
       var sh = ss.getSheetByName(RESP_SHEET);
       return json_({ ok: true, app: 'Rattana 360', sheet: ss.getUrl(), count: sh ? Math.max(sh.getLastRow() - 1, 0) : 0 });
     }
+    if (action === 'emps') {
+      // รายชื่อพนักงานของสาขา (สาธารณะ) — เฉพาะชื่อ ชื่อเล่น แผนก รูป ไม่มีข้อมูลส่วนตัวอื่น
+      var w = clean_(p.w).toUpperCase();
+      if (!BRANCH[w]) return json_({ ok: false, error: 'ไม่รู้จักสาขา' });
+      var emps = getRegistry_().filter(function (e) { return e.active && e.w === w; }).map(publicEmp_);
+      return json_({ ok: true, emps: emps });
+    }
     if (action === 'emp') {
+      var bcode = clean_(p.code).toUpperCase();
+      if (BRANCH[bcode]) return json_({ ok: true, emp: branchEmp_(bcode) });
       var emp = findEmp_(p.code);
       if (!emp || !emp.active) return json_({ ok: false, error: 'ไม่พบรหัสพนักงาน' });
       return json_({ ok: true, emp: publicEmp_(emp) });
