@@ -18,14 +18,45 @@ PAGES_URL="https://rattanaphaiboon.github.io/app"
 APPS=(
   rattana-voice.html
   rattana-supply-lite.html
+  rattana-supply-lite.webmanifest
+  rattana-supply-lite-sw.js
+  supply-lite-icon-32.png
+  supply-lite-icon-180.png
+  supply-lite-icon-192.png
+  supply-lite-icon-512.png
   rattana-scorecard.html
   rattana-pc-checkin.html
   rattana-pc-checkin-guide.html
   rattana-empid.html
   rattana-repair-doc.html
+  ref-jumbo-coolant.jpg
+  ref-jumbo-brake.jpg
+  ref-jumbo-power.jpg
+  ref-pickup-coolant.jpg
+  ref-pickup-brake.jpg
+  ref-pickup-power.jpg
+  ref-pickup-batt.jpg
+  ref-pickup-oil.jpg
+  ref-tyre-photo.jpg
+  ref-dash-photo.jpg
+  ref-oil-photo.jpg
   rattana-onboard.html
   rattana-hr-docs.html
   rattana-jobs.html
+  rattana-quote.html
+  rattana-quote-brief.html
+  rattana-carcheck-brief.html
+  rattana-360.html
+  rattana-360.gs
+  rattana-repair-doc.webmanifest
+  rattana-repair-doc-sw.js
+  carcheck-icon-180.png
+  carcheck-icon-192.png
+  carcheck-icon-512.png
+  eq-pallet.png
+  eq-ehand.png
+  eq-forklift.png
+  eq-reach.png
   rattana-img2pdf.html
   rattana-img2pdf-history.gs
   rattana-img2pdf-sw.js
