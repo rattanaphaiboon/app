@@ -1067,7 +1067,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v4.75';
+const APP_VERSION = 'v4.76';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -4194,10 +4194,16 @@ function exportCountExcel() {
 
 const VERIFY_SKEW_MS = 10 * 60 * 1000;   // เผื่อนาฬิกาเครื่อง vs เขตเวลาของสคริปต์คลาดกัน
 
-// ชีทเก็บเวลาเป็น "yyyy-MM-dd HH:mm:ss" (เขตเวลาสคริปต์) — แปลงกลับเป็น ms
+// แปลงเวลาที่ชีทคืนมาเป็น ms — ★ ชีทมี 2 รูปแบบปนกัน ต้องรองรับทั้งคู่
+//   savedAt      = "2026-09-26 09:24:37"                              (fmtDT_ ของ GAS)
+//   sessionStart = "Fri Sep 25 2026 17:02:44 GMT+0700 (เวลาอินโดจีน)"  (Date.toString ของเซลล์)
+// v4.71-v4.75 รองรับแค่แบบแรก → sessionStart ได้ NaN → เทียบไม่ตรงตลอด
+//   = กดส่งลงชีทแล้วขึ้น "ยังตรวจไม่พบในชีท" ทุกครั้งทั้งที่ข้อมูลขึ้นชีทเรียบร้อย (แก้ v4.76)
 function parseSheetDT(s) {
   if (!s) return NaN;
-  const d = new Date(String(s).trim().replace(' ', 'T'));
+  const raw = String(s).trim();
+  let d = new Date(raw);                                        // รับ Date.toString และ ISO
+  if (isNaN(d.getTime())) d = new Date(raw.replace(' ', 'T'));  // "yyyy-MM-dd HH:mm:ss" (Safari ต้องมี T)
   return isNaN(d.getTime()) ? NaN : d.getTime();
 }
 
@@ -4224,14 +4230,22 @@ async function verifySaved(action, check, delays) {
 }
 
 // นับสต็อก: จับคู่ด้วย sessionStart (เวลาเริ่มรอบนับ = แทบไม่ซ้ำ) + คลัง + ชื่อผู้นับ
-function countSavedCheck(whParent, sessionStartIso, counter) {
+// v4.76 เพิ่มทางสำรอง: ถ้า sessionStart ในชีทว่าง/อ่านไม่ออก (แถวเก่า หรือรูปแบบเปลี่ยนอีก)
+//   ให้ยอมรับ "แถวของคลัง+ผู้นับคนนี้ที่เพิ่งบันทึกตอนที่เรากดส่ง" แทน — กันบล็อกคนทำงานซ้ำรอย v4.71
+//   ส่ง sentMs = 0 เมื่อต้องการเทียบแบบเป๊ะอย่างเดียว (ใช้ตอนตรวจก่อนส่ง)
+function countSavedCheck(whParent, sessionStartIso, counter, sentMs) {
   const wh  = String(whParent || '').toUpperCase();
   const who = String(counter || '').trim();
   const t   = new Date(sessionStartIso).getTime();
-  return rows => rows.some(r =>
-    String(r.warehouse || '').toUpperCase() === wh &&
-    String(r.counterName || '').trim() === who &&
-    Math.abs(parseSheetDT(r.sessionStart) - t) < VERIFY_SKEW_MS);
+  return rows => rows.some(r => {
+    if (String(r.warehouse || '').toUpperCase() !== wh) return false;
+    if (String(r.counterName || '').trim() !== who) return false;
+    const ss = parseSheetDT(r.sessionStart);
+    if (!isNaN(ss) && !isNaN(t) && Math.abs(ss - t) < VERIFY_SKEW_MS) return true;
+    if (!sentMs) return false;
+    const sa = parseSheetDT(r.savedAt);
+    return !isNaN(sa) && Math.abs(sa - sentMs) < VERIFY_SKEW_MS;
+  });
 }
 
 // นับเศษ: ไม่มี sessionStart ในชีท → ใช้ savedAt + ผู้นับ และต้องเจอ "ครบทุกคลัง" ที่ส่งไป
@@ -4376,8 +4390,28 @@ async function saveCountToSheet() {
     setMode('count');
   };
 
-  showSpinner('กำลังบันทึกลง Google Sheet...');
   try {
+    // v4.76: ตรวจก่อนส่ง — รอบนับนี้ขึ้นชีทไปแล้วหรือยัง
+    //   เพราะบั๊ก v4.71-v4.75 ทำให้หลายรอบ "ส่งขึ้นชีทสำเร็จแต่แอปบอกว่าไม่เจอ" แล้วไม่ล้างรายการให้
+    //   ถ้าไม่ตรวจก่อน พอกดส่งอีกครั้งข้อมูลจะเข้าชีทซ้ำ = ยอดนับเบิ้ล
+    showSpinner('ตรวจรายการในชีทก่อนส่ง...');
+    const already = await verifySaved('history',
+      countSavedCheck(payload.warehouse, sessionStartIso, payload.counterName, 0), [0]);
+    if (already) {
+      hideSpinner();
+      const ok = await askConfirm(
+        'รอบนับนี้ขึ้นชีทเรียบร้อยแล้ว (ส่งไปก่อนหน้านี้)\nไม่ต้องส่งซ้ำ — ล้างรายการออกจากเครื่องเลยไหม?',
+        { title: 'ส่งขึ้นชีทไปแล้ว', okLabel: 'ล้างรายการ' });
+      if (ok) {
+        pendingVerify = null; hideVerifyBar();
+        doClear();
+        showToast('ล้างรายการแล้ว ✓ ข้อมูลอยู่ในชีทเรียบร้อย', 'success');
+      }
+      return;
+    }
+
+    showSpinner('กำลังบันทึกลง Google Sheet...');
+    const sentMs = Date.now();
     await fetch(COUNT_SAVE_URL, {
       method: 'POST', mode: 'no-cors',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -4385,7 +4419,7 @@ async function saveCountToSheet() {
     });
     // v4.71: no-cors บอกไม่ได้ว่าถึงชีทจริงไหม → อ่านประวัติกลับมายืนยันก่อนล้าง
     showSpinner('กำลังตรวจสอบว่าข้อมูลขึ้นชีทแล้ว...');
-    const check = countSavedCheck(payload.warehouse, sessionStartIso, payload.counterName);
+    const check = countSavedCheck(payload.warehouse, sessionStartIso, payload.counterName, sentMs);
     if (await verifySaved('history', check)) {
       pendingVerify = null; hideVerifyBar();
       doClear();
