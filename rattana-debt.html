@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v6.23</title>
+<title>Rattana ยอดหนี้คงค้าง v6.24</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -364,6 +364,10 @@ body.dark .items-btn:hover{color:var(--navy)}
 .bi-search{width:100%;padding:8px 10px;border-radius:7px;border:1.5px solid var(--border);background:#fff;color:#1a1a1a;font-size:13px;font-family:inherit;box-sizing:border-box;margin-bottom:8px}
 .bi-search:focus{outline:none;border-color:var(--gold)}
 .bi-count{font-size:11px;color:var(--muted);margin:-4px 0 6px}
+/* v6.24: บิลหลายรูป — ปุ่มรูปละปุ่ม (กดเองทุกรูป มือถือไม่บล็อก) + ปุ่มแชร์ทั้งชุด */
+.bi-pages{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:-2px 0 8px;font-size:12px;color:var(--muted);flex:0 0 auto}
+.bi-pages .items-btn{margin:0}
+.bi-pages .items-btn.done{background:rgba(30,132,73,.12);border-color:#1e8449;color:#1e8449}
 /* v6.18: แถวสลับสีให้อ่านง่าย + กันกฎ sticky คอลัมน์แรกของตารางหนี้ (จอแคบกว่า 900px) มาเพี้ยนในหน้าต่างนี้ */
 .bi-table tbody tr.alt{background:#f2f6fd}
 body.dark .bi-table tbody tr.alt{background:rgba(255,255,255,.05)}
@@ -836,7 +840,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v6.23</span>
+      <span class="app-ver">v6.24</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -5648,6 +5652,7 @@ async function openBillItems(docNo, docDate){
   $('billItemsInfo').textContent = '';
   $('billItemsSearch').value = ''; $('billItemsSearch').style.display = 'none'; $('billItemsCount').style.display = 'none';
   billItemsCurrent = null; $('billItemsSaveBtn').style.display = 'none';   // v6.17: ยังไม่มีข้อมูล = ยังกดบันทึกรูปไม่ได้
+  billItemsBlobs = null; $('billItemsPages').style.display = 'none'; $('billItemsPages').innerHTML = '';   // v6.24: รูปของบิลก่อนหน้าไม่เกี่ยวกับบิลนี้
   $('billItemsModal').classList.add('show');
 
   // บิลเก่ากว่าที่ชีทมี → บอกเลย ไม่ต้องรอค้น
@@ -5881,23 +5886,67 @@ async function billItemsImageBlob(pageIdx, pageCount){
   return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
 }
 
+/* v6.24: บิลหลายรูป — เบราว์เซอร์มือถือบล็อกการดาวน์โหลดไฟล์ที่ 2 ขึ้นไปถ้าผู้ใช้ไม่ได้กดเอง (v6.23 ได้แค่รูปเดียว)
+   → สร้างรูปทั้งชุดไว้ก่อน แล้วโชว์ปุ่มรูปละปุ่มให้กดเอง + ปุ่ม "แชร์ทุกรูป" (Web Share: ส่งเข้า LINE / บันทึกลงอัลบั้มทีเดียวทุกรูป) */
+let billItemsBlobs = null;   // [{blob, name}] ของบิลที่เปิดอยู่
+async function buildBillItemsImages(onProgress){
+  const safe = String((billItemsCurrent && billItemsCurrent.docNo) || 'bill').replace(/[\\/:*?"<>|\s]+/g, '-');
+  const pages = billItemsPageCount();
+  const out = [];
+  for (let p = 0; p < pages; p++){
+    if (onProgress) onProgress(p + 1, pages);
+    const blob = await billItemsImageBlob(p, pages);
+    if (!blob) throw new Error('สร้างรูปไม่ได้');
+    out.push({ blob, name: pages > 1 ? `bill-${safe}-${p + 1}of${pages}.png` : `bill-${safe}.png` });
+  }
+  return out;
+}
+function billItemsFiles(){ return (billItemsBlobs || []).map(b => new File([b.blob], b.name, { type: 'image/png' })); }
+function billItemsCanShare(){
+  try { const files = billItemsFiles(); return !!(files.length && navigator.share && navigator.canShare && navigator.canShare({ files })); }
+  catch (e){ return false; }
+}
+function renderBillItemsPages(){
+  const box = $('billItemsPages');
+  if (!billItemsBlobs || billItemsBlobs.length < 2){ box.style.display = 'none'; box.innerHTML = ''; return; }
+  const n = billItemsBlobs.length;
+  box.innerHTML = `<span>📥 บันทึกทีละรูป (กดทุกปุ่ม):</span>`
+    + billItemsBlobs.map((b, i) => `<button type="button" class="items-btn" id="biPageBtn${i}" onclick="downloadBillItemsPage(${i})">รูป ${i + 1}/${n}</button>`).join('')
+    + (billItemsCanShare() ? `<button type="button" class="items-btn" onclick="shareBillItemsImages()" title="ส่งทุกรูปเข้า LINE หรือบันทึกลงอัลบั้มทีเดียว">📤 แชร์ทุกรูป</button>` : '');
+  box.style.display = 'flex';
+}
+function downloadBillItemsPage(i){
+  const b = billItemsBlobs && billItemsBlobs[i];
+  if (!b) return;
+  downloadBlob(b.blob, b.name);
+  const btn = $('biPageBtn' + i); if (btn) btn.classList.add('done');
+  showToast(`บันทึกรูป ${i + 1}/${billItemsBlobs.length} แล้ว ✓`, 'success');
+}
+async function shareBillItemsImages(){
+  try {
+    const files = billItemsFiles();
+    if (!files.length) return;
+    await navigator.share({ files, title: 'รายการสินค้าในบิล ' + ((billItemsCurrent && billItemsCurrent.docNo) || '') });
+  } catch (e){
+    if (e && e.name !== 'AbortError') showToast('แชร์ไม่ได้: ' + (e.message || ''), 'error');
+  }
+}
 async function downloadBillItemsImage(){
   const btn = $('billItemsSaveBtn');
   const label = btn ? btn.textContent : '';
   if (btn){ btn.disabled = true; btn.textContent = '⏳ กำลังสร้างรูป...'; }
   try {
-    const safe = String((billItemsCurrent && billItemsCurrent.docNo) || 'bill').replace(/[\\/:*?"<>|\s]+/g, '-');
     const pages = billItemsPageCount();
     if (!pages){ showToast('สร้างรูปไม่ได้', 'error'); return; }
-    // v6.23: บิลใหญ่แบ่งหลายรูป — บันทึกทีละรูป เว้นช่วงให้เบราว์เซอร์ทัน
-    for (let p = 0; p < pages; p++){
-      if (btn && pages > 1) btn.textContent = `⏳ กำลังสร้างรูป ${p + 1}/${pages}...`;
-      const blob = await billItemsImageBlob(p, pages);
-      if (!blob){ showToast('สร้างรูปไม่ได้', 'error'); return; }
-      downloadBlob(blob, pages > 1 ? `bill-${safe}-${p + 1}of${pages}.png` : `bill-${safe}.png`);
-      if (p < pages - 1) await new Promise(r => setTimeout(r, 500));
+    billItemsBlobs = await buildBillItemsImages((p, n) => { if (btn && n > 1) btn.textContent = `⏳ กำลังสร้างรูป ${p}/${n}...`; });
+    renderBillItemsPages();
+    downloadBlob(billItemsBlobs[0].blob, billItemsBlobs[0].name);   // รูปแรกลงให้เลย
+    if (pages > 1){
+      const b0 = $('biPageBtn0'); if (b0) b0.classList.add('done');
+      showToast(`บิลนี้มี ${pages} รูป — รูปที่ 1 บันทึกแล้ว กดปุ่ม "รูป 2/${pages}" ถึง "รูป ${pages}/${pages}" ด้านบนเพื่อบันทึกที่เหลือ`, 'success');
+    } else {
+      showToast('บันทึกรูปแล้ว ✓', 'success');
     }
-    showToast(pages > 1 ? `บันทึกรูปแล้ว ${pages} รูป (รูปละไม่เกิน ${BI_ROWS_PER_PAGE} รายการ) ✓` : 'บันทึกรูปแล้ว ✓', 'success');
   } catch (e){
     console.error(e);
     showToast('บันทึกรูปไม่ได้: ' + (e.message || ''), 'error');
@@ -6306,6 +6355,7 @@ window.addEventListener('load', () => {
       <div id="billItemsInfo" class="bi-info"></div>
       <button type="button" id="billItemsSaveBtn" class="bi-save-btn" onclick="downloadBillItemsImage()" title="บันทึกรายการสินค้าในบิลนี้เป็นรูปภาพ" style="display:none">📥 บันทึกรูป</button>
     </div>
+    <div id="billItemsPages" class="bi-pages" style="display:none"></div>
     <input type="search" id="billItemsSearch" class="bi-search" placeholder="🔍 ค้นหาสินค้าในบิลนี้..." style="display:none" oninput="filterBillItems(this.value)">
     <div id="billItemsCount" class="bi-count" style="display:none"></div>
     <div id="billItemsBody"></div>
