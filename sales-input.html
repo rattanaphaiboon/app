@@ -259,7 +259,7 @@ input[type=number] { -moz-appearance: textfield; }
     <h1>Sales Plan</h1>
     <div class="sub" id="dateDisplay"></div>
   </div>
-  <span class="ver-badge">v5.42.0</span>
+  <span class="ver-badge">v5.43.0</span>
   <button class="btn btn-ghost" onclick="clearAll()">ล้าง</button>
   <button class="btn btn-primary" onclick="saveAll()">บันทึก</button>
 </header>
@@ -672,15 +672,18 @@ function updateSummary() {
 
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbxJHoWpBliWExQ9FuMWKI96R5pol-Afz8hgL0ZcVM6R-MQF_yxr9R4e9587Fzii7yDv/exec';
 const SAVE_KEYS = ['plan_buy','plan_sell'];
+const APP_VER = document.querySelector('.ver-badge').textContent.trim();
 const _pending = {};   // 'cat|key' → version ของค่าที่แก้ในเครื่องแต่ GAS ยังไม่ยืนยันว่าบันทึก
 const _editedAt = {};  // 'cat|key' → version ล่าสุดที่แก้ในเครื่อง
-let _editVer = 0, _loaded = false, _saveTimer, _gasSeq = 0;
+let _editVer = 0, _saveTimer, _saving = false, _gasSeq = 0;
 
 function gasCall(params, onData, onError) {
   const cb = '_gasCb' + (++_gasSeq);
   const s = document.createElement('script');
-  window[cb] = data => { delete window[cb]; s.remove(); onData(data); };
-  s.onerror = () => { delete window[cb]; s.remove(); if (onError) onError(); };
+  const done = () => { clearTimeout(timer); window[cb] = () => {}; s.remove(); };
+  const timer = setTimeout(() => { done(); if (onError) onError(); }, 30000);
+  window[cb] = data => { done(); onData(data); };
+  s.onerror = () => { done(); if (onError) onError(); };
   s.src = GAS_URL + '?callback=' + cb + params;
   document.head.appendChild(s);
 }
@@ -697,27 +700,27 @@ function clearAll() {
   renderSections(); switchTab(activeTab); updateSummary();
 }
 function saveAll() {
-  // บันทึกก่อนโหลดค่าจาก GAS เสร็จจะเขียนค่าว่างทับแผนของหมวดอื่น
-  if (!_loaded) { showToast('กำลังโหลดข้อมูล รอสักครู่'); return; }
-  const fail = () => showToast('บันทึกไม่สำเร็จ');
-  // อ่านค่าล่าสุดก่อนเขียน แล้วทับเฉพาะช่องที่แก้ในเครื่องนี้ — ไม่งั้นค่าเก่าในเครื่องจะทับที่เครื่องอื่นเพิ่งบันทึก
-  gasCall('&t=' + Date.now(), latest => {
-    const sent = { ..._pending };
-    const payload = {};
-    categories.forEach(c=>{
-      const remote = latest && latest[c.id];
-      const vals = {};
-      SAVE_KEYS.forEach(k=>{
-        const v = (sent[c.id + '|' + k] || !remote) ? state[c.id][k] : remote[k];
-        vals[k] = (v!=null && v!=='') ? v : '';
-      });
-      payload[c.id] = vals;
+  // ส่งทีละรอบ — ถ้าส่งซ้อนกัน GAS อาจบันทึกค่าที่พิมพ์ครึ่งๆ ทีหลังค่าเต็ม
+  if (_saving) return;
+  const sent = { ..._pending };
+  if (!Object.keys(sent).length) { showToast('บันทึกแล้ว ✓'); return; }
+  // ส่งเฉพาะช่องที่แก้ในเครื่องนี้ GAS คงค่าช่องที่ไม่ได้ส่งไว้ — ค่าเก่าในเครื่องจึงไม่ไปทับที่เครื่องอื่นบันทึก
+  const payload = {};
+  categories.forEach(c=>{
+    payload[c.id] = {};
+    SAVE_KEYS.forEach(k=>{
+      if (!sent[c.id + '|' + k]) return;
+      const v = state[c.id][k];
+      payload[c.id][k] = (v!=null && v!=='') ? v : '';
     });
-    gasCall('&save=' + encodeURIComponent(JSON.stringify(payload)), () => {
-      for (const id in sent) if (_pending[id] === sent[id]) delete _pending[id];
-      showToast('บันทึกแล้ว ✓');
-    }, fail);
-  }, fail);
+  });
+  _saving = true;
+  gasCall('&save=' + encodeURIComponent(JSON.stringify(payload)), () => {
+    _saving = false;
+    for (const id in sent) if (_pending[id] === sent[id]) delete _pending[id];
+    showToast('บันทึกแล้ว ✓');
+    if (Object.keys(_pending).length) saveAll();
+  }, () => { _saving = false; showToast('บันทึกไม่สำเร็จ'); });
 }
 function loadSaved() {
   const ver = _editVer, pendingAtSend = { ..._pending };
@@ -737,11 +740,25 @@ function loadSaved() {
       });
     });
     updateSummary();
-    if (!_loaded) { _loaded = true; if (Object.keys(_pending).length) saveAll(); }
   });
 }
+// หน้าที่เปิดค้างไว้จะยังรันโค้ดเก่า — เจอเวอร์ชันใหม่บน GitHub ให้โหลดหน้าใหม่เอง (เฉพาะตอนไม่มีค่ารอบันทึก)
+function checkUpdate() {
+  if (location.protocol === 'file:' || Object.keys(_pending).length) return;
+  fetch(location.href.split('#')[0], { cache: 'reload' })
+    .then(r => r.text())
+    .then(html => {
+      const m = html.match(/class="ver-badge">(v[\d.]+)</);
+      if (m && m[1] !== APP_VER) location.reload();
+    })
+    .catch(() => {});
+}
 function startPolling() {
-  setInterval(() => (_loaded && Object.keys(_pending).length ? saveAll() : loadSaved()), 30000);
+  setInterval(() => (Object.keys(_pending).length ? saveAll() : loadSaved()), 30000);
+  setInterval(checkUpdate, 5 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { loadSaved(); checkUpdate(); }
+  });
 }
 function fmtNum(v, keepDec) {
   if (v == null || v === '') return '';
