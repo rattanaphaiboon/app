@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v4.76</title>
+<title>Rattana Online Order v4.77</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -811,7 +811,7 @@ body.dark .pdpa-body h4,body.dark .pdpa-body b{color:var(--gold-light,#e2c882)}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.76</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.77</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -4826,6 +4826,8 @@ function renderCart(){
    ห้าม: เขียนแท็บ Quota / QuotaShopCap · ยิง BigQuery · เขียนออเดอร์ ROO ลงแท็บ Order ของ Sales App
    ================================================================================== */
 const QCFG={
+  fetchMs:12000,      /* ⏱ v4.77: เพดานต่อ 1 คำขอ gviz */
+  gateMs:15000,       /* ⏱ v4.77: เพดานรวมของด่านโควต้าตอนกดยืนยัน */
   quotaSheet:'1CqHARklgveAeJ6rTkNeyUSku__puTiNE7-c6ebn93W8',      /* Quota + QuotaShopCap (จัดซื้อกรอก) */
   erpSheet:'1NO8sHyDxwHTRqgcLFCxq_g_Rr09lfe4gt_odwkIgiB0',        /* DS_DC = บิลจริงทุกช่องทาง */
   salesSheet:'1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI',      /* Order ของ Sales App (เซลคีย์วันนี้) */
@@ -4881,11 +4883,25 @@ function qUnitLabel(u){
 }
 
 /* ── อ่าน gviz แบบ JSON (ต้องมี headers=1 ไม่งั้นหัวคอลัมน์กลายเป็น A,B,C) ── */
+/* ⏱ v4.77 — รอได้ไม่เกิน ms แล้วไปต่อ (ใช้กับด่านก่อนส่งออเดอร์ · เกินเวลา = fail-open ตามกฎเดิม) */
+function qRace(p, ms, tag){
+  return Promise.race([ Promise.resolve(p),
+    new Promise((_,rj)=>setTimeout(()=>rj(new Error((tag||'ด่าน')+' ช้าเกิน '+Math.round(ms/1000)+' วิ')), ms)) ]);
+}
 async function qGviz(sheetId, ref, tq){
   let u='https://docs.google.com/spreadsheets/d/'+sheetId+'/gviz/tq?tqx=out:json&headers=1';
   u += ref.gid ? ('&gid='+ref.gid) : ('&sheet='+encodeURIComponent(ref.sheet));
   if(tq) u += '&tq='+encodeURIComponent(tq);
-  const res=await fetch(u);
+  /* ⏱ v4.77 (Surat 28/09: "กดยืนยันแล้วหมุนค้าง ไม่มีอะไรเกิดขึ้น")
+     fetch ไม่มี timeout ในตัว — เน็ตมือถือสะดุด/ชีทใหญ่ตอบช้า = คำขอนี้ไม่มีวันจบ
+     และ submitOrder ก็ await ด่านโควต้า/ปิดสินค้าอยู่ → สปินเนอร์หมุนยาวจนลูกค้าปิดแอป
+     ตัดที่ QCFG.fetchMs แล้วโยน error → ทั้ง 2 ด่าน fail-open ตามกฎเดิม (ไม่บล็อกการสั่ง) */
+  const _ctl=(typeof AbortController!=='undefined')?new AbortController():null;
+  const _tmr=_ctl?setTimeout(()=>{ try{ _ctl.abort(); }catch(e){} }, QCFG.fetchMs||12000):null;
+  let res;
+  try{ res=await fetch(u, _ctl?{signal:_ctl.signal}:undefined); }
+  catch(e){ throw new Error((_ctl&&_ctl.signal&&_ctl.signal.aborted) ? ('gviz: ช้าเกิน '+Math.round((QCFG.fetchMs||12000)/1000)+' วิ') : ('gviz: '+((e&&e.message)||e))); }
+  finally{ if(_tmr) clearTimeout(_tmr); }
   const txt=await res.text();
   const m=txt.match(/setResponse\(([\s\S]*?)\);?\s*$/);
   if(!m) throw new Error('gviz: อ่านผลไม่ได้');
@@ -6367,7 +6383,9 @@ async function submitOrder(force){
        (โหลดไม่ได้จริง ๆ QUOTA.loaded ยังเป็น false -> quotaFinalCheck คืน [] = ปล่อยผ่านตามกฎ fail-open เหมือนเดิม) */
     if(!QUOTA.loaded || Date.now()-QUOTA.ts>120000){
       showSpinner('กำลังตรวจสอบโควต้าสินค้า...');   /* v4.32: เดิมช่วงนี้จอเงียบ 15-20 วิ ลูกค้านึกว่าค้างเลยกดซ้ำ */
-      try{ await quotaBoot(true); } finally{ hideSpinner(); }
+      try{ await qRace(quotaBoot(true), QCFG.gateMs, 'ตรวจโควต้า'); }
+      catch(e){ console.warn('[quota] ข้ามด่าน ปล่อยผ่าน (fail-open):', (e&&e.message)||e); }   /* ⏱ v4.77 */
+      finally{ hideSpinner(); }
     }
     const _qb=quotaFinalCheck();
     if(_qb.length){
@@ -6380,7 +6398,8 @@ async function submitOrder(force){
   }catch(e){ console.warn('[quota] ด่านสุดท้ายข้าม (fail-open)',e); }
   /* ⛔ v4.30 ด่านสุดท้ายปิดสินค้า - ตรวจซ้ำทั้งใบเสมอ (ตะกร้าค้างข้ามวันได้ จัดซื้ออาจสั่งปิดหลังลูกค้าใส่ตะกร้า)
      ยังไม่เคยโหลด/ข้อมูลเก่าเกิน ttl → รอโหลดก่อนตัดสิน · โหลดไม่ได้จริง ๆ = fail-open ตามกฎ (ไม่บล็อก) */
-  try{ if(!SKUC.ts || Date.now()-SKUC.ts>SKUC.ttl) await skucBoot(true); }catch(e){}
+  try{ if(!SKUC.ts || Date.now()-SKUC.ts>SKUC.ttl) await qRace(skucBoot(true), 10000, 'ตรวจสินค้าปิดขาย'); }
+  catch(e){ console.warn('[skuc] ข้ามด่าน ปล่อยผ่าน (fail-open):', (e&&e.message)||e); }   /* ⏱ v4.77 */
   const _cb=skucFinalCheck();
   if(_cb.length){
     showToast('มีสินค้าหมด '+_cb.length+' รายการในบิล - เอาออกหรือเอาติ๊กออกก่อนค่ะ','error');
@@ -6407,13 +6426,21 @@ async function submitOrder(force){
     goCart(); renderCart(); return;
   }
   // v3.90: บิลใหญ่บอกให้ลูกค้ารู้ว่าต้องรอ — ไม่งั้นเห็นหมุนนานแล้วนึกว่าค้าง ปิดแอป/กดซ้ำ
-  showSpinner(selItems.length>60 ? ('กำลังส่งออเดอร์ '+selItems.length+' รายการ...\nบิลใหญ่ใช้เวลาสักครู่ อย่าเพิ่งปิดหน้านี้นะคะ') : 'กำลังส่งออเดอร์...');
+  /* ⏱ v4.77 — โชว์ "เวลาที่ผ่านไป" ระหว่างรอ (เดิมข้อความค้างนิ่ง ลูกค้านึกว่าแอปค้างเลยกดซ้ำ/ปิดแอป)
+     บิลใหญ่หลังบ้านใช้เวลาจริงเป็นนาที — ต้องให้เห็นว่ายังทำงานอยู่ และบอกว่าไม่ต้องกดซ้ำ */
+  const _big9=selItems.length>60, _t9=Date.now();
+  const _tick9=()=>{ const s=Math.round((Date.now()-_t9)/1000);
+    let m='กำลังส่งออเดอร์'+(_big9?(' '+selItems.length+' รายการ'):'')+'... ('+s+' วิ)';
+    if(s>=15) m+='\nกำลังบันทึกลงระบบ อย่าเพิ่งปิดหน้านี้นะคะ';
+    if(s>=60) m+='\nยังส่งอยู่ ไม่ต้องกดซ้ำ — ถ้าเผลอปิด เช็คได้ที่แท็บ 📋';
+    showSpinner(m); };
+  _tick9(); const _int9=setInterval(_tick9, 5000);
   let ok=false;
   try{
     if(isSpecial(currentCustomer)) ok=await sendAndConfirmSpecial(payload, orderId);   // ร้านส่ง: verify จากชีท "Order ร้านส่ง" (backward-safe — .gs เก่าไม่พัง)
     else ok=await sendAndConfirm(payload, orderId);
   }
-  finally{ hideSpinner(); }
+  finally{ clearInterval(_int9); hideSpinner(); }
   if(ok){
     /* 🐛 v4.48 (เคสจริง 29/08 ร้านเจ๊ลั้ง วัดคู้ 2 เครื่องเห็นตะกร้าไม่ตรงกัน)
        เดิม: ลบชิ้นที่สั่งออกจากตะกร้าแล้วเรียก saveCart() -> _cartTouch_ เห็นว่า "หายไปจากตะกร้า"
