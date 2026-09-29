@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v6.09</title>
+<title>HR Rattana v6.10</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3784,7 +3784,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.09';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '13.10';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -4193,6 +4193,10 @@ function getCurrentIdToken() {
    · ครบ 7 วันนับจากตอนเข้า = ออกจากระบบให้เอง — ทั้งตอนเปิดแอป (checkSession) และระหว่างเปิดค้าง (sessionWatch_ ทุกนาที)
    · กดออกจากระบบเอง / รีเซ็ตแอป / เซิร์ฟเวอร์ตอบ Unauthorized = ลืมทันที · เครื่องใช้ร่วมกันต้องกดออกจากระบบก่อนส่งต่อ
    · หน้าเข้าสู่ระบบเติมรหัสพนักงานล่าสุดให้ (ไม่จำรหัสผ่าน) และบอกว่าครบ 7 วันแล้ว
+   v13.10 ★ กุญแจเข้าระบบ (คู่ Apps Script 9.53): เดิม token = "SHEET:<รหัส>" ใครรู้รหัสพนักงานก็ปลอมได้
+   · เข้าระบบสำเร็จ เซิร์ฟเวอร์ออกกุญแจ S2.<รหัส>.<หมดอายุ>.<ลายเซ็น> (ปลอมไม่ได้ · หมดอายุ 7 วัน เซิร์ฟเวอร์บังคับเอง)
+   · Apps Script รุ่นเก่ายังไม่ออกกุญแจ = ใช้ "SHEET:" แบบเดิมไปก่อน (อัปเดตแอปก่อน Deploy เซิร์ฟเวอร์ได้)
+   · เซิร์ฟเวอร์ไม่รับกุญแจ (code session_*) → หน้าต่างบอกเหตุ + พาเข้าสู่ระบบใหม่ · สแกนที่ค้างในเครื่องไม่หาย
    ============================================================ */
 const SESSION_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 let _sessionWatchTimer = null;
@@ -4200,14 +4204,59 @@ function sessionSave_(fresh) {
   try {
     if (!currentUser || !currentUser.sheetLogin) return;
     const token = sessionStorage.getItem('rfc3_idToken');
-    if (!token || token.indexOf('SHEET:') !== 0) return;
+    if (!token || !(token.indexOf('S2.') === 0 || token.indexOf('SHEET:') === 0)) return;   // v13.10: + กุญแจ S2
     const old = LS.get('session', null);
-    const keep = !fresh && old && old.exp > Date.now();   // อัปเดตข้อมูลคน (isPTT ฯลฯ) ไม่ต่ออายุ — ครบ 7 วันนับจากตอนเข้า
-    LS.set('session', { u: currentUser, token, at: keep ? old.at : Date.now(), exp: keep ? old.exp : Date.now() + SESSION_KEEP_MS });
+    const keep = !fresh && old && old.exp > Date.now() && old.token === token;   // อัปเดตข้อมูลคน (isPTT ฯลฯ) ไม่ต่ออายุ — ครบ 7 วันนับจากตอนเข้า
+    const tExp = sessionTokenExp_(token);   // v13.10: กุญแจ S2 มีวันหมดอายุที่เซิร์ฟเวอร์บังคับอยู่ในตัว — ใช้ค่านั้น
+    LS.set('session', { u: currentUser, token, at: keep ? old.at : Date.now(), exp: keep ? old.exp : (tExp || Date.now() + SESSION_KEEP_MS) });
     LS.set('lastUser', String(currentUser.empId || ''));
   } catch (_) {}
 }
 function sessionClear_() { LS.del('session'); }
+function sessionTokenExp_(tok) { const m = /^S2\.[^.]+\.(\d{12,15})\./.exec(String(tok || '')); return m ? +m[1] : 0; }
+function isSheetToken_(tok) { tok = String(tok || ''); return tok.indexOf('S2.') === 0 || tok.indexOf('SHEET:') === 0; }
+/* v13.10: เซิร์ฟเวอร์ไม่รับกุญแจเข้าระบบ (ครบ 7 วัน · รหัสผ่านถูกเปลี่ยน · บัญชีถูกปิด · กุญแจแบบเก่าหลัง Apps Script 9.53)
+   → ลืมเซสชันในเครื่อง แล้วพาไปหน้าเข้าสู่ระบบ — สแกนที่ค้างในเครื่องไม่หาย (ส่งขึ้นระบบเองหลังเข้าใหม่) · บัญชี Google ใช้ทางเดิม */
+let _authFailShown = false;
+function sessionAuthCheck_(json) {
+  try {
+    if (!json || json.ok !== false) return;
+    const code = String(json.code || ''), msg = String(json.error || '');
+    if (code.indexOf('session_') !== 0 && !/^unauthorized/i.test(msg)) return;
+    if (!isSheetToken_(getCurrentIdToken())) return;
+    if (_authFailShown) return;
+    _authFailShown = true;
+    const why = code === 'session_expired' ? 'expired' : code === 'session_legacy' ? 'legacy' : code === 'session_inactive' ? 'inactive' : 'invalid';
+    sessionClear_(); LS.set('sessionNote', why);
+    sessionStorage.removeItem('rfc3_user'); sessionStorage.removeItem('rfc3_idToken'); sessionStorage.removeItem('rfc3_idTokenExp');
+    showReloginModal_(why);
+  } catch (_) {}
+}
+const RELOGIN_TEXT = {
+  legacy:   ['🔒 เข้าสู่ระบบใหม่ 1 ครั้ง', 'ระบบเปลี่ยนเป็นกุญแจเข้าระบบแบบใหม่ที่ปลอดภัยขึ้น ใส่รหัสผ่านอีกครั้งเดียว แล้วระบบจะจำไว้ 7 วัน'],
+  expired:  ['⏰ ครบ 7 วัน', 'ระบบออกจากระบบให้เองทุก 7 วัน ใส่รหัสผ่านเพื่อเข้าใหม่'],
+  inactive: ['⛔ บัญชีถูกปิดใช้งาน', 'ติดต่อ HR เพื่อเปิดใช้งานบัญชี'],
+  invalid:  ['🔒 เข้าสู่ระบบใหม่', 'กุญแจเข้าระบบเดิมใช้ไม่ได้แล้ว (รหัสผ่านอาจถูกเปลี่ยน) ใส่รหัสผ่านเพื่อเข้าใหม่'],
+};
+function showReloginModal_(why) {
+  const t = RELOGIN_TEXT[why] || RELOGIN_TEXT.invalid;
+  let pend = 0;
+  try { pend = logs.filter(l => !l.remote && currentUser && empKey_(l.empId) === empKey_(currentUser.empId)).length; } catch (_) {}
+  try { stopEmpCamera(); } catch (_) {}
+  const old = document.getElementById('reloginModal'); if (old) old.remove();
+  const m = document.createElement('div'); m.id = 'reloginModal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:700;display:flex;align-items:center;justify-content:center;padding:24px';
+  m.innerHTML = '<div style="background:var(--card-bg);border-radius:18px;padding:26px 22px;max-width:360px;width:100%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.3)">' +
+    '<div id="rlTitle" style="font-size:18px;font-weight:800;color:var(--text);margin-bottom:8px"></div>' +
+    '<div id="rlMsg" style="font-size:14px;color:var(--text);line-height:1.65"></div>' +
+    '<div id="rlPend" style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-top:8px"></div>' +
+    '<button id="rlBtn" style="margin-top:18px;width:100%;padding:13px;border:none;border-radius:10px;background:var(--navy);color:#fff;font-weight:700;font-size:15px;cursor:pointer">เข้าสู่ระบบ</button></div>';
+  document.body.appendChild(m);
+  m.querySelector('#rlTitle').textContent = t[0];
+  m.querySelector('#rlMsg').textContent = t[1];
+  if (pend) m.querySelector('#rlPend').textContent = 'เวลาที่สแกนไว้ในเครื่อง ' + pend + ' รายการ จะส่งขึ้นระบบให้เองหลังเข้าสู่ระบบ';
+  m.querySelector('#rlBtn').onclick = () => location.reload();
+}
 /* ปิดแอปแล้วเปิดใหม่ (sessionStorage ว่าง) → คืนเซสชันที่จำไว้ — true = มีและยังไม่ครบ 7 วัน */
 function sessionRestore_() {
   const s = LS.get('session', null);
@@ -4245,10 +4294,15 @@ function loginPrefill_() {
     const u = document.getElementById('loginUsername');
     const last = LS.get('lastUser', '');
     if (u && !u.value && last) u.value = last;
-    if (LS.get('sessionNote', '') === 'expired') {
+    const note = LS.get('sessionNote', '');
+    if (note) {
       LS.del('sessionNote');
       const st = document.getElementById('loginSheetStatus');
-      if (st) st.innerHTML = '<span style="color:var(--muted)">⏰ ครบ 7 วัน ระบบออกจากระบบให้เอง — ใส่รหัสผ่านเพื่อเข้าใหม่</span>';
+      const txt = { expired: '⏰ ครบ 7 วัน ระบบออกจากระบบให้เอง — ใส่รหัสผ่านเพื่อเข้าใหม่',
+                    legacy: '🔒 ระบบเปลี่ยนเป็นกุญแจเข้าระบบแบบใหม่ — ใส่รหัสผ่านอีกครั้งเดียว แล้วจะจำไว้ 7 วัน',
+                    invalid: '🔒 กุญแจเข้าระบบเดิมใช้ไม่ได้แล้ว (รหัสผ่านอาจถูกเปลี่ยน) — ใส่รหัสผ่านเพื่อเข้าใหม่',
+                    inactive: '⛔ บัญชีถูกปิดใช้งาน — ติดต่อ HR' }[note];   // v13.10
+      if (st && txt) st.innerHTML = '<span style="color:var(--muted)">' + txt + '</span>';
     }
   } catch (_) {}
 }
@@ -4381,7 +4435,8 @@ async function doSheetLogin() {
       sheetLogin:  true,
     };
     sessionStorage.setItem('rfc3_user', JSON.stringify(currentUser));
-    sessionStorage.setItem('rfc3_idToken', 'SHEET:' + currentUser.empId);
+    // v13.10: กุญแจที่เซิร์ฟเวอร์เซ็นให้ (Apps Script 9.53+) · รุ่นเก่ายังไม่ออกให้ = ใช้แบบเดิมไปก่อน
+    sessionStorage.setItem('rfc3_idToken', json.sessionToken || ('SHEET:' + currentUser.empId));
     try { saveSharedSession({ ...currentUser }); } catch(_) {}
     sessionSave_(true);   // v13.09: จำ 7 วัน
     document.getElementById('loginScreen').style.display = 'none';
@@ -4397,7 +4452,7 @@ async function doSheetLogin() {
    การ์ดโผล่เมื่อ: เคย login บนเครื่องนี้ + มีใบหน้าลงทะเบียน (LS.faceDescriptor)
    และ faceOwner ตรงกับคนที่จำไว้ · จับคู่กับคนเดียวที่จำไว้ ไม่ค้นหาจากทุกคน
    เกณฑ์ระยะหน้าใช้ตัวเดียวกับสแกนลงเวลา (settings.faceThr) */
-let _flStream = null, _flTimer = null, _flBusy = false;
+let _flStream = null, _flTimer = null, _flBusy = false, _flTok = '';   // v13.10: _flTok = กุญแจที่ได้ตอนหน้าผ่าน
 
 /* v12.74: จำโปรไฟล์ทุกครั้งที่เข้าแอปสำเร็จ — เดิม (12.73) จำเฉพาะตอน adoptMyFace_
    ซึ่งเครื่องที่ใบหน้า cache อยู่แล้วไม่ผ่านจังหวะนั้น การ์ดสแกนหน้าเลยไม่โผล่ */
@@ -4507,6 +4562,7 @@ async function faceLoginTick_() {
         const r = await apiPost(config.appsScriptUrl, { action: 'verifyFace',
           empId: (pf2.u && pf2.u.empId) || '', faceDesc: Array.from(det.descriptor).map(n => +n.toFixed(5)) });
         pass = !!(r && r.ok && r.pass); why = (r && r.msg) || '';
+        _flTok = (pass && r && r.sessionToken) ? String(r.sessionToken) : '';   // v13.10
       } catch (e) { pass = false; why = 'เชื่อมต่อไม่ได้ — ลองใหม่หรือเข้าด้วยรหัส'; }
       if (pass) { if (st) st.textContent = '✓ ยืนยันตัวตนสำเร็จ'; setTimeout(faceLoginSuccess_, 350); }
       else {
@@ -4525,7 +4581,7 @@ function faceLoginSuccess_() {
   if (!p) return;
   currentUser = Object.assign({}, p.u, { loginAt: Date.now(), sheetLogin: true, faceLogin: true });
   sessionStorage.setItem('rfc3_user', JSON.stringify(currentUser));
-  sessionStorage.setItem('rfc3_idToken', 'SHEET:' + currentUser.empId);
+  sessionStorage.setItem('rfc3_idToken', _flTok || ('SHEET:' + currentUser.empId)); _flTok = '';   // v13.10: กุญแจจากเซิร์ฟเวอร์ (รุ่นเก่า = แบบเดิม)
   try { saveSharedSession(Object.assign({}, currentUser)); } catch (_) {}
   sessionSave_(true);   // v13.09: จำ 7 วัน
   document.getElementById('loginScreen').style.display = 'none';
@@ -5045,6 +5101,7 @@ async function callAppsScript(action, payload = {}, opts = {}) {
     if (!json.ok) {
       // v2.4: แค่ throw error — ให้ caller แสดง toast เอง ไม่มี popup/banner
       // v13.03: แนบรหัสไปด้วย (face_mismatch = ระบบตรวจหน้าแล้วไม่รับ ส่งซ้ำก็ไม่ผ่าน)
+      sessionAuthCheck_(json);   // v13.10: กุญแจใช้ไม่ได้ → พาเข้าสู่ระบบใหม่
       const err = new Error(json.error || 'Apps Script error');
       if (json.code) err.code = json.code;
       throw err;
@@ -5179,6 +5236,7 @@ async function apiGetFaceData() {
   try {
     const res = await fetchT_(buildApiUrl('getFaceData'), { redirect:'follow' });
     const json = await res.json();
+    sessionAuthCheck_(json);   // v13.10
     return json.ok ? json.faces : null;
   } catch (e) { console.error(e); return null; }
 }
@@ -5190,6 +5248,7 @@ async function apiGetSettings() {
   try {
     const res = await fetchT_(buildApiUrl('getSettings'), { redirect:'follow' });
     const json = await res.json();
+    sessionAuthCheck_(json);   // v13.10
     return json.ok ? json.settings : null;
   } catch (e) { console.error(e); return null; }
 }
@@ -5201,6 +5260,7 @@ async function apiGetLocations() {
   try {
     const res = await fetchT_(buildApiUrl('getLocations'), { redirect:'follow' });
     const json = await res.json();
+    sessionAuthCheck_(json);   // v13.10
     return json.ok ? json.locations : null;
   } catch (e) { console.error(e); return null; }
 }
@@ -5213,6 +5273,7 @@ async function apiGetPersonalLocations(empId) {
     const params = empId ? { empId } : {};
     const res = await fetchT_(buildApiUrl('getPersonalLocations', params), { redirect:'follow' });
     const json = await res.json();
+    sessionAuthCheck_(json);   // v13.10
     return json.ok ? json.personalLocations : null;
   } catch (e) { console.error(e); return null; }
 }
@@ -5224,6 +5285,7 @@ async function apiGetCheckinLog(filters = {}) {
   try {
     const res = await fetchT_(buildApiUrl('getCheckinLog', filters), { redirect:'follow' });
     const json = await res.json();
+    sessionAuthCheck_(json);   // v13.10
     return json.ok ? json.logs : null;
   } catch (e) { console.error(e); return null; }
 }
@@ -5240,7 +5302,7 @@ async function primeBoot_() {
   try {
     const res = await fetchT_(buildApiUrl('getBootstrap', { light: (typeof canSeeTeam === 'function' && canSeeTeam()) ? '0' : '1', limit: 500 }), { redirect: 'follow' }, 90000);   // v13.03: เพดาน 90 วิ (รวม 5 อย่าง)
     const j = await res.json();
-    if (j && j.ok) _boot = j;
+    if (j && j.ok) _boot = j; else sessionAuthCheck_(j);   // v13.10
   } catch (e) { console.warn('[boot] getBootstrap ไม่สำเร็จ ใช้วิธีเดิมแทน:', e.message); }
 }
 /* หยิบผลจากคำขอรวม "ครั้งเดียว" แล้วทิ้ง — รอบถัดไปให้ไปยิงของจริง (ข้อมูลจะได้สด) */
@@ -7688,7 +7750,7 @@ async function doSelfCheckIn() {
       sessionStorage.removeItem('rfc3_idToken');
       sessionStorage.removeItem('rfc3_idTokenExp');
       sessionClear_();   // v13.09
-      toast(baseMsg + ' (local) · ⚠ Token หมดอายุ — กด Logout แล้ว Login ใหม่', 'warning');
+      toast(baseMsg + (_authFailShown ? ' · เก็บไว้ในเครื่อง — ส่งขึ้นระบบหลังเข้าสู่ระบบใหม่' : ' (local) · ⚠ Token หมดอายุ — กด Logout แล้ว Login ใหม่'), 'warning');   // v13.10
     } else {
       toast(`${baseMsg} · ⚠ ${syncError}`, 'warning');
     }
@@ -9410,7 +9472,7 @@ function renderSystemInfo() {
   const role = { employee:'พนักงาน', supervisor:'หัวหน้า', manager:'ผู้จัดการ', hr:'HR' }[currentUser?.role] || '-';
   el.innerHTML = `
     <div class="status-row"><div class="icon">v</div><div><div class="label">เวอร์ชัน</div><div class="value">${APP_VERSION}</div></div></div>
-    <div class="status-row"><div class="icon">⏰</div><div><div class="label">จำการเข้าระบบ</div><div class="value">${(function(){ try { const s = LS.get('session', null); return (s && s.exp) ? ('ออกให้เอง ' + new Date(s.exp).toLocaleString('th-TH-u-ca-gregory') + ' (7 วันนับจากตอนเข้า)') : 'เฉพาะครั้งนี้ (บัญชี Google)'; } catch (_) { return '-'; } })()}</div></div></div>
+    <div class="status-row"><div class="icon">⏰</div><div><div class="label">จำการเข้าระบบ</div><div class="value">${(function(){ try { const s = LS.get('session', null); if (!(s && s.exp)) return 'เฉพาะครั้งนี้ (บัญชี Google)'; return (String(s.token || '').indexOf('S2.') === 0 ? 'กุญแจแบบใหม่ (เซิร์ฟเวอร์เซ็น)' : 'แบบเก่า (รอ Apps Script 9.53)') + ' · ออกให้เอง ' + new Date(s.exp).toLocaleString('th-TH-u-ca-gregory'); } catch (_) { return '-'; } })()}</div></div></div>
     <div class="status-row"><div class="icon">👤</div><div><div class="label">บทบาท</div><div class="value">${role} (${currentUser?.role||'-'})</div></div></div>
     <div class="status-row"><div class="icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></div><div><div class="label">face-api</div><div class="value">${faceapiReady?'✓ พร้อม':'ยังไม่พร้อม'}</div></div></div>
     <div class="status-row"><div class="icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div><div class="label">ทีม</div><div class="value">${team.length} คน</div></div></div>
