@@ -1055,6 +1055,7 @@ body.dark .badge-gold{color:var(--gold-light)}
 .rt-veh{width:104px;flex-shrink:0;height:28px;font-size:11px;border:1.5px solid var(--border);
   border-radius:6px;padding:0 4px;background:var(--card-bg);color:var(--text)}
 .rt-veh.set{border-color:var(--success);color:#1e8449;font-weight:700}
+.rt-veh.pend{border-style:dashed;border-color:var(--warning)}
 body.dark .rt-veh.set{color:#7be0a3}
 
 .scanbar{position:sticky;top:100px;z-index:60;background:var(--bg);padding:8px 0 10px;margin:-4px 0 4px}
@@ -1848,7 +1849,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-09-29 · 22';
+const BUILD = '2026-09-29 · 23';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 
@@ -2654,7 +2655,7 @@ function setMode(m) {
   if (m === 'store')         { go('scr-stores');   renderStores(); }
 
   else if (m === 'transfer') { go('scr-transfer'); renderTransfer(); }
-  else if (m === 'route')    { go('scr-route');    renderRoute(); }
+  else if (m === 'route')    { go('scr-route');    renderRoute(); syncRoutes(); }
   else if (m === 'dash')     { go('scr-dash');     renderDash(); }
   else                       { go('scr-jobs');     renderJobs(); }
 }
@@ -3885,6 +3886,7 @@ async function reloadOrders(loud) {
           (nRatio ? ` · มีสัดส่วนแบ่ง ${fmtN(nRatio)}` : ' · ไม่ได้สัดส่วนจากชีต Q'), 'success');
     await enrichFromMaster();
     setMode(state.mode || 'team');
+    if (state.mode !== 'route') syncRoutes();   // วันทำงานอาจเปลี่ยน — ดึงทะเบียนของงานนี้ (หน้าจัดรถดึงเองใน setMode แล้ว)
   } catch(e) {
     set('โหลดออเดอร์ไม่สำเร็จ', 'err');
     toast('โหลดออเดอร์ไม่สำเร็จ — ' + String(e.message || e).slice(0,110), 'error');
@@ -3989,7 +3991,7 @@ function openWho(show) {
 /* ═══════════════════════════════════════════════════════════════
    จัดเที่ยวส่ง — จ่ายทะเบียนรถให้ร้านที่มีบิล BK (ช่องทางส่ง)
    ทะเบียนจากชีต "ข้อมูลการใช้รถ update" คอลัมน์ N (ทะเบียน Final) กรองด้วยคอลัมน์ O (คลัง Final) = คลังที่กำลังเช็ค
-   ที่จ่ายไว้ผูกกับรหัสร้าน (state.routeVehicle) โชว์ต่อท้ายชื่อร้านในหน้าเช็คตามทีม/ร้านด้วย
+   ที่จ่ายไว้ผูกกับรหัสร้าน + วันทำงาน ส่งขึ้นชีต "จัดรถ" ให้ทุกเครื่องเห็น โชว์ต่อท้ายชื่อร้านในหน้าเช็คตามทีม/ร้านด้วย
    ═══════════════════════════════════════════════════════════════ */
 const VEHICLE_SRC = { id:'1nCkPfEAlULYB9Rf3OMcq4n2r3lV2ZWAHL5UvZbyD73I', gid:'1128184482' };
 /* คอลัมน์ Q "ประเภทรถ Final" — ตัดอุปกรณ์ยกของในคลังออก เอาแต่รถที่ใช้ส่งของจริง (กระบะ/6 ล้อ/เก๋ง ฯลฯ) */
@@ -4022,11 +4024,99 @@ function buildRouteBills() {
 }
 let ROUTE_BILLS = buildRouteBills();
 
-const vehicleOf = code => (state.routeVehicle || {})[code] || '';
+/* ── ทะเบียนที่จ่ายแล้ว — ทุกเครื่องเห็นตรงกันผ่านชีต "จัดรถ" ──
+   แยกตามงาน (คลัง|วันทำงาน) ขึ้นวันทำงานใหม่ = เริ่มว่างเอง
+     state.route[key] = ค่าล่าสุดที่ดึงจากชีต { รหัสร้าน: {plate, by, at} }
+     state.routeOut   = ที่เปลี่ยนในเครื่องนี้แต่ยังส่งไม่ถึงชีต — ทับค่าจากชีตไว้จนกว่าจะส่งผ่าน
+   ส่งแยกจากคิวหลัก เพราะคิวหลักติดตัวไหนค้างทั้งคิว จะได้ไม่ไปขวางการส่งยอดเช็ค */
+const SHEET_ROUTE = 'จัดรถ';
+delete state.routeVehicle;                     // รุ่นก่อนเก็บแค่ในเครื่อง ไม่แยกวัน — เลิกใช้
+const routeKey = () => `${WAREHOUSE}|${TODAY}`;
+function routeEntry(code) {
+  const key = routeKey();
+  const mine = (state.routeOut || []).filter(o => o['คีย์'] === key && o['รหัสร้าน'] === code);
+  if (mine.length) { const o = mine[mine.length-1];
+    return { plate:o['ทะเบียน'], by:o['ผู้จ่ายรถ'], at:o['เวลาบันทึก'], pending:true }; }
+  return ((state.route || {})[key] || {})[code] || null;
+}
+const vehicleOf = code => (routeEntry(code) || {}).plate || '';
+
 function setVehicle(code, plate) {
-  state.routeVehicle ||= {};
-  if (plate) state.routeVehicle[code] = plate; else delete state.routeVehicle[code];
-  save();
+  const d = new Date(), t2 = x => String(x).padStart(2,'0');
+  const bills = ROUTE_BILLS.filter(b => b.code === code);
+  (state.routeOut ||= []).push({
+    'คีย์': routeKey(), 'วันที่': thaiDate(TODAY), 'คลัง': WAREHOUSE,
+    'รหัสร้าน': code, 'ชื่อร้าน': bills.length ? bills[0].name : '',
+    'เลขที่เอกสาร': bills.map(b => b.ref).join(' · '), 'ทะเบียน': plate || '',
+    'ผู้จ่ายรถ': CHECKER,
+    'เวลาบันทึก': `${thaiDate(d)} ${t2(d.getHours())}:${t2(d.getMinutes())}:${t2(d.getSeconds())}`,
+    'เครื่อง': DEVICE });
+  save(); pushRoutes(true);
+}
+
+let routePushing = false, routePushAgain = false, routeSeq = 0;
+let routePushErr = '', routePushFailAt = 0, routePullErr = '', routePullAt = 0;
+/** ส่งทีละชุด ห้ามส่งซ้อน — ถ้าชุดหลังไปถึงก่อน ค่าเก่าจะกลายเป็นแถวล่างสุดทับค่าใหม่ */
+async function pushRoutes(force) {
+  if (routePushing) { routePushAgain = true; return; }
+  const rows = (state.routeOut || []).slice();
+  if (!rows.length || !GAS_URL || SRC !== 'real' || !navigator.onLine) return;
+  if (!force && routePushErr && Date.now() - routePushFailAt < 5*60000) return;   // เพิ่งพัง อย่ายิงรัว
+  routePushing = true;
+  try {
+    const res = await fetch(GAS_URL, { method:'POST', redirect:'follow',
+      headers:{ 'Content-Type':'text/plain;charset=utf-8' },
+      body: JSON.stringify({ kind:SHEET_ROUTE, rows, meta:{ wh:WAREHOUSE, device:DEVICE, by:CHECKER } }) });
+    const j = JSON.parse(await res.text());
+    if (j.ok !== true) throw new Error(j.error || 'ฝั่งชีตตอบว่าไม่สำเร็จ');
+    rows.forEach(o => {                        // ถึงชีตแล้ว = เป็นค่าจากชีต ไม่ต้องรอดึงรอบหน้า
+      ((state.route ||= {})[o['คีย์']] ||= {})[o['รหัสร้าน']] =
+        { plate:o['ทะเบียน'], by:o['ผู้จ่ายรถ'], at:o['เวลาบันทึก'] };
+    });
+    state.routeOut = (state.routeOut || []).filter(o => !rows.includes(o));
+    routeSeq++; routePushErr = ''; save();
+  } catch(e) {
+    const m = String(e.message || e);
+    routePushErr = /ไม่อนุญาต/.test(m) ? 'Apps Script ยังเป็นรุ่นเก่า ต้อง Deploy ใหม่'
+                 : /failed to fetch|networkerror|load failed/i.test(m) ? 'ส่งขึ้นชีตไม่ได้ (เน็ต?)' : m.slice(0,90);
+    routePushFailAt = Date.now();
+  } finally {
+    routePushing = false;
+    if (routePushAgain) { routePushAgain = false; pushRoutes(true); }
+    refreshRouteViews(false);
+  }
+}
+async function pullRoutes() {
+  if (!GAS_URL || SRC !== 'real' || document.hidden || !navigator.onLine) return;
+  const key = routeKey(), seq = routeSeq;
+  try {
+    const j = await gasJsonp(GAS_URL, { action:'routes', key });
+    if (!j.ok) throw new Error(j.error || 'อ่านทะเบียนจากชีตไม่ได้');
+    if (!Array.isArray(j.rows)) throw new Error('Apps Script ยังเป็นรุ่นเก่า ต้อง Deploy ใหม่');
+    routePullErr = ''; routePullAt = Date.now();
+    if (seq !== routeSeq || key !== routeKey()) return;   // มีการส่ง/เปลี่ยนวันระหว่างดึง ผลนี้อาจเก่า รอรอบหน้า
+    const m = {};
+    j.rows.forEach(r => { m[String(r.code)] = { plate:String(r.plate || ''), by:r.by || '', at:r.at || '' }; });
+    const was = JSON.stringify((state.route || {})[key] || {});
+    (state.route ||= {})[key] = m;
+    Object.keys(state.route).sort((a,b) => b.split('|')[1].localeCompare(a.split('|')[1]))
+      .slice(5).forEach(k => delete state.route[k]);           // เก็บแค่ 5 วันทำงานล่าสุด
+    if (JSON.stringify(m) !== was) { save(); refreshRouteViews(true); }
+  } catch(e) { routePullErr = String(e.message || e).slice(0,90); }
+  finally { refreshRouteViews(false); }
+}
+async function syncRoutes(force) { await pushRoutes(force); await pullRoutes(); }
+setInterval(() => syncRoutes(), 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) syncRoutes(); });
+window.addEventListener('online', () => syncRoutes(true));
+
+/** วาดหน้าที่มีทะเบียนใหม่ — ไม่วาดทับตอนกำลังเลือกทะเบียนอยู่ (dropdown จะปิดเอง)
+ *  หน้ายิงไม่วาดให้ เดี๋ยวแย่งช่องที่กำลังกรอก ยิงครั้งถัดไปก็เห็นเอง */
+function refreshRouteViews(changed) {
+  const ae = document.activeElement;
+  if (ae && ae.classList && ae.classList.contains('rt-veh')) return;
+  if ($('scr-route').classList.contains('on')) renderRoute();
+  else if (changed && $('scr-stores').classList.contains('on')) renderStores();
 }
 
 function renderRoute() {
@@ -4035,11 +4125,21 @@ function renderRoute() {
   if (vehState === 'idle') loadVehicles();
 
   const storeN = new Set(ROUTE_BILLS.map(b => b.code)).size;
+  const pend = (state.routeOut || []).filter(o => o['คีย์'] === routeKey()).length;
+  const err = routePushErr || routePullErr;
+  const pa = new Date(routePullAt), t2 = x => String(x).padStart(2,'0');
+  const sync = SRC !== 'real' ? 'ชุดตัวอย่าง — ไม่ส่งขึ้นชีต'
+    : !GAS_URL ? '<b class="txt-danger">ยังไม่ต่อชีต</b> — ทะเบียนเห็นแค่เครื่องนี้'
+    : err ? `<b class="txt-danger">⚠ ${esc(err)}</b>${pend ? ` · ค้างส่ง ${fmtN(pend)} รายการ (เครื่องอื่นยังไม่เห็น)` : ''}
+        <button class="btn btn-outline btn-sm" onclick="syncRoutes(true)">ลองใหม่</button>`
+    : pend ? `⏳ กำลังส่งขึ้นชีต ${fmtN(pend)} รายการ…`
+    : routePullAt ? `<span class="txt-success">✓ ทุกเครื่องเห็นตรงกัน</span> · ดึงล่าสุด ${t2(pa.getHours())}:${t2(pa.getMinutes())} น.`
+    : 'กำลังดึงทะเบียนจากชีต…';
   $('routeNote').innerHTML = `บิล BK (ช่องทางส่ง) วันนี้ <b>${fmtN(ROUTE_BILLS.length)}</b> ใบ · <b>${fmtN(storeN)}</b> ร้าน · ` +
     (vehState === 'ok'  ? `ทะเบียนรถคลัง ${WAREHOUSE} <b>${fmtN(VEHICLES.length)}</b> คัน`
      : vehState === 'err' ? `<b class="txt-danger">โหลดทะเบียนรถไม่ได้</b>
          <button class="btn btn-outline btn-sm" onclick="loadVehicles()">ลองใหม่</button>`
-     : 'กำลังโหลดทะเบียนรถ…');
+     : 'กำลังโหลดทะเบียนรถ…') + `<br>${sync}`;
 
   const q = $('routeSearch').value.trim().toLowerCase();
   const list = ROUTE_BILLS.filter(b => !q ||
@@ -4052,7 +4152,8 @@ function renderRoute() {
       <span class="rt-slmn">เซล</span><span class="rt-amt">ยอดเงิน</span><span class="rt-veh"></span>
     </div>`;
   $('routeList').innerHTML = head + list.map(b => {
-    const plate = vehicleOf(b.code);
+    const e = routeEntry(b.code), plate = (e || {}).plate || '';
+    const tip = e && e.by ? `จ่ายโดย ${e.by} ${e.at}${e.pending ? ' · ยังไม่ถึงชีต' : ''}` : '';
     const opts = `<option value="">—ไม่จ่าย—</option>` +
       VEHICLES.map(v => `<option value="${esc(v)}" ${v===plate?'selected':''}>${esc(v)}</option>`).join('') +
       (plate && !VEHICLES.includes(plate)
@@ -4062,8 +4163,8 @@ function renderRoute() {
       <span class="rt-ref">${esc(b.ref)}</span>
       <span class="rt-slmn">${esc(b.slmn)}</span>
       <span class="rt-amt">${fmtN(b.amt)}</span>
-      <select class="rt-veh ${plate?'set':''}"
-              onchange="setVehicle('${b.code}', this.value); renderRoute()">${opts}</select>
+      <select class="rt-veh ${plate?'set':''} ${e && e.pending?'pend':''}" title="${esc(tip)}"
+              onchange="setVehicle('${b.code}', this.value); this.blur(); renderRoute()">${opts}</select>
     </div>`;
   }).join('');
 }
