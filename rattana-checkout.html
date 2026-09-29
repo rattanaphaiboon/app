@@ -1280,6 +1280,7 @@ body.dark .gas-ov.who-ov{background:#060c1c}
   <button class="tab-btn" id="tabTeam"  onclick="setMode('team')">เช็คตามทีม</button>
   <button class="tab-btn" id="tabStore" onclick="setMode('store')">เช็คตามร้าน</button>
   <button class="tab-btn" id="tabTrans" onclick="setMode('transfer')">โอนย้าย</button>
+  <button class="tab-btn" id="tabRoute" onclick="setMode('route')">จัดเที่ยวส่ง</button>
   <button class="tab-btn" id="tabDash"  onclick="setMode('dash')">สรุป</button>
 </nav>
 
@@ -1442,6 +1443,18 @@ body.dark .gas-ov.who-ov{background:#060c1c}
     <button class="btn btn-outline" style="flex:1" onclick="setMode('team')">กลับไปเช็ค</button>
     <button class="btn btn-gold" style="flex:2" onclick="confirmTransfer()">✓ ยืนยันใบโอน</button>
   </div>
+</section>
+
+<!-- ═══════════ จัดเที่ยวส่ง — จ่ายทะเบียนรถให้ร้าน BK ═══════════ -->
+<section id="scr-route" class="screen">
+  <div class="demo" id="routeNote"></div>
+  <div class="bar">
+    <span class="pill">📅 <span id="hdDate6"></span></span>
+    <span class="pill">🏬 <span id="hdWh6"></span></span>
+    <input class="scan-input" id="routeSearch" placeholder="ค้นหาร้าน / รหัส / เซล"
+           autocomplete="off" oninput="renderRoute()" style="flex:1;min-width:150px;height:40px">
+  </div>
+  <div id="routeList"></div>
 </section>
 
 <!-- ═══════════ แดชบอร์ดสรุปงานวันนี้ ═══════════ -->
@@ -1818,7 +1831,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-09-28 · 17';
+const BUILD = '2026-09-29 · 20';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 
@@ -1844,6 +1857,9 @@ function indexProducts() {
   });
 }
 indexProducts();
+/** รหัสประจำบรรทัดออเดอร์ — โหมดทีมกับโหมดร้านสร้างสำเนาของบรรทัดคนละชุด ต้องมีตัวโยงกลับ */
+function tagOrders() { ORDERS.forEach((o, i) => { o.lid = i; }); }
+tagOrders();
 
 /* แบ่งทีมตาม VENDOR NAME (คอลัมน์ BH ของมาสเตอร์) — เดิมใช้ CAT GROUP
    ไฟล์แบ่งทีมมาได้ 2 แบบ: {code,name,cats:[...]} (ชุดตัวอย่าง) กับ {cat,code,name} แถวละเจ้า (ไฟล์จริง) */
@@ -1887,7 +1903,7 @@ const chanOf = ref => { const h = String(ref || '').slice(0,2).toUpperCase();
 const chanRank = k => { const i = CHAN_ORDER.indexOf(k); return i < 0 ? 99 : i; };
 function custOf(line) {
   const bk = bookOf(line.ref), hd = bk.slice(0,2);
-  if (hd === 'BK')    return { key:'s|'+line.storeCode, name:line.store || '(ไม่มีชื่อร้าน)', kind:'store' };
+  if (hd === 'BK')    return { key:'s|'+line.storeCode, name:line.store || '(ไม่มีชื่อร้าน)', kind:'store', code:line.storeCode };
   if (PRE_HEAD[hd])   return { key:'h|'+hd,  name:PRE_HEAD[hd], kind:'ch' };
   if (PRE_BOOK[bk])   return { key:'p|'+bk,  name:PRE_BOOK[bk], kind:'code' };
   return { key:'b|'+bk, name:bk, kind:'unknown' };
@@ -1898,7 +1914,7 @@ function custBreak(r) {
   const units = r.product.units, g = {};
   for (const d of r.detail) {
     const c = custOf(d.line);
-    const e = g[c.key] ||= { name:c.name, kind:c.kind, ea:0 };
+    const e = g[c.key] ||= { name:c.name, kind:c.kind, code:c.code, ea:0 };
     // แถมรวมเข้ากับยอดขายเลย — หน้างานยกของตามจำนวนรวม ไม่ต้องสนว่าตัวไหนแถม
     e.ea += d.line.needEA + (d.freeOrdered || 0);
   }
@@ -1909,9 +1925,10 @@ function custBreak(r) {
     .sort((a,b) => RANK[a.kind] - RANK[b.kind] || b.ea - a.ea ||
                     String(a.name).localeCompare(String(b.name), 'th'));
   if (!list.length) return '';
-  return `<div class="cust">` + list.map(e =>
-    `<span class="c-${e.kind}"><i>${esc(e.name)}</i><b>${fmtUnits(e.ea, units, 1)}</b></span>`
-  ).join('') + `</div>`;
+  return `<div class="cust">` + list.map(e => {
+    const veh = e.kind === 'store' ? vehicleOf(e.code) : '';    // ทะเบียนรถที่จ่ายให้ร้านนี้ (หน้าจัดเที่ยวส่ง)
+    return `<span class="c-${e.kind}"><i>${esc(e.name)}${veh ? ` 🚚${esc(veh)}` : ''}</i><b>${fmtUnits(e.ea, units, 1)}</b></span>`;
+  }).join('') + `</div>`;
 }
 const roundOf = time => (ROUNDS.find(r => time >= r.from && time < r.to) || ROUNDS[ROUNDS.length-1]).n;
 
@@ -2205,34 +2222,61 @@ const scannedAll = pid => ROUNDS.reduce((s,r) => s + scannedIn(pid, r.n), 0);
 const sKey = (sc, pid) => 's|' + sc + '|' + pid;
 const sGot = (sc, pid) => (state.sscans || {})[sKey(sc,pid)] || 0;
 
-/* ── "กองที่เพิ่งเจอ" ──
-   ยิงบาร์ 1 ที = เปิดกองใหม่ นับ 1 หน่วย · พิมพ์เลขลงช่อง = บอกว่ากองนี้มีเท่าไรจริง ๆ (ไม่ใช่บวกทับ)
-   ไปเจอกองถัดไปก็ยิงใหม่ เริ่มนับกองใหม่ ยอดรวมบวกสะสมไปเรื่อย ๆ */
+/* ── ช่อง "กองนี้" ──
+   ใส่เลขแล้วบวกเข้ายอด "ได้" ทันที แล้วช่องกลับเป็นว่าง พร้อมรับกองถัดไป
+   ไม่ค้างตัวเลขไว้ — เดิมค้างไว้แล้วรั่วข้ามหน้า (ใส่ 15 ในหน้าร้าน ไปโผล่เป็น 15 ในหน้าทีม)
+   ยอดจริงดูที่ "ได้" แก้ผิดใช้ปุ่ม − หรือแตะที่ยอด "ได้" */
 state.pend = null;
 function pendGet(pid, lv) { const p = state.pend; return (p && p.pid === pid && p.lv === lv) ? p.ea : 0; }
-/** ยิงบาร์ / กดปุ่ม — ต่อกองเดิมถ้ายังไม่ได้พิมพ์เลขปิดกอง ไม่งั้นเปิดกองใหม่ */
-function pendScan(pid, lv, ea) {
-  const p = state.pend;
-  if (p && p.pid === pid && p.lv === lv && !p.done) p.ea = Math.max(0, p.ea + ea);
-  else state.pend = { pid, lv, ea: Math.max(0, ea), done: false };
-}
-/** พิมพ์เลข = บอกว่ากองนี้มีเท่าไรจริง ๆ แล้วปิดกอง ยิงครั้งหน้าเริ่มกองใหม่ */
-function pendType(pid, lv, ea) { state.pend = { pid, lv, ea: Math.max(0, ea), done: true }; }
+/** กด −/+ — บวกลบเข้ายอดตรง ๆ ช่องยังว่างเหมือนเดิม */
+function pendScan(pid, lv, ea) { state.pend = null; }
+/** ใส่เลขเสร็จ — บวกเข้ายอดไปแล้ว ล้างช่องให้ว่าง */
+function pendType(pid, lv, ea) { state.pend = null; }
 /** ยิงบาร์โค้ด = แค่เรียกสินค้าขึ้นมา เปิดกองเปล่า ๆ รอให้ใส่จำนวนเอง ไม่นับให้ */
 function pendOpen(pid, lv) { state.pend = { pid, lv, ea: 0, done: false }; }
 
 /* ═══════════════════════════════════════════════════════════════
    คำนวณผลของ 1 งาน (รวมของแถม)
    ═══════════════════════════════════════════════════════════════ */
+/** ยอดที่เช็คตามร้านไปแล้ว ลงบรรทัดของร้านนั้นตรง ๆ
+ *  ของพวกนี้มีเจ้าของแล้ว ห้ามโยนเข้ากองกลางไปแบ่งใหม่ ไม่งั้นกติกาช่องทาง/สัดส่วนจะพาไปตกร้านอื่น
+ *  ใช้วิธีเดียวกับตอนยืนยันร้าน: ไล่เติมทีละบรรทัดของร้านจนหมด */
+function storePreMap() {
+  const m = {}, left = {};
+  const got = state.sscans || {};
+  Object.keys(got).forEach(k => { if (got[k] > 0) left[k.slice(2)] = got[k]; });   // 's|ร้าน|สินค้า' → 'ร้าน|สินค้า'
+  if (!Object.keys(left).length) return m;
+  /* ไล่จาก ORDERS ตรง ๆ ไม่ผ่าน STORES เพราะ STORES โดนกรองตามปุ่มช่องทาง
+     หน้าสรุปที่ต้องเห็นทั้งวันจะได้ไม่ตกหล่น · ลำดับเดียวกับที่หน้าเช็คตามร้านใช้ */
+  for (const o of ORDERS) {
+    const hit = byCode[String(o.code)]; if (!hit) continue;
+    const k = o.storeCode + '|' + hit.p.id;
+    if (!left[k]) continue;
+    const qty = o.isFree ? (o.free || 0) : (o.qty || 0); if (qty <= 0) continue;
+    const give = Math.min(qty * hit.u.qtyEA, left[k]);
+    left[k] -= give;
+    if (give > 0) m[o.lid] = give;
+  }
+  return m;
+}
+
 function computeJob(job) {
   const rows = [];      // สินค้าขาย
   const freeNeed = {};  // { productId: { lineKey: {...} } }
+  const pre = storePreMap();
 
   for (const sku of Object.values(job.skus)) {
     const p = sku.product;
     const lines = sku.lines;
-    const scanned = scannedAll(p.id);
-    const res = allocate(lines, scanned, p);
+    /* ยอดที่เช็คตามร้านมาแล้ว → ลงบรรทัดของร้านนั้นก่อน
+       ที่เหลือ (ยิงในหน้าทีม + โอน + ทดแทน) ค่อยแบ่งตามกติกาให้บรรทัดที่ยังขาด */
+    const preGive = lines.map(l => Math.min(l.needEA, pre[l.lid] || 0));
+    const preSum  = preGive.reduce((a, b) => a + b, 0);
+    const teamEA  = scannedAll(p.id);
+    const rest    = lines.map((l, i) => Object.assign({}, l, { needEA: Math.max(0, l.needEA - preGive[i]) }));
+    const res0    = allocate(rest, teamEA, p);
+    const res     = Object.assign({}, res0, { give: res0.give.map((g, i) => g + preGive[i]) });
+    const scanned = teamEA + preSum;
     const promos = promosFor(p);
 
     const detail = lines.map((l,i) => {
@@ -2255,7 +2299,8 @@ function computeJob(job) {
       return { line:l, giveEA, free, freeOrdered:0, freeGive:0 };
     });
 
-    rows.push({ sku, product:p, scanned, res, detail, promos,
+    rows.push({ sku, product:p, scanned, res, detail, promos, preSum,
+                preBy: lines.map((l, i) => ({ store:l.store, ea:preGive[i] })).filter(x => x.ea > 0),
       totalNeed: lines.reduce((s,l)=>s+l.needEA,0) });
   }
 
@@ -2532,6 +2577,8 @@ function renderScan() {
         ${r.selfFree ? `<div class="rounds">🎁 ยอดนี้รวมของแถม <b>${fmtUnits(r.selfFree, units)}</b> แล้ว (แถมเป็นตัวเดียวกับที่ขาย)</div>` : ''}
         ${perRound.length > 1 ? `<div class="rounds">└ ${perRound.map(x=>`${x.rr.label} <b>${fmtUnits(x.v, units)}</b>`).join(' · ')}</div>` : ''}
         ${tAll(p.id) ? `<div class="rounds">🚚 ในนี้ยกมาจาก ${FROM_WH} <b>${fmtUnits(tAll(p.id), units, 1)}</b> — ต้องออกใบโอนก่อนเปิดบิล</div>` : ''}
+        ${r.preSum ? `<div class="rounds">🏪 เช็คตามร้านไปแล้ว <b>${fmtUnits(r.preSum, units, 1)}</b>
+           — ${(r.preBy || []).map(x => esc(x.store)).join(' · ')}</div>` : ''}
         ${subList(p.id).map(x => `<div class="rounds">⇄ แทนด้วย <b>${esc(x.p.name)}</b> ${fmtUnits(x.ea, x.p.units, 1)}
            <button class="btn btn-outline btn-sm" style="margin-left:6px;min-height:26px;padding:2px 8px"
              onclick="openSub('${p.id}')">แก้</button></div>`).join('')}
@@ -2585,10 +2632,12 @@ function setMode(m) {
   $('tabStore').classList.toggle('active', m === 'store');
 
   $('tabTrans').classList.toggle('active', m === 'transfer');
+  $('tabRoute').classList.toggle('active', m === 'route');
   $('tabDash').classList.toggle('active',  m === 'dash');
   if (m === 'store')         { go('scr-stores');   renderStores(); }
 
   else if (m === 'transfer') { go('scr-transfer'); renderTransfer(); }
+  else if (m === 'route')    { go('scr-route');    renderRoute(); }
   else if (m === 'dash')     { go('scr-dash');     renderDash(); }
   else                       { go('scr-jobs');     renderJobs(); }
 }
@@ -2616,7 +2665,7 @@ function renderStores() {
       return `<button class="store ${cls}" onclick="openStore('${s.code}')">
         <div class="flex-between gap-8">
           <div style="flex:1;min-width:0">
-            <div class="store-name">${esc(s.name)}</div>
+            <div class="store-name">${esc(s.name)}${vehicleOf(s.code) ? ` <span class="txt-muted" style="font-weight:400">🚚${esc(vehicleOf(s.code))}</span>` : ''}</div>
             <div class="store-sub">${esc(s.code)} · ${esc(s.slmnTxt)}</div>
           </div>
           <span class="badge ${(state.doneStore||{})[s.code]?'badge-ok':p.pct>=100?'badge-ok':p.pct>0?'badge-warn':'badge-gold'}"
@@ -2640,7 +2689,7 @@ function renderStore() {
   $('storeTag').textContent = `${s.code} · ${p.pct}%`;
   const dn = (state.doneStore || {})[s.code];
   $('storeInfo').innerHTML =
-    `<b>${esc(s.name)}</b><br>เซล ${esc(s.slmnTxt)} · ${fmtN(s.refCount)} ใบจอง · ${fmtN(s.skus.length)} รายการ<br>
+    `<b>${esc(s.name)}</b>${vehicleOf(s.code) ? ` <span class="txt-muted">🚚 ${esc(vehicleOf(s.code))}</span>` : ''}<br>เซล ${esc(s.slmnTxt)} · ${fmtN(s.refCount)} ใบจอง · ${fmtN(s.skus.length)} รายการ<br>
      <span class="txt-muted">ใบจอง: ${Object.keys(s.refs).map(esc).join(' · ')}</span>` +
     (dn ? `<br><b class="txt-success">✓ ยืนยันร้านนี้แล้วเมื่อ ${esc(dn.at)} น. · ${fmtN(dn.rows)} แถว</b>` : '');
 
@@ -3457,12 +3506,14 @@ function transferList() {
   JOBS.filter(j => j.round === state.round).forEach(j => {
     computeJob(j).all.forEach(r => {
       // สินค้าตัวเดียวอาจโผล่ทั้งแถวขายและแถวแถม ต้องรวม "ต้องออก" ไม่ใช่นับซ้ำ
-      const e = m[r.product.id] ||= { p:r.product, need:0, team:j.team.name };
+      const e = m[r.product.id] ||= { p:r.product, need:0, pre:0, team:j.team.name };
       e.need += r.totalNeed;
+      e.pre  += r.preSum || 0;             // เช็คตามร้านไปแล้ว ไม่ต้องไปยกมาจาก C4
     });
   });
   return Object.values(m).map(e => {
-    const w4 = w4In(e.p.id, state.round), tr = tGot(e.p.id, state.round);
+    const w4 = w4In(e.p.id, state.round) + subEA(e.p.id, state.round) + e.pre;
+    const tr = tGot(e.p.id, state.round);
     return Object.assign(e, { w4, tr, short: Math.max(0, e.need - w4 - tr) });
   });
 }
@@ -3680,6 +3731,7 @@ function toggleDatePick() {
 function setWh(w) {
   if (!w || w === WAREHOUSE) return;
   WAREHOUSE = w; LSset('rattana_wh', w);
+  VEHICLES = []; vehState = 'idle';           // ทะเบียนรถกรองตามคลัง ต้องดึงใหม่ตอนเปลี่ยนคลัง
   toast(`เปลี่ยนเป็นคลัง ${w} — กำลังโหลดใหม่`, 'info');
   reloadOrders(0);
 }
@@ -3803,11 +3855,11 @@ async function reloadOrders(loud) {
     } catch(e) {}
 
     PRODUCTS.length = 0; PRODUCTS.push(...products);
-    ORDERS.length   = 0; ORDERS.push(...orders);
+    ORDERS.length   = 0; ORDERS.push(...orders); tagOrders();
     TEAMS.length    = 0; TEAMS.push(...teams);
     TODAY = date;
     indexProducts(); indexTeams();
-    JOBS = buildJobs(); STORES = buildStores(); CHANS = buildChans();
+    JOBS = buildJobs(); STORES = buildStores(); CHANS = buildChans(); ROUTE_STORES = buildRouteStores();
     lastHit = null;
 
     set(`ออเดอร์ ${fmtN(orders.length)} บรรทัด · ${fmtN(products.length)} ตัว`, 'ok');
@@ -3914,6 +3966,88 @@ function renderWhoTag() {
 function openWho(show) {
   $('whoOv').classList.toggle('on', !!show);
   if (show) { loadStaff(); renderWho(); setTimeout(() => $('whoQ').focus(), 60); }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   จัดเที่ยวส่ง — จ่ายทะเบียนรถให้ร้านที่มีบิล BK (ช่องทางส่ง)
+   ทะเบียนจากชีต "ข้อมูลการใช้รถ update" คอลัมน์ N (ทะเบียน Final) กรองด้วยคอลัมน์ O (คลัง Final) = คลังที่กำลังเช็ค
+   ที่จ่ายไว้ผูกกับรหัสร้าน (state.routeVehicle) โชว์ต่อท้ายชื่อร้านในหน้าเช็คตามทีม/ร้านด้วย
+   ═══════════════════════════════════════════════════════════════ */
+const VEHICLE_SRC = { id:'1nCkPfEAlULYB9Rf3OMcq4n2r3lV2ZWAHL5UvZbyD73I', gid:'1128184482' };
+let VEHICLES = [], vehState = 'idle';
+async function loadVehicles() {
+  if (vehState === 'loading' || vehState === 'ok') return;
+  vehState = 'loading'; renderRoute();
+  try {
+    const rows = await gvizRows(VEHICLE_SRC.id, VEHICLE_SRC.gid, 'N,O');
+    VEHICLES = [...new Set(rows.filter(r => cln(r[1]) === WAREHOUSE && cln(r[0])).map(r => cln(r[0])))]
+      .sort((a,b) => a.localeCompare(b, 'th'));
+    vehState = 'ok';
+  } catch(e) { vehState = 'err'; console.warn('loadVehicles', e); }
+  renderRoute();
+}
+
+/** ร้านที่มีบิล BK — ไม่กรองตามปุ่มช่องทางบนหน้าอื่น เพราะจัดรถต้องเห็นร้าน BK ทั้งหมดของวันนี้เสมอ */
+function buildRouteStores() {
+  const m = {};
+  for (const o of ORDERS) {
+    if (chanOf(o.ref).key !== 'BK') continue;
+    const qty = o.isFree ? (o.free || 0) : (o.qty || 0);
+    if (qty <= 0) continue;
+    const s = m[o.storeCode] ||= { code:o.storeCode, name:o.store, slmn:{}, refs:{} };
+    s.slmn[o.slmn] = o.slmnName; s.refs[o.ref] = 1;
+  }
+  return Object.values(m).map(s => ({ ...s,
+    refCount: Object.keys(s.refs).length, slmnTxt: Object.keys(s.slmn).join(' · ') }))
+    .sort((a,b) => a.name.localeCompare(b.name, 'th'));
+}
+let ROUTE_STORES = buildRouteStores();
+
+const vehicleOf = code => (state.routeVehicle || {})[code] || '';
+function setVehicle(code, plate) {
+  state.routeVehicle ||= {};
+  if (plate) state.routeVehicle[code] = plate; else delete state.routeVehicle[code];
+  save();
+}
+
+function renderRoute() {
+  $('hdDate6').textContent = thaiDate(TODAY);
+  $('hdWh6').textContent   = WAREHOUSE;
+  if (vehState === 'idle') loadVehicles();
+
+  $('routeNote').innerHTML = `บิล BK (ช่องทางส่ง) วันนี้ <b>${fmtN(ROUTE_STORES.length)}</b> ร้าน · ` +
+    (vehState === 'ok'  ? `ทะเบียนรถคลัง ${WAREHOUSE} <b>${fmtN(VEHICLES.length)}</b> คัน`
+     : vehState === 'err' ? `<b class="txt-danger">โหลดทะเบียนรถไม่ได้</b>
+         <button class="btn btn-outline btn-sm" onclick="loadVehicles()">ลองใหม่</button>`
+     : 'กำลังโหลดทะเบียนรถ…');
+
+  const q = $('routeSearch').value.trim().toLowerCase();
+  const list = ROUTE_STORES.filter(s => !q ||
+    s.name.toLowerCase().includes(q) || s.code.includes(q) || s.slmnTxt.toLowerCase().includes(q));
+  if (!list.length) { $('routeList').innerHTML = `<div class="empty">ไม่มีบิล BK${q?'ที่ค้นหา':'วันนี้'}</div>`; return; }
+
+  $('routeList').innerHTML = list.map(s => {
+    const plate = vehicleOf(s.code);
+    const opts = `<option value="">— ยังไม่จ่ายรถ —</option>` +
+      VEHICLES.map(v => `<option value="${esc(v)}" ${v===plate?'selected':''}>${esc(v)}</option>`).join('') +
+      (plate && !VEHICLES.includes(plate)
+        ? `<option value="${esc(plate)}" selected>${esc(plate)} (ไม่อยู่ในคลัง ${esc(WAREHOUSE)})</option>` : '');
+    return `<div class="store" style="cursor:default">
+      <div class="flex-between gap-8">
+        <div style="flex:1;min-width:0">
+          <div class="store-name">${esc(s.name)}</div>
+          <div class="store-sub">${esc(s.code)} · ${esc(s.slmnTxt)}</div>
+        </div>
+        <span class="badge ${plate?'badge-ok':'badge-gold'}">${plate?'🚚 '+esc(plate):'ยังไม่จ่ายรถ'}</span>
+      </div>
+      <div class="job-stats">
+        <span><b>${fmtN(s.refCount)}</b> บิล</span>
+        <span class="txt-muted">${Object.keys(s.refs).map(esc).join(' · ')}</span>
+      </div>
+      <select class="scan-input" style="margin-top:6px;height:40px"
+              onchange="setVehicle('${s.code}', this.value); renderRoute()">${opts}</select>
+    </div>`;
+  }).join('');
 }
 
 /* ═══ บันทึกราย transaction ลงชีต "กำลังเช็ค" ═══
