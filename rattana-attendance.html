@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v6.08</title>
+<title>HR Rattana v6.09</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3784,7 +3784,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.08';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '13.09';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v12.0 — กันลงเวลาซ้อน + เตือนลืมสแกนเข้า/ออก */
 const SCAN_GAP_MIN = 60;           // ด่านเว้นช่วง: ห้ามสแกนใดๆ ซ้ำภายในกี่นาที (นับทุกชนิด เข้า+ออก)
 const MISS_OUT_ALERT_HOUR = 19;    // ตั้งแต่กี่โมง ให้เตือน "วันนี้ยังไม่สแกนออก" ตอนเปิดแอป
@@ -4186,6 +4186,72 @@ function normalizeEmail(e) { return String(e || '').trim().toLowerCase(); }
 function getCurrentIdToken() {
   return sessionStorage.getItem('rfc3_idToken') || null;
 }
+/* ============================================================
+   v13.09: จำการเข้าระบบ 7 วัน (surat 29/09) — เดิมเก็บใน sessionStorage ปิดเบราว์เซอร์/แอปเมื่อไหร่ต้องเข้าใหม่ทุกครั้ง
+   · เก็บ localStorage 'rfc3_session' = { u, token, at, exp } เฉพาะบัญชีรหัสพนักงาน/สแกนหน้าเข้าระบบ (token SHEET:<รหัส>)
+     บัญชี Google คงเดิม (idToken ของ Google หมดอายุเองใน 1 ชม.)
+   · ครบ 7 วันนับจากตอนเข้า = ออกจากระบบให้เอง — ทั้งตอนเปิดแอป (checkSession) และระหว่างเปิดค้าง (sessionWatch_ ทุกนาที)
+   · กดออกจากระบบเอง / รีเซ็ตแอป / เซิร์ฟเวอร์ตอบ Unauthorized = ลืมทันที · เครื่องใช้ร่วมกันต้องกดออกจากระบบก่อนส่งต่อ
+   · หน้าเข้าสู่ระบบเติมรหัสพนักงานล่าสุดให้ (ไม่จำรหัสผ่าน) และบอกว่าครบ 7 วันแล้ว
+   ============================================================ */
+const SESSION_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+let _sessionWatchTimer = null;
+function sessionSave_(fresh) {
+  try {
+    if (!currentUser || !currentUser.sheetLogin) return;
+    const token = sessionStorage.getItem('rfc3_idToken');
+    if (!token || token.indexOf('SHEET:') !== 0) return;
+    const old = LS.get('session', null);
+    const keep = !fresh && old && old.exp > Date.now();   // อัปเดตข้อมูลคน (isPTT ฯลฯ) ไม่ต่ออายุ — ครบ 7 วันนับจากตอนเข้า
+    LS.set('session', { u: currentUser, token, at: keep ? old.at : Date.now(), exp: keep ? old.exp : Date.now() + SESSION_KEEP_MS });
+    LS.set('lastUser', String(currentUser.empId || ''));
+  } catch (_) {}
+}
+function sessionClear_() { LS.del('session'); }
+/* ปิดแอปแล้วเปิดใหม่ (sessionStorage ว่าง) → คืนเซสชันที่จำไว้ — true = มีและยังไม่ครบ 7 วัน */
+function sessionRestore_() {
+  const s = LS.get('session', null);
+  if (!s || !s.u || !s.token) return false;
+  if (!(s.exp > Date.now())) { sessionClear_(); LS.set('sessionNote', 'expired'); return false; }
+  sessionStorage.setItem('rfc3_user', JSON.stringify(s.u));
+  sessionStorage.setItem('rfc3_idToken', s.token);
+  return true;
+}
+function sessionExpireNow_() {
+  sessionClear_(); LS.set('sessionNote', 'expired');
+  try { stopEmpCamera(); } catch (_) {}
+  sessionStorage.removeItem('rfc3_user'); sessionStorage.removeItem('rfc3_idToken'); sessionStorage.removeItem('rfc3_idTokenExp');
+  localStorage.removeItem('rattana_session'); localStorage.removeItem('rattanaUser');
+  try { toast('⏰ ครบ 7 วัน — ระบบออกจากระบบให้เอง เข้าสู่ระบบใหม่ได้เลย', 'info'); } catch (_) {}
+  setTimeout(() => location.reload(), 1800);
+}
+/* ระหว่างเปิดแอปค้าง: เช็คทุกนาที + ตอนกลับมาที่แอป — กำลังบันทึก/จอหมุนอยู่ให้รอรอบหน้า */
+function sessionWatch_() {
+  const s = LS.get('session', null);
+  if (!s || !s.exp || s.exp > Date.now()) return;
+  if (_checkinBusy) return;
+  const sp = document.getElementById('spinner');
+  if (sp && getComputedStyle(sp).display !== 'none') return;
+  sessionExpireNow_();
+}
+function startSessionWatch_() {
+  if (_sessionWatchTimer) return;
+  _sessionWatchTimer = setInterval(sessionWatch_, 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) sessionWatch_(); });
+}
+/* หน้าเข้าสู่ระบบ: เติมรหัสพนักงานล่าสุด + บอกเหตุที่ต้องเข้าใหม่ */
+function loginPrefill_() {
+  try {
+    const u = document.getElementById('loginUsername');
+    const last = LS.get('lastUser', '');
+    if (u && !u.value && last) u.value = last;
+    if (LS.get('sessionNote', '') === 'expired') {
+      LS.del('sessionNote');
+      const st = document.getElementById('loginSheetStatus');
+      if (st) st.innerHTML = '<span style="color:var(--muted)">⏰ ครบ 7 วัน ระบบออกจากระบบให้เอง — ใส่รหัสผ่านเพื่อเข้าใหม่</span>';
+    }
+  } catch (_) {}
+}
 function isTokenExpiringSoon() { return false; }
 async function ensureValidToken() { return getCurrentIdToken(); }
 async function refreshIdToken() { return getCurrentIdToken(); }
@@ -4197,6 +4263,7 @@ function showSessionExpiredBanner() {
   sessionStorage.removeItem('rfc3_user');
   sessionStorage.removeItem('rfc3_idToken');
   sessionStorage.removeItem('rfc3_idTokenExp');
+  sessionClear_();   // v13.09: เซสชันเสียแล้ว ไม่คืนกลับตอนเปิดใหม่
   toast('Session หมดอายุ — กด logout แล้ว login ใหม่', 'warning');
 }
 let _tokenRefreshTimer = null;
@@ -4316,6 +4383,7 @@ async function doSheetLogin() {
     sessionStorage.setItem('rfc3_user', JSON.stringify(currentUser));
     sessionStorage.setItem('rfc3_idToken', 'SHEET:' + currentUser.empId);
     try { saveSharedSession({ ...currentUser }); } catch(_) {}
+    sessionSave_(true);   // v13.09: จำ 7 วัน
     document.getElementById('loginScreen').style.display = 'none';
     document.getElementById('appScreen').style.display = 'block';
     initApp();
@@ -4459,6 +4527,7 @@ function faceLoginSuccess_() {
   sessionStorage.setItem('rfc3_user', JSON.stringify(currentUser));
   sessionStorage.setItem('rfc3_idToken', 'SHEET:' + currentUser.empId);
   try { saveSharedSession(Object.assign({}, currentUser)); } catch (_) {}
+  sessionSave_(true);   // v13.09: จำ 7 วัน
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('appScreen').style.display = 'block';
   if (currentUser.role === 'supervisor' || currentUser.role === 'manager' || isPTTManager()) buildTeamFromSheet();
@@ -5469,6 +5538,7 @@ function logout() {
   sessionStorage.removeItem('rfc3_user');
   sessionStorage.removeItem('rfc3_idToken');
   sessionStorage.removeItem('rfc3_idTokenExp');
+  sessionClear_(); LS.del('lastUser');   // v13.09: กดออกเอง = ลืมทั้งเซสชันและรหัสที่เติมให้ (เครื่องใช้ร่วมกัน)
   // v1.0: เคลียร์ shared session ของ Rattana ด้วย (logout = ออกจากทุกแอป)
   localStorage.removeItem('rattana_session');
   localStorage.removeItem('rattanaUser');
@@ -5485,9 +5555,13 @@ function checkSession() {
     sessionStorage.removeItem('rfc3_idToken');
     sessionStorage.removeItem('rfc3_idTokenExp');
     try { renderFaceLoginCard_(); } catch (_) {}   // v12.73
+    loginPrefill_();   // v13.09
     setTimeout(initGoogleSignIn, 200);
     return;
   }
+
+  // v13.09: ปิดแอปแล้วเปิดใหม่ — sessionStorage ว่าง → คืนเซสชันที่จำไว้ (ยังไม่ครบ 7 วัน)
+  if (!sessionStorage.getItem('rfc3_user') || !getCurrentIdToken()) sessionRestore_();
 
   // ลอง SSO จาก Rattana Hub ก่อน
   try {
@@ -5520,6 +5594,7 @@ function checkSession() {
   } else {
     if (s && !idToken) sessionStorage.removeItem('rfc3_user');
     try { renderFaceLoginCard_(); } catch (_) {}   // v12.73: การ์ดสแกนหน้าเข้าระบบ
+    loginPrefill_();   // v13.09
     setTimeout(initGoogleSignIn, 200);
   }
 }
@@ -7612,6 +7687,7 @@ async function doSelfCheckIn() {
       // Token หมดอายุ → clear + แสดง login button ใน toast
       sessionStorage.removeItem('rfc3_idToken');
       sessionStorage.removeItem('rfc3_idTokenExp');
+      sessionClear_();   // v13.09
       toast(baseMsg + ' (local) · ⚠ Token หมดอายุ — กด Logout แล้ว Login ใหม่', 'warning');
     } else {
       toast(`${baseMsg} · ⚠ ${syncError}`, 'warning');
@@ -9334,6 +9410,7 @@ function renderSystemInfo() {
   const role = { employee:'พนักงาน', supervisor:'หัวหน้า', manager:'ผู้จัดการ', hr:'HR' }[currentUser?.role] || '-';
   el.innerHTML = `
     <div class="status-row"><div class="icon">v</div><div><div class="label">เวอร์ชัน</div><div class="value">${APP_VERSION}</div></div></div>
+    <div class="status-row"><div class="icon">⏰</div><div><div class="label">จำการเข้าระบบ</div><div class="value">${(function(){ try { const s = LS.get('session', null); return (s && s.exp) ? ('ออกให้เอง ' + new Date(s.exp).toLocaleString('th-TH-u-ca-gregory') + ' (7 วันนับจากตอนเข้า)') : 'เฉพาะครั้งนี้ (บัญชี Google)'; } catch (_) { return '-'; } })()}</div></div></div>
     <div class="status-row"><div class="icon">👤</div><div><div class="label">บทบาท</div><div class="value">${role} (${currentUser?.role||'-'})</div></div></div>
     <div class="status-row"><div class="icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></div><div><div class="label">face-api</div><div class="value">${faceapiReady?'✓ พร้อม':'ยังไม่พร้อม'}</div></div></div>
     <div class="status-row"><div class="icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div><div class="label">ทีม</div><div class="value">${team.length} คน</div></div></div>
@@ -9887,6 +9964,7 @@ async function applyPTTMenuVisibility() {
       currentUser.isPTT  = isPTT;
       currentUser.khlang = khlang;
       try { sessionStorage.setItem('rfc3_user', JSON.stringify(currentUser)); } catch(_) {}
+      sessionSave_();   // v13.09: อัปเดตสำเนาที่จำไว้ (ไม่ต่ออายุ)
     }
   }
   // v9.5/v9.7: โหลดถังลูกทีม PTT — ทั้งพนักงาน PTT และหัวหน้า (เช่น จิรวรรณ ที่คุมทั้ง PTT)
@@ -10522,6 +10600,7 @@ function initApp() {
 
   // v5.2: เตือนเมื่อมีเวอร์ชันใหม่บนเซิร์ฟเวอร์ (ไม่ต้องรอแคช 10 นาที)
   startUpdateChecker();
+  startSessionWatch_();   // v13.09: ครบ 7 วันระหว่างเปิดค้าง → ออกให้เอง
 
   // Background: load all sheets (FaceData, Settings, Locations, etc.)
   setTimeout(async () => {
@@ -10670,6 +10749,7 @@ async function verifyPTTPilot_() {
       if (res.khlang) currentUser.khlang = res.khlang;
       if (res.myPosition) currentUser.pttPosition = res.myPosition;
       try { sessionStorage.setItem('rfc3_user', JSON.stringify(currentUser)); } catch(_) {}
+      sessionSave_();   // v13.09: อัปเดตสำเนาที่จำไว้ (ไม่ต่ออายุ)
       return { ok: true };
     }
     return { ok: false };                          // ทะเบียนตอบแล้วว่าไม่มีชื่อ
@@ -10685,7 +10765,7 @@ function pttGateFailToast_(r) {
     const m = String(r.err).toLowerCase();
     const isAuth = m.indexOf('idtoken') >= 0 || m.indexOf('unauthorized') >= 0 || m.indexOf('session') >= 0;
     toast(isAuth ? '⚠ เซสชันหมดอายุ — กดออกจากระบบแล้วเข้าใหม่' : '⚠ ต่อระบบไม่ได้: ' + r.err, 'warning');
-    if (isAuth) { try { sessionStorage.removeItem('rfc3_idToken'); sessionStorage.removeItem('rfc3_idTokenExp'); } catch(_) {} }
+    if (isAuth) { try { sessionStorage.removeItem('rfc3_idToken'); sessionStorage.removeItem('rfc3_idTokenExp'); sessionClear_(); } catch(_) {} }   // v13.09
   } else {
     toast('ยังไม่พร้อมใช้งานขณะนี้ค่ะ', 'info');
   }
@@ -11006,6 +11086,7 @@ async function renderSlipPage() {
       const _r0 = res.rows[res.rows.length - 1];
       currentUser.khlang = (_r0 && _r0.khlang) || currentUser.khlang || '';
       try { sessionStorage.setItem('rfc3_user', JSON.stringify(currentUser)); } catch(_) {}
+      sessionSave_();   // v13.09: อัปเดตสำเนาที่จำไว้ (ไม่ต่ออายุ)
       applyPTTMenuVisibility();
     }
     const rows = res.rows || [];
@@ -14382,7 +14463,10 @@ function calSelectDay(d) {
 }
 
 loadAll();
-checkSession();
+/* v13.09 ★ เรียกหลังสคริปต์ทั้งไฟล์ทำงานจบ (microtask) — เดิมเรียกตรงนี้กลางไฟล์ ถ้ามีเซสชันค้าง (รีเฟรช/อัปเดตอัตโนมัติ
+   และตั้งแต่ v13.09 ทุกครั้งที่เปิดแอป) initApp → buildTabs → canUseLeaveTime แตะ const LEAVE_TIME_HR_ONLY ที่ประกาศอยู่ท้ายไฟล์
+   → ReferenceError กลาง initApp: เมนูขึ้นแต่ไม่โหลดชีท/ไม่เช็คอัปเดต/ไม่เฝ้าเซสชัน (เจอตอนทดสอบ v13.09) */
+Promise.resolve().then(checkSession);
 
 /* ════════════════════════════════════════
    DOCS PAGE v3.0 — JS
