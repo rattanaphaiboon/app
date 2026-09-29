@@ -966,7 +966,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.345';
+const APP_VERSION='3.346';
 const CFG = {
   oauthClientId:'76489970297-5qsu90p2tpji1rspau5777cqko1dpmn5.apps.googleusercontent.com',
   usersSheetId:'1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
@@ -6794,6 +6794,41 @@ function billReasonText(b){
   return '';
 }
 
+/* ★ v3.346: รูปเส้นทาง "ตามถนนจริง" (user 2026-09-29 "เส้นให้ทำเป็นเส้นตามถนนจริง ไม่เอาเส้นตรง")
+   - ใช้ OSRM ตัวเดียวกับแอปจัดรถ · ส่งทีละไม่เกิน 25 จุดแล้วต่อเส้นเอง (เซิร์ฟเวอร์สาธารณะจำกัดจำนวนจุด/ความยาว URL)
+   - แคชในหน่วยความจำตามชุดพิกัด กันยิงซ้ำทุกครั้งที่วาดแผนที่ใหม่ (หน้านี้วาดใหม่บ่อย)
+   - ขอไม่ได้/ออฟไลน์ = คืน null ให้ผู้เรียกใช้เส้นตรงเดิมต่อ ★ ห้ามทำให้แผนที่หายเด็ดขาด */
+const ROUTE_SNAP_MAX=25;
+const _roadRouteCache=new Map();
+async function roadRouteCoords_(pts){
+  if(!pts||pts.length<2) return null;
+  const key=pts.map(p=>p[0].toFixed(5)+','+p[1].toFixed(5)).join('|');
+  if(_roadRouteCache.has(key)) return _roadRouteCache.get(key);
+  const out=[];
+  try{
+    for(let i=0;i<pts.length-1;i+=ROUTE_SNAP_MAX-1){
+      const chunk=pts.slice(i,i+ROUTE_SNAP_MAX);
+      if(chunk.length<2) break;
+      const cs=chunk.map(p=>p[1].toFixed(6)+','+p[0].toFixed(6)).join(';');
+      const ctrl=new AbortController();
+      const tm=setTimeout(()=>ctrl.abort(),8000);
+      const r=await fetch('https://router.project-osrm.org/route/v1/driving/'+cs+'?overview=full&geometries=geojson',{signal:ctrl.signal});
+      clearTimeout(tm);
+      if(!r.ok) throw new Error('http '+r.status);
+      const d=await r.json();
+      if(d.code!=='Ok'||!d.routes||!d.routes.length) throw new Error('code '+d.code);
+      const seg=d.routes[0].geometry.coordinates.map(c=>[c[1],c[0]]);
+      if(out.length) seg.shift();   // จุดแรกของช่วงถัดไป = จุดสุดท้ายของช่วงก่อน
+      seg.forEach(x=>out.push(x));
+    }
+  }catch(e){
+    console.warn('[route] ขอเส้นทางตามถนนไม่สำเร็จ',(e&&e.message)||e);
+    _roadRouteCache.set(key,null); return null;
+  }
+  const res=out.length>1?out:null;
+  _roadRouteCache.set(key,res);
+  return res;
+}
 /* ========== ROUTE MAP ========== */
 let _map=null;
 function renderRouteMap(j){
@@ -6809,8 +6844,16 @@ function renderRouteMap(j){
     latlngs.push([s.lat,s.lng]);
   });
   if(latlngs.length>1){
-    L.polyline(latlngs,{color:'#4A90D9',weight:3,opacity:.6,dashArray:'6,8'}).addTo(_map);
+    /* ★ v3.346: เส้นตรงจาง ๆ ไว้ก่อนกันจอโล่งระหว่างรอ แล้ววาดเส้นตามถนนจริงทับเมื่อได้ผล
+       ★ ไม่ fitBounds ซ้ำตอนเส้นถนนมา — คนขับอาจเลื่อน/ซูมแผนที่ไปแล้ว */
+    const _straight=L.polyline(latlngs,{color:'#4A90D9',weight:3,opacity:.35,dashArray:'6,8'}).addTo(_map);
     _map.fitBounds(L.latLngBounds(latlngs).pad(0.15));
+    const _mapRef=_map;
+    roadRouteCoords_(latlngs).then(road=>{
+      if(!road||_map!==_mapRef) return;   // แผนที่ถูกวาดใหม่ระหว่างรอ = ทิ้งผลเก่า
+      try{ _mapRef.removeLayer(_straight); }catch(e){}
+      L.polyline(road,{color:'#4A90D9',weight:4,opacity:.9}).addTo(_mapRef);
+    }).catch(()=>{});
   }
   // Stop list
   $('stopList').innerHTML=stops.map((s,i)=>`
