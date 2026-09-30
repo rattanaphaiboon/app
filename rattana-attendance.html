@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v6.14</title>
+<title>HR Rattana v6.15</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3813,7 +3813,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.14';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '13.15';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v13.11: LINE OA ฝ่ายบุคคล (surat 30/09) — ตัวเดียวกับที่แอป 360 / แปลงรูปเป็น PDF / สมัครงาน ใช้ · lin.ee พาไป line.me/R/ti/p/@712dqxgv */
 const HR_LINE_URL = 'https://lin.ee/uIN2DMR', HR_LINE_ID = '@712dqxgv';
 const HR_TEL = '0640978417', HR_TEL_TXT = '064-097-8417';   // v13.12: เบอร์ฝ่ายบุคคล (ตัวเดียวกับแอป 360 / img2pdf / jobs)
@@ -8132,6 +8132,41 @@ function setKioskMode(m) {
   document.getElementById('kModeOut').classList.toggle('active', m==='out');
   resetKioskPhase();
 }
+/* ══ v13.15: หน้าลูกทีม = หน้าที่พนักงานลงทะเบียนเองจากมือถือ (ที่เก็บกลาง FaceData) — หัวหน้าไม่ต้องลงซ้ำ ══
+   (surat 30/09 "ถ้าเพิ่มอีก ให้ไปจับจากใบหน้าที่พนักงานเพิ่มมาอยู่แล้ว จะเพิ่มหลายรอบทำไม")
+   ระบบใช้หน้าจากที่เก็บกลางตั้งแต่ v9.5 อยู่แล้ว แต่ดึงแค่ตอนเปิดแอป — คนที่ลงหน้าหลังหัวหน้าเปิดแอป Kiosk/หน้าทีมยังไม่เห็น
+   (ขึ้น "ไม่มีใบหน้า" / "ไม่พบในทีม") จนกว่าจะปิดเปิดแอป → หัวหน้าเข้าใจว่าต้องลงให้ใหม่
+   ตอนนี้: เปิดหน้า Kiosk / หน้าทีม / เริ่ม Kiosk = ดึงหน้าล่าสุดเงียบๆ (ไม่ถี่กว่า 30 วิ)
+           Kiosk เจอหน้าที่ไม่รู้จัก = ดึงใหม่ (ไม่ถี่กว่าทุก 2 นาที) → คนที่เพิ่งลงหน้าเดินมาสแกนได้เลย
+   อัปเดตเฉพาะ "หน้า" ของสมาชิกทีมเดิม (สมาชิกทีมยังมาจากชีท Users / ทะเบียน PTT ตามเดิม) · var = ไม่มีช่วง TDZ */
+var _tfAt = 0, _tfBusy = false;
+async function teamFacesRefresh_(why) {
+  if (_tfBusy || !config.appsScriptUrl || !currentUser || !Array.isArray(team) || !team.length) return 0;
+  if (Date.now() - (_tfAt || 0) < (why === 'unknown' ? 120000 : 30000)) return 0;
+  _tfBusy = true; _tfAt = Date.now();
+  let added = 0;
+  try {
+    if (!(await loadFaceDataViaApi())) return 0;
+    const map = {};
+    (remoteFaceData || []).forEach(f => { if (f && f.empId && f.descriptor) map[empKey_(f.empId)] = f; });
+    team.forEach(m => {
+      const f = map[empKey_(m.empId)]; if (!f) return;
+      if (!m.descriptor) added++;
+      m.descriptor = f.descriptor; m.descriptor2 = f.descriptor2 || null;
+      if (f.photo) m.photo = f.photo;
+      m.registeredAt = f.registeredAt; m.registeredBy = f.registeredBy; m.synced = true;
+    });
+    saveTeam();
+    const pg = document.querySelector('.page.active');
+    if (pg && pg.id === 'page-team') renderTeamList();
+    try { renderDashboard(); } catch (_) {}
+    if (kioskState.active) { renderKioskStats(); if (added) kioskNote_('อัปเดตหน้าลูกทีม +' + added + ' คน (ลงหน้าจากมือถือตัวเองแล้ว)'); }
+  } catch (e) { console.warn('[teamFaces]', e && e.message); }
+  finally { _tfBusy = false; }
+  return added;
+}
+/* ข้อความสั้นๆ บนบรรทัดวินิจฉัย Kiosk 6 วิ */
+function kioskNote_(text) { kioskState.note = { text, until: Date.now() + 6000 }; kioskDiag_(); setTimeout(kioskDiag_, 6100); }
 function startKiosk() {
   const branchCode = document.getElementById('kioskBranch').value;
   if (!branchCode) { toast('เลือกสาขาก่อน', 'warning'); return; }
@@ -8150,6 +8185,7 @@ function startKiosk() {
   kioskState.active = true;
   renderKioskStats(); renderKioskRecent();
   startKioskCamera();
+  teamFacesRefresh_('start');   // v13.15: หน้าล่าสุดจากที่เก็บกลาง (คนที่เพิ่งลงหน้าหลังเปิดแอป)
 }
 /* v13.14: จังหวะลูป Kiosk — ลูปวิ่งถี่ แต่แต่ละช่วงคุมความถี่เอง
    ค้นหน้า/เทียบหน้า ทุก 400 ms (เท่าเดิม) · ท่าหันหน้า (face-api) ทุก 250 ms · กะพริบ (MediaPipe) เร็วสุดเท่าที่เครื่องไหว
@@ -8223,6 +8259,7 @@ function kioskDiag_() {
   let t = '';
   if (lv && lv.eng === 'mp') t = 'MP ' + (lv.fps ? lv.fps.toFixed(1) : '-') + 'fps · ตา ' + (lv.cur || 0).toFixed(2) + '↑' + (lv.peak || 0).toFixed(2) + (_mpMs ? ' · ' + Math.round(_mpMs) + 'ms' : '');
   else if (lv) t = 'หน้า ' + (lv.nose != null ? lv.nose.toFixed(2) : '-') + (lv.action === 'turn_left' ? ' → ต้องเกิน 0.65' : lv.action === 'turn_right' ? ' → ต้องต่ำกว่า 0.35' : '');
+  else if (kioskState.note && kioskState.note.until > Date.now()) t = kioskState.note.text;   // v13.15
   else t = _mp ? '' : _mpLoading ? 'กำลังโหลดตัวจับกะพริบ…' : _mpErr ? 'ตัวจับกะพริบใช้ไม่ได้ — ใช้ท่าหันหน้าแทน' : '';
   el.textContent = t;
 }
@@ -8265,6 +8302,7 @@ async function kioskDetectTick() {
 
     if (results.length === 0) {
       setKioskHeadline('ไม่พบใบหน้าในทีม', 'ลูกน้องยังไม่ได้ลงทะเบียน', 'error');
+      teamFacesRefresh_('unknown');   // v13.15: อาจเพิ่งลงหน้าจากมือถือ — ดึงใหม่
       return;
     }
     const top = results[0];
@@ -8279,7 +8317,10 @@ async function kioskDetectTick() {
     } else if (top.distance <= settings.faceThr) {
       setKioskHeadline('ใกล้เคียงหลายคน', 'ขยับเข้าใกล้กล้องอีกนิด', 'warn');
     } else {
-      setKioskHeadline('ไม่พบในทีม', `ใกล้สุด: ${top.member.name} (${top.distance.toFixed(2)})`, 'warn');
+      // v13.15: หน้าที่ไม่รู้จัก = อาจเพิ่งลงหน้าจากมือถือหลังเปิดแอป → ดึงหน้าล่าสุด (ไม่ถี่กว่าทุก 2 นาที) · บอกจำนวนคนที่ยังไม่ลงหน้า
+      const noFace = team.filter(m => !m.descriptor).length;
+      setKioskHeadline('ไม่พบในทีม', `ใกล้สุด: ${top.member.name} (${top.distance.toFixed(2)})` + (noFace ? ` · ยังไม่ลงหน้า ${noFace} คน` : ''), 'warn');
+      teamFacesRefresh_('unknown');
     }
   }
 
@@ -9876,9 +9917,9 @@ function showPage(p) {
     evaluateAction();
   }
 
-  if (p === 'kiosk') { fillKioskBranches(); renderDashboard(); }
+  if (p === 'kiosk') { fillKioskBranches(); renderDashboard(); teamFacesRefresh_('page'); }   // v13.15
   if (p === 'dashboard') renderDashboard();
-  if (p === 'team') renderTeamList();
+  if (p === 'team') { renderTeamList(); teamFacesRefresh_('page'); }   // v13.15: หน้าที่ลูกทีมเพิ่งลงจากมือถือ ขึ้นทันที
   if (p === 'today') renderTodayPage();
   if (p === 'history') renderHistory();
   if (p === 'locations') renderLocations();
