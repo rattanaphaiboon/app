@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.14</title>
+<title>Rattana Shop Location v1.15</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -120,6 +120,7 @@ body.dark .btn-primary{background:var(--navy-light);border-color:var(--navy-ligh
 .ce-row input[type=color]{width:34px;height:28px;border:1px solid var(--border);border-radius:6px;padding:0;background:transparent;cursor:pointer}
 .ce-row i{font-style:normal;color:var(--gold);font-weight:700}
 .ce-act{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.backup-row{margin:4px 0 6px}
 .to-map{font-size:12.5px;margin-bottom:8px;padding:5px 8px;border-radius:6px;background:rgba(201,168,76,.12)}
 .txt-muted{color:var(--muted);font-size:11.5px}
 .badge.sale{background:rgba(52,152,219,.12);border-color:rgba(52,152,219,.35)}
@@ -213,7 +214,7 @@ details.card:not([open])>summary{border-bottom:none}
 <body>
 
 <header>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.14 · 2026-09-30</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.15 · 2026-09-30</span></div>
   <div class="hdr-right">
     <button class="icon-btn" id="btnDark" title="โหมดมืด/สว่าง" onclick="toggleDark()">🌙</button>
   </div>
@@ -228,6 +229,11 @@ details.card:not([open])>summary{border-bottom:none}
         <span class="fc-act"><button class="fp-clear" onclick="event.preventDefault();newMap()">＋ สร้างแผนที่</button><span class="chev">▶</span></span></summary>
       <div class="card-body">
         <div id="mapList" class="map-list"></div>
+        <div class="btn-row backup-row">
+          <button class="btn btn-outline btn-sm" onclick="backupData()" title="ดาวน์โหลดทุกแผนที่เก็บเป็นไฟล์">💾 สำรองข้อมูล</button>
+          <button class="btn btn-outline btn-sm" onclick="$('restoreIn').click()" title="เปิดไฟล์สำรองเพื่อกู้คืน">📂 กู้คืนจากไฟล์</button>
+          <input type="file" id="restoreIn" accept=".json,application/json" hidden onchange="restoreData(this)">
+        </div>
         <div class="fp-hint">👁 = แสดง / ซ่อน · 👤 เซลล์ / 🚚 รูท เลือกแยกกันได้ในแต่ละแผนที่ (เลือกได้หลายรายการ) · กดชื่อแผนที่เพื่อเลือกเป็น "แผนที่ที่กำลังแก้ไข" (เพิ่มร้าน / ดึงชีต จะเข้าแผนที่นี้)</div>
       </div>
     </details>
@@ -376,9 +382,36 @@ function load() {
   if (!mapById(activeMapId)) activeMapId = maps[0].id;
   shops.forEach(s => { if (!mapById(s.mapId)) s.mapId = maps[0].id; });
   try { geoCache = JSON.parse(localStorage.getItem(GEO_CACHE_KEY) || '{}'); } catch { geoCache = {}; }
+  applyGeo();
 }
+const DATA_VER = 3;          // bump when the saved shape changes; an older tab never overwrites newer data
+let saveBlocked = false, saveWarned = false;
 function save() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify({ shops, groupColors, showLabels, maps, activeMapId })); } catch {}
+  if (saveBlocked) return;
+  try {
+    const cur = JSON.parse(localStorage.getItem(STORE_KEY) || '{}');
+    if ((cur.ver || 0) > DATA_VER) {
+      saveBlocked = true;
+      showToast('มีแอพเวอร์ชันใหม่กว่าเปิดอยู่ — กด Ctrl+F5 เพื่อรีเฟรชหน้านี้ก่อนแก้ไข', 'warning');
+      return;
+    }
+  } catch {}
+  // area data lives in the geo cache, so it is not stored twice
+  const slim = shops.map(({ region, prov, amphoe, tambon, geoFail, ...rest }) => rest);
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify({ ver: DATA_VER, savedAt: Date.now(), shops: slim, groupColors, showLabels, maps, activeMapId }));
+  } catch (e) {
+    console.warn('save failed', e);
+    if (!saveWarned) { saveWarned = true; showToast('บันทึกลงเครื่องไม่สำเร็จ (พื้นที่เต็ม?) — กด 💾 สำรองข้อมูล เก็บไว้ก่อน', 'error'); }
+  }
+}
+/* fill area fields from the geo cache */
+function applyGeo(list = shops) {
+  list.forEach(s => {
+    if (s.prov) return;
+    const g = geoCache[s.lat.toFixed(4) + ',' + s.lng.toFixed(4)];
+    if (g) Object.assign(s, g);
+  });
 }
 function saveGeoCache() {
   try { localStorage.setItem(GEO_CACHE_KEY, JSON.stringify(geoCache)); } catch {}
@@ -763,7 +796,14 @@ async function reverseGeo(lat, lng) {
 }
 
 let geoRunning = false;
-async function runGeoQueue() {
+function runGeoQueue() {
+  if (geoRunning) return;
+  // Web Locks: only one open tab looks up areas at a time (others just read the shared cache)
+  if (navigator.locks && navigator.locks.request) {
+    navigator.locks.request('rattana-shop-geo', { ifAvailable: true }, lock => lock ? geoLoop() : null);
+  } else geoLoop();
+}
+async function geoLoop() {
   if (geoRunning) return;
   geoRunning = true;
   let errStreak = 0;
@@ -790,7 +830,7 @@ async function runGeoQueue() {
         }
         s.geoFail = true;
       }
-      save(); renderSide(); refreshMarker(s);
+      renderSide(); refreshMarker(s);   // result is already in the geo cache — no full save here
       if (!cached) await sleep(1500);   // Nominatim policy: max 1 request / second — keep a margin
     }
   } finally {
@@ -1111,8 +1151,55 @@ window.addEventListener('scroll', () => $('backToTop').classList.toggle('show', 
 $('inCoord').addEventListener('keydown', e => { if (e.key === 'Enter') addOne(); });
 $('inName').addEventListener('keydown', e => { if (e.key === 'Enter') $('inCoord').focus(); });
 
+/* ===== Keep several open tabs in sync ===== */
+window.addEventListener('storage', e => {
+  if (e.key === STORE_KEY && e.newValue) {
+    const keepActive = activeMapId;
+    load();
+    if (mapById(keepActive)) activeMapId = keepActive;
+    loadSheetCfg(); renderAll();
+  } else if (e.key === GEO_CACHE_KEY && e.newValue) {
+    try { geoCache = JSON.parse(e.newValue); } catch {}
+    applyGeo(); renderSide();
+    for (const s of shops) refreshMarker(s);
+  }
+});
+
+/* ===== Backup / restore (file) ===== */
+function backupData() {
+  const data = { app: 'rattana-shop-location', ver: DATA_VER, exportedAt: new Date().toISOString(), maps, activeMapId, groupColors, shops };
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  const d = new Date();
+  const stamp = `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear() + 543}`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `Rattana Shop Location สำรอง ${stamp}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  showToast(`บันทึกไฟล์สำรองแล้ว (${maps.length} แผนที่ · ${shops.length} ร้าน)`, 'success');
+}
+async function restoreData(inp) {
+  const f = inp.files[0]; inp.value = '';
+  if (!f) return;
+  try {
+    const d = JSON.parse(await f.text());
+    if (d.app !== 'rattana-shop-location' || !Array.isArray(d.maps) || !Array.isArray(d.shops)) throw new Error('ไม่ใช่ไฟล์สำรองของแอพนี้');
+    if (!confirm(`กู้คืนจากไฟล์สำรอง: ${d.maps.length} แผนที่ · ${d.shops.length} ร้าน\nข้อมูลปัจจุบันในเครื่องนี้จะถูกแทนที่ ?`)) return;
+    maps = d.maps; shops = d.shops; groupColors = d.groupColors || {}; activeMapId = d.activeMapId || '';
+    maps.forEach(m => { m.sheet = Object.assign(newSheetCfg(), m.sheet || {}); m.fSales = m.fSales || []; m.fRoutes = m.fRoutes || []; });
+    if (!mapById(activeMapId)) activeMapId = maps[0].id;
+    (d.shops || []).forEach(s => { if (s.prov) geoCache[s.lat.toFixed(4) + ',' + s.lng.toFixed(4)] = { region: s.region, prov: s.prov, amphoe: s.amphoe, tambon: s.tambon }; });
+    saveGeoCache(); applyGeo();
+    save(); loadSheetCfg(); renderAll(); fitAll(); runGeoQueue();
+    showToast('กู้คืนข้อมูลเรียบร้อย ✓', 'success');
+  } catch (e) {
+    console.warn(e); showToast('กู้คืนไม่สำเร็จ: ' + e.message, 'error');
+  }
+}
+
 /* ===== Boot ===== */
 try { if (localStorage.getItem('rattanaDark') === '1') toggleDark(); } catch {}
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch {}
 load();
 loadSheetCfg();
 applyLabels();
@@ -1121,6 +1208,7 @@ renderAll();
 if (shops.length) fitAll();
 shops.forEach(s => { delete s.geoFail; });   // failures from a rate-limit pause get another try
 runGeoQueue();
+setInterval(() => { if (!geoRunning && shops.some(x => !x.prov && !x.geoFail)) runGeoQueue(); }, 60000);   // take over lookups if the other tab closed
 (async () => { for (const m of maps) if (m.sheet.url && m.sheet.auto) await importSheet(true, m.id); })();
 </script>
 </body>
