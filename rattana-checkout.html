@@ -1040,6 +1040,14 @@ body.dark .badge-gold{color:var(--gold-light)}
 .job-stats{display:flex;gap:12px;font-size:12px;color:var(--muted);flex-wrap:wrap}
 .job-stats b{color:var(--text);font-variant-numeric:tabular-nums}
 
+/* แถบบอกว่าใบจองยังไม่ใช่ของล่าสุด — โผล่ทุกแท็บ */
+.stale-bar{display:none;margin:0 0 10px;padding:9px 12px;border-radius:var(--radius-md);font-size:13px;line-height:1.6;
+  background:#fdecea;color:#c0392b;border:1px solid rgba(192,57,43,.35)}
+.stale-bar.on{display:block}
+.stale-bar.load{background:var(--strip-bg);color:var(--text);border-color:var(--strip-bd)}
+body.dark .stale-bar{background:#3a1a17;color:#ff8a7e}
+body.dark .stale-bar.load{background:var(--strip-bg);color:var(--text)}
+
 /* จัดเที่ยวส่ง — ตารางแน่น หนึ่งแถวต่อหนึ่งบิล */
 .rt-list{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-md);
   box-shadow:var(--shadow-sm);overflow-x:auto}
@@ -1336,6 +1344,8 @@ body.dark .gas-ov.who-ov{background:#060c1c}
 </nav>
 
 <div class="content">
+
+<div class="stale-bar" id="staleBar"></div>
 
 <!-- ═══════════ 1. เลือกงาน ═══════════ -->
 <section id="scr-jobs" class="screen on">
@@ -1894,7 +1904,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-09-30 · 27';
+const BUILD = '2026-09-30 · 28';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 
@@ -2270,6 +2280,7 @@ const DEVICE = (() => {
 
 let state = { round:1, jobKey:null, scans:{}, log:[], overrides:{}, filter:'all' };
 try { Object.assign(state, JSON.parse(LSget(LS) || '{}')); } catch(e) {}
+state.log = (state.log || []).slice(-300);         // เครื่องที่ใช้มานานอาจสะสมไว้เยอะ — ตัดทิ้งตั้งแต่เปิด (ดู logMove)
 if (!ROUNDS.some(r => r.n === state.round)) state.round = 1;   // รอบที่เคยบันทึกไว้อาจถูกตัดทิ้งแล้ว
 const save = () => LSset(LS, JSON.stringify(state));
 CHAN_PICK = state.chanPick || [];                 // ค่าที่เคยเลือกไว้
@@ -3884,17 +3895,62 @@ async function gvizRows(id, where, sel) {
   return ((r.table && r.table.rows) || []).map(row => (row.c || []).map(cellTxt));
 }
 
+/* ═══ ข้อมูลต้องเป็นปัจจุบันทุกครั้งที่เข้าแอป (ผู้ใช้สั่ง 30/09) ═══
+   ORDERS_LIVE = โหลดใบจองจากชีตสำเร็จแล้วอย่างน้อยครั้งหนึ่ง (ก่อนนั้นคือข้อมูลเก่าที่ฝังในไฟล์ 18/09)
+   loadedDay   = วันตามนาฬิกาเครื่องตอนโหลดสำเร็จล่าสุด — ข้ามวันแล้วต้องโหลดใหม่ */
+let reloadBusy = false, ORDERS_LIVE = false, loadedDay = '', staleErr = '';
+const ordersStale = () => SRC === 'real' && (!ORDERS_LIVE || loadedDay !== todayISO());
+function renderStale() {
+  const el = $('staleBar'); if (!el) return;
+  if (!ordersStale()) { el.className = 'stale-bar'; return; }
+  if (reloadBusy) { el.className = 'stale-bar on load'; el.innerHTML = '⏳ กำลังโหลดใบจองล่าสุด… รอสักครู่'; return; }
+  el.className = 'stale-bar on';
+  el.innerHTML = `⚠ ยังโหลดใบจองล่าสุดไม่ได้ — ที่เห็นเป็นข้อมูลเก่าวันที่ <b>${thaiDate(TODAY)}</b> อย่าเพิ่งใช้เช็คจริง` +
+    (staleErr ? ` <span style="opacity:.8">(${esc(staleErr)})</span>` : '') +
+    ` · ลองใหม่เองทุก 1 นาที <button class="btn btn-outline btn-sm" onclick="reloadOrders(0,true)">↻ ลองเดี๋ยวนี้</button>`;
+}
+
+/* ยอดที่ยิง/ยืนยันเป็นของวันทำงานนั้น — เปลี่ยนวันแล้วเริ่มนับใหม่ ไม่งั้นยอดเมื่อวานไปโผล่เป็น "ได้" ของวันนี้
+   ของวันก่อนเก็บไว้ 7 วัน เลือกวันย้อนหลังกลับไปเช็คของค้างได้ ยอดเดิมยังอยู่ครบ */
+const DAY_KEYS = ['scans','sscans','tscans','cscans','subs','doneStore','unknown'];
+function switchDay(date) {
+  if (!state.day) { state.day = date; save(); return; }     // รุ่นก่อนไม่ได้จำวัน — ถือว่ายอดที่มีอยู่เป็นของวันนี้
+  if (state.day === date) return;
+  const byDay = state.byDay ||= {};
+  const cur = {}; DAY_KEYS.forEach(k => { if (state[k] !== undefined) cur[k] = state[k]; });
+  byDay[state.day] = cur;
+  const nx = byDay[date] || {};
+  DAY_KEYS.forEach(k => { state[k] = nx[k] !== undefined ? nx[k] : (k === 'unknown' ? [] : {}); });
+  delete byDay[date];
+  Object.keys(byDay).sort().reverse().slice(7).forEach(k => delete byDay[k]);
+  state.day = date; state.jobKey = null; state.storeCode = null; state.pend = null; state.editing = null;
+  save();
+}
+
+/** โหลดใหม่ตอนกลับเข้าแอป — อยู่หน้าเดิม ไม่เด้งออกจากงาน/ร้านที่เปิดค้างไว้ */
+function restoreScreen() {
+  const on = id => $(id).classList.contains('on');
+  if (on('scr-scanner')) return;                           // กล้องเปิดอยู่ ไม่ยุ่ง
+  if (on('scr-scan') && curJob())     { renderScan();    return; }
+  if (on('scr-summary') && curJob())  { renderSummary(); return; }
+  if (on('scr-store') && curStore())  { renderStore();   return; }
+  setMode(state.mode || 'team');
+}
+
 /** อ่านใบจองใหม่แล้วสร้าง PRODUCTS / ORDERS / TEAMS ใหม่ทั้งชุด
- *  ชีต B = ออเดอร์ทั้งหมด (ตัวตั้ง) · ชีต Q = สัดส่วนไว้แบ่งของตอนไม่พอ (เอามา join) */
-async function reloadOrders(loud) {
+ *  ชีต B = ออเดอร์ทั้งหมด (ตัวตั้ง) · ชีต Q = สัดส่วนไว้แบ่งของตอนไม่พอ (เอามา join)
+ *  keep = โหลดเองตอนกลับเข้าแอป ให้อยู่หน้าเดิม */
+async function reloadOrders(loud, keep) {
   const tag = $('srcTag');
   const set = (t, cls) => { tag.className = 'qbadge on ' + (cls || ''); tag.textContent = t; };
   if (SRC !== 'real') { toast('ตอนนี้ใช้ชุดตัวอย่างอยู่ สลับไปข้อมูลจริงก่อน', 'warning'); return; }
+  if (reloadBusy) { if (loud) toast('กำลังโหลดอยู่ รอสักครู่', 'info'); return; }
   const pend = Object.values(state.scans || {}).some(v => v > 0) ||
                Object.values(state.tscans || {}).some(v => v > 0);
   if (pend && loud && !confirm('มียอดที่ยิงค้างอยู่ในเครื่อง\nโหลดใบจองใหม่แล้วงานจะถูกสร้างใหม่ ยอดเดิมอาจไม่ตรงกับรายการใหม่\n\nยืนยันโหลดใหม่?')) return;
 
   const c = srcCfg();
+  reloadBusy = true; renderStale();
   try {
     set('กำลังอ่านออเดอร์…');
     /* ชีต B: A วันที่ · B เลขที่ใบจอง · C รหัสร้าน · D ชื่อร้าน · E รหัสเซล · F ชื่อเซล
@@ -3964,10 +4020,12 @@ async function reloadOrders(loud) {
       if (got.length) teams = got;
     } catch(e) {}
 
+    switchDay(date);                          // ยอดที่ยิงของวันก่อนเก็บแยกไว้ ไม่มานับรวมกับวันนี้
     PRODUCTS.length = 0; PRODUCTS.push(...products);
     ORDERS.length   = 0; ORDERS.push(...orders); tagOrders();
     TEAMS.length    = 0; TEAMS.push(...teams);
     TODAY = date;
+    ORDERS_LIVE = true; loadedDay = todayISO(); staleErr = '';
     indexProducts(); indexTeams();
     JOBS = buildJobs(); STORES = buildStores(); CHANS = buildChans(); ROUTE_BILLS = buildRouteBills();
     lastHit = null;
@@ -3976,13 +4034,25 @@ async function reloadOrders(loud) {
     toast(`โหลดใหม่แล้ว ${thaiDate(date)} · ขาย ${fmtN(nSale)} · แถม ${fmtN(nFree)} บรรทัด` +
           (nRatio ? ` · มีสัดส่วนแบ่ง ${fmtN(nRatio)}` : ' · ไม่ได้สัดส่วนจากชีต Q'), 'success');
     await enrichFromMaster();
-    setMode(state.mode || 'team');
-    if (state.mode !== 'route') syncRoutes();   // วันทำงานอาจเปลี่ยน — ดึงทะเบียนของงานนี้ (หน้าจัดรถดึงเองใน setMode แล้ว)
+    if (keep) restoreScreen(); else setMode(state.mode || 'team');
+    // วันทำงานอาจเปลี่ยน — ดึงทะเบียนของงานนี้ (หน้าจัดรถ/สรุปเที่ยวดึงเองใน setMode แล้ว)
+    if (!['route','trip'].includes(state.mode)) syncRoutes();
   } catch(e) {
+    staleErr = String(e.message || e).slice(0,110);
     set('โหลดออเดอร์ไม่สำเร็จ', 'err');
-    toast('โหลดออเดอร์ไม่สำเร็จ — ' + String(e.message || e).slice(0,110), 'error');
-  }
+    toast('โหลดออเดอร์ไม่สำเร็จ — ' + staleErr, 'error');
+  } finally { reloadBusy = false; renderStale(); }
 }
+/* กลับเข้าแอป (สลับแอป/ปิดจอ) นานเกิน 10 นาที หรือข้ามวัน → โหลดใบจองล่าสุดให้เอง อยู่หน้าเดิม
+   โหลดไม่ผ่าน (เน็ตหลุดตอนเปิด) → ลองใหม่เองทุก 1 นาที และทันทีที่เน็ตกลับมา */
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (SRC !== 'real') return;
+  if (ordersStale() || (hiddenAt && Date.now() - hiddenAt >= 10*60000)) reloadOrders(0, true);
+});
+setInterval(() => { if (!document.hidden && ordersStale()) reloadOrders(0, true); }, 60000);
+window.addEventListener('online', () => { if (ordersStale()) reloadOrders(0, true); });
 /* ═══════════════════════════════════════════════════════════════
    หน้าแรก — เลือกว่าใครเป็นคนเช็ค
    รายชื่อมาจากชีตพนักงาน ค้นด้วยชื่อจริงหรือชื่อเล่นก็ได้
@@ -4381,7 +4451,10 @@ function tripHtml(rnd) {
 let liveBuf = [], liveTimer = null;
 
 function logMove(e) {
+  /* ไม่มีที่ไหนอ่าน state.log (ของจริงอยู่ในชีต กำลังเช็ค แล้ว) — เก็บแค่ 300 ล่าสุด
+     ปล่อยโตไม่จำกัดจะกินพื้นที่เครื่องจนเต็ม (แชร์กับทุกแอปใน rattanaphaiboon.github.io) แล้วบันทึกยอดไม่ลงเงียบ ๆ */
   state.log.push(e);
+  if (state.log.length > 300) state.log.splice(0, state.log.length - 300);
   liveBuf.push(liveRow(e));
   clearTimeout(liveTimer);
   liveTimer = setTimeout(flushLive, liveBuf.length >= 25 ? 0 : 15000);
@@ -5175,12 +5248,11 @@ if (!CHECKER) openWho(1);                    // ยังไม่เคยเ�
 setMode(state.mode || 'team');
 renderQueueBadge();
 flushQueue();
-/* เปิดแอปมาแล้วยังไม่ได้ยิงอะไรเลย → ดึงออเดอร์ล่าสุดให้เองเลย จะได้ไม่ต้องกดทุกเช้า
-   ถ้ามียอดยิงค้างอยู่ ไม่แตะ เดี๋ยวงานเปลี่ยนกลางคัน กดปุ่ม ↻ เองเมื่อพร้อม */
-const ยังไม่ได้ยิง = !Object.values(state.scans || {}).some(v => v > 0) &&
-                    !Object.values(state.tscans || {}).some(v => v > 0);
-if (SRC === 'real' && ยังไม่ได้ยิง) reloadOrders(0);
-else enrichFromMaster();     // ดึง CAT GROUP + รูป + บาร์โค้ดครบทุกระดับ จากมาสเตอร์สด
+/* เปิดแอปทุกครั้ง ดึงใบจองล่าสุดให้เองเสมอ (ผู้ใช้สั่ง 30/09)
+   เดิมข้ามถ้าเคยยิงไปแล้ว — เลยค้างอยู่กับข้อมูลเก่าที่ฝังในไฟล์ (18/09) ต้องกดโหลดเองทุกครั้ง
+   ยอดที่ยิงไว้ไม่หาย เก็บแยกตามวันทำงาน (switchDay) */
+if (SRC === 'real') reloadOrders(0);
+else enrichFromMaster();     // ชุดตัวอย่าง: ดึง CAT GROUP + รูป + บาร์โค้ดครบทุกระดับ จากมาสเตอร์สด
 </script>
 </body>
 </html>
