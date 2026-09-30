@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.10</title>
+<title>Rattana Shop Location v1.11</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -181,7 +181,7 @@ details.card:not([open])>summary{border-bottom:none}
 <body>
 
 <header>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.10 · 2026-09-30</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.11 · 2026-09-30</span></div>
   <div class="hdr-right">
     <button class="icon-btn" id="btnDark" title="โหมดมืด/สว่าง" onclick="toggleDark()">🌙</button>
   </div>
@@ -262,12 +262,6 @@ details.card:not([open])>summary{border-bottom:none}
       <div class="stat-card"><div class="s-label">ร้านทั้งหมด</div><div class="s-value" id="stTotal">0</div></div>
       <div class="stat-card"><div class="s-label">จังหวัด</div><div class="s-value" id="stProv">0</div></div>
       <div class="stat-card warn"><div class="s-label">รอหาพื้นที่</div><div class="s-value" id="stPending">0</div></div>
-    </div>
-
-    <!-- Area summary -->
-    <div class="card card-gold">
-      <div class="card-head"><span>🗺️ อยู่พื้นที่ไหนบ้าง</span><span class="geo-status" id="geoStatus"></span></div>
-      <div class="card-body" id="areaBox"><div class="empty">ยังไม่มีข้อมูล</div></div>
     </div>
 
     <!-- List -->
@@ -617,6 +611,7 @@ let geoRunning = false;
 async function runGeoQueue() {
   if (geoRunning) return;
   geoRunning = true;
+  let errStreak = 0;
   try {
     for (;;) {
       const s = shops.find(x => !x.prov && !x.geoFail);
@@ -626,19 +621,29 @@ async function runGeoQueue() {
       try {
         const r = await reverseGeo(s.lat, s.lng);
         cached = r.cached;
+        errStreak = 0;
         if (shops.includes(s)) Object.assign(s, r.data);
       } catch (e) {
         console.warn('reverse geo failed', e);
+        // 429 "too many requests" comes back without CORS headers -> TypeError. Pause and retry the same shop.
+        if (e instanceof TypeError || /HTTP (429|5\d\d)/.test(e.message)) {
+          errStreak++;
+          const wait = Math.min(60000 * errStreak, 300000);
+          if (errStreak === 1) showToast(`ระบบหาพื้นที่ขอให้รอสักครู่ — จะลองใหม่อัตโนมัติ (อีก ${Math.round(wait / 60000)} นาที)`, 'warning');
+          await sleep(wait);
+          continue;
+        }
         s.geoFail = true;
       }
       save(); renderSide(); refreshMarker(s);
-      if (!cached) await sleep(1100);   // Nominatim limit: 1 request / second
+      if (!cached) await sleep(1500);   // Nominatim policy: max 1 request / second — keep a margin
     }
   } finally {
     geoRunning = false; updateGeoStatus();
   }
 }
 function retryGeo() {
+  if (geoRunning) { showToast('กำลังหาพื้นที่อยู่แล้ว', 'info'); return; }
   let n = 0;
   shops.forEach(s => { if (s.geoFail || !s.prov || s.prov === '-') { delete s.geoFail; delete s.prov; n++; } });
   if (!n) { showToast('ทุกร้านมีข้อมูลพื้นที่แล้ว', 'info'); return; }
@@ -649,9 +654,6 @@ function updateGeoStatus() {
   const pending = shops.filter(x => !x.prov && !x.geoFail).length;
   const failed = shops.filter(x => x.geoFail).length;
   $('stPending').textContent = pending + failed;
-  $('geoStatus').innerHTML = geoRunning && pending
-    ? `<span class="spin"></span>กำลังหาพื้นที่… เหลือ ${pending}`
-    : failed ? `⚠ หาไม่สำเร็จ ${failed} ร้าน` : '';
 }
 
 /* ===== Map ===== */
@@ -830,12 +832,6 @@ function onSearch() {
   filterText = clean($('inSearch').value);
   renderAll();
 }
-function setFilter(v) {
-  filterText = filterText === v ? '' : v;
-  $('inSearch').value = filterText;
-  renderAll();
-  fitAll();
-}
 
 function renderSide() {
   const list = filtered();
@@ -845,22 +841,6 @@ function renderSide() {
   $('listCount').textContent = narrowed ? `${list.length} / ${shops.length}` : shops.length;
   updateGeoStatus();
   renderFilterPanel();
-
-  // Area summary: region -> province counts (follows the current filter)
-  const tree = {};
-  list.forEach(s => {
-    if (!s.prov) return;
-    const r = s.region || 'ไม่ทราบ';
-    (tree[r] = tree[r] || {})[s.prov] = (tree[r][s.prov] || 0) + 1;
-  });
-  const regs = REGION_ORDER.filter(r => tree[r]);
-  $('areaBox').innerHTML = regs.length ? regs.map(r => {
-    const provList = Object.entries(tree[r]).sort((a, b) => b[1] - a[1]);
-    const total = provList.reduce((a, [, n]) => a + n, 0);
-    return `<div class="region"><div class="region-h"><span class="chip ${filterText === r ? 'active' : ''}" style="cursor:pointer" onclick="setFilter('${esc(r)}')">🧭 ${esc(r)} <b>${total}</b></span></div>
-      <div class="chips">${provList.map(([p, n]) =>
-        `<button class="chip ${filterText === p ? 'active' : ''}" onclick="setFilter('${esc(p)}')">${esc(p)} <b>${n}</b></button>`).join('')}</div></div>`;
-  }).join('') : `<div class="empty">${shops.length ? '⏳ กำลังหาพื้นที่…' : 'ยังไม่มีข้อมูล'}</div>`;
 
   // Shop list (sorted: region > province > amphoe > name)
   const regIdx = r => { const i = REGION_ORDER.indexOf(r || 'ไม่ทราบ'); return i < 0 ? 99 : i; };
@@ -930,6 +910,7 @@ applyLabels();
 $('dayLegend').innerHTML = DAY_ROUTES.slice(0, 6).map(d => `<span><span class="dot" style="background:${d.color}"></span>${d.day}</span>`).join('');
 renderAll();
 if (shops.length) fitAll();
+shops.forEach(s => { delete s.geoFail; });   // failures from a rate-limit pause get another try
 runGeoQueue();
 if (sheetCfg.url && sheetCfg.auto) importSheet(true);
 </script>
