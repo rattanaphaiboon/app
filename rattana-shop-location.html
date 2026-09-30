@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.3</title>
+<title>Rattana Shop Location v1.4</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -73,6 +73,7 @@ body.dark .btn-primary{background:var(--navy-light);border-color:var(--navy-ligh
 .or-sep{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin:14px 0 10px}
 .or-sep::before,.or-sep::after{content:"";flex:1;height:1px;background:var(--border)}
 #driveLast .btn{margin-left:4px;vertical-align:middle}
+.drive-err{color:var(--danger);background:rgba(231,76,60,.08);border:1px solid rgba(231,76,60,.3);border-radius:6px;padding:6px 8px;word-break:break-word}
 .picker-dialog-bg{z-index:20000 !important}.picker-dialog{z-index:20001 !important}
 
 /* Forms */
@@ -164,7 +165,7 @@ details.card:not([open])>summary{border-bottom:none}
 <body>
 
 <header>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.3 · 2026-09-30</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.4 · 2026-09-30</span></div>
   <div class="hdr-right">
     <button class="icon-btn" id="btnDark" title="โหมดมืด/สว่าง" onclick="toggleDark()">🌙</button>
   </div>
@@ -220,6 +221,7 @@ details.card:not([open])>summary{border-bottom:none}
       <div class="card-body">
         <button class="btn btn-gold btn-block" id="driveBtn" onclick="openDrivePicker()">📁 เลือกไฟล์จาก Google ไดรฟ์</button>
         <div class="hint" id="driveLast"></div>
+        <div class="hint drive-err" id="driveErr" style="display:none"></div>
         <div class="hint">เลือกได้ทั้ง Google ชีต / .xlsx / .csv — อ่านทุกแท็บในไฟล์ · ไม่ต้องแชร์ไฟล์ (ใช้สิทธิ์บัญชี Google ของคุณ)</div>
         <div class="or-sep">หรือวางลิงก์ Google Sheet</div>
         <div class="field">
@@ -463,13 +465,20 @@ function addBulk() {
 /* Parse an xlsx/xls/csv buffer (all tabs) and add shops. src = 'manual' or 'drive:<fileId>' */
 function importWorkbook(buf, fileName, src = 'manual') {
   const wb = XLSX.read(buf, { type: 'array' });
+  return importTables(wb.SheetNames.map(n => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: '' })), fileName, src);
+}
+/* tables: array of (array of rows) — one per tab */
+function importTables(tables, fileName, src = 'manual') {
   let total = [], badAll = 0;
-  wb.SheetNames.forEach(n => {
-    const rows = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: '' });
+  tables.forEach(rows => {
     const { ok, bad } = parseRows(rows);
     total = total.concat(ok); badAll += bad.length;
   });
-  if (!total.length) { showToast(`ไม่พบคอลัมน์ ชื่อร้าน + ละติจูด/ลองติจูด ใน ${fileName}`, 'error'); return 0; }
+  if (!total.length) {
+    const head = (tables.find(t => t.length) || [[]])[0].filter(Boolean).slice(0, 8).join(', ');
+    const msg = `ไม่พบคอลัมน์ ชื่อร้าน + ละติจูด/ลองติจูด ใน ${fileName}` + (head ? ` (หัวตารางที่เจอ: ${head})` : '');
+    showToast(msg, 'error'); setDriveErr(src !== 'manual' ? msg : ''); return 0;
+  }
   if (src !== 'manual') shops = shops.filter(s => s.src !== src);   // re-import same Drive file = replace
   addShops(total, src); fitAll();
   showToast(`นำเข้า ${total.length} ร้านจาก ${fileName}` + (badAll ? ` · ข้าม ${badAll} แถว (ไม่มีพิกัด)` : ''), badAll ? 'warning' : 'success');
@@ -554,24 +563,83 @@ function onPicked(data) {
   importDriveFile({ id: d.id, name: d.name, mimeType: d.mimeType });
 }
 
+function setDriveErr(msg) {
+  const el = $('driveErr');
+  el.textContent = msg ? '⚠ ' + msg : '';
+  el.style.display = msg ? '' : 'none';
+}
+
+/* fetch with the Drive token; throws Error with Google's own message */
+async function gFetch(url) {
+  const r = await fetch(url, { headers: { Authorization: 'Bearer ' + driveToken } });
+  if (r.ok) return r;
+  let detail = '';
+  try { const j = await r.json(); detail = (j.error && (j.error.message || j.error.status)) || ''; } catch {}
+  if (r.status === 401) driveToken = null;
+  const e = new Error(`HTTP ${r.status}${detail ? ' ' + detail : ''}`);
+  e.status = r.status;
+  throw e;
+}
+
+/* Google Sheet → tables. Tries 3 ways so it still works if one Google API is disabled */
+async function loadGoogleSheetTables(id, errs) {
+  // 1) Drive API export as xlsx (all tabs)
+  try {
+    const r = await gFetch(`https://www.googleapis.com/drive/v3/files/${id}/export?mimeType=${encodeURIComponent(MIME_XLSX)}`);
+    const wb = XLSX.read(await r.arrayBuffer(), { type: 'array' });
+    return wb.SheetNames.map(n => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: '' }));
+  } catch (e) { errs.push('Drive API: ' + e.message); }
+  // 2) Sheets API values (all tabs)
+  try {
+    const meta = await (await gFetch(`https://sheets.googleapis.com/v4/spreadsheets/${id}?fields=sheets.properties.title`)).json();
+    const titles = (meta.sheets || []).map(s => s.properties.title);
+    const qs = titles.map(t => 'ranges=' + encodeURIComponent(`'${t.replace(/'/g, "''")}'`)).join('&');
+    const vals = await (await gFetch(`https://sheets.googleapis.com/v4/spreadsheets/${id}/values:batchGet?${qs}&valueRenderOption=UNFORMATTED_VALUE`)).json();
+    return (vals.valueRanges || []).map(v => v.values || []);
+  } catch (e) { errs.push('Sheets API: ' + e.message); }
+  // 3) gviz (first tab) with the user's token, then without (works if shared by link)
+  for (const tok of [driveToken, '']) {
+    try {
+      const t = await gvizJsonp(id, '', '', tok);
+      return [gvizTableToRows(t)];
+    } catch (e) { errs.push('gviz' + (tok ? '+token' : '') + ': ' + e.message); }
+  }
+  return null;
+}
+
 async function importDriveFile(doc) {
   const btn = $('driveBtn');
   btn.disabled = true; btn.textContent = '⏳ กำลังโหลด ' + doc.name + '…';
+  setDriveErr('');
+  const errs = [];
   try {
-    const url = doc.mimeType === MIME_GSHEET
-      ? `https://www.googleapis.com/drive/v3/files/${doc.id}/export?mimeType=${encodeURIComponent(MIME_XLSX)}`
-      : `https://www.googleapis.com/drive/v3/files/${doc.id}?alt=media&supportsAllDrives=true`;
-    const r = await fetch(url, { headers: { Authorization: 'Bearer ' + driveToken } });
-    if (r.status === 401) { driveToken = null; throw new Error('หมดเวลาล็อกอิน — กดเลือกไฟล์อีกครั้ง'); }
-    if (!r.ok) throw new Error('HTTP ' + r.status + (r.status === 403 ? ' (ไม่มีสิทธิ์ หรือยังไม่ได้เปิด Drive API)' : ''));
-    const n = importWorkbook(await r.arrayBuffer(), doc.name, 'drive:' + doc.id);
+    let tables;
+    if (doc.mimeType === MIME_GSHEET) {
+      tables = await loadGoogleSheetTables(doc.id, errs);
+    } else {
+      try {
+        const r = await gFetch(`https://www.googleapis.com/drive/v3/files/${doc.id}?alt=media&supportsAllDrives=true`);
+        const wb = XLSX.read(await r.arrayBuffer(), { type: 'array' });
+        tables = wb.SheetNames.map(n => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: '' }));
+      } catch (e) { errs.push('Drive API: ' + e.message); }
+    }
+    console.log('[drive import]', doc, errs);
+    if (!tables) {
+      if (!driveToken) throw new Error('หมดเวลาล็อกอิน — กดเลือกไฟล์อีกครั้ง');
+      const hint = errs.some(x => /has not been used|disabled|SERVICE_DISABLED/i.test(x))
+        ? ' → ต้องเปิดใช้ Google Drive API ใน Google Cloud ของ Client ID นี้' : '';
+      throw new Error(errs.join(' | ') + hint);
+    }
+    const n = importTables(tables, doc.name, 'drive:' + doc.id);
     if (n) {
       lastDrive = { ...doc, last: Date.now(), count: n };
       try { localStorage.setItem(DRIVE_KEY, JSON.stringify(lastDrive)); } catch {}
       showDriveLast();
     }
   } catch (e) {
-    console.warn(e); showToast('โหลดไฟล์จากไดรฟ์ไม่สำเร็จ: ' + e.message, 'error');
+    console.warn(e);
+    showToast('โหลดไฟล์จากไดรฟ์ไม่สำเร็จ — ดูรายละเอียดใต้ปุ่ม', 'error');
+    setDriveErr(`โหลด "${doc.name}" ไม่สำเร็จ: ${e.message}`);
   } finally {
     btn.disabled = false; btn.textContent = '📁 เลือกไฟล์จาก Google ไดรฟ์';
   }
@@ -618,13 +686,14 @@ function parseSheetLink(url) {
   return { id: m[1], gid: g ? g[1] : '' };
 }
 
-function gvizJsonp(id, sheet, gid) {
+function gvizJsonp(id, sheet, gid, token) {
   return new Promise((resolve, reject) => {
     const cb = '__gv' + Date.now() + Math.floor(Math.random() * 1000);
     const s = document.createElement('script');
     let qs = `tqx=out:json;responseHandler:${cb}&headers=1`;
     if (sheet) qs += '&sheet=' + encodeURIComponent(sheet);
     else if (gid) qs += '&gid=' + gid;
+    if (token) qs += '&access_token=' + encodeURIComponent(token);
     const timer = setTimeout(() => { cleanup(); reject(new Error('NO_ACCESS')); }, 20000);
     function cleanup() { clearTimeout(timer); try { delete window[cb]; } catch { window[cb] = undefined; } s.remove(); }
     window[cb] = d => {
