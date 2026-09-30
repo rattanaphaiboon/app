@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v6.12</title>
+<title>HR Rattana v6.13</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -2849,7 +2849,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
 
     <!-- ===== v12.82: สมุดรายชื่อพนักงาน ===== -->
     <div id="page-directory" class="page">
-      <div class="docs-search-wrap"><span class="docs-search-ico">🔍</span><input type="text" id="dirSearch" placeholder="ค้นชื่อ / ชื่อเล่น / รหัส / สาขา / แผนก" oninput="dirFilter_(this.value)"></div>
+      <div class="docs-search-wrap"><span class="docs-search-ico">🔍</span><input type="text" id="dirSearch" placeholder="ค้นชื่อ / ชื่อเล่น / รหัส / สาขา / แผนก / PTT" oninput="dirFilter_(this.value)"></div>
       <div id="dirList"></div>
     </div>
 
@@ -3810,7 +3810,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.12';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '13.13';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v13.11: LINE OA ฝ่ายบุคคล (surat 30/09) — ตัวเดียวกับที่แอป 360 / แปลงรูปเป็น PDF / สมัครงาน ใช้ · lin.ee พาไป line.me/R/ti/p/@712dqxgv */
 const HR_LINE_URL = 'https://lin.ee/uIN2DMR', HR_LINE_ID = '@712dqxgv';
 const HR_TEL = '0640978417', HR_TEL_TXT = '064-097-8417';   // v13.12: เบอร์ฝ่ายบุคคล (ตัวเดียวกับแอป 360 / img2pdf / jobs)
@@ -5161,6 +5161,7 @@ async function callAppsScript(action, payload = {}, opts = {}) {
       sessionAuthCheck_(json);   // v13.10: กุญแจใช้ไม่ได้ → พาเข้าสู่ระบบใหม่
       const err = new Error(json.error || 'Apps Script error');
       if (json.code) err.code = json.code;
+      err.srv = true;   // v13.13: เซิร์ฟเวอร์ตอบแล้วว่าไม่รับ (ไม่ใช่เน็ตหลุด)
       throw err;
     }
     // v12.93: อนุมัติ/ถอนอนุมัติสำเร็จ = ตัวเลขโควต้า "ทุกคน" ที่จำไว้เก่าแล้ว → ครั้งหน้าดึงสด
@@ -9408,19 +9409,60 @@ async function apOverlapCheck_(it) {
   body.appendChild(div);
 }
 
-/* ── 5) สมุดรายชื่อพนักงาน (จาก allUsers · เบอร์โทรเฉพาะหัวหน้า/HR) ── */
-function renderDirectoryPage() { const i = document.getElementById('dirSearch'); dirFilter_(i ? i.value : ''); }
+/* ── 5) สมุดรายชื่อพนักงาน (จาก allUsers · เบอร์โทรเฉพาะหัวหน้า/HR) ──
+   v13.13 (surat 30/09 "สมุดรายชื่อไม่ขึ้นพนักงาน PTT"): ชีท Users มีแต่ RATTANA · PTT อยู่ทะเบียน PTT อีกไฟล์
+   → ดึง getPTTDirectory (backend 9.54: สาขา/คลัง/ตำแหน่ง · เบอร์เฉพาะหัวหน้า/HR) · เซิร์ฟเวอร์ยังเป็น 9.53 → getPTTBuyers (ชื่อ/ชื่อเล่น)
+   จำไว้ในเครื่อง (แยกต่อคน) โชว์ทันทีรอบหน้า · ดึงใหม่ครั้งเดียวต่อการเปิดแอป */
+var _dirPtt = null, _dirPttFresh = false, _dirPttBusy = false, _dirPttOwner = '';
+function dirPttKey_() { return 'dirPtt_' + (currentUser ? currentUser.empId : ''); }
+function dirPttSync_() {   // เปลี่ยนคนเข้าระบบในเครื่องเดียวกัน → ทิ้งของคนก่อน (มีเบอร์โทรที่คนก่อนเห็นได้)
+  if (_dirPttOwner !== dirPttKey_()) { _dirPtt = null; _dirPttFresh = false; _dirPttOwner = dirPttKey_(); }
+}
+async function dirLoadPtt_() {
+  dirPttSync_();
+  if (_dirPttBusy || _dirPttFresh || !currentUser) return;
+  _dirPttBusy = true;
+  try {
+    let r;
+    try { r = await callAppsScript('getPTTDirectory', {}); }
+    catch (e) { if (/Unknown action/i.test(String(e && e.message))) r = await callAppsScript('getPTTBuyers', {}); else throw e; }
+    _dirPtt = (r.staff || []).filter(s => s && s.empId && s.name).map(s => ({
+      empId: String(s.empId).trim(), name: s.name, nickname: s.nickname || '',
+      branch: 'PTT' + (s.saka ? ' ' + s.saka : ''), department: s.khlang || '', position: s.position || '',
+      phone: s.phone || '', status: 'active', ptt: true }));
+    _dirPttFresh = true;
+    LS.set(dirPttKey_(), { at: Date.now(), rows: _dirPtt });
+  } catch (e) { console.warn('[dirPtt]', e && e.message); }
+  finally { _dirPttBusy = false; }
+  const pg = document.getElementById('page-directory');
+  if (pg && pg.classList.contains('active')) renderDirectoryPage();
+}
+function dirRows_() {
+  dirPttSync_();
+  const base = (allUsers || []).filter(u => (u.status || '').toLowerCase() === 'active');
+  if (!_dirPtt) { const c = LS.get(dirPttKey_(), null); if (c && Array.isArray(c.rows)) _dirPtt = c.rows; }
+  if (!_dirPtt || !_dirPtt.length) return base;
+  const have = new Set(base.map(u => String(u.empId || '').trim()));
+  return base.concat(_dirPtt.filter(u => !have.has(String(u.empId).trim())));
+}
+function renderDirectoryPage() { dirLoadPtt_(); const i = document.getElementById('dirSearch'); dirFilter_(i ? i.value : ''); }
 function dirFilter_(q) {
   const el = document.getElementById('dirList'); if (!el) return;
   const s = String(q || '').trim().toLowerCase();
   const showPhone = (typeof canSeeTeam === 'function' && canSeeTeam());
-  const rows = (allUsers || []).filter(u => (u.status || '').toLowerCase() === 'active')
-    .filter(u => !s || [u.name, u.nickname, u.empId, u.branch, u.department, u.supervisorName].some(v => String(v || '').toLowerCase().includes(s)))
+  const all = dirRows_();
+  const rows = all
+    .filter(u => !s || [u.name, u.nickname, u.empId, u.branch, u.department, u.supervisorName, u.position].some(v => String(v || '').toLowerCase().includes(s)))
     .sort((a, b) => String(a.name).localeCompare(String(b.name), 'th')).slice(0, 150);
-  if (!rows.length) { el.innerHTML = '<div class="empty"><div class="ico">📒</div>ไม่พบรายชื่อ</div>'; return; }
-  el.innerHTML = rows.map(u => `<div class="slip-history-item" style="margin:0 0 8px">
+  const nPtt = all.filter(u => u.ptt).length;
+  const head = (_dirPttBusy && !nPtt)
+    ? '<div class="text-sm text-muted" style="margin:0 0 8px">⏳ กำลังโหลดรายชื่อพนักงาน PTT…</div>'
+    : `<div class="text-sm text-muted" style="margin:0 0 8px">ทั้งหมด ${all.length} คน${nPtt ? ` · รวม PTT ${nPtt} คน` : ''}</div>`;
+  if (!rows.length) { el.innerHTML = head + '<div class="empty"><div class="ico">📒</div>ไม่พบรายชื่อ</div>'; return; }
+  el.innerHTML = head + rows.map(u => `<div class="slip-history-item" style="margin:0 0 8px">
       <div class="slip-history-left"><div><div class="slip-history-month">${_h(u.name)}${u.nickname ? ' (' + _h(u.nickname) + ')' : ''}</div>
       <div class="slip-history-date">${_h(u.empId)} · ${_h(u.branch)}${u.department ? ' · ' + _h(u.department) : ''}</div>
+      ${u.position ? `<div class="slip-history-date" style="opacity:.75">${_h(u.position)}</div>` : ''}
       ${u.supervisorName ? `<div class="slip-history-date" style="opacity:.75">หัวหน้า: ${_h(u.supervisorName)}</div>` : ''}</div></div>
       <div class="slip-history-right">${showPhone && u.phone ? `<a href="tel:${_h(u.phone)}" style="color:#0F766E;font-weight:700;text-decoration:none;white-space:nowrap">📞 ${_h(u.phone)}</a>` : ''}</div></div>`).join('') +
     (rows.length === 150 ? '<div class="text-sm text-muted text-center">แสดง 150 คนแรก — พิมพ์ค้นเพิ่ม</div>' : '');
@@ -12225,7 +12267,7 @@ async function submitReimburse() {
       reason,
       attachment,
     });
-    toast('✓ ยื่นคำขอตกเบิกแล้ว · รออนุมัติ', 'success');
+    toast('✓ ยื่นคำขอตกเบิกแล้ว · รอ HR ตรวจสอบ', 'success');   // v13.13: ไม่ต้องให้หัวหน้าอนุมัติ
     document.getElementById('rbReason').value = '';
     document.getElementById('rbDeductDate').value = '';
     document.getElementById('rbDeductPeriod').value = '';
@@ -12939,7 +12981,7 @@ function apCacheRead_() {
 }
 function apCacheWrite_(items) {
   _apLastAt = Date.now();
-  try { localStorage.setItem(approvalsCacheKey_(), JSON.stringify({ items, at: _apLastAt })); } catch (_) {}
+  try { localStorage.setItem(approvalsCacheKey_(), JSON.stringify({ items: apStrip_(items), at: _apLastAt })); } catch (_) {}
 }
 /* ยิง getPendingAll รอบเดียว แล้วแชร์ให้ทั้งหน้าอนุมัติและการ์ดหน้าแรก */
 function apFetch_(opts) {
@@ -12954,7 +12996,7 @@ function apFetch_(opts) {
       res = await callAppsScript('getPendingAll', { supervisorId: currentUser.empId, withDone: withDone ? 1 : 0 });
     }
     // เซิร์ฟเวอร์ตัดสินขอบเขตให้แล้ว (canDecide) — แอปกันแค่ "ใบของตัวเอง" เป็นชั้นสำรอง
-    const items = (res.items || []).filter(notMyOwnReq_);
+    const items = apPrep_(res.items);   // v13.13: + ขอตกเบิกเฉพาะ HR + ทับสถานะที่กดค้างอยู่ในคิว
     _approvalItems = items;
     apCacheWrite_(items);
     updateApproveAlert(items.filter(it => (it.status || 'pending') === 'pending'));
@@ -12969,14 +13011,17 @@ async function loadApprovals() {
   // 1) มีของเก่า → วาดทันที (ป้าย ⏳ กำลังอัปเดต) ไม่ต้องรอเน็ต
   if (!_approvalItems.length) {
     const c = apCacheRead_();
-    if (c && c.items.length) { _approvalItems = c.items; _apLastAt = c.at; }
+    if (c && c.items.length) { _approvalItems = apPrep_(c.items); _apLastAt = c.at; }   // v13.13: กรอง + ทับสถานะที่กดค้างในคิว
   }
   if (_approvalItems.length) renderApprovalsList_(true);
-  else el.innerHTML = '<div class="text-sm text-muted">กำลังโหลด...</div>';
+  else el.innerHTML = apQBarHtml_() + '<div class="text-sm text-muted">กำลังโหลด...</div>';
 
   // 2) ดึงของจริงเบื้องหลัง แล้ววาดทับ (คงตำแหน่งเลื่อนเดิม)
+  //    v13.13: เริ่มดึงก่อน แล้วค่อยปลุกคิว — คิวจะรอของสดชุดนี้ก่อนส่ง (เลขแถวล่าสุด)
+  const fresh = apFetch_({ withDone: true });
+  apQRun_();
   try {
-    await apFetch_({ withDone: true });
+    await fresh;
     const y = window.scrollY;
     renderApprovalsList_(false);
     window.scrollTo(0, y);
@@ -13039,11 +13084,12 @@ function renderApprovalsList_(stale) {
   if (kpi) {
     kpi.innerHTML = `<div class="kpi"><div class="num">${items.length}</div><div class="label">${TAB_LABEL[_approvalsTab]}${isHR ? '' : ' · ลูกทีม'}${stale ? ' · ⏳ กำลังอัปเดต' + apAgeText_() : ''}</div></div>`;
   }
+  const bar = apQBarHtml_();   // v13.13: สถานะคิวบันทึกผลอนุมัติ (กำลังส่ง / ส่งไม่ได้)
   if (!items.length) {
     const hasAnyStatus = _approvalItems.some(it => it.status);
-    el.innerHTML = _approvalsTab === 'pending'
+    el.innerHTML = bar + (_approvalsTab === 'pending'
       ? '<div class="empty"><div class="ico">✓</div>ไม่มีคำขอรอ</div>'
-      : `<div class="empty"><div class="ico">📂</div>ยังไม่มีรายการในแท็บนี้${hasAnyStatus ? '' : '<div style="font-size:11.5px;color:var(--muted);margin-top:6px">ประวัติจะแสดงหลังอัปเดต backend เป็น v5.7</div>'}</div>`;
+      : `<div class="empty"><div class="ico">📂</div>ยังไม่มีรายการในแท็บนี้${hasAnyStatus ? '' : '<div style="font-size:11.5px;color:var(--muted);margin-top:6px">ประวัติจะแสดงหลังอัปเดต backend เป็น v5.7</div>'}</div>`);
     return;
   }
   // ── แบ่งเป็นหมวดหมู่ตามประเภทคำขอ ── (idx ชี้กลับ _approvalItems ชุดเต็ม)
@@ -13053,10 +13099,13 @@ function renderApprovalsList_(stale) {
     const cat = APPROVE_SHEET_LABEL[it.sheet] || it.sheet || 'อื่นๆ';
     (groups[cat] = groups[cat] || []).push({ it, idx });
   });
-  el.innerHTML = Object.keys(groups).map(cat => {
+  el.innerHTML = bar + Object.keys(groups).map(cat => {
     const rows = groups[cat].map(({ it, idx }) => {
       const st = stOf(it);
-      const badge = st === 'approved'
+      // v13.13: กดแล้วแต่เซิร์ฟเวอร์ยังไม่ยืนยัน = ⏳ · บันทึกไม่สำเร็จ (เด้งกลับรออนุมัติ) = บอกเหตุผลใต้ใบ
+      const badge = it._saving
+        ? '<span style="font-size:11px;font-weight:700;color:var(--muted);flex-shrink:0">⏳ กำลังบันทึก</span>'
+        : st === 'approved'
         ? '<span style="font-size:11px;font-weight:700;color:var(--success);flex-shrink:0">✓ อนุมัติ</span>'
         : st === 'rejected'
         ? '<span style="font-size:11px;font-weight:700;color:var(--danger);flex-shrink:0">✗ ไม่อนุมัติ</span>' : '';
@@ -13064,6 +13113,7 @@ function renderApprovalsList_(stale) {
         <div class="info">
           <div class="title">${it.name || '-'}</div>
           <div class="sub">${_apPeriod(it)} · ${it.info || ''}</div>
+          ${it._err ? `<div class="sub" style="color:var(--danger);font-weight:700">⚠ บันทึกไม่สำเร็จ: ${escH_(it._err)}</div>` : ''}
         </div>
         ${badge}
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:.4"><polyline points="9 18 15 12 9 6"/></svg>
@@ -13174,6 +13224,7 @@ function openTimeIssueFix(idx) {
 async function updateApproveAlert(preItems) {
   try {
     if (!currentUser || !canApproveUI_()) { _pendingApprove = null; renderApproveAlert_(); return; }   // v12.96
+    if (!preItems) { try { if (apQ_().length) apQRun_(); } catch (_) {} }   // v13.13: ผลอนุมัติค้างส่ง → ส่งต่อ (บูต · กลับเข้าแอป · ทุก 10 นาที)
     let items = preItems;
     if (!items) {
       if (_approveAlertBusy) return;   // มีรอบดึงค้างอยู่ — ไม่ยิงซ้อน
@@ -13314,13 +13365,16 @@ function openApprovalDetail(idx) {
   }
   // v12.38: รายการที่ตัดสินแล้ว = ดูอย่างเดียว (ซ่อนปุ่มอนุมัติ/ปฏิเสธ + โชว์ผล)
   const st = it.status || 'pending';
+  if (st === 'pending' && it._err) {   // v13.13: ส่งครั้งก่อนไม่สำเร็จ — บอกเหตุผลก่อนกดใหม่
+    html += '<div class="adm-section"><div class="adm-row" style="background:rgba(231,76,60,.08)"><span class="adm-lbl">⚠ ครั้งก่อน</span><span class="adm-val" style="color:var(--danger)">บันทึกไม่สำเร็จ — ' + escH_(it._err) + '</span></div></div>';
+  }
   if (st !== 'pending') {
     html += `<div class="adm-section"><div class="adm-row"><span class="adm-lbl">ผลการพิจารณา</span>
-      <span class="adm-val" style="font-weight:700;color:${st === 'approved' ? 'var(--success)' : 'var(--danger)'}">${st === 'approved' ? '✓ อนุมัติแล้ว' : '✗ ไม่อนุมัติ'}${it.approver ? ' · โดย ' + it.approver : ''}</span></div></div>`;
+      <span class="adm-val" style="font-weight:700;color:${st === 'approved' ? 'var(--success)' : 'var(--danger)'}">${st === 'approved' ? '✓ อนุมัติแล้ว' : '✗ ไม่อนุมัติ'}${it.approver ? ' · โดย ' + it.approver : ''}</span></div>${it._saving ? '<div class="adm-row"><span class="adm-lbl"></span><span class="adm-val" style="color:var(--muted)">⏳ กำลังบันทึกเข้าระบบ…</span></div>' : ''}</div>`;
     // v12.64: ถอนการอนุมัติได้จากในแอป — เดิมอนุมัติผิดแล้วต้องให้ HR ไปพิมพ์ทับในชีทเอง
     //   เคสที่ทำให้ต้องมี: อนุมัติลาวันที่ 9 ไปแล้ว พนักงานขอเปลี่ยนเป็นวันที่ 10
     //   ใบเดิมค้างเป็นอนุมัติ กินโควต้าต่อ พอยื่นใบใหม่ก็โดนตัดซ้ำอีกวัน
-    if (st === 'approved' && canApprove()) {
+    if (st === 'approved' && canApprove() && !it._saving) {   // v13.13: ยังบันทึกไม่เสร็จ = ยังถอนไม่ได้
       html += `<div class="adm-section">
         <button type="button" onclick="admRevoke()" style="width:100%;height:46px;border-radius:12px;border:1.5px solid var(--danger);background:#fff;color:var(--danger);font:inherit;font-size:14.5px;font-weight:700;cursor:pointer">↩ ถอนการอนุมัติ</button>
         <div style="font-size:11.5px;color:var(--muted);margin-top:7px;line-height:1.5">
@@ -13362,39 +13416,150 @@ function closeApprovalDetail() {
   _admCurrent = null;
 }
 
+/* ══ v13.13: กดอนุมัติ/ไม่อนุมัติ = เสร็จบนจอทันที แล้วส่งเซิร์ฟเวอร์เบื้องหลัง (surat 30/09 "ยังโหลดช้าอยู่ตอนกดอนุมัติ") ══
+   เดิมกดแล้ววงกลมหมุนรอ 2 ต่อ: (1) รอดึงรายการทั้งหน้าใหม่ให้จบ (getPendingAll อ่าน 11 ชีท + เซ็นลิงก์รูปทีละใบ)
+   (2) รอเซิร์ฟเวอร์เขียนผล · ตอนนี้ใบย้ายไปแท็บ อนุมัติ/ไม่อนุมัติ ทันที (ป้าย ⏳ กำลังบันทึก) แล้วคิวในเครื่องส่งทีละใบ
+   · คิวเก็บในเครื่อง — ปิดแอป/เน็ตหลุดกลางทาง เปิดใหม่ส่งต่อให้เอง (backend 9.54 ไม่เขียนซ้ำ/ไม่แจ้งเตือนซ้ำ)
+   · เซิร์ฟเวอร์ไม่รับ (เช่น ลาซ้อนใบที่อนุมัติแล้ว · มีคนตัดสินไปก่อน) → ใบเด้งกลับแท็บรออนุมัติ + บอกเหตุผลใต้ใบ
+   · ยังรอของสดก่อนส่งเหมือนเดิม (กันเลขแถวขยับ — กติกา v12.31) แต่รอในคิว ไม่ขวางมือผู้อนุมัติ
+   ตัวแปรใช้ var (ไม่มีช่วง TDZ) — ฟังก์ชันพวกนี้ถูกเรียกจาก updateApproveAlert ตั้งแต่ตอนบูต */
+var _apQ = null, _apLocal = null, _apQBusy = false, _apQStalled = false;
+function apLocal_() { return _apLocal || (_apLocal = new Map()); }   // k → { status, approver, state: q|ok|err, at, err }
+function apKey_(it) { return [it.sheet, it.row, String(it.empId == null ? '' : it.empId).trim(), String(it.info || '')].join('|'); }
+function apSame_(x, job) { return x.sheet === job.sheet && String(x.empId == null ? '' : x.empId).trim() === job.empId && String(x.info || '') === job.info; }
+function apQKey_() { return 'apQueue_' + (currentUser ? currentUser.empId : ''); }
+function apQ_() {
+  const key = apQKey_();
+  if (!_apQ || _apQ.owner !== key) {
+    const saved = LS.get(key, null);
+    _apQ = { owner: key, jobs: Array.isArray(saved) ? saved.filter(j => j && j.k && j.sheet) : [] };
+    _apQ.jobs.forEach(j => { if (!apLocal_().has(j.k)) apLocal_().set(j.k, { status: j.decision, approver: j.by || '', state: 'q', at: j.at || Date.now() }); });
+  }
+  return _apQ.jobs;
+}
+function apQSave_() { if (_apQ) LS.set(_apQ.owner, _apQ.jobs); }
+/* ใบที่กดไว้แต่เซิร์ฟเวอร์ยังไม่ยืนยัน (หรือเพิ่งยืนยันไม่ถึง 5 นาที) → ทับสถานะบนจอ กันใบเด้งกลับตอนดึงรายการใหม่ */
+function apOverlay_(items) {
+  apQ_();
+  const loc = apLocal_(), now = Date.now();
+  loc.forEach((v, k) => { if (v.state !== 'q' && now - v.at > 5 * 60000) loc.delete(k); });
+  (items || []).forEach(it => {
+    it._saving = false; it._err = '';
+    const v = loc.get(apKey_(it));
+    if (!v) return;
+    const pend = (it.status || 'pending') === 'pending';
+    if (v.state === 'err') { if (pend) it._err = v.err || ''; return; }
+    if (pend) { it.status = v.status; it.approver = v.approver || it.approver; }
+    it._saving = v.state === 'q';
+  });
+  return items;
+}
+/* v13.13: ขอตกเบิก = HR ตรวจเอง ไม่ขึ้นคิวหัวหน้า (surat 30/09) — backend 9.54 กรองให้แล้ว แอปกันอีกชั้นเผื่อเซิร์ฟเวอร์ยังเป็น 9.53 */
+function apHrOnlySheet_(sheet) { return sheet === 'ขอตกเบิก'; }
+function apVisible_(it) { return notMyOwnReq_(it) && (!apHrOnlySheet_(it.sheet) || isHROnly()); }
+function apPrep_(items) { return apOverlay_((items || []).filter(apVisible_)); }
+function apStrip_(items) { return (items || []).map(it => { const o = Object.assign({}, it); delete o._saving; delete o._err; return o; }); }
+function apCacheSave_() { try { localStorage.setItem(approvalsCacheKey_(), JSON.stringify({ items: apStrip_(_approvalItems), at: _apLastAt })); } catch (_) {} }
+function apQBarHtml_() {
+  const n = currentUser ? apQ_().length : 0;
+  if (!n) return '';
+  if (_apQStalled && !_apQBusy) {
+    return `<div style="margin:0 0 10px;padding:9px 12px;border-radius:10px;background:rgba(231,76,60,.1);color:var(--danger);font-size:12.5px;font-weight:700;display:flex;align-items:center;gap:8px">
+      <span style="flex:1">⚠ ยังส่งผลอนุมัติไม่ได้ ${n} รายการ — จะส่งให้เองเมื่อเน็ตกลับมา</span>
+      <button type="button" class="mini-btn" onclick="apQRun_()">ส่งอีกครั้ง</button></div>`;
+  }
+  return `<div style="margin:0 0 10px;padding:9px 12px;border-radius:10px;background:rgba(52,152,219,.1);color:var(--text);font-size:12.5px;font-weight:700">⏳ กำลังบันทึกผลอนุมัติ ${n} รายการ…</div>`;
+}
+function apRerender_() {
+  const y = window.scrollY;
+  renderApprovalsList_(!!_approvalsLoadPromise);
+  window.scrollTo(0, y);
+  // รายการยังไม่เคยโหลด (คิวส่งต่อตอนเปิดแอป ก่อนของสดมา) → ห้ามเขียนแคช/เลขการ์ดเป็นว่าง
+  if (!_apLastAt && !_approvalItems.length) return;
+  apCacheSave_();
+  updateApproveAlert(_approvalItems.filter(x => (x.status || 'pending') === 'pending'));   // การ์ด+ป้ายเลขลดทันที
+}
+function apBarRefresh_() {
+  const pg = document.getElementById('page-approvals');
+  if (!pg || !pg.classList.contains('active')) return;
+  const y = window.scrollY; renderApprovalsList_(!!_approvalsLoadPromise); window.scrollTo(0, y);
+}
+/* ใบในรายการล่าสุดที่ตรงกับงานในคิว: แถวเดิม · แถวขยับแต่เจอใบเดียว · ของสดมาหลังกดแต่ไม่เจอแล้ว = null (ใบถูกลบ/แก้) */
+function apFindFresh_(job) {
+  const exact = _approvalItems.find(x => apSame_(x, job) && x.row === job.row);
+  if (exact) return exact;
+  const moved = _approvalItems.filter(x => apSame_(x, job));
+  if (moved.length === 1) return moved[0];
+  if (!moved.length && _apLastAt > job.at) return null;
+  return undefined;   // ยังไม่มีของสดใหม่กว่าตอนกด — ส่งแถวเดิม (backend 9.54 ตรวจรหัส+รายละเอียดซ้ำอีกชั้น)
+}
+function apQFinish_(job, ok, msg) {
+  const q = apQ_(), i = q.indexOf(job);
+  if (i >= 0) q.splice(i, 1);
+  apQSave_();
+  apLocal_().set(job.k, ok ? { status: job.decision, approver: job.by || '', state: 'ok', at: Date.now() }
+                           : { state: 'err', err: msg, at: Date.now() });
+  _approvalItems.forEach(x => {   // ทุกก๊อปที่ตรง (รายการอาจถูกแทนด้วยของสดระหว่างส่ง)
+    if (!apSame_(x, job)) return;
+    x._saving = false;
+    if (!ok && x.status === job.decision) { x.status = 'pending'; x.approver = ''; x._err = msg; }
+  });
+  if (!ok) toast('❌ ' + (job.decision === 'approved' ? 'อนุมัติ' : 'ไม่อนุมัติ') + ' ' + (job.name || '') + ' ไม่สำเร็จ — ' + msg, 'error');
+  apRerender_();
+  if (!ok) { _approveAlertAt = 0; setTimeout(() => { apFetch_({ withDone: true }).then(() => apRerender_()).catch(() => {}); }, 300); }   // ดึงสถานะจริงมาวาดทับ
+}
+async function apQRun_() {
+  if (_apQBusy || !currentUser) return;
+  const q = apQ_();
+  if (!q.length) { if (_apQStalled) { _apQStalled = false; apBarRefresh_(); } return; }
+  _apQBusy = true; _apQStalled = false; apBarRefresh_();
+  // ส่งต่อตอนเปิดแอป (ยังไม่เคยดึงรายการ) → ดึงของสดก่อน จะได้เลขแถวล่าสุด (apFetch_ รวมรอบกับการ์ดหน้าแรกให้)
+  if (!_apLastAt && !_approvalsLoadPromise) { try { apFetch_({ withDone: true }).catch(() => {}); } catch (_) {} }
+  try {
+    while (q.length) {
+      const job = q[0];
+      // ① ใบที่กดจากแคช + ของสดกำลังมา → รอของสดก่อน (เลขแถวในชีทอาจขยับ — กติกา v12.31)
+      if (_approvalsLoadPromise) { try { await _approvalsLoadPromise; } catch (_) {} }
+      const cur = apFindFresh_(job);
+      if (cur === null) { apQFinish_(job, false, 'ใบนี้เปลี่ยนไปแล้ว (อาจถูกแก้/ลบในชีท) — ดูรายการล่าสุดอีกครั้ง'); continue; }
+      try {
+        await callAppsScript('approveAny', { sheet: job.sheet, row: cur ? cur.row : job.row, decision: job.decision, note: job.note || '',
+          approverName: job.by || currentUser.name, empId: job.empId, info: job.info });
+        apQFinish_(job, true, '');
+      } catch (e) {
+        const msg = String((e && e.message) || e || 'บันทึกไม่สำเร็จ');
+        if ((e && /^session_/.test(e.code || '')) || /^Unauthorized|idToken/.test(msg)) { _apQStalled = true; break; }   // รอเข้าสู่ระบบใหม่ แล้วส่งต่อ
+        if (e && e.srv) { apQFinish_(job, false, msg); continue; }   // เซิร์ฟเวอร์ตอบว่าไม่รับ — ส่งซ้ำก็ไม่ผ่าน
+        job.tries = (job.tries || 0) + 1; apQSave_();                // เน็ตหลุด/เซิร์ฟเวอร์ช้า — ลองใหม่ 3 ครั้ง แล้วพักไว้
+        if (job.tries >= 3) { job.tries = 0; apQSave_(); _apQStalled = true; break; }
+        await new Promise(r => setTimeout(r, 2000 * job.tries));
+      }
+    }
+  } finally { _apQBusy = false; apBarRefresh_(); }
+}
+window.addEventListener('online', () => { try { apQRun_(); } catch (_) {} });
+
 async function admDecide(decision) {
-  if (!_admCurrent) return;
+  const it = _admCurrent;
+  if (!it) return;
   let note = '';
   if (decision === 'rejected') {
     note = prompt('เหตุผลที่ปฏิเสธ:') || '';
     if (!note) { toast('ต้องระบุเหตุผล', 'warning'); return; }
   }
-  try {
-    showSpinner('กำลังบันทึก...');
-    // v12.31: ถ้ารายการที่เปิดมาจากแคชและกำลังรีเฟรชอยู่ → รอของสดก่อน (เลขแถวในชีทอาจขยับถ้ามีคนลบแถวมือ)
-    if (_approvalsLoadPromise) { try { await _approvalsLoadPromise; } catch (_) {} }
-    const cur = _admCurrent;
-    const fresh = _approvalItems.find(it => it.sheet === cur.sheet && it.row === cur.row &&
-      String(it.empId) === String(cur.empId) && String(it.info || '') === String(cur.info || ''));
-    if (!fresh) {
-      toast('รายการนี้เพิ่งมีการเปลี่ยนแปลง — โหลดรายการล่าสุดแล้ว เลือกใหม่อีกครั้ง', 'warning');
-      closeApprovalDetail();
-      loadApprovals();
-      return;
-    }
-    await callAppsScript('approveAny', { sheet: cur.sheet, row: cur.row, decision, note, approverName: currentUser.name });
-    toast(decision === 'approved' ? '✓ อนุมัติแล้ว' : '✗ ปฏิเสธแล้ว', 'success');
-    closeApprovalDetail();
-    // v12.31/38: เปลี่ยนสถานะรายการบนจอเลย (ย้ายไปแท็บ อนุมัติ/ไม่อนุมัติ) — ไม่ดึงใหม่ทั้งหน้า + คงตำแหน่งเลื่อน
-    fresh.status = decision === 'approved' ? 'approved' : 'rejected';
-    fresh.approver = currentUser.name || '';
-    try { localStorage.setItem(approvalsCacheKey_(), JSON.stringify(_approvalItems)); } catch (_) {}
-    const y = window.scrollY;
-    renderApprovalsList_(false);
-    window.scrollTo(0, y);
-    updateApproveAlert(_approvalItems.filter(it => (it.status || 'pending') === 'pending'));   // การ์ด+ป้ายลดเลขทันที
-  } catch(e) { toast('❌ ' + e.message, 'error'); }
-  finally { hideSpinner(); }
+  const st = decision === 'approved' ? 'approved' : 'rejected';
+  const q = apQ_();
+  const job = { k: apKey_(it), sheet: it.sheet, row: it.row, empId: String(it.empId == null ? '' : it.empId).trim(), info: String(it.info || ''),
+                name: it.name || '', decision: st, note, by: (currentUser && currentUser.name) || '', at: Date.now(), tries: 0 };
+  if (q.some(j => j.k === job.k)) { closeApprovalDetail(); toast('ใบนี้กำลังบันทึกอยู่', 'info'); return; }
+  q.push(job); apQSave_();
+  apLocal_().set(job.k, { status: st, approver: job.by, state: 'q', at: job.at });
+  it.status = st; it.approver = job.by; it._saving = true; it._err = '';
+  apOverlay_(_approvalItems);   // รายการถูกแทนด้วยของสดตอนเปิดใบอยู่ → ก๊อปใหม่ก็ย้ายแท็บด้วย
+  closeApprovalDetail();
+  toast((st === 'approved' ? '✓ อนุมัติ ' : '✗ ไม่อนุมัติ ') + (it.name || ''), 'success');
+  apRerender_();
+  apQRun_();
 }
 
 async function approveAnyItem(sheet, row, decision) {
