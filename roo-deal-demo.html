@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>ทดลองรัตนล็อกดีล v4.30</title>
+<title>ทดลองรัตนล็อกดีล v4.31</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -691,7 +691,7 @@ body.head-mode .bn-badge{display:none!important}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.30</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.31</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -3821,8 +3821,9 @@ async function qGviz(sheetId, ref, tq){
   const j=JSON.parse(m[1]);
   if(j.status==='error') throw new Error('gviz: '+JSON.stringify(j.errors||''));
   const cols=(j.table.cols||[]).map(c=>String((c.label||c.id||'')).trim());
+  const colIds=(j.table.cols||[]).map(c=>String(c.id||''));   /* v4.82: ตัวอักษรคอลัมน์จริง (A/B/AK) ไว้เขียน select โดยไม่ต้อง hardcode */
   const rows=(j.table.rows||[]).map(r=>(r.c||[]).map(c=>(c==null||c.v==null)?'':c.v));
-  return {cols,rows};
+  return {cols,colIds,rows};
 }
 /* หัวคอลัมน์ซ้ำ -> คอลัมน์แรกที่มีชื่อนั้นชนะ (กับดักข้อ 5 : แท็บ Order มี "วัน" ทั้ง A และ AL) */
 function qIdx(cols){ const ix={}; cols.forEach((c,i)=>{ if(ix[c]===undefined) ix[c]=i; }); return ix; }
@@ -3890,22 +3891,89 @@ function qShopCode(p){
   return clean((currentCustomer||{}).shopCode||'');
 }
 
+/* 👨‍👩‍👧 v4.82 — ยกมาจากแอปจริง (rattana-online-order.html) ต้องให้ตัวเลขตรงกันทุกร้าน
+   ลูกค้าคนเดียวมีหลายรหัส (เปลี่ยนรหัสใหม่ · รหัสเครดิตคู่เงินสด · หลายสาขา) = ใช้เพดานก้อนเดียว
+   กลุ่ม = union(รหัสที่ One-Customer-ID เดียวกัน) + (รหัส ↔ รหัสเดิม) จากแท็บ Customer ของชีท Backend
+   ⚠️ หาตัวอักษรคอลัมน์จาก label เสมอ (gviz limit 0) ห้าม hardcode B/AG/AK
+   ⚠️ fail-open: อ่านกลุ่มไม่ได้ = ทำงานรายรหัสแบบเดิม ห้ามบล็อกการขาย */
+const QGRP={ map:null, ts:0, p:null };
+function qGrpOf(code){ const c=qCode(code); if(!c) return []; const g=QGRP.map&&QGRP.map[c]; return (g&&g.length)?g:[c]; }
+async function qGroupBoot(){
+  if(QGRP.map && QGRP.ts && Date.now()-QGRP.ts<QCFG.ttl) return QGRP.map;
+  if(QGRP.p) return QGRP.p;
+  const p=(async()=>{
+    try{
+      const head=await qGviz(QCFG.salesSheet,{sheet:'Customer'},'limit 0');
+      const LAB=['รหัส บีพลัส','One-Customer-ID','รหัสเดิม'], ids=[];
+      LAB.forEach(function(lab){ const i=(head.cols||[]).indexOf(lab); ids.push(i>=0?(head.colIds||[])[i]:''); });
+      if(ids.some(x=>!x)){
+        console.warn('[quota] แท็บ Customer ไม่มีคอลัมน์กลุ่มครบ ('+LAB.join('/')+') — ใช้เพดานรายรหัสเหมือนเดิม');
+        QGRP.map={}; QGRP.ts=Date.now(); return QGRP.map;
+      }
+      const t=await qGviz(QCFG.salesSheet,{sheet:'Customer'},'select '+ids.join(','));
+      const par={};
+      const find=a=>{ if(par[a]===undefined) par[a]=a; while(par[a]!==a){ par[a]=par[par[a]]; a=par[a]; } return a; };
+      const uni=(a,b)=>{ if(!a||!b||a===b) return; const ra=find(a), rb=find(b); if(ra!==rb) par[ra]=rb; };
+      const byOne={};
+      (t.rows||[]).forEach(r=>{
+        const code=qCode(r[0]), one=qCode(r[1]), old=qCode(r[2]);
+        if(!code) return;
+        find(code);
+        if(one) (byOne[one]||(byOne[one]=[])).push(code);
+        if(old) uni(code, old);
+      });
+      Object.keys(byOne).forEach(k=>{ const a=byOne[k]; for(let i=1;i<a.length;i++) uni(a[0],a[i]); });
+      const bag={};
+      Object.keys(par).forEach(c=>{ const r=find(c); (bag[r]||(bag[r]=[])).push(c); });
+      const m={}; let ng=0;
+      Object.keys(bag).forEach(r=>{ const g=bag[r].slice().sort(); if(g.length<2) return; ng++; g.forEach(c=>{ m[c]=g; }); });
+      QGRP.map=m; QGRP.ts=Date.now();
+      console.log('[quota] กลุ่มลูกค้าหลายรหัส '+ng+' กลุ่ม · '+Object.keys(m).length+' รหัส');
+      return m;
+    }catch(e){
+      console.warn('[quota] โหลดกลุ่มลูกค้าไม่ได้ — ใช้เพดานรายรหัสเหมือนเดิม:', (e&&e.message)||e);
+      QGRP.map=QGRP.map||{}; QGRP.ts=0;
+      return QGRP.map;
+    }
+  })();
+  QGRP.p=p;
+  try{ return await p; } finally{ QGRP.p=null; }
+}
+/* 🆕 v4.79 — "ตารางเพดานยังไม่ได้สร้างให้กติกานี้" ≠ "ร้านนี้ไม่เคยซื้อ"
+   คีย์ที่ไม่มีสักแถวใน QuotaShopCap = จัดซื้อยังไม่ได้ gen → ห้ามตัดทุกร้านเหลือ 1 ลัง (fail-open) */
+const QCAPKEY={};
+async function qCapKeyReady(key){
+  if(key in QCAPKEY) return QCAPKEY[key];
+  try{
+    const t=await qGviz(QCFG.quotaSheet,{sheet:'QuotaShopCap'},'select A where A = "'+key.replace(/"/g,'')+'" limit 1');
+    QCAPKEY[key]=!!(t&&t.rows&&t.rows.length);
+  }catch(e){ QCAPKEY[key]=true; }
+  return QCAPKEY[key];
+}
 /* ── เพดานรายร้าน (§7) - สูตรนี้ Surat เคาะเอง ห้ามเปลี่ยน ── */
 async function qShopCap(rule, shopCode){
   if(qtNorm(rule.share)!==qtNorm('ตามที่เคยซื้อ')) return null;      /* ก่อนได้ก่อน = ไม่มีเพดานรายร้าน */
   if(!shopCode) return null;
   const key=rule.by+'|'+rule.val;
-  const tq='select A,B,C,D where A = "'+key.replace(/"/g,'')+'" and B = "'+String(shopCode).replace(/"/g,'')+'"';
+  const grp=qGrpOf(shopCode);   /* 👨‍👩‍👧 v4.82: ทุกรหัสของลูกค้าคนเดียวกัน (ไม่อยู่กลุ่มไหน = [รหัสตัวเอง] = เหมือนเดิมเป๊ะ) */
+  const tq='select A,B,C,D where A = "'+key.replace(/"/g,'')+'" and '
+    + (grp.length>1 ? qMatchesClause('B',grp) : ('B = "'+String(shopCode).replace(/"/g,'')+'"'));
   const t=await qGviz(QCFG.quotaSheet,{sheet:'QuotaShopCap'},tq);
   const per=rule.perShop||0;
-  if(!t.rows.length)
+  if(!t.rows.length){
+    if(!(await qCapKeyReady(key))){                                  /* 🆕 v4.79 */
+      console.warn('[quota] ยังไม่มีตารางเพดานรายร้านของ "'+key+'" — ข้ามเพดานรายร้าน (เหลือแค่ก้อนรวม)');
+      return null;
+    }
     return { cap:1, hist:0, why:'ร้านนี้ไม่เคยซื้อกลุ่มนี้ใน 2 เดือนหลัง - ซื้อได้สูงสุด 1 ลังทั้งรอบ' };
-  const r=t.rows[0];
-  const hist=parseFloat(r[2])||0;
-  const histCap=parseFloat(r[3])||1;
+  }
+  /* 👨‍👩‍👧 v4.82: หลายรหัส = บวกเพดานที่หลังบ้านคิดไว้แล้ว ❌ ห้ามคิดสัดส่วนใหม่เอง */
+  let hist=0, histCap=0;
+  t.rows.forEach(r=>{ hist+=parseFloat(r[2])||0; histCap+=parseFloat(r[3])||1; });
+  const _more=(t.rows.length>1) ? (' · รวม '+t.rows.length+' รหัสของลูกค้าเดียวกัน') : '';
   if(per>0) return { cap:Math.max(1,Math.min(per,histCap)), hist:hist,
-    why:'ตามสัดส่วนที่เคยซื้อ '+hist+' ลัง/2 เดือน (เพดานที่ตั้ง '+per+')' };
-  return { cap:histCap, hist:hist, why:'เคยซื้อ '+hist+' ลัง/2 เดือน - ได้ตามสัดส่วน '+histCap+' ลังทั้งรอบ' };
+    why:'ตามสัดส่วนที่เคยซื้อ '+hist+' ลัง/2 เดือน (เพดานที่ตั้ง '+per+')'+_more };
+  return { cap:Math.max(1,histCap), hist:hist, why:'เคยซื้อ '+hist+' ลัง/2 เดือน - ได้ตามสัดส่วน '+histCap+' ลังทั้งรอบ'+_more };
 }
 
 /* ── ยอดที่ใช้ไปแล้ว ──
@@ -3941,6 +4009,7 @@ async function qUsedFor(rule, bcs, bcMap, shopCode, draftOid){
     rooJob(QCFG.rooOrderGid), rooJob(QCFG.rooSpecialGid)
   ];
   const want=qCode(shopCode);
+  const wantSet=new Set(qGrpOf(shopCode));   /* 👨‍👩‍👧 v4.82: ยอดที่ใช้ไปต้องนับทุกรหัสของลูกค้าคนเดียวกัน ให้ตรงกับเพดานที่รวมกลุ่มแล้ว */
   const res=await Promise.all(jobs.map(async j=>{
     try{
       const t=await qGviz(j.sheet, j.ref, j.tq);
@@ -3950,7 +4019,7 @@ async function qUsedFor(rule, bcs, bcMap, shopCode, draftOid){
         if(!p) return;
         const cs=qToCases(p, qUnitLabel(r[2]), r[3]);
         pool+=cs;
-        if(want && qCode(r[0])===want) shop+=cs;
+        if(want && wantSet.has(qCode(r[0]))) shop+=cs;   /* v4.82: เดิมเทียบรหัสเดียว */
       });
       return { src:j.src, pool, shop, rows:t.rows.length };
     }catch(e){ console.warn('[quota] '+j.src+' ล้ม:',e&&e.message); return { src:j.src, err:String(e&&e.message||e) }; }
@@ -3971,7 +4040,8 @@ async function quotaBoot(force){
   QUOTA.busy=true;
   QUOTA.p=(async()=>{
   try{
-    const rules=await qLoadRules();
+    /* 👨‍👩‍👧 v4.82: โหลดกลุ่มลูกค้าขนานไปกับกติกา · ล้มก็ไปต่อ (ใช้เพดานรายรหัสแบบเดิม) */
+    const [rules]=await Promise.all([ qLoadRules(), qGroupBoot().catch(()=>null) ]);
     const st={}, draft=(typeof draftOrderId==='function')?draftOrderId():'';
     /* ทุกแถว + ทุกคำขอ ยิงขนานกันหมด (เดิมวนทีละแถว รอ 30-60 วิกว่าป้ายจะขึ้น) */
     await Promise.all(rules.map(async rule=>{
