@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.15</title>
+<title>Rattana Shop Location v1.16</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -29,7 +29,13 @@ header{background:var(--navy);color:#fff;padding:10px 16px;display:flex;align-it
 .logo-text{font-weight:700;letter-spacing:1.5px;font-size:18px;color:#fff;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .logo-text span.nm{color:var(--gold)}
 .ver-badge{font-size:11px;font-weight:600;letter-spacing:.3px;background:rgba(201,168,76,.18);color:var(--gold-light);border:1px solid rgba(201,168,76,.45);padding:1px 8px;border-radius:10px}
-.hdr-right{margin-left:auto;display:flex;gap:8px}
+.hdr-right{margin-left:auto;display:flex;gap:8px;align-items:center}
+.sync-badge{font-size:11.5px;font-weight:600;padding:3px 10px;border-radius:12px;border:1px solid rgba(255,255,255,.25);color:#fff;white-space:nowrap}
+.sync-badge.ok{background:rgba(46,204,113,.2);border-color:rgba(46,204,113,.55)}
+.sync-badge.busy{background:rgba(201,168,76,.22);border-color:rgba(201,168,76,.6)}
+.sync-badge.err{background:rgba(231,76,60,.25);border-color:rgba(231,76,60,.6)}
+.sync-badge:empty{display:none}
+body.online .local-only{display:none}
 .icon-btn{background:transparent;color:#fff;border:1px solid rgba(255,255,255,.2);width:38px;height:38px;border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;font-size:18px;transition:background .15s}
 .icon-btn:hover{background:rgba(255,255,255,.12)}
 
@@ -214,8 +220,9 @@ details.card:not([open])>summary{border-bottom:none}
 <body>
 
 <header>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.15 · 2026-09-30</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.16 · 2026-09-30</span></div>
   <div class="hdr-right">
+    <span class="sync-badge" id="syncBadge" title=""></span>
     <button class="icon-btn" id="btnDark" title="โหมดมืด/สว่าง" onclick="toggleDark()">🌙</button>
   </div>
 </header>
@@ -280,8 +287,8 @@ details.card:not([open])>summary{border-bottom:none}
           <label>ชื่อแท็บ (ไม่ใส่ = ใช้แท็บในลิงก์ / แท็บแรก)</label>
           <input class="input" id="gsTab" placeholder="เช่น Sheet1" autocomplete="off">
         </div>
-        <label class="chk"><input type="checkbox" id="gsReplace" checked> แทนที่ร้านที่ดึงจากชีตครั้งก่อน</label>
-        <label class="chk"><input type="checkbox" id="gsAuto" checked> โหลดจากชีตนี้อัตโนมัติทุกครั้งที่เปิดแอพ</label>
+        <label class="chk local-only"><input type="checkbox" id="gsReplace" checked> แทนที่ร้านที่ดึงจากชีตครั้งก่อน</label>
+        <label class="chk local-only"><input type="checkbox" id="gsAuto" checked> โหลดจากชีตนี้อัตโนมัติทุกครั้งที่เปิดแอพ</label>
         <div class="btn-row mt">
           <button class="btn btn-gold" id="gsBtn" onclick="importSheet()">☁️ ดึงข้อมูล</button>
         </div>
@@ -332,6 +339,9 @@ details.card:not([open])>summary{border-bottom:none}
 const STORE_KEY = 'rattanaShopLoc_v1';
 const GEO_CACHE_KEY = 'rattanaShopLocGeo_v1';
 const SHEET_KEY = 'rattanaShopLocSheet_v1';
+/* Online storage (Google Apps Script web app, file "rattana-shop-location-server v1.0.gs").
+   Empty = data is kept only in this browser. With a URL = everyone who opens the app sees the same maps. */
+const SERVER_URL = '';
 const TH_BOUNDS = [[5.6, 97.3], [20.5, 105.7]];
 // Colors for non-day groups — kept away from the route-day colors below
 const PALETTE = ['#1a237e','#00897b','#6d4c41','#546e7a','#827717','#3949ab','#b71c1c','#004d40','#4e342e','#37474f'];
@@ -398,6 +408,7 @@ function save() {
   } catch {}
   // area data lives in the geo cache, so it is not stored twice
   const slim = shops.map(({ region, prov, amphoe, tambon, geoFail, ...rest }) => rest);
+  if (ONLINE) schedulePush();
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify({ ver: DATA_VER, savedAt: Date.now(), shops: slim, groupColors, showLabels, maps, activeMapId }));
   } catch (e) {
@@ -755,7 +766,9 @@ function setActiveMap(id) {
 
 function removeShop(id) {
   const s = shops.find(x => x.id === id);
-  if (!s || !confirm(`ลบ "${s.name}" ?`)) return;
+  if (!s) return;
+  if (ONLINE && s.src === 'sheet') { showToast('ร้านนี้มาจาก Google Sheet — ลบในชีต แล้วกด "ดึงข้อมูล" ใหม่', 'warning'); return; }
+  if (!confirm(`ลบ "${s.name}" ?`)) return;
   shops = shops.filter(x => x.id !== id);
   save(); renderAll();
 }
@@ -763,8 +776,11 @@ function clearAll() {   // clears the active map only
   const m = activeMap();
   const n = shops.filter(s => s.mapId === m.id).length;
   if (!n) { showToast(`"${m.name}" ยังไม่มีร้าน`, 'info'); return; }
-  if (!confirm(`ลบหมุดทั้งหมดในแผนที่ "${m.name}" ${n} ร้าน ?`)) return;
+  if (!confirm(ONLINE
+    ? `ลบหมุดทั้งหมดในแผนที่ "${m.name}" ${n} ร้าน และยกเลิกลิงก์ Google Sheet ของแผนที่นี้ ?\n(ทุกคนที่เปิดแอพจะเห็นการเปลี่ยนแปลงนี้)`
+    : `ลบหมุดทั้งหมดในแผนที่ "${m.name}" ${n} ร้าน ?`)) return;
   shops = shops.filter(s => s.mapId !== m.id);
+  if (ONLINE) { m.sheet.url = ''; m.sheet.tab = ''; m.sheet.last = 0; loadSheetCfg(); }
   filterText = ''; $('inSearch').value = '';
   save(); renderAll(); fitAll();
 }
@@ -818,6 +834,7 @@ async function geoLoop() {
         cached = r.cached;
         errStreak = 0;
         if (shops.includes(s)) Object.assign(s, r.data);
+        if (!cached) queueGeoPush(s.lat, s.lng, r.data);
       } catch (e) {
         console.warn('reverse geo failed', e);
         // 429 "too many requests" comes back without CORS headers -> TypeError. Pause and retry the same shop.
@@ -1151,6 +1168,148 @@ window.addEventListener('scroll', () => $('backToTop').classList.toggle('show', 
 $('inCoord').addEventListener('keydown', e => { if (e.key === 'Enter') addOne(); });
 $('inName').addEventListener('keydown', e => { if (e.key === 'Enter') $('inCoord').focus(); });
 
+/* ===== Online storage (shared by everyone) ===== */
+const ONLINE = !!SERVER_URL;
+let srvRev = null, lastPushed = '', pushTimer = null, pushing = false, pushAgain = false, geoOut = [], geoTimer = null;
+function setSync(state, text, title) {
+  const b = $('syncBadge'); if (!b) return;
+  b.className = 'sync-badge ' + state; b.textContent = text; b.title = title || '';
+}
+/* the part of the data everyone shares; per-viewer things (show/hide, filters, active map) stay local */
+function sharedSnapshot() {
+  return {
+    maps: maps.map(m => ({ id: m.id, name: m.name, sheet: { url: m.sheet.url || '', tab: m.sheet.tab || '' }, routeColors: m.routeColors || {} })),
+    manualShops: shops.filter(x => x.src !== 'sheet').map(({ region, prov, amphoe, tambon, geoFail, ...rest }) => rest),
+    groupColors
+  };
+}
+function jsonp(url, timeout = 25000) {
+  return new Promise((resolve, reject) => {
+    const cb = '__srv' + Date.now() + Math.floor(Math.random() * 1000);
+    const el = document.createElement('script');
+    const timer = setTimeout(() => { done(); reject(new Error('timeout')); }, timeout);
+    function done() { clearTimeout(timer); try { delete window[cb]; } catch { window[cb] = undefined; } el.remove(); }
+    window[cb] = d => { done(); resolve(d); };
+    el.onerror = () => { done(); reject(new Error('load')); };
+    el.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + cb + '&_=' + Date.now();
+    document.head.appendChild(el);
+  });
+}
+async function postServer(body) {
+  const r = await fetch(SERVER_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+  return r.json();
+}
+/* merge server data into the app; returns ids of maps whose sheet link changed */
+function applyServer(data) {
+  const changed = [];
+  if (!data || !Array.isArray(data.maps) || !data.maps.length) return changed;
+  const prev = {}; maps.forEach(m => prev[m.id] = m);
+  maps = data.maps.map(sm => {
+    const old = prev[sm.id] || {};
+    const sheet = Object.assign(newSheetCfg(), old.sheet || {}, { url: sm.sheet?.url || '', tab: sm.sheet?.tab || '', replace: true, auto: true });
+    if (!old.sheet || old.sheet.url !== sheet.url || old.sheet.tab !== sheet.tab) changed.push(sm.id);
+    return { id: sm.id, name: sm.name, sheet, routeColors: sm.routeColors || {},
+             visible: old.visible !== false, fSales: old.fSales || [], fRoutes: old.fRoutes || [] };
+  });
+  const ids = new Set(maps.map(m => m.id));
+  const manual = (data.manualShops || []).filter(x => ids.has(x.mapId)).map(x => Object.assign({}, x));
+  shops = [...shops.filter(x => x.src === 'sheet' && ids.has(x.mapId) && !changed.includes(x.mapId)), ...manual];
+  if (data.groupColors) groupColors = data.groupColors;
+  if (!mapById(activeMapId)) activeMapId = maps[0].id;
+  applyGeo();
+  lastPushed = JSON.stringify(sharedSnapshot());
+  return changed;
+}
+async function loadFromServer(first) {
+  setSync('busy', '⏳ กำลังโหลด…');
+  const res = await jsonp(SERVER_URL + '?action=load');
+  if (!res || !res.ok) throw new Error((res && res.error) || 'load failed');
+  (res.geo || []).forEach(g => { if (g[0] && g[2]) geoCache[g[0]] = { region: g[1], prov: g[2], amphoe: g[3], tambon: g[4] }; });
+  saveGeoCache();
+  srvRev = res.rev;
+  let changed;
+  if (res.data && Array.isArray(res.data.maps) && res.data.maps.length) {
+    changed = applyServer(res.data);
+    saveLocalOnly();
+  } else {
+    // server is empty (first time) → publish what this browser has
+    changed = [];
+    lastPushed = '';
+    schedulePush(0);
+  }
+  loadSheetCfg(); renderAll();
+  if (first) fitAll();
+  setSync('ok', '☁️ ออนไลน์', 'ข้อมูลแผนที่เก็บออนไลน์ — ทุกคนที่เปิดแอพเห็นเหมือนกัน');
+  // (re)load shops from each map's Google Sheet
+  for (const m of maps) if (m.sheet.url && (first || changed.includes(m.id))) await importSheet(true, m.id);
+  runGeoQueue();
+}
+/* save to this browser without triggering a push */
+function saveLocalOnly() {
+  const slim = shops.map(({ region, prov, amphoe, tambon, geoFail, ...rest }) => rest);
+  try { localStorage.setItem(STORE_KEY, JSON.stringify({ ver: DATA_VER, savedAt: Date.now(), shops: slim, groupColors, showLabels, maps, activeMapId })); } catch {}
+}
+function schedulePush(delay = 800) {
+  if (!ONLINE || srvRev === null && delay !== 0) return;   // wait until the first load finished
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(pushShared, delay);
+}
+async function pushShared() {
+  const snap = sharedSnapshot();
+  const json = JSON.stringify(snap);
+  if (json === lastPushed) return;
+  if (pushing) { pushAgain = true; return; }
+  pushing = true;
+  setSync('busy', '⏳ กำลังบันทึก…');
+  try {
+    const res = await postServer({ action: 'save', baseRev: srvRev, data: snap });
+    if (res.ok) {
+      srvRev = res.rev; lastPushed = json;
+      setSync('ok', '☁️ บันทึกแล้ว', 'บันทึกออนไลน์แล้ว — ทุกคนเห็นการเปลี่ยนแปลงนี้');
+    } else if (res.conflict) {
+      srvRev = res.rev;
+      const changed = applyServer(res.data);
+      saveLocalOnly(); loadSheetCfg(); renderAll();
+      for (const id of changed) { const m = mapById(id); if (m && m.sheet.url) await importSheet(true, id); }
+      showToast('มีคนแก้ไขแผนที่พร้อมกัน — โหลดข้อมูลล่าสุดแล้ว กรุณาทำรายการเดิมอีกครั้ง', 'warning');
+      setSync('ok', '☁️ ออนไลน์');
+    } else throw new Error(res.error || 'save failed');
+  } catch (e) {
+    console.warn('push failed', e);
+    setSync('err', '⚠ บันทึกออนไลน์ไม่สำเร็จ', String(e.message || e));
+    showToast('บันทึกออนไลน์ไม่สำเร็จ — จะลองใหม่อัตโนมัติ', 'error');
+    setTimeout(() => schedulePush(0), 15000);
+  } finally {
+    pushing = false;
+    if (pushAgain) { pushAgain = false; schedulePush(0); }
+  }
+}
+function queueGeoPush(lat, lng, d) {
+  if (!ONLINE) return;
+  geoOut.push([lat.toFixed(4) + ',' + lng.toFixed(4), d.region || '', d.prov || '', d.amphoe || '', d.tambon || '']);
+  if (geoOut.length >= 20) flushGeo();
+  else { clearTimeout(geoTimer); geoTimer = setTimeout(flushGeo, 20000); }
+}
+async function flushGeo() {
+  clearTimeout(geoTimer);
+  if (!geoOut.length) return;
+  const items = geoOut.splice(0);
+  try { await postServer({ action: 'geo', items }); } catch (e) { console.warn('geo push failed', e); geoOut.unshift(...items); }
+}
+window.addEventListener('pagehide', () => { if (ONLINE && geoOut.length) navigator.sendBeacon && navigator.sendBeacon(SERVER_URL, JSON.stringify({ action: 'geo', items: geoOut })); });
+/* check every minute whether someone else changed the maps */
+async function pollServer() {
+  if (!ONLINE || pushing || srvRev === null || document.hidden) return;
+  try {
+    const r = await jsonp(SERVER_URL + '?action=rev', 15000);
+    if (r && r.ok && r.rev !== srvRev && JSON.stringify(sharedSnapshot()) === lastPushed) {
+      closeDD();
+      await loadFromServer(false);
+      showToast('อัปเดตแผนที่ล่าสุดจากออนไลน์แล้ว', 'info');
+    }
+  } catch {}
+}
+
 /* ===== Keep several open tabs in sync ===== */
 window.addEventListener('storage', e => {
   if (e.key === STORE_KEY && e.newValue) {
@@ -1209,7 +1368,19 @@ if (shops.length) fitAll();
 shops.forEach(s => { delete s.geoFail; });   // failures from a rate-limit pause get another try
 runGeoQueue();
 setInterval(() => { if (!geoRunning && shops.some(x => !x.prov && !x.geoFail)) runGeoQueue(); }, 60000);   // take over lookups if the other tab closed
-(async () => { for (const m of maps) if (m.sheet.url && m.sheet.auto) await importSheet(true, m.id); })();
+if (ONLINE) {
+  document.body.classList.add('online');
+  loadFromServer(true).catch(e => {
+    console.warn('server load failed', e);
+    setSync('err', '⚠ ออฟไลน์', 'เชื่อมต่อข้อมูลออนไลน์ไม่ได้ — แสดงข้อมูลที่เก็บในเครื่องนี้');
+    showToast('เชื่อมต่อข้อมูลออนไลน์ไม่ได้ — แสดงข้อมูลในเครื่องนี้แทน', 'warning');
+    (async () => { for (const m of maps) if (m.sheet.url) await importSheet(true, m.id); })();
+  });
+  setInterval(pollServer, 60000);
+} else {
+  setSync('', '💻 เก็บในเครื่อง', 'ข้อมูลเก็บในเบราว์เซอร์นี้เท่านั้น');
+  (async () => { for (const m of maps) if (m.sheet.url && m.sheet.auto) await importSheet(true, m.id); })();
+}
 </script>
 </body>
 </html>
