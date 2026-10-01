@@ -1916,7 +1916,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-10-01 · 37';
+const BUILD = '2026-10-01 · 39';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -2906,8 +2906,10 @@ function fullJob(key) {
 function allJobs() { if (!CHAN_PICK.length) return JOBS; fullJob(''); return JOBS_ALL; }
 
 /** view = ช่องทางที่เห็น (null = ทุกช่องทาง) — ปกติเท่ากับปุ่มช่องทาง · แดชบอร์ดส่ง null
- *  onlyPids = คิดเฉพาะสินค้าเหล่านี้ (ใช้ตอนคิดสิทธิ์ของแถม ไม่ต้องคิดทั้งงาน) */
-function computeJob(job, view = viewSet(), onlyPids) {
+ *  onlyPids = คิดเฉพาะสินค้าเหล่านี้ (ใช้ตอนคิดสิทธิ์ของแถม ไม่ต้องคิดทั้งงาน)
+ *  remote = รวมยอดที่เครื่องอื่นกำลังเช็ค (ชีต กำลังเช็ค — livePools) ไว้แสดงในหน้าโอนย้ายเท่านั้น
+ *           ห้ามใช้ตอนลงชีต (ไม่ลงยอดแทนเครื่องอื่น) · ส่วนนี้แยกไว้ที่ d.remote / r.remote ไม่เข้า d.from */
+function computeJob(job, view = viewSet(), onlyPids, remote) {
   const rows = [];      // สินค้าขาย
   const freeNeed = {};  // { productId: { lineKey: {...} } }
   const pre = storePreMap();
@@ -2936,20 +2938,28 @@ function computeJob(job, view = viewSet(), onlyPids) {
     const baseSum  = baseGive.reduce((a, b) => a + b, 0);
     const preGive  = lines.map(l => Math.min(l.needEA, pre[l.lid] || 0));
     const preSum   = preGive.reduce((a, b) => a + b, 0);
-    let got = 0, stranded = 0, surplus = 0;
-    Object.entries(poolsOf(p.id, job.round)).sort((a, b) => tagRank(a[0]) - tagRank(b[0])).forEach(([tag, ea]) => {
+    let got = 0, stranded = 0, surplus = 0, remoteGot = 0;
+    const rem = {};
+    // กองในเครื่องก่อน แล้วค่อยกองของเครื่องอื่น (ถ้าขอ) · ในแต่ละพวก กองเฉพาะช่องทางก่อน กองกลางทีหลัง
+    const pl = Object.entries(poolsOf(p.id, job.round)).map(([t, ea]) => [t, ea, false]);
+    if (remote) Object.entries(livePools(p.id, job.round)).forEach(([t, ea]) => pl.push([t, ea, true]));
+    pl.sort((a, b) => a[2] - b[2] || tagRank(a[0]) - tagRank(b[0])).forEach(([tag, ea, isR]) => {
       const chans = tagChans(tag);
       const ls = full.filter(l => !chans || chans.includes(chanOf(l.ref).key));
       const r = allocate(ls.map(l => Object.assign({}, l, { needEA: remain[l.lid] })), ea, p);
       ls.forEach((l, i) => {
         give[l.lid] += r.give[i]; remain[l.lid] -= r.give[i];
-        if (r.give[i]) from[l.lid][tag] = (from[l.lid][tag] || 0) + r.give[i];   // ไว้หักกองตอนยืนยัน
+        if (!r.give[i]) return;
+        if (isR) rem[l.lid] = (rem[l.lid] || 0) + r.give[i];                   // ของเครื่องอื่น — แสดงผลอย่างเดียว
+        else from[l.lid][tag] = (from[l.lid][tag] || 0) + r.give[i];         // ไว้หักกองตอนยืนยัน
       });
       /* กองของช่องทางอื่นล้วน ไม่นับในหน้านี้ — แต่ต้องแบ่งก่อนเหมือนกัน กองกลางที่ตามมาจะได้ลงบรรทัดเดียวกันทุกหน้า
          (ไม่งั้นดูหน้า "ปลีก" กับหน้า "ทั้งหมด" ยอดกองกลางตกบิลปลีกไม่เท่ากัน) */
       if (!tagOverlap(tag, view)) return;
-      if (tagInside(tag, view)) { got += ea; stranded += r.stranded; surplus += r.surplus; }   // กองของหน้านี้เต็ม ๆ
-      else got += ls.reduce((s, l, i) => s + (vis.has(l.lid) ? r.give[i] : 0), 0);          // กองกว้างกว่า — เอาเฉพาะส่วนที่ตกบรรทัดในหน้านี้
+      const add = tagInside(tag, view) ? ea                                   // กองของหน้านี้เต็ม ๆ
+        : ls.reduce((s, l, i) => s + (vis.has(l.lid) ? r.give[i] : 0), 0);    // กองกว้างกว่า — เอาเฉพาะส่วนที่ตกบรรทัดในหน้านี้
+      if (tagInside(tag, view)) { stranded += r.stranded; surplus += r.surplus; }
+      got += add; if (isR) remoteGot += add;
     });
     const res = { give: lines.map(l => give[l.lid]), stranded, surplus,
                   full: lines.every(l => give[l.lid] >= l.needEA) };
@@ -2981,10 +2991,11 @@ function computeJob(job, view = viewSet(), onlyPids) {
       /* over = แถมที่ลงชีตไปแล้วเกินสิทธิ์ใหม่ (ตัวหลักมาขาดทีหลัง) — ต้องเอาคืน */
       const over = l.ordEA !== undefined ? Math.max(0, (cf ? cf.given : 0) - l.needEA) : 0;
       return { line:l, giveEA, free, freeOrdered:0, freeGive:0, from:from[l.lid], over, pre:pre[l.lid] || 0,
-               conf: !!cf && !cf.partial, part: !!cf && !!cf.partial, confGiven: cf ? Math.min(l.needEA, cf.given) : 0 };
+               conf: !!cf && !cf.partial, part: !!cf && !!cf.partial, confGiven: cf ? Math.min(l.needEA, cf.given) : 0,
+               remote: rem[l.lid] || 0 };
     });
 
-    rows.push({ sku, product:p, scanned, res, detail, promos, preSum, confSum, baseSum, round:job.round,
+    rows.push({ sku, product:p, scanned, res, detail, promos, preSum, confSum, baseSum, round:job.round, remote:remoteGot,
                 preBy: lines.map((l, i) => ({ store:l.store, ea:preGive[i] })).filter(x => x.ea > 0),
       totalNeed: lines.reduce((s,l)=>s+l.needEA,0) });
   }
@@ -3329,6 +3340,7 @@ function thumbHtml(p) {
 function setMode(m) {
   state.mode = m; state.storeCode = null; save();
   if (m === 'team' || m === 'store' || m === 'transfer') loadDone();   // มีเครื่องอื่นยืนยันงาน/ร้านไปแล้วหรือยัง
+  if (m === 'transfer') loadLive();          // ยอดที่ทีมอื่นกำลังเช็คจากเครื่องอื่น (ชีต กำลังเช็ค)
   $('tabTeam').classList.toggle('active',  m === 'team');
   $('tabStore').classList.toggle('active', m === 'store');
 
@@ -4328,32 +4340,39 @@ function confirmChan() {
    ของที่ W4 ไม่พอตามออเดอร์ ไปยกจาก C4 มาเติม แล้วเปิดบิลออกจาก W4
    ยอดที่ยิงตรงนี้เก็บคนละกอง เอาไปออกใบโอนย้ายได้ และหักยอดที่ยังขาดให้ด้วย
    ═══════════════════════════════════════════════════════════════ */
-/** สินค้าที่ต้องใช้ในรอบนี้ พร้อมยอดที่ยังขาด / ยอดที่โอนมา
- *  ยอดขาดคิดทีละบรรทัดจากผลแบ่งของหน้าทีม (ยอดยิง + โอน + ทดแทน + เช็คตามร้าน) แยกสองแบบ (ผู้ใช้สั่ง 30/09: ทุกเครื่องต้องเห็นตรงกัน)
- *    sConf  = บรรทัดที่ปิดงานแล้ว — ตั้งต้นจากชีต ยืนยันเช็ค ทุกเครื่องเห็นเหมือนกัน
- *    sLocal = บรรทัดที่ยังไม่ปิดงาน ของงานที่เครื่องนี้ยิงค้างไว้ — รู้เฉพาะเครื่องนี้
- *  งานที่ยังไม่มีใครปิดและเครื่องนี้ไม่ได้ยิง ไม่รู้ว่าขาดอะไร ไม่เอามาขึ้นว่าต้องยก (เดิมขึ้นว่าต้องยกทั้งหมด ซึ่งผิด) */
+/** สินค้าที่ต้องใช้ในรอบนี้ ของทุกทีม พร้อมยอดที่ยังขาด / ยอดที่โอนมา
+ *  ผู้ใช้สั่ง 01/10: "ต้องเห็นของทุกทีม แต่หักยอดที่ทุกทีมเช็คไปแล้วออก" (เดิมเห็นแค่งานที่ปิดแล้ว + งานที่เครื่องนี้ยิง)
+ *  ยอดขาดคิดทีละบรรทัดจากผลแบ่งของหน้าทีม (ยอดยิง + โอน + ทดแทน + เช็คตามร้าน + ยอดที่เครื่องอื่นกำลังเช็ค) แยกตามสถานะ
+ *    sConf = บรรทัดที่ปิดงานแล้ว — ตั้งต้นจากชีต ยืนยันเช็ค ทุกเครื่องเห็นเหมือนกัน
+ *    sOpen = งานที่ยังไม่ปิด แต่มีคนกำลังเช็ค (เครื่องนี้ หรือเครื่องอื่นจากชีต กำลังเช็ค) — ตัวที่ยังไม่ได้ยิงนับว่าขาดทั้งหมด
+ *    sPart = ยังไม่มีใครเริ่มงาน แต่บรรทัดนี้มีของโอนจาก C4 ลงชีตแล้ว / เช็คตามร้านในเครื่องนี้
+ *    sNone = ยังไม่มีใครเริ่มเช็คงานนี้ — ยังไม่รู้ว่า W4 มีพอไหม ไม่นับเป็น "ต้องยก" (แยกไว้ปุ่ม "ยังไม่เช็ค") */
 function transferList() {
   const m = {}, view = viewSet(), rnd = state.round;
-  const slot = (p, team) => m[p.id] ||= { p, need:0, got:0, sConf:0, sLocal:0, sPart:0, stranded:0, team };
+  const slot = (p, team) => m[p.id] ||= { p, need:0, got:0, sConf:0, sOpen:0, sPart:0, sNone:0, stranded:0, team };
   JOBS.filter(j => j.round === rnd).forEach(j => {
-    const c = computeJob(j);
-    const mine = c.all.some(r => r.scanned - (r.confSum || 0) > 0);   // เครื่องนี้เริ่มยิงงานนี้แล้ว
+    const c = computeJob(j, view, null, true);
+    const mine = c.all.some(r => r.scanned - (r.confSum || 0) - (r.remote || 0) > 0);   // เครื่องนี้เริ่มยิงงานนี้แล้ว
+    const others = liveWho(j, view);                                                    // เครื่องอื่นกำลังเช็คงานนี้ (ยังไม่ปิด)
+    const open = mine || others.length > 0;
+    const by = others.map(x => nickOf(x.by) + (x.at ? ' ' + x.at.slice(0, 5).replace('.', ':') : ''))
+                     .concat(mine ? ['เครื่องนี้'] : []);
     c.all.forEach(r => {
       // สินค้าตัวเดียวอาจโผล่ทั้งแถวขายและแถวแถม ต้องรวม ไม่ใช่นับซ้ำ
       let used = false;
       r.detail.forEach(d => {
-        if (!d.conf && !d.part && !mine) return;
         const e = slot(r.product, j.team.name), sh = Math.max(0, d.line.needEA - d.giveEA);
         e.need += d.line.needEA; e.got += Math.min(d.giveEA, d.line.needEA); used = true;
+        (e.det ||= []).push(d);                                // ไว้ทำป้ายผู้รับ (ร้าน/PMW/SM สาขา) เหมือนหน้าเช็คตามทีม
         if (d.conf) { e.sConf += sh; e.sSheet = (e.sSheet || 0) + Math.max(0, d.line.needEA - d.confGiven); }
-        else if (d.part && !mine) e.sPart += sh;               // โอนจาก C4 ลงชีตแล้ว ทีมยังไม่ปิด — ทุกเครื่องเห็น
-        else e.sLocal += sh;
-        // บิลที่ปิดงานแล้วแต่ได้ของเพิ่ม (ยกจาก C4/ยิงเพิ่ม) ที่ยังไม่ได้ลงชีต — ต้องกดยืนยันใบโอน/ยืนยันเพิ่ม
-        if (d.conf && d.giveEA > d.confGiven) (e.pend ||= []).push({ who:custOf(d.line).name, ea:d.giveEA - d.confGiven });
+        else if (open) { e.sOpen += sh; e.openBy = by; }
+        else if (d.part || d.pre) e.sPart += sh;               // โอนจาก C4 ลงชีตแล้ว / เช็คตามร้าน — ทีมยังไม่เริ่ม
+        else e.sNone += sh;
+        // บิลที่ปิดงานแล้วแต่ได้ของเพิ่ม (ยกจาก C4/ยิงเพิ่ม) ในเครื่องนี้ ที่ยังไม่ได้ลงชีต — ต้องกดยืนยันใบโอน/ยืนยันเพิ่ม
+        const own = d.giveEA - (d.remote || 0);
+        if (d.conf && own > d.confGiven) (e.pend ||= []).push({ who:custOf(d.line).name, ea:own - d.confGiven });
       });
       if (used) m[r.product.id].stranded += r.res.stranded || 0;   // เศษที่แบ่งไม่ลง ยกมาเติมแค่ส่วนที่ขาดพอ
-      if (tAll(r.product.id, view, rnd)) slot(r.product, j.team.name);
     });
   });
   return Object.values(m).map(e => {
@@ -4362,7 +4381,9 @@ function transferList() {
     e.tNew = keys.reduce((s, k) => s + Math.max(0, (state.tscans[k] || 0) - (sent[k] || 0)), 0);   // ยังไม่ได้ออกใบโอน
     const tu = state.tused || {};
     e.tPend = keys.reduce((s, k) => s + Math.max(0, (state.tscans[k] || 0) - (tu[k] || 0)), 0);   // ยังไม่ลงชีต ยืนยันเช็ค (เครื่องอื่นยังไม่เห็น)
-    e.short = Math.max(0, e.sConf + e.sLocal + e.sPart - e.stranded);
+    e.short = Math.max(0, e.sConf + e.sOpen + e.sPart - e.stranded);
+    e.unchk = e.sNone;
+    e.rt = liveTrans(e.p.id, rnd, view);                                                    // เครื่องอื่นยกมาแล้ว ยังไม่ยืนยันใบโอน
     return e;
   });
 }
@@ -4373,13 +4394,17 @@ function renderTransfer() {
   $('roundSeg3').innerHTML = ROUNDS.map(r =>
     `<button class="${r.n===state.round?'on':''}" onclick="setRound(${r.n})">${r.label}</button>`).join('');
   renderChanPick();
+  const liveOk = LIVE.day === TODAY && LIVE.wh === WAREHOUSE;
   $('transNote').innerHTML =
     `ของที่ <b>${WAREHOUSE}</b> ไม่พอตามออเดอร์ ยิงตรงนี้เพื่อยกมาจาก <b>${FROM_WH}</b><br>
-     <span class="txt-muted">ยอดขาดของงานที่<b>ปิดงานแล้ว</b>มาจากชีต ยืนยันเช็ค — ทุกเครื่องเห็นเหมือนกัน ·
-       งานที่ยังไม่ปิด เห็นเฉพาะเครื่องที่ยิงค้างไว้<br>
+     <span class="txt-muted">เห็นของ<b>ทุกทีม</b> หักยอดที่ทุกทีมเช็คแล้ว: งานที่<b>ปิดงานแล้ว</b>ใช้ยอดจากชีต ยืนยันเช็ค ·
+       งานที่<b>ยังไม่ปิด</b>ใช้ยอดที่ทุกเครื่องกำลังเช็ค (ชีต กำลังเช็ค อ่านใหม่ทุก 1 นาที) ·
+       ทีมที่ยังไม่มีใครเริ่มเช็ค อยู่ในปุ่ม <b>ยังไม่เช็ค</b><br>
        กด ✓ ยืนยันใบโอน = ลงใบโอน + ลงชีต ยืนยันเช็ค ให้ทุกเครื่องเห็นว่าบิลไหนได้ของจาก C4 แล้ว
        (บิลที่ปิดงานแล้ว = <b>ยืนยันเพิ่ม</b> · บิลที่ยังไม่ปิด = <b>โอนจาก C4 · รอปิดงาน</b> ทีม/ร้านไม่ต้องยิงซ้ำ)
-       ${confReady() ? '' : ' · <b class="txt-danger">ยังอ่านชีต ยืนยันเช็ค ไม่ได้ — ยอดของงานที่ปิดแล้วอาจยังไม่ขึ้น</b>'}</span>`;
+       ${confReady() ? '' : ' · <b class="txt-danger">ยังอ่านชีต ยืนยันเช็ค ไม่ได้ — ยอดของงานที่ปิดแล้วอาจยังไม่ขึ้น</b>'}
+       ${liveOk ? ` · อ่านยอดที่กำลังเช็คล่าสุด ${hhmmOf(liveAt)}`
+                : ' · <b class="txt-danger">ยังอ่านชีต กำลังเช็ค ไม่ได้ — ยอดที่เครื่องอื่นกำลังเช็คยังไม่ขึ้น</b>'}</span>`;
 
   const all = transferList();
   /* เตือน: ยกของมาแล้วแต่ยังไม่ได้กดยืนยัน — ชีต/เครื่องอื่นยังไม่รู้ (บิลที่ปิดแล้วยังเห็นว่าขาดเท่าเดิม · ทีมที่ยังไม่ปิดจะไม่รู้ว่ามีของมาแล้ว) */
@@ -4393,51 +4418,57 @@ function renderTransfer() {
     slipN ? `🧾 ยังไม่ออกใบโอน ${fmtN(slipN)} รายการ` : ''].filter(Boolean);
   if (warn.length) $('transNote').innerHTML += `<div class="note" style="margin:8px 0 0">${warn.join('<br>')}</div>`;
   const rb = returnsBanner(); if (rb) $('transNote').innerHTML += `<div style="margin-top:8px">${rb}</div>`;
-  const needList = all.filter(e => e.short > 0), doneList = all.filter(e => e.tr > 0);
-  const totShort = needList.reduce((a,b) => a + b.short, 0);
+  const needList = all.filter(e => e.short > 0), doneList = all.filter(e => e.tr > 0), noneList = all.filter(e => e.unchk > 0);
   $('transStats').innerHTML = `
     <div class="stat ${needList.length?'danger':'success'}"><div class="l">ต้องยกจาก ${FROM_WH}</div>
       <div class="v">${needList.length}</div><div class="l" style="margin:4px 0 0">รายการ</div></div>
     <div class="stat"><div class="l">ยกมาแล้ว</div><div class="v">${doneList.length}</div>
-      <div class="l" style="margin:4px 0 0">รายการ</div></div>`;
+      <div class="l" style="margin:4px 0 0">รายการ</div></div>
+    ${noneList.length ? `<div class="stat"><div class="l">ยังไม่มีใครเช็ค</div><div class="v">${noneList.length}</div>
+      <div class="l" style="margin:4px 0 0">รายการ</div></div>` : ''}`;
 
   const f = state.tfilter || 'need';
-  const cnt = { need:needList.length, done:doneList.length, all:all.length };
-  $('transChips').innerHTML = [['need',`ต้องยก ${cnt.need}`],['done',`ยกแล้ว ${cnt.done}`],['all',`ทั้งหมด ${cnt.all}`]]
+  const cnt = { need:needList.length, none:noneList.length, done:doneList.length, all:all.length };
+  $('transChips').innerHTML = [['need',`ต้องยก ${cnt.need}`],['none',`ยังไม่เช็ค ${cnt.none}`],['done',`ยกแล้ว ${cnt.done}`],['all',`ทั้งหมด ${cnt.all}`]]
     .map(([k,t]) => `<button class="chip ${k===f?'on':''}" onclick="setTFilter('${k}')">${t}</button>`).join('');
 
   const q = $('qInput3').value.trim().toLowerCase();
   let list = all.filter(e => {
     if (e.p.id === lastHit) return true;
     if (f === 'need' && e.short <= 0) return false;
+    if (f === 'none' && e.unchk <= 0) return false;
     if (f === 'done' && e.tr <= 0) return false;
     if (q && !(e.p.name.toLowerCase().includes(q) || e.p.units.some(u => String(u.code).includes(q)))) return false;
     return true;
   });
   /* ตัวที่ต้องยกไม่ถึง 1 ลัง อยู่บนสุด เพราะต้องรื้อลังแบ่ง เสียเวลากว่ายกทั้งลัง
-     ถัดมาคือตัวที่ยกเต็มลัง ตัวที่ไม่ต้องยกแล้วลงล่าง · ในกลุ่มเดียวกันยอดมากอยู่บน */
-  const csRank = e => e.short <= 0 ? 2 : (e.short < e.p.units[0].qtyEA ? 0 : 1);
+     ถัดมาคือตัวที่ยกเต็มลัง · ตัวที่ยังไม่มีใครเช็ค · ตัวที่ไม่ต้องยกแล้วลงล่าง · ในกลุ่มเดียวกันยอดมากอยู่บน */
+  const csRank = e => e.short > 0 ? (e.short < e.p.units[0].qtyEA ? 0 : 1) : e.unchk > 0 ? 2 : 3;
   list.sort((a,b) => (a.p.id===lastHit ? -1 : b.p.id===lastHit ? 1
-    : csRank(a) - csRank(b) || b.short - a.short || a.p.name.localeCompare(b.p.name,'th')));
+    : csRank(a) - csRank(b) || (b.short || b.unchk) - (a.short || a.unchk) || a.p.name.localeCompare(b.p.name,'th')));
 
   if (!list.length) {
     $('transList').innerHTML = `<div class="empty">${
-      f === 'need' ? `ของครบที่ ${WAREHOUSE} แล้ว ไม่ต้องยกจาก ${FROM_WH}` : 'ไม่มีรายการที่ตรงเงื่อนไข'}</div>`;
+      f === 'need' ? (noneList.length
+        ? `ของที่ทีมเช็คแล้วยังไม่มีตัวไหนขาด · ยังไม่มีใครเช็ค ${fmtN(noneList.length)} รายการ (ปุ่ม ยังไม่เช็ค)`
+        : `ของครบที่ ${WAREHOUSE} แล้ว ไม่ต้องยกจาก ${FROM_WH}`) : 'ไม่มีรายการที่ตรงเงื่อนไข'}</div>`;
     keepFocus(); return;
   }
 
   $('transList').innerHTML = list.map(e => {
     const p = e.p, units = p.units, pu = pickUnit(p);
-    const cls = e.short === 0 ? (e.tr ? 'ok' : 'none') : 'short';
+    const cls = e.short ? 'short' : e.tr ? 'ok' : 'none';
+    const rtEA = e.rt.reduce((s, x) => s + x.ea, 0);
     return `<div class="srow ${cls} ${p.id===lastHit?'hit':''}" id="sku-${p.id}">
       ${thumbHtml(p)}
       <div class="smain">
         <div class="stop">
           <div class="sname">${esc(p.name)}</div>
-          <span class="badge ${e.short?'badge-danger':e.tr?'badge-ok':'badge-warn'}"
-            >${e.short ? 'ต้องยก' : e.tr ? 'ยกแล้ว' : 'พอที่ '+WAREHOUSE}</span>
+          <span class="badge ${e.short?'badge-danger':e.unchk?'badge-warn':e.tr?'badge-ok':'badge-warn'}"
+            >${e.short ? 'ต้องยก' : e.unchk ? 'ยังไม่เช็ค' : e.tr ? 'ยกแล้ว' : 'พอที่ '+WAREHOUSE}</span>
         </div>
         <div class="smeta">${units.map(u=>u.code).join(' · ')} · ทีม ${esc(e.team)}</div>
+        ${custBreak({ product:p, detail:e.det || [] })}
         <div class="trow-need">
           <span><i>ต้องออก</i> <b>${fmtUnits(e.need, units, 1)}</b></span>
           ${e.short && e.short < e.need ? `<span><i>ต้องยกจาก ${FROM_WH}</i> <b class="lo">${fmtUnits(e.short, units, 1)}</b></span>` : ''}
@@ -4473,7 +4504,12 @@ function renderTransfer() {
            ยังไม่ได้ลงชีต กด ✓ ยืนยันใบโอน</div>`
           : e.tPend ? `<div class="note">📝 ยกมา <b>${fmtUnits(e.tPend, units, 1)}</b> ยังไม่ได้ยืนยัน — เครื่องอื่นยังไม่เห็น กด ✓ ยืนยันใบโอน</div>` : ''}
         ${e.sPart ? `<div class="rounds">⏳ โอนจาก C4 ลงชีตแล้ว รอทีม/ร้านปิดงาน — ยังขาด <b>${fmtUnits(e.sPart, units, 1)}</b></div>` : ''}
-        ${e.sLocal ? `<div class="rounds">⏳ ยังไม่ปิดงาน ขาด <b>${fmtUnits(e.sLocal, units, 1)}</b> — ยอดในเครื่องนี้</div>` : ''}
+        ${e.sOpen ? `<div class="rounds">⏳ ทีมยังไม่ปิดงาน ขาด <b>${fmtUnits(e.sOpen, units, 1)}</b> — ยอดที่กำลังเช็ค${
+            e.openBy && e.openBy.length ? ` (${esc(e.openBy.join(' · '))})` : ''}</div>` : ''}
+        ${e.unchk ? `<div class="rounds">○ ทีม ${esc(e.team)} ยังไม่มีใครเริ่มเช็ค — ต้องออก <b>${fmtUnits(e.unchk, units, 1)}</b>
+                     ยังไม่รู้ว่า ${WAREHOUSE} มีพอไหม</div>` : ''}
+        ${rtEA ? `<div class="rounds">🚚 เครื่องอื่นยกมาแล้ว <b>${fmtUnits(rtEA, units, 1)}</b> ยังไม่ยืนยันใบโอน
+                   (${esc([...new Set(e.rt.map(x => nickOf(x.by)))].join(' · '))}) — หักให้แล้ว</div>` : ''}
         ${e.tNew ? `<div class="rounds">🧾 ยังไม่ออกใบโอน <b>${fmtUnits(e.tNew, units, 1)}</b></div>` : ''}
       </div>
     </div>`;
@@ -4589,16 +4625,19 @@ function confirmTransfer() {
       queueRows(slip.rows, { round:state.round, team:`โอน ${FROM_WH}→${WAREHOUSE}`, what:`ออกใบโอน` }, SHEET_MOVE, true))
     slip.commit();
   let nAdd = 0, nPart = 0;
+  const mk = [];                             // แถวหมุดในชีต กำลังเช็ค (liveMarks)
   adds.forEach(a => {
     const tl = `${a.j.team.code} ${a.j.team.name}${chanSfx()}`;
     if (a.rows.length && queueRows(a.rows, { round:a.j.round, team:tl, what:`ยืนยันเพิ่ม ทีม ${a.j.team.name}` }, SHEET_DONE, true)) {
-      markSent(a.c, true, a.acc); nAdd += a.rows.length;
+      markSent(a.c, true, a.acc); nAdd += a.rows.length; mk.push([ADD_TXT, tl, a.j.round]);
     }
     // แยกคิว — ชื่อกลุ่มใน _log ไม่ขึ้นต้นด้วยรหัสทีม จะได้ไม่ขึ้นว่างานนี้ "ยืนยันแล้ว" (ทีมยังไม่ได้ปิดงาน)
     if (a.part.rows.length && queueRows(a.part.rows, { round:a.j.round, team:`โอน ${FROM_WH} → ${tl}`, what:`โอนจาก ${FROM_WH}` }, SHEET_DONE, true)) {
       a.part.commit(); nPart += a.part.rows.length;
     }
   });
+  if (CHECKER && (slip.rows.length || nAdd || nPart)) mk.push(['ยืนยันใบโอน', `โอน ${FROM_WH}→${WAREHOUSE}${chanSfx()}`, state.round]);
+  liveMarks(mk);
   save(); renderTransfer();
   toast(`✓ ${[slip.rows.length ? `ใบโอน ${fmtN(slip.rows.length)} แถว` : '', nAdd ? `ยืนยันเพิ่ม ${fmtN(nAdd)} แถว` : '',
               nPart ? `โอนเติมงานที่ยังไม่ปิด ${fmtN(nPart)} แถว` : ''].filter(Boolean).join(' · ')}` +
@@ -5055,6 +5094,140 @@ async function loadConf(force) {
   } catch(e) { console.warn('loadConf', e); }
   finally { confBusy = false; }
 }
+
+/* ═══ ยอดที่เครื่องอื่นกำลังเช็ค (ยังไม่ปิดงาน) — อ่านจากชีต กำลังเช็ค (BUILD 39 · ผู้ใช้ขอ 01/10) ═══
+   "ตอนยิงโอนย้ายเห็นแค่ของทีมที่เช็คตามทีมไว้ ที่จริงต้องเห็นของทุกทีม แต่หักยอดที่ทุกทีมเช็คไปแล้วออก"
+   เดิมงานที่ยังไม่ปิด รู้ยอดเฉพาะเครื่องที่ยิง → หน้าโอนย้ายของเครื่องอื่นไม่เห็นงานนั้นเลย
+   ทุกครั้งที่ยิงลงชีต กำลังเช็ค อยู่แล้ว (ส่งทุก 15 วิ) — ตั้งแต่ BUILD 39 ช่อง "ยืนยันแล้ว" ของแถวยอดทีม/โอน = "รอบ N · ค้างยืนยัน X ชิ้น"
+     X = ยอดของเครื่องนั้นที่ยังไม่ได้ลงชีต ยืนยันเช็ค (liveLeft) — ช่อง "ยิงแล้ว" ปนยอดจากชีตอยู่ เอามาบวกตรง ๆ จะนับซ้ำ
+   ปิดงาน / ยืนยันเพิ่ม / ยืนยันใบโอน → ลงแถวหมุด "— ปิดงาน —" ต่อท้าย (liveMarks) แถวก่อนหมุดถือว่าลงชีตไปแล้ว
+     ปิดงาน = ทุกเครื่อง (ชีตเป็นยอดจริงแล้ว · ยิงค้างไว้เครื่องหนึ่งแล้วย้ายไปยิงซ้ำอีกเครื่อง จะได้ไม่นับซ้ำ)
+     ยืนยันเพิ่ม / ยืนยันใบโอน = เฉพาะเครื่องที่กด
+   แถวรุ่นก่อน 39 (ช่องนี้ว่าง): รอบเดาจากว่าสินค้าอยู่รอบไหน/ยอดต้องออก · ยอดค้าง = ยิงแล้ว − ที่ชีตปิดงานแล้ว
+     งานที่ _log บอกว่าปิดแล้วแต่ไม่มีหมุด = ไม่นับ · ยอดโอนรุ่นก่อนไม่นับ (ไม่รู้ว่าลงชีตไปเท่าไหร่)
+   ใช้แสดงในหน้าโอนย้ายเท่านั้น (computeJob(…, remote)) — ไม่ลงชีตแทนเครื่องอื่น */
+const LIVE_LEFT = 'ค้างยืนยัน';
+const LIVE_MARK = { 'ปิดงาน':'close', [ADD_TXT]:'add', 'ยืนยันใบโอน':'slip' };
+let LIVE = { day:'', wh:'', rows:[] }, liveAt = 0, liveBusy = false, liveVer = 0, liveIdx = null;
+const hhmmOf = ts => { const d = new Date(ts), t2 = x => String(x).padStart(2,'0'); return `${t2(d.getHours())}:${t2(d.getMinutes())}`; };
+
+async function loadLive(force) {
+  if (SRC !== 'real' || !ORDERS_LIVE || liveBusy || document.hidden) return;
+  if (!force && LIVE.day === TODAY && LIVE.wh === WAREHOUSE && Date.now() - liveAt < 20000) return;
+  liveBusy = true;
+  const day = TODAY, wh = WAREHOUSE;
+  try {
+    const res = await gvizJsonp(LOG_SRC.id, { sheet:SHEET_LIVE, tq:`select * where A = '${thaiDate(day)}'` });
+    if (res.status === 'error') throw new Error((res.errors || [{}])[0].detailed_message || 'อ่าน กำลังเช็ค ไม่ได้');
+    if (day !== TODAY || wh !== WAREHOUSE) return;          // เปลี่ยนวัน/คลังระหว่างอ่าน
+    const cols = ((res.table && res.table.cols) || []).map(c => nrm(c.label));
+    const want = ['คลัง','บาร์โค้ด','หน่วย','ต้องออก','-','ทดแทน','ชื่อผู้ยิง','เวลายิง','เครื่อง','ยิงแล้ว(EA)','ยืนยันแล้ว','กลุ่มที่เช็ค'];
+    const ix = want.map(n => cols.indexOf(n));
+    const list = (res.table && res.table.rows) || [];
+    if (list.length && ix.some(i => i < 0)) throw new Error('ชีต กำลังเช็ค หัวคอลัมน์ไม่ครบ');
+    const rows = list.map(r => { const c = (r.c || []).map(cellTxt); return ix.map(i => c[i] || ''); });
+    const same = LIVE.day === day && LIVE.wh === wh && JSON.stringify(LIVE.rows) === JSON.stringify(rows);
+    LIVE = { day, wh, rows }; liveAt = Date.now();
+    if (!same) { liveVer++; loadConf(); }                   // มีคนปิดงาน (หมุด) → ยอดในชีต ยืนยันเช็ค ต้องตามมาพร้อมกัน
+    if (onTransfer()) {                                      // เวลาอ่านล่าสุดบนหน้าก็ต้องขยับ
+      const ae = document.activeElement;
+      if (!(ae && ae.matches && ae.matches('input.qty'))) renderTransfer();   // กำลังพิมพ์จำนวน อย่าวาดทับ
+    }
+  } catch(e) { console.warn('loadLive', e); }
+  finally { liveBusy = false; }
+}
+setInterval(() => { if (onTransfer()) loadLive(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && onTransfer()) loadLive(true); });
+
+/** แถวชีต กำลังเช็ค → ยอดค้างของเครื่องอื่น { pools:{'สินค้า@รอบ':{ป้าย:ชิ้น}}, who:{'รอบ|ทีม':{เครื่อง:{by,at,tag}}}, tWho:{'สินค้า@รอบ':[…]} } */
+function liveIndex() {
+  const key = [liveVer, confVer, doneAt, TODAY, WAREHOUSE].join('|');
+  if (liveIdx && liveIdx.key === key && liveIdx.jobs === JOBS) return liveIdx;
+  const idx = liveIdx = { key, jobs:JOBS, pools:{}, who:{}, tWho:{} };
+  if (LIVE.day !== TODAY || LIVE.wh !== WAREHOUSE) return idx;
+  const wh = WAREHOUSE, tPre = `โอน ${FROM_WH}→${wh}`, AJ = allJobs();
+  const byName = {}; Object.values(byId).forEach(p => { if (!byName[p.name]) byName[p.name] = p; });
+  const teamOf = {}; AJ.forEach(j => Object.keys(j.skus).forEach(pid => { teamOf[pid] = String(j.team.code); }));
+  /* รวมค่าของบรรทัดสินค้านี้ในงาน (ทีม × รอบ) เฉพาะช่องทางในป้าย · ไม่มีสินค้านี้ในงาน = null */
+  const lineSum = (tc, rnd, pid, tag, fn) => {
+    const j = AJ.find(x => x.round === rnd && String(x.team.code) === tc), s = j && j.skus[pid]; if (!s) return null;
+    const ch = tagChans(tag), ls = s.lines.map(capLine).filter(l => !ch || ch.includes(chanOf(l.ref).key));
+    return ls.length ? ls.reduce((a, l) => a + fn(l), 0) : null;
+  };
+  const marks = [], data = [];
+  LIVE.rows.forEach((c, i) => {
+    const [whc, code, unit, need, how, sub, by, at, dev, run, left, grp] = c;
+    const tm = grp.match(/^(\d+) \S/), isT = grp.startsWith(tPre);
+    if (!(tm && whc === wh) && !isT) return;               // เอาแค่ยอดทีมของคลังนี้ + โอนเข้าคลังนี้
+    const tag = tagOfGroup(grp), rm = left.match(/รอบ\s*(\d+)/), rnd = rm ? +rm[1] : 0;
+    const kind = /✓/.test(left) && LIVE_MARK[how];
+    if (kind) { if (rnd) marks.push({ i, dev, kind, team: tm ? tm[1] : '', tag, rnd }); return; }
+    if (dev === DEVICE) return;                             // ยอดของเครื่องนี้ใช้ในเครื่อง (สดกว่า)
+    const p = /^แทน /.test(sub) ? byName[sub.slice(4).trim()] : (byCode[code] || {}).p;
+    if (!p) return;
+    const lm = left.match(new RegExp(LIVE_LEFT + '\\s*([\\d.,]+)')), u = p.units.find(x => x.label === unit);
+    data.push({ i, dev, by, at, tag, pid:p.id, tc: tm ? tm[1] : (teamOf[p.id] || ''), tr:isT, rnd,
+                left: lm ? numOf(lm[1]) : null, run:numOf(run), need: u && !sub ? numOf(need) * u.qtyEA : 0 });
+  });
+  /* แถวรุ่นก่อน 39 ไม่บอกรอบ — สินค้ามีในรอบเดียว = รอบนั้น · มีสองรอบ = ดูยอดต้องออก · ยังไม่รู้ = รอบของแถวใกล้สุดของเครื่องและกลุ่มเดียวกัน */
+  const rnds = ROUNDS.map(x => x.n);
+  data.forEach(r => {
+    if (r.rnd || r.tr) return;
+    const cand = rnds.filter(n => lineSum(r.tc, n, r.pid, r.tag, l => l.needEA) !== null);
+    if (cand.length === 1) r.rnd = cand[0];
+    else if (cand.length > 1 && r.need) {
+      const hit = cand.filter(n => Math.abs(lineSum(r.tc, n, r.pid, r.tag, l => l.needEA) - r.need) < 0.5);
+      if (hit.length === 1) r.rnd = hit[0];
+    }
+  });
+  data.forEach(r => {
+    if (r.rnd || r.tr) return;
+    let best = null;
+    data.forEach(x => { if (x.rnd && !x.tr && x.dev === r.dev && x.tc === r.tc && x.tag === r.tag &&
+                            (!best || Math.abs(x.i - r.i) < Math.abs(best.i - r.i))) best = x; });
+    if (best) r.rnd = best.rnd;
+  });
+  /* แถวนี้ลงชีต ยืนยันเช็ค ไปแล้วหรือยัง — มีหมุดตามหลัง:
+       ยอดทีม: ปิดงาน (เครื่องไหนก็ได้) / ยืนยันเพิ่ม (เครื่องเดียวกัน) ของทีม+รอบเดียวกัน ที่ช่องทางครอบแถวนี้
+       ยอดโอน: ยืนยันใบโอน / ปิดงาน / ยืนยันเพิ่ม ของทีมนั้น — เครื่องเดียวกัน (ปิดงานก็ใช้ของโอนในเครื่องไปด้วย)
+     งานที่ยังไม่มีหมุดเลยแต่ _log บอกว่าปิดแล้ว (เครื่องรุ่นก่อน 39 ปิด) = ถือว่าลงชีตแล้วทั้งหมด */
+  const doneEv = (rnd, tc) => (DONE.day === TODAY && DONE.job[`${rnd}|${tc}`]) || [];
+  const covered = r => marks.some(m => m.i > r.i && m.rnd === r.rnd && (r.tr
+        ? m.dev === r.dev && (m.kind === 'slip' || m.team === r.tc)
+        : m.team === r.tc && tagInside(r.tag, tagChans(m.tag)) && (m.kind === 'close' || m.dev === r.dev)))
+    || (!r.tr && !marks.some(m => m.team === r.tc && m.rnd === r.rnd)
+        && doneEv(r.rnd, r.tc).some(e => tagInside(r.tag, tagChans(e.tag || TAG_ALL))));
+  const last = {};
+  data.forEach(r => { if (r.rnd) last[[r.dev, r.tr ? 't' : 'j', r.tag, r.pid, r.rnd].join('|')] = r; });
+  Object.values(last).forEach(r => {
+    if (covered(r)) return;
+    let ea = r.left;
+    if (ea === null) {
+      if (r.tr) return;                                     // ยอดโอนรุ่นก่อน 39 — ไม่รู้ว่าลงชีตไปเท่าไหร่ ไม่นับ (แบบเดิม)
+      const cf = lineSum(r.tc, r.rnd, r.pid, r.tag, l => { const x = confOf(l); return x && !x.partial ? Math.min(l.needEA, x.given) : 0; });
+      ea = Math.max(0, r.run - (cf || 0));
+    }
+    if (!r.tr) {                                            // มีคนกำลังเช็คงานนี้ (ยังไม่ปิด)
+      const w = (idx.who[`${r.rnd}|${r.tc}`] ||= {})[r.dev + '|' + r.tag] ||= { by:r.by, at:r.at, tag:r.tag };
+      if (r.at > w.at) w.at = r.at;
+    }
+    if (ea <= 0) return;
+    const m = idx.pools[r.pid + '@' + r.rnd] ||= {}; m[r.tag] = (m[r.tag] || 0) + ea;
+    if (r.tr) (idx.tWho[r.pid + '@' + r.rnd] ||= []).push({ by:r.by, ea, tag:r.tag });
+  });
+  return idx;
+}
+const livePools = (pid, rnd) => liveIndex().pools[pid + '@' + rnd] || {};
+/** เครื่องอื่นที่กำลังเช็คงานนี้ (ช่องทางทับกับที่เลือก) — รวมคนเดียวกันหลายช่องทางเป็นแถวเดียว */
+const liveWho = (j, view = viewSet()) => {
+  const m = {};
+  Object.values(liveIndex().who[`${j.round}|${j.team.code}`] || {}).forEach(x => {
+    if (!tagOverlap(x.tag, view)) return;
+    const k = x.by; if (!m[k] || x.at > m[k].at) m[k] = x;
+  });
+  return Object.values(m);
+};
+const liveTrans = (pid, rnd, view = viewSet()) => (liveIndex().tWho[pid + '@' + rnd] || []).filter(x => tagOverlap(x.tag, view));
 
 /** การยืนยันทั้งหมดของงาน/ร้านนี้ (ทุกเครื่อง) — ของเครื่องนี้ที่เพิ่งกดขึ้นทันที ไม่ต้องรอชีต */
 function doneList(kind, key) {
@@ -5574,9 +5747,31 @@ function liveRow(e) {
     'เครื่อง': DEVICE,
     'ยิงแล้ว(EA)': run, 'ยิงแยกหน่วย': fmtUnitsTxt(run, p.units),
     'เลขที่ใบจอง': '', 'ชื่อร้าน': e.store ? ((STORES.find(s=>s.code===e.store)||{}).name || '') : '',
-    'ยืนยันแล้ว': '', 'รหัสเซล': '',
+    'ยืนยันแล้ว': (e.store || e.chan) ? '' : liveLeft(e), 'รหัสเซล': '',
     'กลุ่มที่เช็ค': grp,
   };
+}
+/** ช่อง "ยืนยันแล้ว" ของแถวยอดทีม/โอน = "รอบ 1 · ค้างยืนยัน 24 ชิ้น" — ยอดของเครื่องนี้ที่ยังไม่ได้ลงชีต ยืนยันเช็ค
+ *  เครื่องอื่นอ่านไปใช้ในหน้าโอนย้าย (loadLive) · ยอดทีม = กองของรอบ+ป้ายนี้ ไม่นับของโอน (ของโอนจดในแถวโอนเอง) */
+function liveLeft(e) {
+  const rnd = e.round || state.round, tag = e.tag || TAG_ALL;
+  const ea = e.src ? tLeft(e.pid, rnd, tag)
+                   : Math.max(0, (poolsOf(e.pid, rnd)[tag] || 0) - tLeft(e.pid, rnd, tag));
+  return `รอบ ${rnd} · ${LIVE_LEFT} ${ea} ชิ้น`;
+}
+/** ปิดงาน / ยืนยันเพิ่ม / ยืนยันใบโอน → แถวหมุดในชีต กำลังเช็ค บอกเครื่องอื่นว่ายอดค้างที่จดไว้ก่อนหน้านี้ลงชีตแล้ว
+ *  list = [[อะไร, กลุ่ม, รอบ], …] · ต่อท้ายคิว หลังแถวที่ลงชีต ยืนยันเช็ค */
+function liveMarks(list) {
+  if (!list.length) return;
+  const d = new Date(), t2 = x => String(x).padStart(2,'0');
+  list.forEach(([what, grp, rnd]) => liveBuf.push({
+    'วันที่': thaiDate(TODAY), 'คลัง': WAREHOUSE, 'บาร์โค้ด': '', 'สินค้า': `— ${what} —`, 'หน่วย': '',
+    'ต้องออก': '', 'ยิงแล้ว': '', 'ขาด': '', '-': what, 'ทดแทน': '', 'ชื่อผู้ยิง': CHECKER,
+    'วันที่ยิง': thaiDate(d), 'เวลายิง': `${t2(d.getHours())}.${t2(d.getMinutes())}.${t2(d.getSeconds())}`,
+    'เครื่อง': DEVICE, 'ยิงแล้ว(EA)': '', 'ยิงแยกหน่วย': '', 'เลขที่ใบจอง': '', 'ชื่อร้าน': '',
+    'ยืนยันแล้ว': `รอบ ${rnd} · ✓ ${what}`, 'รหัสเซล': '', 'กลุ่มที่เช็ค': grp,
+  }));
+  flushLive();
 }
 /** เหมือน fmtUnits แต่เป็นข้อความล้วน — ลงชีตต้องไม่มีแท็ก HTML ติดไป */
 const fmtUnitsTxt = (ea, units) => String(fmtUnits(ea, units)).replace(/<[^>]*>/g, '');
@@ -5964,6 +6159,7 @@ function confirmJob() {
   const what = more ? `ยืนยันเพิ่ม ทีม ${job.team.name}` : `ปิดงานทีม ${job.team.name}`;
   if (queueRows(rows, { round:job.round, team:`${job.team.code} ${job.team.name}${chanSfx()}`, what })) {
     markSent(c, false, acc);                 // ยอดที่ลงชีตแล้ว ไม่นับซ้ำในเครื่องนี้
+    liveMarks([[more ? ADD_TXT : 'ปิดงาน', `${job.team.code} ${job.team.name}${chanSfx()}`, job.round]]);   // หน้าโอนย้ายเครื่องอื่นเลิกนับยอดค้างเก่า
     const d = new Date(), t2 = x => String(x).padStart(2,'0');
     (state.doneJob ||= {})[job.key + '|' + curTag()] = { at:`${t2(d.getHours())}:${t2(d.getMinutes())}`, by:CHECKER, rows:rows.length };
     save();
