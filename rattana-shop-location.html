@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.24</title>
+<title>Rattana Shop Location v1.25</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -265,7 +265,7 @@ details.card:not([open])>summary{border-bottom:none}
 
 <header>
   <button class="icon-btn" id="btnHome" title="แผนที่ทั้งหมด" onclick="goHome()" style="display:none">⌂</button>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.24 · 2026-10-01</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.25 · 2026-10-01</span></div>
   <div class="hdr-right">
     <span class="cur-map" id="curMapName"></span>
     <span class="sync-badge" id="syncBadge" title=""></span>
@@ -610,29 +610,77 @@ function parseCoord(str) {
 const isNum = t => /^-?\d+(\.\d+)?$/.test(t);
 const looksCoord = t => /^https?:/i.test(t) || /^-?\d{1,3}\.\d+\s*[,\s]\s*-?\d{1,3}\.\d+$/.test(t);
 
-/* Detect header columns */
-function detectHeader(row) {
-  const h = row.map(c => clean(c).toLowerCase());
-  const find = (re, not) => h.findIndex(c => re.test(c) && !(not && not.test(c)));
-  let name = find(/ชื่อ/, /รหัส|code/);
-  if (name < 0) name = find(/ร้าน|name|shop|store|customer|ลูกค้า/, /รหัส|code|^id|\bid\b/);
-  const lat = find(/^lat|ละติ|ลาติ/);
-  const lng = find(/^(lng|lon|long)|ลองติ|ลองจิ/);
-  const coord = find(/พิกัด|location|latlng|lat\s*,\s*l|coordinate|gps|ลิงก์|link|url|map/);
+/* ----- Column detection: coordinates are found from the VALUES (not the header names) ----- */
+const numOf = t => { t = String(t || '').replace(/[,\s]/g, ''); return /^-?\d+\.\d+$/.test(t) ? parseFloat(t) : NaN; };  // decimals only
+const isLatV = v => v >= 5 && v <= 21;      // Thailand latitude
+const isLngV = v => v >= 97 && v <= 106;    // Thailand longitude
+const DAY_RE = /จันทร์|อังคาร|พุธ|พฤหัส|ศุกร์|เสาร์|อาทิตย์|^(จ|อ|พ|พฤ|ศ|ส|อา)\.?$|^(mon|tue|wed|thu|fri|sat|sun)/i;
+
+function detectColumns(rows, first) {
+  const head = (rows[first] || []).map(c => clean(c).toLowerCase());
+  const body = rows.slice(first, first + 400).filter(r => r.some(c => c));
+  const nCol = Math.max(0, ...body.map(r => r.length));
+  const st = [];
+  for (let c = 0; c < nCol; c++) {
+    let filled = 0, lat = 0, lng = 0, pair = 0, num = 0, day = 0, codey = 0;
+    const uniq = new Set();
+    body.forEach(r => {
+      const t = clean(r[c]); if (!t) return;
+      filled++;
+      const v = numOf(t);
+      if (!isNaN(v)) { num++; if (isLatV(v)) lat++; if (isLngV(v)) lng++; }
+      else {
+        const cc = (looksCoord(t) || /google\.[a-z.]+\/maps|maps\.app\.goo/i.test(t)) ? parseCoord(t) : null;
+        if (cc && isLatV(cc.lat) && isLngV(cc.lng)) pair++;
+        if (DAY_RE.test(t)) day++;
+        if (/^[A-Za-z0-9\-_/.]+$/.test(t)) codey++;
+        uniq.add(t);
+      }
+    });
+    st.push({ c, filled, lat, lng, pair, num, day, codey, uniq: uniq.size, h: head[c] || '' });
+  }
+  const need = x => Math.max(2, x.filled * 0.5);
+  const hdr = (x, re) => re.test(x.h) ? 1 : 0;
+  const best = (list, score) => list.sort((a, b) => score(b) - score(a))[0];
+
+  // latitude / longitude columns (header name only breaks ties)
+  const latC = best(st.filter(x => x.lat >= need(x)), x => x.lat * 10 + hdr(x, /lat|ละติ|ลาติ/));
+  const lngC = best(st.filter(x => x !== latC && x.lng >= need(x)), x => x.lng * 10 + hdr(x, /lng|lon|ลองติ|ลองจิ/));
+  const coordC = (latC && lngC) ? null : best(st.filter(x => x.pair >= need(x)), x => x.pair);
+  if (!(latC && lngC) && !coordC) return null;
+
+  const used = new Set([latC, lngC, coordC].filter(Boolean).map(x => x.c));
+  const find = (re, not) => st.findIndex(x => !used.has(x.c) && re.test(x.h) && !(not && not.test(x.h)));
+  // shop name: header first (ชื่อร้าน › ชื่อ › ร้าน/name), else the text column with the most different values
+  let name = find(/ชื่อร้าน|ชื่อลูกค้า|shop\s*name|store\s*name/);
+  if (name < 0) name = find(/ชื่อ/, /รหัส|code|เซล|sale|พนักงาน|ผู้ดูแล/);
+  if (name < 0) name = find(/ร้าน|name|shop|store|customer|ลูกค้า/, /รหัส|code|^id|\bid\b|เซล|sale/);
+  if (name < 0) {
+    const t = best(st.filter(x => !used.has(x.c) && x.uniq >= 2 && x.num < x.filled * 0.3 && x.codey < x.filled * 0.6 && x.day < x.filled * 0.3), x => x.uniq);
+    name = t ? t.c : -1;
+  }
+  if (name >= 0) used.add(name);
   const sale = find(/เซล|sale|พนักงาน|ผู้ดูแล|ตัวแทน/);
-  let group = find(/รูท|route|^วัน|day/, /วันที่|date/);   // route column wins
-  if (group < 0) group = h.findIndex((c, i) => i !== sale && /กลุ่ม|group|สาย|ประเภท|type|zone|โซน|เขต/.test(c));
-  if (name >= 0 && ((lat >= 0 && lng >= 0) || coord >= 0)) return { name, lat, lng, coord, group, sale };
-  return null;
+  if (sale >= 0) used.add(sale);
+  // route: header (รูท / route / วัน) or a column whose values are mostly day names
+  let group = find(/รูท|route|^วัน|day/, /วันที่|date/);
+  if (group < 0) { const d = best(st.filter(x => !used.has(x.c) && x.day >= x.filled * 0.4 && x.filled > 0), x => x.day); group = d ? d.c : -1; }
+  if (group < 0) group = find(/กลุ่ม|group|สาย|ประเภท|type|zone|โซน|เขต/);
+
+  // is the first row a header? (its latitude / coordinate cell is not a coordinate)
+  const r0 = rows[first] || [];
+  const hasHeader = latC ? isNaN(numOf(r0[latC.c])) : !parseCoord(clean(r0[coordC.c]));
+  return { lat: latC ? latC.c : -1, lng: lngC ? lngC.c : -1, coord: coordC ? coordC.c : -1, name, group, sale, hasHeader };
 }
 
-/* rows: array of arrays -> {ok:[{name,lat,lng,group}], bad:[lineNo]} */
+/* rows: array of arrays -> {ok:[{name,lat,lng,group,sale}], bad:[lineNo]} */
 function parseRows(rows) {
   const ok = [], bad = [];
   rows = rows.map(r => r.map(c => clean(c)));
-  let start = 0, map = null;
   const first = rows.findIndex(r => r.some(c => c));
-  if (first >= 0) { map = detectHeader(rows[first]); if (map) start = first + 1; }
+  if (first < 0) return { ok, bad };
+  const map = detectColumns(rows, first);
+  const start = map && map.hasHeader ? first + 1 : first;
 
   for (let i = start; i < rows.length; i++) {
     const r = rows[i];
@@ -640,10 +688,14 @@ function parseRows(rows) {
     let rec = null;
     if (map) {
       let ll = null;
-      if (map.lat >= 0 && map.lng >= 0) ll = fixLatLng(parseFloat(r[map.lat]), parseFloat(r[map.lng]));
+      if (map.lat >= 0 && map.lng >= 0) {
+        const a = numOf(r[map.lat]), b = numOf(r[map.lng]);
+        if (!isNaN(a) && !isNaN(b)) ll = fixLatLng(a, b);
+      }
       if (!ll && map.coord >= 0) ll = parseCoord(r[map.coord]);
-      if (ll) rec = { name: r[map.name] || '', ...ll, group: map.group >= 0 ? (r[map.group] || '') : '', sale: map.sale >= 0 ? (r[map.sale] || '') : '' };
+      if (ll) rec = { name: map.name >= 0 ? (r[map.name] || '') : '', ...ll, group: map.group >= 0 ? (r[map.group] || '') : '', sale: map.sale >= 0 ? (r[map.sale] || '') : '' };
     } else {
+      // no clear columns: take the first two numbers on the line as lat, lng
       const nums = [], texts = [];
       r.forEach(t => {
         if (!t) return;
