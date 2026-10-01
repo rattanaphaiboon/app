@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.20</title>
+<title>Rattana Shop Location v1.21</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -158,6 +158,7 @@ body.dark .btn-primary{background:var(--navy-light);border-color:var(--navy-ligh
 .mc-menu{position:absolute;top:6px;right:6px;display:flex;gap:4px}
 .mc-menu button{width:30px;height:30px;border-radius:15px;border:none;background:rgba(255,255,255,.88);color:#0d1b3e;font-size:14px;box-shadow:0 1px 3px rgba(0,0,0,.25)}
 .mc-menu button:hover{background:#fff}
+.mc-multi{position:absolute;top:8px;right:8px;background:rgba(13,27,62,.82);color:#fff;font-size:11.5px;font-weight:700;padding:2px 9px;border-radius:10px}
 .home-empty{grid-column:1/-1;text-align:center;color:var(--muted);padding:40px}
 .cur-map{font-size:13px;font-weight:700;color:var(--gold-light);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 body.view-home .cur-map{display:none}
@@ -256,7 +257,7 @@ details.card:not([open])>summary{border-bottom:none}
 
 <header>
   <button class="icon-btn" id="btnHome" title="แผนที่ทั้งหมด" onclick="goHome()" style="display:none">⌂</button>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.20 · 2026-10-01</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.21 · 2026-10-01</span></div>
   <div class="hdr-right">
     <span class="cur-map" id="curMapName"></span>
     <span class="sync-badge" id="syncBadge" title=""></span>
@@ -1245,7 +1246,7 @@ function renderSide() {
 function renderAll() {
   if (typeof view !== 'undefined') {
     if (view === 'home') renderHome();
-    else $('curMapName').textContent = '🗂 ' + activeMap().name;
+    else $('curMapName').textContent = curMapLabel();
   }
   listLimit = LIST_STEP;
   renderSide();
@@ -1532,6 +1533,7 @@ async function restoreData(inp) {
 var view = 'home';   // var: renderAll/fitAll may run before this line
 let homeSort = 'recent';
 try { homeSort = localStorage.getItem('rattanaShopLocSort') || 'recent'; } catch {}
+function curMapLabel() { const v = maps.filter(m => m.visible !== false); return '🗂 ' + (v.length ? v : [activeMap()]).map(m => m.name).join(' + '); }
 function touchMap(id) { const m = mapById(id); if (m) m.updatedAt = Date.now(); }
 function fmtDate(ts) {
   if (!ts) return '';
@@ -1545,7 +1547,7 @@ function setView(v) {
   $('home').style.display = v === 'home' ? '' : 'none';
   document.querySelector('.app').style.display = v === 'home' ? 'none' : '';
   $('btnHome').style.display = v === 'home' ? 'none' : '';
-  $('curMapName').textContent = v === 'map' ? '🗂 ' + activeMap().name : '';
+  $('curMapName').textContent = v === 'map' ? curMapLabel() : '';
 }
 function goHome() {
   closeDD();
@@ -1553,18 +1555,22 @@ function goHome() {
   renderHome();
   if (location.hash) history.replaceState(null, '', location.pathname + location.search);
 }
-/* open one map: show it alone (other maps can still be switched on in the side panel) */
-function openMap(id, keepOthers) {
-  const m = mapById(id); if (!m) { goHome(); return; }
-  if (!keepOthers) maps.forEach(x => { x.visible = x.id === id; });
-  activeMapId = id; m.visible = true;
+/* open one card: its map(s) alone (other maps can still be switched on in the side panel) */
+function openMap(id, keepOthers) { openMaps([id], keepOthers); }
+function openMaps(ids, keepOthers) {
+  ids = ids.filter(mapById);
+  if (!ids.length) { goHome(); return; }
+  if (!keepOthers) maps.forEach(x => { x.visible = ids.includes(x.id); });
+  ids.forEach(i => { mapById(i).visible = true; });
+  const id = ids.includes(activeMapId) ? activeMapId : ids[0];
+  activeMapId = id;
   saveLocalOnly();
   loadSheetCfg();
   setView('map');
   map.invalidateSize();
   renderAll();
   fitAll();
-  const h = '#map=' + encodeURIComponent(id);
+  const h = '#map=' + ids.map(encodeURIComponent).join(',');
   if (location.hash !== h) history.pushState(null, '', h);
 }
 function homeNewMap() {
@@ -1584,25 +1590,36 @@ function renderHome() {
   const cnt = {};
   shops.forEach(x => cnt[x.mapId] = (cnt[x.mapId] || 0) + 1);
   const lastOf = m => m.updatedAt || m.sheet.last || m.createdAt || 0;
-  const list = maps.filter(m => !q || m.name.toLowerCase().includes(q))
-    .sort(homeSort === 'name' ? (a, b) => TH_COLL.compare(a.name, b.name) : (a, b) => lastOf(b) - lastOf(a));
-  $('homeGrid').innerHTML = list.length ? list.map(m => `
-    <div class="map-card" onclick="openMap('${m.id}')" title="เปิดแผนที่ ${esc(m.name)}">
-      <canvas data-map="${m.id}" width="420" height="240"></canvas>
-      <div class="mc-menu edit-only">
+  // maps imported from the same Google Sheet file are shown as ONE card
+  const fileKey = m => { const l = parseSheetLink(m.sheet.url || ''); return l ? 'f:' + l.id : 'm:' + m.id; };
+  const byKey = new Map();
+  maps.forEach(m => { const k = fileKey(m); if (!byKey.has(k)) byKey.set(k, []); byKey.get(k).push(m); });
+  const cards = [...byKey.values()].map(ms => {
+    ms.sort((a, b) => lastOf(b) - lastOf(a));
+    return { ms, ids: ms.map(m => m.id), name: ms.map(m => m.name).join(' + '),
+             count: ms.reduce((n, m) => n + (cnt[m.id] || 0), 0), last: Math.max(...ms.map(lastOf)) };
+  });
+  const list = cards.filter(c => !q || c.ms.some(m => m.name.toLowerCase().includes(q)))
+    .sort(homeSort === 'name' ? (a, b) => TH_COLL.compare(a.name, b.name) : (a, b) => b.last - a.last);
+  $('homeGrid').innerHTML = list.length ? list.map(c => {
+    const one = c.ms.length === 1, m = c.ms[0];
+    return `
+    <div class="map-card" onclick="openMaps(['${c.ids.join("','")}'])" title="เปิดแผนที่ ${esc(c.name)}">
+      <canvas data-maps="${c.ids.join(',')}" width="420" height="240"></canvas>
+      ${one ? `<div class="mc-menu edit-only">
         <button title="เปลี่ยนชื่อ" onclick="event.stopPropagation();renameMap('${m.id}')">✎</button>
         <button title="ลบแผนที่" onclick="event.stopPropagation();deleteMap('${m.id}')">🗑</button>
-      </div>
+      </div>` : `<div class="mc-multi" title="แผนที่จากไฟล์ Google Sheet เดียวกัน">📑 ${c.ms.length} แผนที่</div>`}
       <div class="mc-body">
-        <div class="mc-name">${esc(m.name)}</div>
-        <div class="mc-meta">${(cnt[m.id] || 0).toLocaleString('th-TH')} ร้าน${lastOf(m) ? ' · ' + fmtDate(lastOf(m)) : ''}</div>
+        <div class="mc-name">${esc(c.name)}</div>
+        <div class="mc-meta">${c.count.toLocaleString('th-TH')} ร้าน${c.last ? ' · ' + fmtDate(c.last) : ''}</div>
       </div>
-    </div>`).join('') : `<div class="home-empty">${maps.length ? 'ไม่พบแผนที่ที่ค้นหา' : 'ยังไม่มีแผนที่ — กด "＋ สร้างแผนที่ใหม่"'}</div>`;
+    </div>`; }).join('') : `<div class="home-empty">${maps.length ? 'ไม่พบแผนที่ที่ค้นหา' : 'ยังไม่มีแผนที่ — กด "＋ สร้างแผนที่ใหม่"'}</div>`;
   document.querySelectorAll('#homeGrid canvas').forEach(drawThumb);
 }
 /* small preview of a map: pins drawn by route color on a soft background */
 function drawThumb(cv) {
-  const id = cv.dataset.map;
+  const ids = (cv.dataset.maps || '').split(',');
   const ctx = cv.getContext('2d');
   const W = cv.width, H = cv.height;
   const g = ctx.createLinearGradient(0, 0, W, H);
@@ -1611,7 +1628,7 @@ function drawThumb(cv) {
   ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 2;
   for (let x = 0; x < W; x += 60) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + 40, H); ctx.stroke(); }
   for (let y = 30; y < H; y += 60) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y - 20); ctx.stroke(); }
-  const pts = shops.filter(x => x.mapId === id);
+  const pts = shops.filter(x => ids.includes(x.mapId));
   if (!pts.length) {
     ctx.fillStyle = 'rgba(13,27,62,.45)'; ctx.font = '600 22px Sarabun, sans-serif'; ctx.textAlign = 'center';
     ctx.fillText('ยังไม่มีร้าน', W / 2, H / 2 + 8);
@@ -1630,7 +1647,8 @@ function drawThumb(cv) {
 }
 function route() {
   const mm = location.hash.match(/^#map=(.+)$/);
-  if (mm && mapById(decodeURIComponent(mm[1]))) openMap(decodeURIComponent(mm[1]), true);
+  const ids = mm ? mm[1].split(',').map(decodeURIComponent).filter(mapById) : [];
+  if (ids.length) openMaps(ids, true);
   else { setView('home'); renderHome(); }
 }
 window.addEventListener('popstate', route);
