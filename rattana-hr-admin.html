@@ -178,7 +178,7 @@ const CFG = {
   api: 'https://script.google.com/macros/s/AKfycbzyZsYY9R3WAhy7LUiaIF_xPTK50vVgggrv6Ua5WYCdKOUHGNd_PjDcSojI39OSiRU/exec',
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ', usersTab: 'Sheet1',
   attendanceSheetId: '1aywVdJ5-zw70__3BHjE3itjZotiubaRUAMjWOzgCAts',
-  ver: '1.1',
+  ver: '1.2',
 };
 const S = { token: '', exp: 0, u: null, users: [], ptt: [], byId: {}, period: null, hr: null, settings: null, holidays: null, locations: null,
             faces: null, docs: null, docsRange: '', view: 'dashboard', sub: '', emp: null, empTab: 'time', empDays: {}, shifts: {}, audit: {}, quotaAll: null, busy: {} };
@@ -276,11 +276,20 @@ async function start() {
   $('#login').hidden = true; $('#app').hidden = false;
   $('#uName').textContent = S.u.name || S.u.empId; $('#uSub').textContent = (S.u.empId || '') + ' · HR'; $('#uAv').textContent = String(S.u.name || '?').slice(0, 1);
   nav();
+  // v1.2: ลิงก์ตรง #fix/<รหัส>/<yyyy-mm-dd>/<in|out>/<HH:MM> — เปิดหน้าต่างเพิ่มเวลาที่กรอกไว้ให้ (ตรวจแล้วกดบันทึกเอง)
+  const fxm = /^#fix\/([^/]+)\/(\d{4}-\d{2}-\d{2})(?:\/(in|out))?(?:\/(\d{1,2}:\d{2}))?$/.exec(decodeURIComponent(location.hash || ''));
+  if (fxm) { S.fixLink = { id: fxm[1], date: fxm[2], type: fxm[3] || 'out', time: fxm[4] ? fxm[4].padStart(5, '0') : '' }; try { history.replaceState(null, '', '#employees'); } catch (_) {} }
   const v = (location.hash || '').replace('#', '').split('/');
   S.view = v[0] || 'dashboard'; S.sub = v[1] || '';
   render();
   await Promise.all([loadUsers().catch(e => toast('โหลดชีท Users ไม่ได้: ' + e.message, 'bad')), loadPtt().catch(() => {}), loadPeriod(false).catch(e => toast('โหลดงวดไม่ได้: ' + e.message, 'bad'))]);
   render();
+  openFixLink_();   // v1.2
+}
+function openFixLink_() {
+  const f = S.fixLink; if (!f) return; S.fixLink = null;
+  S.emp = f.id; S.empTab = 'time'; go('employees');
+  setTimeout(() => openFix(f.id, '', '', '', f), 500);
 }
 async function reloadAll() { S.hr = null; S.docs = null; S.empDays = {}; S.audit = {}; S.quotaAll = null; S.faces = null; toast('กำลังดึงข้อมูลใหม่…'); await Promise.all([loadUsers().catch(() => {}), loadPtt().catch(() => {}), loadPeriod(true).catch(() => {})]); render(); }
 
@@ -501,7 +510,7 @@ async function renderEmpTime(e, el) {
       <td>${late ? `<span class="tag t-pending">สาย ${late}</span>` : ''}${early ? ` <span class="tag t-other">กลับก่อน ${early}</span>` : ''}</td>
       <td class="l">${x.leave ? h(x.leave) + (x.leaveH ? ` <span class="sm muted">${x.leaveH} ชม.</span>` : '') : ''}</td>
       <td>${stChip(x.status)}</td>
-      <td><button class="pen" title="เพิ่ม/แก้เวลาวันนี้" onclick="openFix('${h(e.empId)}','${x.iso}','${h(x.status)}')">✎</button>${x.in ? `<button class="pen" title="รูปสแกน" onclick="openScanPhotos('${h(e.empId)}','${x.iso}')">📷</button>` : ''}</td></tr>`;
+      <td><button class="pen" title="เพิ่ม/แก้เวลาวันนี้" onclick="openFix('${h(e.empId)}','${x.iso}','${h(x.status)}','${h(x.in || '')}')">✎</button>${x.in ? `<button class="pen" title="รูปสแกน" onclick="openScanPhotos('${h(e.empId)}','${x.iso}')">📷</button>` : ''}</td></tr>`;
   });
   el.innerHTML = `<div class="fl"><span class="sm muted">งวด ${h(S.period.from)} – ${h(S.period.to)} · สถานะจากแท็บ สรุปวัน · "สาย" คิดจากเวลาเข้างาน ${min2hm(start)} + ผ่อนผัน ${grace} นาที (ข้อมูลประกอบ ไม่ใช่ตัวเลขที่ใช้คิดเงิน)</span><span class="sp" style="flex:1"></span><button class="btn sm" onclick="S.empDays={};renderEmpPane()">⟳</button><button class="btn sm xls" onclick="xlsEmpTime('${h(e.empId)}')">EXCEL</button></div>
     <div class="tw"><table><thead><tr><th class="l">วันที่</th><th class="l">กะการทำงาน</th><th class="l">เวลาทำงาน</th><th>มาสาย / กลับก่อน</th><th class="l">ลา</th><th>สถานะ</th><th></th></tr></thead><tbody>${rows.join('') || '<tr><td colspan="7" class="empty">ไม่มีข้อมูลในงวดนี้ (คนนี้ยังไม่มีสแกนในชีทหลัก)</td></tr>'}</tbody></table></div>`;
@@ -545,9 +554,15 @@ async function auditDay(iso) {
   return S.audit['day|' + iso];
 }
 /* เพิ่ม/แก้เวลาแทนพนักงาน — ยื่นคำขอ "แก้เวลาย้อนหลัง" ในนามพนักงาน (ชีทการลาApp) แล้วอนุมัติทันที → ระบบเติมสแกนให้ (backend v4.8) */
-function openFix(id, iso, status) {
-  const e = empOf(id); const day = iso || todayIso();
+function openFix(id, iso, status, inTime, preset) {
+  const e = empOf(id);
+  // v1.2 ★ กะดึก: เข้าตอนเย็น (≥ 12:00) แล้ว "ไม่ครบคู่" = ขาดเวลาออก ซึ่งเกิดเช้าวันถัดไป (ระบบนับกะดึกแบบเที่ยงถึงเที่ยง)
+  //   เดิมหน้าต่างตั้งวันที่เป็นวันเข้ากะ → ได้เวลาออกตอนเช้า "ก่อน" เข้ากะ ไปปิดกะคืนก่อนหน้าแทน (เคส 690030 · 25/09)
+  const nextIso = iso ? isoOf(new Date(new Date(iso + 'T00:00:00').getTime() + 864e5)) : '';
+  const night = !!(iso && status && /ไม่ครบคู่/.test(status) && hm2min(inTime) != null && hm2min(inTime) >= 12 * 60 && nextIso <= todayIso());
+  const day = (preset && preset.date) || (night ? nextIso : iso) || todayIso();
   modal(`✎ เพิ่ม / แก้เวลา — ${h(e.name)} (${h(id)})`, `
+    ${night ? `<div class="alert" style="margin-bottom:10px">🌙 กะดึก — เข้า <b>${h(inTime)}</b> ของ ${h(dmy(iso))} · เวลาออกคือ<b>เช้าวันที่ ${h(dmy(nextIso))}</b> (ระบบนับกะดึกแบบเที่ยงถึงเที่ยง) — ตั้งวันที่ให้แล้ว</div>` : ''}
     <div class="grid g2"><div class="fld"><label>วันที่</label><input type="date" id="fxDate" value="${day}" max="${todayIso()}"></div><div class="fld"><label>เหตุผล</label><select id="fxWhy">${TA_WHY.map(w => `<option>${w}</option>`).join('')}</select></div></div>
     ${status ? `<div class="sm muted" style="margin:-4px 0 10px">สถานะวันนี้ในชีท: ${stChip(status)}</div>` : ''}
     <div id="fxRows"></div>
@@ -556,7 +571,7 @@ function openFix(id, iso, status) {
     <label class="ck" style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" id="fxAuto" checked> อนุมัติทันที (ระบบจะเติมสแกนเวลานี้ให้และสถานะในชีทเปลี่ยนตาม)</label>
     <div class="sm muted" style="margin-top:8px">บันทึกเป็นใบ "แก้เวลาย้อนหลัง" ในชีทการลาApp ในนามพนักงาน โดยระบุว่ายื่นจากหลังบ้าน HR — มีร่องรอยตรวจสอบย้อนหลังได้</div>`,
     `<button class="btn" onclick="closeModal()">ยกเลิก</button><button class="btn p" id="fxSave" onclick="fxSave('${h(id)}')">บันทึก</button>`);
-  S.fx = [{ type: status && /ไม่ครบคู่/.test(status) ? 'out' : 'in', time: '' }];
+  S.fx = [{ type: (preset && preset.type) || (status && /ไม่ครบคู่/.test(status) ? 'out' : 'in'), time: (preset && preset.time) || '' }];
   fxRender();
 }
 function fxAdd() { S.fx.push({ type: S.fx.length && S.fx[S.fx.length - 1].type === 'in' ? 'out' : 'in', time: '' }); fxRender(); }
@@ -578,7 +593,7 @@ async function fxSave(id) {
         const docs = (await api('getLeaveDocs', { from: date, to: date })).items || [];
         const doc = docs.find(d => d.empId === id && d.status === 'pending' && /แก้เวลา/.test(d.type) && d.info === reason);
         if (!doc) throw new Error('บันทึกใบแล้วแต่หาแถวเพื่ออนุมัติไม่พบ — ไปอนุมัติที่เมนู จัดการลางาน');
-        await api('approveAny', { sheet: doc.sheet, row: doc.row, decision: 'approved', approverName: S.u.name, empId: id, info: doc.info });
+        await api('approveAny', { sheet: doc.sheet, row: doc.row, decision: 'approved', approverName: S.u.name, empId: id, info: docAinfo_(doc) });
       }
     }
     toast(`✓ บันทึกเวลา ${items.length} รายการ${auto ? ' และอนุมัติแล้ว' : ' (รออนุมัติ)'}`, 'ok');
@@ -609,7 +624,7 @@ function renderIssuesHtml() {
   const list = (S.hr.issues || []).slice().sort((a, b) => (a.name + a.iso) < (b.name + b.iso) ? -1 : 1);
   if (!list.length) return '<div class="empty">ไม่มีวันที่ต้องแก้ในงวดนี้ ✓</div>';
   return `<div class="sm muted" style="margin-bottom:8px">สถานะ "ผิด" / "ไม่ครบคู่" ${S.hr.issueTotal} วัน${S.hr.issueTotal > list.length ? ` (แสดง ${list.length} แรก)` : ''} · กด ✎ เพื่อเพิ่มเวลาที่ขาดในนามพนักงาน</div>
-    <div class="tw"><table><thead><tr><th class="l">พนักงาน</th><th>รหัส</th><th class="l">วันที่</th><th class="l">เวลาที่มี</th><th class="l">ลา</th><th>สถานะ</th><th></th></tr></thead><tbody>${list.map(i => `<tr><td class="l"><a href="#" onclick="openEmp('${h(i.empId)}','time');return false">${h(i.name || i.empId)}</a></td><td>${h(i.empId)}</td><td class="l">${dowTh(i.iso)} ${h(i.date)}</td><td class="l">${i.in ? 'เข้า ' + h(i.in) : '<span class="muted">ไม่มีสแกน</span>'}${i.out ? ' · ออก ' + h(i.out) : ''}</td><td class="l">${h(i.leave || '')}</td><td>${stChip(i.status)}</td><td><button class="pen" onclick="openFix('${h(i.empId)}','${i.iso}','${h(i.status)}')">✎</button></td></tr>`).join('')}</tbody></table></div>`;
+    <div class="tw"><table><thead><tr><th class="l">พนักงาน</th><th>รหัส</th><th class="l">วันที่</th><th class="l">เวลาที่มี</th><th class="l">ลา</th><th>สถานะ</th><th></th></tr></thead><tbody>${list.map(i => `<tr><td class="l"><a href="#" onclick="openEmp('${h(i.empId)}','time');return false">${h(i.name || i.empId)}</a></td><td>${h(i.empId)}</td><td class="l">${dowTh(i.iso)} ${h(i.date)}</td><td class="l">${i.in ? 'เข้า ' + h(i.in) : '<span class="muted">ไม่มีสแกน</span>'}${i.out ? ' · ออก ' + h(i.out) : ''}</td><td class="l">${h(i.leave || '')}</td><td>${stChip(i.status)}</td><td><button class="pen" onclick="openFix('${h(i.empId)}','${i.iso}','${h(i.status)}','${h(i.in || '')}')">✎</button></td></tr>`).join('')}</tbody></table></div>`;
 }
 function xlsAuto() { const P = S.hr.people || []; toXls('ลงเวลาAuto_' + S.period.fromIso + '_' + S.period.toIso, `ลงเวลาAuto งวด ${S.period.from} – ${S.period.to}`, ['ชื่อสกุล', 'รหัส พนง.', 'คลัง', 'จำนวนแรงที่ทำงาน', 'ป่วยมีบพ.', 'กิจรับค่าจ้าง', 'ลาคลอด ญ/ช', 'พักร้อน', 'ป่วยไม่มีใบแพทย์', 'ขาดงาน', 'ลาไม่รับค่าจ้าง', 'สลับวันหยุด', 'รวมวัน', 'จำนวนแรงที่ทำงาน', 'วันที่ต้องแก้'], P.map(p => [p.name, p.empId, p.khlang, p.work, p.sickCert, p.personal, p.maternity, p.vacation, p.sickNoCert, p.absent, p.unpaid, p.swap, p.total, p.work, p.issues]), ['#f6b26b', '#f6b26b', '#f6b26b', '#d9ead3', '#93c47d', '#d9ead3', '#ffff00', '#d9ead3', '#d9d2e9', '#990000', '#990000', '#7030a0', '#4472c4', '#d9ead3', '#f8c7c4']); }
 function openPeriod() {
@@ -648,12 +663,15 @@ function docsTable(rows, all) {
     <td class="l sm">${h(d.requestedAt)}</td><td class="l"><a href="#" onclick="openEmp('${h(d.empId)}','docs');return false">${h(d.name)}</a>${d.nick ? ' (' + h(d.nick) + ')' : ''}<br><span class="sm muted">${h(d.empId)}${d.khlang ? ' · ' + h(d.khlang) : ''}</span></td><td class="l">${h(d.type)}</td><td class="l">${h(d.date)}${d.endDate && d.endDate !== d.date ? ' – ' + h(d.endDate) : ''}</td><td>${d.quotaDays ? d.quotaDays : d.hours ? d.hours + ' ชม.' : ''}</td><td class="l" style="max-width:260px;white-space:normal">${h(d.info)}${d.photo ? ` <a href="${h(d.photo)}" target="_blank" rel="noopener">📎</a>` : ''}</td><td>${docTag(d.status)}</td><td class="l sm">${h(d.approver)}${d.approvedAt ? '<br><span class="muted">' + h(d.approvedAt) + '</span>' : ''}</td>
     <td style="white-space:nowrap">${d.status === 'pending' ? `<button class="btn sm ok" onclick="decide(${i},'approved')">อนุมัติ</button> <button class="btn sm bad" onclick="decide(${i},'rejected')">ไม่อนุมัติ</button>` : d.status === 'approved' ? `<button class="btn sm" onclick="revoke(${i})">↩ ถอน</button>` : ''}</td></tr>`; }).join('') || '<tr><td colspan="9" class="empty">ไม่มีเอกสารตามตัวกรอง</td></tr>'}</tbody></table></div>`;
 }
+/* v1.2 ★ ข้อความยืนยันใบตอนอนุมัติ = "ประเภท · รายละเอียด" (เซิร์ฟเวอร์เทียบกับคอลัมน์ F+L ของการลาApp)
+   v1.0–1.1 ส่งแค่รายละเอียด → เซิร์ฟเวอร์จริงตอบ "รายการนี้เปลี่ยนไปแล้ว" ทุกครั้ง (เทสต์เดิมใช้เซิร์ฟเวอร์ปลอมที่ไม่ได้ตรวจ) */
+function docAinfo_(d) { return (d && d.ainfo != null) ? d.ainfo : [d && d.type, d && d.info].filter(Boolean).join(' · '); }
 async function decide(i, decision) {
   const d = S.docs[i]; if (!d) return;
   let note = '';
   if (decision === 'rejected') { note = prompt(`เหตุผลที่ไม่อนุมัติ — ${d.name} · ${d.type} ${d.date}`) || ''; if (!note) return; }
   else if (!confirm(`อนุมัติ ${d.name} · ${d.type} · ${d.date}${d.endDate && d.endDate !== d.date ? ' – ' + d.endDate : ''} ?`)) return;
-  try { await api('approveAny', { sheet: d.sheet, row: d.row, decision, note, approverName: S.u.name, empId: d.empId, info: d.info }); d.status = decision; d.approver = S.u.name; toast(decision === 'approved' ? '✓ อนุมัติแล้ว' : '✗ ไม่อนุมัติแล้ว', 'ok'); if (S.hr) S.hr.pending = Math.max(0, (S.hr.pending || 0) - 1); nav(); render(); }
+  try { await api('approveAny', { sheet: d.sheet, row: d.row, decision, note, approverName: S.u.name, empId: d.empId, info: docAinfo_(d) }); d.status = decision; d.approver = S.u.name; toast(decision === 'approved' ? '✓ อนุมัติแล้ว' : '✗ ไม่อนุมัติแล้ว', 'ok'); if (S.hr) S.hr.pending = Math.max(0, (S.hr.pending || 0) - 1); nav(); render(); }
   catch (e) { toast('❌ ' + e.message, 'bad'); }
 }
 async function revoke(i) {
