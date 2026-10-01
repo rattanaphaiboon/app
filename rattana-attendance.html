@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1b3e">
-<title>HR Rattana v6.18</title>
+<title>HR Rattana v6.19</title>
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
 <link rel="manifest" href="manifest-hr.json">
@@ -3880,7 +3880,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.18';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '13.19';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v13.11: LINE OA ฝ่ายบุคคล (surat 30/09) — ตัวเดียวกับที่แอป 360 / แปลงรูปเป็น PDF / สมัครงาน ใช้ · lin.ee พาไป line.me/R/ti/p/@712dqxgv */
 const HR_LINE_URL = 'https://lin.ee/uIN2DMR', HR_LINE_ID = '@712dqxgv';
 const HR_TEL = '0640978417', HR_TEL_TXT = '064-097-8417';   // v13.12: เบอร์ฝ่ายบุคคล (ตัวเดียวกับแอป 360 / img2pdf / jobs)
@@ -4116,7 +4116,11 @@ async function syncLogsFromSheet(opts = {}) {
   const todayKey_ = todayKey();  // ISO YYYY-MM-DD สำหรับ local logs
 
   try {
-    const res = await callAppsScript('getCheckinLog', {
+    // v13.19: ตอนเปิดแอป — ข้อมูลบูตมีประวัติ 7 วันของเราครบแล้ว (more=false) ใช้ตรงนั้นเลย ไม่ยิงคำขอซ้ำ
+    //   (เดิมทุกคนยิง getCheckinLog วันนี้ซ้ำทันทีหลังบูต = อ่านท้ายชีท 6,000 แถวอีกรอบ)
+    const bl = (opts.boot && _bootLogMeta && _bootLogMeta.days >= 1 && !_bootLogMeta.more && Date.now() - _bootLogMeta.at < 180000) ? _bootLogMeta : null;
+    const res = bl ? { logs: bl.rows.filter(l => String(l.empId) === String(currentUser.empId) && String(l.date) === ddmmyyyy).slice(0, 50) }
+                   : await callAppsScript('getCheckinLog', {
       empId: currentUser.empId,
       date: ddmmyyyy,
       limit: 50,
@@ -5412,7 +5416,14 @@ async function apiGetPersonalLocations(empId) {
 async function apiGetCheckinLog(filters = {}) {
   if (!config.appsScriptUrl) return null;
   if (!getCurrentIdToken()) return null;
-  if (!filters.date && !filters.month && !filters.empId) { const b = bootTake_("logs"); if (b) return b.logs; }
+  if (!filters.date && !filters.month && !filters.empId) {
+    const b = bootTake_("logs");
+    if (b) {
+      // v13.19: จำไว้ใช้ตอน sync "วันนี้" — เซิร์ฟเวอร์ 9.56 บอกว่าครบหน้าต่างไหม (more=false) ถ้าครบไม่ต้องยิงซ้ำ
+      _bootLogMeta = { at: Date.now(), days: +b.days || 0, more: b.more !== false, rows: b.logs || [] };
+      return b.logs;
+    }
+  }
   try {
     const res = await fetchT_(buildApiUrl('getCheckinLog', filters), { redirect:'follow' });
     const json = await res.json();
@@ -5427,11 +5438,14 @@ async function apiGetCheckinLog(filters = {}) {
    ตอนนี้ยิง getBootstrap ครั้งเดียวแล้วแจกให้ตัวโหลดเดิมใช้ ตัวโหลดไม่ต้องแก้เลย
    ถ้า getBootstrap พลาด (เซิร์ฟเวอร์ยังไม่ Deploy v9.25) จะกลับไปยิงทีละตัวตามเดิม */
 let _boot = null;
+let _bootLogMeta = null;   // v13.19: ประวัติจากข้อมูลบูต (ใช้ sync วันนี้)
 async function primeBoot_() {
   _boot = null;
   if (!config.appsScriptUrl || !getCurrentIdToken()) return;
   try {
-    const res = await fetchT_(buildApiUrl('getBootstrap', { light: (typeof canSeeTeam === 'function' && canSeeTeam()) ? '0' : '1', limit: 500 }), { redirect: 'follow' }, 90000);   // v13.03: เพดาน 90 วิ (รวม 5 อย่าง)
+    // v13.19: บูตแบบเบาทุกคน (ไม่ดึงรูปใบหน้าทั้งทีม — หัวหน้า/HR เดิมโหลดรูปทุกคนทุกครั้งที่เปิดแอป) · รูปเดิมในเครื่องเก็บไว้ใช้ต่อ
+    //   (loadFaceDataViaApi) · หน้าทีม/Kiosk ดึงรูปเต็มเองอยู่แล้ว (teamFacesRefresh_)
+    const res = await fetchT_(buildApiUrl('getBootstrap', { light: '1', limit: 500 }), { redirect: 'follow' }, 90000);   // v13.03: เพดาน 90 วิ (รวม 5 อย่าง)
     const j = await res.json();
     if (j && j.ok) _boot = j; else sessionAuthCheck_(j);   // v13.10
   } catch (e) { console.warn('[boot] getBootstrap ไม่สำเร็จ ใช้วิธีเดิมแทน:', e.message); }
@@ -5449,12 +5463,13 @@ async function loadAllSheets(opts = {}) {
   if (!silent) { showSpinner('โหลดข้อมูล...', true); setProgress(10); }
   try {
     // Users Sheet ยังใช้ CSV (Sheet เดิม)
-    await loadUsersSheet();
-    setProgress(25);
+    // v13.19: ชีท Users (CSV) กับข้อมูลบูตยิงพร้อมกัน — เดิมรอ CSV เสร็จก่อนค่อยยิงบูต (ต่อคิวกันเปล่าๆ)
+    const usersP = loadUsersSheet();
 
     // ถ้ามี Apps Script → ใช้เป็นหลัก
     if (config.appsScriptUrl) {
       await primeBoot_();   // v12.67: คำขอเดียวได้ครบ 5 อย่าง — ตัวโหลดข้างล่างหยิบจากตรงนี้
+      await usersP; setProgress(25);
       const tasks = [
         loadSettingsViaApi().then(() => setProgress(40)),
         loadLocationsViaApi().then(() => setProgress(55)),
@@ -5464,6 +5479,7 @@ async function loadAllSheets(opts = {}) {
       ];
       await Promise.allSettled(tasks);
     } else {
+      await usersP; setProgress(25);
       // Fallback: ใช้ CSV จาก usersSheetId (legacy v4.0-4.2)
       const tasks = [
         loadSettingsSheet().then(() => setProgress(40)),
@@ -5483,6 +5499,9 @@ async function loadFaceDataViaApi() {
   const rows = await apiGetFaceData();
   if (!rows) return false;
   window._faceDataLoadedAt = Date.now();   // v13.02: รู้ว่าดึงจากระบบแล้ว — ไม่มีหน้าจริง ค่อยโชว์ปุ่มลงทะเบียน
+  // v13.19: ข้อมูลบูตแบบเบาไม่มีรูป — ใช้รูปเดิมในเครื่องต่อ (คนเดิม + ลงทะเบียนครั้งเดียวกัน) · ลงหน้าใหม่ = รอรูปจากหน้าทีม
+  const prevPhoto = {};
+  (remoteFaceData || []).forEach(f => { if (f && f.empId && f.photo) prevPhoto[empKey_(f.empId) + '|' + String(f.registeredAt || '')] = f.photo; });
   remoteFaceData = rows.filter(r => r.empId).map(r => {
     const descs = parseDescriptors_(typeof r.descriptor === 'string' ? r.descriptor : JSON.stringify(r.descriptor || null));  // v9.1
     return {
@@ -5490,7 +5509,7 @@ async function loadFaceDataViaApi() {
       name: r.name || '',
       descriptor: descs[0] || null,
       descriptor2: descs[1] || null,
-      photo: r.photo || '',
+      photo: r.photo || prevPhoto[empKey_(r.empId) + '|' + String(r.registeredAt || '')] || '',
       registeredAt: r.registeredAt || '',
       registeredBy: r.registeredBy || '',
     };
@@ -5581,7 +5600,7 @@ async function loadCheckinLogViaApi() {
 async function refreshUsersSheet() {
   showSpinner('โหลด Users Sheet ใหม่...');
   try {
-    _myTeamCache = null; _officeRefCache = null;   // v9.8: ดึงรายชื่อใหม่
+    _myTeamCache = null; _officeRefCache = null; officeRefLsDel_();   // v9.8: ดึงรายชื่อใหม่
     const ok = await loadUsersSheet();
     if (!ok) { toast('โหลดไม่สำเร็จ', 'error'); return; }
     if (currentUser?.role === 'supervisor' || currentUser?.role === 'manager' || isPTTManager()) {   // v9.9: ผจก. PTT ด้วย
@@ -5842,11 +5861,21 @@ async function loadFaceModelsOnce_(silent) {
           const t = setTimeout(() => rej(new Error(what + ' โหลดนานเกิน ' + Math.round(ms / 1000) + ' วิ')), ms);
           p.then(v => { clearTimeout(t); res(v); }, e => { clearTimeout(t); rej(e); });
         });
-        if (!faceapi.nets.tinyFaceDetector.isLoaded) await withT(faceapi.nets.tinyFaceDetector.loadFromUri(url), 45000, 'ตัวจับหน้า');
-        if(!silent) setProgress(40);
-        if (!faceapi.nets.faceLandmark68Net.isLoaded) await withT(faceapi.nets.faceLandmark68Net.loadFromUri(url), 45000, 'จุดบนใบหน้า');
-        if(!silent) setProgress(70);
-        if (!faceapi.nets.faceRecognitionNet.isLoaded) await withT(faceapi.nets.faceRecognitionNet.loadFromUri(url), 150000, 'ตัวจำใบหน้า');
+        // v13.19 ★ 3 ตัวโหลดพร้อมกัน + เก็บไฟล์ถาวรในเครื่อง (mdlLoadNet_) — อ่านจากเครื่องพลาด = ทางเดิม loadFromUri
+        const NETS = [[faceapi.nets.tinyFaceDetector, 'tiny_face_detector_model', 45000, 'ตัวจับหน้า'],
+                      [faceapi.nets.faceLandmark68Net, 'face_landmark_68_model', 45000, 'จุดบนใบหน้า'],
+                      [faceapi.nets.faceRecognitionNet, 'face_recognition_model', 150000, 'ตัวจำใบหน้า']];
+        let doneN = 0;
+        const bump = () => { doneN++; if (!silent) setProgress(10 + doneN * 30); };
+        await Promise.all(NETS.map(async ([net, name, ms, what]) => {
+          if (net.isLoaded) { bump(); return; }
+          if (mdlCacheOk_()) {
+            try { await withT(mdlLoadNet_(net, url, name, ms), ms + 15000, what); bump(); return; }
+            catch (eC) { mdlCacheBad_('face', eC); }
+          }
+          if (!net.isLoaded) await withT(net.loadFromUri(url), ms, what);
+          bump();
+        }));
         if(!silent) setProgress(100);
         _faceModelHost = idx;
         faceapiReady = true;
@@ -5865,6 +5894,73 @@ async function loadFaceModelsOnce_(silent) {
     if(!silent){ setFaceModelStatus('⚠ โหลดโมเดลไม่ได้', 'warn'); toast('โหลดโมเดลไม่ได้ — บันทึกได้แต่ไม่มีใบหน้า', 'warning'); }
     return false;
   } finally { if(!silent) hideSpinner(); }
+}
+
+/* ══ v13.19 ★ ไฟล์โมเดลเก็บถาวรในเครื่อง (Cache Storage) ══
+   เดิมพึ่งแคชของเบราว์เซอร์อย่างเดียว — เว็บต้นทางโมเดลใบหน้าสั่งเก็บแค่ 10 นาที (max-age=600) ตัวจับกะพริบ 1 ชม.
+   → เปิดแอปรอบถัดไปต้องถามต้นทางใหม่ทุกไฟล์ และถ้าเบราว์เซอร์ล้างแคช (มือถือพื้นที่น้อย / เปิดผ่าน LINE) = โหลดใหม่ ~20 MB
+   ช่วงเข้างานคนโหลดพร้อมกันตรงประตู เน็ตแน่น = กล้องขึ้น "กำลังเตรียมโมเดล" นาน
+   ตอนนี้: โหลดจากต้นทางครั้งแรกครั้งเดียวแล้วเก็บใน Cache Storage · รอบต่อไปอ่านจากเครื่อง ไม่แตะเน็ต
+   URL ทุกไฟล์ล็อกเวอร์ชัน (ไฟล์ไม่เปลี่ยน) · อ่านจากเครื่องพลาด = ลบไฟล์นั้นทิ้ง + ปิดทางนี้ 7 วัน แล้วโหลดแบบเดิม */
+const MODEL_CACHE = 'rfc3-models-v1';
+let _mdlCache = undefined;
+async function mdlCache_() {
+  if (_mdlCache !== undefined) return _mdlCache;
+  try { _mdlCache = (window.caches && window.isSecureContext !== false) ? await caches.open(MODEL_CACHE) : null; } catch (_) { _mdlCache = null; }
+  return _mdlCache;
+}
+function mdlCacheOk_(kind) { try { const t = +LS.get('mdlCacheBad_' + (kind || 'face'), 0); return !(t && Date.now() - t < 7 * 864e5); } catch (_) { return true; } }
+function mdlCacheBad_(kind, e) {
+  console.warn('[mdl] อ่านไฟล์โมเดลจากเครื่องไม่ได้ (' + kind + ') — ใช้ทางเดิม 7 วัน:', e && e.message);
+  try { LS.set('mdlCacheBad_' + kind, Date.now()); } catch (_) {}
+}
+async function mdlForget_(urls) { try { const c = await mdlCache_(); if (c) await Promise.all((urls || []).map(u => c.delete(u).catch(() => false))); } catch (_) {} }
+/* ไฟล์เดียว → ArrayBuffer · ในเครื่องก่อน ไม่มีค่อยโหลด (เพดานเวลารวมตอนรับข้อมูล) แล้วเก็บ */
+async function mdlGetBuf_(url, ms) {
+  const cache = await mdlCache_();
+  if (cache) { try { const hit = await cache.match(url); if (hit) return await hit.arrayBuffer(); } catch (_) {} }
+  const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+  const timer = setTimeout(() => { try { if (ctl) ctl.abort(); } catch (_) {} }, ms || 60000);
+  try {
+    const res = await fetch(url, ctl ? { signal: ctl.signal } : {});
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + String(url).split('/').pop());
+    const buf = await res.arrayBuffer();
+    if (cache) { try { await cache.put(url, new Response(buf.slice(0), { headers: { 'Content-Type': res.headers.get('Content-Type') || 'application/octet-stream' } })); } catch (_) {} }
+    return buf;
+  } finally { clearTimeout(timer); }
+}
+/* โหลดโมเดล face-api 1 ตัวจากไฟล์ที่เก็บไว้ — ผลเหมือน net.loadFromUri (ถอดน้ำหนักด้วย tf.io.decodeWeights ตัวเดียวกัน) */
+async function mdlLoadNet_(net, base, name, ms) {
+  const urls = [base + '/' + name + '-weights_manifest.json'];
+  try {
+    const man = JSON.parse(new TextDecoder().decode(await mdlGetBuf_(urls[0], 30000)));
+    const specs = [], parts = [];
+    (Array.isArray(man) ? man : []).forEach(g => { (g.weights || []).forEach(w => specs.push(w)); (g.paths || []).forEach(p => parts.push(base + '/' + p)); });
+    if (!specs.length || !parts.length) throw new Error('manifest ว่าง');
+    urls.push.apply(urls, parts);
+    const bufs = await Promise.all(parts.map(u => mdlGetBuf_(u, ms)));
+    const all = new Uint8Array(bufs.reduce((a, b) => a + b.byteLength, 0));
+    let off = 0; bufs.forEach(b => { all.set(new Uint8Array(b), off); off += b.byteLength; });
+    net.loadFromWeightMap(faceapi.tf.io.decodeWeights(all.buffer, specs));
+  } catch (e) { await mdlForget_(urls); throw e; }
+}
+/* v13.19 ★ อุ่นเครื่องตัวจับหน้า "ระหว่างรอกล้องตื่น" (กดสแกนแล้ว getUserMedia + เฟรมแรก ~0.5–2 วิ)
+   ครั้งแรกที่รันบนมือถือต้องคอมไพล์ shader 1–3 วิ — เดิมไปเริ่มหลังกล้องติด (ต่อคิวกัน) ตอนนี้ทำซ้อนช่วงรอกล้อง
+   ขนาดภาพเท่ากับลูปสแกน (320) = shader ชุดเดียวกัน · ทำครั้งเดียวต่อการเปิดแอป · ไม่ทำตอนอยู่หน้าแรก (เครื่องไม่มี GPU จะค้าง) */
+let _faceWarm = false;
+async function faceWarmup_() {
+  if (_faceWarm || !faceapiReady) return;
+  _faceWarm = true;
+  try {
+    const t0 = performance.now();
+    const c = document.createElement('canvas'); c.width = 320; c.height = 320;
+    const g = c.getContext('2d'); g.fillStyle = '#7a7a7a'; g.fillRect(0, 0, 320, 320);
+    await faceapi.detectSingleFace(c, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }));
+    const c2 = document.createElement('canvas'); c2.width = 150; c2.height = 150; c2.getContext('2d').drawImage(c, 0, 0, 150, 150);
+    await faceapi.nets.faceLandmark68Net.detectLandmarks(c2);
+    await faceapi.computeFaceDescriptor(c2);
+    console.log('[face] อุ่นเครื่อง ' + Math.round(performance.now() - t0) + ' ms');
+  } catch (e) { console.warn('[face] อุ่นเครื่องไม่สำเร็จ', e && e.message); }
 }
 
 /* v8.7 — โมเดลโหลดไม่สำเร็จ → retry เงียบๆ ทุก 6 วิ ระหว่างจอสแกนเปิดอยู่ */
@@ -6121,10 +6217,20 @@ function mpLoad_() {
     try {
       const m = await import(MP_BASE + '/vision_bundle.mjs');
       const files = await m.FilesetResolver.forVisionTasks(MP_BASE + '/wasm');
-      _mp = await m.FaceLandmarker.createFromOptions(files, {
-        baseOptions: { modelAssetPath: MP_MODEL, delegate: 'CPU' },
-        outputFaceBlendshapes: true, runningMode: 'VIDEO', numFaces: 1,
-      });
+      const opt = (buf) => ({ baseOptions: buf ? { modelAssetBuffer: buf, delegate: 'CPU' } : { modelAssetPath: MP_MODEL, delegate: 'CPU' },
+                             outputFaceBlendshapes: true, runningMode: 'VIDEO', numFaces: 1 });
+      // v13.19 ★ wasm ~9.4 MB + โมเดล ~3.8 MB อ่านจาก Cache Storage (โหลดครั้งแรกครั้งเดียว) — พลาด = ทางเดิมจากต้นทาง
+      let made = null;
+      if (mdlCacheOk_('mp')) {
+        const urls = [files.wasmLoaderPath, files.wasmBinaryPath, MP_MODEL];
+        try {
+          const [js, wasm, task] = await Promise.all([mdlGetBuf_(urls[0], 60000), mdlGetBuf_(urls[1], 180000), mdlGetBuf_(urls[2], 120000)]);
+          const loc = { wasmLoaderPath: URL.createObjectURL(new Blob([js], { type: 'text/javascript' })),
+                        wasmBinaryPath: URL.createObjectURL(new Blob([wasm], { type: 'application/wasm' })) };
+          made = await m.FaceLandmarker.createFromOptions(loc, opt(new Uint8Array(task)));
+        } catch (eC) { mdlCacheBad_('mp', eC); mdlForget_(urls); }
+      }
+      _mp = made || await m.FaceLandmarker.createFromOptions(files, opt(null));
       _mpErr = ''; _mpRunErrN = 0;
       return true;
     } catch (e) {
@@ -7097,6 +7203,17 @@ function getGps() {
   //   gpsWatchId = navigator.geolocation.watchPosition(onGpsOk, () => {}, { enableHighAccuracy:true });
   // }
 }
+/* v13.19: อุ่น GPS ตอนเปิดแอป — เฉพาะเครื่องที่อนุญาตตำแหน่งไว้แล้ว (ไม่เด้งถามสิทธิ์) · กดสแกนภายใน 30 วิ = ได้พิกัดทันที
+   (getGps รับพิกัดอายุ ≤30 วิ) และชิป GPS ตื่นอยู่แล้ว จับพิกัดใหม่ได้ไวกว่า */
+function gpsPrewarm_() {
+  try {
+    if (!currentUser || !navigator.geolocation || !navigator.permissions || !canUseCheckin()) return;
+    navigator.permissions.query({ name: 'geolocation' }).then(st => {
+      if (!st || st.state !== 'granted') return;
+      navigator.geolocation.getCurrentPosition(() => {}, () => {}, { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 });
+    }).catch(() => {});
+  } catch (_) {}
+}
 function onGpsOk(pos) {
   const { latitude:lat, longitude:lng, accuracy } = pos.coords;
   // รวม locations ทั่วไป + PersonalLocations เฉพาะ user คนนี้
@@ -7891,7 +8008,8 @@ async function doSelfCheckIn() {
   window._forceNextType = null;
   renderTodayStatus(); renderTodayPage(); renderHistory(); renderDashboard();
   if (synced) {
-    await syncLogsFromSheet({ silent: true });
+    // v13.19: ไม่ดึงประวัติวันนี้ซ้ำหลังลงเวลา — เซิร์ฟเวอร์ตอบชนิดเข้า/ออกที่ลงจริงมาแล้ว (แก้ในเครื่องไปข้างบน)
+    //   เดิมทุกการสแกนตามด้วย getCheckinLog อีก 1 คำขอ (อ่านท้ายชีท 6,000 แถว) = งานเซิร์ฟเวอร์ช่วงเข้างานเป็นสองเท่า
     renderHomeTodayCard();
     evaluateAction();
   } else {
@@ -8052,7 +8170,10 @@ async function _logsForYesterday_(empId) {
   if (config.appsScriptUrl) {
     try {
       const ddmm = String(yd.getDate()).padStart(2, '0') + '/' + String(yd.getMonth() + 1).padStart(2, '0') + '/' + yd.getFullYear();
-      const res = await callAppsScript('getCheckinLog', { empId, date: ddmm, limit: 50 });
+      // v13.19: ข้อมูลบูตมีประวัติ 7 วันครบ (more=false) = มีของเมื่อวานอยู่แล้ว — ไม่ยิงคำขอ (เดิมทุกคนยิงทุกครั้งที่เปิดแอป)
+      const bl = (_bootLogMeta && _bootLogMeta.days >= 2 && !_bootLogMeta.more && Date.now() - _bootLogMeta.at < 600000) ? _bootLogMeta : null;
+      const res = bl ? { logs: bl.rows.filter(l => String(l.empId) === String(empId) && String(l.date) === ddmm) }
+                     : await callAppsScript('getCheckinLog', { empId, date: ddmm, limit: 50 });
       items = (res.logs || []).filter(l => String(l.empId) === String(empId)).map(r => {
         const ms = new Date(r.timestamp).getTime() || 0;
         return _normScan_(r.type, ms, _hhmmFromSheetTime_(r.time, ms));
@@ -9131,7 +9252,13 @@ async function ensureSummaryLeaves(empId){
   _sumLeavesFor=String(empId);
 }
 
-function renderHistory(){ renderSummary(); renderHistoryLegacy(); }
+function renderHistory(){
+  // v13.19: วาดเฉพาะตอนหน้าประวัติเปิดอยู่ — เดิมเปิดแอป/ลงเวลาทุกครั้งวาดหน้าที่ซ่อนอยู่ = ยิง getMyLeaves + getCheckinLog ทั้งเดือนทิ้งเปล่าๆ
+  //   (เข้าหน้าประวัติเมื่อไร showPage วาดใหม่เองอยู่แล้ว)
+  const pg = document.getElementById('page-history');
+  if (pg && !pg.classList.contains('active')) return;
+  renderSummary(); renderHistoryLegacy();
+}
 
 async function renderSummary(){
   const root=document.getElementById('summaryRoot'); if(!root) return;
@@ -9503,12 +9630,13 @@ const _thDate = iso => { try { const d = new Date(iso); if (isNaN(d)) return Str
 
 /* ── 1) แจ้งเตือน (อ่านจากแท็บ "แจ้งเตือน" — ช่องทางเด้งเข้ามือถือต่อทีหลัง) ── */
 let _notif = { items: [], unread: 0, at: 0, busy: false };
-async function refreshBell_(force) {
+async function refreshBell_(force, viaBundle) {
   if (!currentUser || _notif.busy) return;
   if (!force && Date.now() - _notif.at < 60000) { renderBell_(); return; }
   _notif.busy = true;
   try {
-    const r = await callAppsScript('getMyNotifications', {});
+    const hb = viaBundle ? await homeBundle_() : null;   // v13.19: ตอนบูตใช้ผลคำขอเดียวกับฟีด
+    const r = (hb && hb.notif && hb.notif.ok) ? hb.notif : await callAppsScript('getMyNotifications', {});
     _notif.items = r.items || []; _notif.unread = r.unread || 0; _notif.at = Date.now();
     try { LS.set('notifCache', { items: _notif.items.slice(0, 30), unread: _notif.unread }); } catch (_) {}
   } catch (e) { /* ไม่มีเน็ต → ใช้แคช */ }
@@ -10362,7 +10490,7 @@ function setProgress(p){ document.getElementById('progressFill').style.width = p
 async function refreshAll() {
   const b = document.getElementById('btnRefresh');
   b.style.animation='spin .6s linear'; b.disabled=true;
-  _myTeamCache = null; _officeRefCache = null; _pttRoster = []; _pttRosterLoaded = false;   // v9.8: รีเฟรช = ดึงรายชื่อใหม่
+  _myTeamCache = null; _officeRefCache = null; officeRefLsDel_(); _pttRoster = []; _pttRosterLoaded = false;   // v9.8: รีเฟรช = ดึงรายชื่อใหม่
   ensurePttRoster_();   // v9.9: ดึง roster PTT รอบใหม่ด้วย (คนลาออกจะหลุดจากทีม/kiosk)
   loadAll();
   // v1.4: sync logs จาก Sheet ก่อน render
@@ -10579,7 +10707,11 @@ async function applyPTTMenuVisibility() {
     try {
       // v12.16: ถามจาก "ทะเบียนพนักงาน PTT" ก่อน — เดิมดูจากสลิปเงินเดือน คนที่ยังไม่มีสลิป
       // (พนักงานใหม่/สลิปยังไม่ออก) เลยถูกตัดสินว่าไม่ใช่ PTT แล้วโดนล็อกเช็คอิน "ยังไม่พร้อมใช้งาน"
-      const rs = await callAppsScript('getPTTStaff', {});
+      // v13.19: "ไม่พบพนักงาน PTT" = คำตอบจริง (ไม่อยู่ในทะเบียน PTT) — เดิม callAppsScript โยน error → ถือว่าเน็ตล่ม ไม่จำผล
+      //   = พนักงาน RATTANA ทุกคนยิงคำขอนี้ซ้ำทุกครั้งที่เปิดแอป (เซิร์ฟเวอร์เปิดไฟล์ทะเบียน PTT) · ตอนนี้ไปดูสลิปต่อตามที่ตั้งใจแล้วจำผลไว้กับกุญแจ
+      let rs = null;
+      try { rs = await callAppsScript('getPTTStaff', {}); }
+      catch (eP) { if (String((eP && eP.message) || '').indexOf('ไม่พบพนักงาน PTT') < 0) throw eP; rs = { ok: false }; }
       if (rs && rs.ok) {
         isPTT = true;
         khlang = rs.khlang || '';
@@ -11148,8 +11280,10 @@ function startUpdateChecker() {
     if (updateSafe_()) { location.replace(BASE + '?_v=' + pendingVer); return; }
     setTimeout(tryApply_, 15000);   // ยังไม่ว่าง — ลองใหม่ทุก 15 วิ จนกว่าจะได้
   }
+  let lastChk = 0;   // v13.19
   async function check() {
     if (notified || document.hidden) return;
+    lastChk = Date.now();
     try {
       const res = await fetch(BASE + '?_chk=' + Date.now(), { cache: 'no-store' });
       if (!res.ok) return;
@@ -11163,9 +11297,12 @@ function startUpdateChecker() {
       }
     } catch (_) {}
   }
-  setTimeout(check, 8000);                       // เช็คหลังโหลด 8 วิ
+  // v13.19: เปิดแอปมาจากเน็ตอยู่แล้ว (ไม่ได้มาจากแคชเครื่อง) = ไฟล์ล่าสุดแล้ว ไม่ต้องโหลดซ้ำตอน 8 วิ — ช่วงคนเยอะประหยัดเน็ตคนละ ~285 KB
+  let fromNet = false;
+  try { const nv = performance.getEntriesByType('navigation')[0]; fromNet = !!(nv && nv.transferSize > 0); } catch (_) {}
+  setTimeout(check, fromNet ? 4 * 60 * 1000 : 8000);   // เช็คหลังโหลด 8 วิ (มาจากแคชเครื่อง)
   setInterval(check, 5 * 60 * 1000);             // เช็คทุก 5 นาที
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) check(); });  // เช็คเมื่อกลับมาที่แอป
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && Date.now() - lastChk > 3 * 60 * 1000) check(); });  // เช็คเมื่อกลับมาที่แอป (ไม่ถี่เกิน 3 นาที)
 }
 
 function initApp() {
@@ -11193,7 +11330,11 @@ function initApp() {
   fillKioskBranches();
   applyPTTMenuVisibility();   // PTT: ซ่อนปุ่มอุปกรณ์สำนักงาน + สั่งข้าว
   // v9.8: prefetch รายชื่อเข้า cache ล่วงหน้า — เปิดฟอร์มแรกก็ขึ้นทันที ไม่ต้องรอ API
-  setTimeout(() => { try { getOfficeRef_().catch(()=>{}); resolveMyTeam().catch(()=>{}); retryFaceSync_(); } catch(_) {} }, 1200);
+  // v13.19: ดึงรายชื่อฟอร์มล่วงหน้า "หลังช่วงบูต" และเฉพาะคนที่มีทีม — เดิมทุกคนยิง 2 คำขอ (getOfficeRefData + getPTTStaff) ทุกครั้งที่เปิดแอป
+  //   ช่วงเข้างานคำขอพวกนี้ไปแย่งคิวเซิร์ฟเวอร์กับการลงเวลา · ฟอร์มที่เปิดทีหลังยังดึงเองได้ตามเดิม
+  setTimeout(() => { try { retryFaceSync_(); } catch(_) {} }, 1200);
+  setTimeout(() => { try { getOfficeRef_().catch(()=>{}); if (canApprove() || isPTTManager()) resolveMyTeam().catch(()=>{}); } catch(_) {} }, 30000);
+  setTimeout(gpsPrewarm_, 1500);   // v13.19
 
   // v12.25: โชว์ของล่าสุดจากแคชเครื่องทันที (ศูนย์ API) — v12.23 เคยยิง API ขนานตรงนี้
   // แล้วไปแย่งคิวเน็ต (เบราว์เซอร์จำกัด ~6 คำขอ/โดเมน) กับ loadAllSheets จนหน้าแรกช้าลงทั้งแอป
@@ -11241,7 +11382,7 @@ function initApp() {
     // v8.7: ดัน log ที่ค้าง (sync ไม่สำเร็จรอบก่อน) ขึ้น Sheet ก่อน sync กลับ
     try { await resyncPendingLogs(); } catch(_) {}
     // v1.4: Sync local logs กับ Sheet เพื่อให้ next-action ถูก (Sheet = source of truth)
-    await syncLogsFromSheet();
+    await syncLogsFromSheet({ boot: true });   // v13.19: ใช้ประวัติจากข้อมูลบูต (ไม่ยิงซ้ำ) เมื่อครบ
     // Re-build team with fresh face data
     if (currentUser.role === 'supervisor' || currentUser.role === 'manager' || isPTTManager()) {   // v9.9: ผจก. PTT ด้วย — FaceData มาช้ากว่า roster
       buildTeamFromSheet();
@@ -11255,13 +11396,13 @@ function initApp() {
     renderTodayStatus();
     evaluateAction();   // refresh ปุ่ม "เข้างาน/ออกงาน" ตาม logs ใหม่
     renderHomeTodayCard();  // v2.0: อัพเดท today card ด้วย
-    renderHomeFeed();       // v12.25: รีเฟรชฟีดท้ายคิว — คิวเน็ตว่างแล้ว (ตอนเปิดแอปโชว์จากแคชไปก่อน)
+    renderHomeFeed();       // v12.25: รีเฟรชฟีดท้ายคิว — คิวเน็ตว่างแล้ว (ตอนเปิดแอปโชว์จากแคชไปก่อน) · v13.19: คำขอเดียวร่วมกับกระดิ่ง
     if (selfLiveMode_() !== 'off') setTimeout(() => { mpLoad_(); }, 2000);   // v13.08: ตัวจับกะพริบ — โหลดเงียบๆ ท้ายคิว
     checkScanPairAlert();   // v12.0: เตือนลืมสแกนเข้า/ออก (เมื่อวาน+วันนี้) หลัง logs ตรงกับชีทแล้ว
     // v12.96: เช็คว่ามีลูกน้องก่อน (ไม่มี = ซ่อนเมนูอนุมัติ + ไม่ต้องดึงเลข) แล้วค่อยดึงเลขรออนุมัติ
     teamScopeBoot_().catch(() => {}).then(() => updateApproveAlert());   // v12.21: การ์ดเอกสารรออนุมัติ
     updateTimeIssues();     // v12.59: การ์ดข้อมูลลงเวลาต้องตรวจ
-    try { renderNotInCard_(); refreshBell_(true); } catch (_) {}   // v12.82
+    try { renderNotInCard_(); refreshBell_(true, true); } catch (_) {}   // v12.82 · v13.19: กระดิ่งใช้ผลคำขอเดียวกับฟีด (getHomeBundle)
   }, 200);
 
   // Update time + button state every second (only when home tab active)
@@ -11279,6 +11420,9 @@ function initApp() {
   setTimeout(async () => {
     await loadFaceModels(true);
   }, 600);
+  // v13.19: ตัวจับกะพริบเริ่มโหลด 4 วิหลังเปิดแอปเสมอ — เดิมรอข้อมูลบูตจบก่อน (ช่วงคนเยอะ = 10+ วิ → คนกดสแกนเร็วต้องยืนรอด่านกะพริบ)
+  //   ตัวเดิมท้ายคิวข้อมูลบูตยังอยู่ (เรียกซ้ำได้ ไม่โหลดซ้ำ)
+  if (selfLiveMode_() !== 'off') setTimeout(() => { mpLoad_(); }, 4000);
 
   // Auto-stop camera + GPS เมื่อสลับไป tab อื่น
   document.addEventListener('visibilitychange', () => {
@@ -11520,6 +11664,7 @@ async function startCheckinScan_(mode) {
     if (cf) cf.textContent = '⏳ กำลังเปิดกล้อง…';
     if (lf) { lf.classList.remove('ok', 'warn', 'err'); lf.classList.add('pending'); lf.onclick = null; lf.style.cursor = ''; } }
   startEmpCamera();
+  if (faceapiReady) faceWarmup_();   // v13.19: คอมไพล์ shader ระหว่างรอกล้องตื่น
   setTimeout(() => getGps(), 300);
   if (selfLiveMode_() !== 'off' && !_mp) mpLoad_();   // v13.08: ยังไม่ได้โหลดตัวจับกะพริบ — เริ่มโหลดเลย (ระหว่างนี้ใช้ face-api)
   if (!faceapiReady) {
@@ -13409,11 +13554,17 @@ function notMyOwnReq_(it) {
 let _officeRefCache = null;
 function getOfficeRef_() {
   if (!_officeRefCache) {
-    _officeRefCache = callAppsScript('getOfficeRefData', { empId: currentUser.empId })
+    // v13.19: เก็บในเครื่อง 12 ชม. — รายชื่อเพื่อนร่วมคลัง/ทะเบียนรถเปลี่ยนไม่บ่อย (เดิมยิงทุกครั้งที่เปิดแอป · เปิดไฟล์ Users + ไฟล์รถ)
+    const k = 'officeRef_' + String(currentUser.empId || '');
+    const c = LS.get(k, null);
+    if (c && c.data && c.at && Date.now() - c.at < 12 * 3600e3) _officeRefCache = Promise.resolve(c.data);
+    else _officeRefCache = callAppsScript('getOfficeRefData', { empId: currentUser.empId })
+      .then(r => { try { LS.set(k, { at: Date.now(), data: r }); } catch (_) {} return r; })
       .catch(e => { _officeRefCache = null; throw e; });   // ล้มเหลว → ล้างไว้ลองใหม่
   }
   return _officeRefCache;
 }
+function officeRefLsDel_() { try { if (currentUser) LS.del('officeRef_' + String(currentUser.empId || '')); } catch (_) {} }   // v13.19: กดรีเฟรช = ดึงใหม่
 
 /* v9.6: รายชื่อในฟอร์มที่หัวหน้าเลือก "ลูกทีมตัวเอง" (ใบเตือน/โอนย้าย/ขอกำลังคน/เงินเดือน)
    หัวหน้า → ลูกทีม (Users supervisorName + PTT roster) · HR หรือหาทีมไม่เจอ → fallback รายชื่อรวมเดิม */
@@ -16410,16 +16561,32 @@ function primeHomeFeedFromCache_() {
   } catch (_) {}
 }
 
+/* v13.19: ฟีดหน้าแรก (ลา · แก้เวลา · ใบเตือน) + กระดิ่งแจ้งเตือน = คำขอเดียว (getHomeBundle) — ใช้ร่วมกันภายใน 20 วิ
+   เซิร์ฟเวอร์รุ่นเก่าตอบ Unknown action → จำไว้ แล้วใช้ทางเดิม (แยกคำขอ) ตลอด session */
+let _hbP = null, _hbAt = 0, _hbOld = false;
+function homeBundle_() {
+  if (_hbOld || !currentUser) return Promise.resolve(null);
+  if (_hbP && Date.now() - _hbAt < 20000) return _hbP;
+  _hbAt = Date.now();
+  _hbP = callAppsScript('getHomeBundle', {}).catch(e => { if (/Unknown action/i.test(String(e && e.message))) _hbOld = true; return null; });
+  return _hbP;
+}
 async function renderHomeFeed() {
   const el = document.getElementById('homeFeedList');
   if (!el || !currentUser) return;
   try {
-    let fails = 0;
-    const [lv, ta, wn] = await Promise.all([
-      callAppsScript('getMyLeaves',       { empId: currentUser.empId }).catch(_=>{ fails++; return { leaves:[] }; }),
-      callAppsScript('getMyTimeAdjusts',  { empId: currentUser.empId }).catch(_=>{ fails++; return { items:[]  }; }),
-      callAppsScript('getMyWarnings',     { empId: currentUser.empId }).catch(_=>{ fails++; return { items:[]  }; }),
-    ]);
+    let fails = 0, lv, ta, wn;
+    const hb = await homeBundle_();   // v13.19: คำขอเดียว (Apps Script 9.56+) — เซิร์ฟเวอร์รุ่นเก่า = ยิงแยก 3 คำขอแบบเดิม
+    if (hb) {
+      const part = (x, empty) => (x && x.ok !== false) ? x : (fails++, empty);
+      lv = part(hb.leaves, { leaves:[] }); ta = part(hb.adjusts, { items:[] }); wn = part(hb.warnings, { items:[] });
+    } else {
+      [lv, ta, wn] = await Promise.all([
+        callAppsScript('getMyLeaves',       { empId: currentUser.empId }).catch(_=>{ fails++; return { leaves:[] }; }),
+        callAppsScript('getMyTimeAdjusts',  { empId: currentUser.empId }).catch(_=>{ fails++; return { items:[]  }; }),
+        callAppsScript('getMyWarnings',     { empId: currentUser.empId }).catch(_=>{ fails++; return { items:[]  }; }),
+      ]);
+    }
     if (fails === 3) return;   // ล่มทั้งสาม (เน็ต/เซิร์ฟเวอร์) — คงของเดิม/แคชบนจอไว้ อย่าเขียนทับว่า "ไม่มีรายการ"
     const items = [];
     (lv.leaves || []).forEach(l => items.push({
