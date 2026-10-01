@@ -1352,6 +1352,7 @@ body.dark .gas-ov.who-ov{background:#060c1c}
 <div class="content">
 
 <div class="stale-bar" id="staleBar"></div>
+<div class="stale-bar" id="dayBar"></div>
 
 <!-- ═══════════ 1. เลือกงาน ═══════════ -->
 <section id="scr-jobs" class="screen on">
@@ -1596,7 +1597,7 @@ body.dark .gas-ov.who-ov{background:#060c1c}
   <div id="sumList"></div>
   <div id="sheetPreview"></div>
   <div class="footbar">
-    <button class="btn btn-gold" style="flex:1" onclick="confirmJob()">✓ ยืนยันปิดงาน</button>
+    <button class="btn btn-gold" style="flex:1" id="jobOkBtn" onclick="confirmJob()">✓ ยืนยันปิดงาน</button>
   </div>
 </section>
 
@@ -1912,9 +1913,12 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-09-30 · 31';
+const BUILD = '2026-09-30 · 32';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
+/* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
+   ก่อนจะทันตั้ง GAS_URL='' เอง (30/09 หลุดขึ้นชีต กำลังเช็ค ไป 1 แถวเพราะแบบนี้) · ใช้งานจริงเปิดจาก GitHub Pages ไม่โดน */
+if (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) GAS_URL = '';
 
 /* ชื่อชีตปลายทาง — ต้องตรงกับ ALLOWED ใน apps-script.gs */
 const SHEET_DONE = 'ยืนยันเช็ค';     // สรุปตอนกดปิดงาน
@@ -2294,19 +2298,151 @@ const save = () => LSset(LS, JSON.stringify(state));
 CHAN_PICK = state.chanPick || [];                 // ค่าที่เคยเลือกไว้
 if (CHAN_PICK.length) JOBS = buildJobs();         // สร้างงานใหม่ตามช่องทางที่เลือก
 
-const scanKey  = (pid, rnd) => pid + '@' + rnd;
+/* ── ยอดแยกตามช่องทางที่เลือกไว้ตอนยิง (ผู้ใช้สั่ง 30/09) ──
+   เลือก "ปลีก" แล้วยิง = กองของปลีก ไปลงเฉพาะบิลปลีก · เลือกหลายช่องทาง/ทั้งหมด = กองกลางของช่องทางเหล่านั้น แบ่งตามกติกาเดิม
+   (เดิมยอดเป็นกองเดียวต่อสินค้า สลับปุ่มช่องทางแล้วยอดปลีกไปตกบิลส่ง)
+   ป้ายอยู่ท้ายคีย์: "รหัส@รอบ#BV" · ยอดรุ่นก่อน (ไม่มีป้าย) = กองกลางทุกช่องทาง '*' ใช้คีย์เดิมได้เลย ไม่ต้องย้ายข้อมูล
+   ใช้กับยอดยิงในหน้าทีม (scans) โอนย้าย (tscans) และทดแทน (subs) — เช็คตามร้านเป็นของร้านอยู่แล้ว ไม่เกี่ยว */
+const TAG_ALL    = '*';
+const curTag     = () => CHAN_PICK.length ? CHAN_PICK.slice().sort().join('+') : TAG_ALL;
+const tagSfx     = tag => (!tag || tag === TAG_ALL) ? '' : '#' + tag;
+const tagOfKey   = k => { const i = k.indexOf('#'); return i < 0 ? TAG_ALL : k.slice(i + 1); };
+const tagChans   = t => t === TAG_ALL ? null : t.split('+');
+const viewSet    = () => CHAN_PICK.length ? CHAN_PICK.slice() : null;        // null = ทุกช่องทาง
+const tagInside  = (t, view) => !view || (t !== TAG_ALL && tagChans(t).every(c => view.includes(c)));
+const tagOverlap = (t, view) => !view || t === TAG_ALL || tagChans(t).some(c => view.includes(c));
+const tagRank    = t => t === TAG_ALL ? 99 : tagChans(t).length;             // กองเฉพาะก่อน กองกลางทีหลัง
+/** ชื่อช่องทางที่เลือกอยู่ ต่อท้ายชื่อกลุ่มในชีต เช่น "1 คิง · ส่ง" — ทุกช่องทาง = ไม่ต่อ (แบบเดิม) */
+const chanSfx    = () => CHAN_PICK.length
+  ? ' · ' + CHAN_PICK.slice().sort((a,b) => chanRank(a) - chanRank(b)).map(k => CHAN_NAME[k] || k).join('+') : '';
+
+const scanKey  = (pid, rnd, tag = curTag()) => pid + '@' + rnd + tagSfx(tag);
 /* ── โอนย้าย C4 → W4 ──
    ของที่ W4 ไม่พอ ต้องไปยกจาก C4 มาเติมให้ครบออเดอร์ แล้วเปิดบิลออกจาก W4
    เก็บคนละกองกับยอดเช็คปกติ เพราะต้องเอาไปออกใบโอนย้าย
    แต่ให้นับรวมเป็น "ได้" ด้วย ไม่งั้นหน้าเช็คจะยังขึ้นว่าขาดทั้งที่ยกมาแล้ว */
 const FROM_WH = 'C4';
-const tKey = (pid, rnd) => 't|' + pid + '@' + rnd;
-const tGot = (pid, rnd) => (state.tscans || {})[tKey(pid,rnd)] || 0;
-const tAll = pid => ROUNDS.reduce((s,r) => s + tGot(pid, r.n), 0);
+const tKey = (pid, rnd, tag = curTag()) => 't|' + pid + '@' + rnd + tagSfx(tag);
+const tGot = (pid, rnd, tag = curTag()) => (state.tscans || {})[tKey(pid, rnd, tag)] || 0;
 
-const w4In = (pid, rnd) => state.scans[scanKey(pid,rnd)] || 0;
-const scannedIn = (pid, rnd) => w4In(pid, rnd) + tGot(pid, rnd) + subEA(pid, rnd);
-const scannedAll = pid => ROUNDS.reduce((s,r) => s + scannedIn(pid, r.n), 0);
+/** กองยอดของสินค้า แยกตามป้ายช่องทาง { ป้าย: ชิ้น } = ยิงในหน้าทีม + โอนจาก C4 + ทดแทน
+ *  rnd ว่าง = ทุกรอบ (แบบเดิม) และหักส่วนที่ยืนยันลงชีตไปแล้ว (state.used)
+ *  — ส่วนนั้นไปอยู่ในยอดยืนยันของชีต (CONF) แล้ว ถ้าไม่หักจะนับซ้ำ */
+function poolsOf(pid, rnd) {
+  const m = {}, add = (k, ea) => { if (ea > 0) { const t = tagOfKey(k); m[t] = (m[t] || 0) + ea; } };
+  const hit = (k, pre) => k.startsWith(pre + pid + '@') && (!rnd || k.slice((pre + pid + '@').length).split('#')[0] === String(rnd));
+  for (const k in state.scans || {})  if (hit(k, ''))   add(k, state.scans[k]);
+  for (const k in state.tscans || {}) if (hit(k, 't|')) add(k, state.tscans[k]);
+  for (const k in state.subs || {})   if (hit(k, 'u|')) add(k, (state.subs[k] || []).reduce((s, x) => s + (x.ea || 0), 0));
+  if (!rnd) for (const t in m) {
+    m[t] = Math.max(0, m[t] - ((state.used || {})[pid + '#' + t] || 0));
+    if (!m[t]) delete m[t];
+  }
+  return m;
+}
+/** ยอดที่เป็นของหน้าที่เปิดอยู่เต็ม ๆ (กองที่ป้ายอยู่ในช่องทางที่เลือก) — ใช้เลือกหน่วย/ข้อความสั้น */
+const ownPool = (pid, view = viewSet(), rnd) =>
+  Object.entries(poolsOf(pid, rnd)).reduce((s, [t, ea]) => s + (tagInside(t, view) ? ea : 0), 0);
+/** คีย์ยอดโอนจาก C4 ของสินค้านี้ที่เกี่ยวกับหน้าที่เปิดอยู่ (rnd ว่าง = ทุกรอบ) */
+const tKeysOf = (pid, view = viewSet(), rnd) => Object.keys(state.tscans || {})
+  .filter(k => k.startsWith('t|' + pid + '@') && tagOverlap(tagOfKey(k), view) &&
+               (!rnd || k.slice(('t|' + pid + '@').length).split('#')[0] === String(rnd)));
+/** ยอดโอนจาก C4 ที่เห็นในหน้านี้ (ยกมาแล้วทั้งหมด รวมที่ยืนยันไปแล้ว) */
+const tAll = (pid, view = viewSet(), rnd) => tKeysOf(pid, view, rnd).reduce((s, k) => s + (state.tscans[k] || 0), 0);
+
+/* ═══ ยอดที่ยืนยันลงชีตแล้ว (ชีต ยืนยันเช็ค) — ทุกเครื่องเห็นเหมือนกัน (ผู้ใช้สั่ง 30/09) ═══
+   ใช้ตั้งต้นบรรทัดที่ปิดงานแล้วในหน้าทีม/โอนย้าย แทนยอดในเครื่อง — ไปยกของ C4 ด้วยเครื่องไหนก็เห็นยอดขาดตรงกัน
+     แถวปิดงาน      = ตั้งยอดของบรรทัดนั้นใหม่ (ปิดซ้ำ อันล่าสุดชนะ)
+     แถว ยืนยันเพิ่ม = ลงเฉพาะยอดที่ได้เพิ่ม (ผู้ใช้เลือก 30/09) · ยอดที่ยังขาดเขียนไว้ในช่องสรุป "ยังขาด N" อ่านกลับมาตั้งค่า
+                     (อ่านแถวเดิมซ้ำก็ได้ค่าเดิม ไม่เพี้ยน)
+   เอาเฉพาะแถวของงานทีม (กลุ่มขึ้นต้นด้วยรหัสทีม) · แถวเช็คตามร้านและแถวทดแทนไม่นับ
+   CONF = ที่อ่านจากชีตล่าสุด · confSent = ส่งถึงชีตแล้วแต่ยังไม่ได้อ่านกลับ · คิวที่ยังไม่ได้ส่งก็นับ */
+const ADD_TXT = 'ยืนยันเพิ่ม';
+const CONF_LS = 'rattana_conf';
+/* CONF.by["วันทำงาน|คลัง"] = แถวที่อ่านจากชีต (เก็บ 3 วันล่าสุด สลับวันทำงานไปมาแล้วไม่ต้องรออ่านใหม่)
+   CONF.ok = ชุดไหนอ่านจากชีตสำเร็จแล้วในรอบเปิดแอปนี้ */
+let CONF = { by:{}, ok:{} }, confSent = [], confVer = 0, confMap = null;
+try { const c = JSON.parse(LSget(CONF_LS) || 'null');
+      if (c) { CONF.by = c.by || {}; confSent = c.sent || []; } } catch(e) {}
+const confK = () => TODAY + '|' + WAREHOUSE;
+const confSave = () => {
+  const ks = Object.keys(CONF.by); ks.slice(0, Math.max(0, ks.length - 3)).forEach(k => { delete CONF.by[k]; delete CONF.ok[k]; });
+  const keep = new Set(Object.keys(CONF.by).concat(confK()));
+  confSent = confSent.filter(x => keep.has(x.date + '|' + x.wh));
+  LSset(CONF_LS, JSON.stringify({ by:CONF.by, sent:confSent }));
+};
+const confKey = (ref, code, isF) => ref + '|' + code + '|' + (isF ? 'F' : 'S');
+/** แถวชีต (ตามชื่อหัวคอลัมน์) → แบบย่อ */
+const confRow = o => [cln(o['เลขที่ใบจอง']), cln(o['บาร์โค้ด']), cln(o['หน่วย']), numOf(o['สั่ง-ขาย']), numOf(o['สั่ง-แถม']),
+                      numOf(o['ขาด-ขาย']), numOf(o['ขาด-แถม']), cln(o['สรุป']), cln(o['กลุ่มที่เช็ค'])];
+const confTeamRow = r => /^\d+ \S/.test(r[8]) && !/^ทดแทน/.test(r[7]);
+function confApply(m, r) {
+  if (!confTeamRow(r)) return;
+  const [ref, code, unit, so, sf, ms, mf, sum] = r;
+  const q = parseUnit(unit).qtyEA || 1;
+  if (sum.startsWith(ADD_TXT)) {
+    const e = m[confKey(ref, code, sum.startsWith(ADD_TXT + ' แถม'))]; if (!e) return;
+    const left = sum.match(/ยังขาด\s*([\d.,]+)/);
+    e.short = left ? numOf(left[1]) * q : 0;
+  } else {
+    const isF = !so && sf > 0;
+    m[confKey(ref, code, isF)] = { need:(isF ? sf : so) * q, short:Math.max(0, isF ? mf : ms) * q };
+  }
+}
+/** บรรทัดที่ยืนยันแล้วของวันทำงานนี้ { คีย์: { need, short, given } } เป็นชิ้น */
+function confLines() {
+  if (confMap && confMap.ver === confVer && confMap.day === TODAY && confMap.wh === WAREHOUSE) return confMap.m;
+  const m = {}, cur = (d, w) => d === TODAY && w === WAREHOUSE;
+  (CONF.by[confK()] || []).forEach(r => confApply(m, r));
+  confSent.forEach(x => { if (cur(x.date, x.wh)) x.rows.forEach(r => confApply(m, r)); });
+  let q = []; try { q = getQueue(); } catch(e) {}         // ตอนเปิดไฟล์ คิวอาจยังไม่ถูกประกาศ
+  q.forEach(it => {
+    if (it.kind === SHEET_DONE && it.meta && cur(it.meta.date, it.meta.wh)) it.rows.forEach(o => confApply(m, confRow(o)));
+  });
+  Object.values(m).forEach(e => { e.given = Math.max(0, e.need - e.short); });
+  confMap = { m, ver:confVer, day:TODAY, wh:WAREHOUSE };
+  return m;
+}
+const confOf = l => confLines()[confKey(l.ref, l.code, !!l.erpFree)] || null;
+const confReady = () => !!CONF.ok[confK()];
+
+/** ยืนยันลงชีตแล้ว → หักยอดที่ใช้ไปออกจากกองในเครื่อง (state.used) ไม่ให้นับซ้ำกับยอดในชีต
+ *  onlyConf = ยืนยันเพิ่มจากหน้าโอนย้าย (ลงเฉพาะบรรทัดที่ปิดงานแล้ว) · acc.subs = ของทดแทนที่ลงชีตไป */
+function markSent(c, onlyConf, acc) {
+  const u = state.used ||= {};
+  c.all.forEach(r => r.detail.forEach(d => {
+    if (onlyConf && !d.conf) return;
+    for (const t in d.from || {}) { const k = r.product.id + '#' + t; u[k] = (u[k] || 0) + d.from[t]; }
+  }));
+  const ss = state.subsSent ||= {};
+  const got = (acc && acc.subs) || {};
+  for (const pid in got) for (const sp in got[pid]) { const m = ss[pid] ||= {}; m[sp] = (m[sp] || 0) + got[pid][sp]; }
+}
+/** อัปจากรุ่น ≤31 กลางวัน — งานที่เครื่องนี้ปิดไปแล้วด้วยรุ่นเก่า (doneJob คีย์ไม่มีป้าย) ยอดในเครื่องคือยอดที่อยู่ในชีตแล้ว
+ *  แต่รุ่นเก่าไม่ได้จดว่าใช้ไปเท่าไหร่ → หักกองกลางออกเท่ายอดที่ชีตบอกว่าได้ ไม่งั้นนับซ้ำ (เช่นยอดปลีกที่ปิดแล้วไปตกบิลออนไลน์อีก)
+ *  ทำครั้งเดียวต่อวันทำงาน หลังอ่านชีตสำเร็จ · รันซ้ำได้ค่าเดิม */
+function migrateUsed() {
+  const tag = TODAY + '|' + WAREHOUSE, was = JSON.stringify(state.used || {});
+  if (state.usedMig === tag || !confReady()) return false;
+  state.usedMig = tag;
+  const old = Object.keys(state.doneJob || {}).filter(k => k.split('|').length === 2);
+  if (old.length) {
+    const keep = CHAN_PICK; CHAN_PICK = []; let jobs; try { jobs = buildJobs(); } finally { CHAN_PICK = keep; }
+    const u = state.used ||= {};
+    old.forEach(key => {
+      const j = jobs.find(x => x.key === key); if (!j) return;
+      Object.values(j.skus).forEach(s => {
+        const pid = s.product.id;
+        const inSheet = s.lines.reduce((a, l) => { const cf = confOf(l); return a + (cf ? Math.min(l.needEA, cf.given) : 0); }, 0);
+        const raw = ROUNDS.reduce((a, r) => a + (poolsOf(pid, r.n)[TAG_ALL] || 0), 0);
+        const k = pid + '#' + TAG_ALL, v = Math.min(raw, inSheet);
+        if (v > (u[k] || 0)) u[k] = v;
+      });
+    });
+  }
+  save();
+  return JSON.stringify(state.used || {}) !== was;
+}
 
 /* ยอดของโหมด "เช็คตามร้าน" แยกคนละชุดกับโหมดทีม เพราะคนละวิธีนับ */
 const sKey = (sc, pid) => 's|' + sc + '|' + pid;
@@ -2350,23 +2486,63 @@ function storePreMap() {
   return m;
 }
 
-function computeJob(job) {
+/** งานเดียวกันแต่ครบทุกช่องทาง — กองยอดของช่องทางอื่น/กองกลาง ต้องแบ่งบนบรรทัดทุกช่องทางก่อน
+ *  ถึงจะรู้ว่าตกบรรทัดที่เห็นในหน้านี้เท่าไหร่ */
+let JOBS_ALL = null, JOBS_ALL_OF = null;
+function fullJob(key) {
+  if (!CHAN_PICK.length) return JOBS.find(j => j.key === key);
+  if (JOBS_ALL_OF !== JOBS) {
+    const keep = CHAN_PICK; CHAN_PICK = [];
+    try { JOBS_ALL = buildJobs(); } finally { CHAN_PICK = keep; }
+    JOBS_ALL_OF = JOBS;
+  }
+  return JOBS_ALL.find(j => j.key === key);
+}
+
+/** view = ช่องทางที่เห็น (null = ทุกช่องทาง) — ปกติเท่ากับปุ่มช่องทาง · แดชบอร์ดส่ง null */
+function computeJob(job, view = viewSet()) {
   const rows = [];      // สินค้าขาย
   const freeNeed = {};  // { productId: { lineKey: {...} } }
   const pre = storePreMap();
+  const fj = view ? fullJob(job.key) : null;
 
   for (const sku of Object.values(job.skus)) {
     const p = sku.product;
     const lines = sku.lines;
-    /* ยอดที่เช็คตามร้านมาแล้ว → ลงบรรทัดของร้านนั้นก่อน
-       ที่เหลือ (ยิงในหน้าทีม + โอน + ทดแทน) ค่อยแบ่งตามกติกาให้บรรทัดที่ยังขาด */
-    const preGive = lines.map(l => Math.min(l.needEA, pre[l.lid] || 0));
-    const preSum  = preGive.reduce((a, b) => a + b, 0);
-    const teamEA  = scannedAll(p.id);
-    const rest    = lines.map((l, i) => Object.assign({}, l, { needEA: Math.max(0, l.needEA - preGive[i]) }));
-    const res0    = allocate(rest, teamEA, p);
-    const res     = Object.assign({}, res0, { give: res0.give.map((g, i) => g + preGive[i]) });
-    const scanned = teamEA + preSum;
+    const full = (fj && fj.skus[p.id]) ? fj.skus[p.id].lines : lines;   // บรรทัดทุกช่องทางของงานนี้
+    const vis = new Set(lines.map(l => l.lid));
+    /* ตั้งต้นแต่ละบรรทัด
+         บรรทัดที่ยืนยันลงชีตแล้ว (CONF จากชีต ยืนยันเช็ค — ทุกเครื่องเห็นเหมือนกัน) → เริ่มที่ยอดที่ชีตบอกว่าได้แล้ว
+         บรรทัดที่เช็คตามร้านมาแล้ว → ลงบรรทัดของร้านนั้นก่อน
+       ที่เหลือ (ยิงในหน้าทีม + โอน + ทดแทน ที่ยังไม่ได้ยืนยัน) แบ่งทีละกองตามป้ายช่องทาง — กองเฉพาะช่องทางก่อน กองกลางทีหลัง
+       กองหนึ่งลงได้เฉพาะบรรทัดของช่องทางในป้ายมัน · แต่ละกองแบ่งตามกติกาเดิม (allocate) */
+    const give = {}, remain = {}, cfOf = {}, from = {};
+    full.forEach(l => {
+      const cf = confOf(l); cfOf[l.lid] = cf;
+      const g = Math.min(l.needEA, Math.max(cf ? cf.given : 0, pre[l.lid] || 0));
+      give[l.lid] = g; remain[l.lid] = l.needEA - g; from[l.lid] = {};
+    });
+    const baseGive = lines.map(l => give[l.lid]);
+    const baseSum  = baseGive.reduce((a, b) => a + b, 0);
+    const preGive  = lines.map(l => Math.min(l.needEA, pre[l.lid] || 0));
+    const preSum   = preGive.reduce((a, b) => a + b, 0);
+    let got = 0, stranded = 0, surplus = 0;
+    Object.entries(poolsOf(p.id)).sort((a, b) => tagRank(a[0]) - tagRank(b[0])).forEach(([tag, ea]) => {
+      if (!tagOverlap(tag, view)) return;                 // กองของช่องทางอื่นล้วน ไม่เกี่ยวกับหน้านี้
+      const chans = tagChans(tag);
+      const ls = full.filter(l => !chans || chans.includes(chanOf(l.ref).key));
+      const r = allocate(ls.map(l => Object.assign({}, l, { needEA: remain[l.lid] })), ea, p);
+      ls.forEach((l, i) => {
+        give[l.lid] += r.give[i]; remain[l.lid] -= r.give[i];
+        if (r.give[i]) from[l.lid][tag] = (from[l.lid][tag] || 0) + r.give[i];   // ไว้หักกองตอนยืนยัน
+      });
+      if (tagInside(tag, view)) { got += ea; stranded += r.stranded; surplus += r.surplus; }   // กองของหน้านี้เต็ม ๆ
+      else got += ls.reduce((s, l, i) => s + (vis.has(l.lid) ? r.give[i] : 0), 0);          // กองกว้างกว่า — เอาเฉพาะส่วนที่ตกบรรทัดในหน้านี้
+    });
+    const res = { give: lines.map(l => give[l.lid]), stranded, surplus,
+                  full: lines.every(l => give[l.lid] >= l.needEA) };
+    const scanned = got + baseSum;
+    const confSum = lines.reduce((s, l, i) => s + (cfOf[l.lid] ? baseGive[i] : 0), 0);
     const promos = promosFor(p);
 
     const detail = lines.map((l,i) => {
@@ -2386,10 +2562,14 @@ function computeJob(job) {
           fromId:p.id, promo:f.pr.promo,
         });
       }
-      return { line:l, giveEA, free, freeOrdered:0, freeGive:0 };
+      /* conf = บรรทัดนี้ยืนยันลงชีตแล้ว · confGiven = ยอดที่ชีตมีอยู่แล้ว (ยืนยันเพิ่มลงเฉพาะส่วนที่เกินจากนี้)
+         from = ยอดที่มาจากกองไหนบ้าง (ป้ายช่องทาง → ชิ้น) ไว้หักออกจากกองหลังยืนยัน */
+      const cf = cfOf[l.lid];
+      return { line:l, giveEA, free, freeOrdered:0, freeGive:0, from:from[l.lid],
+               conf: !!cf, confGiven: cf ? Math.min(l.needEA, cf.given) : 0 };
     });
 
-    rows.push({ sku, product:p, scanned, res, detail, promos, preSum,
+    rows.push({ sku, product:p, scanned, res, detail, promos, preSum, confSum,
                 preBy: lines.map((l, i) => ({ store:l.store, ea:preGive[i] })).filter(x => x.ea > 0),
       totalNeed: lines.reduce((s,l)=>s+l.needEA,0) });
   }
@@ -2427,7 +2607,7 @@ function computeJob(job) {
       continue;
     }
 
-    const scanned = scannedAll(p.id);
+    const scanned = ownPool(p.id, view);
     const res = allocate(lines, scanned, p);
     freeRows.push({ sku:{ product:p, lines }, product:p, scanned, res, isFree:true,
       detail: lines.map((l,i) => ({ line:l, giveEA:res.give[i], free:[],
@@ -2520,6 +2700,7 @@ function renderJobs() {
     const cl = j.team.cats || [];
     const cats = cl.length ? cl.slice(0,2).join(' · ') + (cl.length > 2 ? ` +อีก ${cl.length-2} เจ้า` : '') : '—';
     const dn = jobDone(j.key);                 // ยืนยันแล้วจากเครื่องไหนก็ได้
+    if (!dn.length && jobHasConf(c)) dn.push({ at:'', by:'', device:'' });   // _log ยังไม่ขึ้น แต่ชีต ยืนยันเช็ค มีแล้ว
     return `<button class="job ${dn.length?'done':''}" onclick="openJob('${j.key}')">
       <div class="job-top">
         <div>
@@ -2576,9 +2757,10 @@ function renderScan() {
   const job = curJob(); if (!job) { go('scr-jobs'); return; }
   $('jobTag').textContent = `ทีม ${job.team.name} · ${ROUNDS[job.round-1].label} · ${WAREHOUSE}`;
   const dn = jobDone(job.key);
-  $('doneNote').innerHTML = dn.length ? `<div class="done-note"><b>${esc(doneText(dn))}</b><br>
-    ยิงต่อได้ตามปกติ แต่ถ้ากดยืนยันปิดงานซ้ำ ข้อมูลจะซ้ำในชีต</div>` : '';
-  const c = computeJob(job);
+  const c = computeJob(job), more = jobHasConf(c);
+  $('doneNote').innerHTML = (dn.length || more) ? `<div class="done-note"><b>${esc(doneText(dn) || '✓ ยืนยันแล้ว')}</b><br>
+    ${more ? 'ยิงต่อได้ตามปกติ — ของที่ได้เพิ่ม กด <b>ยืนยันเพิ่ม</b> ในหน้าสรุป จะลงชีตเฉพาะยอดที่เพิ่ม'
+           : 'ยิงต่อได้ตามปกติ แต่ถ้ากดยืนยันปิดงานซ้ำ ข้อมูลจะซ้ำในชีต'}</div>` : '';
 
   const cnt = { all:c.all.length, none:0, short:0, ok:0 };
   c.all.forEach(r => {
@@ -2632,7 +2814,7 @@ function renderScan() {
     const gotTxt = rollUp ? `${inPick} <i>=</i> ${tidy}` : tidy;
     const cls = r.scanned === 0 ? 'none' : r.scanned >= r.totalNeed ? 'ok' : 'short';
     const st  = rowState(r.totalNeed, r.scanned, r.res);
-    const perRound = ROUNDS.map(rr => ({ rr, v: scannedIn(p.id, rr.n) })).filter(x => x.v > 0);
+    const perRound = ROUNDS.map(rr => ({ rr, v: ownPool(p.id, viewSet(), rr.n) })).filter(x => x.v > 0);
     return `<div class="srow ${cls} ${r.isFree?'free':''} ${p.id===lastHit?'hit':''}" id="sku-${p.id}">
       ${thumbHtml(p)}
       <div class="smain">
@@ -2724,7 +2906,7 @@ function thumbHtml(p) {
    ═══════════════════════════════════════════════════════════════ */
 function setMode(m) {
   state.mode = m; state.storeCode = null; save();
-  if (m === 'team' || m === 'store') loadDone();   // มีเครื่องอื่นยืนยันงาน/ร้านไปแล้วหรือยัง
+  if (m === 'team' || m === 'store' || m === 'transfer') loadDone();   // มีเครื่องอื่นยืนยันงาน/ร้านไปแล้วหรือยัง
   $('tabTeam').classList.toggle('active',  m === 'team');
   $('tabStore').classList.toggle('active', m === 'store');
 
@@ -2927,7 +3109,7 @@ function pickUnit(p) {
   const u = p.units.find(x => x.lv === lv);
   if (u) return u;                                   // ยิงบาร์ไหน ใช้หน่วยนั้น
   // ยังไม่เคยยิง → ใช้หน่วยใหญ่สุดที่ยอดปัจจุบันเต็มอย่างน้อย 1 หน่วย
-  const cur = scannedAll(p.id);
+  const cur = ownPool(p.id);
   if (cur > 0) {
     const fit = p.units.find(x => cur >= x.qtyEA);
     if (fit) return fit;
@@ -2987,23 +3169,32 @@ function editTotal(pid, where) {
 
 /** แก้ "ยอดรวม" ตรง ๆ (แตะที่ตัวเลข ได้) — นับเป็นหน่วยที่ยิงล่าสุด
  *  เศษที่เล็กกว่าหน่วยนั้นเก็บไว้เหมือนเดิม ไม่หายไป */
+/** ยอด "ได้" ของสินค้านี้ในงานที่เปิดอยู่ (ตรงกับตัวเลขบนจอ) — ไม่อยู่ในงานที่เปิด ใช้กองของหน้านี้ */
+function gotOf(pid) {
+  const j = curJob(), r = j && computeJob(j).all.find(x => x.product.id === pid);
+  return r ? r.scanned : ownPool(pid);
+}
 function setQty(pid, val) {
   state.editing = null;
   const p = byId[pid]; if (!p) return;
-  const u = pickUnit(p), cur = scannedAll(pid);
+  const u = pickUnit(p), cur = gotOf(pid);
   const rem  = cur % u.qtyEA;
   const n    = Math.max(0, Math.floor(Number(String(val).replace(/[^\d]/g,'')) || 0));
   const want = n * u.qtyEA + rem;
-  const others = cur - scannedIn(pid, state.round);
-  const tr = tGot(pid, state.round) + subEA(pid, state.round);   // ยอดโอน + ยอดทดแทน แก้ที่ปุ่มของมันเอง
-  if (want < others + tr) {
-    toast(tr
-      ? `มียอดจากโอน/ทดแทนอยู่ ${fmtUnits(tr, p.units)}${others?` และรอบก่อนหน้า ${fmtUnits(others, p.units)}`:''} — ตั้งต่ำกว่านี้ไม่ได้`
-      : `รอบก่อนหน้ายิงไว้ ${fmtUnits(others, p.units)} แล้ว ตั้งต่ำกว่านี้ไม่ได้`, 'warning');
+  // ยอดที่ยืนยันลงชีตไปแล้ว ลดในหน้านี้ไม่ได้ (ชีตมีไปแล้ว)
+  const j = curJob(), row = j && computeJob(j).all.find(x => x.product.id === pid);
+  if (row && row.confSum && want < row.confSum) {
+    toast(`ยืนยันลงชีตไปแล้ว ${fmtUnits(row.confSum, p.units)} — ตั้งต่ำกว่านี้ไม่ได้`, 'warning');
     renderScan(); return;
   }
+  // ขยับเฉพาะยอดยิงของรอบนี้ + ช่องทางที่เลือกอยู่ ให้ตัวเลข "ได้" บนจอเป็นตามที่ใส่
   const k = scanKey(pid, state.round), before = state.scans[k] || 0;
-  state.scans[k] = want - others - tr;
+  const next = before + (want - cur);
+  if (next < 0) {
+    toast(`ยอดนี้มีส่วนที่มาจากโอน/ทดแทน/รอบอื่น/เช็คตามร้าน ${fmtUnits(cur - before, p.units)} — ตั้งต่ำกว่านี้ไม่ได้`, 'warning');
+    renderScan(); return;
+  }
+  state.scans[k] = next;
   if (state.scans[k] !== before)
     logMove({ ts:Date.now(), pid, ea:state.scans[k]-before, round:state.round,
               device:DEVICE, by:CHECKER, how:`ใส่เลข ${n} ${u.short}` });
@@ -3023,7 +3214,7 @@ function addEA(pid, ea, unit, how) {
   lastHit = pid; save(); renderScan();
   const p = byId[pid];
   feed(`${ea>0?'+':''}${fmtN(Math.abs(ea)/ (unit?unit.qtyEA:1))} ${unit?unit.short:'ชิ้น'} · <b>${esc(p.name)}</b><br>
-        <span style="font-size:12px;font-weight:400;opacity:.85">รวม ${fmtUnits(scannedAll(pid), p.units)}</span>`);
+        <span style="font-size:12px;font-weight:400;opacity:.85">รวม ${fmtUnits(gotOf(pid), p.units)}</span>`);
   // เลื่อนหาเฉพาะตอนที่รายการหลุดจอจริง ๆ — ยิงรัว ๆ แล้วจอกระตุกทำให้คนเช็คหลุดโฟกัส
   setTimeout(() => {
     const el = $('sku-'+pid); if (!el) return;
@@ -3101,7 +3292,7 @@ function handleCode(code) {
   pendOpen(p.id, u.lv);                       // ยิงแล้วไม่นับให้ ปล่อยช่องว่างรอใส่จำนวน
   lastHit = p.id; save(); renderScan(); focusQty(p.id);
   feed(`<b>${esc(p.name)}</b><br><span style="font-size:12px;font-weight:400;opacity:.85"
-    >ใส่จำนวนที่นับได้ (${u.short} × ${fmtN(u.qtyEA)}) · ตอนนี้ได้ ${fmtUnits(scannedAll(p.id), p.units)}</span>`);
+    >ใส่จำนวนที่นับได้ (${u.short} × ${fmtN(u.qtyEA)}) · ตอนนี้ได้ ${fmtUnits(gotOf(p.id), p.units)}</span>`);
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -3111,14 +3302,14 @@ function handleCode(code) {
    ลงชีต กำลังเช็ค ในคอลัมน์ "ทดแทน" ว่าแทนอะไรด้วยอะไร
    ส่วนชีต ยืนยันเช็ค ลงเป็นสินค้าตัวที่ได้จริง แยกบรรทัดออกจากตัวที่สั่ง
    ═══════════════════════════════════════════════════════════════ */
-const subKey  = (pid, rnd) => 'u|' + pid + '@' + rnd;
-const subsIn  = (pid, rnd) => (state.subs || {})[subKey(pid, rnd)] || [];
-const subEA   = (pid, rnd) => subsIn(pid, rnd).reduce((s, x) => s + (x.ea || 0), 0);
-const subAll  = pid => ROUNDS.reduce((s, r) => s + subEA(pid, r.n), 0);
-/** รายการทดแทนของสินค้าตัวนี้ รวมทุกรอบ ยุบตัวเดียวกันเข้าด้วยกัน */
-function subList(pid) {
+const subKey  = (pid, rnd, tag = curTag()) => 'u|' + pid + '@' + rnd + tagSfx(tag);
+/** คีย์ทดแทนของสินค้านี้ที่เกี่ยวกับหน้าที่เปิดอยู่ (ป้ายช่องทางทับกับที่เลือก) */
+const subKeysOf = (pid, view = viewSet()) => Object.keys(state.subs || {})
+  .filter(k => k.startsWith('u|' + pid + '@') && tagOverlap(tagOfKey(k), view));
+/** รายการทดแทนของสินค้าตัวนี้ รวมทุกรอบ ยุบตัวเดียวกันเข้าด้วยกัน — เฉพาะช่องทางที่เกี่ยวกับหน้านี้ */
+function subList(pid, view = viewSet()) {
   const m = {};
-  ROUNDS.forEach(r => subsIn(pid, r.n).forEach(x => {
+  subKeysOf(pid, view).forEach(k => (state.subs[k] || []).forEach(x => {
     const e = m[x.pid] ||= { ea:0, lv:x.lv };
     e.ea += x.ea; if (x.lv) e.lv = x.lv;
   }));
@@ -3255,10 +3446,7 @@ function saveSub() {
 }
 function dropSub(pid) {
   if (!subFor) return;
-  ROUNDS.forEach(r => {
-    const k = subKey(subFor.id, r.n);
-    if (state.subs && state.subs[k]) state.subs[k] = state.subs[k].filter(x => x.pid !== pid);
-  });
+  subKeysOf(subFor.id).forEach(k => { state.subs[k] = state.subs[k].filter(x => x.pid !== pid); });
   save(); renderSub(); renderScan();
 }
 
@@ -3276,7 +3464,7 @@ function dashData() {
   const shortList = [], checkList = [];
 
   jobs.forEach(j => {
-    const c = computeJob(j);
+    const c = computeJob(j, null);                 // ทุกช่องทาง ไม่ใช่เฉพาะที่ปุ่มเลือกอยู่
     const rd = rounds[j.round] ||= { n:j.round, label:ROUNDS[j.round-1].label, items:0, ok:0, short:0, need:0, give:0 };
     const tm = teams[j.team.code + '|' + j.team.name] ||= { code:j.team.code, name:j.team.name, items:0, ok:0, short:0, need:0, give:0 };
     c.all.forEach(r => {
@@ -3633,21 +3821,36 @@ function confirmChan() {
    ของที่ W4 ไม่พอตามออเดอร์ ไปยกจาก C4 มาเติม แล้วเปิดบิลออกจาก W4
    ยอดที่ยิงตรงนี้เก็บคนละกอง เอาไปออกใบโอนย้ายได้ และหักยอดที่ยังขาดให้ด้วย
    ═══════════════════════════════════════════════════════════════ */
-/** สินค้าที่ต้องใช้ในรอบนี้ พร้อมยอด W4 / ยอดที่โอนมา / ยอดที่ยังต้องไปยก */
+/** สินค้าที่ต้องใช้ในรอบนี้ พร้อมยอดที่ยังขาด / ยอดที่โอนมา
+ *  ยอดขาดคิดทีละบรรทัดจากผลแบ่งของหน้าทีม (ยอดยิง + โอน + ทดแทน + เช็คตามร้าน) แยกสองแบบ (ผู้ใช้สั่ง 30/09: ทุกเครื่องต้องเห็นตรงกัน)
+ *    sConf  = บรรทัดที่ปิดงานแล้ว — ตั้งต้นจากชีต ยืนยันเช็ค ทุกเครื่องเห็นเหมือนกัน
+ *    sLocal = บรรทัดที่ยังไม่ปิดงาน ของงานที่เครื่องนี้ยิงค้างไว้ — รู้เฉพาะเครื่องนี้
+ *  งานที่ยังไม่มีใครปิดและเครื่องนี้ไม่ได้ยิง ไม่รู้ว่าขาดอะไร ไม่เอามาขึ้นว่าต้องยก (เดิมขึ้นว่าต้องยกทั้งหมด ซึ่งผิด) */
 function transferList() {
-  const m = {};
-  JOBS.filter(j => j.round === state.round).forEach(j => {
-    computeJob(j).all.forEach(r => {
-      // สินค้าตัวเดียวอาจโผล่ทั้งแถวขายและแถวแถม ต้องรวม "ต้องออก" ไม่ใช่นับซ้ำ
-      const e = m[r.product.id] ||= { p:r.product, need:0, pre:0, team:j.team.name };
-      e.need += r.totalNeed;
-      e.pre  += r.preSum || 0;             // เช็คตามร้านไปแล้ว ไม่ต้องไปยกมาจาก C4
+  const m = {}, view = viewSet(), rnd = state.round;
+  const slot = (p, team) => m[p.id] ||= { p, need:0, got:0, sConf:0, sLocal:0, stranded:0, team };
+  JOBS.filter(j => j.round === rnd).forEach(j => {
+    const c = computeJob(j);
+    const mine = c.all.some(r => r.scanned - (r.confSum || 0) > 0);   // เครื่องนี้เริ่มยิงงานนี้แล้ว
+    c.all.forEach(r => {
+      // สินค้าตัวเดียวอาจโผล่ทั้งแถวขายและแถวแถม ต้องรวม ไม่ใช่นับซ้ำ
+      let used = false;
+      r.detail.forEach(d => {
+        if (!d.conf && !mine) return;
+        const e = slot(r.product, j.team.name), sh = Math.max(0, d.line.needEA - d.giveEA);
+        e.need += d.line.needEA; e.got += Math.min(d.giveEA, d.line.needEA); used = true;
+        if (d.conf) e.sConf += sh; else e.sLocal += sh;
+      });
+      if (used) m[r.product.id].stranded += r.res.stranded || 0;   // เศษที่แบ่งไม่ลง ยกมาเติมแค่ส่วนที่ขาดพอ
+      if (tAll(r.product.id, view, rnd)) slot(r.product, j.team.name);
     });
   });
   return Object.values(m).map(e => {
-    const w4 = w4In(e.p.id, state.round) + subEA(e.p.id, state.round) + e.pre;
-    const tr = tGot(e.p.id, state.round);
-    return Object.assign(e, { w4, tr, short: Math.max(0, e.need - w4 - tr) });
+    const keys = tKeysOf(e.p.id, view, rnd), sent = state.tsent || {};
+    e.tr   = keys.reduce((s, k) => s + (state.tscans[k] || 0), 0);                          // ยกมาแล้ว (เครื่องนี้)
+    e.tNew = keys.reduce((s, k) => s + Math.max(0, (state.tscans[k] || 0) - (sent[k] || 0)), 0);   // ยังไม่ได้ออกใบโอน
+    e.short = Math.max(0, e.sConf + e.sLocal - e.stranded);
+    return e;
   });
 }
 
@@ -3659,7 +3862,10 @@ function renderTransfer() {
   renderChanPick();
   $('transNote').innerHTML =
     `ของที่ <b>${WAREHOUSE}</b> ไม่พอตามออเดอร์ ยิงตรงนี้เพื่อยกมาจาก <b>${FROM_WH}</b><br>
-     <span class="txt-muted">ยอดที่ยิงจะไปหักของที่ยังขาดในหน้าเช็คให้เอง และแยกเก็บไว้ออกใบโอนย้าย</span>`;
+     <span class="txt-muted">ยอดขาดของงานที่<b>ปิดงานแล้ว</b>มาจากชีต ยืนยันเช็ค — ทุกเครื่องเห็นเหมือนกัน ·
+       งานที่ยังไม่ปิด เห็นเฉพาะเครื่องที่ยิงค้างไว้<br>
+       กด ✓ ยืนยันใบโอน = ลงใบโอน + <b>ยืนยันเพิ่ม</b>ให้บิลที่ปิดงานแล้ว (ลงเฉพาะยอดที่ได้เพิ่ม)
+       ${confReady() ? '' : ' · <b class="txt-danger">ยังอ่านชีต ยืนยันเช็ค ไม่ได้ — ยอดของงานที่ปิดแล้วอาจยังไม่ขึ้น</b>'}</span>`;
 
   const all = transferList();
   const needList = all.filter(e => e.short > 0), doneList = all.filter(e => e.tr > 0);
@@ -3709,7 +3915,7 @@ function renderTransfer() {
         <div class="smeta">${units.map(u=>u.code).join(' · ')} · ทีม ${esc(e.team)}</div>
         <div class="trow-need">
           <span><i>ต้องออก</i> <b>${fmtUnits(e.need, units, 1)}</b></span>
-          ${e.w4 && e.short ? `<span><i>ต้องยกจาก ${FROM_WH}</i> <b class="lo">${fmtUnits(e.short, units, 1)}</b></span>` : ''}
+          ${e.short && e.short < e.need ? `<span><i>ต้องยกจาก ${FROM_WH}</i> <b class="lo">${fmtUnits(e.short, units, 1)}</b></span>` : ''}
           ${e.tr ? `<span><i>ยกมาแล้ว</i> <b class="hi">${fmtUnits(e.tr, units, 1)}</b></span>` : ''}
         </div>
         <div class="sbot">
@@ -3735,6 +3941,9 @@ function renderTransfer() {
             <button onclick="tBump('${p.id}',1)" aria-label="เพิ่ม 1 ${pu.short}">+</button>
           </div>
         </div>
+        ${e.sConf ? `<div class="rounds">✓ ปิดงานแล้ว ยังขาด <b>${fmtUnits(e.sConf, units, 1)}</b> — ทุกเครื่องเห็นเหมือนกัน</div>` : ''}
+        ${e.sLocal ? `<div class="rounds">⏳ ยังไม่ปิดงาน ขาด <b>${fmtUnits(e.sLocal, units, 1)}</b> — ยอดในเครื่องนี้</div>` : ''}
+        ${e.tNew && e.tNew < e.tr ? `<div class="rounds">🧾 ยังไม่ออกใบโอน <b>${fmtUnits(e.tNew, units, 1)}</b></div>` : ''}
       </div>
     </div>`;
   }).join('');
@@ -3774,22 +3983,32 @@ function tBump(pid, dir) {
 function tSetQty(pid, val) {
   state.editing = null;
   const p = byId[pid]; if (!p) return;
-  const u = pickUnit(p), cur = tGot(pid, state.round);
+  const u = pickUnit(p), cur = tAll(pid, viewSet(), state.round);   // ตัวเลขที่เห็นบนจอ (รวมทุกกองของหน้านี้)
   const rem = cur % u.qtyEA;
   const n = Math.max(0, Math.floor(Number(String(val).replace(/[^\d]/g,'')) || 0));
-  (state.tscans ||= {})[tKey(pid, state.round)] = n * u.qtyEA + rem;
+  // ขยับเฉพาะกองของช่องทางที่เลือกอยู่ ให้ยอดบนจอเป็นตามที่ใส่
+  const k = tKey(pid, state.round), before = (state.tscans ||= {})[k] || 0;
+  const next = before + (n * u.qtyEA + rem - cur);
+  if (next < 0) { toast(`ยอดนี้มีส่วนที่ยิงตอนเลือกช่องทางอื่น ${fmtUnits(cur - before, p.units)} — ตั้งต่ำกว่านี้ไม่ได้`, 'warning'); renderTransfer(); return; }
+  state.tscans[k] = next;
+  if (next !== before)
+    logMove({ ts:Date.now(), pid, ea:next - before, round:state.round, src:FROM_WH, device:DEVICE, by:CHECKER, how:'แก้ยอดโอนรวม' });
   lastHit = pid; save(); renderTransfer();
 }
 
-/** แถวที่จะลงชีต "โอน" — แตกเป็นหน่วยที่ลงตัว บรรทัดละหน่วย จะได้เอาไปคีย์ใบโอนย้ายตรง ๆ */
-function transferSheetRows() {
+/** แถวที่จะลงชีต "โอน" — แตกเป็นหน่วยที่ลงตัว บรรทัดละหน่วย จะได้เอาไปคีย์ใบโอนย้ายตรง ๆ
+ *  ลงเฉพาะยอดที่ยังไม่เคยออกใบ (state.tsent) — เดิมกดยืนยันใบโอนซ้ำแล้วได้ใบโอนซ้ำทั้งชุด
+ *  คืน { rows, commit } — commit() จำว่าออกใบไปแล้ว เรียกหลังเข้าคิวสำเร็จ */
+function transferSheetRows(list = transferList()) {
   const now = new Date();
   const hhmm = String(now.getHours()).padStart(2,'0') + '.' + String(now.getMinutes()).padStart(2,'0');
   const rnd = ROUNDS[state.round-1].label;
-  const out = [];
-  for (const e of transferList()) {
-    if (e.tr <= 0) continue;
-    const { parts, rest } = toUnits(e.tr, e.p.units);
+  const out = [], done = [], sent = state.tsent || {};
+  for (const e of list) {
+    if (e.tNew <= 0) continue;
+    tKeysOf(e.p.id, viewSet(), state.round).forEach(k => {
+      const d = (state.tscans[k] || 0) - (sent[k] || 0); if (d > 0) done.push([k, d]); });
+    const { parts, rest } = toUnits(e.tNew, e.p.units);
     const small = e.p.units[e.p.units.length-1];
     /* หัวคอลัมน์ต้องตรงกับชีต "โอนย้าย" จริง ไม่งั้นค่าไปลงไม่ถูกช่อง
        A วันที่ B คลัง C บาร์โค้ด D สินค้า E หน่วย F ต้องโอน G โอนได้ H ขาด
@@ -3804,20 +4023,46 @@ function transferSheetRows() {
       'ต้องโอน': qty, 'โอนได้': qty, 'ขาด': 0,
       'ร้าน/เซล (จัดให้)': `เข้าคลัง ${WAREHOUSE}`, 'จัดให้(json)': '',
       'ชื่อผู้โอน': CHECKER, 'วันที่โอน': thaiDate(TODAY), 'เวลาโอน': hhmm,
-      'เครื่อง': DEVICE, 'ยิงแล้ว(EA)': ea, 'ยิงแยกหน่วย': fmtUnitsTxt(e.tr, e.p.units),
+      'เครื่อง': DEVICE, 'ยิงแล้ว(EA)': ea, 'ยิงแยกหน่วย': fmtUnitsTxt(e.tNew, e.p.units),
       'เลขที่ใบจอง': '', 'ชื่อร้าน': `โอนเข้าคลัง ${WAREHOUSE}`,
       'ยืนยันแล้ว': '✓ ยืนยันแล้ว', 'รหัสเซล': '',
-      'กลุ่มที่เช็ค': `โอน ${FROM_WH}→${WAREHOUSE} · ${rnd} · ทีม ${e.team}`,
+      'กลุ่มที่เช็ค': `โอน ${FROM_WH}→${WAREHOUSE} · ${rnd} · ทีม ${e.team}${chanSfx()}`,
     });
     parts.forEach(pt => push(pt.n, pt.u, pt.n * pt.u.qtyEA));
     if (rest) push(rest, null, rest);           // เศษที่ไม่ลงหน่วยไหน คิดเป็นหน่วยเล็กสุด
   }
-  return out;
+  return { rows:out, commit: () => { const s = state.tsent ||= {}; done.forEach(([k, d]) => { s[k] = (s[k] || 0) + d; }); } };
 }
+/** ยืนยันใบโอน = (1) ใบโอนของที่ยกมาใหม่ ลงชีต โอนย้าย
+ *               (2) บิลที่ปิดงานไปแล้วแต่ได้ของเพิ่ม (จาก C4 หรือยิงเพิ่ม) → แถว "ยืนยันเพิ่ม" ลงชีต ยืนยันเช็ค
+ *                   เฉพาะยอดที่เพิ่ม ทุกเครื่องเห็นยอดขาดลดลงตาม (ผู้ใช้เลือก 30/09)
+ *  บิลที่ยังไม่ปิดงาน ของที่ยกมาไปนับตอนทีมกดปิดงานเอง */
 function confirmTransfer() {
-  const rows = transferSheetRows();
-  if (!rows.length) { toast(`ยังไม่ได้ยิงของที่ยกมาจาก ${FROM_WH}`, 'warning'); return; }
-  queueRows(rows, { round:state.round, team:`โอน ${FROM_WH}→${WAREHOUSE}`, what:`ออกใบโอน ${FROM_WH}→${WAREHOUSE}` }, SHEET_MOVE);
+  if (!CHECKER) { toast('ยังไม่ได้เลือกว่าใครเป็นคนเช็ค', 'warning'); openWho(1); return; }
+  const list = transferList(), slip = transferSheetRows(list);
+  const adds = [];
+  JOBS.filter(j => j.round === state.round).forEach(j => {
+    const c = computeJob(j), acc = {};
+    const rows = sheetRows(j, c, { onlyConf:true, acc });
+    if (rows.length) adds.push({ j, c, rows, acc });
+  });
+  if (!slip.rows.length && !adds.length) {
+    toast(list.some(e => e.tr > 0) ? `ไม่มีของที่ยกมาใหม่จาก ${FROM_WH} — ออกใบโอนไปครบแล้ว`
+                                   : `ยังไม่ได้ยิงของที่ยกมาจาก ${FROM_WH}`, 'warning'); return; }
+  flushLive();
+  if (slip.rows.length &&
+      queueRows(slip.rows, { round:state.round, team:`โอน ${FROM_WH}→${WAREHOUSE}`, what:`ออกใบโอน` }, SHEET_MOVE, true))
+    slip.commit();
+  let nAdd = 0;
+  adds.forEach(a => {
+    if (queueRows(a.rows, { round:a.j.round, team:`${a.j.team.code} ${a.j.team.name}${chanSfx()}`,
+                            what:`ยืนยันเพิ่ม ทีม ${a.j.team.name}` }, SHEET_DONE, true)) {
+      markSent(a.c, true, a.acc); nAdd += a.rows.length;
+    }
+  });
+  save(); renderTransfer();
+  toast(`✓ ${slip.rows.length ? `ใบโอน ${fmtN(slip.rows.length)} แถว` : ''}${slip.rows.length && nAdd ? ' · ' : ''}` +
+        `${nAdd ? `ยืนยันเพิ่ม ${fmtN(nAdd)} แถว` : ''} — ${GAS_URL ? 'กำลังส่งขึ้นชีต' : 'เข้าคิวไว้ ต่อชีตเมื่อไหร่จะส่งให้เอง'}`, 'success');
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -3924,10 +4169,13 @@ function renderStale() {
 }
 
 /* ยอดที่ยิง/ยืนยันเป็นของวันทำงานนั้น (ผู้ใช้สั่ง 30/09: "ข้ามวันแล้ว ถ้ายังไม่ได้ยืนยันให้ล้างข้อมูลพร้อมเริ่มใหม่")
-     ข้ามไปวันใหม่ (ใหม่กว่าทุกวันที่เครื่องนี้เคยเปิด = state.maxDay) → ล้างยอดที่ยังค้างทั้งหมด เริ่มใหม่
+     "ข้ามวัน" = วันที่ตามนาฬิกาเครื่องเปลี่ยน (state.clock) → ล้างยอดที่ยังค้างทุกวันทำงาน เริ่มใหม่
        ที่ยืนยันแล้วอยู่ในคิว/ชีตแล้ว ไม่หาย · บันทึกการยิงที่ยังไม่ได้ส่ง (liveBuf) ส่งเข้าคิวก่อนล้าง
-     เลือกวันย้อนหลังเอง (ไปเช็คของค้าง) → เก็บยอดของวันที่เปิดอยู่ไว้ กลับมาวันนั้นได้ครบ */
-const DAY_KEYS = ['scans','sscans','tscans','cscans','subs','doneStore','doneJob','unknown'];
+     วันเดียวกันแต่วันทำงานของใบจองเปลี่ยน (เช้า ๆ ใบจองวันนี้ยังไม่เข้า เช็คของเมื่อวานไปก่อน แล้วใบจองวันนี้เข้ามา
+       หรือเลือกวันย้อนหลังเอง) → พักยอดของวันทำงานเดิมไว้ กลับมาได้ครบ ไม่ลบ
+       (รุ่น 29–31 ใช้วันทำงานตัดสิน ใบจองวันใหม่เข้าตอนสาย ๆ แล้วยอดที่ยิงค้างของเมื่อวานถูกลบทิ้ง — แก้ 30/09) */
+/* used = ยอดในกองที่ยืนยันลงชีตไปแล้ว · subsSent = ของทดแทนที่ลงชีตไปแล้ว · tsent = ยอดโอนที่ออกใบไปแล้ว */
+const DAY_KEYS = ['scans','sscans','tscans','cscans','subs','doneStore','doneJob','unknown','used','subsSent','tsent'];
 const DAY_EMPTY = k => k === 'unknown' ? [] : {};
 const hasDayData = () => ['scans','sscans','tscans','cscans','subs'].some(k =>
   Object.values(state[k] || {}).some(v => Array.isArray(v) ? v.length : v > 0)) || Object.keys(state.doneStore || {}).length;
@@ -3938,10 +4186,11 @@ function dropCarryOver() {
   const t0 = new Date(); t0.setHours(0,0,0,0);
   const keep = new Set();
   (state.log || []).filter(e => e && e.ts >= t0.getTime()).forEach(e => {
-    if (e.src)        keep.add(tKey(e.pid, e.round));
+    const tag = e.tag || TAG_ALL;                  // รุ่นก่อนไม่มีป้ายช่องทาง = กองกลาง
+    if (e.src)        keep.add(tKey(e.pid, e.round, tag));
     else if (e.chan)  keep.add(cKey(e.chan, e.pid));
     else if (e.store) { keep.add(sKey(e.store, e.pid)); keep.add('done|' + e.store); }
-    else              { keep.add(scanKey(e.pid, e.round)); keep.add(subKey(e.pid, e.round)); }
+    else              { keep.add(scanKey(e.pid, e.round, tag)); keep.add(subKey(e.pid, e.round, tag)); }
   });
   const pick = o => Object.fromEntries(Object.entries(o || {}).filter(([k]) => keep.has(k)));
   const had = hasDayData();
@@ -3951,32 +4200,61 @@ function dropCarryOver() {
   return had;
 }
 
+/** วันตามนาฬิกาของการยิงล่าสุดในเครื่อง — ใช้กับเครื่องที่อัปมาจากรุ่นที่ยังไม่จำ state.clock */
+function lastLogDay() {
+  const ts = Math.max(0, ...(state.log || []).map(e => (e && e.ts) || 0));
+  if (!ts) return '';
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
 function switchDay(date) {
   const reset = () => { state.jobKey = null; state.storeCode = null; state.pend = null; state.editing = null; };
-  if (state.dayRule !== 2) {                   // ยังไม่เคยใช้กติกานี้ในเครื่องนี้
+  const t = todayISO();
+  if (state.dayRule !== 2) {                   // ยังไม่เคยใช้กติกานี้ในเครื่องนี้ (รุ่น ≤28)
     const had = dropCarryOver();
-    state.dayRule = 2; state.day = state.maxDay = date; state.byDay = {};
+    state.dayRule = 2; state.day = date; state.clock = t; state.byDay = {};
     reset(); save();
     if (had) toast('ล้างยอดที่ค้างจากวันก่อนแล้ว — เก็บไว้เฉพาะที่ยิงวันนี้', 'info');
     return;
   }
-  if (state.day === date) return;
-  const byDay = state.byDay ||= {};
-  if (date > (state.maxDay || '')) {
-    const had = hasDayData(), was = state.day;
+  if (!state.clock) state.clock = lastLogDay() || t;    // อัปจากรุ่น 29–31
+  delete state.maxDay;
+  if (state.clock !== t) {                     // ข้ามวันจริง → ล้างที่ยังไม่ยืนยันทุกวันทำงาน
+    const had = hasDayData() || Object.keys(state.byDay || {}).length > 0;
     flushLive();                               // การยิงที่ยังไม่ได้ส่งขึ้นชีต เข้าคิวก่อน
     DAY_KEYS.forEach(k => { state[k] = DAY_EMPTY(k); });
-    state.byDay = {}; state.maxDay = date;
-    if (had) toast(`ขึ้นวันใหม่ — ล้างยอดที่ยังไม่ยืนยันของ ${thaiDate(was)} แล้ว เริ่มใหม่`, 'info');
-  } else {
+    state.byDay = {}; state.clock = t; state.day = date;
+    reset(); save();
+    if (had) toast('ขึ้นวันใหม่ — ล้างยอดที่ยังไม่ยืนยันแล้ว เริ่มใหม่', 'info');
+    return;
+  }
+  if (state.day === date) return;
+  // วันเดียวกัน แค่เปลี่ยนวันทำงาน → พักยอดของวันเดิมไว้ ดึงของวันใหม่ (ถ้าเคยพักไว้) กลับมา
+  const byDay = state.byDay ||= {};
+  if (state.day) {
     const cur = {}; DAY_KEYS.forEach(k => { if (state[k] !== undefined) cur[k] = state[k]; });
     byDay[state.day] = cur;
-    const nx = byDay[date] || {};
-    DAY_KEYS.forEach(k => { state[k] = nx[k] !== undefined ? nx[k] : DAY_EMPTY(k); });
-    delete byDay[date];
   }
+  const nx = byDay[date] || {};
+  DAY_KEYS.forEach(k => { state[k] = nx[k] !== undefined ? nx[k] : DAY_EMPTY(k); });
+  delete byDay[date];
   state.day = date; reset();
   save();
+}
+/** ใบจองวันใหม่เข้ามาแล้ว แต่ยังมียอดยิงค้างของวันทำงานเดิม — ไม่กระโดดเอง ขึ้นแถบให้แตะเปลี่ยน */
+let NEWER_DAY = '';
+function pickedToday(dc) {
+  let pick = null; try { pick = JSON.parse(LSget('rattana_pick_date') || 'null'); } catch(e) {}
+  return !!(pick && pick.on === todayISO() && dc[pick.date]);
+}
+function renderDayBar() {
+  const el = $('dayBar'); if (!el) return;
+  if (!NEWER_DAY || NEWER_DAY === TODAY) { el.className = 'stale-bar'; return; }
+  el.className = 'stale-bar on load';
+  el.innerHTML = `📅 ใบจองของวันที่ <b>${thaiDate(NEWER_DAY)}</b> เข้ามาแล้ว — ตอนนี้ยังเปิดของ <b>${thaiDate(TODAY)}</b> อยู่
+    เพราะมียอดที่ยิงค้าง (ยังไม่ยืนยัน) · ยอดไม่หาย สลับไปมาได้
+    <button class="btn btn-gold btn-sm" onclick="setWorkDate('${NEWER_DAY}')">เปลี่ยนไป ${thaiDate(NEWER_DAY)}</button>`;
 }
 
 /** โหลดใหม่ตอนกลับเข้าแอป — อยู่หน้าเดิม ไม่เด้งออกจากงาน/ร้านที่เปิดค้างไว้ */
@@ -4025,8 +4303,14 @@ async function reloadOrders(loud, keep) {
     const dc = {};
     b.forEach(r => { if (cln(r[6]) !== wh) return; const d = isoOf(r[0]); if (d) dc[d] = (dc[d] || 0) + 1; });
     DATE_FOUND = dc;
-    const date = pickWorkDate(dc);
+    let date = pickWorkDate(dc);
     if (!date) throw new Error('อ่านวันที่ในชีตออเดอร์ไม่ได้');
+    /* ห้ามกระโดดข้ามวันทำงานเองระหว่างที่มียอดยิงค้าง (ยังไม่ยืนยัน) ของวันเดิม — วันเดียวกันตามนาฬิกา
+       เช้า ๆ ใบจองวันนี้ยังไม่เข้า แอปเปิดของเมื่อวาน (รอบ 2 = เที่ยว 1 วันนี้) คนเช็คกำลังยิงอยู่ แล้วใบจองวันนี้เข้ามา
+       → อยู่วันเดิม ขึ้นแถบให้แตะเปลี่ยนเอง */
+    NEWER_DAY = '';
+    if (!pickedToday(dc) && state.day && state.day !== date && dc[state.day] &&
+        state.clock === todayISO() && hasDayData()) { NEWER_DAY = date; date = state.day; }
     const rows = b.filter(r => cln(r[6]) === wh && isoOf(r[0]) === date);
 
     /* ชีต Q: สัดส่วนที่เคยซื้อ — join ด้วย เลขที่ใบจอง + บาร์โค้ด
@@ -4095,7 +4379,7 @@ async function reloadOrders(loud, keep) {
     staleErr = String(e.message || e).slice(0,110);
     set('โหลดออเดอร์ไม่สำเร็จ', 'err');
     toast('โหลดออเดอร์ไม่สำเร็จ — ' + staleErr, 'error');
-  } finally { reloadBusy = false; renderStale(); }
+  } finally { reloadBusy = false; renderStale(); renderDayBar(); }
 }
 /* กลับเข้าแอป (สลับแอป/ปิดจอ) นานเกิน 10 นาที หรือข้ามวัน → โหลดใบจองล่าสุดให้เอง อยู่หน้าเดิม
    โหลดไม่ผ่าน (เน็ตหลุดตอนเปิด) → ลองใหม่เองทุก 1 นาที และทันทีที่เน็ตกลับมา */
@@ -4115,7 +4399,15 @@ window.addEventListener('online', () => { if (ordersStale()) reloadOrders(0, tru
    _log ไม่มีวันทำงาน — ใช้วันที่ที่กดยืนยัน (ปกติวันเดียวกัน) */
 const LOG_SRC = { id:'1MAZhfAh93QRc9f5sjTl4Dm2Z5v5Ae9_8cOFqgrVfj98', sheet:'_log' };
 let DONE = { day:'', job:{}, store:{} }, doneAt = 0, doneBusy = false;
+/** ชื่อกลุ่มที่บันทึก "1 คิง · ปลีก+ส่ง" → ป้ายช่องทาง "BK+BV" · ไม่มีต่อท้าย (รุ่นก่อน/ทุกช่องทาง) = '*' */
+function tagOfGroup(g) {
+  const m = String(g || '').match(/ · (.+)$/); if (!m) return TAG_ALL;
+  const byName = {}; Object.keys(CHAN_NAME).forEach(k => { byName[CHAN_NAME[k]] = k; });
+  const ks = m[1].split('+').map(s => byName[s.trim()]).filter(Boolean);
+  return ks.length ? ks.sort().join('+') : TAG_ALL;
+}
 async function loadDone(force) {
+  loadConf(force);                               // ยอดที่ยืนยันแล้วในชีต ยืนยันเช็ค อ่านไปพร้อมกัน
   if (SRC !== 'real' || !ORDERS_LIVE || doneBusy || document.hidden) return;
   if (!force && DONE.day === TODAY && Date.now() - doneAt < 20000) return;
   doneBusy = true;
@@ -4133,7 +4425,9 @@ async function loadDone(force) {
       const hm = c[0].match(/(\d{1,2}):(\d{2})/);
       const ev = { at: hm ? hm[1].padStart(2,'0') + ':' + hm[2] : '', device:c[3], by:c[4] };
       if (/^ร้าน /.test(c[2])) { const sc = code[c[2].slice(5)]; if (sc) (store[sc] ||= []).push(ev); }
-      else { const rnd = parseInt(c[1], 10), tc = c[2].split(' ')[0]; if (rnd && tc) (job[`${rnd}|${tc}`] ||= []).push(ev); }
+      else { const rnd = parseInt(c[1], 10), tc = c[2].split(' ')[0];
+             ev.tag = tagOfGroup(c[2]);                // ปิดงานของช่องทางไหน (ชื่อกลุ่มมีช่องทางต่อท้าย)
+             if (rnd && /^\d+$/.test(tc)) (job[`${rnd}|${tc}`] ||= []).push(ev); }
     });
     const was = JSON.stringify(DONE);
     DONE = { day, job, store }; doneAt = Date.now();
@@ -4144,22 +4438,68 @@ async function loadDone(force) {
 setInterval(() => loadDone(), 90000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) loadDone(true); });
 
+/** อ่านชีต ยืนยันเช็ค ของวันทำงานนี้ (อ่านอย่างเดียว ผ่าน gviz) → CONF — ดูคำอธิบายที่ confLines */
+let confAt = 0, confBusy = false;
+async function loadConf(force) {
+  if (SRC !== 'real' || !ORDERS_LIVE || confBusy || document.hidden) return;
+  if (!force && confReady() && Date.now() - confAt < 20000) return;
+  confBusy = true;
+  const day = TODAY, wh = WAREHOUSE, t0 = Date.now();
+  try {
+    const res = await gvizJsonp(LOG_SRC.id, { sheet:SHEET_DONE,
+      tq:`select * where A = '${thaiDate(day)}' and B = '${wh}'` });
+    if (res.status === 'error') throw new Error((res.errors || [{}])[0].detailed_message || 'อ่าน ยืนยันเช็ค ไม่ได้');
+    if (day !== TODAY || wh !== WAREHOUSE) return;          // เปลี่ยนวัน/คลังระหว่างอ่าน
+    const cols = ((res.table && res.table.cols) || []).map(c => nrm(c.label));
+    const want = ['เลขที่ใบจอง','บาร์โค้ด','หน่วย','สั่ง-ขาย','สั่ง-แถม','ขาด-ขาย','ขาด-แถม','สรุป','กลุ่มที่เช็ค'];
+    const ix = want.map(n => cols.indexOf(n));
+    const list = (res.table && res.table.rows) || [];
+    if (list.length && ix.some(i => i < 0)) throw new Error('ชีต ยืนยันเช็ค หัวคอลัมน์ไม่ครบ');
+    const rows = list.map(r => { const c = (r.c || []).map(cellTxt), o = {};
+                                 want.forEach((n, i) => { o[n] = c[ix[i]]; }); return confRow(o); })
+                     .filter(confTeamRow);
+    const was = JSON.stringify(confLines()), key = day + '|' + wh;
+    delete CONF.by[key]; CONF.by[key] = rows; CONF.ok[key] = true; confAt = Date.now();   // ลบก่อนใส่ = ขยับเป็นชุดล่าสุด
+    // ที่ส่งถึงชีตก่อนเริ่มอ่านรอบนี้นานพอ (1 นาที) ถือว่าอยู่ในที่อ่านมาแล้ว
+    confSent = confSent.filter(x => !(x.date === day && x.wh === wh) || x.at > t0 - 60000);
+    confVer++; confSave();
+    const mig = migrateUsed();
+    if (mig || JSON.stringify(confLines()) !== was) refreshDoneViews();
+  } catch(e) { console.warn('loadConf', e); }
+  finally { confBusy = false; }
+}
+
 /** การยืนยันทั้งหมดของงาน/ร้านนี้ (ทุกเครื่อง) — ของเครื่องนี้ที่เพิ่งกดขึ้นทันที ไม่ต้องรอชีต */
 function doneList(kind, key) {
-  const ev = DONE.day === TODAY ? (DONE[kind][key] || []).slice() : [];
-  const mine = (kind === 'job' ? state.doneJob : state.doneStore || {}) || {};
-  const m = mine[key];
-  if (m && !ev.some(e => e.device === DEVICE))
-    ev.push({ at: String(m.at || '').replace('.', ':'), device:DEVICE, by:m.by || CHECKER });
+  let ev = DONE.day === TODAY ? (DONE[kind][key] || []).slice() : [];
+  const mine = (kind === 'job' ? state.doneJob : state.doneStore) || {};
+  if (kind === 'job') {
+    /* งานทีมแยกตามช่องทาง — เครื่องนี้จำไว้ที่คีย์ "งาน|ป้าย" (รุ่นก่อนไม่มีป้าย = ทุกช่องทาง)
+       เอาเฉพาะที่ป้ายทับกับช่องทางที่เลือกอยู่ ปิดงานปลีกแล้วไปดูงานส่ง ต้องไม่ขึ้นว่ายืนยันแล้ว */
+    Object.keys(mine).forEach(k => {
+      if (k !== key && !k.startsWith(key + '|')) return;
+      const tag = k === key ? TAG_ALL : k.slice(key.length + 1), m = mine[k];
+      if (!ev.some(e => e.device === DEVICE && (e.tag || TAG_ALL) === tag))
+        ev.push({ at: String(m.at || '').replace('.', ':'), device:DEVICE, by:m.by || CHECKER, tag });
+    });
+    const view = viewSet();
+    ev = ev.filter(e => tagOverlap(e.tag || TAG_ALL, view));
+  } else {
+    const m = mine[key];
+    if (m && !ev.some(e => e.device === DEVICE))
+      ev.push({ at: String(m.at || '').replace('.', ':'), device:DEVICE, by:m.by || CHECKER });
+  }
   return ev;
 }
 const jobDone   = key  => doneList('job', key);
 const storeDone = code => doneList('store', code);
-/** "✓ ยืนยันแล้ว 16:20 · มิ้นท์ (เครื่องอื่น)" + จำนวนครั้งถ้าเกินหนึ่ง */
+/** "✓ ยืนยันแล้ว (ปลีก) 16:20 · มิ้นท์ (เครื่องอื่น)" + จำนวนครั้งถ้าเกินหนึ่ง */
 function doneText(ev) {
   if (!ev.length) return '';
   const last = ev[ev.length - 1];
-  return `✓ ยืนยันแล้ว ${last.at} · ${nickOf(last.by)}${last.device === DEVICE ? ' (เครื่องนี้)' : ' (เครื่องอื่น)'}` +
+  if (!last.device) return '✓ ยืนยันแล้ว';
+  const ch = last.tag && last.tag !== TAG_ALL ? ` (${tagChans(last.tag).map(k => CHAN_NAME[k] || k).join('+')})` : '';
+  return `✓ ยืนยันแล้ว${ch} ${last.at} · ${nickOf(last.by)}${last.device === DEVICE ? ' (เครื่องนี้)' : ' (เครื่องอื่น)'}` +
          (ev.length > 1 ? ` · ยืนยันแล้ว ${ev.length} ครั้ง` : '');
 }
 /** ยืนยันซ้ำ = ข้อมูลซ้ำในชีต — ถามก่อน (กดเองเท่านั้น ไม่ใช่เด้งเอง) */
@@ -4173,6 +4513,7 @@ function refreshDoneViews() {
   else if (on('scr-summary')) renderSummary();
   else if (on('scr-stores'))  renderStores();
   else if (on('scr-store'))   renderStore();
+  else if (on('scr-transfer')) renderTransfer();
 }
 /* ═══════════════════════════════════════════════════════════════
    หน้าแรก — เลือกว่าใครเป็นคนเช็ค
@@ -4583,6 +4924,7 @@ let liveBuf = [], liveTimer = null;
 function logMove(e) {
   /* ไม่มีที่ไหนอ่าน state.log (ของจริงอยู่ในชีต กำลังเช็ค แล้ว) — เก็บแค่ 300 ล่าสุด
      ปล่อยโตไม่จำกัดจะกินพื้นที่เครื่องจนเต็ม (แชร์กับทุกแอปใน rattanaphaiboon.github.io) แล้วบันทึกยอดไม่ลงเงียบ ๆ */
+  if (!e.store && !e.chan && e.tag === undefined) e.tag = curTag();   // ยิงตอนเลือกช่องทางไหน (ยอดทีม/โอน/ทดแทน)
   state.log.push(e);
   if (state.log.length > 300) state.log.splice(0, state.log.length - 300);
   liveBuf.push(liveRow(e));
@@ -4608,14 +4950,14 @@ function liveRow(e) {
              || { short:'ชิ้น', label:'ชิ้นx1(EA)', code:'', qtyEA:1 };
   const d  = new Date(e.ts);
   const t2 = x => String(x).padStart(2,'0');
-  const grp = e.src   ? `โอน ${e.src}→${WAREHOUSE}`
+  const grp = e.src   ? `โอน ${e.src}→${WAREHOUSE}${chanSfx()}`
             : e.chan  ? `ช่องทาง ${(CHAN_NAME[e.chan] || e.chan)}`
             : e.store ? `ร้าน ${(STORES.find(s => s.code === e.store) || {}).name || e.store}`
-            : (curJob() ? `${curJob().team.code} ${curJob().team.name}` : '');
-  const run = e.src   ? tGot(e.pid, e.round)
+            : (curJob() ? `${curJob().team.code} ${curJob().team.name}${chanSfx()}` : '');
+  const run = e.src   ? tGot(e.pid, e.round, e.tag)
             : e.chan  ? cGot(e.chan, e.pid)
             : e.store ? sGot(e.store, e.pid)
-            : scannedAll(e.pid);
+            : gotOf(e.pid);                          // ตัวเลข "ได้" ที่เห็นบนจอตอนยิง
   /* หัวคอลัมน์ต้องตรงกับชีต "กำลังเช็ค" จริง
      A วันที่ B คลัง C บาร์โค้ด D สินค้า E หน่วย F ต้องออก G ยิงแล้ว H ขาด
      I - J ทดแทน K ชื่อผู้ยิง L วันที่ยิง M เวลายิง N เครื่อง
@@ -4663,9 +5005,15 @@ function renderSummary() {
   $('sumTag').textContent = `ทีม ${job.team.name} · ${ROUNDS[job.round-1].label}`;
   loadDone();                                    // ก่อนกดยืนยัน เช็คล่าสุดว่ามีเครื่องอื่นยืนยันไปหรือยัง
   const dn = jobDone(job.key);
-  $('doneNote2').innerHTML = dn.length ? `<div class="done-note"><b>${esc(doneText(dn))}</b><br>
-    ถ้ากดยืนยันปิดงานอีก ข้อมูลจะซ้ำในชีต</div>` : '';
   const c = computeJob(job);
+  const more = jobHasConf(c), nAdd = more ? sheetRows(job, c).length : 0;
+  $('jobOkBtn').textContent = more ? '✓ ยืนยันเพิ่ม' : '✓ ยืนยันปิดงาน';
+  $('doneNote2').innerHTML = more
+    ? `<div class="done-note"><b>${esc(doneText(dn) || '✓ ยืนยันแล้ว')}</b><br>
+        ยอดที่ยืนยันแล้วอยู่ในชีตแล้ว — กด <b>ยืนยันเพิ่ม</b> จะลงเฉพาะยอดที่ได้เพิ่ม
+        ${nAdd ? `(${fmtN(nAdd)} แถว)` : '(ตอนนี้ยังไม่มียอดเพิ่ม)'}</div>`
+    : dn.length ? `<div class="done-note"><b>${esc(doneText(dn))}</b><br>
+        ถ้ากดยืนยันปิดงานอีก ข้อมูลจะซ้ำในชีต</div>` : '';
 
   let nOk=0, nShort=0, storesShort=new Set(), nSurplus=0, nStranded=0;
   c.all.forEach(r => {
@@ -4744,9 +5092,14 @@ function renderSheetPreview() {
 
 /** คิวแหล่งของสินค้าตัวหนึ่ง — ของตัวจริงก่อน แล้วค่อยตัวทดแทน
  *  ใช้ทั้งบนหน้าสรุปและตอนลงชีต จะได้ตรงกันเป๊ะ */
-function srcQueue(r) {
-  const subs = subList(r.product.id);
-  const own  = Math.max(0, r.scanned - subs.reduce((s, x) => s + x.ea, 0));
+function srcQueue(r, forWrite) {
+  let subs = subList(r.product.id);
+  /* ลงชีต: บรรทัดที่ยืนยันไปแล้วลงแค่ส่วนที่เพิ่ม — ของทดแทนที่เคยลงชีตไปแล้ว และยอดที่ชีตมีอยู่แล้ว ไม่เอามาแจกซ้ำ */
+  if (forWrite) {
+    const sent = (state.subsSent || {})[r.product.id] || {};
+    subs = subs.map(x => Object.assign({}, x, { ea: Math.max(0, x.ea - (sent[x.p.id] || 0)) })).filter(x => x.ea > 0);
+  }
+  const own  = Math.max(0, r.scanned - (forWrite ? r.confSum || 0 : 0) - subs.reduce((s, x) => s + x.ea, 0));
   const q = [{ p: r.product, ea: own, lv: null }]
             .concat(subs.map(x => ({ p: x.p, ea: x.ea, lv: x.lv })));
   return want => {
@@ -4831,9 +5184,13 @@ function cardOf(r) {
   </div>`;
 }
 
-/* ── ส่งออก / ยืนยัน ── */
-function sheetRows() {
-  const job = curJob(); const c = computeJob(job);
+/* ── ส่งออก / ยืนยัน ──
+   บรรทัดที่ยังไม่เคยยืนยัน = แถวเต็มแบบเดิม · บรรทัดที่ยืนยันไปแล้ว (มีในชีต) = แถว "ยืนยันเพิ่ม" เฉพาะยอดที่ได้เพิ่ม
+   ไม่มีอะไรเพิ่มก็ไม่ลง (ผู้ใช้เลือก 30/09: ไม่ลงซ้ำทั้งชุด)
+   opt.onlyConf = ลงเฉพาะบรรทัดที่ยืนยันแล้ว (ยืนยันใบโอน) · opt.acc = เก็บของทดแทนที่ลงไป ไว้หักทีหลัง */
+function sheetRows(job = curJob(), c, opt = {}) {
+  if (!job) return [];
+  c = c || computeJob(job);
   const now = new Date();
   const hhmm = String(now.getHours()).padStart(2,'0') + '.' + String(now.getMinutes()).padStart(2,'0');
   // ของแถมที่เป็นคนละ SKU — ผูกกลับไปยังสินค้าต้นทางที่ทำให้ได้แถม
@@ -4848,10 +5205,11 @@ function sheetRows() {
   for (const r of c.rows) {
     /* คิวแหล่งของ: ของตัวจริงก่อน แล้วค่อยตัวทดแทน
        ทำให้รู้ว่าร้านไหนได้ของตัวจริง ร้านไหนได้ตัวแทน ไม่ใช่รวมกันมั่ว */
-    const takeFrom = srcQueue(r);      // ใช้ตัวเดียวกับหน้าสรุป จะได้ตรงกันเสมอ
+    const takeFrom = srcQueue(r, true);      // ตัวเดียวกับหน้าสรุป แต่ไม่นับยอดที่ลงชีตไปแล้ว
 
     for (const d of r.detail) {
       const l = d.line, ou = l.orderedUnit;
+      if (opt.onlyConf && !d.conf) continue;
       const ext = extFree[`${l.ref}|${l.storeCode}|${r.product.id}`] || { ordered:0, got:0 };
       // บรรทัดที่ ERP ส่งมาเป็นของแถม (TRD_Q_FREE) ต้องลงช่องแถม ไม่ใช่ช่องขาย
       const isF  = !!l.erpFree;
@@ -4864,13 +5222,29 @@ function sheetRows() {
         'เครื่อง': DEVICE, 'รหัสเซล': l.slmn, 'ผู้เช็ค': CHECKER,
         'เวลาเช็ค': thaiDate(TODAY)+' '+hhmm,
         '%ที่แบ่ง': l.ratio + '%', 'AVG ที่เคยซื้อ': l.avg,
-        'กลุ่มที่เช็ค': `${job.team.code} ${job.team.name}`,
+        'กลุ่มที่เช็ค': `${job.team.code} ${job.team.name}${chanSfx()}`,
       };
 
-      const parts = d.giveEA > 0 ? takeFrom(d.giveEA) : [];
+      // ยืนยันไปแล้ว → ลงแค่ส่วนที่ได้เพิ่มจากยอดในชีต
+      const want  = d.conf ? d.giveEA - d.confGiven : d.giveEA;
+      if (d.conf && want <= 0) continue;
+      const parts = want > 0 ? takeFrom(want) : [];
       const own   = parts.filter(x => x.p.id === r.product.id).reduce((s,x)=>s+x.ea,0);
       const ownU  = own / ou.qtyEA;
 
+      if (d.conf) {
+        /* แถวยืนยันเพิ่ม: สั่ง 0 · ได้ = ส่วนที่เพิ่ม · ขาด = ติดลบเท่าส่วนที่เพิ่ม (รวมคอลัมน์ในชีตแล้วยอดถูก)
+           ยอดที่ยังขาดหลังเพิ่มแล้ว เขียนไว้ในช่องสรุป — ทุกเครื่องอ่านกลับไปตั้งยอดบรรทัดนี้ */
+        const addU  = want / ou.qtyEA;
+        const leftU = +(Math.max(0, l.needEA - d.giveEA) / ou.qtyEA).toFixed(3);
+        out.push(Object.assign({}, base, {
+          'บาร์โค้ด': l.code, 'สินค้า': r.product.name, 'หน่วย': ou.label,
+          'สั่ง-ขาย': 0, 'สั่ง-แถม': 0,
+          'ได้-ขาย': isF ? 0 : ownU, 'ได้-แถม': isF ? ownU : 0,
+          'ขาด-ขาย': isF ? 0 : -addU, 'ขาด-แถม': isF ? -addU : 0,
+          'สรุป': `${ADD_TXT}${isF ? ' แถม' : ''} · ${leftU > 0 ? 'ยังขาด ' + leftU : 'ครบ'}`,
+        }));
+      } else
       // บรรทัดหลัก — ของตัวที่สั่ง ยอดสั่ง/ขาด อยู่ที่บรรทัดนี้
       out.push(Object.assign({}, base, {
         'บาร์โค้ด': l.code, 'สินค้า': r.product.name, 'หน่วย': ou.label,
@@ -4887,6 +5261,7 @@ function sheetRows() {
            กรณีนั้นลงเป็นหน่วยเล็กสุดแทน จะได้ไม่มีเลขทศนิยมโผล่ในชีต */
         let su = subUnit(x.p, x.lv);
         if (x.ea % su.qtyEA !== 0) su = x.p.units[x.p.units.length-1];
+        if (opt.acc) { const m = (opt.acc.subs ||= {})[r.product.id] ||= {}; m[x.p.id] = (m[x.p.id] || 0) + x.ea; }
         out.push(Object.assign({}, base, {
           'บาร์โค้ด': su.code, 'สินค้า': x.p.name, 'หน่วย': su.label,
           'สั่ง-ขาย': 0, 'สั่ง-แถม': 0,
@@ -4911,7 +5286,7 @@ const getQueue = () => {
   try { queueMem = JSON.parse(LSget(QK) || '[]'); } catch(e) { queueMem = []; }
   return queueMem;
 };
-const setQueue = q => { queueMem = q; LSset(QK, JSON.stringify(q)); };
+const setQueue = q => { queueMem = q; confVer++; LSset(QK, JSON.stringify(q)); };
 function renderQueueBadge() {
   const n = getQueue().length, el = $('qBadge');
   el.classList.toggle('on', n > 0);
@@ -4943,6 +5318,12 @@ async function flushQueue(loud) {
         why = ok ? '' : `ส่งแล้วแต่แถวในชีตไม่เพิ่ม (${before} → ${after})`;
       }
       if (!ok) throw new Error(why || 'ฝั่งชีตตอบว่าไม่สำเร็จ');
+      /* ยอดยืนยันที่เพิ่งส่งถึงชีต — จำไว้จนกว่าจะอ่านชีตกลับมาเจอ ไม่งั้นช่วงนั้นหน้าจอจะเหมือนยังไม่เคยยืนยัน */
+      if (item.kind === SHEET_DONE && item.meta) {
+        confSent.push({ at:Date.now(), date:item.meta.date, wh:item.meta.wh,
+                        rows:(item.rows || []).map(confRow).filter(confTeamRow) });
+        confSave(); setTimeout(() => loadConf(true), 5000);
+      }
       setQueue(getQueue().slice(1));
       renderQueueBadge();
     }
@@ -4956,14 +5337,21 @@ async function flushQueue(loud) {
 window.addEventListener('online', () => flushQueue());
 setInterval(() => flushQueue(), 60000);
 
+/** งานนี้ (ช่องทางที่เห็น) มีบรรทัดที่ยืนยันลงชีตแล้วไหม — มีแล้ว ปุ่มปิดงานกลายเป็น "ยืนยันเพิ่ม" */
+const jobHasConf = c => c.all.some(r => r.detail.some(d => d.conf));
 function confirmJob() {
-  const rows = sheetRows();
-  if (!rows.length) { toast('ยังไม่มีข้อมูลให้บันทึก', 'warning'); return; }
-  const job = curJob();
-  if (!confirmAgain('งาน', jobDone(job.key))) return;
-  if (queueRows(rows, { round:job.round, team:`${job.team.code} ${job.team.name}`, what:`ปิดงานทีม ${job.team.name}` })) {
+  const job = curJob(); if (!job) return;
+  const c = computeJob(job), acc = {};
+  const rows = sheetRows(job, c, { acc });
+  const more = jobHasConf(c);
+  if (!rows.length) { toast(more ? 'ไม่มียอดที่ได้เพิ่มจากที่ยืนยันไปแล้ว' : 'ยังไม่มีข้อมูลให้บันทึก', 'warning'); return; }
+  // มีคนยืนยันไปแล้ว (_log) แต่ไม่เจอบรรทัดในชีต ยืนยันเช็ค (อ่านชีตไม่ได้/ใบจองเปลี่ยน) — ไม่รู้ว่าอะไรลงไปแล้ว เตือนเรื่องซ้ำแบบเดิม
+  if (!more && !confirmAgain('งาน', jobDone(job.key))) return;
+  const what = more ? `ยืนยันเพิ่ม ทีม ${job.team.name}` : `ปิดงานทีม ${job.team.name}`;
+  if (queueRows(rows, { round:job.round, team:`${job.team.code} ${job.team.name}${chanSfx()}`, what })) {
+    markSent(c, false, acc);                 // ยอดที่ลงชีตแล้ว ไม่นับซ้ำในเครื่องนี้
     const d = new Date(), t2 = x => String(x).padStart(2,'0');
-    (state.doneJob ||= {})[job.key] = { at:`${t2(d.getHours())}:${t2(d.getMinutes())}`, by:CHECKER, rows:rows.length };
+    (state.doneJob ||= {})[job.key + '|' + curTag()] = { at:`${t2(d.getHours())}:${t2(d.getMinutes())}`, by:CHECKER, rows:rows.length };
     save();
     setMode('team');                         // ปิดงานแล้วกลับหน้าแรกของเช็คตามทีม
   }
