@@ -1913,7 +1913,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-10-01 · 35';
+const BUILD = '2026-10-01 · 36';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -2332,21 +2332,47 @@ const FROM_WH = 'C4';
 const tKey = (pid, rnd, tag = curTag()) => 't|' + pid + '@' + rnd + tagSfx(tag);
 const tGot = (pid, rnd, tag = curTag()) => (state.tscans || {})[tKey(pid, rnd, tag)] || 0;
 
-/** กองยอดของสินค้า แยกตามป้ายช่องทาง { ป้าย: ชิ้น } = ยิงในหน้าทีม + โอนจาก C4 + ทดแทน
- *  rnd ว่าง = ทุกรอบ (แบบเดิม) และหักส่วนที่ยืนยันลงชีตไปแล้ว (state.used)
- *  — ส่วนนั้นไปอยู่ในยอดยืนยันของชีต (CONF) แล้ว ถ้าไม่หักจะนับซ้ำ */
-function poolsOf(pid, rnd) {
+/** กองยอดของสินค้า "ของรอบนี้" แยกตามป้ายช่องทาง { ป้าย: ชิ้น } = ยิงในหน้าทีม + โอนจาก C4 + ทดแทน
+ *  หักส่วนที่ยืนยันลงชีตไปแล้ว (state.used คีย์ "รหัส@รอบ#ป้าย") — ส่วนนั้นอยู่ในยอดของชีต (CONF) แล้ว ถ้าไม่หักจะนับซ้ำ
+ *  ยอดเป็นของรอบที่ยิงเท่านั้น (BUILD 36) — รุ่นก่อนรวมทุกรอบ ยิงรอบ 1 แล้วไปโผล่เป็น "ได้" ในงานรอบ 2 ด้วย
+ *  (เจอจริง 30/09 ติ่งฟง น้ำสับปะรด/แอปเปิ้ล ทีมคิง: 1 ลังที่ยิงให้ร้านพี่ศักดิ์รอบ 1 ถูกยืนยันให้คุณไตรสิทธิ์รอบ 2 ซ้ำอีก)
+ *  rnd ว่าง = รวมทุกรอบ (ใช้แค่เลือกหน่วย/ข้อความ ไม่ใช้แบ่งของ) */
+const usedKey = (pid, rnd, tag) => pid + '@' + rnd + '#' + tag;
+function rawPools(pid, rnd) {
   const m = {}, add = (k, ea) => { if (ea > 0) { const t = tagOfKey(k); m[t] = (m[t] || 0) + ea; } };
-  const hit = (k, pre) => k.startsWith(pre + pid + '@') && (!rnd || k.slice((pre + pid + '@').length).split('#')[0] === String(rnd));
+  const hit = (k, pre) => k.startsWith(pre + pid + '@') && k.slice((pre + pid + '@').length).split('#')[0] === String(rnd);
   for (const k in state.scans || {})  if (hit(k, ''))   add(k, state.scans[k]);
   for (const k in state.tscans || {}) if (hit(k, 't|')) add(k, state.tscans[k]);
   for (const k in state.subs || {})   if (hit(k, 'u|')) add(k, (state.subs[k] || []).reduce((s, x) => s + (x.ea || 0), 0));
-  if (!rnd) for (const t in m) {
-    m[t] = Math.max(0, m[t] - ((state.used || {})[pid + '#' + t] || 0));
+  return m;
+}
+function poolsOf(pid, rnd) {
+  if (!rnd) {
+    const m = {};
+    ROUNDS.forEach(r => { const x = poolsOf(pid, r.n); for (const t in x) m[t] = (m[t] || 0) + x[t]; });
+    return m;
+  }
+  const m = rawPools(pid, rnd), u = state.used || {};
+  for (const t in m) {
+    m[t] = Math.max(0, m[t] - (u[usedKey(pid, rnd, t)] || 0));
     if (!m[t]) delete m[t];
   }
   return m;
 }
+/* รุ่น 32–35 จด used ไม่แยกรอบ ("รหัส#ป้าย") — แปลงครั้งเดียว: แจกลงรอบที่มียอดในเครื่อง เรียงรอบ 1 → 2 */
+(function () {
+  const u = state.used || {};
+  Object.keys(u).filter(k => !k.includes('@')).forEach(k => {
+    const i = k.lastIndexOf('#'), pid = k.slice(0, i), tag = k.slice(i + 1);
+    let left = u[k]; delete u[k];
+    ROUNDS.forEach(r => {
+      if (left <= 0) return;
+      const nk = usedKey(pid, r.n, tag), room = Math.max(0, (rawPools(pid, r.n)[tag] || 0) - (u[nk] || 0));
+      const take = Math.min(left, room);
+      if (take > 0) { u[nk] = (u[nk] || 0) + take; left -= take; }
+    });
+  });
+})();
 /** ยอดที่เป็นของหน้าที่เปิดอยู่เต็ม ๆ (กองที่ป้ายอยู่ในช่องทางที่เลือก) — ใช้เลือกหน่วย/ข้อความสั้น */
 const ownPool = (pid, view = viewSet(), rnd) =>
   Object.entries(poolsOf(pid, rnd)).reduce((s, [t, ea]) => s + (tagInside(t, view) ? ea : 0), 0);
@@ -2431,7 +2457,7 @@ function markSent(c, onlyConf, acc) {
     if (onlyConf && !d.conf) return;
     const pid = r.product.id, rnd = roundOf(d.line.time);
     for (const t in d.from || {}) {
-      const k = pid + '#' + t; u[k] = (u[k] || 0) + d.from[t];
+      const k = usedKey(pid, rnd, t); u[k] = (u[k] || 0) + d.from[t];
       tUseFrom(pid, rnd, t, d.from[t]);                 // ของโอนจาก C4 ถือว่าใช้ไปก่อน (ไม่เอาไปลง "โอนจาก C4" ซ้ำ)
     }
     if (d.pre) { const k = sKey(d.line.storeCode, pid); su[k] = (su[k] || 0) + d.pre; }   // เช็คตามร้านส่วนนี้ลงชีตแล้ว
@@ -2448,13 +2474,13 @@ function tUseFrom(pid, rnd, tag, ea) {
   return take;
 }
 /** ยอดโอนในเครื่องนี้ที่ยังไม่ลงชีต (ทุกรอบ ทุกกองที่เกี่ยวกับหน้านี้) · ยอดที่โอนลงชีตแล้วของบรรทัดที่ยังไม่ปิด (ทุกเครื่องเห็น) */
-const tPendOf = pid => tKeysOf(pid).reduce((s, k) => s + Math.max(0, (state.tscans[k] || 0) - ((state.tused || {})[k] || 0)), 0);
+const tPendOf = (pid, rnd) => tKeysOf(pid, viewSet(), rnd).reduce((s, k) => s + Math.max(0, (state.tscans[k] || 0) - ((state.tused || {})[k] || 0)), 0);
 const partOf  = r => r.detail.reduce((s, d) => s + (d.part ? d.confGiven : 0), 0);
 /** อัปจากรุ่น ≤31 กลางวัน — งานที่เครื่องนี้ปิดไปแล้วด้วยรุ่นเก่า (doneJob คีย์ไม่มีป้าย) ยอดในเครื่องคือยอดที่อยู่ในชีตแล้ว
  *  แต่รุ่นเก่าไม่ได้จดว่าใช้ไปเท่าไหร่ → หักกองกลางออกเท่ายอดที่ชีตบอกว่าได้ ไม่งั้นนับซ้ำ (เช่นยอดปลีกที่ปิดแล้วไปตกบิลออนไลน์อีก)
  *  ทำครั้งเดียวต่อวันทำงาน หลังอ่านชีตสำเร็จ · รันซ้ำได้ค่าเดิม */
 function migrateUsed() {
-  const tag = TODAY + '|' + WAREHOUSE + '|35', was = JSON.stringify([state.used || {}, state.sused || {}]);
+  const tag = TODAY + '|' + WAREHOUSE + '|36', was = JSON.stringify([state.used || {}, state.sused || {}]);
   if (state.usedMig === tag || !confReady()) return false;
   state.usedMig = tag;
   const old = Object.keys(state.doneJob || {}).filter(k => k.split('|').length === 2);
@@ -2489,8 +2515,8 @@ function migrateUsed() {
       Object.values(j.skus).forEach(s => {
         const pid = s.product.id;
         const inSheet = s.lines.reduce((a, l) => { const cf = confOf(l); return a + (cf ? Math.min(l.needEA, cf.given) : 0); }, 0);
-        const raw = ROUNDS.reduce((a, r) => a + (poolsOf(pid, r.n)[TAG_ALL] || 0), 0);
-        const k = pid + '#' + TAG_ALL, v = Math.min(raw, inSheet);
+        const raw = rawPools(pid, j.round)[TAG_ALL] || 0;              // ยอดของรอบงานนั้น (รุ่นเก่าไม่มีป้ายช่องทาง)
+        const k = usedKey(pid, j.round, TAG_ALL), v = Math.min(raw, inSheet);
         if (v > (u[k] || 0)) u[k] = v;
       });
     });
@@ -2889,7 +2915,7 @@ function computeJob(job, view = viewSet(), onlyPids) {
     const preGive  = lines.map(l => Math.min(l.needEA, pre[l.lid] || 0));
     const preSum   = preGive.reduce((a, b) => a + b, 0);
     let got = 0, stranded = 0, surplus = 0;
-    Object.entries(poolsOf(p.id)).sort((a, b) => tagRank(a[0]) - tagRank(b[0])).forEach(([tag, ea]) => {
+    Object.entries(poolsOf(p.id, job.round)).sort((a, b) => tagRank(a[0]) - tagRank(b[0])).forEach(([tag, ea]) => {
       const chans = tagChans(tag);
       const ls = full.filter(l => !chans || chans.includes(chanOf(l.ref).key));
       const r = allocate(ls.map(l => Object.assign({}, l, { needEA: remain[l.lid] })), ea, p);
@@ -2936,7 +2962,7 @@ function computeJob(job, view = viewSet(), onlyPids) {
                conf: !!cf && !cf.partial, part: !!cf && !!cf.partial, confGiven: cf ? Math.min(l.needEA, cf.given) : 0 };
     });
 
-    rows.push({ sku, product:p, scanned, res, detail, promos, preSum, confSum, baseSum,
+    rows.push({ sku, product:p, scanned, res, detail, promos, preSum, confSum, baseSum, round:job.round,
                 preBy: lines.map((l, i) => ({ store:l.store, ea:preGive[i] })).filter(x => x.ea > 0),
       totalNeed: lines.reduce((s,l)=>s+l.needEA,0) });
   }
@@ -2974,9 +3000,9 @@ function computeJob(job, view = viewSet(), onlyPids) {
       continue;
     }
 
-    const scanned = ownPool(p.id, view);
+    const scanned = ownPool(p.id, view, job.round);
     const res = allocate(lines, scanned, p);
-    freeRows.push({ sku:{ product:p, lines }, product:p, scanned, res, isFree:true,
+    freeRows.push({ sku:{ product:p, lines }, product:p, scanned, res, isFree:true, round:job.round,
       detail: lines.map((l,i) => ({ line:l, giveEA:res.give[i], free:[],
                                     freeOrdered:0, freeGive:0 })),
       promos:[], totalNeed: lines.reduce((s,l)=>s+l.needEA,0) });
@@ -3185,7 +3211,8 @@ function renderScan() {
     const gotTxt = rollUp ? `${inPick} <i>=</i> ${tidy}` : tidy;
     const cls = r.scanned === 0 ? 'none' : r.scanned >= r.totalNeed ? 'ok' : 'short';
     const st  = rowState(r.totalNeed, r.scanned, r.res);
-    const perRound = ROUNDS.map(rr => ({ rr, v: ownPool(p.id, viewSet(), rr.n) })).filter(x => x.v > 0);
+    // ยิงไว้ในรอบอื่น — นับในงานรอบนั้น ไม่นับที่นี่ บอกไว้กันงงว่าของหายไปไหน (ยิงผิดรอบก็เห็น)
+    const otherRnd = ROUNDS.filter(rr => rr.n !== job.round).map(rr => ({ rr, v: ownPool(p.id, viewSet(), rr.n) })).filter(x => x.v > 0);
     return `<div class="srow ${cls} ${r.isFree?'free':''} ${p.id===lastHit?'hit':''}" id="sku-${p.id}">
       ${thumbHtml(p)}
       <div class="smain">
@@ -3225,12 +3252,12 @@ function renderScan() {
         </div>
         ${r.selfFree ? `<div class="rounds">🎁 ยอดนี้รวมของแถม <b>${fmtUnits(r.selfFree, units)}</b> แล้ว (แถมเป็นตัวเดียวกับที่ขาย)</div>` : ''}
         ${freeNotesHtml(r)}
-        ${perRound.length > 1 ? `<div class="rounds">└ ${perRound.map(x=>`${x.rr.label} <b>${fmtUnits(x.v, units)}</b>`).join(' · ')}</div>` : ''}
-        ${tPendOf(p.id) ? `<div class="rounds">🚚 ในนี้ยกมาจาก ${FROM_WH} <b>${fmtUnits(tPendOf(p.id), units, 1)}</b> — ยังไม่ได้ยืนยันใบโอน (เครื่องอื่นยังไม่เห็น)</div>` : ''}
+        ${otherRnd.length ? `<div class="rounds">ℹ ยิงไว้ใน${otherRnd.map(x=>`${x.rr.label} <b>${fmtUnits(x.v, units)}</b>`).join(' · ')} — นับในงานรอบนั้น ไม่นับที่นี่</div>` : ''}
+        ${tPendOf(p.id, job.round) ? `<div class="rounds">🚚 ในนี้ยกมาจาก ${FROM_WH} <b>${fmtUnits(tPendOf(p.id, job.round), units, 1)}</b> — ยังไม่ได้ยืนยันใบโอน (เครื่องอื่นยังไม่เห็น)</div>` : ''}
         ${partOf(r) ? `<div class="rounds">🚚 โอนจาก ${FROM_WH} ลงชีตแล้ว <b>${fmtUnits(partOf(r), units, 1)}</b> — นับเป็น "ได้" ให้แล้ว ไม่ต้องยิงซ้ำ</div>` : ''}
         ${r.preSum ? `<div class="rounds">🏪 เช็คตามร้านไปแล้ว <b>${fmtUnits(r.preSum, units, 1)}</b>
            — ${(r.preBy || []).map(x => esc(x.store)).join(' · ')}</div>` : ''}
-        ${subList(p.id).map(x => `<div class="rounds">⇄ แทนด้วย <b>${esc(x.p.name)}</b> ${fmtUnits(x.ea, x.p.units, 1)}
+        ${subList(p.id, viewSet(), job.round).map(x => `<div class="rounds">⇄ แทนด้วย <b>${esc(x.p.name)}</b> ${fmtUnits(x.ea, x.p.units, 1)}
            <button class="btn btn-outline btn-sm" style="margin-left:6px;min-height:26px;padding:2px 8px"
              onclick="openSub('${p.id}')">แก้</button></div>`).join('')}
         ${usedAsSub(p.id).map(x => `<div class="rounds">⇄ ตัวนี้ถูกยกไปใช้แทน <b>${esc(x.name)}</b>
@@ -3444,18 +3471,22 @@ function sAddEA(pid, ea, unit, how) {
   const s = curStore(); if (!s) return;
   const k = sKey(s.code, pid);
   (state.sscans ||= {});
-  state.sscans[k] = Math.max(0, (state.sscans[k] || 0) + ea);
-  logMove({ ts:Date.now(), pid, store:s.code, ea, device:DEVICE, by:CHECKER, how });
+  const before = state.sscans[k] || 0, floor = (state.sused || {})[k] || 0;   // ส่วนที่ลงชีตแล้ว ลดไม่ได้
+  const next = Math.max(floor, before + ea);
+  if (next === before) { toast(floor ? 'ยอดที่ยังไม่ลงชีตเป็น 0 แล้ว — ส่วนที่ยืนยันไปแล้วลดจากหน้านี้ไม่ได้' : 'ยอดเป็น 0 แล้ว — ลดอีกไม่ได้', 'warning');
+                         lastHit = pid; renderStore(); return; }
+  state.sscans[k] = next;
+  logMove({ ts:Date.now(), pid, store:s.code, ea:next - before, device:DEVICE, by:CHECKER, how });
   lastHit = pid; save(); renderStore();
   const p = byId[pid], sk = s.skus.find(x => x.product.id === pid);
-  feed(`${ea>0?'+':''}${fmtN(Math.abs(ea)/(unit?unit.qtyEA:1))} ${unit?unit.short:'ชิ้น'} · <b>${esc(p.name)}</b><br>
+  feed(`${ea>0?'+':'−'}${fmtN(Math.abs(ea)/(unit?unit.qtyEA:1))} ${unit?unit.short:'ชิ้น'} · <b>${esc(p.name)}</b><br>
         <span style="font-size:12px;font-weight:400;opacity:.85">รวม ${fmtUnits(sk ? storeAlloc(s, sk).got : state.sscans[k], p.units)}</span>`);
 }
 function sBump(pid, dir) {
   const p = byId[pid]; if (!p) return;
   const u = pickUnit(p);
   pendScan(pid, u.lv, dir*u.qtyEA);
-  sAddEA(pid, dir*u.qtyEA, u, 'มือ');
+  sAddEA(pid, dir*u.qtyEA, u, handTxt(dir, u));
 }
 function sAddQty(pid, val) {
   const p = byId[pid]; if (!p) return;
@@ -3571,11 +3602,13 @@ function pickUnit(p) {
   }
   return p.units[0];
 }
+/** คอลัมน์ "-" ในชีต กำลังเช็ค ตอนกดปุ่ม −/+ — บอกทิศและจำนวน (เดิมเขียนแค่ "มือ" ดูไม่ออกว่ากดบวกหรือลบ) */
+const handTxt = (dir, u) => `มือ ${dir > 0 ? '+' : '−'}1 ${u.short}`;
 function bump(pid, dir) {
   const p = byId[pid]; if (!p) return;
   const u = pickUnit(p);
   pendScan(pid, u.lv, dir * u.qtyEA);
-  addEA(pid, dir * u.qtyEA, u, 'มือ');
+  addEA(pid, dir * u.qtyEA, u, handTxt(dir, u));
 }
 
 /** ช่องข้าง −/+ = "เจอเพิ่มอีกเท่าไร" ไม่ใช่ยอดรวม
@@ -3653,13 +3686,15 @@ function setQty(pid, val) {
         <br><span style="font-size:12px;font-weight:400;opacity:.85">${esc(p.name)}</span>`);
 }
 function addEA(pid, ea, unit, how) {
-  const k = scanKey(pid, state.round);
-  const next = Math.max(0, (state.scans[k]||0) + ea);
+  const k = scanKey(pid, state.round), before = state.scans[k] || 0;
+  const next = Math.max(0, before + ea);
+  // กด − ตอนยอดยิงของรอบนี้เป็น 0 แล้ว = ไม่มีอะไรเปลี่ยน ไม่จดลงชีต (เดิมจดเป็น "มือ" ทำให้ดูเหมือนกด + ซ้ำ)
+  if (next === before) { toast('ยอดที่ยิงในรอบนี้เป็น 0 แล้ว — ลดอีกไม่ได้', 'warning'); lastHit = pid; renderScan(); return; }
   state.scans[k] = next;
-  logMove({ ts:Date.now(), pid, ea, round:state.round, device:DEVICE, by:CHECKER, how });
+  logMove({ ts:Date.now(), pid, ea:next - before, round:state.round, device:DEVICE, by:CHECKER, how });
   lastHit = pid; save(); renderScan();
   const p = byId[pid];
-  feed(`${ea>0?'+':''}${fmtN(Math.abs(ea)/ (unit?unit.qtyEA:1))} ${unit?unit.short:'ชิ้น'} · <b>${esc(p.name)}</b><br>
+  feed(`${ea>0?'+':'−'}${fmtN(Math.abs(ea)/ (unit?unit.qtyEA:1))} ${unit?unit.short:'ชิ้น'} · <b>${esc(p.name)}</b><br>
         <span style="font-size:12px;font-weight:400;opacity:.85">รวม ${fmtUnits(gotOf(pid), p.units)}</span>`);
   // เลื่อนหาเฉพาะตอนที่รายการหลุดจอจริง ๆ — ยิงรัว ๆ แล้วจอกระตุกทำให้คนเช็คหลุดโฟกัส
   setTimeout(() => {
@@ -3749,13 +3784,14 @@ function handleCode(code) {
    ส่วนชีต ยืนยันเช็ค ลงเป็นสินค้าตัวที่ได้จริง แยกบรรทัดออกจากตัวที่สั่ง
    ═══════════════════════════════════════════════════════════════ */
 const subKey  = (pid, rnd, tag = curTag()) => 'u|' + pid + '@' + rnd + tagSfx(tag);
-/** คีย์ทดแทนของสินค้านี้ที่เกี่ยวกับหน้าที่เปิดอยู่ (ป้ายช่องทางทับกับที่เลือก) */
-const subKeysOf = (pid, view = viewSet()) => Object.keys(state.subs || {})
-  .filter(k => k.startsWith('u|' + pid + '@') && tagOverlap(tagOfKey(k), view));
-/** รายการทดแทนของสินค้าตัวนี้ รวมทุกรอบ ยุบตัวเดียวกันเข้าด้วยกัน — เฉพาะช่องทางที่เกี่ยวกับหน้านี้ */
-function subList(pid, view = viewSet()) {
+/** คีย์ทดแทนของสินค้านี้ที่เกี่ยวกับหน้าที่เปิดอยู่ (ป้ายช่องทางทับกับที่เลือก · rnd ว่าง = ทุกรอบ) */
+const subKeysOf = (pid, view = viewSet(), rnd) => Object.keys(state.subs || {})
+  .filter(k => k.startsWith('u|' + pid + '@') && tagOverlap(tagOfKey(k), view) &&
+               (!rnd || k.slice(('u|' + pid + '@').length).split('#')[0] === String(rnd)));
+/** รายการทดแทนของสินค้าตัวนี้ (ของรอบ rnd) ยุบตัวเดียวกันเข้าด้วยกัน — เฉพาะช่องทางที่เกี่ยวกับหน้านี้ */
+function subList(pid, view = viewSet(), rnd) {
   const m = {};
-  subKeysOf(pid, view).forEach(k => (state.subs[k] || []).forEach(x => {
+  subKeysOf(pid, view, rnd).forEach(k => (state.subs[k] || []).forEach(x => {
     const e = m[x.pid] ||= { ea:0, lv:x.lv };
     e.ea += x.ea; if (x.lv) e.lv = x.lv;
   }));
@@ -3822,7 +3858,7 @@ function pickSub(pid) { subPick = prodById(pid) || null; renderSub(); setTimeout
 
 function renderSub() {
   if (!subFor) return;
-  const have = subList(subFor.id);
+  const have = subList(subFor.id, viewSet(), state.round);
   const q = $('subQ').value.trim().toLowerCase();
 
   $('subHead').innerHTML =
@@ -3892,7 +3928,7 @@ function saveSub() {
 }
 function dropSub(pid) {
   if (!subFor) return;
-  subKeysOf(subFor.id).forEach(k => { state.subs[k] = state.subs[k].filter(x => x.pid !== pid); });
+  subKeysOf(subFor.id, viewSet(), state.round).forEach(k => { state.subs[k] = state.subs[k].filter(x => x.pid !== pid); });
   save(); renderSub(); renderScan();
 }
 
@@ -4221,7 +4257,7 @@ function cBump(pid, dir) {
   const p = byId[pid]; if (!p) return;
   const u = pickUnit(p);
   pendScan(pid, u.lv, dir * u.qtyEA);
-  cAddEA(pid, dir * u.qtyEA, u, 'มือ');
+  cAddEA(pid, dir * u.qtyEA, u, handTxt(dir, u));
 }
 function cSetQty(pid, val) {
   state.editing = null;
@@ -4425,13 +4461,16 @@ function renderTransfer() {
 function setTFilter(k) { state.tfilter = k; save(); renderTransfer(); }
 
 function tAddEA(pid, ea, unit, how) {
-  const k = tKey(pid, state.round);
-  const next = Math.max(0, tGot(pid, state.round) + ea);
+  const k = tKey(pid, state.round), before = tGot(pid, state.round);
+  const floor = Math.max((state.tused || {})[k] || 0, (state.tsent || {})[k] || 0);   // ลงชีต/ออกใบโอนแล้ว ลดไม่ได้
+  const next = Math.max(floor, before + ea);
+  if (next === before) { toast(floor ? 'ส่วนที่ยืนยันใบโอนไปแล้วลดจากหน้านี้ไม่ได้' : 'ยอดเป็น 0 แล้ว — ลดอีกไม่ได้', 'warning');
+                         lastHit = pid; renderTransfer(); return; }
   (state.tscans ||= {})[k] = next;
-  logMove({ ts:Date.now(), pid, ea, round:state.round, src:FROM_WH, device:DEVICE, by:CHECKER, how });
+  logMove({ ts:Date.now(), pid, ea:next - before, round:state.round, src:FROM_WH, device:DEVICE, by:CHECKER, how });
   lastHit = pid; save(); renderTransfer();
   const p = byId[pid];
-  feed(`${ea>0?'+':''}${fmtN(Math.abs(ea)/(unit?unit.qtyEA:1))} ${unit?unit.short:'ชิ้น'} จาก ${FROM_WH} · <b>${esc(p.name)}</b><br>
+  feed(`${ea>0?'+':'−'}${fmtN(Math.abs(ea)/(unit?unit.qtyEA:1))} ${unit?unit.short:'ชิ้น'} จาก ${FROM_WH} · <b>${esc(p.name)}</b><br>
         <span style="font-size:12px;font-weight:400;opacity:.85">ยกมาแล้ว ${fmtUnits(next, p.units)}</span>`);
 }
 function tAddQty(pid, val) {
@@ -4451,7 +4490,7 @@ function tBump(pid, dir) {
   const p = byId[pid]; if (!p) return;
   const u = pickUnit(p);
   pendScan(pid, u.lv, dir * u.qtyEA);
-  tAddEA(pid, dir * u.qtyEA, u, 'มือ');
+  tAddEA(pid, dir * u.qtyEA, u, handTxt(dir, u));
 }
 function tSetQty(pid, val) {
   state.editing = null;
@@ -4575,7 +4614,7 @@ function transferPartRows(j, c) {
     });
     commits.push(() => {
       const u = state.used ||= {};
-      for (const t in use) { u[pid + '#' + t] = (u[pid + '#' + t] || 0) + use[t]; tUseFrom(pid, j.round, t, use[t]); }
+      for (const t in use) { const k = usedKey(pid, j.round, t); u[k] = (u[k] || 0) + use[t]; tUseFrom(pid, j.round, t, use[t]); }
     });
   }));
   return { rows, commit: () => commits.forEach(f => f()) };
@@ -5618,10 +5657,10 @@ function renderSheetPreview0() {
 /** คิวแหล่งของสินค้าตัวหนึ่ง — ของตัวจริงก่อน แล้วค่อยตัวทดแทน
  *  ใช้ทั้งบนหน้าสรุปและตอนลงชีต จะได้ตรงกันเป๊ะ */
 function srcQueue(r, forWrite) {
-  let subs = subList(r.product.id);
+  let subs = subList(r.product.id, viewSet(), r.round);
   /* ลงชีต: บรรทัดที่ยืนยันไปแล้วลงแค่ส่วนที่เพิ่ม — ของทดแทนที่เคยลงชีตไปแล้ว และยอดที่ชีตมีอยู่แล้ว ไม่เอามาแจกซ้ำ */
   if (forWrite) {
-    const sent = (state.subsSent || {})[r.product.id] || {};
+    const sent = (state.subsSent || {})[r.product.id + '@' + r.round] || {};       // ของทดแทนที่ลงชีตแล้ว (ของรอบนี้)
     subs = subs.map(x => Object.assign({}, x, { ea: Math.max(0, x.ea - (sent[x.p.id] || 0)) })).filter(x => x.ea > 0);
   }
   const own  = Math.max(0, r.scanned - (forWrite ? r.confSum || 0 : 0) - subs.reduce((s, x) => s + x.ea, 0));
@@ -5653,7 +5692,7 @@ function cardOf(r) {
     ? `<div class="note" style="background:var(--strip-bg);border-color:var(--strip-bd)">
          🎁 ${esc(r.promos[0].promo)} — เกณฑ์ ${fmtN(r.promos[0].thresholdEA)} ชิ้น แถม ${fmtN(r.promos[0].freeEA)} ชิ้น</div>` : '';
   const hasFree = r.detail.some(d => (d.freeOrdered || 0) > 0);
-  const subs = subList(p.id);
+  const subs = subList(p.id, viewSet(), r.round);
   const take = srcQueue(r);
 
   const rows = r.detail.map(d => {
@@ -5795,7 +5834,7 @@ function sheetRows(job = curJob(), c, opt = {}) {
            กรณีนั้นลงเป็นหน่วยเล็กสุดแทน จะได้ไม่มีเลขทศนิยมโผล่ในชีต */
         let su = subUnit(x.p, x.lv);
         if (x.ea % su.qtyEA !== 0) su = x.p.units[x.p.units.length-1];
-        if (opt.acc) { const m = (opt.acc.subs ||= {})[r.product.id] ||= {}; m[x.p.id] = (m[x.p.id] || 0) + x.ea; }
+        if (opt.acc) { const m = (opt.acc.subs ||= {})[r.product.id + '@' + r.round] ||= {}; m[x.p.id] = (m[x.p.id] || 0) + x.ea; }
         out.push(Object.assign({}, base, {
           'บาร์โค้ด': su.code, 'สินค้า': x.p.name, 'หน่วย': su.label,
           'สั่ง-ขาย': 0, 'สั่ง-แถม': 0,
