@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.18</title>
+<title>Rattana Shop Location v1.19</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -195,6 +195,7 @@ details.card:not([open])>summary{border-bottom:none}
 .mini:hover{border-color:var(--gold)}
 .badge{display:inline-block;padding:0 7px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap;background:rgba(201,168,76,.18);color:var(--text);border:1px solid rgba(201,168,76,.4);margin-left:4px;vertical-align:1px}
 .empty{padding:28px 10px;text-align:center;color:var(--muted)}
+.list-more{list-style:none;padding:10px 0 4px}
 .geo-status{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
 .geo-status .spin{width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite}
 
@@ -204,7 +205,7 @@ details.card:not([open])>summary{border-bottom:none}
 .pin-wrap svg{display:block;filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.4))}
 .pin-label{position:absolute;left:23px;top:3px;white-space:nowrap;font-family:'Sarabun',sans-serif;font-size:12px;font-weight:700;color:#202124;line-height:1.2;pointer-events:none;
   text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 0 3px #fff,0 0 3px #fff}
-.hide-labels .pin-label{display:none}
+.hide-labels .pin-label,.auto-hide-labels .pin-label{display:none}
 .leaflet-container{font-family:'Sarabun',sans-serif}
 .pop h4{font-size:15px;margin-bottom:2px}
 .pop .p-row{font-size:12.5px;color:#444}
@@ -234,7 +235,7 @@ details.card:not([open])>summary{border-bottom:none}
 <body>
 
 <header>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.18 · 2026-10-01</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.19 · 2026-10-01</span></div>
   <div class="hdr-right">
     <span class="sync-badge" id="syncBadge" title=""></span>
     <span class="user-chip online-only" id="userChip"></span>
@@ -682,7 +683,7 @@ async function importSheet(silent = false, mapId = activeMapId) {
     addShops(ok, 'sheet', m.id);
     Object.assign(m.sheet, { last: Date.now(), lastCount: ok.length });
     save(); showSheetLast();
-    fitAll();
+    if (!silent) fitAll();
     showToast(`[${m.name}] ดึงจาก Google Sheet ${ok.length} ร้าน` + (bad.length ? ` · ข้าม ${bad.length} แถว (ไม่มีพิกัด)` : ''), bad.length ? 'warning' : 'success');
   } catch (e) {
     console.warn(e);
@@ -874,7 +875,7 @@ async function geoLoop() {
         }
         s.geoFail = true;
       }
-      renderSide(); refreshMarker(s);   // result is already in the geo cache — no full save here
+      scheduleSide(); refreshMarker(s);   // result is already in the geo cache — no full save here
       if (!cached) await sleep(1500);   // Nominatim policy: max 1 request / second — keep a margin
     }
   } finally {
@@ -963,17 +964,44 @@ function popupHtml(s) {
 }
 function refreshMarker(s) {
   const m = markers[s.id];
-  if (m) m.setPopupContent(popupHtml(s));
+  if (m && m.isPopupOpen()) m.setPopupContent(popupHtml(s));   // closed popups are rebuilt on open
+}
+/* Performance: only pins inside the visible map area (+ margin) are in the DOM.
+   Marker objects are cached and reused; they are rebuilt only when name / color changes. */
+let markerList = [];
+const markerSig = s => s.name + '|' + shopColor(s);
+function makeMarker(s) {
+  const m = L.marker([s.lat, s.lng], { icon: pinIcon(s), title: s.name, riseOnHover: true });
+  m.bindPopup(() => popupHtml(s));
+  m._sig = markerSig(s);
+  return m;
 }
 function renderMarkers(list) {
-  markerLayer.clearLayers();
-  for (const k in markers) delete markers[k];
-  list.forEach(s => {
-    const m = L.marker([s.lat, s.lng], { icon: pinIcon(s), title: s.name, riseOnHover: true }).bindPopup(popupHtml(s));
-    markers[s.id] = m;
-    markerLayer.addLayer(m);
-  });
+  markerList = list;
+  const ids = new Set(list.map(s => s.id));
+  for (const id in markers) if (!ids.has(id)) { markerLayer.removeLayer(markers[id]); delete markers[id]; }
+  syncMarkers();
 }
+function syncMarkers() {
+  const b = map.getBounds().pad(0.35);
+  let inView = 0;
+  for (const s of markerList) {
+    let m = markers[s.id];
+    const show = b.contains([s.lat, s.lng]);
+    if (show) {
+      inView++;
+      if (m && m._sig !== markerSig(s)) { markerLayer.removeLayer(m); m = null; }
+      if (!m) { m = markers[s.id] = makeMarker(s); }
+      if (!markerLayer.hasLayer(m)) markerLayer.addLayer(m);
+    } else if (m && markerLayer.hasLayer(m) && !m.isPopupOpen()) {
+      markerLayer.removeLayer(m);
+    }
+  }
+  // too many names on screen = slow + unreadable → hide labels until zoomed in
+  map.getContainer().classList.toggle('auto-hide-labels', inView > 400 || map.getZoom() < 11);
+}
+let syncTimer = null;
+map.on('moveend zoomend', () => { clearTimeout(syncTimer); syncTimer = setTimeout(syncMarkers, 60); });
 function renderLegend() {
   const order = g => { const d = dayIndex(g); return d >= 0 ? d : 50; };
   const list = filtered();
@@ -994,16 +1022,17 @@ function renderLegend() {
   ).join('<div style="height:6px"></div>');
 }
 function fitAll() {
-  const b = markerLayer.getBounds();
-  if (b.isValid()) map.flyToBounds(b.pad(0.08), { maxZoom: 15, duration: .6 });
-  else map.flyToBounds(TH_BOUNDS, { duration: .6 });
+  const list = markerList.length ? markerList : filtered();
+  if (!list.length) { map.flyToBounds(TH_BOUNDS, { duration: .6 }); return; }
+  const b = L.latLngBounds(list.map(s => [s.lat, s.lng]));
+  map.flyToBounds(b.pad(0.08), { maxZoom: 15, duration: .6 });
 }
 function focusShop(id) {
-  const s = shops.find(x => x.id === id), m = markers[id];
+  const s = shops.find(x => x.id === id);
   if (!s) return;
   if (window.innerWidth < 900) window.scrollTo({ top: 0, behavior: 'smooth' });
   map.flyTo([s.lat, s.lng], Math.max(map.getZoom(), 16), { duration: .6 });
-  if (m) setTimeout(() => m.openPopup(), 650);
+  setTimeout(() => { syncMarkers(); const mk = markers[id]; if (mk) mk.openPopup(); }, 700);
 }
 
 // Click map -> pick coordinate
@@ -1124,6 +1153,16 @@ function onSearch() {
   renderAll();
 }
 
+const TH_COLL = new Intl.Collator('th');
+const LIST_STEP = 200;
+let listLimit = LIST_STEP;
+function showMoreList() { listLimit += LIST_STEP; renderSide(); }
+/* light re-render of the side panel, at most every 2 s (used by the background area lookup) */
+let sideTimer = null;
+function scheduleSide() {
+  if (sideTimer) return;
+  sideTimer = setTimeout(() => { sideTimer = null; renderSide(); }, 2000);
+}
 function renderSide() {
   const list = filtered();
   const all = visShops().length;
@@ -1135,14 +1174,16 @@ function renderSide() {
   renderMaps();
   renderActiveFilter();
 
-  // Shop list (sorted: region > province > amphoe > name)
+  // Shop list (sorted: region > province > amphoe > name) — only the first `listLimit` rows are drawn
   const regIdx = r => { const i = REGION_ORDER.indexOf(r || 'ไม่ทราบ'); return i < 0 ? 99 : i; };
+  const cmp = TH_COLL.compare;
   const sorted = [...list].sort((a, b) =>
     regIdx(a.region) - regIdx(b.region) ||
-    String(a.prov || 'ฮ').localeCompare(String(b.prov || 'ฮ'), 'th') ||
-    String(a.amphoe || '').localeCompare(String(b.amphoe || ''), 'th') ||
-    a.name.localeCompare(b.name, 'th'));
-  $('shopList').innerHTML = sorted.length ? sorted.map(s => `
+    cmp(a.prov || 'ฮ', b.prov || 'ฮ') ||
+    cmp(a.amphoe || '', b.amphoe || '') ||
+    cmp(a.name, b.name));
+  const more = sorted.length - listLimit;
+  $('shopList').innerHTML = sorted.length ? sorted.slice(0, listLimit).map(s => `
     <li class="shop-item" onclick="focusShop('${s.id}')">
       <span class="dot" style="background:${shopColor(s)}"></span>
       <div class="shop-main">
@@ -1154,7 +1195,8 @@ function renderSide() {
         <a class="mini" href="${gmapsUrl(s)}" target="_blank" rel="noopener" title="เปิด Google Maps" onclick="event.stopPropagation()">🗺</a>
         <button class="mini edit-only" title="ลบ" onclick="event.stopPropagation();removeShop('${s.id}')">✕</button>
       </div>
-    </li>`).join('') : `<li class="empty">${shops.length ? 'ไม่พบร้านที่ค้นหา' : 'ยังไม่มีร้าน — เพิ่มร้านจากด้านบน'}</li>`;
+    </li>`).join('') + (more > 0 ? `<li class="list-more"><button class="btn btn-outline btn-block" onclick="showMoreList()">แสดงเพิ่มอีก ${Math.min(more, LIST_STEP).toLocaleString('th-TH')} ร้าน (เหลือ ${more.toLocaleString('th-TH')})</button></li>` : '')
+    : `<li class="empty">${shops.length ? 'ไม่พบร้านที่ค้นหา' : 'ยังไม่มีร้าน — เพิ่มร้านจากด้านบน'}</li>`;
 
   const opts = [...DAY_ROUTES.slice(0, 6).map(d => d.day), ...Object.keys(groupColors).filter(g => dayIndex(g) < 0)];
   $('groupList').innerHTML = opts.map(g => `<option value="${esc(g)}">`).join('');
@@ -1162,6 +1204,7 @@ function renderSide() {
 }
 
 function renderAll() {
+  listLimit = LIST_STEP;
   renderSide();
   renderMarkers(filtered());
   renderLegend();
@@ -1324,10 +1367,10 @@ async function loadFromServer(first) {
     if (canEdit) schedulePush(0);
   }
   loadSheetCfg(); renderAll();
-  if (first) fitAll();
   setSync('ok', '☁️ ออนไลน์', 'ข้อมูลแผนที่เก็บออนไลน์ — เปิดจากเครื่องไหนก็เห็นเหมือนกัน');
   // (re)load shops from each map's Google Sheet
   for (const m of maps) if (m.sheet.url && (first || changed.includes(m.id))) await importSheet(true, m.id);
+  if (first) fitAll();
   runGeoQueue();
 }
 /* save to this browser without triggering a push */
