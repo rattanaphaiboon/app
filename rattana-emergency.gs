@@ -19,7 +19,7 @@
 //                   (เว้นว่าง = ส่งหาพนักงานแผนกบุคคลทุกคนในทะเบียนผู้ใช้ที่ Status Active)
 //    ALERT_OFF = 1  ← ปิดอีเมลด่วนทั้งหมด
 
-var VERSION = '1.0';
+var VERSION = '1.1';
 // ทะเบียนพนักงาน 5 บริษัท (ชีต "APP ออกหนังสือ HR") — หาแท็บด้วย gid ก่อน ไม่เจอค่อยหาด้วยชื่อ
 var EMP_SHEET_ID = '1iCdOIMnpaVzhoFXfDfiqh0EbOHnAumD4UW_IM4HuzwA';
 var EMP_TABS = [
@@ -208,21 +208,28 @@ function findEmp_(code) {
 function publicEmp_(e) {
   return { code: e.code, name: e.name, nick: e.nick, w: e.w, wName: wName_(e.w), dept: e.dept, co: e.co };
 }
+// เรียงผล: ตรงทุกตัว (ชื่อเล่น/ชื่อ/นามสกุล/รหัส) → ขึ้นต้นด้วยคำที่พิมพ์ → มีคำนี้อยู่ข้างใน
+// (ชื่อเล่นสั้น ๆ เช่น "นก" จะไม่ถูกคนที่มีคำนี้ซ่อนในนามสกุลดันตกรายการ)
 function findEmps_(q) {
   q = norm_(q);
   if (!q) return [];
   var digits = /^\d+$/.test(q);
   if (!digits && q.length < 2) return [];
-  var list = getEmployees_(), out = [];
-  if (digits) {
-    list.forEach(function (e) { if (e.code === q) out.push(e); });
-    list.forEach(function (e) { if (e.code !== q && e.code.indexOf(q) === 0 && out.length < 8) out.push(e); });
-  } else {
-    for (var i = 0; i < list.length && out.length < 8; i++) {
-      if (norm_(list[i].name + ' ' + list[i].nick + ' ' + list[i].code).indexOf(q) >= 0) out.push(list[i]);
+  var list = getEmployees_(), hits = [];
+  for (var i = 0; i < list.length; i++) {
+    var e = list[i], s = -1;
+    if (digits) {
+      if (e.code === q) s = 0; else if (e.code.indexOf(q) === 0) s = 1;
+    } else {
+      var nick = norm_(e.nick), name = norm_(e.name), parts = name.split(' ').concat(nick.split(' '));
+      if (nick === q || parts.indexOf(q) >= 0) s = 0;
+      else if (parts.some(function (p) { return p.indexOf(q) === 0; })) s = 1;
+      else if ((name + ' ' + nick).indexOf(q) >= 0) s = 2;
     }
+    if (s >= 0) hits.push({ s: s, i: i, e: e });
   }
-  return out.slice(0, 8).map(publicEmp_);
+  hits.sort(function (a, b) { return a.s - b.s || a.i - b.i; });
+  return hits.slice(0, 10).map(function (h) { return publicEmp_(h.e); });
 }
 
 // ───────────────────────── ทะเบียนผู้ใช้แอป (สิทธิ์หน้า HR) ─────────────────────────
