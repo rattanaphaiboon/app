@@ -178,7 +178,7 @@ const CFG = {
   api: 'https://script.google.com/macros/s/AKfycbzyZsYY9R3WAhy7LUiaIF_xPTK50vVgggrv6Ua5WYCdKOUHGNd_PjDcSojI39OSiRU/exec',
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ', usersTab: 'Sheet1',
   attendanceSheetId: '1aywVdJ5-zw70__3BHjE3itjZotiubaRUAMjWOzgCAts',
-  ver: '1.4',
+  ver: '1.5',
 };
 const S = { token: '', exp: 0, u: null, users: [], ptt: [], byId: {}, period: null, hr: null, settings: null, holidays: null, locations: null,
             faces: null, docs: null, docsRange: '', view: 'dashboard', sub: '', emp: null, empTab: 'time', empDays: {}, shifts: {}, audit: {}, quotaAll: null, busy: {} };
@@ -279,12 +279,16 @@ async function start() {
   // v1.2: ลิงก์ตรง #fix/<รหัส>/<yyyy-mm-dd>/<in|out>/<HH:MM> — เปิดหน้าต่างเพิ่มเวลาที่กรอกไว้ให้ (ตรวจแล้วกดบันทึกเอง)
   const fxm = /^#fix\/([^/]+)\/(\d{4}-\d{2}-\d{2})(?:\/(in|out))?(?:\/(\d{1,2}:\d{2}))?$/.exec(decodeURIComponent(location.hash || ''));
   if (fxm) { S.fixLink = { id: fxm[1], date: fxm[2], type: fxm[3] || 'out', time: fxm[4] ? fxm[4].padStart(5, '0') : '' }; try { history.replaceState(null, '', '#employees'); } catch (_) {} }
+  // v1.5: ลิงก์ตรง #leave/<รหัส>[/<ประเภท>[/<yyyy-mm-dd>[/<yyyy-mm-dd>]]] — เปิดหน้าต่างยื่นใบลาแทนที่กรอกไว้ให้ (HR ตรวจแล้วกดบันทึกเอง)
+  const lvm = /^#leave\/([^/]+)(?:\/([a-z_]+))?(?:\/(\d{4}-\d{2}-\d{2}))?(?:\/(\d{4}-\d{2}-\d{2}))?$/.exec(decodeURIComponent(location.hash || ''));
+  if (lvm) { S.leaveLink = { id: lvm[1], type: lvm[2] || '', from: lvm[3] || '', to: lvm[4] || '' }; try { history.replaceState(null, '', '#employees'); } catch (_) {} }
   const v = (location.hash || '').replace('#', '').split('/');
   S.view = v[0] || 'dashboard'; S.sub = v[1] || '';
   render();
   await Promise.all([loadUsers().catch(e => toast('โหลดชีท Users ไม่ได้: ' + e.message, 'bad')), loadPtt().catch(() => {}), loadPeriod(false).catch(e => toast('โหลดงวดไม่ได้: ' + e.message, 'bad'))]);
   render();
   openFixLink_();   // v1.2
+  openLeaveLink_();   // v1.5
 }
 function openFixLink_() {
   const f = S.fixLink; if (!f) return; S.fixLink = null;
@@ -525,7 +529,7 @@ async function renderEmpPane() {
         </div>
         ${S.hr ? `<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">${[['แรง', p.work], ['ขาด', p.absent], ['ป่วยมีใบ', p.sickCert], ['ป่วยไม่มีใบ', p.sickNoCert], ['กิจ', p.personal], ['พักร้อน', p.vacation], ['คลอด', p.maternity], ['ไม่รับค่าจ้าง', p.unpaid], ['สลับหยุด', p.swap]].filter(x => num(x[1])).map(x => `<span class="tag" style="background:#eef2f9;color:var(--navy)">${x[0]} ${num(x[1])}</span>`).join('')}${p.issues ? `<span class="tag t-rejected">ต้องแก้ ${p.issues} วัน</span>` : ''}<span class="sm muted" style="align-self:center">งวด ${h(S.period.from)} – ${h(S.period.to)}</span></div>` : ''}
       </div>
-      <div style="display:flex;flex-direction:column;gap:6px"><button class="btn sm" onclick="loadFaces().then(renderEmpPane)" title="โหลดรูปใบหน้าที่ลงทะเบียน (ทั้งบริษัท ~3-4 MB ครั้งเดียว)">🙂 รูปใบหน้า</button><button class="btn sm" onclick="openFix('${h(e.empId)}','','')">＋ เพิ่มเวลา</button></div>
+      <div style="display:flex;flex-direction:column;gap:6px"><button class="btn sm" onclick="loadFaces().then(renderEmpPane)" title="โหลดรูปใบหน้าที่ลงทะเบียน (ทั้งบริษัท ~3-4 MB ครั้งเดียว)">🙂 รูปใบหน้า</button><button class="btn sm" onclick="openFix('${h(e.empId)}','','')">＋ เพิ่มเวลา</button><button class="btn sm" onclick="openLeaveFor('${h(e.empId)}')">＋ ยื่นใบลาแทน</button></div>
     </div></div>
     <div class="card"><div class="tabs">${[['time', 'ตารางเวลาการทำงาน'], ['docs', 'เอกสารลา'], ['quota', 'โควต้าการลา'], ['scans', 'บันทึกการสแกน']].map(t => `<button class="${S.empTab === t[0] ? 'on' : ''}" onclick="S.empTab='${t[0]}';renderEmpPane()">${t[1]}</button>`).join('')}</div>
       <div id="empTab">${loadingCard()}</div></div>`;
@@ -675,6 +679,66 @@ async function fxSave(id) {
     loadPeriod(true).then(() => render()).catch(() => render());
   } catch (err) { toast('❌ ' + err.message, 'bad'); btn.disabled = false; btn.textContent = 'บันทึก'; }
 }
+/* ══════════ v1.5 ยื่นใบลาแทนพนักงาน (+ อนุมัติทันที) — surat 02/10 "ฟางลาคลอดจริง ลงใบให้หน่อย" ══════════
+   ใบลาที่ HR รู้จากที่อื่น (HumanSoft / ใบกระดาษ) ต้องอยู่ในการลาApp ด้วย ไม่งั้นสรุปวัน/รายงานการมาทำงานนับเป็นขาด
+   ใช้ action เดิมทั้งหมด (ไม่ต้อง Deploy Apps Script): submitLeaveApp (ยื่นแทน · HR ไม่ติดเพดานโควต้า) → getLeaveDocs → approveAny
+   ประเภท/ป้ายชื่อชุดเดียวกับฟอร์มลาในแอป (leaveTypeLabel) · ลาคลอดเติมวันสุดท้าย 98 วันให้ (แก้ได้) */
+const LV_TYPES = [['personal', 'กิจ'], ['sick_with_cert', 'ป่วย (มีใบ)'], ['sick_no_cert', 'ป่วย (ไม่มีใบ)'], ['vacation', 'พักร้อน'],
+  ['unpaid_personal', 'กิจไม่รับค่าจ้าง'], ['maternity_paid', 'ลาคลอด (รับค่าจ้าง)'], ['maternity_unpaid', 'ลาคลอด (ไม่รับค่าจ้าง)'], ['training', 'ลาฝึกอบรม']];
+const isoAddDays = (iso, n) => isoOf(new Date(new Date(iso + 'T00:00:00').getTime() + n * 864e5));
+const lvDaysOf_ = (f, t) => Math.round((new Date(t + 'T00:00:00') - new Date(f + 'T00:00:00')) / 864e5) + 1;
+function openLeaveFor(id, preset) {
+  preset = preset || {};
+  const e = empOf(id);
+  if (!e) { toast('ไม่พบพนักงานรหัส ' + id + ' ในรายชื่อ', 'bad'); return; }
+  const type = LV_TYPES.some(t => t[0] === preset.type) ? preset.type : 'personal';
+  modal(`＋ ยื่นใบลาแทน — ${h(e.name)}${e.nick ? ' (' + h(e.nick) + ')' : ''} · ${h(id)}`, `
+    <div class="grid g2"><div class="fld"><label>ประเภทการลา</label><select id="lvType" onchange="lvRecalc_(true)">${LV_TYPES.map(t => `<option value="${t[0]}"${t[0] === type ? ' selected' : ''}>${h(t[1])}</option>`).join('')}</select></div>
+      <div class="fld"><label>จำนวนวัน</label><div id="lvDays" class="b" style="padding:9px 0">—</div></div></div>
+    <div class="grid g2"><div class="fld"><label>ตั้งแต่วันที่</label><input type="date" id="lvFrom" value="${h(preset.from || '')}" onchange="lvRecalc_(true)"></div>
+      <div class="fld"><label>ถึงวันที่</label><input type="date" id="lvTo" value="${h(preset.to || '')}" onchange="lvRecalc_(false)"></div></div>
+    <div class="fld"><label>เหตุผล / หมายเหตุ (ไม่บังคับ)</label><input id="lvReason" value="${h(preset.reason || '')}" placeholder="เช่น ลาคลอดตามใบแพทย์ · บันทึกย้อนหลังจาก HumanSoft"></div>
+    <label class="ck" style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" id="lvAuto" checked> อนุมัติทันที (สรุปวัน/รายงานการมาทำงานขึ้นเป็น "ลา" เลย)</label>
+    <div class="sm muted" style="margin-top:8px">บันทึกลงชีทการลาApp ในนามพนักงาน (ขอโดย ${h(S.u.name || S.u.empId)}) · ลาคลอด: เลือกวันเริ่มแล้วระบบเติมวันสุดท้ายให้ครบ 98 วันตามกฎหมาย แก้ได้</div>`,
+    `<button class="btn" onclick="closeModal()">ยกเลิก</button><button class="btn p" id="lvSave" onclick="lvSave_('${h(id)}')">บันทึก</button>`);
+  lvRecalc_(!preset.to);
+}
+function lvRecalc_(autoEnd) {
+  const t = $('#lvType').value, f = $('#lvFrom').value, toEl = $('#lvTo');
+  if (autoEnd && f && /^maternity/.test(t)) toEl.value = isoAddDays(f, 97);        // ลาคลอด 98 วัน (นับวันหยุดด้วย)
+  else if (autoEnd && f && (!toEl.value || toEl.value < f)) toEl.value = f;
+  const to = toEl.value;
+  $('#lvDays').textContent = (f && to && to >= f) ? lvDaysOf_(f, to) + ' วัน' : '—';
+}
+async function lvSave_(id) {
+  const e = empOf(id), type = $('#lvType').value, label = (LV_TYPES.find(x => x[0] === type) || [])[1] || type;
+  const from = $('#lvFrom').value, to = $('#lvTo').value || from, auto = $('#lvAuto').checked, why = $('#lvReason').value.trim();
+  if (!from) { toast('เลือกวันเริ่มลา', 'warn'); return; }
+  if (to < from) { toast('วันสุดท้ายต้องไม่ก่อนวันเริ่ม', 'warn'); return; }
+  const days = lvDaysOf_(from, to);
+  const reason = (why || label) + ' · ยื่นแทนโดย HR (' + (S.u.name || S.u.empId) + ')';
+  const btn = $('#lvSave'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> กำลังบันทึก…';
+  try {
+    await api('submitLeaveApp', { reqId: reqId(), empId: id, name: e.name, nickname: e.nick || '', type, typeLabel: label, unit: 'days',
+                                  startDate: dmy(from), endDate: dmy(to), hours: 8 * days, reason });
+    if (auto) {
+      const docs = (await api('getLeaveDocs', { from, to })).items || [];
+      const doc = docs.find(d => d.empId === id && d.status === 'pending' && d.iso === from && d.endIso === to && String(d.info || '').replace(/^⚠เกินโควต้า · /, '') === reason);
+      if (!doc) throw new Error('บันทึกใบแล้ว แต่หาแถวเพื่ออนุมัติไม่พบ — ไปอนุมัติที่เมนู จัดการลางาน');
+      await api('approveAny', { sheet: doc.sheet, row: doc.row, decision: 'approved', approverName: S.u.name, empId: id, info: docAinfo_(doc) });
+    }
+    toast(`✓ ลงใบ${label} ${dmy(from)}${to !== from ? ' – ' + dmy(to) : ''} (${days} วัน) ${auto ? 'และอนุมัติแล้ว' : '— รออนุมัติ'}`, 'ok');
+    closeModal();
+    S.docs = null; S.hr = null; S.att = null; S.empDays = {};
+    loadPeriod(true).then(() => render()).catch(() => render());
+  } catch (err) { toast('❌ ' + err.message, 'bad'); btn.disabled = false; btn.textContent = 'บันทึก'; }
+}
+function openLeaveLink_() {
+  const f = S.leaveLink; if (!f) return; S.leaveLink = null;
+  S.emp = f.id; S.empTab = 'docs'; go('employees');
+  setTimeout(() => openLeaveFor(f.id, f), 500);
+}
+
 /* ══════════ เวลาการทำงาน (งวด) ══════════ */
 function renderTime(m) {
   if (!S.hr) { m.innerHTML = loadingCard('กำลังอ่านแท็บ สรุปวัน / ลงเวลาAuto…'); loadPeriod(false).then(() => { if (S.view === 'time') render(); }).catch(e => { m.innerHTML = `<div class="card alert bad">โหลดไม่ได้: ${h(e.message)}${/Unknown action/.test(e.message) ? ' — เซิร์ฟเวอร์ยังไม่ใช่ Apps Script 9.55 ต้อง Deploy ก่อน' : ''}</div>`; }); return; }
