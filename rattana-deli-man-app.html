@@ -972,7 +972,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.362';
+const APP_VERSION='3.363';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -7531,6 +7531,22 @@ async function iscnFromCache_(codes){
     return n;
   }catch(e){ return 0; }
 }
+/* ★★ v3.363: ชีท IS ของไฟล์ Order ถูก Google จำกัดจำนวนคำขอได้ (ตรวจเจอจริง 2 ต.ค. 2026:
+   แท็บ IS ไม่ตอบเลยเกิน 25 วิ · แท็บอื่นในไฟล์เดียวกันตอบ HTTP 429 = Too Many Requests
+   ขณะที่ไฟล์อื่นปกติดี) ของเดิมเจอแบบนี้แล้วกล่องจะค้าง "⏳ ตรวจใบรับคืนที่ออกแล้ว…" ตลอดกาล
+   ตอนนี้: รอไม่เกิน 12 วิ → ล้มเหลวก็บอกให้รู้ + ปุ่มลองใหม่ + ลองเองอัตโนมัติอีก 2 รอบ (8 วิ / 25 วิ) */
+const _issuedCNErr={};
+function iscnRetryOpen_(){
+  try{
+    const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
+    const b=j.bills[_billIdx]; if(!b) return;
+    const code=String(b.code||'').trim(); if(!code) return;
+    delete _issuedCNErr[code]; delete _issuedCNDone[code];
+    const el=document.getElementById('issuedCnBox');
+    if(el) el.innerHTML='<div class="txt-xs txt-muted" style="margin-top:4px">⏳ กำลังลองใหม่…</div>';
+    fetchIssuedCN_(code).then(iscnRepaintOpen_).catch(iscnRepaintOpen_);
+  }catch(e){}
+}
 function iscnRepaintOpen_(){
   try{ if(typeof _billIdx==='number'&&_billIdx>=0&&document.getElementById('issuedCnBox')) applyIssuedCN_(_billIdx); }catch(e){}
 }
@@ -7582,7 +7598,7 @@ async function prefetchIssuedCNForJob_(j){
         const tq="select A,B,C,I,K,M,N,O where "+part.map(function(c){ return "C = '"+_dsdcEsc(c)+"'"; }).join(' or ');
         const url='https://docs.google.com/spreadsheets/d/'+DSDC_SRC_ID+'/gviz/tq?tqx=out:csv&sheet='+encodeURIComponent(IS_SHEET)+'&tq='+encodeURIComponent(tq)+'&_cb='+Date.now();
         const ctrl=('AbortController' in window)?new AbortController():null;
-        const to=setTimeout(function(){ if(ctrl) ctrl.abort(); },45000);
+        const to=setTimeout(function(){ if(ctrl) ctrl.abort(); },12000);   /* ★ v3.363: ไม่ตอบใน 12 วิ = ตัดแล้วค่อยลองใหม่ ดีกว่าค้างยาว */
         let rows=[];
         try{
           const res=await fetch(url,{cache:'no-store',signal:ctrl?ctrl.signal:undefined});
@@ -7603,6 +7619,7 @@ async function prefetchIssuedCNForJob_(j){
         });
         const _now=Date.now();
         await iscnMapLoad_();
+        part.forEach(function(c){ delete _issuedCNErr[c]; });   /* ★ v3.363: สำเร็จแล้วล้างธงพลาด */
         part.forEach(function(c){
           const list=byCode[c]?Object.values(byCode[c]):[];   // ไม่มีใบ = [] (ถือว่าดึงแล้ว)
           state.issuedCN[c]=list;
@@ -7613,17 +7630,36 @@ async function prefetchIssuedCNForJob_(j){
       })();
       part.forEach(function(c){ _issuedCNWait[c]=p; });
       _waits.push(p
-        .catch(function(e){ console.warn('[IS prefetch]',(e&&e.message)||e); part.forEach(function(c){ delete _issuedCNDone[c]; }); })
+        .catch(function(e){
+          console.warn('[IS prefetch]',(e&&e.message)||e);
+          /* ★ v3.363: ล้มเหลว = ปลดธง "ดึงแล้ว" + มาร์คว่าพลาด (ให้กล่องบอกผู้ใช้ได้) · ของในแคชยังอยู่ ไม่ถูกลบ */
+          part.forEach(function(c){ delete _issuedCNDone[c]; if(!Array.isArray(state.issuedCN[c])) _issuedCNErr[c]=1; });
+        })
         .then(function(){ part.forEach(function(c){ delete _issuedCNWait[c]; }); }));
     }
     await Promise.all(_waits);
     iscnMapSave_();   /* ★ v3.362: เขียนแคชรอบเดียวตอนจบ (ไม่เขียนทีละชุด) */
+    /* ★ v3.363: ร้านไหนพลาด ลองใหม่เองอีก 2 รอบ เว้นระยะให้ Google หายติดโควต้าก่อน */
+    const _failed=codes.filter(function(c){ return _issuedCNErr[c]&&!_issuedCNDone[c]; });
+    if(_failed.length&&!j._iscnRetried){
+      j._iscnRetried=1;
+      [8000,25000].forEach(function(ms){
+        setTimeout(function(){
+          const still=_failed.filter(function(c){ return !_issuedCNDone[c]&&!_issuedCNWait[c]; });
+          if(!still.length) return;
+          still.forEach(function(c){ delete _issuedCNErr[c]; });
+          prefetchIssuedCNForJob_({id:j.id,bills:still.map(function(c){ return {code:c}; })});
+        },ms);
+      });
+    }
   }catch(e){ console.warn('[IS prefetch]',(e&&e.message)||e); }
 }
 async function fetchIssuedCN_(code){
   // v3.157: จับใบลดหนี้ IS ด้วย "รหัสร้าน" (AR_CODE = คอลัมน์ C) แทน TRD_REFER_REF(P) → โชว์ CN ทุกใบของร้านนี้
   code=String(code||'').trim(); if(!code) return;
   if(!state.issuedCN) state.issuedCN={};
+  /* ★ v3.363: บริษัทที่ยังไม่มีไฟล์ Order/ชีท IS (Colgate) = ไม่มีแหล่งข้อมูล ไม่ใช่ "โหลดพลาด" → ว่างเฉย ๆ ไม่ขึ้นคำเตือน */
+  if(!DSDC_SRC_ID){ state.issuedCN[code]=[]; return; }
   if(state.issuedCN[code]) return;                     // ดึงแล้ว (key = รหัสร้าน)
   /* ★ v3.357: ถ้ากำลังโหลดล่วงหน้าอยู่ (ยิงรวมทั้งใบคุม) ให้รอชุดนั้นแทนการยิงซ้ำ
      ไม่งั้นคนขับที่กดเข้าบิลระหว่างรอจะเจอกล่องว่าง เพราะ _issuedCNDone ถูกจองไว้แล้ว */
@@ -7633,7 +7669,7 @@ async function fetchIssuedCN_(code){
     const tq="select A,B,I,K,M,N,O where C = '"+_dsdcEsc(code)+"'";   // ★ v3.318: +DI_DATE (A) · DI_REF, SKU_NAME, TRD_QTY, TRD_U_PRC, TRD_G_AMT, DI_REMARK · where AR_CODE
     const url='https://docs.google.com/spreadsheets/d/'+DSDC_SRC_ID+'/gviz/tq?tqx=out:csv&sheet='+encodeURIComponent(IS_SHEET)+'&tq='+encodeURIComponent(tq)+'&_cb='+Date.now();
     const ctrl=('AbortController' in window)?new AbortController():null;
-    const to=setTimeout(()=>{ if(ctrl) ctrl.abort(); },45000);
+    const to=setTimeout(()=>{ if(ctrl) ctrl.abort(); },12000);   /* ★ v3.363 */
     const res=await fetch(url,{cache:'no-store',signal:ctrl?ctrl.signal:undefined});
     clearTimeout(to);
     if(!res.ok) throw new Error('IS HTTP '+res.status);
@@ -7648,7 +7684,13 @@ async function fetchIssuedCN_(code){
       if(!byCn[cnDoc].reason){ const rm=cleanCell(r['DI_REMARK']||''); if(rm) byCn[cnDoc].reason=rm; }
     });
     state.issuedCN[code]=Object.values(byCn);
-  }catch(e){ console.warn('IS CN fetch failed:',e); state.issuedCN[code]=state.issuedCN[code]||[]; }
+  }catch(e){
+    /* ★ v3.363: ล้มเหลวห้ามใส่ [] ทับ — เดิมใส่ว่างแล้วกล่องขึ้น "ไม่มีใบ" ทั้งที่จริงแค่โหลดไม่ได้
+       (ของในแคชถ้ามีก็ปล่อยไว้ · ไม่มีก็มาร์คพลาดให้กล่องขึ้นปุ่มลองใหม่) */
+    console.warn('IS CN fetch failed:',e);
+    delete _issuedCNDone[code];
+    if(!Array.isArray(state.issuedCN[code])) _issuedCNErr[code]=1;
+  }
 }
 /* ★★ v3.318: ใบรับคืนที่ออกแล้ว (IS) โชว์ย้อนหลังได้ไม่เกิน 15 วัน (user 2026-09-08)
    เดิมไม่กรองวันที่เลย → ใบเก่าค้างในระบบ (เจอจริง ISS6907/439 ออก 21 ก.ค. โผล่ตอน 8 ก.ย. = 49 วัน) ขึ้นปนกับใบใหม่
@@ -7820,8 +7862,22 @@ function applyIssuedCN_(idx){
     if(_billIdx!==idx) return;
     const el=$('issuedCnBox'); if(!el) return;
     const _isArr=(state.issuedCN||{})[b.code], _saleArr=(state.saleCN||{})[b.code];   // v3.157: key = รหัสร้าน · v3.264: + เซลล์สั่งเก็บ
-    if(!Array.isArray(_isArr)&&!Array.isArray(_saleArr)){ el.innerHTML='<div class="txt-xs txt-muted" style="margin-top:4px">⏳ ตรวจใบรับคืนที่ออกแล้ว…</div>'; return; }
+    if(!Array.isArray(_isArr)&&!Array.isArray(_saleArr)){
+      /* ★ v3.363: แยก "กำลังโหลด" กับ "โหลดไม่ได้" ออกจากกัน — เดิมค้าง ⏳ ตลอดกาลเวลาชีทไม่ตอบ */
+      if(_issuedCNErr[b.code]){
+        el.innerHTML='<div class="txt-xs" style="margin-top:4px;padding:7px 9px;border:1px solid var(--warning);border-radius:8px;background:rgba(243,156,18,.10)">'
+          +'⚠️ โหลดใบรับคืนที่ออกแล้วไม่สำเร็จ (ชีทไม่ตอบ/คำขอถี่เกิน) — ยอดหักยังกรอกเองได้ตามปกติ '
+          +'<button type="button" class="btn btn-outline btn-sm" style="margin-top:6px" onclick="iscnRetryOpen_()">↻ ลองใหม่</button></div>';
+        return;
+      }
+      el.innerHTML='<div class="txt-xs txt-muted" style="margin-top:4px">⏳ ตรวจใบรับคืนที่ออกแล้ว…</div>'; return;
+    }
     const list=(_isArr||[]).concat(_saleArr||[]);
+    /* ★ v3.363: ใบ IS โหลดพลาด แต่ใบเซลล์สั่งเก็บโหลดได้ (เคสที่เจอบ่อยสุดตอนชีท IS โดนจำกัดคำขอ)
+       เดิมกล่องว่างเปล่าเฉย ๆ = คนขับนึกว่าร้านนี้ไม่มีใบ → ต้องบอกให้รู้ว่า "โหลดไม่ได้" + ปุ่มลองใหม่ */
+    const _isWarn=(_issuedCNErr[b.code]&&!Array.isArray(_isArr))
+      ?'<div class="txt-xs" style="margin:4px 0 8px;padding:7px 9px;border:1px solid var(--warning);border-radius:8px;background:rgba(243,156,18,.10)">⚠️ โหลดใบรับคืนที่ออกแล้ว (IS) ไม่สำเร็จ — ชีทไม่ตอบ/คำขอถี่เกิน <button type="button" class="btn btn-outline btn-sm" style="margin-left:6px" onclick="iscnRetryOpen_()">↻ ลองใหม่</button></div>'
+      :'';
     // v3.92: โหลดจากชีท (มีเลข CN ในหมายเหตุ แต่ยังไม่มี _cnPicked) → ติ๊กให้ตามเลข CN เดิม (ไม่แตะยอดรวม)
     if((!b.payment._cnPicked||!Object.keys(b.payment._cnPicked).length) && b.payment.creditNoteRef){
       const pk={}; String(b.payment.creditNoteRef).split(',').forEach(x=>{ x=x.trim(); if(x) pk[x]=true; });
@@ -7830,7 +7886,7 @@ function applyIssuedCN_(idx){
     const picked=b.payment._cnPicked||{};
     // v3.157: ซ่อนใบที่ "ใช้ไปแล้ว" ในบิลอื่น (กันเลือกซ้ำ) — แต่คงใบที่บิลนี้เลือกไว้เองเสมอ
     const vis=list.filter(c=>picked[c.cnDoc]||(!cnUsedElsewhere_(c.cnDoc,b.doc)&&cnInWindow_(c)));   // ★ v3.318: +ตัดใบเกิน 15 วัน (ใบที่ติ๊กไว้แล้วไม่หาย)
-    if(!vis.length){ el.innerHTML=''; return; }
+    if(!vis.length){ el.innerHTML=_isWarn; return; }   /* ★ v3.363: ไม่มีใบให้โชว์แต่ IS โหลดพลาด = บอก ไม่ใช่ว่างเปล่า */
     const isSum=vis.filter(c=>picked[c.cnDoc]).reduce((s,c)=>s+(parseFloat(c.amount)||0),0);         // ยอดมีเอกสาร (IS)
     // ★ v3.225: นับ "CN ที่ทำในแอป" ของบิลนี้เป็นยอดที่มี CN ด้วย (เดิมนับเฉพาะ IS → ขึ้นว่า "นอก CN ต้องระบุเหตุผล" ทั้งที่มี CN จริง)
     //   ใช้เกณฑ์เดียวกับตอนบันทึก (cnBacked) เพื่อให้ข้อความบนจอตรงกับที่ระบบตรวจจริง
@@ -7838,7 +7894,7 @@ function applyIssuedCN_(idx){
     const appCN=_cnAmt.ok;
     const manual=Math.max(0,(parseFloat(b.payment.creditNote)||0)-isSum-appCN);                      // ยอดไม่มีเอกสารจริงๆ (พิมพ์เอง)
     const pendSale=vis.filter(c=>c._sale&&!c.collected);   // ★ v3.264: ใบเซลล์สั่งเก็บที่ยังไม่เก็บ → ปุ่มเดียว "เก็บ+หักยอด"
-    el.innerHTML=`<div style="padding:10px 12px;border-radius:10px;border:1px solid var(--gold);background:var(--gold-soft)">
+    el.innerHTML=_isWarn+`<div style="padding:10px 12px;border-radius:10px;border:1px solid var(--gold);background:var(--gold-soft)">
       <div class="txt-sm txt-bold mb-8">📄 ใบรับคืนของร้านนี้ (ออกแล้ว + เซลล์สั่งเก็บ)${ro?'':' — แตะเลือกใบ = ระบบบวกยอดเข้าช่องหักยอดให้เอง'}</div>
       ${vis.map(c=>{const lock=c._sale&&!c.collected&&!ro; return `<label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--border);cursor:${(ro||lock)?'default':'pointer'}${lock?';opacity:.72':''}">
         ${lock?`<span style="width:20px;flex:none;text-align:center;margin-top:2px">🔒</span>`:`<input type="checkbox" ${picked[c.cnDoc]?'checked':''} ${ro?'disabled':''} onchange="toggleIssuedCN_(${idx},'${esc(c.cnDoc).replace(/'/g,"\\'")}',this.checked)" style="width:20px;height:20px;margin-top:2px;flex:none">`}
