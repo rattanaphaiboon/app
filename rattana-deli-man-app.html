@@ -968,7 +968,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.356';
+const APP_VERSION='3.357';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -6318,6 +6318,7 @@ function renderActiveJob(){
   if(!j){ backToMyJobsList(); return; }
   // v1.47: approved → สรุปข้อมูลที่จำเป็นแทน detail/edit view
   if(j.status==='approved'){ renderApprovedSummary(j); return; }
+  prefetchIssuedCNForJob_(j);   /* ★ v3.357: โหลดใบรับคืน (IS) ของทุกร้านในใบคุมไว้ล่วงหน้า — ไม่รอผล ไม่บล็อกการวาดหน้า */
   const total=j.bills.reduce((s,b)=>s+b.amount,0);
   const done=j.bills.filter(b=>b.status!=='pending').length;
   const collected=j.bills.reduce((s,b)=>s+payTotal(b.payment),0);
@@ -7467,11 +7468,82 @@ function applyCNCredit(idx){
    → โชว์ในหน้าเก็บเงินให้คนขับ "เลือก" เพื่อหักยอด (creditNote) โดยไม่ต้องทำ CN ในแอป ===== */
 const IS_SHEET='IS';
 const _issuedCNDone={};
+const _issuedCNWait={};   /* ★ v3.357: รหัสร้าน -> promise ของรอบที่กำลังโหลดอยู่ */
+/* ★★ v3.357: โหลด "ใบรับคืนที่ออกแล้ว (ชีท IS)" ของทั้งใบคุมล่วงหน้าในคำขอเดียว
+   (user 2026-10-02 "มันโหลดช้าอะ" — กล่องให้ติ๊กเลือก CN โผล่ช้ามาก)
+   เดิม: เปิดบิลใบไหนค่อยยิง gviz ของร้านนั้น 1 คำขอ — วัดจริงจากเน็ตบ้าน 0.7–3.8 วินาทีต่อครั้ง
+         คนขับเปิดบิลแล้วต้องนั่งรอทุกใบ (10–40 ร้านต่อใบคุม = ยิง 10–40 รอบ)
+   ใหม่: พอเปิดหน้ารายละเอียดใบคุม กวาดรหัสร้านทั้งใบมายิงทีเดียว (where C='a' or C='b' …) ครั้งละ 25 ร้าน
+         พอกดเข้าบิลข้อมูลพร้อมแล้ว · ร้านที่ไม่มีใบก็เก็บเป็น [] กันยิงซ้ำ
+   ★ ยิงไม่สำเร็จต้องปลดธงคืน ไม่งั้นร้านนั้นจะไม่มีใครดึงให้อีกเลยทั้งรอบ */
+async function prefetchIssuedCNForJob_(j){
+  try{
+    if(!j||!Array.isArray(j.bills)||!j.bills.length) return;
+    if(!DSDC_SRC_ID) return;                     // บริษัทที่ยังไม่มีไฟล์ Order (Colgate)
+    if(!state.issuedCN) state.issuedCN={};
+    /* เรียงให้ตรงกับที่หน้าจอเรียง (ยังไม่กรอกขึ้นก่อน → ตามลำดับใบคุม) ชุดแรกที่ยิงจะได้เป็นบิลที่คนขับเปิดก่อน */
+    const _seqOf=function(b){ return (b&&b.seq!==undefined&&b.seq!==null&&b.seq!=='')?Number(b.seq):99999; };
+    const _bills=j.bills.slice().sort(function(a,b){
+      const ap=(a&&a.status==='pending')?0:1, bp=(b&&b.status==='pending')?0:1;
+      if(ap!==bp) return ap-bp;
+      return _seqOf(a)-_seqOf(b);
+    });
+    const codes=[];
+    _bills.forEach(function(b){
+      const c=String((b&&b.code)||'').trim();
+      if(c&&codes.indexOf(c)<0&&!state.issuedCN[c]&&!_issuedCNDone[c]&&!_issuedCNWait[c]) codes.push(c);
+    });
+    if(!codes.length) return;
+    /* ★ ขนาดชุด 10 + ยิงขนานกันทุกชุด — วัดจริงบนเน็ตบ้าน 2 ต.ค. 2026 (ใบคุม 33 ร้าน):
+       ชุดละ 25 ต่อคิว 11.3 วิ · คำขอเดียว 33 ร้าน 1.8 วิ · ชุดละ 10 ขนาน 4 คำขอ ~1-3.7 วิ · ชุดละ 5 ขนาน 1.0 วิ
+       เลือก 10/ขนาน เพราะเร็วพอ ๆ กับ 5 แต่ยิงน้อยกว่า และชุดแรก (บิลที่จะเปิดก่อน) เสร็จใน ~0.5 วิ */
+    const _waits=[];
+    for(let i=0;i<codes.length;i+=10){
+      const part=codes.slice(i,i+10);
+      const p=(async function(){
+        const tq="select A,B,C,I,K,M,N,O where "+part.map(function(c){ return "C = '"+_dsdcEsc(c)+"'"; }).join(' or ');
+        const url='https://docs.google.com/spreadsheets/d/'+DSDC_SRC_ID+'/gviz/tq?tqx=out:csv&sheet='+encodeURIComponent(IS_SHEET)+'&tq='+encodeURIComponent(tq)+'&_cb='+Date.now();
+        const ctrl=('AbortController' in window)?new AbortController():null;
+        const to=setTimeout(function(){ if(ctrl) ctrl.abort(); },45000);
+        let rows=[];
+        try{
+          const res=await fetch(url,{cache:'no-store',signal:ctrl?ctrl.signal:undefined});
+          clearTimeout(to);
+          if(!res.ok) throw new Error('IS HTTP '+res.status);
+          rows=parseCsv(await res.text());
+        }catch(e){ clearTimeout(to); throw e; }
+        const byCode={};
+        rows.forEach(function(r){
+          const code=cleanCell(r['AR_CODE']||''); const cnDoc=cleanCell(r['DI_REF']||'');
+          if(!code||!cnDoc) return;
+          if(!byCode[code]) byCode[code]={};
+          const amt=parseFloat(cleanCell(r['TRD_G_AMT']||'0').replace(/,/g,''))||0;
+          if(!byCode[code][cnDoc]) byCode[code][cnDoc]={cnDoc,date:cleanCell(r['DI_DATE']||''),reason:cleanCell(r['DI_REMARK']||''),amount:0,items:[]};
+          byCode[code][cnDoc].amount+=amt;
+          byCode[code][cnDoc].items.push({sku:cleanCell(r['SKU_NAME']),qty:parseFloat(cleanCell(r['TRD_QTY']||'0').replace(/,/g,''))||0,price:parseFloat(cleanCell(r['TRD_U_PRC']||'0').replace(/,/g,''))||0,amount:amt});
+          if(!byCode[code][cnDoc].reason){ const rm=cleanCell(r['DI_REMARK']||''); if(rm) byCode[code][cnDoc].reason=rm; }
+        });
+        part.forEach(function(c){
+          state.issuedCN[c]=byCode[c]?Object.values(byCode[c]):[];   // ไม่มีใบ = [] (ถือว่าดึงแล้ว)
+          _issuedCNDone[c]=1;
+        });
+      })();
+      part.forEach(function(c){ _issuedCNWait[c]=p; });
+      _waits.push(p
+        .catch(function(e){ console.warn('[IS prefetch]',(e&&e.message)||e); part.forEach(function(c){ delete _issuedCNDone[c]; }); })
+        .then(function(){ part.forEach(function(c){ delete _issuedCNWait[c]; }); }));
+    }
+    await Promise.all(_waits);
+  }catch(e){ console.warn('[IS prefetch]',(e&&e.message)||e); }
+}
 async function fetchIssuedCN_(code){
   // v3.157: จับใบลดหนี้ IS ด้วย "รหัสร้าน" (AR_CODE = คอลัมน์ C) แทน TRD_REFER_REF(P) → โชว์ CN ทุกใบของร้านนี้
   code=String(code||'').trim(); if(!code) return;
   if(!state.issuedCN) state.issuedCN={};
   if(state.issuedCN[code]) return;                     // ดึงแล้ว (key = รหัสร้าน)
+  /* ★ v3.357: ถ้ากำลังโหลดล่วงหน้าอยู่ (ยิงรวมทั้งใบคุม) ให้รอชุดนั้นแทนการยิงซ้ำ
+     ไม่งั้นคนขับที่กดเข้าบิลระหว่างรอจะเจอกล่องว่าง เพราะ _issuedCNDone ถูกจองไว้แล้ว */
+  if(_issuedCNWait[code]){ try{ await _issuedCNWait[code]; }catch(e){} return; }
   if(_issuedCNDone[code]) return; _issuedCNDone[code]=1;
   try{
     const tq="select A,B,I,K,M,N,O where C = '"+_dsdcEsc(code)+"'";   // ★ v3.318: +DI_DATE (A) · DI_REF, SKU_NAME, TRD_QTY, TRD_U_PRC, TRD_G_AMT, DI_REMARK · where AR_CODE
