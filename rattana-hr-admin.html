@@ -178,7 +178,7 @@ const CFG = {
   api: 'https://script.google.com/macros/s/AKfycbzyZsYY9R3WAhy7LUiaIF_xPTK50vVgggrv6Ua5WYCdKOUHGNd_PjDcSojI39OSiRU/exec',
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ', usersTab: 'Sheet1',
   attendanceSheetId: '1aywVdJ5-zw70__3BHjE3itjZotiubaRUAMjWOzgCAts',
-  ver: '1.3',
+  ver: '1.4',
 };
 const S = { token: '', exp: 0, u: null, users: [], ptt: [], byId: {}, period: null, hr: null, settings: null, holidays: null, locations: null,
             faces: null, docs: null, docsRange: '', view: 'dashboard', sub: '', emp: null, empTab: 'time', empDays: {}, shifts: {}, audit: {}, quotaAll: null, busy: {} };
@@ -409,6 +409,10 @@ function renderDashboard(m) {
       <div class="kpi"><div class="n ${absent ? 'warn' : ''}">${S.hr ? Math.round(absent * 100) / 100 : '…'}</div><div class="l">ขาดงานรวมในงวด (วัน)</div></div>
       <div class="kpi"><div class="n ${hr.pending ? 'warn' : 'info'}">${hr.pending != null ? hr.pending : '…'}</div><div class="l">เอกสารรออนุมัติ</div></div>
     </div>
+    <div class="card" id="attCard"><h3 style="flex-wrap:wrap">การมาทำงาน · RATTANA<span class="sp"></span><span style="display:flex;gap:6px;align-items:center">
+      <input type="date" id="attDate" value="${S.attDate || todayIso()}" max="${todayIso()}" onchange="attSetDate_(this.value)" style="padding:5px 8px;border:1px solid var(--line);border-radius:8px;font:inherit;font-size:12.5px">
+      <button class="btn sm" onclick="loadAtt_(true)" title="สรุปใหม่">↻</button><button class="btn sm" id="attMailBtn" onclick="attSend_()">✉ ส่งอีเมล</button></span></h3>
+      <div id="attBody"><div class="muted"><span class="spin"></span> กำลังสรุปการมาทำงาน…</div></div></div>
     <div class="grid g3">
       <div class="card"><h3>เพศ <span class="sp"></span><span class="sm muted">RATTANA (ชีท Users)</span></h3>
         <div style="display:flex;gap:18px;justify-content:space-around;text-align:center;padding:6px 0 10px">
@@ -425,8 +429,60 @@ function renderDashboard(m) {
         ${S.hr ? ((S.hr.issues || []).slice().sort((a, b) => b.iso < a.iso ? -1 : 1).slice(0, 8).map(i => `<div class="dl"><div style="width:90px" class="muted">${h(i.date)}</div><div style="flex:1"><a href="#" onclick="openEmp('${h(i.empId)}','time');return false">${h(i.name || i.empId)}</a> <span class="sm muted">${h(i.empId)}</span></div>${stChip(i.status)}</div>`).join('') || '<div class="empty">ไม่มีวันที่ต้องแก้ในงวดนี้ ✓</div>') : loadingCard()}</div>
       <div class="card"><h3>เอกสารรออนุมัติ <span class="sp"></span><button class="btn sm" onclick="go('docs')">จัดการ</button></h3><div id="dashDocs">${loadingCard('กำลังโหลดเอกสาร…')}</div></div>
     </div>`;
+  loadAtt_();   // v1.4 การมาทำงานประจำวัน
   if (S.period) loadDocs(S.period.fromIso, S.period.toIso).then(d => { const el = $('#dashDocs'); if (!el) return; const p = d.filter(x => x.status === 'pending').slice(0, 8);
     el.innerHTML = p.length ? p.map(x => `<div class="dl"><div style="width:90px" class="muted">${h(x.date)}</div><div style="flex:1"><a href="#" onclick="openEmp('${h(x.empId)}','docs');return false">${h(x.name)}</a> <span class="sm muted">${h(x.type)}</span></div>${docTag(x.status)}</div>`).join('') : '<div class="empty">ไม่มีเอกสารรออนุมัติในงวดนี้ ✓</div>'; }).catch(e => { const el = $('#dashDocs'); if (el) el.innerHTML = `<div class="alert bad">${h(e.message)}</div>`; });
+}
+
+/* ══════════ v1.4 การมาทำงานประจำวัน (RATTANA แยกสาขา) — getDailyAttendance (Apps Script 9.59) ══════════
+   แบบเดียวกับข้อความ HumanSoft Notify: มาทำงาน · วันหยุด · ลาแต่ละประเภท (A อนุมัติ / N รออนุมัติ) · ขาดงาน (ไม่มีสแกน)
+   ตัวเลขสดตอนเปิดดู (คนที่มาสแกนทีหลังหายจากรายชื่อขาดเมื่อกด ↻) · เลือกวันย้อนหลังได้ถึงต้นเดือนก่อน */
+async function loadAtt_(force) {
+  const el = () => $('#attBody');
+  if (!el()) return;
+  const iso = S.attDate || todayIso(), c = S.att;
+  if (!force && c && c.iso === iso && Date.now() - c.at < 3 * 60000) { el().innerHTML = attHtml_(c.d); return; }
+  el().innerHTML = '<div class="muted"><span class="spin"></span> กำลังสรุปการมาทำงาน…</div>';
+  try {
+    const d = await api('getDailyAttendance', { date: iso });
+    S.att = { iso, at: Date.now(), d };
+    if (el() && (S.attDate || todayIso()) === iso) el().innerHTML = attHtml_(d);
+  } catch (e) {
+    const old = /Unknown action/i.test(String(e.message));
+    if (el()) el().innerHTML = `<div class="alert ${old ? '' : 'bad'}">${old ? 'ต้อง Deploy Apps Script 9.59 ก่อน ถึงจะสรุปการมาทำงานได้' : h(e.message)}</div>`;
+  }
+}
+function attSetDate_(v) { S.attDate = v || todayIso(); loadAtt_(true); }
+function attHtml_(d) {
+  if (!d || !d.ok) return `<div class="alert bad">${h((d && d.error) || 'โหลดไม่ได้')}</div>`;
+  const nm = (arr, st) => arr.map(p => `<a href="#" onclick="openEmp('${h(p.id)}','time');return false" title="${h(p.name)} (${h(p.id)})">${h(p.label)}</a>${st ? `<span class="sm muted">(${h(p.st)})</span>` : ''}`).join(', ');
+  const line = (label, n, names, color) => `<div class="dl"><div style="width:170px${color ? ';color:' + color : ''}">${h(label)}</div><div class="b" style="width:64px${color ? ';color:' + color : ''}">${n} คน</div><div style="flex:1;min-width:0">${names || ''}</div></div>`;
+  const t = d.totals || {};
+  let x = `<div class="sm muted" style="margin:-4px 0 10px">วัน${h(d.dow)}ที่ ${h(d.dmyBE)}${d.live ? ' · ข้อมูล ณ ' + h(d.at) + ' น. — คนที่มาสแกนทีหลังจะหายจากรายชื่อขาดเมื่อกด ↻' : ''}${d.sunday ? ' · วันอาทิตย์' : ''}${d.holiday ? ' · วันหยุด: ' + h(d.holiday) : ''}</div>
+    <div class="grid g4" style="margin-bottom:12px">
+      <div class="kpi"><div class="n">${t.total || 0}</div><div class="l">พนักงาน (สาขา ${h((d.branchesCfg || []).join(' · '))})</div></div>
+      <div class="kpi"><div class="n ok">${t.present || 0}</div><div class="l">มาทำงาน (มีสแกน)</div></div>
+      <div class="kpi"><div class="n info">${(t.leave || 0) + (t.off || 0)}</div><div class="l">ลา / วันหยุด</div></div>
+      <div class="kpi"><div class="n ${t.absent ? 'bad' : 'ok'}">${t.absent || 0}</div><div class="l">ขาดงาน (ไม่มีสแกน)</div></div></div>`;
+  (d.branches || []).forEach(g => {
+    x += `<div style="border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin-bottom:10px">
+      <div class="b" style="margin-bottom:4px">สาขา ${h(g.w)} · ${h(g.company)} <span class="sm muted" style="font-weight:400">${g.total} คน</span></div>
+      ${line('มาทำงาน', g.present, '', 'var(--ok)')}
+      ${g.off.length ? line('วันหยุด', g.off.length, nm(g.off, true)) : ''}
+      ${g.leaves.map(l => line(l.type, l.people.length, nm(l.people, true), 'var(--info)')).join('')}
+      ${line('ขาดงาน (ไม่มีสแกน)', g.absent.length, nm(g.absent, false) || '<span class="muted">—</span>', g.absent.length ? 'var(--bad)' : 'var(--ok)')}
+    </div>`;
+  });
+  if (!(d.branches || []).length) x += '<div class="muted">ไม่มีพนักงานในสาขาที่ตั้งไว้</div>';
+  return x + '<div class="sm muted">ขาดงาน = ไม่มีสแกนและไม่มีใบลา · (A) = อนุมัติแล้ว · (N) = รออนุมัติ · กดชื่อเพื่อดูตารางเวลาของคนนั้น</div>';
+}
+async function attSend_() {
+  const iso = S.attDate || todayIso();
+  if (!confirm('ส่งอีเมลสรุปการมาทำงานวันที่ ' + dmy(iso) + ' ตอนนี้?')) return;
+  const b = $('#attMailBtn'); if (b) b.disabled = true;
+  try { const r = await api('sendDailyAttendance', { date: iso }); toast('✓ ส่งอีเมลแล้ว → ' + (r.to || []).join(', '), 'ok'); }
+  catch (e) { toast(/Unknown action/i.test(String(e.message)) ? 'ต้อง Deploy Apps Script 9.59 ก่อน' : e.message, 'bad'); }
+  finally { if (b) b.disabled = false; }
 }
 
 /* ══════════ ข้อมูลพนักงาน ══════════ */
