@@ -1228,20 +1228,32 @@ function rainInfo(d){
   const sev=tot<0.1?0:tot<=10?1:tot<=35?2:tot<=90?3:4;
   return {tot,mx,sev,lb:['ไม่มีฝน','ฝนตกเล็กน้อย','ฝนตกปานกลาง','ฝนตกหนัก','ฝนตกหนักมาก'][sev],start:i0<0?null:i0===0?'now':d.time[i0]};
 }
-/* ── ระดับน้ำแม่น้ำ/คลองเทียบตลิ่ง (ThaiWater · ทั้งประเทศ ~800 สถานี · แคช 10 นาที) ── */
+/* ── ระดับน้ำแม่น้ำ/คลองเทียบตลิ่ง (ThaiWater ทั้งประเทศ ~800 สถานี)
+   ลำดับ: หลังบ้าน action=river (ย่อแล้ว แคช 10 นาที ทุกเครื่องใช้ชุดเดียวกัน) → โหลดตรงจาก ThaiWater (1.4 MB)
+   → ชุดล่าสุดที่เก็บไว้ในเครื่อง (ThaiWater จำกัดการเรียก/ล่ม ก็ยังมีข้อมูลให้ดู) ──
+   แถวย่อ = [ชื่อสถานี, แม่น้ำ, จังหวัด, lat, lng, สถานการณ์ 1–5, เทียบตลิ่ง (+ล้น/−ต่ำกว่า), ม.รทก., ครั้งก่อน, เวลาวัด, หน่วยงาน] (ตรงกับ rivers_ ในหลังบ้าน) */
+const twFromRow=a=>({n:a[0],r:a[1],p:a[2],la:+a[3],lo:+a[4],sit:+a[5]||0,d:a[6]==null?null:+a[6],m:a[7]==null?NaN:+a[7],pm:a[8]==null?NaN:+a[8],t:a[9]||'',ts:+(twDate(a[9])||0),ag:a[10]||''});
+async function twDirect(){
+  const r=await withTimeout(fetch(TW_URL),30000); if(!r.ok)throw new Error('ThaiWater HTTP '+r.status);
+  const j=await r.json(), r2=v=>{ v=parseFloat(v); return isFinite(v)?Math.round(v*100)/100:null; }, cl=s=>clean(s).replace(/\s+/g,' ');
+  return ((j.waterlevel_data&&j.waterlevel_data.data)||[]).map(x=>{ const s=x.station||{}, g=x.geocode||{}, nm=s.tele_station_name||{}, dv=Math.abs(parseFloat(x.diff_wl_bank));
+    return [cl(nm.th||nm.en),cl(x.river_name),cl(g.province_name&&g.province_name.th),Math.round(+s.tele_station_lat*1e4)/1e4,Math.round(+s.tele_station_long*1e4)/1e4,
+      +x.situation_level||0,isFinite(dv)?Math.round((/ล้น/.test(String(x.diff_wl_bank_text||''))?dv:-dv)*100)/100:null,r2(x.waterlevel_msl),r2(x.waterlevel_msl_previous),x.waterlevel_datetime||'',cl(x.agency&&x.agency.agency_shortname&&x.agency.agency_shortname.th)]; });
+}
 function getRivers(){
   if(AR.tw&&Date.now()-AR.twAt<10*60e3)return Promise.resolve(AR.tw);
   if(AR.twP)return AR.twP;
-  AR.twP=withTimeout(fetch(TW_URL),30000).then(r=>{ if(!r.ok)throw new Error('HTTP '+r.status); return r.json(); }).then(j=>{
-    const arr=(j.waterlevel_data&&j.waterlevel_data.data)||[];
-    AR.tw=arr.map(x=>{ const s=x.station||{}, g=x.geocode||{}, dv=Math.abs(parseFloat(x.diff_wl_bank)), nm=s.tele_station_name||{};
-      return {n:clean(nm.th||nm.en),r:clean(x.river_name),p:clean(g.province_name&&g.province_name.th),
-        la:+s.tele_station_lat,lo:+s.tele_station_long,sit:+x.situation_level||0,d:isFinite(dv)?(/ล้น/.test(String(x.diff_wl_bank_text||''))?dv:-dv):null,
-        m:parseFloat(x.waterlevel_msl),pm:parseFloat(x.waterlevel_msl_previous),t:x.waterlevel_datetime||'',ts:+(twDate(x.waterlevel_datetime)||0),ag:clean(x.agency&&x.agency.agency_shortname&&x.agency.agency_shortname.th)}; })
-      .filter(s=>s.n&&isFinite(s.la)&&isFinite(s.lo)&&s.la&&s.lo&&Date.now()-s.ts<72*3600e3);   // ตัดสถานีที่ไม่ส่งข้อมูลเกิน 3 วัน
-    AR.twAt=Date.now();
+  AR.twP=(async()=>{
+    let rows=null, at=0, err='';
+    if(!DEMO){ try{ const o=await gasGet({action:'river'},25000); if(o&&o.ok&&Array.isArray(o.s)&&o.s.length){ rows=o.s; at=+new Date(o.at)||Date.now(); } else if(o&&!/unknown action/i.test(o.error||''))err=o.error||''; }catch(e){ err=e.message; } }
+    if(!rows){ try{ rows=await twDirect(); at=Date.now(); }catch(e){ err=e.message||err; } }
+    if(rows)lsSet('rf_tw',{t:at,s:rows});
+    else{ const c=lsGet('rf_tw',null); if(c&&Array.isArray(c.s)&&c.s.length){ rows=c.s; at=c.t||0; } }
+    if(!rows)throw new Error(err||'โหลดไม่ได้');
+    AR.tw=rows.map(twFromRow).filter(s=>s.n&&isFinite(s.la)&&isFinite(s.lo)&&s.la&&s.lo&&Date.now()-s.ts<72*3600e3);   // ตัดสถานีที่ไม่ส่งข้อมูลเกิน 3 วัน
+    AR.twAt=Date.now(); AR.twFrom=at;
     return AR.tw;
-  }).finally(()=>{ AR.twP=null; });
+  })().finally(()=>{ AR.twP=null; });
   return AR.twP;
 }
 
@@ -1460,7 +1472,8 @@ function arRenderRivers(v){
     head=`ระดับน้ำในแม่น้ำและคลอง${sc.p?' จ.'+sc.p:' '+ps.length+' จังหวัด'} เทียบกับตลิ่ง · เรียงจากน่าห่วงที่สุด`;
   }
   const over=L.filter(s=>s.sit===5).length, much=L.filter(s=>s.sit===4).length, show=L.slice(0,v.moreRv?40:4);
-  box.innerHTML=`<div class="ar-rv-h">${esc(head)}${over||much?`<span class="ar-rv-c">${[over?'ล้นตลิ่ง '+over:'',much?'น้ำมาก '+much:''].filter(Boolean).join(' · ')} สถานี</span>`:''}</div>`
+  const old=AR.twFrom&&Date.now()-AR.twFrom>40*60e3?`<div class="ar-tm" style="margin-bottom:2px">⚠️ แหล่งข้อมูลตอบช้า — แสดงชุดล่าสุดเมื่อ ${esc(thaiShort(new Date(AR.twFrom)))}</div>`:'';
+  box.innerHTML=`<div class="ar-rv-h">${esc(head)}${over||much?`<span class="ar-rv-c">${[over?'ล้นตลิ่ง '+over:'',much?'น้ำมาก '+much:''].filter(Boolean).join(' · ')} สถานี</span>`:''}</div>${old}`
     +(show.length?show.map(stationHtml).join(''):'<div class="txt-sm txt-muted" style="padding:6px 0 10px">ไม่พบสถานีวัดระดับน้ำในพื้นที่นี้</div>')
     +(L.length>4?`<button type="button" class="ar-more" data-act="more">${v.moreRv?'ย่อรายการ ▲':`ดูทั้งหมด ${Math.min(L.length,40)} สถานี ▼`}</button>`:'');
 }

@@ -1,5 +1,6 @@
 // Rattana แบบสำรวจสถานการณ์ฉุกเฉิน — หลังบ้าน (Google Apps Script) v1.2
 // v1.2: action=area — สรุประดับน้ำรายอำเภอ 24 ชม. + รายงานในรัศมี 2 กม. (หน้า "พื้นที่ของฉัน" — ส่งแค่ตัวเลขรวม ไม่มีชื่อ/พิกัดรายคน)
+//       action=river — ระดับน้ำแม่น้ำ/คลองจาก ThaiWater แบบย่อ แคช 10 นาที (ทุกเครื่องใช้ชุดเดียวกัน ไม่ต้องโหลด 1.4 MB เอง)
 // แบบสำรวจบ้านพนักงาน ช่วงน้ำท่วม 2569 — พนักงานกรอกได้เลยไม่ต้องล็อกอิน / HR ดูแดชบอร์ด+แผนที่
 // รายชื่อพนักงานครบ 5 บริษัท: รัตนไพบูลย์ · อาร์พีบี (แท็บ ข้อมูลพนักงาน) + สเตชั่น · สโตร์ · คอฟฟี่ (แท็บ ข้อมูลPTT)
 //
@@ -720,6 +721,39 @@ function addStat_(s, x) {
   if (x[4]) s.up++;
   if (x[5] * 60000 > s.last) s.last = x[5] * 60000;
 }
+// ระดับน้ำในแม่น้ำ/คลองทั่วประเทศ (คลังข้อมูลน้ำแห่งชาติ ThaiWater) — ย่อเหลือ [ชื่อสถานี, แม่น้ำ, จังหวัด, lat, lng,
+// สถานการณ์ 1–5, เทียบตลิ่ง (+ล้น/−ต่ำกว่า ม.), ระดับ ม.รทก., ระดับครั้งก่อน, เวลาวัด, หน่วยงาน]
+// แคช 10 นาที + สำรอง 6 ชม. (ถ้า ThaiWater ล่ม/จำกัดการเรียก ใช้ชุดเดิมไปก่อน)
+var TW_URL = 'https://api-v3.thaiwater.net/api/v1/thaiwater30/public/waterlevel_load';
+function rivers_() {
+  var hit = cacheGetBig_('tw_v1');
+  if (hit) return hit;
+  var res = null;
+  try { res = UrlFetchApp.fetch(TW_URL, { muteHttpExceptions: true }); } catch (e) { res = null; }
+  if (!res || res.getResponseCode() !== 200) {
+    var old = cacheGetBig_('tw_old_v1');
+    if (old) { old.stale = true; return old; }
+    throw new Error('ThaiWater ' + (res ? 'HTTP ' + res.getResponseCode() : 'ติดต่อไม่ได้'));
+  }
+  var arr = ((JSON.parse(res.getContentText()) || {}).waterlevel_data || {}).data || [];
+  var r2 = function (v) { v = parseFloat(v); return isFinite(v) ? Math.round(v * 100) / 100 : null; };
+  var out = { at: new Date().toISOString(), s: [] };
+  arr.forEach(function (x) {
+    var s = x.station || {}, g = x.geocode || {}, nm = s.tele_station_name || {}, ag = x.agency || {};
+    var la = Number(s.tele_station_lat), lo = Number(s.tele_station_long);
+    if (!la || !lo || !isFinite(la) || !isFinite(lo)) return;
+    var dv = Math.abs(parseFloat(x.diff_wl_bank));
+    out.s.push([clean_(nm.th || nm.en), clean_(x.river_name), clean_(g.province_name && g.province_name.th),
+                Math.round(la * 1e4) / 1e4, Math.round(lo * 1e4) / 1e4, Number(x.situation_level) || 0,
+                isFinite(dv) ? Math.round((/ล้น/.test(String(x.diff_wl_bank_text || '')) ? dv : -dv) * 100) / 100 : null,
+                r2(x.waterlevel_msl), r2(x.waterlevel_msl_previous), String(x.waterlevel_datetime || ''),
+                clean_(ag.agency_shortname && ag.agency_shortname.th)]);
+  });
+  cachePutBig_('tw_v1', out, 600);
+  cachePutBig_('tw_old_v1', out, 21600);
+  return out;
+}
+
 // d = { รหัสอำเภอ: {n, c:[แห้ง…มิดหัว], down, up, unk, last} } · out = นอก 9 จังหวัด · near = รัศมี 2 กม. 12 ชม. (ถ้าส่ง lat/lng มา)
 function area_(p) {
   var pts = areaPts_(), d = {}, out = blankStat_();
@@ -751,6 +785,7 @@ function doGet(e) {
     }
     if (action === 'find') return json_({ ok: true, emps: findEmps_(p.q) });
     if (action === 'area') return json_(area_(p));
+    if (action === 'river') { var rv = rivers_(); return json_({ ok: true, at: rv.at, stale: !!rv.stale, s: rv.s }); }
     if (action === 'emp') {
       var emp = findEmp_(p.code);
       if (!emp) return json_({ ok: false, error: 'ไม่พบรหัสพนักงาน' });
