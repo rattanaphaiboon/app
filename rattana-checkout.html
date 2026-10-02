@@ -1916,7 +1916,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-10-01 · 39';
+const BUILD = '2026-10-02 · 40';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -1956,6 +1956,7 @@ const smBranch = remark => { const m = String(remark || '').match(/สาขา\
 function tagOrders() {
   SM_REFS.clear();
   ORDERS.forEach((o, i) => { o.lid = i; if (o.chan === 'SM') SM_REFS.add(o.ref); });
+  ORDERS.ver = (ORDERS.ver || 0) + 1;            // ใบจองชุดใหม่ (ORDERS แก้ในที่เดิม เทียบตัวแปรไม่ได้) — codeAlias/confLines คิดใหม่
 }
 tagOrders();
 
@@ -2436,25 +2437,48 @@ const confRowOk = r => (/^\d+ \S/.test(r[8]) || /^ร้าน /.test(r[8])) && 
 const PART_TXT = 'โอนจาก C4';
 function confApply(m, r) {
   if (!confRowOk(r)) return;
-  const [ref, code, unit, so, sf, ms, mf, sum] = r;
-  const q = parseUnit(unit).qtyEA || 1;
+  const [ref, code0, unit, so, sf, ms, mf, sum] = r;
+  const q = parseUnit(unit).qtyEA || 1;               // ตัวเลขทุกตัวของแถว (รวมในช่องสรุป) เป็นหน่วยของแถวนั้นเอง
+  const isF = sum.startsWith(ADD_TXT) ? sum.startsWith(ADD_TXT + ' แถม')
+            : sum.startsWith(PART_TXT) ? sum.startsWith(PART_TXT + ' แถม') : (!so && sf > 0);
+  // แถวที่ลงเป็นหน่วยเล็กกว่าที่สั่ง (intRow) ใช้บาร์โค้ดของหน่วยนั้น → แปลงกลับเป็นบาร์โค้ดของบรรทัดในใบจอง
+  const k = confKey(ref, codeAlias(ref, code0, isF) || code0, isF);
   if (sum.startsWith(ADD_TXT)) {
-    const e = m[confKey(ref, code, sum.startsWith(ADD_TXT + ' แถม'))]; if (!e || e.partial) return;
+    const e = m[k]; if (!e || e.partial) return;
     const left = sum.match(/ยังขาด\s*([\d.,]+)/);
     e.short = left ? numOf(left[1]) * q : 0;
   } else if (sum.startsWith(PART_TXT)) {
-    const k = confKey(ref, code, sum.startsWith(PART_TXT + ' แถม')), e = m[k];
+    const e = m[k];
     if (e && !e.partial) return;                        // ปิดงานไปแล้ว — ยอดอยู่ในแถวปิดงานแล้ว
     const tot = sum.match(/รวมได้\s*([\d.,]+)/);
     m[k] = { partial:true, given: tot ? numOf(tot[1]) * q : 0 };
   } else {
-    const isF = !so && sf > 0;
-    m[confKey(ref, code, isF)] = { need:(isF ? sf : so) * q, short:Math.max(0, isF ? mf : ms) * q };
+    m[k] = { need:(isF ? sf : so) * q, short:Math.max(0, isF ? mf : ms) * q };
   }
+}
+/** บาร์โค้ดหน่วยไหนก็ได้ของสินค้า → บาร์โค้ดของบรรทัดในใบจอง (ใบจอง + ขาย/แถม เดียวกัน)
+ *  บิลที่มีสินค้าตัวเดียวกันหลายบรรทัด (คนละหน่วย) แยกไม่ได้ → ไม่มีให้ (intRow คงบาร์โค้ดเดิมไว้) */
+let ALIAS = null, ALIAS_OF = null;
+function codeAlias(ref, code, isF) {
+  if (!ALIAS || ALIAS_OF !== ORDERS.ver) {
+    const by = {}, m = {};
+    ORDERS.forEach(o => {
+      const h = byCode[String(o.code)]; if (!h) return;
+      const k = o.ref + '\u0001' + h.p.id + '\u0001' + (o.isFree ? 'F' : 'S');
+      (by[k] ||= { p:h.p, codes:new Set() }).codes.add(String(o.code));
+    });
+    for (const k in by) {
+      if (by[k].codes.size !== 1) continue;
+      const [ref1, , sf] = k.split('\u0001'), line = [...by[k].codes][0];
+      by[k].p.units.forEach(u => { m[ref1 + '|' + u.code + '|' + sf] = line; });
+    }
+    ALIAS = m; ALIAS_OF = ORDERS.ver;
+  }
+  return ALIAS[ref + '|' + code + '|' + (isF ? 'F' : 'S')];
 }
 /** บรรทัดที่ยืนยันแล้วของวันทำงานนี้ { คีย์: { need, short, given } } เป็นชิ้น */
 function confLines() {
-  if (confMap && confMap.ver === confVer && confMap.day === TODAY && confMap.wh === WAREHOUSE) return confMap.m;
+  if (confMap && confMap.ver === confVer && confMap.day === TODAY && confMap.wh === WAREHOUSE && confMap.ord === ORDERS.ver) return confMap.m;
   const m = {}, cur = (d, w) => d === TODAY && w === WAREHOUSE;
   (CONF.by[confK()] || []).forEach(r => confApply(m, r));
   confSent.forEach(x => { if (cur(x.date, x.wh)) x.rows.forEach(r => confApply(m, r)); });
@@ -2463,7 +2487,7 @@ function confLines() {
     if (it.kind === SHEET_DONE && it.meta && cur(it.meta.date, it.meta.wh)) it.rows.forEach(o => confApply(m, confRow(o)));
   });
   Object.values(m).forEach(e => { if (!e.partial) e.given = Math.max(0, e.need - e.short); });
-  confMap = { m, ver:confVer, day:TODAY, wh:WAREHOUSE };
+  confMap = { m, ver:confVer, day:TODAY, wh:WAREHOUSE, ord:ORDERS.ver };
   return m;
 }
 const confOf = l => confLines()[confKey(l.ref, l.code, !!l.erpFree)] || null;
@@ -2827,7 +2851,7 @@ function returnDone(i) {
   if (!confirm(`คืนคลังแล้ว: ${x.p.name} ${fmtUnitsTxt(x.ea, x.p.units)}\n${retWhere(x)}\n\nลงชีตลดยอดของแถมของบิลนี้?`)) return;
   const l = x.line, ou = l.orderedUnit, q = ou.qtyEA, isF = !!l.erpFree;
   const ord = l.ordEA !== undefined ? l.ordEA : l.needEA, newGiven = l.needEA;      // สิทธิ์ใหม่ = ยอดที่ควรได้
-  const backU = x.ea / q, leftU = +(Math.max(0, ord - newGiven) / q).toFixed(3);
+  const backU = x.ea / q, leftU = +(Math.max(0, ord - newGiven) / q).toFixed(6);
   const d = new Date(), t2 = v => String(v).padStart(2,'0');
   const row = {
     'วันที่': thaiDate(TODAY), 'คลัง': WAREHOUSE, 'เลขที่ใบจอง': l.ref, 'ชื่อร้าน': l.store,
@@ -2835,7 +2859,7 @@ function returnDone(i) {
     '%ที่แบ่ง': (l.ratio || 0) + '%', 'AVG ที่เคยซื้อ': l.avg || 0, 'กลุ่มที่เช็ค': `${x.team.code} ${x.team.name}`,
     'บาร์โค้ด': l.code, 'สินค้า': x.p.name, 'หน่วย': ou.label, 'สั่ง-ขาย': 0, 'สั่ง-แถม': 0,
     'ได้-ขาย': isF ? 0 : -backU, 'ได้-แถม': isF ? -backU : 0, 'ขาด-ขาย': isF ? 0 : backU, 'ขาด-แถม': isF ? backU : 0,
-    'สรุป': `${ADD_TXT}${isF ? ' แถม' : ''} · คืนคลัง ${+backU.toFixed(3)} (ตัดแถมตามโปร) · ${leftU > 0 ? 'ยังขาด ' + leftU : 'ครบ'}`,
+    'สรุป': `${ADD_TXT}${isF ? ' แถม' : ''} · คืนคลัง ${+backU.toFixed(6)} (ตัดแถมตามโปร) · ${leftU > 0 ? 'ยังขาด ' + leftU : 'ครบ'}`,
   };
   if (queueRows([row], { round:roundOf(l.time), team:`คืนคลัง → ${x.team.code} ${x.team.name}`, what:'ลงชีตคืนคลัง' })) renderDash();
 }
@@ -3570,7 +3594,7 @@ function confirmStore0(s) {
       const l = x.l, cap = x.cap, cutEA = l.needEA - cap;              // แถมที่ตัดตามโปร
       const ou = l.orderedUnit, isF = !!l.erpFree, inf = isF ? capInfo(l.lid) : null;
       const total = x.base + x.add, q = ou.qtyEA;
-      const why = cutEA > 0 ? ` · ตัดแถมตามโปร ${+(cutEA / q).toFixed(3)}`
+      const why = cutEA > 0 ? ` · ตัดแถมตามโปร ${+(cutEA / q).toFixed(6)}`
                 : (inf && inf.mode === 'none' && inf.short && total < l.needEA) ? ' · ไม่มีกติกาในชีตโปร' : '';
       const base = {
         'วันที่':thaiDate(TODAY), 'คลัง':WAREHOUSE, 'เลขที่ใบจอง':l.ref, 'ชื่อร้าน':s.name,
@@ -3581,7 +3605,7 @@ function confirmStore0(s) {
       if (x.closed) {
         closed = true;
         if (x.add <= 0) continue;
-        const leftU = +(Math.max(0, l.needEA - total) / q).toFixed(3), addU = x.add / q;
+        const leftU = +(Math.max(0, l.needEA - total) / q).toFixed(6), addU = x.add / q;
         rows.push(Object.assign(base, {
           'สั่ง-ขาย':0, 'สั่ง-แถม':0, 'ได้-ขาย': isF ? 0 : addU, 'ได้-แถม': isF ? addU : 0,
           'ขาด-ขาย': isF ? 0 : -addU, 'ขาด-แถม': isF ? -addU : 0,
@@ -3594,7 +3618,7 @@ function confirmStore0(s) {
           'ได้-ขาย':  isF ? 0 : addU, 'ได้-แถม':  isF ? addU : 0,
           'ขาด-ขาย':  isF ? 0 : shortU, 'ขาด-แถม': isF ? shortU : 0,
           'สรุป': (total >= l.needEA ? 'ครบ' : cutEA > 0 && total >= cap ? 'ได้ตามสิทธิ์' : total > 0 ? 'ขาด' : 'ไม่ได้เลย') + why +
-                  (x.part ? ` · รวมโอน C4 ${+(x.base / q).toFixed(3)}` : ''),
+                  (x.part ? ` · รวมโอน C4 ${+(x.base / q).toFixed(6)}` : ''),
         }));
       }
       if (x.add) used[sKey(s.code, k.product.id)] = (used[sKey(s.code, k.product.id)] || 0) + x.add;
@@ -4664,7 +4688,7 @@ function transferPartRows(j, c) {
       if (take > 0) { left[k] -= take; ea += take; use[t] = take; }
     }
     if (ea <= 0) return;
-    const addU = ea / ou.qtyEA, totU = +((d.confGiven + ea) / ou.qtyEA).toFixed(3);
+    const addU = ea / ou.qtyEA, totU = +((d.confGiven + ea) / ou.qtyEA).toFixed(6);
     rows.push({
       'วันที่': thaiDate(TODAY), 'คลัง': WAREHOUSE, 'เลขที่ใบจอง': l.ref, 'ชื่อร้าน': l.store,
       'เครื่อง': DEVICE, 'รหัสเซล': l.slmn, 'ผู้เช็ค': CHECKER, 'เวลาเช็ค': thaiDate(TODAY) + ' ' + hhmm,
@@ -6010,7 +6034,7 @@ function sheetRows(job = curJob(), c, opt = {}) {
       const ordEA = l.ordEA !== undefined ? l.ordEA : l.needEA, cutU = (ordEA - l.needEA) / ou.qtyEA;
       const ordU = ordEA / ou.qtyEA, gotU = d.giveEA / ou.qtyEA;
       const inf  = isF ? capInfo(l.lid) : null;
-      const why  = cutU > 0 ? ` · ตัดแถมตามโปร ${+cutU.toFixed(3)}`
+      const why  = cutU > 0 ? ` · ตัดแถมตามโปร ${+cutU.toFixed(6)}`
                  : (inf && inf.mode === 'none' && inf.short && gotU < ordU) ? ' · ไม่มีกติกาในชีตโปร' : '';
       const saleOrd = isF ? 0 : ordU, saleGot = isF ? 0 : gotU;
       const f = { ordered:(isF ? ordU : 0) + (d.freeOrdered||0) + ext.ordered,
@@ -6026,7 +6050,7 @@ function sheetRows(job = curJob(), c, opt = {}) {
       // ยืนยันไปแล้ว / มีของโอนจาก C4 ลงชีตไว้แล้ว → ลงแค่ส่วนที่ได้เพิ่มจากยอดในชีต
       const want  = (d.conf || d.part) ? d.giveEA - d.confGiven : d.giveEA;
       if (d.conf && want <= 0) continue;
-      const partTxt = d.part ? ` · รวมโอน C4 ${+(d.confGiven / ou.qtyEA).toFixed(3)}` : '';   // ได้ในแถวนี้ไม่รวมที่โอนไปแล้ว
+      const partTxt = d.part ? ` · รวมโอน C4 ${+(d.confGiven / ou.qtyEA).toFixed(6)}` : '';   // ได้ในแถวนี้ไม่รวมที่โอนไปแล้ว
       const parts = want > 0 ? takeFrom(want) : [];
       const own   = parts.filter(x => x.p.id === r.product.id).reduce((s,x)=>s+x.ea,0);
       const ownU  = own / ou.qtyEA;
@@ -6035,7 +6059,7 @@ function sheetRows(job = curJob(), c, opt = {}) {
         /* แถวยืนยันเพิ่ม: สั่ง 0 · ได้ = ส่วนที่เพิ่ม · ขาด = ติดลบเท่าส่วนที่เพิ่ม (รวมคอลัมน์ในชีตแล้วยอดถูก)
            ยอดที่ยังขาดหลังเพิ่มแล้ว เขียนไว้ในช่องสรุป — ทุกเครื่องอ่านกลับไปตั้งยอดบรรทัดนี้ */
         const addU  = want / ou.qtyEA;
-        const leftU = +(Math.max(0, ordEA - d.giveEA) / ou.qtyEA).toFixed(3);   // เทียบกับที่ ERP ออก (ชีตเก็บแบบนั้น)
+        const leftU = +(Math.max(0, ordEA - d.giveEA) / ou.qtyEA).toFixed(6);   // เทียบกับที่ ERP ออก (ชีตเก็บแบบนั้น)
         out.push(Object.assign({}, base, {
           'บาร์โค้ด': l.code, 'สินค้า': r.product.name, 'หน่วย': ou.label,
           'สั่ง-ขาย': 0, 'สั่ง-แถม': 0,
@@ -6168,6 +6192,40 @@ function confirmJob() {
   }
 }
 
+/* ═══ จำนวนในชีตเป็นจำนวนเต็มเสมอ (ผู้ใช้สั่ง 02/10: "ไม่เอาทศนิยม ให้ลงตามจำนวน PA หรือ EA เปลี่ยนหน่วยตามจริงด้วย") ═══
+   เช่น สั่ง 1 ลังx24 ได้ 6 ชิ้น → เดิม "ได้ 0.25 ลัง" · ตอนนี้ลงเป็น แพ็คx6: สั่ง 4 · ได้ 1 · ขาด 3
+   ทำตอนเข้าคิว ทุกแถวของชีต ยืนยันเช็ค / กำลังเช็ค (โอนย้ายแตกบรรทัดละหน่วยอยู่แล้ว)
+   หน่วยที่ใช้ = หน่วยใหญ่สุดที่ไม่เกินหน่วยเดิม ที่ทุกตัวเลขของแถวหารลงตัว (ลงตัวกับหน่วยเดิมอยู่แล้ว = ไม่เปลี่ยน)
+   ตัวเลขในช่องสรุป (ยังขาด / รวมได้ / รวมโอน C4 / ตัดแถมตามโปร / คืนคลัง) เปลี่ยนตามหน่วยด้วย — แอปอ่านกลับด้วยหน่วยของแถวนั้นเอง
+   บาร์โค้ดเปลี่ยนเป็นของหน่วยใหม่ (อ่านกลับผ่าน codeAlias) · บิลที่มีสินค้านี้หลายบรรทัด คงบาร์โค้ดเดิม
+   แถวต่าง ๆ ของบรรทัดเดียวกัน (ปิดงาน / ยืนยันเพิ่ม) อาจคนละหน่วย — ดูหน่วยของแต่ละแถว */
+const INT_COLS = { [SHEET_DONE]: ['สั่ง-ขาย','สั่ง-แถม','ได้-ขาย','ได้-แถม','ขาด-ขาย','ขาด-แถม'],
+                   [SHEET_LIVE]: ['ต้องออก','ยิงแล้ว','ขาด'] };
+const SUM_NUM = /(ยังขาด|รวมได้|รวมโอน C4|ตัดแถมตามโปร|คืนคลัง)(\s+)(-?[\d.,]+)/g;
+function intRow(row, kind) {
+  try {
+    const cols = INT_COLS[kind], code = String(row['บาร์โค้ด'] || '');
+    const hit = cols && (byCode[code] || catByCode[code]); if (!hit) return row;
+    const u0 = hit.p.units.find(x => x.label === row['หน่วย']) || hit.u, q0 = u0.qtyEA;
+    const toEA = x => Math.round(Number(x) * q0);
+    const nums = cols.filter(k => typeof row[k] === 'number');
+    const sum = String(row['สรุป'] || ''), sumEA = [...sum.matchAll(SUM_NUM)].map(m => toEA(numOf(m[3])));
+    const all = nums.map(k => toEA(row[k])).concat(sumEA);
+    if (all.every(ea => ea % q0 === 0)) return row;                  // ลงตัวกับหน่วยเดิมอยู่แล้ว
+    const u = hit.p.units.slice().sort((a, b) => b.qtyEA - a.qtyEA)
+                .find(x => x.qtyEA < q0 && all.every(ea => ea % x.qtyEA === 0));
+    if (!u) return row;
+    const out = Object.assign({}, row, { 'หน่วย': u.label });
+    nums.forEach(k => { out[k] = toEA(row[k]) / u.qtyEA; });
+    if (sum) out['สรุป'] = sum.replace(SUM_NUM, (m, w, sp, n) => w + sp + toEA(numOf(n)) / u.qtyEA);
+    const ref = row['เลขที่ใบจอง'];
+    const isF = /^(ยืนยันเพิ่ม|โอนจาก C4) แถม/.test(sum) ||
+                (!row['สั่ง-ขาย'] && (row['สั่ง-แถม'] > 0 || !!row['ได้-แถม'] || !!row['ขาด-แถม']));
+    if (!ref || /^ทดแทน/.test(sum) || codeAlias(ref, u.code, isF) === (codeAlias(ref, code, isF) || code)) out['บาร์โค้ด'] = u.code;
+    return out;
+  } catch (e) { console.warn('intRow', e); return row; }
+}
+
 /** เข้าคิวแล้วส่ง — ใช้ร่วมกันทั้งปิดงานทีมและปิดร้าน
  *  เข้าคิวก่อนเสมอ ยิงในคลังสัญญาณหลุดบ่อย ส่งไม่ผ่านต้องไม่หาย */
 function queueRows(rows, extra, kind, quiet) {
@@ -6175,6 +6233,7 @@ function queueRows(rows, extra, kind, quiet) {
     if (quiet) return;
     toast('ยังไม่ได้เลือกว่าใครเป็นคนเช็ค', 'warning'); openWho(1); return;
   }
+  rows = rows.map(r => intRow(r, kind || SHEET_DONE));   // จำนวนเต็มตามหน่วยจริง ไม่มีทศนิยม
   if (!quiet) flushLive();                   // ของที่ยิงค้างอยู่ ส่งขึ้นก่อนสรุป
 
   /* ยังไม่ได้ตั้งที่บันทึกก็เข้าคิวไว้ก่อน ไม่ทิ้ง และไม่เด้งกล่องตั้งค่ามาขัดจังหวะ
