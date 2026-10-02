@@ -1380,7 +1380,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.295</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.297</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -11157,9 +11157,11 @@ function _pvOrdDay(x){ const d=(typeof parseAnyDate==='function')?parseAnyDate(x
 function _pvCsOf(ea,sku){ const p=(typeof products!=='undefined'&&products[sku])||{}; const qc=p.qtyPerCS||0;
   return qc>0?Math.floor(Math.round(ea)/qc):0; }
 async function _pvDiffData(c){
-  if(_pvDiffCache[c.ticket])return _pvDiffCache[c.ticket];
   const tk=String(c.ticket||'').replace(/'/g,'');
   if(!tk)throw new Error('ใบคุมนี้ไม่มีเลขที่');
+  // v9.297: ★ ต้องมีข้อมูลสินค้าก่อน ไม่งั้น _pvCsOf คืน 0 ทุกบรรทัด (ตัวเลขเป็น 0 หมดแบบเงียบ ๆ)
+  if(!await _pvEnsureProducts())throw new Error('ยังไม่มีข้อมูลสินค้า (จำนวนชิ้นต่อลัง) — เปิดหน้าจัดรถให้โหลดข้อมูลก่อน');
+  if(_pvDiffCache[c.ticket])return _pvDiffCache[c.ticket];
   // ① บิลที่อยู่บนใบคุมนี้ (ชีทบันทึกบิลและการชำระ)
   const bills=await fetchSheet(PAY_SHEET_TAB,PAY_SHEET_ID,{timeoutMs:35000,retries:1,tq:`SELECT B,C,E WHERE A='${tk}'`});
   const docs=[], custOf={}, days={};
@@ -11188,8 +11190,85 @@ async function _pvDiffData(c){
     const st=String(b.arName||'').trim()||'—';
     Object.keys(b.skus).forEach(sku=>{ const cs=_pvCsOf((b.skus[sku]||{}).ea||0,sku); if(cs<=0)return;
       pln[sku]=(pln[sku]||0)+cs; (plnSt[st]=plnSt[st]||{})[sku]=((plnSt[st]||{})[sku]||0)+cs; }); });
-  const res={ticket:c.ticket, act, pln, actSt, plnSt, miss, nDoc:docs.length, nLine:(rows||[]).length, lost:c.lost||0, card:(c.card==null?null:c.card)};
+  const res={ticket:c.ticket, act, pln, actSt, plnSt, miss, noBill:!((typeof billMap!=='undefined')&&Object.keys(billMap||{}).length), nDoc:docs.length, nLine:(rows||[]).length, lost:c.lost||0, card:(c.card==null?null:c.card)};
   _pvDiffCache[c.ticket]=res; return res;
+}
+// ══ v9.296: น้ำหนัก/ปริมาตร "จริง" จากบิลที่ไปส่งจริง (ใบขายบนใบคุม) ══
+//   user: "อยากได้น้ำหนักกับปริมาตร จากข้อมูลจริงตามบิลที่ไปส่งอะ"
+//   ① ชีทบันทึกบิลฯ — ใบคุมของวันนั้นทั้งหมดในคำขอเดียว (A เลขใบคุม · B Doc_Date · C Doc_No) ≈1 วิ
+//   ② DS_DC — ยิง "รายวันที่บิล" ไม่ใช่รายใบคุม ≈4 วิ/วัน (รายใบคุมแบบ _pvDiffData ใช้ 30-40 วิ/ใบ)
+//   ③ คิดน้ำหนัก/ปริมาตรด้วยสูตรเดียวกับฝั่งแผน จะได้เทียบกันตรง ๆ ได้
+let _pvWV=null, _pvWVKey='', _pvWVBusy=false, _pvWVErr='';
+async function _pvEnsureProducts(){
+  if(typeof products==='undefined')return false;
+  if(Object.keys(products).length)return true;
+  const rows=await fetchSheet('Sheet1',PRODUCT_SHEET_ID,{timeoutMs:60000,retries:1,tq:'SELECT A, Q, DS, DV'});
+  (rows||[]).forEach(p=>{
+    const name=String(p['PRODUCT NAME']||'').trim(); if(!name||products[name])return;
+    const q=parseFloat(p['QTY CS']||0)||0, wCS=parseFloat(p['GOODS_WEIGHT']||0)||0, vCS=parseFloat(p['GOODS_VOLUME']||0)||0;
+    products[name]={ wPerCS:wCS, qtyPerCS:q,
+      w:(q>0?(wCS/q):wCS)||0,                      // กก./ชิ้น (สูตรเดียวกับ loadData)
+      v:(vCS>0?((q>0?(vCS/q):vCS)/1000):0) };      // m³/ชิ้น
+  });
+  return Object.keys(products).length>0;
+}
+function _pvWVk(){ return ((typeof currentWarehouse!=='undefined'&&currentWarehouse)||'')+'|'+_pvDate; }
+async function _pvLoadWV(tickets){
+  const key=_pvWVk();
+  const tks=[...new Set((tickets||[]).map(x=>String(x||'').replace(/'/g,'').trim()).filter(Boolean))];
+  if(!tks.length){ _pvWV={}; _pvWVKey=key; return; }
+  _pvWVBusy=true; _pvWVErr='';
+  try{
+    if(!await _pvEnsureProducts())throw new Error('ยังไม่มีข้อมูลสินค้า (น้ำหนัก/ปริมาตร) — เปิดหน้าจัดรถให้โหลดข้อมูลก่อน');
+    const bills=await fetchSheet(PAY_SHEET_TAB,PAY_SHEET_ID,{timeoutMs:60000,retries:1,
+      tq:`SELECT A,B,C WHERE ${tks.map(t=>`A='${t}'`).join(' or ')}`});
+    const docOf={}, days={};
+    (bills||[]).forEach(b=>{ const tk=String(b['เลขใบคุม']||'').trim(), doc=String(b['Doc_No']||'').trim();
+      if(!tk||!doc)return;
+      const a=docOf[tk]=docOf[tk]||[]; if(a.indexOf(doc)<0)a.push(doc);
+      const dy=_pvOrdDay(b['Doc_Date']); if(dy)days[dy]=1; });
+    const byDoc={}, _today=_pvOrdDay(new Date());
+    for(const dy of Object.keys(days)){
+      const ck='pvwv|'+ORDER_WL+'|'+dy, maxAge=(dy===_today)?20*60e3:7*24*3600e3;
+      let rows=null;
+      try{ const c=await _ocGet(ck); if(c&&c.rows&&c.rows.length&&(Date.now()-(c.at||0))<maxAge){ rows=c.rows; console.log(`⚡ ใบขาย ${dy}: ใช้ข้อมูลในเครื่อง ${rows.length} บรรทัด`); } }catch(e){}
+      if(!rows){
+        rows=await fetchSheet(DSDC_SHEET_TAB,ORDER_SHEET_ID,{timeoutMs:150000,retries:1,
+          tq:`SELECT B,I,J,K,L WHERE G='${ORDER_WL}' and A='${dy}'`});
+        if(rows&&rows.length){ try{ _ocPut(ck,{at:Date.now(),rows}); }catch(e){} }
+      }
+      (rows||[]).forEach(r=>{ const ref=String(r['DI_REF']||'').trim(), sku=String(r['SKU_NAME']||'').trim();
+        if(!ref||!sku)return;
+        const ea=eaOf(r), p=(typeof products!=='undefined'&&products[sku])||{v:0};
+        const o=byDoc[ref]=byDoc[ref]||{w:0,v:0};
+        o.w+=_dqWPerEa(sku,r['TRD_UTQNAME'])*ea; o.v+=(p.v||0)*ea; });
+    }
+    const out={};
+    tks.forEach(tk=>{ const ds=docOf[tk]||[]; let w=0,v=0,hit=0;
+      ds.forEach(d=>{ const o=byDoc[d]; if(!o)return; w+=o.w; v+=o.v; hit++; });
+      out[tk]={w,v,nDoc:ds.length,hit}; });
+    _pvWV=out;
+  }catch(e){ _pvWVErr=String((e&&e.message)||e); _pvWV={}; console.warn('[เทียบรูปตู้] น้ำหนักจริง:',_pvWVErr); }
+  finally{ _pvWVKey=key; _pvWVBusy=false; }
+}
+//   โหลดครั้งเดียวต่อ (คลัง|วันส่ง) แล้ววาดหน้าใหม่ · ตั้ง _pvWVKey ทั้งตอนสำเร็จและล้มเหลว = ไม่วนยิงซ้ำ
+function _pvWVKick(tickets){
+  if(_pvWVBusy||_pvWVKey===_pvWVk())return;
+  _pvLoadWV(tickets).then(()=>{ if(document.getElementById('pvList'))renderPhotoView(); });
+}
+function _pvWVLine(t,tp){
+  if(!t||!t.ticket)return '';
+  if(_pvWVBusy&&_pvWVKey!==_pvWVk())return `<div class="pv-st">⏳ กำลังอ่านใบขายเพื่อคิดน้ำหนัก/ปริมาตรจริง… <span style="color:#9BAAB8">(ชีท Order ใหญ่ รอบแรกอาจนาน 1-2 นาที · รอบหลังเร็ว)</span></div>`;
+  const wv=_pvWV&&_pvWV[t.ticket];
+  if(!wv)return _pvWVErr?`<div class="pv-st" style="color:#B45309">⚠ อ่านน้ำหนักจริงไม่ได้: ${_pvEsc(_pvWVErr)}</div>`:'';
+  const pw=(tp&&tp.w)||0, pv=(tp&&tp.v)||0;
+  const d=(a,b)=>(b>0)?Math.round((a-b)/b*100):null;
+  const dw=d(wv.w,pw), dv=d(wv.v,pv);
+  const tag=x=>(x==null)?'':` <span style="color:${Math.abs(x)<=2?'#15803D':(Math.abs(x)<=10?'#B45309':'#DC2626')}">${x>0?'+':''}${x}%</span>`;
+  const warn=(wv.nDoc&&wv.hit<wv.nDoc)?` <span style="color:#B45309" title="บิลบางใบไม่มีรายการสินค้าในแท็บ DS_DC ของวันนั้น">(ได้ ${wv.hit}/${wv.nDoc} บิล)</span>`:'';
+  return `<div class="pv-st" title="คิดจากรายการสินค้าในใบขายที่อยู่บนใบคุมใบนี้ · สูตรเดียวกับฝั่งแผน">`
+    +`⚖ จริง <b>${fmtKg(wv.w)}</b>${pw>0?` <span style="color:#8795A6">/ แผน ${fmtKg(pw)}</span>${tag(dw)}`:''}`
+    +` · 📐 จริง <b>${fmtM3(wv.v)}</b>${pv>0?` <span style="color:#8795A6">/ แผน ${fmtM3(pv)}</span>${tag(dv)}`:''}${warn}</div>`;
 }
 function _pvDiffRows(p,a){
   const keys=[...new Set(Object.keys(p||{}).concat(Object.keys(a||{})))];
@@ -11205,7 +11284,7 @@ function _pvDiffHtml(d){
   let h=`<div class="pvd-note">📦 แผน (ใบจอง) <b>${_pvNum(tp)}</b> ลัง · จริง (ใบขายบนใบคุม) <b>${_pvNum(ta)}</b> ลัง · ต่าง ${_pvDx(ta-tp)} ลัง`
     +`${(d.lost>0&&d.card!=null)?`<br>บนการ์ดขึ้น <b>${d.card>0?'+':''}${_pvNum(d.card)}</b> เพราะการ์ดหัก "ของไม่พอตั้งแต่จัดรถ" ${_pvNum(d.lost)} ลัง ออกจากแผนก่อน (ยอดที่ควรได้ ${_pvNum(Math.max(0,tp-d.lost))}) — ตารางนี้เทียบใบจองกับใบขายตรงๆ ไม่หัก`:''}`
     +`<br>นับลังแบบเดียวกันทั้ง 2 ฝั่ง (ชิ้นรวม ÷ ลังละกี่ชิ้น ปัดลง) จากบิล ${d.nDoc} ใบ · ${_pvNum(d.nLine)} บรรทัดสินค้า`
-    +`${d.miss?`<br>⚠ ใบจอง ${d.miss} ใบไม่อยู่ในข้อมูลที่โหลด (เกินกรอบวัน) — ฝั่งแผนอาจขาดไป`:''}</div>`;
+    +`${d.miss?`<br>⚠ ${d.noBill?'ยังไม่ได้โหลดบิลของหน้าจัดรถ — เปิดหน้า 🚚 จัดรถ ก่อน ฝั่งแผนถึงจะมีตัวเลข':`ใบจอง ${d.miss} ใบไม่อยู่ในข้อมูลที่โหลด (เกินกรอบวัน) — ฝั่งแผนอาจขาดไป`}`:''}</div>`;
   if(!rows.length)return h+`<div class="pvd-note">✓ รายการสินค้าตรงกันทุกตัว</div>`;
   h+=`<div class="pvd-h">🔻 ต่างกัน ${rows.length} รายการ${same>0?` · ตรงกัน ${same} รายการ`:''}</div>`
     +`<table class="pvd-t"><thead><tr><th>สินค้า</th><th class="n">แผน</th><th class="n">จริง</th><th class="n">ต่าง</th></tr></thead><tbody>`
@@ -11236,7 +11315,7 @@ async function pvDiffOpen(i){
   try{ const d=await _pvDiffData(c); _tdDiff=d; bd.innerHTML=_pvDiffHtml(d); }
   catch(e){ bd.innerHTML=`<div class="pvd-note">❌ อ่านข้อมูลไม่สำเร็จ — ${_pvEsc(String((e&&e.message)||e))}</div>`; }
 }
-function _pvPhotoCard(t,planCs,ls,m,r,refs){
+function _pvPhotoCard(t,planCs,ls,m,r,refs,tp){
   if(!t)return `<div class="pv-none">ยังไม่มีใบคุมของคันนี้ในวันที่เลือก<br><span style="font-size:11px;color:#9BAAB8">คนขับยังไม่รับงาน หรือใบคุมลงคนละวัน</span></div>`;
   const th=_pvThumb(t.photo), alt=_pvAlt(t.photo);
   // เทียบกับ "ยอดที่ควรได้" = แผน − ของไม่พอ (สต็อกไม่พอตั้งแต่แรก ไม่ใช่ของขาดตอนขึ้นรถ)
@@ -11260,6 +11339,7 @@ function _pvPhotoCard(t,planCs,ls,m,r,refs){
     <div class="pv-cs">${t.cs.total!=null?`<span class="pv-kv">📦 จริง <b>${Math.round(t.cs.total).toLocaleString('en-US')}</b> ลัง</span>`:'<span class="pv-kv">ยังไม่ได้นับลัง</span>'}${diff}${_pvCats(t.cs)}</div>
     ${(m&&m.n)?(()=>{ const q=m.hit/m.n, col=q>=0.999?'pv-ok':(q>=0.5?'pv-kv':'pv-bad');
         return `<div class="pv-cs"><span class="${col}" style="font-weight:700" title="ชื่อร้านในแผนที่เจอในรายชื่อร้านของใบคุม">🏪 ร้านตรง ${m.hit}/${m.n}</span>${(m.how==='time'&&q<0.3)?'<span class="pv-bad">⚠ ร้านไม่ตรงแผน — อาจสลับเที่ยว/สลับคัน</span>':''}</div>`; })():''}
+    ${_pvWVLine(t,tp)}
     <div class="pv-st">🧑‍✈️ ${_pvEsc(t.driver||'—')}${t.chk?` · ✅ ตรวจรูปแล้ว: ${_pvEsc(t.chk)}${t.chkBy?' ('+_pvEsc(t.chkBy)+')':''}`:''}</div>
   </div>`;
 }
@@ -11305,7 +11385,7 @@ function renderPhotoView(){
     if(t)nPair++; else nMiss++; if(m&&m.how==='swap')nSwap++;
     const ls=pre?null:(LOSS[r.plate+'||'+tp.tr]||null);
     const box=(pre?PBOX:BOX)[_pvNorm(r.plate)+'||'+tp.tr]||'';
-    ht+=`<div class="pv-row${t?'':' miss'}${(m&&m.how==='swap')?' swap':''}">${_pvPlanCard(r,tp,ls,box,pre,`<div class="pv-inbox">${_pvPhotoCard(t,tp.tcat,ls,m,r,tp.refs)}</div>`)}</div>`;   // v9.216: รูปอยู่ในกรอบเที่ยว · v9.217 ใต้ชื่อร้าน
+    ht+=`<div class="pv-row${t?'':' miss'}${(m&&m.how==='swap')?' swap':''}">${_pvPlanCard(r,tp,ls,box,pre,`<div class="pv-inbox">${_pvPhotoCard(t,tp.tcat,ls,m,r,tp.refs,tp)}</div>`)}</div>`;   // v9.216: รูปอยู่ในกรอบเที่ยว · v9.217 ใต้ชื่อร้าน
   });
   if(ht)h+=_pvGrid(ht);
   // ── ใบคุมที่ไม่มีในแผน (จัดรถไม่ได้บันทึก / คนละวัน) ──
@@ -11327,6 +11407,7 @@ function renderPhotoView(){
   if(!h)h=`<div class="pv-none">วันที่ ${_pvDate} ยังไม่มีแผนจัดรถหรือใบคุมให้เทียบ</div>`;
   else h=`<div style="font-size:12px;color:#6B7A90;margin-bottom:10px">วันส่ง <b>${_pvDate}</b> · เทียบได้ ${nPair} เที่ยว${nSwap?` · <b style="color:#C2410C">เปลี่ยนรถ ${nSwap}</b>`:''}${nMiss?` · ยังไม่มีใบคุม ${nMiss} เที่ยว`:''}${extra.length?` · ใบคุมนอกแผน ${extra.length} ใบ`:''}</div>`+h;
   host.innerHTML=h;
+  try{ _pvWVKick(tks.map(x=>x.ticket)); }catch(e){ console.warn('[เทียบรูปตู้] wv',e); }   // v9.296: น้ำหนัก/ปริมาตรจริง (โหลดหลังวาด แล้ววาดซ้ำรอบเดียว)
 }
 // ══ v9.40: จัดการค้างส่ง (เลือกใบที่ให้ขึ้นค้างส่ง) ══
 function _syncBacklogBtn(n){ const b=document.getElementById('lineBacklogBtn'); if(b)b.textContent='🕗 จัดการค้างส่ง'+(n?` (${n})`:''); }
