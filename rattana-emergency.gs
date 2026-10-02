@@ -1,4 +1,5 @@
-// Rattana แบบสำรวจสถานการณ์ฉุกเฉิน — หลังบ้าน (Google Apps Script) v1.0
+// Rattana แบบสำรวจสถานการณ์ฉุกเฉิน — หลังบ้าน (Google Apps Script) v1.2
+// v1.2: action=area — สรุประดับน้ำรายอำเภอ 24 ชม. + รายงานในรัศมี 2 กม. (หน้า "พื้นที่ของฉัน" — ส่งแค่ตัวเลขรวม ไม่มีชื่อ/พิกัดรายคน)
 // แบบสำรวจบ้านพนักงาน ช่วงน้ำท่วม 2569 — พนักงานกรอกได้เลยไม่ต้องล็อกอิน / HR ดูแดชบอร์ด+แผนที่
 // รายชื่อพนักงานครบ 5 บริษัท: รัตนไพบูลย์ · อาร์พีบี (แท็บ ข้อมูลพนักงาน) + สเตชั่น · สโตร์ · คอฟฟี่ (แท็บ ข้อมูลPTT)
 //
@@ -19,7 +20,7 @@
 //                   (เว้นว่าง = ส่งหาพนักงานแผนกบุคคลทุกคนในทะเบียนผู้ใช้ที่ Status Active)
 //    ALERT_OFF = 1  ← ปิดอีเมลด่วนทั้งหมด
 
-var VERSION = '1.1';
+var VERSION = '1.2';
 // ทะเบียนพนักงาน 5 บริษัท (ชีต "APP ออกหนังสือ HR") — หาแท็บด้วย gid ก่อน ไม่เจอค่อยหาด้วยชื่อ
 var EMP_SHEET_ID = '1iCdOIMnpaVzhoFXfDfiqh0EbOHnAumD4UW_IM4HuzwA';
 var EMP_TABS = [
@@ -495,6 +496,7 @@ function submit_(p) {
     prepSheet_(LOG_SHEET).appendRow(row);
     upsertLatest_(row, emp);
   } finally { lock.releaseLock(); }
+  areaCacheClear_();
   try { alertUrgent_(row, lv, fileIds); } catch (e) { /* ส่งเมลไม่ได้ ไม่กระทบการบันทึก */ }
   return { ok: true, id: id, photos: fileIds.length };
 }
@@ -587,7 +589,153 @@ function follow_(user, p) {
     });
     if (!done) return { ok: false, error: 'ไม่พบรายการ (หรือไม่มีสิทธิ์สาขานี้)' };
   } finally { lock.releaseLock(); }
+  areaCacheClear_();   // HR ยืนยัน "น้ำลดแล้ว" มีผลกับสีแผนที่
   return { ok: true, follow: status, followBy: status ? user.name : '', followAt: at ? at.toISOString() : '', hrNote: note, hrWater: water };
+}
+
+// ───────────────────────── พื้นที่ของฉัน: ระดับน้ำรายอำเภอ (สาธารณะ — ตัวเลขรวมเท่านั้น) ─────────────────────────
+// เส้นขอบอำเภอแบบย่อ 9 จังหวัด อยู่ข้างแอปบน GitHub Pages (ไฟล์เดียวกับที่หน้าเว็บใช้วาดแผนที่)
+var AREA_URL = 'https://rattanaphaiboon.github.io/app/rattana-emergency-areas.json';
+var AREA_HOURS = 24, NEAR_KM = 2, NEAR_HOURS = 12;
+// ระดับน้ำ 6 ขั้น ต้องตรงกับ WATER[].lb ใน rattana-emergency.html (ชีตเก็บเป็น "ข้อเท้า – เข่า (10–50 ซม.)")
+var WATER_LB = ['แห้ง / ต่ำกว่าข้อเท้า', 'ข้อเท้า – เข่า', 'เข่า – เอว', 'เอว – อก', 'อกขึ้นไป', 'มิดหัว / ท่วมหลังคา'];
+var AREAS_MEM_ = null;
+
+function areas_() {
+  if (AREAS_MEM_) return AREAS_MEM_;
+  var hit = cacheGetBig_('areas_v1');
+  if (!hit) {
+    var res = UrlFetchApp.fetch(AREA_URL, { muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) throw new Error('โหลดเส้นขอบอำเภอไม่ได้ (HTTP ' + res.getResponseCode() + ')');
+    hit = JSON.parse(res.getContentText()).features.map(function (f) {
+      var bb = [180, 90, -180, -90];
+      f.geometry.coordinates.forEach(function (poly) {
+        poly[0].forEach(function (p) {
+          if (p[0] < bb[0]) bb[0] = p[0];
+          if (p[0] > bb[2]) bb[2] = p[0];
+          if (p[1] < bb[1]) bb[1] = p[1];
+          if (p[1] > bb[3]) bb[3] = p[1];
+        });
+      });
+      return { c: String(f.properties.c), bb: bb, g: f.geometry.coordinates };
+    });
+    cachePutBig_('areas_v1', hit, 21600);
+  }
+  AREAS_MEM_ = hit;
+  return hit;
+}
+function inRing_(x, y, r) {
+  var c = false;
+  for (var i = 0, j = r.length - 1; i < r.length; j = i++) {
+    var a = r[i], b = r[j];
+    if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) c = !c;
+  }
+  return c;
+}
+function segD2_(x, y, a, b) {
+  var dx = b[0] - a[0], dy = b[1] - a[1], t = dx || dy ? ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy) : 0;
+  t = Math.max(0, Math.min(1, t));
+  var ex = a[0] + t * dx - x, ey = a[1] + t * dy - y;
+  return ex * ex + ey * ey;
+}
+// รหัสอำเภอของพิกัด — เส้นขอบเป็นแบบย่อ ถ้าตกช่องว่างตรงแนวเขต ใช้อำเภอที่ใกล้สุดในระยะ ~2 กม. (เหมือนในหน้าเว็บ)
+function areaCode_(lat, lng, A) {
+  var best = '', bd = 4e-4;
+  for (var k = 0; k < A.length; k++) {
+    var f = A[k], b = f.bb;
+    if (lng < b[0] - 0.02 || lng > b[2] + 0.02 || lat < b[1] - 0.02 || lat > b[3] + 0.02) continue;
+    for (var i = 0; i < f.g.length; i++) {
+      var poly = f.g[i];
+      if (inRing_(lng, lat, poly[0])) {
+        var hole = false;
+        for (var h = 1; h < poly.length; h++) if (inRing_(lng, lat, poly[h])) { hole = true; break; }
+        if (!hole) return f.c;
+      }
+      var r = poly[0];
+      for (var s = 1; s < r.length; s++) {
+        var d = segD2_(lng, lat, r[s - 1], r[s]);
+        if (d < bd) { bd = d; best = f.c; }
+      }
+    }
+  }
+  return best;
+}
+function waterIdx_(t) {
+  t = String(t || '');
+  for (var i = 0; i < WATER_LB.length; i++) if (t.indexOf(WATER_LB[i]) === 0) return i;
+  return -1;
+}
+// บรรทัดยืนยันล่าสุดของ HR ในบันทึก "[01/10/2569 19.30 · ชื่อ] ยืนยัน: น้ำลดแล้ว"
+function confirmOf_(note) {
+  var re = /\] ยืนยัน: (ยังท่วมอยู่|น้ำลดแล้ว)/g, m, last = '';
+  while ((m = re.exec(String(note || '')))) last = m[1];
+  return last;
+}
+function kmBetween_(a, b, c, d) {
+  var k = Math.PI / 180;
+  var x = Math.pow(Math.sin((c - a) * k / 2), 2) + Math.cos(a * k) * Math.cos(c * k) * Math.pow(Math.sin((d - b) * k / 2), 2);
+  return 2 * 6371 * Math.asin(Math.sqrt(x));
+}
+// รายงานล่าสุดของแต่ละคนใน 24 ชม. → [lat, lng, ระดับน้ำ 0–5 (−1 ไม่ทราบ), แจ้งว่าน้ำลด, น้ำกำลังขึ้น, เวลา(นาที), รหัสอำเภอ]
+// แจ้งว่าน้ำลด = กดอัปเดตด่วน "น้ำลดแล้ว" / HR ยืนยันน้ำลด / ครั้งก่อนมีน้ำ ครั้งนี้แห้ง · น้ำกำลังขึ้น = สูงกว่าครั้งก่อนของคนเดียวกัน
+// (ตรงกับ areaPoints() ในหน้าเว็บ) — แคช 60 วิ และล้างทันทีเมื่อมีรายงานใหม่/HR บันทึก
+function areaPts_() {
+  var hit = cacheGetBig_('apts_v1');
+  if (hit) return hit;
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(LOG_SHEET), pts = [];
+  if (sheet && sheet.getLastRow() >= 2) {
+    var vals = sheet.getRange(2, 1, sheet.getLastRow() - 1, C_HRNOTE).getValues();
+    var by = {}, order = [];
+    for (var i = 0; i < vals.length; i++) {
+      var v = vals[i];
+      if (!v[C_ID - 1]) continue;
+      var t = v[C_TS - 1] instanceof Date ? v[C_TS - 1].getTime() : new Date(v[C_TS - 1]).getTime();
+      if (!isFinite(t)) continue;
+      var k = personKey_(String(v[C_CODE - 1] || ''), String(v[C_NAME - 1] || ''));
+      if (!by[k]) { by[k] = []; order.push(k); }
+      by[k].push({ t: t, w: waterIdx_(v[C_WATER - 1]), lat: Number(v[C_LAT - 1]), lng: Number(v[C_LNG - 1]),
+                   ln: String(v[C_LOC_NOTE - 1] || ''), hn: String(v[C_HRNOTE - 1] || '') });
+    }
+    var since = Date.now() - AREA_HOURS * 3600e3, A;
+    try { A = areas_(); } catch (e) { A = []; }
+    order.forEach(function (k) {
+      var L = by[k].sort(function (a, b) { return a.t - b.t; }), r = L[L.length - 1];
+      if (r.t < since || !r.lat || !r.lng || !isFinite(r.lat) || !isFinite(r.lng)) return;
+      var pc = L.length > 1 ? L[L.length - 2].w : -1, cf = confirmOf_(r.hn);
+      var down = cf ? cf === 'น้ำลดแล้ว' : (/อัปเดตด่วน: น้ำลดแล้ว/.test(r.ln) || (r.w === 0 && pc > 0));
+      var up = !down && pc >= 0 && r.w > pc;
+      pts.push([r.lat, r.lng, r.w, down ? 1 : 0, up ? 1 : 0, Math.round(r.t / 60000), A.length ? areaCode_(r.lat, r.lng, A) : '']);
+    });
+  }
+  cachePutBig_('apts_v1', pts, 60);
+  return pts;
+}
+function areaCacheClear_() {
+  try { CacheService.getScriptCache().remove('apts_v1_n'); } catch (e) { /* ไม่เป็นไร หมดอายุเองใน 60 วิ */ }
+}
+function blankStat_() { return { n: 0, c: [0, 0, 0, 0, 0, 0], down: 0, up: 0, unk: 0, last: 0 }; }
+function addStat_(s, x) {
+  s.n++;
+  if (x[3]) s.down++; else if (x[2] < 0) s.unk++; else s.c[x[2]]++;
+  if (x[4]) s.up++;
+  if (x[5] * 60000 > s.last) s.last = x[5] * 60000;
+}
+// d = { รหัสอำเภอ: {n, c:[แห้ง…มิดหัว], down, up, unk, last} } · out = นอก 9 จังหวัด · near = รัศมี 2 กม. 12 ชม. (ถ้าส่ง lat/lng มา)
+function area_(p) {
+  var pts = areaPts_(), d = {}, out = blankStat_();
+  pts.forEach(function (x) { addStat_(x[6] ? (d[x[6]] || (d[x[6]] = blankStat_())) : out, x); });
+  var res = { ok: true, at: new Date().toISOString(), hours: AREA_HOURS, d: d, out: out };
+  var lat = Number(p.lat), lng = Number(p.lng);
+  if (p.lat && p.lng && isFinite(lat) && isFinite(lng)) {
+    var since = Date.now() - NEAR_HOURS * 3600e3, n = 0, fl = 0, worst = -1;
+    pts.forEach(function (x) {
+      if (x[5] * 60000 < since || kmBetween_(lat, lng, x[0], x[1]) > NEAR_KM) return;
+      n++;
+      if (!x[3] && x[2] >= 1) { fl++; if (x[2] > worst) worst = x[2]; }
+    });
+    res.near = { n: n, fl: fl, worst: worst, km: NEAR_KM, h: NEAR_HOURS };
+  }
+  return res;
 }
 
 // ───────────────────────── ทางเข้า ─────────────────────────
@@ -602,6 +750,7 @@ function doGet(e) {
                      count: sh ? Math.max(sh.getLastRow() - 1, 0) : 0, people: lt ? Math.max(lt.getLastRow() - 1, 0) : 0 });
     }
     if (action === 'find') return json_({ ok: true, emps: findEmps_(p.q) });
+    if (action === 'area') return json_(area_(p));
     if (action === 'emp') {
       var emp = findEmp_(p.code);
       if (!emp) return json_({ ok: false, error: 'ไม่พบรหัสพนักงาน' });
@@ -646,6 +795,8 @@ function setupSheet() {
   Logger.log('พร้อมใช้งาน ✓  แท็บ "' + log.getName() + '" ' + Math.max(log.getLastRow() - 1, 0) + ' รายการ · "' +
              latest.getName() + '" ' + Math.max(latest.getLastRow() - 1, 0) + ' คน');
   Logger.log('โฟลเดอร์รูป: ' + folder.getUrl());
+  try { Logger.log('เส้นขอบอำเภอ (หน้าพื้นที่ของฉัน) ' + areas_().length + ' อำเภอ'); }
+  catch (e) { Logger.log('โหลดเส้นขอบอำเภอไม่ได้: ' + e.message); }
   Logger.log('รายชื่อพนักงานที่ค้นหาได้ ' + emps.length + ' คน → ' +
              Object.keys(byCo).map(function (k) { return k + ' ' + byCo[k]; }).join(' · '));
   var props = PropertiesService.getScriptProperties();
