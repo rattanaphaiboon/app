@@ -8291,6 +8291,48 @@ async function docChkReadFile(f){
   const td=todayBKK(); DOCCHK.date = ds.indexOf(td)>=0 ? td : (ds[ds.length-1]||td);
   DOCCHK.wh=''; return true;
 }
+
+/* ── v4.96: อ่าน Doc.xlsx แบบแอป Rattana Checkout (rattana-checkout.html reloadOrders) ──
+ * ไฟล์ .xlsx บน Drive (id เดียวกับที่ Checkout ใช้ · ตั้งค่าในแอป Checkout = คีย์ rattana_src_cfg โดเมนเดียวกัน → ใช้ตามนั้น)
+ * gviz อ่าน .xlsx ด้วยชื่อชีตได้ แต่ไม่ส่ง CORS ตอน redirect → ต้องเรียกแบบ <script> (JSONP)
+ * ชีต B: A วันที่ · B เลขที่ใบจอง · C รหัสร้าน · D ชื่อร้าน · E รหัสเซล · F ชื่อเซล · G คลัง · N ยอดเงิน(TRD_G_AMT) · O หมายเหตุ(billId…) */
+const DOC_SRC_DEF={ ord:'13rYehyXmEZWmKTdjxAVPrLn4GwEtHuve', bSheet:'B' };
+function docSrcCfg(){ try{ return Object.assign({}, DOC_SRC_DEF, JSON.parse(localStorage.getItem('rattana_src_cfg')||'{}')); }catch(e){ return Object.assign({}, DOC_SRC_DEF); } }
+function _docGvizJsonp(id, params, ms){
+  return new Promise((resolve,reject)=>{
+    const cb='pkdoc_'+Date.now().toString(36)+Math.random().toString(36).slice(2,7), sc=document.createElement('script'); let done=false;
+    const timer=setTimeout(()=>fin(null,new Error('หมดเวลาโหลด')), ms||60000);
+    function fin(d,err){ if(done) return; done=true; clearTimeout(timer); try{ delete window[cb]; }catch(e){ window[cb]=undefined; } if(sc.parentNode) sc.remove(); err?reject(err):resolve(d); }
+    window[cb]=d=>fin(d); sc.onerror=()=>fin(null,new Error('เรียกไฟล์ Doc ไม่สำเร็จ (สิทธิ์เข้าถึง?)'));
+    sc.src=`https://docs.google.com/spreadsheets/d/${id}/gviz/tq?`+new URLSearchParams(Object.assign({tqx:'responseHandler:'+cb, _cb:Date.now()}, params));
+    document.head.appendChild(sc);
+  });
+}
+function _docCell(c){ return c==null?'' : String(c.f!=null?c.f:(c.v!=null?c.v:'')).replace(/[\u200b-\u200d\ufeff]/g,'').trim(); }
+function _docIso(t){   // ตัวเดียวกับ isoOf ของ Checkout — ไฟล์มีทั้ง DD/MM และ MM/DD
+  t=String(t||'').trim(); let m=t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if(m){ const a=+m[1], b=+m[2]; let y=+m[3]; if(y>2400) y-=543; const d=a>12?a:(b>12?b:a), mo=a>12?b:(b>12?a:b);
+    return y+'-'+String(mo).padStart(2,'0')+'-'+String(d).padStart(2,'0'); }
+  m=t.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/); return m?(m[1]+'-'+m[2].padStart(2,'0')+'-'+m[3].padStart(2,'0')):_dcIso(t);
+}
+async function docChkLoadDrive(){
+  const c=docSrcCfg();
+  loading(true,'อ่าน Doc.xlsx (ชีต '+(c.bSheet||'B')+') จาก Google Drive…');
+  try{
+    const r=await _docGvizJsonp(c.ord, {sheet:c.bSheet||'B', tq:'select A,B,C,D,E,F,G,N,O'});
+    if(r && r.status==='error') throw new Error(((r.errors||[])[0]||{}).detailed_message||'gviz error');
+    const rows=((r.table&&r.table.rows)||[]).map(x=>(x.c||[]).map(_docCell));
+    DOCCHK.rows=rows.map(a=>({ date:_docIso(a[0]), ref:a[1], code:a[2], store:a[3], sm:a[4], smName:String(a[5]||'').replace(/^คุณ\s*/,''),
+      wh:String(a[6]||'').toUpperCase(), amt:parseFloat(String(a[7]).replace(/[^\d.-]/g,''))||0, bill:(String(a[8]||'').match(/billId\s*([A-Za-z0-9\-]+)/)||[])[1]||'' }))
+      .filter(x=>x.ref && x.ref!=='DI_REF');
+    if(!DOCCHK.rows.length) throw new Error('ชีต B ไม่มีข้อมูล');
+    DOCCHK.file='Doc.xlsx (Google Drive · ชีต '+(c.bSheet||'B')+')'; DOCCHK.mod=Date.now(); DOCCHK.src='drive';
+    const ds=[...new Set(DOCCHK.rows.map(x=>x.date))].filter(Boolean).sort(), td=todayBKK();
+    if(!DOCCHK.date || ds.indexOf(DOCCHK.date)<0) DOCCHK.date = ds.indexOf(td)>=0 ? td : (ds.filter(d=>d<=td).pop()||ds[ds.length-1]||td);
+    docChkRender(); toast('✅ อ่าน Doc.xlsx แล้ว '+DOCCHK.rows.length.toLocaleString()+' บรรทัด');
+  }catch(e){ toast('⛔ อ่าน Doc.xlsx ไม่ได้: '+(e.message||e)+' — ใช้ 📂 เลือกไฟล์แทนได้'); }
+  finally{ loading(false); }
+}
 async function docChkPick(){
   try{
     if(window.showOpenFilePicker){
@@ -8318,7 +8360,7 @@ async function docChkOpen(){
     el.addEventListener('drop',async e=>{ e.preventDefault(); const f=e.dataTransfer.files&&e.dataTransfer.files[0]; if(f && await docChkReadFile(f)) docChkRender(); });
     document.body.appendChild(el); }
   el.style.display='flex'; docChkRender();
-  if(!DOCCHK.rows) docChkReload();
+  docChkLoadDrive();
 }
 function docChkCalc(){
   const d=DOCCHK.date, R=(DOCCHK.rows||[]).filter(r=>r.date===d && (!DOCCHK.wh || r.wh===DOCCHK.wh));
@@ -8397,8 +8439,8 @@ function docChkRender(){
   let body='';
   if(!DOCCHK.rows){
     body=`<div style="padding:22px;text-align:center;color:#475569;font-size:13.5px;line-height:1.7">
-      ① แอดมินเปิด <b>Doc.xlsx</b> (SQL Admin W4) → กดรีเฟรช SQL → <b>เซฟ</b><br>② กด <b>📂 เลือกไฟล์ Doc.xlsx</b> (ครั้งแรกครั้งเดียว — ครั้งต่อไปกด 🔄 อ่านไฟล์ล่าสุด ได้เลย)<br>
-      <span style="font-size:12px;color:#94a3b8">หรือลากไฟล์มาวางในกล่องนี้</span></div>`;
+      ⏳ กำลังอ่าน <b>Doc.xlsx</b> จาก Google Drive (ไฟล์เดียวกับแอป Checkout)…<br>
+      <span style="font-size:12px;color:#94a3b8">แอดมินรี SQL + เซฟแล้ว รอ Drive ซิงก์สักครู่ แล้วกด 🔄 โหลดใหม่</span></div>`;
   } else {
     const C=docChkCalc(), ds=[...new Set(DOCCHK.rows.map(r=>r.date))].filter(Boolean).sort().reverse();
     const vbtn=(v,l)=>`<button type="button" onclick="DOCCHK.view='${v}';docChkRender()" style="font-family:inherit;font-weight:800;font-size:13px;padding:6px 14px;border-radius:9px;cursor:pointer;border:1.5px solid #0d1b3e;background:${DOCCHK.view===v?'#0d1b3e':'#fff'};color:${DOCCHK.view===v?'#fff':'#0d1b3e'}">${l}</button>`;
@@ -8408,7 +8450,7 @@ function docChkRender(){
     const td='padding:5px 8px;border-top:1px solid #f1f5f9';
     body=`<div style="padding:12px 16px">
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:12.5px;color:#475569">
-        📄 <b>${esc(DOCCHK.file)}</b> · เซฟล่าสุด ${DOCCHK.mod?new Date(DOCCHK.mod).toLocaleString('th-TH'):'-'}
+        📄 <b>${esc(DOCCHK.file)}</b> · ${DOCCHK.src==='drive'?'โหลดเมื่อ':'เซฟล่าสุด'} ${DOCCHK.mod?new Date(DOCCHK.mod).toLocaleString('th-TH'):'-'}
         <span style="margin-left:auto">วันที่ <select onchange="DOCCHK.date=this.value;docChkRender()" style="font-family:inherit">${ds.map(x=>`<option value="${x}" ${x===DOCCHK.date?'selected':''}>${_cutThDate(x)}</option>`).join('')}</select>
         ${C.whs.length>1?` คลัง <select onchange="DOCCHK.wh=this.value;docChkRender()" style="font-family:inherit"><option value="">ทั้งหมด</option>${C.whs.map(w=>`<option ${w===DOCCHK.wh?'selected':''}>${w}</option>`).join('')}</select>`:` · คลัง ${esc(C.whs.join(','))}`}</span></div>
       ${DOCCHK.view==='sm'?'':`<div style="font-weight:800;color:#0d1b3e;margin:10px 0 6px">📊 ใบจองที่เปิดใน bplus (จากไฟล์)</div>
@@ -8428,9 +8470,10 @@ function docChkRender(){
     <div style="padding:12px 16px;border-bottom:1px solid #e5e7eb;font-size:17px;font-weight:800;color:#0d1b3e">📥 ตรวจใบจองเข้าระบบ (Doc.xlsx)</div>
     ${body}
     <div style="padding:10px 12px;border-top:1px solid #e5e7eb;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
-      <button type="button" onclick="docChkPick()" style="${btn};border:1.5px solid #0d1b3e;background:#fff;color:#0d1b3e">📂 เลือกไฟล์ Doc.xlsx</button>
+      <button type="button" onclick="docChkPick()" title="สำรอง — ถ้าอ่านจาก Drive ไม่ได้" style="${btn};border:1px solid #cbd5e1;background:#fff;color:#64748b;font-weight:600">📂 เลือกไฟล์เอง</button>
       ${(DOCCHK.rows&&DOCCHK.view==='sm')?`<button type="button" onclick="docChkSmCopy()" style="${btn};border:1.5px solid #166534;background:#f0fdf4;color:#166534">📋 คัดลอกทุกเซล (วางไลน์)</button>`:''}
-      ${DOCCHK.rows?`<button type="button" onclick="docChkReload()" style="${btn};border:1.5px solid #c9a84c;background:#fffbeb;color:#92400e">🔄 อ่านไฟล์ล่าสุด (หลังรี SQL + เซฟ)</button>`:''}
+      <button type="button" onclick="docChkLoadDrive()" style="${btn};border:1.5px solid #c9a84c;background:#fffbeb;color:#92400e">🔄 โหลดใหม่ (หลังรี SQL + เซฟ)</button>
+      ${false?`<button type="button" onclick="docChkReload()" style="${btn};border:1.5px solid #c9a84c;background:#fffbeb;color:#92400e">🔄 อ่านไฟล์ล่าสุด (หลังรี SQL + เซฟ)</button>`:''}
       <button type="button" onclick="document.getElementById('docChkModal').style.display='none'" style="${btn};border:0;background:#0d1b3e;color:#fff">ปิด</button>
     </div></div>`;
 }
