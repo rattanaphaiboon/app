@@ -972,7 +972,7 @@ body.dark .banner-gold{color:var(--gold-light)}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.367';
+const APP_VERSION='3.368';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -9125,6 +9125,28 @@ function askLoadPhotoForClose_(j,pending){
     ov.querySelector('[data-a="cancel"]').addEventListener('click',()=>finish(''));
   });
 }
+/* ★★ v3.368: ปิดงานแล้ว "ไม่มีเอกสาร CN ที่คลังต้องออก" = อนุมัติอัตโนมัติ ไม่ต้องรอคนกด (user 2026-10-03 · เฉพาะรัตนไพบูลย์)
+   เงื่อนไข (ต้องครบทุกข้อ ไม่งั้นรอคนอนุมัติแบบเดิม):
+     · ทุกบิลส่งสำเร็จ — ไม่มีบิล CN คืนทั้งบิล และไม่มีบิล "ไม่ได้จัดส่ง" (ของกลับคลัง)
+     · ชีท CN ไม่มีใบไหนของบิล/ใบคุมนี้ (คืนบางส่วน/ขนส่งเก็บเอง) — เว้นใบที่คลังกด "ไม่อนุมัติ" ไปแล้ว
+     · ถ้ามีพาเลท/ลังน้ำ/ถังต้องคืน ต้องเช็คทรัพย์สินกลับคลังแล้ว
+   อ่านชีท CN ไม่ได้ (เน็ตหลุด/ช้าเกิน 15 วิ) = ไม่อนุมัติอัตโนมัติ (ปลอดภัยไว้ก่อน) */
+const AUTO_APPROVER='อนุมัติอัตโนมัติ (ไม่มี CN)';
+async function autoApproveCheck_(j){
+  try{
+    if(CO.key!=='rtn') return false;
+    const bills=(j&&j.bills)||[];
+    if(!bills.length) return false;
+    if(bills.some(b=>b.status!=='done'||b.isCN)) return false;
+    if(assetNeedsCheck_(j)&&!assetsChecked_(j)) return false;
+    _cnHistMemo.ts=0;   // อ่านชีท CN สด ไม่ใช้ของในแคช
+    const n=await Promise.race([loadCNHistory(),new Promise(r=>setTimeout(()=>r(null),15000))]);
+    if(n===null||n===undefined||!Array.isArray(state.cnHistory)) return false;
+    const docs=new Set(bills.map(b=>String(b.doc||'').trim().toUpperCase()).filter(Boolean));
+    const jid=normJobId(j.id);
+    return !state.cnHistory.some(c=>!cnVoided(c)&&(docs.has(String(c.docNo||'').trim().toUpperCase())||(c.jobId&&normJobId(c.jobId)===jid)));
+  }catch(e){ console.warn('autoApproveCheck_:',e); return false; }
+}
 async function submitForApproval(){
   const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
   if(j.bills.some(b=>b.status==='pending')){ showToast('ยังมีบิลค้างอยู่','warning'); return; }
@@ -9155,22 +9177,26 @@ async function submitForApproval(){
   // v3.161: ยอดขาดไม่บล็อกการปิดงานแล้ว (เดิม v2.78 บล็อก) — ปิดงานได้เลย ยอดขาดยังโชว์เตือนในสรุป
   if(j._submitting) return;   // v3.41: กันกดขออนุมัติซ้ำ (แจ้งเตือน + เขียนชีท 2 รอบ)
   j._submitting=true;
-  j.status='pending_approval';
+  showToast('กำลังตรวจ CN…','info');
+  const _auto=await autoApproveCheck_(j);   // ★ v3.368
+  j.status=_auto?'approved':'pending_approval';
   j.submittedAt=Date.now();
+  if(_auto){ j.approvedAt=j.submittedAt; j.approvedBy=AUTO_APPROVER; }   // ★ v3.368
   j._submitLocal=j.submittedAt;   // ★ v3.336: เครื่องนี้เป็นคนกดปิดงาน — กันดึงกลับตอนชีทยังไม่ทัน ใช้เฉพาะเครื่องที่กดเท่านั้น
   j._unsubmitLocal=null;
   j.rejectedAt=null; j.rejectedBy=''; j.rejectReason='';   // ★ v3.336: ส่งใหม่หลังถูกตีกลับ = ไม่พกข้อมูลตีกลับเก่าไปกับคำขอ
   j._notifiedSubmit=0;        // v3.41: reset ให้ยิงแจ้งเตือนรอบนี้ได้ (การส่งใหม่)
   persistJobs();
-  showToast('ส่งหัวหน้าอนุมัติแล้ว ✓','success');
+  showToast(_auto?'ปิดงานแล้ว ✓ อนุมัติอัตโนมัติ (ไม่มี CN)':'ส่งหัวหน้าอนุมัติแล้ว ✓','success');
   // ★ v3.281: สำเนา "การปิดงาน" ขึ้นกล่องสำรองด้วย (เดิม syncToSheets เป็น no-cors อ่านผลไม่ได้ ถ้าหายกลางทางไม่มีใครรู้)
-  sbInboxPut_('submit',j.id,'',{action:'save_job',jobId:j.id,status:'pending_approval',submittedAt:j.submittedAt,ret:j.ret||null,
+  sbInboxPut_('submit',j.id,'',{action:'save_job',jobId:j.id,status:j.status,submittedAt:j.submittedAt,ret:j.ret||null,
+    ...(_auto?{approvedAt:j.approvedAt,approvedBy:j.approvedBy}:{}),   // ★ v3.368: อนุมัติอัตโนมัติ — กล่องสำรองพาผลอนุมัติไปด้วย
     odoStart:j.odoStart||'',odoEnd:j.odoEnd||'',warehouse:j.warehouse||'',loadPhoto:_lpLink_(j.team&&j.team.loadPhoto),   // ★ v3.334
     odoDist:(odoNum_(j.odoStart)&&odoNum_(j.odoEnd))?Math.round((odoNum_(j.odoEnd)-odoNum_(j.odoStart))*100)/100:''});   // ★ v3.298: เลขไมล์เข้ากล่องสำรองด้วย · ★ v3.315: +ระยะทาง (เดิมไม่มี → ตาข่ายเขียนเลขปิดงานได้แต่ระยะทางว่าง)
   // POST ไป Apps Script (ถ้ามี URL)
   // ★ v3.312: ปิดงานผ่านคิว — เดิม no-cors ยิงแล้วลืม สัญญาณหลุด = ชีทไม่รู้ว่าปิด (เคส CVMW1/004380)
   await syncToSheets(j,{queue:true,label:'submit'}).catch(e=>console.warn('sync:',e));
-  notifyApprovalDiscord(j);   // v1.94: เด้งแจ้ง Discord แยกตามคลัง
+  if(!_auto) notifyApprovalDiscord(j);   // v1.94: เด้งแจ้ง Discord แยกตามคลัง · ★ v3.368: อนุมัติอัตโนมัติแล้ว ไม่ต้องเรียกคนมากด
   if(j.isRedelivery) doneRedelivery_(j);   // v3.43: ปิดคิวส่งซ้ำ (บิลที่ส่งสำเร็จ/CN)
   j._submitting=false;        // v3.41: ปลดล็อกหลังส่งเสร็จ
   // v1.45: กลับไป list view หน้างานของฉัน — งานจะไปอยู่กล่อง "รออนุมัติ"
