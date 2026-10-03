@@ -10,7 +10,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="om-icon-192.png">
   <link rel="apple-touch-icon" sizes="192x192" href="om-icon-192.png">
   <link rel="manifest" href="om-realtime-manifest.json">
-  <title>Rattana OM Report v11.16</title>
+  <title>Rattana OM Report v11.17</title>
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
@@ -618,7 +618,7 @@
 <header>
   <div class="header-row1">
     <button id="sidebarToggle" onclick="toggleSidebar()" title="ซ่อน/แสดง Sidebar">☰</button>
-    <div class="logo-text">Rattana <span>OM Report</span> <span class="ver-badge">v11.16 · 2026-10-03</span></div>
+    <div class="logo-text">Rattana <span>OM Report</span> <span class="ver-badge">v11.17 · 2026-10-03</span></div>
     <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรชข้อมูล">↻</button>
     <button class="icon-btn" id="btnDark" onclick="toggleDark()" title="Dark mode">🌙</button>
     <button class="icon-btn" onclick="exportExcel()" title="Export Excel">📥</button>
@@ -1581,6 +1581,48 @@ function liveCustName(code, name) {
   return custNameByCode[c] || (mapped && mapped.name) || name;
 }
 
+// ── วันทำงาน: จันทร์–เสาร์ ไม่นับวันหยุดในชีต Target คอลัมน์ Holiday (ไฟล์ CUST_MASTER_ID) ──
+const HOLIDAY_KEY = 'rattana_om_holidays';
+let mHolidaysReady = Promise.resolve();
+let mHolidays = (() => { try { return new Set(JSON.parse(localStorage.getItem(HOLIDAY_KEY)) || []); } catch (e) { return new Set(); } })();
+async function fetchHolidays() {
+  try {
+    const base = `https://docs.google.com/spreadsheets/d/${CUST_MASTER_ID}/gviz/tq?sheet=Target&tq=`;
+    const js = async q => { const t = await (await fetch(base + encodeURIComponent(q))).text(); return JSON.parse(t.slice(t.indexOf('{'), t.lastIndexOf('}') + 1)).table; };
+    const col = (await js('select * limit 1')).cols.find(c => String(c.label).trim() === 'Holiday');
+    if (!col) return;
+    const set = new Set(), pad = n => String(n).padStart(2, '0');
+    (await js(`select ${col.id} where ${col.id} is not null`)).rows.forEach(r => {
+      const c = r.c[0]; if (!c) return;
+      let m = String(c.v).match(/Date\((\d+),(\d+),(\d+)/);
+      if (m) return set.add(`${m[1]}-${pad(+m[2] + 1)}-${pad(m[3])}`);
+      m = String(c.f || c.v).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (m) set.add(`${m[3]}-${pad(m[2])}-${pad(m[1])}`);
+    });
+    mHolidays = set;
+    try { localStorage.setItem(HOLIDAY_KEY, JSON.stringify([...set])); } catch (e) {}
+  } catch (e) {}
+}
+function mWorkdays(ym, upto) {
+  const [y, m] = String(ym || '').split('/').map(Number);
+  if (!y || !m) return 0;
+  const dim = new Date(y, m, 0).getDate(), end = Math.min(upto || dim, dim);
+  let n = 0;
+  for (let d = 1; d <= end; d++) {
+    if (new Date(y, m - 1, d).getDay() === 0) continue;
+    if (mHolidays.has(`${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`)) continue;
+    n++;
+  }
+  return n;
+}
+// ratio = วันทำงานที่ผ่านไปเดือนนี้ ÷ วันทำงานของเดือนฐาน (base = 'YYYY/MM' หรือ array = ใช้ค่าเฉลี่ย)
+function mPace(ym, day, base) {
+  const bs = Array.isArray(base) ? base.filter(Boolean) : [base];
+  const wdBase = bs.length ? bs.reduce((t, b) => t + mWorkdays(b), 0) / bs.length : 0;
+  const wdSoFar = mWorkdays(ym, day), wdCur = mWorkdays(ym);
+  return { ratio: wdBase ? wdSoFar / wdBase : 0, proj: wdSoFar ? wdCur / wdSoFar : 0, wdSoFar, wdBase, wdCur };
+}
+
 // ยอดเดือนปัจจุบันรายร้าน / รายร้าน×แบรนด์ — คืน null ถ้าไม่มีข้อมูลหรือยังเป็นเดือนเดียวกับข้อมูลหลัก
 function buildLiveMaps(latestMonth) {
   if (!liveMonth || (latestMonth && liveMonth.ym <= latestMonth)) return null;
@@ -1590,26 +1632,27 @@ function buildLiveMaps(latestMonth) {
     byCust[n] = (byCust[n] || 0) + r.ex;
     if (r.brand) byBrand[n + '|||' + r.brand] = (byBrand[n + '|||' + r.brand] || 0) + r.cs;
   });
-  return { byCust, byBrand, ratio: liveMonth.day / liveMonth.daysInMonth };
+  return { byCust, byBrand, ratio: mPace(liveMonth.ym, liveMonth.day, latestMonth).ratio };
 }
 
 function renderLiveBar(totAvg, latestMonth) {
   const el = document.getElementById('liveBar');
   if (!el) return;
   if (!liveMonth || (latestMonth && liveMonth.ym <= latestMonth)) { el.style.display = 'none'; el.innerHTML = ''; return; }
-  const { exvat, cs, bills, day, daysInMonth, ym } = liveMonth;
-  const proj = exvat / day * daysInMonth;
+  const { exvat, cs, bills, day, ym } = liveMonth;
+  const pa = mPace(ym, day, latestMonth ? prevQuarterMonths(latestMonth).months : []);
+  const proj = exvat * pa.proj;
   let paceHtml = '';
   if (selBU) {
     paceHtml = `<div class="lb-note">⚠️ ยอดเดือนนี้เป็นของทุก Cat BU ไม่ตามตัวกรองที่เลือก จึงไม่เทียบอัตราให้</div>`;
   } else if (totAvg > 0) {
-    const pace = totAvg * (day / daysInMonth);
+    const pace = totAvg * pa.ratio;
     const pct  = (exvat - pace) / pace * 100;
     const up   = pct >= 0;
     paceHtml = `<div class="lb-item">
         <div class="lb-lab">เทียบอัตรา AVG 3 M.</div>
         <div><span class="trend ${up ? 'up' : 'down'}">${up ? '▲' : '▼'} ${Math.abs(pct).toFixed(1)}%</span></div>
-        <div class="lb-sub">ควรได้ ${fmtFull(pace)} ณ วันที่ ${day}</div>
+        <div class="lb-sub">ควรได้ ${fmtFull(pace)} ณ วันทำงานที่ ${pa.wdSoFar}</div>
       </div>`;
   }
   el.style.display = 'flex';
@@ -1623,7 +1666,7 @@ function renderLiveBar(totAvg, latestMonth) {
     <div class="lb-item">
       <div class="lb-lab">คาดทั้งเดือน</div>
       <div class="lb-val" style="color:var(--info)">${fmtFull(proj)}</div>
-      <div class="lb-sub">จาก ${day}/${daysInMonth} วัน</div>
+      <div class="lb-sub">วันทำงาน ${pa.wdSoFar}/${pa.wdCur} วัน</div>
     </div>
     ${paceHtml}`;
 }
@@ -1632,6 +1675,7 @@ function renderLiveBar(totAvg, latestMonth) {
 function initApp() {
   // Build salesperson dropdown first — no data loaded yet
   mShow('home');
+  mHolidaysReady = fetchHolidays().then(() => { if (filteredData.length) renderAll(); else mRender(); });
   buildSaleDD();
   fetchSalesTabs().then(buildSaleDD);
 }
@@ -2292,7 +2336,7 @@ function switchTab(id, btn) {
 }
 
 // ══ MOBILE APP SCREENS ═══════════════════════════
-const M_VER = 'v11.16 · 2026-10-03';
+const M_VER = 'v11.17 · 2026-10-03';
 
 // ── แจ้งเตือนเวอร์ชันใหม่: โหลดไฟล์ตัวเองจากเซิร์ฟเวอร์ (ไม่ใช้ cache) แล้วเทียบ M_VER ──
 let mNewVer = '';
@@ -2549,14 +2593,15 @@ function mHeroHtml(o) {
       </div>
       <div class="m-mut" style="font-size:12px;margin-top:4px">AVG 3 M. (${mRange(o.A)}): <b style="color:var(--m-text)">${mN(o.avg)}</b> · ผลต่าง <b class="${mUD(o.latest - o.avg)}">${mSg(o.latest - o.avg)}</b></div>`;
   }
-  const { got, day, dim, ym } = o.live;
-  const pace = o.latest * day / dim, pp = o.paceOk && pace > 0 ? (got - pace) / pace * 100 : null;
+  const { got, day, ym } = o.live;
+  const pa = mPace(ym, day, o.L);
+  const pace = o.latest * pa.ratio, pp = o.paceOk && pace > 0 ? (got - pace) / pace * 100 : null;
   return `<div class="m-stat"><div class="lab">${mIcb(o.icon, o.col)} ยอดขายรวม${scope} · เดือนนี้ (${mMon(ym)}) <span class="m-mut" style="font-weight:500;font-size:11px">ถึงวันที่ ${day}</span></div></div>
     <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:8px;margin-top:8px">
       <div style="font-size:30px;font-weight:800;letter-spacing:-.5px">${mN(got)} <small style="font-size:15px">บาท</small></div>
       ${pp != null ? `<div style="text-align:right"><div class="${mUD(pp)}" style="font-weight:800;font-size:16px">${mPct(pp)}</div><div class="m-mut" style="font-size:10px">vs ที่ควรได้</div></div>` : ''}
     </div>
-    <div class="m-mut" style="font-size:12px;margin-top:2px">${o.paceOk ? `ควรได้ ${mN(pace)} ณ วันที่ ${day} (จังหวะ ${mMon(o.L)})` : (o.note || '')} · คาดทั้งเดือน ${mN(got / day * dim)}</div>
+    <div class="m-mut" style="font-size:12px;margin-top:2px">${o.paceOk ? `ควรได้ ${mN(pace)} · วันทำงาน ${pa.wdSoFar} จาก ${pa.wdBase} วันของ ${mMon(o.L)}` : (o.note || '')} · คาดทั้งเดือน ${mN(got * pa.proj)} (${pa.wdCur} วันทำงาน)</div>
     <div class="m-hero-prev">
       <div><span class="m-mut">${mLastLabel(o.L)}</span><b>${mN(o.latest)}</b></div>
       <div style="text-align:right"><b class="${mUD(pAvg || 0)}">${mPct(pAvg)}</b><span class="m-mut">vs AVG 3 M. (${mRange(o.A)}) ${mN(o.avg)}</span></div>
@@ -2573,7 +2618,7 @@ function mROverview(c) {
     return `<rect x="${i * 14}" y="${40 - h}" width="9" height="${h}" rx="2" fill="#1660d6" opacity="${.35 + i * .2}"><title>${m}: ${mN(c.monthTot[m])}</title></rect>`;
   }).join('')}</svg>`;
   const hero = mHeroHtml({ icon: 'chart', col: 'blue', L: c.latestMonth, latest: c.totLatest, avg: c.totAvg, A: c.prevQMthsInData, bars,
-    live: c.live && liveMonth ? { got: liveMonth.exvat, day: liveMonth.day, dim: liveMonth.daysInMonth, ym: liveMonth.ym } : null,
+    live: c.live && liveMonth ? { got: liveMonth.exvat, day: liveMonth.day, ym: liveMonth.ym } : null,
     paceOk: !selBU, note: 'ยอดเดือนนี้รวมทุก Cat BU (ไม่ตามตัวกรอง)' });
   const pAvg = c.totAvg > 0 ? (c.totLatest - c.totAvg) / c.totAvg * 100 : null;
   const pBuy = c.buyA ? (c.buyL - c.buyA) / c.buyA * 100 : null;
@@ -2845,6 +2890,7 @@ async function mLoadWH(force) {
   if (mWH.loading) return;
   if (!force && mWH.agg && Date.now() - mWH.ts < TTL) return;
   if (!salesTabsLoaded) await fetchSalesTabs();
+  await mHolidaysReady;
   const names = [...SALESPEOPLE];
   Object.assign(mWH, { loading: true, done: 0, total: names.length });
   if (mScreen === 'wh') mRender();
@@ -2901,7 +2947,7 @@ async function mLoadWH(force) {
       const dm = maxD.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
       if (dm) {
         const ym = `${dm[1]}/${String(dm[2]).padStart(2, '0')}`;
-        if (ym > L) live = { byRoo, ym, day: +dm[3], dim: new Date(+dm[1], +dm[2], 0).getDate() };
+        if (ym > L) live = { byRoo, ym, day: +dm[3], ratio: mPace(ym, +dm[3], L).ratio };
       }
     }
   } catch (e) {}
@@ -2955,7 +3001,7 @@ function mDiagSale(s, live) {
   const smallPct = s.buyL ? s.small / s.buyL * 100 : 0;
   if (smallPct >= 25) add(1, `ร้าน&lt;2,500 ${s.small} ร้าน`, { t: `เพิ่ม Basket ร้านเล็ก ${s.small} ร้าน`, go: 'small', v: 0 });
   if (live && live.day >= 5 && s.latest > 0) {
-    const pace = s.latest * live.day / live.dim, pp = pct(s.live || 0, pace);
+    const pace = s.latest * live.ratio, pp = pct(s.live || 0, pace);
     if (pp != null && pp <= -40) add(2, `เดือนนี้ช้า ${pp.toFixed(0)}%`, { t: 'เร่งร้านที่ยังไม่สั่งเดือนนี้', go: 'nobill', v: pace - (s.live || 0) });
     else if (pp != null && pp <= -20) add(1, `เดือนนี้ช้า ${pp.toFixed(0)}%`, { t: 'เร่งร้านที่ยังไม่สั่งเดือนนี้', go: 'nobill', v: pace - (s.live || 0) });
   }
@@ -3003,7 +3049,7 @@ function mRWH() {
 
   const hero = mHeroHtml({ icon: 'grid', col: 'teal', scope: mWH.wh === 'all' ? 'ทุกคลัง' : 'คลัง ' + escHtml(mWH.wh),
     L: a.L, latest: tot.l, avg: tot.a, A: a.A, paceOk: true,
-    live: a.live ? { got: sum(s => s.live || 0), day: a.live.day, dim: a.live.dim, ym: a.live.ym } : null });
+    live: a.live ? { got: sum(s => s.live || 0), day: a.live.day, ym: a.live.ym } : null });
   const stat = (ic, col, lab, val, sub, cls) => `<div class="m-card m-stat"><div class="lab">${mIcb(ic, col)}${lab}</div><div class="val">${val}</div><div class="sub ${cls}">${sub}</div></div>`;
 
   let whHtml = '';
@@ -3032,7 +3078,7 @@ function mRWH() {
     const i = a.sales.indexOf(s), p = s.avg > 0 ? (s.latest - s.avg) / s.avg * 100 : null, d = s.diag, lv = LV[d.level];
     let liveTxt = '';
     if (a.live) {
-      const pace = s.latest * a.live.day / a.live.dim;
+      const pace = s.latest * a.live.ratio;
       liveTxt = ` · ${mMon(a.live.ym)}: <b>${mN(s.live || 0)}</b>${pace > 0 ? ` <span class="${mUD((s.live || 0) - pace)}">(${mPct(((s.live || 0) - pace) / pace * 100)})</span>` : ''}`;
     }
     const tags = d.tags.length ? d.tags.map(t => `<span class="wh-tag ${t.sev === 2 ? 'r' : t.sev === 1 ? 'o' : 'g'}">${t.t}</span>`).join('') : '<span class="wh-tag g">ไม่พบปัญหา</span>';
@@ -3095,7 +3141,7 @@ function mRHome(c) {
   if (c) {
     sumHtml = `<div class="m-card" onclick="mGo('overview')" style="cursor:pointer">${mHeroHtml({ icon: 'chart', col: 'blue',
       L: c.latestMonth, latest: c.totLatest, avg: c.totAvg, A: c.prevQMthsInData, paceOk: !selBU, note: 'ยอดเดือนนี้รวมทุก Cat BU',
-      live: c.live && liveMonth ? { got: liveMonth.exvat, day: liveMonth.day, dim: liveMonth.daysInMonth, ym: liveMonth.ym } : null })}</div>`;
+      live: c.live && liveMonth ? { got: liveMonth.exvat, day: liveMonth.day, ym: liveMonth.ym } : null })}</div>`;
   } else if (currentSheet) {
     sumHtml = `<div class="m-card m-empty" style="padding:18px">⏳ กำลังโหลดข้อมูล ${escHtml(currentSheet)}…</div>`;
   }
