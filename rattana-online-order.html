@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v5.00</title>
+<title>Rattana Online Order v5.01</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -1061,7 +1061,7 @@ body.dark .pdpa-body h4,body.dark .pdpa-body b{color:var(--gold-light,#e2c882)}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.00</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.01</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -2572,7 +2572,15 @@ function pullCart(force){
    จนชนลิมิต 30 executions → ยืนยันออเดอร์/ซิงค์ล้มเป็นช่วงๆ) · กลับเข้าแอป = ดึงทันทีชดเชย */
 function startCartSync(){ if(isHead(currentCustomer)) return;   /* v4.22 */
   if(_cartSyncOn) return; _cartSyncOn=true;
-  setInterval(()=>{ if(!document.hidden) pullCart(false); },20000);
+  /* ⚡ v5.01 — เครื่องที่เปิดแอปทิ้งไว้เฉย ๆ (ไม่แตะจอเกิน 3 นาที) ดึงตะกร้าทุก 60 วิแทน 20 วิ
+     ทุกเครื่องที่เปิดค้างยิงสคริปต์บัญชีเดียวกับที่รับออเดอร์ → ลดคิวให้คนที่กำลังกดยืนยัน
+     แตะจอครั้งแรกหลังพัก = ดึงทันที (ไม่ต้องรอรอบ) → คนที่ใช้งานอยู่ไม่รู้สึกต่าง */
+  let _tick=0, _lastAct=Date.now();
+  const _act=()=>{ const idle=Date.now()-_lastAct>180000; _lastAct=Date.now(); if(idle && !document.hidden) pullCart(false); };
+  ['pointerdown','keydown','touchstart'].forEach(ev=>{ try{ document.addEventListener(ev,_act,{passive:true,capture:true}); }catch(e){} });
+  setInterval(()=>{ if(document.hidden) return; _tick++;
+    if(Date.now()-_lastAct>180000 && _tick%3!==0) return;   // พักจอ → 1 ใน 3 รอบ = ทุก 60 วิ
+    pullCart(false); },20000);
   document.addEventListener('visibilitychange',()=>{ if(!document.hidden) pullCart(false); else { try{ if(_syncTimer) syncOrderNow(); }catch(e){} } });   // v4.35: สลับออกแอป = ดันของที่ค้างขึ้นชีทก่อน
 }
 
@@ -7530,6 +7538,9 @@ function _postedOnce(oid){ try{ return (JSON.parse(localStorage.getItem('rop_pos
 function _markPosted(oid){ try{ const a=JSON.parse(localStorage.getItem('rop_posted')||'[]');
   if(a.indexOf(oid)<0){ a.push(oid); lsSet('rop_posted', JSON.stringify(a.slice(-40))); } }catch(e){} }
 
+/* ⚡ v5.01 — แปลคำตอบตรงของ action=order : true = เขียนแล้ว (order saved / duplicate = เคยเขียนครบแล้ว / empty)
+   false = หลังบ้านบอกไม่สำเร็จ (busy ฯลฯ) · null = อ่านไม่ออก → กลับไปใช้วิธีวนถามสถานะแบบเดิม */
+function _bodyVerdict(b){ if(!b || typeof b!=='object' || typeof b.ok!=='boolean') return null; return b.ok; }
 async function sendAndConfirm(payload, orderId){
   const need=_needKeys(payload);
   const nItems=(payload.items||[]).length, rounds=_pollRounds(nItems);
@@ -7538,13 +7549,22 @@ async function sendAndConfirm(payload, orderId){
   const preOk=_linesOk(pre,need);
   if(preOk===true) return true;                                         // กดซ้ำหลังส่งสำเร็จ (ทุกชิ้นอนุมัติแล้ว) → ไม่ส่งซ้ำ
   if(preOk===null && statusSupported(pre) && pre.approved && !pre.pending) return true;   // backend เก่า: ทั้งบิลอนุมัติหมด ไม่มีค้าง = ส่งแล้วจริง
-  let done=false, postOk=false, failAt=-1;
-  const posting=postGAS(payload,{retries:1,timeoutMs:nItems>60?300000:180000})   // ยิงครั้งเดียว · no-cors resolve = เซิร์ฟเวอร์ประมวลผลจบ+ตอบกลับแล้ว
-    .then(v=>{ postOk=!!v; done=true; return v; }).catch(()=>{ postOk=false; done=true; });
+  let done=false, postOk=false, failAt=-1, body=null;
+  const posting=postGAS(payload,{retries:1,timeoutMs:nItems>60?300000:180000,read:true})   // ยิงครั้งเดียว · v5.01 อ่านคำตอบได้
+    .then(v=>{ postOk=!!v; if(v&&typeof v==='object') body=v.body; done=true; return v; }).catch(()=>{ postOk=false; done=true; });
+  /* ⚡ v5.01 — รอคำตอบตรงจากหลังบ้านก่อน 8 วิ (บิลเล็กส่วนใหญ่จบในช่วงนี้ = ไม่ต้องยิงถามสถานะเลยสักครั้ง)
+     ยังไม่จบ → วนถามแบบเดิม แต่ทุกรอบเช็คคำตอบตรงก่อนเสมอ */
+  const _bv=()=>{ if(!(done && body)) return null; const v=_bodyVerdict(body); return (v===true && body.empty && need.length) ? false : v; };   // บิลถูกปัดว่าทั้งที่เราส่งของไป = ไม่นับว่าสำเร็จ
+  const _vb=async()=>{ if(_bv()===true) return true;
+    const f=await orderStatusRaw(orderId); return _linesOk(f,need)===true; };   // หลังบ้านบอกล้ม → เช็คชีทอีกครั้งเดียวก่อนตัดสิน
+  for(let w=0; w<32 && !done; w++) await sleep(250);
+  if(_bv()!==null) return await _vb();
   for(let i=0;i<rounds;i++){                                            // poll — คืนไวสุดเมื่อชีทขึ้น "อนุมัติ" ครบรายชิ้น (ไม่ต้องรอ LINE/Supabase)
-    await sleep(2000);
+    await sleep(i===0?0:3000);
+    if(_bv()!==null) return await _vb();
     const st=await orderStatusRaw(orderId);
     if(_linesOk(st,need)===true) return true;                           // ✓ ชีทขึ้น "อนุมัติ" ครบทุกชิ้นที่สั่ง
+    if(_bv()!==null) return await _vb();                                // ⚡ v5.01: คำตอบตรงมาถึงระหว่างรอ poll
     if(done){                                                           // เซิร์ฟเวอร์ตอบกลับแล้ว = เขียนชีทเสร็จ
       /* ⭐ v3.90: fetch ล้ม/หมดเวลา ไม่ได้แปลว่าหลังบ้านไม่ได้เขียน — บิลใหญ่ Apps Script อาจยังไล่เขียนอยู่
          (เดิมคืน false ทันที → ขึ้น "เน็ตไม่เสถียร" ทั้งที่อีกครู่ออเดอร์เข้าจริง แล้วลูกค้ากดซ้ำ)
@@ -7581,13 +7601,20 @@ async function sendAndConfirmSpecial(payload, orderId){
   const preOk=(pre && pre.checkedSpecial) ? _linesOk(pre,need) : null;
   if(preOk===true) return true;
   if(preOk===null && pre && pre.checkedSpecial && pre.approved && !pre.pending) return true;   // .gs v1.22 (มี checkedSpecial แต่ไม่มี lines): ทั้งบิลอนุมัติหมด = ส่งแล้วจริง
-  let done=false, postOk=false, failAt=-1;
-  const posting=postGAS(payload,{retries:1,timeoutMs:nItems>60?300000:180000})
-    .then(v=>{ postOk=!!v; done=true; return v; }).catch(()=>{ postOk=false; done=true; });
+  let done=false, postOk=false, failAt=-1, body=null;
+  const posting=postGAS(payload,{retries:1,timeoutMs:nItems>60?300000:180000,read:true})   /* ⚡ v5.01 อ่านคำตอบตรง (ดู sendAndConfirm) */
+    .then(v=>{ postOk=!!v; if(v&&typeof v==='object') body=v.body; done=true; return v; }).catch(()=>{ postOk=false; done=true; });
+  const _bv=()=>{ if(!(done && body)) return null; const v=_bodyVerdict(body); return (v===true && body.empty && need.length) ? false : v; };   // บิลถูกปัดว่าทั้งที่เราส่งของไป = ไม่นับว่าสำเร็จ
+  const _vb=async()=>{ if(_bv()===true) return true;
+    const f=await jsonpGet(q,20000); return !!(f && f.checkedSpecial && _linesOk(f,need)===true); };
+  for(let w=0; w<32 && !done; w++) await sleep(250);
+  if(_bv()!==null) return await _vb();
   for(let i=0;i<rounds;i++){
-    await sleep(2000);
+    await sleep(i===0?0:3000);
+    if(_bv()!==null) return await _vb();
     const st=await jsonpGet(q,20000);
     if(st && st.checkedSpecial && _linesOk(st,need)===true) return true;
+    if(_bv()!==null) return await _vb();
     if(done){
       if(!postOk){                                                       // v3.90: ให้โอกาสหลังบ้านเขียนจบอีก 60 วิ ก่อนตัดสินว่าล้ม (ดูคอมเมนต์ใน sendAndConfirm)
         if(failAt<0) failAt=i;
@@ -7623,6 +7650,15 @@ async function postGAS(payload,opts){
       const ctrl=(typeof AbortController!=='undefined')?new AbortController():null;
       const to=ctrl?setTimeout(()=>ctrl.abort(),timeoutMs):0;
       try{
+        /* ⚡ v5.01 — opts.read: อ่านคำตอบของหลังบ้านได้จริง (คืน {body})
+           วัดแล้ว 06/10: /exec ตอบ POST ด้วย Access-Control-Allow-Origin:* ทั้ง 2 ทอด (script.google → googleusercontent)
+           text/plain = simple request ไม่มี preflight → อ่าน JSON ได้ตรง ๆ ไม่ต้องวนถาม getOrderStatus ทุก 2 วิ
+           (เดิมทุกการยืนยันยิงสคริปต์หลักซ้ำ 3-10 ครั้ง = แย่งคิวเดียวกับออเดอร์ร้านอื่น) */
+        if(opts&&opts.read){
+          const res=await fetch(CFG.GAS_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload),signal:ctrl?ctrl.signal:undefined});
+          let b=null; try{ b=await res.json(); }catch(e){ b=null; }
+          return {body:b};
+        }
         // no-cors: Apps Script ไม่ส่ง CORS header — ใช้ simple request (text/plain) เพื่อให้เขียนได้โดยไม่ถูก block
         // (อ่านผลตอบไม่ได้ — การยืนยันว่าเขียนจริงทำผ่าน getOrderStatus JSONP ใน sendAndConfirm)
         await fetch(CFG.GAS_URL,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload),signal:ctrl?ctrl.signal:undefined});
