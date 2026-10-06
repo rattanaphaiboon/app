@@ -9392,13 +9392,23 @@ function smrGoBills(){
  * เก็บใน Supabase ตาราง online_sales (โครงเดียวกับ roo_sales · SQL = _SUPABASE-ONLINE-SALES.sql) → สถานะจัดเห็นร่วมกันทุกเครื่อง
  * Picker เปิดบิลเอง → ⛔ แอดมินต้องเลิกนำเข้าแท็บ imp เข้า bplus ตรง ไม่งั้นบิลซ้ำ */
 const ONL_CFG = { sheetId:'1XZWxsMrlxnA9K9VN_y-3JWAQaEwEsUxGTO8vb1oRnBI', tbl:'online_sales',
-  chans:[ {key:'SHP', name:'Shopee',        gid:'1306538200', color:'#ee4d2d', raw:{gid:'388187274',  ord:'หมายเลขคำสั่งซื้อ', st:'สถานะการสั่งซื้อ', name:'ชื่อสินค้า', vr:'ชื่อตัวเลือก', qty:'จำนวน', price:'ราคาขาย'}},
-          {key:'TT',  name:'TikTok',        gid:'1269584576', color:'#111827', raw:{gid:'0',          ord:'Order ID', st:'Order Status', name:'Product Name', vr:'Variation', qty:'Quantity', sum:'SKU Subtotal After Discount'}},
-          {key:'AMZ', name:'Amaze (Makro)', gid:'123049338',  color:'#c2410c', raw:{gid:'597771146',  ord:'Amaze order number', st:'Order status', name:'SKU name', vr:'Seller SKU ID', qty:'Qty', sum:'Net sale price'}},
-          {key:'TM',  name:'Thai Mart',     gid:'229356146',  color:'#0e7490', raw:{gid:'1168229876', ord:'เลขคำสั่งซื้อ', st:'สถานะคำสั่งซื้อ', name:'ชื่อสินค้า', vr:'ตัวเลือกสินค้า (Variation)', qty:'จำนวน', price:'ราคาต่อหน่วย (บาท)'}} ],
+  chans:[ {key:'SHP', name:'Shopee',        gid:'1306538200', color:'#ee4d2d', raw:{gid:'388187274',  ord:'หมายเลขคำสั่งซื้อ', st:'สถานะการสั่งซื้อ', name:'ชื่อสินค้า', vr:'ชื่อตัวเลือก', qty:'จำนวน',
+            keep:g=>!g('วิธีการจัดส่ง'),                                                              // ชีท SHOPEE: where M is null
+            price:g=>num(g('ราคาขาย')) - num(g('โค้ดส่วนลดชำระโดยผู้ขาย'))/(num(g('จำนวน'))||1) + num(g('ส่วนลดจาก Shopee')),
+            priceTxt:'ราคาขาย − โค้ดส่วนลดผู้ขาย÷จำนวน + ส่วนลดจาก Shopee'}},
+          {key:'TT',  name:'TikTok',        gid:'1269584576', color:'#111827', raw:{gid:'0',          ord:'Order ID', st:'Order Status', name:'Product Name', vr:'Variation', qty:'Quantity',
+            keep:g=>true, free:g=>/^ฟรี/.test(String(g('Product Name')||'')),                     // TT imp: ชื่อสินค้าขึ้นต้น "ฟรี" = แถม
+            price:g=>num(g('SKU Unit Original Price')) - num(g('SKU Seller Discount'))/(num(g('Quantity'))||1),
+            priceTxt:'SKU Unit Original Price − SKU Seller Discount÷Quantity'}},
+          {key:'AMZ', name:'Amaze (Makro)', gid:'123049338',  color:'#c2410c', raw:{gid:'597771146',  ord:'Amaze order number', st:'Order status', name:'SKU name', vr:'Seller SKU ID', qty:'Qty',
+            keep:g=>/^(ORDER_CONFIRM|PACK_DONE|PICK_CONFIRM)$/.test(String(g('Order status')||'').trim()),   // ชีท AMAZE: 3 สถานะนี้เท่านั้น
+            price:g=>num(g('Order_original_price [THB]')) - num(g('order_discounted_price'))/(num(g('Qty'))||1) + num(g('Seller bundle deal discount from seller')),
+            priceTxt:'Order_original_price − order_discounted_price÷Qty + Seller bundle deal discount'}},
+          {key:'TM',  name:'Thai Mart',     gid:'229356146',  color:'#0e7490', raw:{gid:'1168229876', ord:'เลขคำสั่งซื้อ', st:'สถานะคำสั่งซื้อ', name:'ชื่อสินค้า', vr:'ตัวเลือกสินค้า (Variant)', qty:'จำนวน',
+            keep:g=>true, price:g=>num(g('ราคาต่อหน่วย (บาท)')), priceTxt:'ราคาต่อหน่วย (บาท)'}} ],
   skipped:[ {name:'Lazada', why:'แท็บ Lazada imp ขึ้นออเดอร์ชุดเดียวกับ Thai Mart (สูตรชี้ผิดแท็บ) — ข้ามไว้ก่อน'} ] };
 const ONL_VIRTUAL_BILLS = true;   // true = บิลเสมือนในเครื่อง (LAB เดโม · ยังไม่มีตาราง) · false = เข้าหน้าเลือกบิลผ่าน online_sales เท่านั้น
-let ONL = { at:'', busy:false, err:'', lines:[], chErr:{}, miss:[] };
+let ONL = { at:'', busy:false, err:'', lines:[], chErr:{}, miss:[], pchk:[] };   // pchk = ตรวจยอดต่อออเดอร์ ไฟล์ที่วาง (สูตรแอป) vs imp
 /* v5.02b: แถวในไฟล์ดิบที่ "หายจากแท็บ imp" = แท็บ set ของชีทแมพไม่ได้ → ให้แอดมินเลือกสินค้าเองแบบ SMR (จำในเครื่อง · ควรไปเติมแท็บ set ด้วย)
  * คีย์ = ช่องทาง|ชื่อสินค้า platform|ตัวเลือก → {bc, mult (1 ชิ้นที่ขาย = กี่หน่วยของเรา), at} */
 let ONL_LINKS = (()=>{ try{ return JSON.parse(localStorage.getItem('onl_links')||'{}')||{}; }catch(e){ return {}; } })();
@@ -9417,7 +9427,7 @@ async function onlLoad(force, quiet, push){
   try{
     const res=await Promise.all(ONL_CFG.chans.map(c=>Promise.all([ fetchCsvExport(ONL_CFG.sheetId, c.gid, 1), c.raw?fetchCsvExport(ONL_CFG.sheetId, c.raw.gid, 1).catch(()=>null):null ])
       .then(([m,raw])=>({c,m,raw})).catch(e=>({c,e}))));
-    const lines=[], miss=[]; ONL.chErr={};
+    const lines=[], miss=[], rawAmt={}; ONL.chErr={};
     for(const {c,m,e,raw} of res){
       if(e){ ONL.chErr[c.key]=String((e&&e.message)||e); continue; }
       const hi=(m||[]).findIndex(r=>String((r||[])[0]||'').trim()==='วันที่เอกสาร');
@@ -9437,26 +9447,36 @@ async function onlLoad(force, quiet, push){
           bc, qty, free, price:num(r[I.price]), wh:String(r[I.wh]||'').trim()||'W4', nameB:I.nameB>=0?String(r[I.nameB]||'').trim():'',
           pName:I.pn>=0?String(r[I.pn]||'').trim():'', pVar:I.pv>=0?String(r[I.pv]||'').trim():'', n:seen[k] });
       }
-      /* v5.02b: ไฟล์ดิบ → แถวที่ไม่มีใน imp (ออเดอร์ไม่มีเลย หรือมีแต่ไม่มีสินค้าชื่อนี้) */
+      /* v5.02c: ไฟล์ดิบ → ① กรองแบบเดียวกับชีท (SHOPEE: ยังไม่มีวิธีจัดส่ง · AMAZE: 3 สถานะ) ② แถวที่หายจาก imp = แท็บ set แมพไม่ได้
+       * ③ ยอดต่อออเดอร์ตามสูตรแอป (priceTxt) เทียบยอดที่จะเปิดบิล → ราคาต้องตามแอป ไม่ใช่ Stocksync */
       if(raw && c.raw && raw.length>1){
-        const RH=raw[0].map(x=>String(x==null?'':x).trim()), rc=k=>RH.indexOf(k), R=c.raw;
-        const J={ord:rc(R.ord), st:rc(R.st), name:rc(R.name), vr:rc(R.vr), qty:rc(R.qty), price:R.price?rc(R.price):-1, sum:R.sum?rc(R.sum):-1};
-        if(J.ord>=0 && J.name>=0 && J.qty>=0) for(const r of raw.slice(1)){
-          const ord=String(r[J.ord]||'').trim(), qty=num(r[J.qty]); if(!ord || !(qty>0)) continue;
-          if(J.st>=0 && /ยกเลิก|cancel/i.test(String(r[J.st]||''))) continue;
-          const name=String(r[J.name]||'').trim(), vr=J.vr>=0?_onlCode(r[J.vr]):'', nn=_onlNorm(name);
+        const RH=raw[0].map(x=>String(x==null?'':x).trim()), R=c.raw;
+        const iOrd=RH.indexOf(R.ord), iName=RH.indexOf(R.name), iQty=RH.indexOf(R.qty), iVr=RH.indexOf(R.vr), iSt=RH.indexOf(R.st);
+        if(iOrd>=0 && iName>=0 && iQty>=0) for(const r of raw.slice(1)){
+          const g=k=>{ const ix=RH.indexOf(k); return ix>=0?String(r[ix]==null?'':r[ix]).trim():''; };
+          const ord=String(r[iOrd]||'').trim(), qty=num(r[iQty]); if(!ord || !(qty>0)) continue;
+          if(!R.keep(g)) continue;
+          if(iSt>=0 && /ยกเลิก|cancel/i.test(String(r[iSt]||''))) continue;
+          if(R.free && R.free(g)) continue;   // ของแถม (TT "ฟรี…") ไม่มียอด
+          const name=String(r[iName]||'').trim(), vr=iVr>=0?_onlCode(r[iVr]):'', nn=_onlNorm(name);
+          const unitPrice=Math.round(R.price(g)*100)/100;
+          const pk=c.key+'|'+ord; (rawAmt[pk]=rawAmt[pk]||{ch:c.key, chName:c.name, ord, amt:0, n:0}); rawAmt[pk].amt+=unitPrice*qty; rawAmt[pk].n++;
           const got=impNames[ord]; if(got && got.some(x=>x && (x===nn || x.slice(0,30)===nn.slice(0,30)))) continue;
           if(got && got.length && !got.some(x=>x)) continue;   // imp ไม่มีคอลัมน์ Product Name → นับว่ามีออเดอร์นี้แล้ว
-          const unitPrice = J.price>=0 ? num(r[J.price]) : (J.sum>=0 ? Math.round(num(r[J.sum])/qty*100)/100 : 0);
           const key=onlMissKey(c.key,name,vr), lk=ONL_LINKS[key];
-          const mi={ ch:c.key, chName:c.name, ord, name, vr, qty, unitPrice, key, cust:custCfg, status:J.st>=0?String(r[J.st]||'').trim():'' };
-          miss.push(mi);
+          miss.push({ ch:c.key, chName:c.name, ord, name, vr, qty, unitPrice, key, cust:custCfg, status:iSt>=0?String(r[iSt]||'').trim():'' });
           if(lk && lk.bc){ const mult=+lk.mult||1, k2=ord+'|'+lk.bc; seen[k2]=(seen[k2]||0)+1;
             lines.push({ ch:c.key, chName:c.name, ord, doc:'', cust:custCfg, sm:'TTW101', bc:lk.bc, qty:qty*mult, free:0,
               price:Math.round(unitPrice/mult*100)/100, wh:'W4', nameB:'', pName:name, pVar:vr, n:seen[k2], manual:true }); }
         }
       }
     }
+    /* ③ ตรวจยอดต่อออเดอร์: สูตรแอป (ไฟล์ที่วาง) vs บรรทัดที่จะเปิดบิล — ออเดอร์ที่ยังมีแถวรอเลือกสินค้า ไม่นับว่าผิด */
+    { const billAmt={}; lines.forEach(l=>{ const k=l.ch+'|'+l.ord; billAmt[k]=(billAmt[k]||0)+l.price*l.qty; });
+      const waiting=new Set(miss.filter(m=>!ONL_LINKS[m.key]).map(m=>m.ch+'|'+m.ord));
+      ONL.pchk=Object.keys(Object.assign({}, rawAmt, billAmt)).map(k=>{ const a=rawAmt[k]||{}, ch=k.split('|')[0], cc=ONL_CFG.chans.find(x=>x.key===ch)||{};
+        const app=Math.round((a.amt||0)*100)/100, bill=Math.round((billAmt[k]||0)*100)/100;
+        return { k, ch, chName:cc.name||ch, ord:k.slice(ch.length+1), app, bill, waiting:waiting.has(k), noRaw:!rawAmt[k], ok:Math.abs(app-bill)<0.5 }; }); }
     ONL.lines=lines; ONL.miss=miss; ONL.at=nowStamp();
     onlSyncOrders();
     if(!lines.length && !Object.keys(ONL.chErr).length) ONL.err='อ่านชีทได้ แต่แท็บ imp ยังไม่มีออเดอร์ — แอดมินยังไม่ได้วางรอบใหม่?';
@@ -9586,10 +9606,20 @@ function renderOnl(){
   h+=`<div style="display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 12px">`;
   ONL_CFG.chans.forEach(c=>{ const x=L.filter(l=>l.ch===c.key); h+=tile(new Set(x.map(l=>l.ord)).size+` <span style="font-size:12px;font-weight:600;color:#64748b">ออเดอร์ · ${x.length} บรรทัด</span>`, c.name+' · ฿'+Math.round(x.reduce((a,l)=>a+l.price*l.qty,0)).toLocaleString(), c.color); });
   const mUn=(ONL.miss||[]).filter(m=>!ONL_LINKS[m.key]), mOk=(ONL.miss||[]).length-mUn.length;
+  const PC=(ONL.pchk||[]).filter(x=>!x.waiting), pBad=PC.filter(x=>!x.ok);
+  h+=tile(`${PC.length-pBad.length} / ${PC.length}`, 'ออเดอร์ที่ยอดตรงราคาแอป (ไฟล์ที่วาง)', pBad.length?'#dc2626':'#16a34a');
   h+=tile(mUn.length, 'หาบาร์ไม่เจอ (รอเลือกสินค้า)'+(mOk?' · เลือกแล้ว '+mOk:''), mUn.length?'#dc2626':'#16a34a');
   if(miss) h+=tile(miss, 'บาร์ไม่พบใน PDDT (ไม่ส่ง)', '#dc2626');
   if(ONL_SB.ok) h+=tile(inSb+' / '+L.length, 'อยู่ใน Supabase แล้ว', '#7c3aed');
   h+=`</div>`;
+  h+=`<details class="smr-note" style="margin-top:4px"><summary style="cursor:pointer"><b>💰 ราคาที่ใช้เปิดบิล = ราคาตามแอปของแต่ละช่องทาง</b> (สูตรเดียวกับชีทวางข้อมูล · ไม่ใช้ราคา Stocksync) — กดดูสูตร</summary>
+    <div style="margin-top:6px;font-size:12px">${ONL_CFG.chans.map(c=>`<div>• <b>${esc(c.name)}</b>: ${esc(c.raw.priceTxt)} ÷ จำนวนต่อชิ้นในแท็บ set</div>`).join('')}
+    <div style="margin-top:4px;color:#64748b">ตรวจทุกครั้งที่โหลด: ยอดต่อออเดอร์จากไฟล์ที่วาง (คิดสูตรเอง) ต้องเท่ากับยอดที่จะเปิดบิล</div></div></details>`;
+  if(pBad.length){
+    h+=`<div class="smr-note bad"><b>⚠️ ยอดไม่ตรงราคาแอป ${pBad.length} ออเดอร์</b> — เช็คแท็บ set (จำนวนต่อชิ้น) หรือแถวที่วางซ้ำ</div>
+    <div class="tbl-wrap" style="margin-bottom:12px"><table class="smr-tbl"><thead><tr><th>ช่องทาง</th><th>เลขออเดอร์</th><th class="num">ยอดตามแอป</th><th class="num">ยอดที่จะเปิดบิล</th><th class="num">ต่าง</th></tr></thead><tbody>
+    ${pBad.map(x=>`<tr class="smr-badrow"><td>${esc(x.chName)}</td><td class="bc6">${esc(x.ord)}</td><td class="num">${x.noRaw?'<span class="mini">ไม่มีในไฟล์ที่วาง</span>':x.app.toLocaleString()}</td><td class="num">${x.bill.toLocaleString()}</td><td class="num">${(Math.round((x.bill-x.app)*100)/100).toLocaleString()}</td></tr>`).join('')}</tbody></table></div>`;
+  }
   if((ONL.miss||[]).length){
     h+=`<div class="smr-note bad" style="margin-top:4px"><b>⚠️ หาบาร์ไม่เจอ ${ONL.miss.length} รายการ</b> — มีในไฟล์ที่วาง แต่แท็บ set ของชีทแมพไม่ได้ (เลยไม่ขึ้นในแท็บ imp) · กด 🔎 เลือกสินค้า แล้วเลือกหน่วย → เข้าบิลให้เลย
       <br><span style="font-size:11.5px">จำไว้ในเครื่องนี้ · ควรไปเติมแท็บ <b>set</b> ในชีทด้วย เครื่องอื่นจะได้เห็นเหมือนกัน · ช่อง "x กี่หน่วย" = ขาย 1 ชิ้นบน platform = กี่หน่วยของเรา (ราคาหารให้เอง)</span></div>
@@ -9608,11 +9638,12 @@ function renderOnl(){
   }
   if(!L.length){ p.innerHTML=h+(ONL.busy?'':'<div class="empty">ยังไม่มีออเดอร์ — กด 🔄 โหลด</div>'); return; }
   const rows=L.slice().sort((a,b)=>(DATA.prodIdx[a.bc]?1:0)-(DATA.prodIdx[b.bc]?1:0) || a.ch.localeCompare(b.ch) || a.ord.localeCompare(b.ord));
-  h+=`<div class="tbl-wrap"><table class="smr-tbl"><thead><tr><th>ช่องทาง</th><th>เลขออเดอร์</th><th>บาร์ (เรา)</th><th>สินค้าเรา</th><th>หน่วย</th><th class="num">จำนวน</th><th class="num">แถม</th><th class="num">ราคา/หน่วย</th><th>สินค้า platform</th></tr></thead><tbody>`;
+  h+=`<div class="tbl-wrap"><table class="smr-tbl"><thead><tr><th>ช่องทาง</th><th>เลขออเดอร์</th><th>บาร์ (เรา)</th><th>สินค้าเรา</th><th>หน่วย</th><th class="num">จำนวน</th><th class="num">แถม</th><th class="num">ราคา/หน่วย (แอป)</th><th class="num">Stocksync S03</th><th>สินค้า platform</th></tr></thead><tbody>`;
   rows.forEach(l=>{ const P=onlProd(l.bc);
     h+=`<tr class="${P.rec?'':'smr-badrow'}"><td>${esc(l.chName)}</td><td class="bc6">${esc(l.ord)}${l.manual?' <span class="smr-pill">เลือกเอง</span>':''}</td><td class="bc6">${esc(l.bc)}</td>
       <td>${P.rec?esc(P.rec.short||P.rec.name):'<b style="color:#dc2626">⚠️ ไม่พบใน PDDT</b> '+esc(l.nameB)}</td><td>${esc(SMR_UNIT_TH[P.level]||'')} x${P.eaPer}</td>
-      <td class="num">${l.qty}</td><td class="num">${l.free||''}</td><td class="num">${l.price.toLocaleString()}</td>
+      <td class="num">${l.qty}</td><td class="num">${l.free||''}</td><td class="num"><b>${l.price.toLocaleString()}</b></td>
+      <td class="num mini">${(()=>{ const sp=P.rec&&P.rec.s03?num(P.rec.s03[P.level]):0; return sp?`${sp.toLocaleString()}${Math.abs(sp-l.price)>=0.5?` <span style="color:${l.price<sp?'#dc2626':'#16a34a'}">(${l.price<sp?'':'+'}${Math.round((l.price-sp)*100)/100})</span>`:''}`:'-'; })()}</td>
       <td style="font-size:11.5px;color:#64748b">${esc((l.pName||'').slice(0,70))}${l.pVar?' · '+esc(l.pVar.slice(0,40)):''}</td></tr>`; });
   h+=`</tbody></table></div>`;
   p.innerHTML=h;
