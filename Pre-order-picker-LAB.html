@@ -9392,13 +9392,21 @@ function smrGoBills(){
  * เก็บใน Supabase ตาราง online_sales (โครงเดียวกับ roo_sales · SQL = _SUPABASE-ONLINE-SALES.sql) → สถานะจัดเห็นร่วมกันทุกเครื่อง
  * Picker เปิดบิลเอง → ⛔ แอดมินต้องเลิกนำเข้าแท็บ imp เข้า bplus ตรง ไม่งั้นบิลซ้ำ */
 const ONL_CFG = { sheetId:'1XZWxsMrlxnA9K9VN_y-3JWAQaEwEsUxGTO8vb1oRnBI', tbl:'online_sales',
-  chans:[ {key:'SHP', name:'Shopee',        gid:'1306538200', color:'#ee4d2d'},
-          {key:'TT',  name:'TikTok',        gid:'1269584576', color:'#111827'},
-          {key:'AMZ', name:'Amaze (Makro)', gid:'123049338',  color:'#c2410c'},
-          {key:'TM',  name:'Thai Mart',     gid:'229356146',  color:'#0e7490'} ],
+  chans:[ {key:'SHP', name:'Shopee',        gid:'1306538200', color:'#ee4d2d', raw:{gid:'388187274',  ord:'หมายเลขคำสั่งซื้อ', st:'สถานะการสั่งซื้อ', name:'ชื่อสินค้า', vr:'ชื่อตัวเลือก', qty:'จำนวน', price:'ราคาขาย'}},
+          {key:'TT',  name:'TikTok',        gid:'1269584576', color:'#111827', raw:{gid:'0',          ord:'Order ID', st:'Order Status', name:'Product Name', vr:'Variation', qty:'Quantity', sum:'SKU Subtotal After Discount'}},
+          {key:'AMZ', name:'Amaze (Makro)', gid:'123049338',  color:'#c2410c', raw:{gid:'597771146',  ord:'Amaze order number', st:'Order status', name:'SKU name', vr:'Seller SKU ID', qty:'Qty', sum:'Net sale price'}},
+          {key:'TM',  name:'Thai Mart',     gid:'229356146',  color:'#0e7490', raw:{gid:'1168229876', ord:'เลขคำสั่งซื้อ', st:'สถานะคำสั่งซื้อ', name:'ชื่อสินค้า', vr:'ตัวเลือกสินค้า (Variation)', qty:'จำนวน', price:'ราคาต่อหน่วย (บาท)'}} ],
   skipped:[ {name:'Lazada', why:'แท็บ Lazada imp ขึ้นออเดอร์ชุดเดียวกับ Thai Mart (สูตรชี้ผิดแท็บ) — ข้ามไว้ก่อน'} ] };
 const ONL_VIRTUAL_BILLS = true;   // true = บิลเสมือนในเครื่อง (LAB เดโม · ยังไม่มีตาราง) · false = เข้าหน้าเลือกบิลผ่าน online_sales เท่านั้น
-let ONL = { at:'', busy:false, err:'', lines:[], chErr:{} };
+let ONL = { at:'', busy:false, err:'', lines:[], chErr:{}, miss:[] };
+/* v5.02b: แถวในไฟล์ดิบที่ "หายจากแท็บ imp" = แท็บ set ของชีทแมพไม่ได้ → ให้แอดมินเลือกสินค้าเองแบบ SMR (จำในเครื่อง · ควรไปเติมแท็บ set ด้วย)
+ * คีย์ = ช่องทาง|ชื่อสินค้า platform|ตัวเลือก → {bc, mult (1 ชิ้นที่ขาย = กี่หน่วยของเรา), at} */
+let ONL_LINKS = (()=>{ try{ return JSON.parse(localStorage.getItem('onl_links')||'{}')||{}; }catch(e){ return {}; } })();
+let ONL_PICKING = null;
+(async()=>{ try{ const v=await _pkIdbGet('onl_links'); if(v && typeof v==='object') ONL_LINKS=Object.assign({}, v, ONL_LINKS); }catch(e){} })();
+function onlSaveLinks(){ try{ localStorage.setItem('onl_links', JSON.stringify(ONL_LINKS)); }catch(e){} try{ _pkIdbSet('onl_links', ONL_LINKS); }catch(e){} }
+const _onlNorm = s => String(s==null?'':s).normalize('NFC').replace(/\s+/g,'').toLowerCase();
+const onlMissKey = (ch,name,vr) => ch+'|'+_onlNorm(name).slice(0,80)+'|'+_onlNorm(vr).slice(0,40);
 let ONL_SB = { ok:null, err:'', have:new Set(), billsInApp:0, busy:false };
 const _onlCode = v => String(v==null?'':v).trim().replace(/\.0+$/,'');
 async function onlLoad(force, quiet, push){
@@ -9407,9 +9415,10 @@ async function onlLoad(force, quiet, push){
   ONL.busy=true; ONL.err=''; renderOnl();
   if(!quiet) loading(true,'กำลังอ่านชีทออเดอร์ออนไลน์ (แท็บ imp)…');
   try{
-    const res=await Promise.all(ONL_CFG.chans.map(c=>fetchCsvExport(ONL_CFG.sheetId, c.gid, 1).then(m=>({c,m})).catch(e=>({c,e}))));
-    const lines=[]; ONL.chErr={};
-    for(const {c,m,e} of res){
+    const res=await Promise.all(ONL_CFG.chans.map(c=>Promise.all([ fetchCsvExport(ONL_CFG.sheetId, c.gid, 1), c.raw?fetchCsvExport(ONL_CFG.sheetId, c.raw.gid, 1).catch(()=>null):null ])
+      .then(([m,raw])=>({c,m,raw})).catch(e=>({c,e}))));
+    const lines=[], miss=[]; ONL.chErr={};
+    for(const {c,m,e,raw} of res){
       if(e){ ONL.chErr[c.key]=String((e&&e.message)||e); continue; }
       const hi=(m||[]).findIndex(r=>String((r||[])[0]||'').trim()==='วันที่เอกสาร');
       if(hi<0){ ONL.chErr[c.key]='หาหัวตาราง "วันที่เอกสาร" ไม่เจอ'; continue; }
@@ -9417,7 +9426,9 @@ async function onlLoad(force, quiet, push){
       const I={doc:col('เลขที่เอกสาร'), cust:col('รหัสลูกค้า'), sm:col('รหัสพนักงานขาย'), ord:col('หมายเหตุ'), bc:col('รหัสซื้อขาย'), qty:col('จำนวน'),
         free:col('แถม'), price:col('ราคาต่อหน่วย'), wh:col('ตำแหน่งเก็บ'), nameB:H.findIndex(h=>/^ชื่อสินค้า/.test(h)), pn:col('Product Name'), pv:col('Variation')};
       if(I.ord<0 || I.bc<0 || I.qty<0){ ONL.chErr[c.key]='หัวคอลัมน์ไม่ครบ (หมายเหตุ/รหัสซื้อขาย/จำนวน)'; continue; }
-      const seen={};
+      const seen={}, impNames={};
+      const custCfg=_onlCode((m[0]||[])[2]);   // แถว 1 ของแท็บ imp = TTW101 | BO01 | รหัสลูกค้า | …
+      for(const r of m.slice(hi+1)){ const o=String(r[I.ord]||'').trim(); if(o) (impNames[o]=impNames[o]||[]).push(_onlNorm(I.pn>=0?r[I.pn]:'')); }
       for(const r of m.slice(hi+1)){
         const ord=String(r[I.ord]||'').trim(), bc=_onlCode(r[I.bc]), qty=num(r[I.qty]), free=I.free>=0?num(r[I.free]):0;
         if(!ord || !bc || (!(qty>0) && !(free>0))) continue;
@@ -9426,8 +9437,27 @@ async function onlLoad(force, quiet, push){
           bc, qty, free, price:num(r[I.price]), wh:String(r[I.wh]||'').trim()||'W4', nameB:I.nameB>=0?String(r[I.nameB]||'').trim():'',
           pName:I.pn>=0?String(r[I.pn]||'').trim():'', pVar:I.pv>=0?String(r[I.pv]||'').trim():'', n:seen[k] });
       }
+      /* v5.02b: ไฟล์ดิบ → แถวที่ไม่มีใน imp (ออเดอร์ไม่มีเลย หรือมีแต่ไม่มีสินค้าชื่อนี้) */
+      if(raw && c.raw && raw.length>1){
+        const RH=raw[0].map(x=>String(x==null?'':x).trim()), rc=k=>RH.indexOf(k), R=c.raw;
+        const J={ord:rc(R.ord), st:rc(R.st), name:rc(R.name), vr:rc(R.vr), qty:rc(R.qty), price:R.price?rc(R.price):-1, sum:R.sum?rc(R.sum):-1};
+        if(J.ord>=0 && J.name>=0 && J.qty>=0) for(const r of raw.slice(1)){
+          const ord=String(r[J.ord]||'').trim(), qty=num(r[J.qty]); if(!ord || !(qty>0)) continue;
+          if(J.st>=0 && /ยกเลิก|cancel/i.test(String(r[J.st]||''))) continue;
+          const name=String(r[J.name]||'').trim(), vr=J.vr>=0?_onlCode(r[J.vr]):'', nn=_onlNorm(name);
+          const got=impNames[ord]; if(got && got.some(x=>x && (x===nn || x.slice(0,30)===nn.slice(0,30)))) continue;
+          if(got && got.length && !got.some(x=>x)) continue;   // imp ไม่มีคอลัมน์ Product Name → นับว่ามีออเดอร์นี้แล้ว
+          const unitPrice = J.price>=0 ? num(r[J.price]) : (J.sum>=0 ? Math.round(num(r[J.sum])/qty*100)/100 : 0);
+          const key=onlMissKey(c.key,name,vr), lk=ONL_LINKS[key];
+          const mi={ ch:c.key, chName:c.name, ord, name, vr, qty, unitPrice, key, cust:custCfg, status:J.st>=0?String(r[J.st]||'').trim():'' };
+          miss.push(mi);
+          if(lk && lk.bc){ const mult=+lk.mult||1, k2=ord+'|'+lk.bc; seen[k2]=(seen[k2]||0)+1;
+            lines.push({ ch:c.key, chName:c.name, ord, doc:'', cust:custCfg, sm:'TTW101', bc:lk.bc, qty:qty*mult, free:0,
+              price:Math.round(unitPrice/mult*100)/100, wh:'W4', nameB:'', pName:name, pVar:vr, n:seen[k2], manual:true }); }
+        }
+      }
     }
-    ONL.lines=lines; ONL.at=nowStamp();
+    ONL.lines=lines; ONL.miss=miss; ONL.at=nowStamp();
     onlSyncOrders();
     if(!lines.length && !Object.keys(ONL.chErr).length) ONL.err='อ่านชีทได้ แต่แท็บ imp ยังไม่มีออเดอร์ — แอดมินยังไม่ได้วางรอบใหม่?';
   }catch(e){ ONL.err='โหลดไม่สำเร็จ: '+String((e&&e.message)||e); console.warn('[ONL]', e); }
@@ -9511,6 +9541,24 @@ async function onlSbPush(){
   }catch(e){ toast('⛔ '+(e.message||e)); }
   finally{ loading(false); }
 }
+function onlPickOpen(key){ ONL_PICKING=key; renderOnl(); setTimeout(()=>{ const i=document.getElementById('onlPickQ'); if(i){ const m=(ONL.miss||[]).find(x=>x.key===key); if(m && !i.value) i.value=String(m.name||'').replace(/\(.*?\)|ยกลัง|\d+\s*(ถุง|ขวด|กล่อง|ซอง|แพ็ค|ชิ้น)/g,' ').trim().split(/\s+/).slice(0,2).join(' '); i.focus(); onlPickType(i.value); } },60); }
+function onlPickClose(){ ONL_PICKING=null; renderOnl(); }
+function onlPickType(v){
+  const box=document.getElementById('onlPickRes'); if(!box) return;
+  const rs=smrPickSearch(v);
+  box.innerHTML = rs.length ? rs.map(r=>{ const rec=r.rec, nm=rec.short||rec.name;
+    const us=['CS','PA','EA'].map(u=>{ const bc=String(rec['code'+u]||'').trim(); if(!bc) return '';
+      return `<button type="button" class="btn-load" style="padding:4px 9px;font-size:12px" data-bc="${esc(bc)}" onclick="onlPickChoose(this.dataset.bc)">${SMR_UNIT_TH[u]} x${num(rec['qty'+u])||1}</button>`; }).join(' ');
+    return `<div class="smr-pickres" style="cursor:default"><b>${esc(nm)}</b><div class="mini">${esc(rec.catGroup||'')} · W4: ${esc((rec.stockRaw&&rec.stockRaw.W4)||'0')}</div><div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">${us}</div></div>`;
+  }).join('') : '<div class="mini" style="padding:6px 2px">พิมพ์ชื่อสินค้า หรือเลขบาร์โค้ด 4 หลักขึ้นไป…</div>';
+}
+function onlPickChoose(bc){
+  if(!ONL_PICKING || !bc) return;
+  const mult=Math.max(1, parseInt((document.getElementById('onlPickMult')||{}).value)||1);
+  ONL_LINKS[ONL_PICKING]={bc, mult, at:nowStamp()}; onlSaveLinks(); ONL_PICKING=null;
+  toast('🔗 จับคู่แล้ว — กำลังโหลดใหม่'); onlLoad(1,1);
+}
+function onlDropLink(key){ delete ONL_LINKS[key]; onlSaveLinks(); onlLoad(1,1); }
 function onlGoBills(){
   try{ if(typeof exportChans!=='undefined' && exportChans && exportChans.add) exportChans.add('ออนไลน์'); }catch(e){}
   bnGo('main'); switchTab('bills');
@@ -9537,14 +9585,32 @@ function renderOnl(){
   Object.entries(ONL.chErr||{}).forEach(([k,e])=>{ h+=`<div class="smr-note bad">⚠️ ${esc(k)}: ${esc(e)}</div>`; });
   h+=`<div style="display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 12px">`;
   ONL_CFG.chans.forEach(c=>{ const x=L.filter(l=>l.ch===c.key); h+=tile(new Set(x.map(l=>l.ord)).size+` <span style="font-size:12px;font-weight:600;color:#64748b">ออเดอร์ · ${x.length} บรรทัด</span>`, c.name+' · ฿'+Math.round(x.reduce((a,l)=>a+l.price*l.qty,0)).toLocaleString(), c.color); });
-  h+=tile(miss, 'บาร์ไม่พบใน PDDT (ไม่ส่ง)', miss?'#dc2626':'#16a34a');
+  const mUn=(ONL.miss||[]).filter(m=>!ONL_LINKS[m.key]), mOk=(ONL.miss||[]).length-mUn.length;
+  h+=tile(mUn.length, 'หาบาร์ไม่เจอ (รอเลือกสินค้า)'+(mOk?' · เลือกแล้ว '+mOk:''), mUn.length?'#dc2626':'#16a34a');
+  if(miss) h+=tile(miss, 'บาร์ไม่พบใน PDDT (ไม่ส่ง)', '#dc2626');
   if(ONL_SB.ok) h+=tile(inSb+' / '+L.length, 'อยู่ใน Supabase แล้ว', '#7c3aed');
   h+=`</div>`;
+  if((ONL.miss||[]).length){
+    h+=`<div class="smr-note bad" style="margin-top:4px"><b>⚠️ หาบาร์ไม่เจอ ${ONL.miss.length} รายการ</b> — มีในไฟล์ที่วาง แต่แท็บ set ของชีทแมพไม่ได้ (เลยไม่ขึ้นในแท็บ imp) · กด 🔎 เลือกสินค้า แล้วเลือกหน่วย → เข้าบิลให้เลย
+      <br><span style="font-size:11.5px">จำไว้ในเครื่องนี้ · ควรไปเติมแท็บ <b>set</b> ในชีทด้วย เครื่องอื่นจะได้เห็นเหมือนกัน · ช่อง "x กี่หน่วย" = ขาย 1 ชิ้นบน platform = กี่หน่วยของเรา (ราคาหารให้เอง)</span></div>
+    <div class="tbl-wrap" style="margin-bottom:12px"><table class="smr-tbl"><thead><tr><th>ช่องทาง</th><th>เลขออเดอร์</th><th>สินค้า platform</th><th class="num">จำนวน</th><th class="num">ราคา/ชิ้น</th><th>จับคู่</th></tr></thead><tbody>`;
+    ONL.miss.forEach(m=>{ const lk=ONL_LINKS[m.key], rec=lk?DATA.prodIdx[lk.bc]:null, lv=rec?mtfUnitOf(rec,lk.bc):'';
+      h+=`<tr class="${lk?'':'smr-badrow'}"><td>${esc(m.chName)}</td><td class="bc6">${esc(m.ord)}</td><td>${esc(m.name)}${m.vr?`<div class="mini">${esc(m.vr)}</div>`:''}</td>
+        <td class="num">${m.qty}</td><td class="num">${(m.unitPrice||0).toLocaleString()}</td>
+        <td>${lk?`✅ <b>${esc(rec?(rec.short||rec.name):lk.bc)}</b> <span class="mini">${esc(SMR_UNIT_TH[lv]||'')} ${lk.mult>1?'· x'+lk.mult:''} · ${esc(lk.bc)}</span> <button type="button" class="btn-load" style="padding:3px 8px;font-size:11.5px" data-k="${esc(m.key)}" onclick="onlPickOpen(this.dataset.k)">เปลี่ยน</button> <button type="button" class="btn-load" style="padding:3px 8px;font-size:11.5px" data-k="${esc(m.key)}" onclick="onlDropLink(this.dataset.k)">↺ ล้าง</button>`
+          :`<button type="button" class="btn-export" style="padding:5px 10px;font-size:12.5px" data-k="${esc(m.key)}" onclick="onlPickOpen(this.dataset.k)">🔎 เลือกสินค้า</button>`}</td></tr>`;
+      if(ONL_PICKING===m.key) h+=`<tr><td colspan="6" style="background:#f8fafc"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+          <input id="onlPickQ" placeholder="ค้นชื่อสินค้า / บาร์โค้ด" oninput="onlPickType(this.value)" style="flex:1;min-width:200px;padding:7px 10px;border:1.5px solid #cbd5e1;border-radius:8px;font-family:inherit">
+          <label style="font-size:12.5px">1 ชิ้นที่ขาย = <input id="onlPickMult" type="number" min="1" value="${lk&&lk.mult||1}" style="width:56px;padding:6px;border:1.5px solid #cbd5e1;border-radius:8px"> หน่วยของเรา</label>
+          <button type="button" class="btn-load" onclick="onlPickClose()">ปิด</button></div><div id="onlPickRes"></div></td></tr>`;
+    });
+    h+=`</tbody></table></div>`;
+  }
   if(!L.length){ p.innerHTML=h+(ONL.busy?'':'<div class="empty">ยังไม่มีออเดอร์ — กด 🔄 โหลด</div>'); return; }
   const rows=L.slice().sort((a,b)=>(DATA.prodIdx[a.bc]?1:0)-(DATA.prodIdx[b.bc]?1:0) || a.ch.localeCompare(b.ch) || a.ord.localeCompare(b.ord));
   h+=`<div class="tbl-wrap"><table class="smr-tbl"><thead><tr><th>ช่องทาง</th><th>เลขออเดอร์</th><th>บาร์ (เรา)</th><th>สินค้าเรา</th><th>หน่วย</th><th class="num">จำนวน</th><th class="num">แถม</th><th class="num">ราคา/หน่วย</th><th>สินค้า platform</th></tr></thead><tbody>`;
   rows.forEach(l=>{ const P=onlProd(l.bc);
-    h+=`<tr class="${P.rec?'':'smr-badrow'}"><td>${esc(l.chName)}</td><td class="bc6">${esc(l.ord)}</td><td class="bc6">${esc(l.bc)}</td>
+    h+=`<tr class="${P.rec?'':'smr-badrow'}"><td>${esc(l.chName)}</td><td class="bc6">${esc(l.ord)}${l.manual?' <span class="smr-pill">เลือกเอง</span>':''}</td><td class="bc6">${esc(l.bc)}</td>
       <td>${P.rec?esc(P.rec.short||P.rec.name):'<b style="color:#dc2626">⚠️ ไม่พบใน PDDT</b> '+esc(l.nameB)}</td><td>${esc(SMR_UNIT_TH[P.level]||'')} x${P.eaPer}</td>
       <td class="num">${l.qty}</td><td class="num">${l.free||''}</td><td class="num">${l.price.toLocaleString()}</td>
       <td style="font-size:11.5px;color:#64748b">${esc((l.pName||'').slice(0,70))}${l.pVar?' · '+esc(l.pVar.slice(0,40)):''}</td></tr>`; });
