@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana HR Docs — ออกเอกสารบุคคลอัตโนมัติ v12.6</title>
+<title>Rattana HR Docs — ออกเอกสารบุคคลอัตโนมัติ v12.7</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
@@ -2126,7 +2126,7 @@ body.dark .chip.t-memo{color:#d7aef0}
    สิทธิ์: ฝ่ายทรัพยากรบุคคลเท่านั้นที่เห็นข้อมูล/ออกเอกสาร · หัวหน้างานเห็นแค่รายการเอกสารของทีม + PDF + ส่งเอกสารกลับ
    เลขที่เอกสารรันที่หลังบ้านตอนกดออกเอกสาร (SA69-001 / S.E.B.2609/001) · รูปประกอบสวัสดิการจากคอลัมน์ "รูปภาพ" (v2.6)
    ══════════════════════════════════════════════════════════════ */
-const APP_VER = '12.6';
+const APP_VER = '12.7';
 
 /* localStorage แบบกันพัง — โหมดส่วนตัว / data: URL จะ throw ทำให้ทั้งสคริปต์ตายได้ */
 const LS = {
@@ -2367,40 +2367,75 @@ function rowsToObjs(rows) {
 }
 
 /* ══════════ Backend (Apps Script) ══════════ */
-/* v12.6 หลังบ้าน (Google Apps Script) บางช่วงตอบหน้า "ไม่พบเพจ" แทนข้อมูลเป็นพัก ๆ
-   (วัดจริง 2026-10-06: ตอบช้า 9–30 วินาที และพังราวครึ่งหนึ่งของคำขอ เป็นทั้งตัว v3.9 และ v4.1 — แอปอื่นของ Rattana ปกติ)
-   → คำสั่งที่ "อ่านอย่างเดียว" ลองใหม่ให้เองสูงสุด 3 รอบ ผู้ใช้ไม่ต้องกดเอง
-   → คำสั่งที่บันทึก (log/pdf/submit/…) ไม่ลองซ้ำ เพราะหลังบ้านอาจทำเสร็จไปแล้ว ยิงซ้ำจะได้ไฟล์/อีเมล/เลขเอกสารซ้ำ */
-const API_READ  = new Set(['data', 'team', 'cardteam', 'lookup', 'gcheck', 'empcheck', 'img', 'card', 'ping', 'login']);
-const API_TRIES = 3;
+/* v12.7 หลังบ้าน (Google Apps Script) ส่งคำตอบกลับช้า/หายเป็นพัก ๆ
+   (วัดจริง 2026-10-06: ตัวสคริปต์ทำงานเสร็จใน ~1 วินาที แต่ขั้น "ส่งคำตอบกลับ" ของ Google (script.googleusercontent.com/macros/echo)
+    ใช้ 2–48 วินาที · ราวครึ่งหนึ่งได้หน้า 404 "ไม่พบเพจ" · บางครั้งเด้งกลับไปเป็นคำตอบของ doGet — เป็นทั้งตัว v3.9 และ v4.1
+    แอปอื่นของ Rattana ณ เวลาเดียวกันตอบ 2 วินาทีปกติ)
+   → คำสั่ง "อ่านอย่างเดียว" ยิงซ้อนหลายทางพร้อมกัน เอาคำตอบแรกที่ใช้ได้ (ยิงเพิ่มทุก 4 วินาที / ทันทีเมื่อทางไหนพัง)
+   → คำสั่งที่บันทึก (log/pdf/submit/…) ยิงทางเดียว ไม่ลองซ้ำ เพราะหลังบ้านอาจทำเสร็จไปแล้ว ยิงซ้ำจะได้ไฟล์/อีเมล/เลขเอกสารซ้ำ */
+const API_READ     = new Set(['data', 'team', 'cardteam', 'lookup', 'gcheck', 'empcheck', 'img', 'card', 'ping', 'login']);
+const API_TRIES    = 3;        /* testGas ลองซ้ำกี่รอบ */
+const API_HEDGE_MS = 4000;     /* รอทางแรกนานเท่านี้แล้วยังไม่ได้ → ยิงทางใหม่ซ้อน */
+const API_MAX_PAR  = 4;        /* ยิงซ้อนพร้อมกันได้สูงสุดกี่ทาง */
+const API_MAX_TRY  = 10;       /* รวมทั้งหมดไม่เกินกี่ครั้ง */
+const API_CAP_MS   = 120000;   /* รอรวมนานสุด 2 นาที */
+const API_WRITE_MS = 180000;   /* คำสั่งบันทึก (อัป PDF ฯลฯ) รอได้นานสุด 3 นาที */
 const apiWait = ms => new Promise(r => setTimeout(r, ms));
-function apiRetryNote(n) {   /* ถ้ากำลังมีหน้าต่างรอโหลดอยู่ บอกผู้ใช้ว่ากำลังลองใหม่ จะได้ไม่คิดว่าค้าง */
+function apiRetryNote(n) {   /* ถ้ากำลังมีหน้าต่างรอโหลดอยู่ บอกผู้ใช้ว่ากำลังลองทางอื่น จะได้ไม่คิดว่าค้าง */
   const sp = $('spinner'), m = $('spinnerMsg');
   if (!sp || !m || !sp.classList.contains('show')) return;
-  m.textContent = m.textContent.replace(/ ⏳.*$/, '') + ` ⏳ หลังบ้านตอบช้า กำลังลองใหม่ (${n}/${API_TRIES})…`;
+  m.textContent = m.textContent.replace(/ ⏳.*$/, '') + ` ⏳ หลังบ้านตอบช้า กำลังลองพร้อมกันหลายทาง (ครั้งที่ ${n})…`;
+}
+/* ยิง 1 ครั้ง → คืนผลลัพธ์ JSON ที่ใช้ได้ หรือ null ถ้าพัง (ไม่ใช่ JSON / เน็ตหลุด / ถูกยกเลิก / เป็นคำตอบของ doGet) */
+async function gasTry(body, ctl) {
+  try {
+    const res  = await fetch(CONFIG.gasUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body, signal: ctl.signal });
+    const text = await res.text();
+    if (!text.trim().startsWith('{')) return null;
+    const o = JSON.parse(text);
+    /* มี service = มาจาก doGet แปลว่า Google เปลี่ยน POST เป็น GET ระหว่างทาง ข้อมูลที่ส่งไปหายหมด ห้ามรับเป็นผลลัพธ์ */
+    return (o && !o.service) ? o : null;
+  } catch (e) { return null; }
+}
+/* คำสั่งอ่าน: ยิงซ้อนหลายทาง เอาคำตอบแรกที่ใช้ได้ แล้วยกเลิกทางที่เหลือ */
+function gasRead(body) {
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now(), live = new Set();
+    let started = 0, failed = 0, done = false, timer = 0;
+    const finish = (o, err) => {
+      if (done) return; done = true; clearInterval(timer);
+      live.forEach(c => { try { c.abort(); } catch (e) { /* ข้าม */ } });
+      o ? resolve(o) : reject(err);
+    };
+    const giveUp = () => finish(null, new Error(`หลังบ้านไม่ตอบกลับ (ลองให้แล้ว ${started} ครั้ง) — ระบบ Google ตอบช้าชั่วคราว กรุณาลองใหม่อีกครั้งในอีกสักครู่`));
+    const launch = () => {
+      if (done || started >= API_MAX_TRY || live.size >= API_MAX_PAR) return;
+      const ctl = new AbortController(); live.add(ctl); started++;
+      if (started > 1) apiRetryNote(started);
+      gasTry(body, ctl).then(o => {
+        live.delete(ctl);
+        if (done) return;
+        if (o) return finish(o);
+        failed++;
+        if (failed >= API_MAX_TRY || (started >= API_MAX_TRY && !live.size)) return giveUp();
+        launch();   /* ทางนี้พัง → ยิงทางใหม่ทันที ไม่ต้องรอ */
+      });
+    };
+    launch();
+    timer = setInterval(() => { if (Date.now() - t0 > API_CAP_MS) return giveUp(); launch(); }, API_HEDGE_MS);
+  });
+}
+/* คำสั่งบันทึก: ยิงทางเดียว ไม่ลองซ้ำ */
+async function gasWrite(body) {
+  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), API_WRITE_MS);
+  const o = await gasTry(body, ctl); clearTimeout(t);
+  if (!o) throw new Error('หลังบ้านไม่ตอบกลับ — รายการนี้อาจบันทึกไปแล้ว กรุณากด 🔄 รีเฟรชตรวจดูก่อนทำซ้ำ');
+  return o;
 }
 async function api(action, payload, opts) {
   if (!CONFIG.gasUrl) throw new Error('ยังไม่ได้ตั้งค่า URL หลังบ้าน (Apps Script)');
-  const body  = JSON.stringify(Object.assign({ action, token: TOKEN.get() }, payload || {}));
-  const tries = API_READ.has(action) ? API_TRIES : 1;
-  let out = null;
-  for (let i = 1; ; i++) {
-    let text = '';
-    try {
-      const res = await fetch(CONFIG.gasUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body });
-      text = await res.text();
-    } catch (e) { text = ''; }   /* เน็ตหลุด / Google ไม่ตอบ — นับเป็นรอบที่พลาด */
-    out = null;
-    if (text.trim().startsWith('{')) { try { out = JSON.parse(text); } catch (e) { out = null; } }
-    /* คำตอบที่มี service มาจาก doGet = Google เปลี่ยนคำขอ POST เป็น GET ระหว่างทาง (เจอจริง 2026-10-06)
-       ข้อมูลที่ส่งไปหายหมด ห้ามรับเป็นผลลัพธ์ ไม่งั้นแอปจะได้ข้อมูลว่างเหมือนโหลดสำเร็จ */
-    if (out && !out.service) break;
-    if (i >= tries) throw new Error(tries > 1
-      ? `หลังบ้านไม่ตอบกลับ (ลองให้แล้ว ${tries} ครั้ง) — ระบบ Google ตอบช้าชั่วคราว กรุณาลองใหม่อีกครั้งในอีกสักครู่`
-      : 'หลังบ้านไม่ตอบกลับ — รายการนี้อาจบันทึกไปแล้ว กรุณากด 🔄 รีเฟรชตรวจดูก่อนทำซ้ำ');
-    apiRetryNote(i + 1);
-    await apiWait(800 * i);
-  }
+  const body = JSON.stringify(Object.assign({ action, token: TOKEN.get() }, payload || {}));
+  const out  = API_READ.has(action) ? await gasRead(body) : await gasWrite(body);
   if (!out.ok) {
     if (out.code === 'AUTH' && !(opts && opts.noRelogin)) { TOKEN.del(); LS.del('rhd_user'); showLoginScreen(out.error || 'กรุณาเข้าสู่ระบบใหม่'); }
     throw new Error(out.error || 'เกิดข้อผิดพลาด');
