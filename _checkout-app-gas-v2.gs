@@ -23,7 +23,7 @@
 var TARGET_SHEET_ID = '1sOB-ZemPeWqLxsK3dQuacZHgDTvYF52NwaLHGTE8NSw';   // "Check Out — ยิงเช็คออก" (ไฟล์ของแอปนี้)
 var OLD_SHEET_ID    = '1_EXR_c5qYkjILICpYyOfB48vz_CQGuQ5hjlfze84Y0g';   // ไฟล์เดิมของ Picker — ใช้แค่ตอน migrate ครั้งเดียว
 
-var VERSION = 'co-gas-v2';   // co-gas-v2: ลำดับแถวในชีท = ลำดับที่กดส่งครั้งแรก (เดิมบล็อกของคนที่เพิ่งส่งเด้งไปท้ายสุดทุกครั้ง ลำดับไม่นิ่ง) — ไว้ไล่เทียบกับที่เด้ง Discord · co-gas-v1: แยกหลังบ้านของ Check Out ออกมาเป็นโปรเจกต์ของตัวเอง · ลอก saveTransfer_/readTransfer_/clearTransfer_/saveManualTransfer_/readManualTransfer_/clearManualTransfer_/writeTab_ มาจาก Picker gas-v26 แบบไม่แก้พฤติกรรม · เปลี่ยนแค่ไฟล์ปลายทาง
+var VERSION = 'co-gas-v2';   // co-gas-v2: +2 คอลัมน์ท้ายสุด "ชื่อคนส่ง" (จาก data.sender) + "วันเวลาส่ง" (GAS ประทับเอง เวลาเซิร์ฟเวอร์ ทุกเครื่องเทียบกันได้) · แยกจาก "ชื่อผู้ยิง" เพราะเครื่องเดียวส่งแทนหลายคนได้ · ส่งซ้ำ = ลบของเดิมแล้วต่อท้ายสุดเสมอ → ลำดับในชีท = ลำดับที่ส่งจริง ไล่เทียบกับที่เด้ง Discord ได้ · co-gas-v1: แยกหลังบ้านของ Check Out ออกมาเป็นโปรเจกต์ของตัวเอง · ลอก saveTransfer_/readTransfer_/clearTransfer_/saveManualTransfer_/readManualTransfer_/clearManualTransfer_/writeTab_ มาจาก Picker gas-v26 แบบไม่แก้พฤติกรรม · เปลี่ยนแค่ไฟล์ปลายทาง
 
 var CO_TABS = ['ยิงเช็คออก', 'ยิงเช็คใบเตรียม', 'ยิงโอนย้าย', 'ตารางแบ่งของ', 'โอนย้ายสร้างเอง'];   // แท็บที่แอปนี้ดูแล (ใช้ตอน migrate/ping)
 
@@ -62,11 +62,19 @@ function saveTransfer_(data) {
     var tab = data.tab || 'ยิงโอนย้าย';
     var header = data.header || TF_SYNC_HEADER;
     var nCol = header.length;
+    /* ═══ co-gas-v2: +คอลัมน์ท้ายสุด "วันเวลาส่ง" ═══
+       ประทับฝั่ง GAS ไม่ใช่ฝั่งแอป — เวลาของเซิร์ฟเวอร์ตัวเดียว ทุกเครื่องเทียบกันได้จริง
+       (นาฬิกาในมือถือแต่ละเครื่องคลาดกันได้ · และกันเครื่องแก้เวลาเอง)
+       ใช้ไล่เทียบกับที่เด้ง Discord ว่าก้อนไหนมาตอนไหน
+       ★ แถวของเครื่องอื่น (kept) อ่าน NC คอลัมน์ เพื่อ "เก็บคนส่ง+เวลาเดิมของเขาไว้" ไม่ใช่ประทับใหม่ทั้งชีท */
+    var NC = nCol + 2, SENT_HDRS = ['ชื่อคนส่ง', 'วันเวลาส่ง'];
+    var sender = String(data.sender == null ? '' : data.sender).trim();   /* คนที่กดส่ง — คนละคนกับ "ชื่อผู้ยิง" ได้ (เครื่องเดียวส่งแทนหลายคน) · แอปรุ่นเก่าไม่ส่งมา = ว่าง */
+    var stamp = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd HH:mm:ss');
     var date = String(data.date || ''), wh = String(data.wh || ''), dev = String(data.device || '');
     var sheet = ss.getSheetByName(tab) || ss.insertSheet(tab);
     var lr = sheet.getLastRow(), lc = sheet.getLastColumn();
     var cutoff = Utilities.formatDate(new Date(Date.now() - TF_KEEP_DAYS * 86400000), 'Asia/Bangkok', 'yyyy-MM-dd');
-    var kept = [], pruned = 0, at = -1;   /* at = ตำแหน่งที่บล็อกของเครื่องนี้เคยอยู่ (co-gas-v2) */
+    var kept = [], pruned = 0;
     if (lr >= 2 && dev && lc > 0) {
       var vals = sheet.getRange(2, 1, lr - 1, lc).getValues();
       for (var i = 0; i < vals.length; i++) {
@@ -74,20 +82,22 @@ function saveTransfer_(data) {
         if (!rd) continue;                                                        // แถวเก่าไม่มี device → ทิ้ง
         var rdate = String(r[0] == null ? '' : r[0]).trim();
         if (rdate && rdate < cutoff) { pruned++; continue; }                      // auto-prune เกิน TF_KEEP_DAYS วัน
-        if (rdate === date && String(r[1]) === wh && rd === dev) { if (at < 0) at = kept.length; continue; }   // แถวเครื่องนี้ (วัน/คลังนี้) → จะแทนที่ "ที่ตำแหน่งเดิม"
-        var o = []; for (var c = 0; c < nCol; c++) o.push(r[c] == null ? '' : String(r[c])); kept.push(o);
+        if (rdate === date && String(r[1]) === wh && rd === dev) continue;        // แถวเครื่องนี้ (วัน/คลังนี้) → ลบทิ้ง แล้วชุดใหม่ไปต่อท้าย
+        var o = []; for (var c = 0; c < NC; c++) o.push(r[c] == null ? '' : String(r[c])); kept.push(o);   /* NC = เก็บ "ชื่อคนส่ง/วันเวลาส่ง" เดิมของเครื่องอื่นไว้ */
       }
     }
-    var incoming = (data.rows || []).map(function (r) { var o = []; for (var c = 0; c < nCol; c++) o.push(r[c] == null ? '' : String(r[c])); return o; });
-    /* ═══ co-gas-v2: ลำดับในชีท = ลำดับที่ "กดส่งครั้งแรก" ═══
-       เดิม kept.concat(incoming) = บล็อกของเครื่องที่เพิ่งส่ง เด้งไปต่อท้ายสุดทุกครั้ง
-       → คนส่งก่อนถูกดันขึ้นไปเรื่อย ๆ ลำดับไม่นิ่ง ไล่เทียบกับที่เด้ง Discord ไม่ได้
-       ใหม่: เคยส่งแล้ว = เขียนทับ "ที่เดิม" (at) · ยังไม่เคยส่ง = ต่อท้าย (คนมาทีหลังอยู่ล่าง) */
-    var all = (at >= 0) ? kept.slice(0, at).concat(incoming, kept.slice(at)) : kept.concat(incoming);
+    var incoming = (data.rows || []).map(function (r) {
+      var o = []; for (var c = 0; c < nCol; c++) o.push(r[c] == null ? '' : String(r[c]));
+      o.push(sender); o.push(stamp); return o; });   /* ชุดที่เพิ่งส่ง = คนส่ง+เวลาเดียวกันทั้งก้อน */
+    var all = kept.concat(incoming);   /* ส่งซ้ำ = ของเดิมถูกลบไปแล้ว ชุดใหม่ต่อท้ายสุดเสมอ */
     sheet.clearContents();
-    sheet.getRange(1, 1, sheet.getMaxRows(), nCol).setNumberFormat('@');
-    sheet.getRange(1, 1, 1, nCol).setValues([header.map(String)]);
-    if (all.length) { var rng = sheet.getRange(2, 1, all.length, nCol); rng.setValues(all); try { rng.setNumberFormat('@'); rng.setValues(all); } catch (e2) {} }
+    sheet.getRange(1, 1, sheet.getMaxRows(), NC).setNumberFormat('@');
+    sheet.getRange(1, 1, 1, NC).setValues([header.map(String).concat(SENT_HDRS)]);
+    if (all.length) {
+      for (var k = 0; k < all.length; k++) { while (all[k].length < NC) all[k].push(''); }   /* แถวเก่าที่ยังไม่มีคอลัมน์นี้ = เติมช่องว่าง */
+      var rng = sheet.getRange(2, 1, all.length, NC); rng.setValues(all);
+      try { rng.setNumberFormat('@'); rng.setValues(all); } catch (e2) {}
+    }
     return jsonOut({ ok: true, saved: incoming.length, total: all.length, pruned: pruned });
   } finally { lock.releaseLock(); }
 }
