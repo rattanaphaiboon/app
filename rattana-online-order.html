@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v4.99</title>
+<title>Rattana Online Order v5.00</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -1061,7 +1061,7 @@ body.dark .pdpa-body h4,body.dark .pdpa-body b{color:var(--gold-light,#e2c882)}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.99</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.00</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -7498,7 +7498,8 @@ function jsonpGetAt(base, params, timeoutMs){
     setTimeout(()=>fin(null), timeoutMs||5000);
   });
 }
-async function orderStatusRaw(orderId){ return await jsonpGet({action:'getOrderStatus',orderId}, 8000); }
+/* ⏱ v5.00: 20 วิ ไม่ใช่ 8 — วัดจริง /exec ตอบ 4.5-9 วิ ตั้ง 8 วิ = ทิ้งคำตอบที่กำลังจะมาถึง ยืนยันไม่สำเร็จสักที */
+async function orderStatusRaw(orderId){ return await jsonpGet({action:'getOrderStatus',orderId}, 20000); }
 function statusSupported(r){ return !!(r && Object.prototype.hasOwnProperty.call(r,'approved')); }   // backend รองรับ getOrderStatus ไหม
 /* ── verify "รายชิ้น" (v3.74) — แก้บั๊กใหญ่: บิลที่เคยยืนยันบางส่วนมีแถว "อนุมัติ" ปนอยู่
    การเช็คธง approved ระดับบิล ทำให้แอปคิดว่า "ส่งแล้ว" ทั้งที่ชิ้นใหม่ยังไม่ถูกส่ง → ไม่ส่งจริง + ล้างตะกร้า
@@ -7523,10 +7524,17 @@ function _linesOk(st,need){
    (เขียนชีท → LINE หลายก้อน → Discord → มิเรอร์ Supabase ทั้งบิล) · 90 รอบ×2วิ = 3 นาที เดิมอาจไม่พอ
    คืนจำนวนรอบ poll (รอบละ 2 วิ) : บิลเล็กเท่าเดิม / บิลใหญ่สุด ~8 นาที */
 function _pollRounds(n){ return Math.min(240, 90 + Math.ceil((n||0)/2)); }
+/* ⚡ v5.00 — จำว่าบิลไหนเคยยิงไปแล้ว (อยู่ข้ามการรีโหลด)
+   ยังไม่เคยยิง = ไม่มีทางซ้ำได้ → ข้ามเช็คก่อนส่งไปเลย (ประหยัด 5-9 วิ) */
+function _postedOnce(oid){ try{ return (JSON.parse(localStorage.getItem('rop_posted')||'[]')).indexOf(oid)>=0; }catch(e){ return false; } }
+function _markPosted(oid){ try{ const a=JSON.parse(localStorage.getItem('rop_posted')||'[]');
+  if(a.indexOf(oid)<0){ a.push(oid); lsSet('rop_posted', JSON.stringify(a.slice(-40))); } }catch(e){} }
+
 async function sendAndConfirm(payload, orderId){
   const need=_needKeys(payload);
   const nItems=(payload.items||[]).length, rounds=_pollRounds(nItems);
-  const pre=await orderStatusRaw(orderId);
+  const pre = _postedOnce(orderId) ? await orderStatusRaw(orderId) : null;
+  _markPosted(orderId);
   const preOk=_linesOk(pre,need);
   if(preOk===true) return true;                                         // กดซ้ำหลังส่งสำเร็จ (ทุกชิ้นอนุมัติแล้ว) → ไม่ส่งซ้ำ
   if(preOk===null && statusSupported(pre) && pre.approved && !pre.pending) return true;   // backend เก่า: ทั้งบิลอนุมัติหมด ไม่มีค้าง = ส่งแล้วจริง
@@ -7568,7 +7576,8 @@ async function sendAndConfirmSpecial(payload, orderId){
   const q={action:'getOrderStatus',orderId,special:1};
   const need=_needKeys(payload);
   const nItems=(payload.items||[]).length, rounds=_pollRounds(nItems);   // v3.90: ร้านส่งสั่งทีละ 200+ รายการเป็นปกติ
-  const pre=await jsonpGet(q,8000);
+  const pre = _postedOnce(orderId) ? await jsonpGet(q,20000) : null;   /* ⚡ v5.00 เหมือนร้านทั่วไป */
+  _markPosted(orderId);
   const preOk=(pre && pre.checkedSpecial) ? _linesOk(pre,need) : null;
   if(preOk===true) return true;
   if(preOk===null && pre && pre.checkedSpecial && pre.approved && !pre.pending) return true;   // .gs v1.22 (มี checkedSpecial แต่ไม่มี lines): ทั้งบิลอนุมัติหมด = ส่งแล้วจริง
@@ -7577,7 +7586,7 @@ async function sendAndConfirmSpecial(payload, orderId){
     .then(v=>{ postOk=!!v; done=true; return v; }).catch(()=>{ postOk=false; done=true; });
   for(let i=0;i<rounds;i++){
     await sleep(2000);
-    const st=await jsonpGet(q,8000);
+    const st=await jsonpGet(q,20000);
     if(st && st.checkedSpecial && _linesOk(st,need)===true) return true;
     if(done){
       if(!postOk){                                                       // v3.90: ให้โอกาสหลังบ้านเขียนจบอีก 60 วิ ก่อนตัดสินว่าล้ม (ดูคอมเมนต์ใน sendAndConfirm)
@@ -7587,11 +7596,11 @@ async function sendAndConfirmSpecial(payload, orderId){
       }
       for(let j=0;j<3;j++){
         await sleep(1500);
-        const f=await jsonpGet(q,8000);
+        const f=await jsonpGet(q,20000);
         if(f && f.checkedSpecial){ const v=_linesOk(f,need); if(v===true) return true; if(v===null && f.approved) return true; }
         if(f && !f.checkedSpecial) return true;                          // .gs เก่า (ยังเช็คชีทร้านส่งไม่ได้) → เชื่อ POST ที่จบแล้ว
       }
-      const last=await jsonpGet(q,8000);
+      const last=await jsonpGet(q,20000);
       if(last && last.checkedSpecial){ const lv=_linesOk(last,need); if(lv!==null) return lv; return !!last.approved; }
       return true;
     }
