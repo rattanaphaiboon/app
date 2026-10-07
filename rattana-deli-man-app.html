@@ -1190,7 +1190,7 @@ body.ui2 .toast{border-radius:14px}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.376';
+const APP_VERSION='3.377';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -1218,7 +1218,10 @@ const COMPANIES={
     dsdcId:'',dsdcSheet:'',   /* ยังไม่มีรายละเอียดสินค้าในบิล */
     /* ★ v3.374: ข้อมูลร้านของ Colgate (ชื่อ/ที่อยู่/เบอร์/พิกัด/เซลล์) — user ส่งชีทมา 5 ต.ค. 2026 · รหัสร้าน = คอลัมน์ "ลูกค้า" (TH60C…) ตรงกับ Customer_Code ในใบคุม
        ★ ใช้กับข้อมูลร้านอย่างเดียว — ชีท CN / CN-Sale-dman ยังอ่านจาก CFG.customerSheetId เหมือนเดิม ห้ามสลับ */
-    custSheetId:'1XCdVZ5VU72UuByO5tIvV9fbWwfJiUCFeYOzU8uh6b88',custSheetName:'Customer CG'}
+    custSheetId:'1XCdVZ5VU72UuByO5tIvV9fbWwfJiUCFeYOzU8uh6b88',custSheetName:'Customer CG',
+    /* ★ v3.377: รายละเอียดสินค้าในบิลของ Colgate (SAP export · บรรทัดละสินค้า · user ส่งมา 7 ต.ค. 2026) — คนละรูปแบบกับ DS_DC
+       ★ dsdcId ยังว่างไว้ตั้งใจ: ตัวนั้นพ่วงชีท IS (ใบรับคืน) ด้วย — ไฟล์นี้ไม่มีแท็บ IS · gviz ชื่อแท็บผิด = ได้แท็บแรกเงียบ ๆ */
+    bdGid:0,bdId:'1OepX5zLLriaixqCYvOIoZ5K5h6NF7Dz94bPQlqciSlc',bdSheet:'ชีต1'}
 };
 const CO_KEY='dman_company';
 const _LS=window.localStorage;   /* ตัวจริง ไม่ผ่านคำนำหน้า — ใช้เก็บ "บริษัทที่เลือก" ร่วมกันทั้งสองโหมด */
@@ -2136,7 +2139,84 @@ let DSDC_SHEET='DS_DC';
 const DSDC_COLS='A,B,C,E,F,G,H,I,J,K,M,N';   // DI_DATE,DI_REF,AR_CODE,SLMN_CODE,SLMN_NAME,WL_CODE,TRD_SH_CODE,SKU_NAME,TRD_UTQNAME,TRD_QTY,TRD_U_PRC,TRD_G_AMT
 const _dsdcDone={};                          // จำ query ที่ดึงแล้ว กันยิงซ้ำ
 function _dsdcEsc(v){ return String(v||'').replace(/'/g,''); }   // กัน quote ทำ query แตก
+/* ★★ v3.377: บริษัทที่มีไฟล์รายละเอียดบิลของตัวเอง (Colgate) — ผู้เรียกทุกตัวยังส่ง where แบบ DS_DC ("B = 'เลขบิล'" / "C = 'รหัสร้าน'")
+   ★ อ่านทั้งไฟล์ด้วย /export?format=csv แล้วกรองในเครื่อง — ห้ามใช้ gviz กับไฟล์นี้: คอลัมน์ Material มีทั้งเลขล้วน (61038718) และตัวอักษรผสม (TH03159A)
+     gviz เดาชนิดคอลัมน์เป็นตัวเลขแล้ว "ทิ้งค่าตัวอักษรเป็นช่องว่างเงียบ ๆ" (วัดจริง 7 ต.ค.: หาย 399 บรรทัด) · export คืนค่าดิบครบ + เรียกข้ามโดเมนได้ (ทดสอบจากหน้าแอปจริงแล้ว ~0.9MB/1 วิ)
+   ไฟล์เล็ก (ราว 3,000 บรรทัด) → อ่านครั้งเดียวเก็บไว้ 5 นาที ทุกคำขอในช่วงนั้นกรองจากก้อนเดียวกัน · แถวหัวแบบ SAP → mergeDsDc_ แปลงต่อเอง (bdCoRows_) */
+const BD_CO_TTL_MS=5*60000;
+let _bdCoAll=null, _bdCoAllTs=0, _bdCoAllP=null;
+function bdCoAll_(){
+  if(_bdCoAll&&(Date.now()-_bdCoAllTs)<BD_CO_TTL_MS) return Promise.resolve(_bdCoAll);
+  if(_bdCoAllP) return _bdCoAllP;
+  _bdCoAllP=(async()=>{
+    const url='https://docs.google.com/spreadsheets/d/'+CO.bdId+'/export?format=csv&gid='+(CO.bdGid||0);
+    const ctrl=('AbortController' in window)?new AbortController():null;
+    const to=setTimeout(()=>{ if(ctrl) ctrl.abort(); },45000);
+    try{
+      const res=await fetch(url,{cache:'no-store',signal:ctrl?ctrl.signal:undefined});
+      clearTimeout(to);
+      if(!res.ok) throw new Error('bill-detail HTTP '+res.status);
+      const rows=parseCsv(await res.text());
+      if(!rows.length||rows[0]['Document No.']===undefined) throw new Error('ไฟล์รายละเอียดบิลไม่มีหัว "Document No."');
+      _bdCoAll=rows; _bdCoAllTs=Date.now();
+      return rows;
+    }catch(e){ clearTimeout(to); throw e; }
+  })().finally(()=>{ _bdCoAllP=null; });
+  return _bdCoAllP;
+}
+async function fetchBdCo_(where){
+  const docs={}, custs={};
+  String(where).replace(/\b([BC]) = '([^']*)'/g,(m,col,v)=>{ (col==='B'?docs:custs)[String(v).trim().toUpperCase()]=1; return m; });
+  const [rows]=await Promise.all([bdCoAll_(),ensureBdCoMat_().catch(()=>{})]);
+  return rows.filter(r=>docs[String(r['Document No.']||'').trim().toUpperCase()]||custs[String(r['Customer']||'').trim().toUpperCase()]);
+}
+/* Material (รหัส SAP) → สินค้าในชีทสินค้าของบริษัท (คอลัมน์ "รหัสสินค้า") — เอาบาร์โค้ดมาให้สแกนเช็คของขึ้นรถได้ (ไฟล์บิลไม่มีบาร์โค้ด)
+   ชีทเล็ก (ราว 400 แถว / 100KB) อ่านครั้งเดียวต่อรอบเปิดแอป · อ่านไม่ได้ = ไม่มีบาร์โค้ด แต่รายการสินค้ายังขึ้นครบ */
+let _bdCoMat=null, _bdCoMatP=null;
+function ensureBdCoMat_(){
+  if(_bdCoMat) return Promise.resolve(_bdCoMat);
+  if(_bdCoMatP) return _bdCoMatP;
+  _bdCoMatP=fetchSheet(CFG.productsSheetId,CFG.productsSheetName).then(rows=>{
+    const m={};
+    (rows||[]).forEach(r=>{
+      const k=cleanCell(r['รหัสสินค้า']||''); if(!k) return;
+      m[k]={CS:code0_(r['Barcode / CTN']),PA:code0_(r['Barcode /Pack']),EA:code0_(r['Barcode /Piece']),
+            uCS:cleanCell(r['หน่วยนับ(CS)']||''),uPA:cleanCell(r['หน่วยนับ(PA)']||''),uEA:cleanCell(r['หน่วยนับ(EA)']||'')};
+    });
+    if(Object.keys(m).length) _bdCoMat=m;
+    return m;
+  }).finally(()=>{ _bdCoMatP=null; });
+  return _bdCoMatP;
+}
+/* แถว SAP → แถวรูปแบบ DS_DC · ยอดบรรทัด = Net Val + Tax (ตรวจแล้ว: รวมทั้งบิล = TotalBaht ในใบคุมพอดี)
+   บรรทัดเดียวมีทั้งลัง (Order Qty / Sales Unit 1) และชิ้น (Order Qty in EA/IP / Sales Unit 2) ได้ → แยกเป็น 2 รายการ แบ่งยอดตามจำนวนชิ้น
+   หน่วยต้องมี "(CS)" ตอนเป็นลัง — countCatCS_ นับลังจากคำนี้ · ข้ามใบลดหนี้ (Document Type RE) */
+function bdCoRows_(rows){
+  const out=[], mat=_bdCoMat||{};
+  const n=v=>parseFloat(String(cleanCell(v)||'0').replace(/,/g,''))||0;
+  const lbl={CS:'ลัง (CS)',EA:'ชิ้น (EA)',IP:'แพ็ค (IP)',PA:'แพ็ค (PA)'};
+  (rows||[]).forEach(r=>{
+    const doc=cleanCell(r['Document No.']); if(!doc) return;
+    if(/^RE$/i.test(cleanCell(r['Document Type']||''))) return;
+    const code=cleanCell(r['Material']||''), p=mat[code]||{};
+    const conv=n(r['Conv'])||1, qCS=n(r['Order Qty']), qEA=n(r['Order Qty in EA/IP']);
+    const u1=(cleanCell(r['Sales Unit 1'])||'CS').toUpperCase(), u2=(cleanCell(r['Sales Unit 2'])||'EA').toUpperCase();
+    const amt=n(r['Net Val'])+n(r['Tax']);
+    const pcs=qCS*conv+qEA;
+    const base={DI_REF:doc,AR_CODE:cleanCell(r['Customer']||''),WL_CODE:'W3',SLMN_CODE:cleanCell(r['SalesRep']||''),
+      SLMN_NAME:cleanCell(r['SalesRep Name']||'').replace(/\s+[\d-]{9,}\s*$/,''),SKU_NAME:cleanCell(r['Material Desc']||''),
+      _bcs:[p.CS,p.PA,p.EA].filter(Boolean),_mat:code};
+    const push=(q,u,a)=>{ const lab=(u==='CS'&&p.uCS)?p.uCS:(lbl[u]||u);
+      out.push(Object.assign({},base,{TRD_SH_CODE:(u==='CS'?p.CS:(u==='EA'?p.EA:p.PA))||p.EA||p.CS||'',TRD_UTQNAME:lab,
+        TRD_QTY:q,TRD_U_PRC:q?Math.round(a/q*100)/100:0,TRD_G_AMT:Math.round(a*100)/100})); };
+    if(qCS>0&&qEA>0){ const aCS=pcs?amt*(qCS*conv)/pcs:amt; push(qCS,u1,aCS); push(qEA,u2,amt-aCS); }
+    else if(qCS>0) push(qCS,u1,amt);
+    else push(qEA||0,u2,amt);
+  });
+  return out;
+}
 async function fetchDsDc_(where){
+  if(CO.bdId) return fetchBdCo_(where);   // ★ v3.377
   const tq='select '+DSDC_COLS+' where '+where;
   const url='https://docs.google.com/spreadsheets/d/'+DSDC_SRC_ID+'/gviz/tq?tqx=out:csv&sheet='+encodeURIComponent(DSDC_SHEET)+'&tq='+encodeURIComponent(tq)+'&_cb='+Date.now();
   const ctrl=('AbortController' in window)?new AbortController():null;
@@ -2150,6 +2230,7 @@ async function fetchDsDc_(where){
 }
 function mergeDsDc_(rows){
   const acc={};
+  if(rows&&rows.length&&rows[0]['Document No.']!==undefined) rows=bdCoRows_(rows);   // ★ v3.377: แถวแบบ SAP (Colgate)
   (rows||[]).forEach(r=>{
     const doc=cleanCell(r['DI_REF']); if(!doc) return;
     if(!acc[doc]) acc[doc]=[];
@@ -2165,6 +2246,7 @@ function mergeDsDc_(rows){
       price:parseFloat(cleanCell(r['TRD_U_PRC']||'0').replace(/,/g,''))||0,
       amount:parseFloat(cleanCell(r['TRD_G_AMT']||'0').replace(/,/g,''))||0,
     });
+    if(r._bcs&&r._bcs.length){ const it=acc[doc][acc[doc].length-1]; it.barcodes=r._bcs; it.matCode=r._mat||''; }   // ★ v3.377: บาร์โค้ดทุกหน่วยของสินค้า (สแกนหน่วยไหนก็ติด)
   });
   Object.keys(acc).forEach(d=>{ state.billDetails[d]=acc[d]; });   // แทนที่ทีละบิล (ดึงซ้ำก็ไม่เบิ้ล)
   try{ setCachedSheet(BILLDETAILS_CACHE_KEY,state.billDetails); }catch(e){}
@@ -6970,6 +7052,7 @@ async function buildScanItems(b){
     }
     const it=byName[key];
     const c=normBC(bd.barcode); if(c) it.codes.add(c);
+    (bd.barcodes||[]).forEach(x=>{ const c2=normBC(x); if(c2) it.codes.add(c2); });   // ★ v3.377
     const u=bd.unit||'-'; it.qtyByUnit[u]=(it.qtyByUnit[u]||0)+(bd.qty||0);
     it.amount+=(bd.amount||0);
   });
