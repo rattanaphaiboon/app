@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v5.03</title>
+<title>Rattana Online Order v5.04</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -1061,7 +1061,7 @@ body.dark .pdpa-body h4,body.dark .pdpa-body b{color:var(--gold-light,#e2c882)}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.03</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.04</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -7764,19 +7764,53 @@ self.onmessage = async function(e){
 let PRODUCTS_WORKER_URL=null;
 try{ if(typeof Worker!=='undefined' && typeof Blob!=='undefined' && URL.createObjectURL){ PRODUCTS_WORKER_URL=URL.createObjectURL(new Blob([PRODUCTS_WORKER_SRC],{type:'text/javascript'})); } }catch(e){}
 function productsCsvUrl(){ return 'https://docs.google.com/spreadsheets/d/'+CFG.productsSheetId+'/gviz/tq?tqx=out:csv&gid='+CFG.productsGid; }
-function fetchProductsMainThread(){ return fetchCsvGid(CFG.productsSheetId,CFG.productsGid).then(slimProducts); }
+/* ⚡ v5.04 (Surat 07/10: "โหลดสินค้าตอนเข้าแอปช้ามาก") — ขอเฉพาะคอลัมน์ที่แอปใช้ (PRODUCT_COLS 67 จาก 132)
+   วัดจริง 07/10: ทั้งแผ่น 17 MB ใช้ 76 วิ · เลือกคอลัมน์ 10.6 MB ใช้ 21 วิ (เวลาส่วนใหญ่คือ Google สร้างไฟล์ ไม่ใช่เน็ต)
+   หาตัวอักษรคอลัมน์จากชื่อหัวด้วย "limit 0" ทุกครั้ง (ห้าม hardcode — ชีทเพิ่ม/ย้ายคอลัมน์ได้) · จำไว้ในหน่วยความจำ
+   ผลเหมือนเดิมทุกช่อง: worker ยังเลือกคอลัมน์ด้วย "ชื่อหัว" เหมือนเดิม · หาหัวไม่ได้/ได้น้อยผิดปกติ = ใช้ลิงก์ทั้งแผ่นแบบเดิม */
+let _prodSelUrl=null;
+/* ถามหัวคอลัมน์ใช้ 2-10 วิ (Google ต้องเปิดชีททั้งแผ่น) → จำลิงก์ไว้ในเครื่อง 24 ชม. แล้วค่อยถามใหม่เบื้องหลัง
+   ถ้าชีทย้ายคอลัมน์ระหว่างนั้น: ข้อมูลที่ได้จะขาดคอลัมน์ → _prodSlimBad() จับได้ → ล้างที่จำไว้แล้วดึงทั้งแผ่นแทนทันที */
+const PROD_SEL_KEY='rop_prodsel_v1';
+function _prodSlimBad(rows){ try{ return !rows || !rows.length || !rows[0]['PRODUCT NAME'] && rows.slice(0,50).every(r=>!r['PRODUCT NAME']) || Object.keys(rows[0]).length<PRODUCT_COLS.length*0.8; }catch(e){ return true; } }
+async function productsCsvUrlSlim(){
+  if(_prodSelUrl) return _prodSelUrl;
+  let c=null;
+  try{ c=JSON.parse(localStorage.getItem(PROD_SEL_KEY)||'null'); }catch(e){}
+  if(!c){ try{ c=await idbGet(PROD_SEL_KEY); }catch(e){} }                 /* localStorage โดเมนนี้เต็มบ่อย → สำรองใน IndexedDB */
+  if(c && c.url && Date.now()-c.ts<24*3600*1000){ _prodSelUrl=c.url; return c.url; }
+  const u=await _productsCsvUrlSlimFetch();
+  if(u!==productsCsvUrl()){ const v={url:u, ts:Date.now()}; try{ lsSet(PROD_SEL_KEY, JSON.stringify(v)); }catch(e){} try{ idbSet(PROD_SEL_KEY, v); }catch(e){} }
+  return u;
+}
+async function _productsCsvUrlSlimFetch(){
+  try{
+    const ctl=(typeof AbortController!=='undefined')?new AbortController():null;
+    const tm=ctl?setTimeout(()=>{ try{ctl.abort();}catch(e){} },15000):null;
+    let txt; try{ txt=await (await fetch('https://docs.google.com/spreadsheets/d/'+CFG.productsSheetId+'/gviz/tq?tqx=out:json&gid='+CFG.productsGid+'&tq='+encodeURIComponent('limit 0'), ctl?{signal:ctl.signal}:undefined)).text(); }
+    finally{ if(tm) clearTimeout(tm); }
+    const j=JSON.parse(txt.match(/setResponse\(([\s\S]*?)\);?\s*$/)[1]);
+    const byLab={}; (j.table.cols||[]).forEach(c=>{ const l=clean(c.label||''); if(l && !byLab[l]) byLab[l]=c.id; });
+    const ids=PRODUCT_COLS.map(c=>byLab[c]).filter(Boolean);
+    if(!byLab['PRODUCT NAME'] || ids.length<PRODUCT_COLS.length*0.8) return productsCsvUrl();   /* หัวเปลี่ยนเยอะ = ไม่เสี่ยง ใช้ทั้งแผ่น */
+    _prodSelUrl=productsCsvUrl()+'&tq='+encodeURIComponent('select '+ids.join(','));
+    return _prodSelUrl;
+  }catch(e){ console.warn('[products] หาคอลัมน์ไม่ได้ ใช้ทั้งแผ่น',e&&e.message); return productsCsvUrl(); }
+}
+function fetchProductsMainThread(){ return productsCsvUrlSlim().then(u=>fetch(u)).then(r=>{ if(!r.ok) throw new Error('fetch'); return r.text(); }).then(t=>slimProducts(parseCsv(t))); }   /* v5.04: เลือกคอลัมน์ */
 function fetchProductsSmart(){
   if(!PRODUCTS_WORKER_URL) return fetchProductsMainThread();
-  return new Promise(function(resolve,reject){
+  return productsCsvUrlSlim().then(function(_url){ return new Promise(function(resolve,reject){   /* v5.04: ลิงก์เลือกคอลัมน์ */
     var w; try{ w=new Worker(PRODUCTS_WORKER_URL); }catch(e){ return fetchProductsMainThread().then(resolve,reject); }
     var settled=false;
     function fin(fn,v){ if(settled)return; settled=true; try{w.terminate();}catch(e){} fn(v); }
     function fallback(){ if(settled)return; fetchProductsMainThread().then(function(v){fin(resolve,v);},function(er){fin(reject,er);}); }
     w.onmessage=function(e){ var m=e.data||{}; if(m.ok) fin(resolve,m.data); else fallback(); };
     w.onerror=function(){ fallback(); };
-    try{ w.postMessage({url:productsCsvUrl(), cols:PRODUCT_COLS}); }catch(e){ fallback(); }
-    setTimeout(fallback, 30000);
-  });
+    try{ w.postMessage({url:_url, cols:PRODUCT_COLS}); }catch(e){ fallback(); }
+    /* v5.04: 30 → 90 วิ — เดิมเกิน 30 วิ (ปกติตอนชีทช้า) แล้วดึงไฟล์ก้อนเดิมซ้ำบนหน้าจอหลัก = โหลด 2 รอบ + จอค้างตอนแกะไฟล์ */
+    setTimeout(fallback, 90000);
+  }); });
 }
 // เซ็ตข้อมูลเข้าตัวแปร + สร้าง index (ใช้ซ้ำทั้งตอนวาดจากแคชและจากเน็ต)
 /* ชีทรับเคลม: Vendor code (col A) → เครดิต (col G) — ใช้จับสินค้าเข้าชื่อร้านตามวันเครดิต */
@@ -7841,9 +7875,15 @@ async function loadAll(silent){
   else if(!silent){ showSpinner('กำลังโหลดสินค้า...'); }
   try{
     loadHeadPhones();                       /* v4.22: ยิงคู่ขนานตั้งแต่ต้น ไม่ await (login ค่อย await) */
-    let prod;
-    try{ prod=await fetchProductsSmart(); idbSet('rop_products',prod); }   // ⚡ parse ใน Web Worker (UI ไม่ค้าง) — มี fallback เมน thread
-    catch(e){ if(!prodCache) throw e; prod=prodCache; }   // เน็ตล่ม → ใช้แคช
+    /* ⚡ v5.04: ยิงสินค้าคู่ขนานกับข้อมูลชุดเล็ก — เดิมรอสินค้าเสร็จก่อน (20-76 วิ) แล้วค่อยเริ่มโหลด ลูกค้า/โปร/ทะเบียน */
+    const prodP=fetchProductsSmart()
+      .then(p=>{ if(!_prodSlimBad(p)) return p;                                          /* ลิงก์เลือกคอลัมน์ที่จำไว้เก่าแล้ว (ชีทย้ายคอลัมน์) */
+        console.warn('[products] ข้อมูลเลือกคอลัมน์ไม่ครบ — ล้างที่จำไว้ ดึงทั้งแผ่นแทน');
+        try{ localStorage.removeItem(PROD_SEL_KEY); }catch(e){} try{ idbSet(PROD_SEL_KEY,null); }catch(e){}
+        _prodSelUrl=productsCsvUrl(); return fetchProductsSmart(); })
+      .then(p=>{ idbSet('rop_products',p); return p; })   // ⚡ parse ใน Web Worker (UI ไม่ค้าง) — มี fallback เมน thread
+      .catch(e=>{ if(!prodCache) throw e; return prodCache; });                         // เน็ตล่ม → ใช้แคช
+    prodP.catch(()=>{});   /* กัน unhandled rejection ระหว่างรอชุดเล็ก (ยัง await ข้างล่างตามเดิม) */
     const [promo,users,cust,ea,whmap,special,vendordata,override,specialPrice,dcwh]=await Promise.all([
       getData('rop_promo',()=>fetchCsvExport(CFG.promoSheetId,CFG.promoGid)),
       getData('rop_users',()=>fetchCsvGid(CFG.usersSheetId,CFG.usersGid)),
@@ -7860,6 +7900,7 @@ async function loadAll(silent){
       // ล้มแล้วไม่ทำให้ทั้งแอปล่ม (คืน {} → warehouseForCustomer ตกไปใช้ชีท Users แบบเดิม)
       getData('rop_dcwh',()=>fetchCsvExport(CFG.regSheetId,CFG.geoGid).then(buildDcWh)).catch(()=>({})),
     ]);
+    const prod=await prodP;
     applyData(prod,promo,users,cust,ea,whmap,special,vendordata,override,specialPrice,dcwh);
     await resolveLogin();
     ensureUidLinked(currentCustomer);   // เผื่อมี LINE uid ใหม่ที่ยังไม่ผูกกับร้าน
