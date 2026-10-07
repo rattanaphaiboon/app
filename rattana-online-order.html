@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v5.01</title>
+<title>Rattana Online Order v5.02</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -1061,7 +1061,7 @@ body.dark .pdpa-body h4,body.dark .pdpa-body b{color:var(--gold-light,#e2c882)}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.01</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.02</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -5436,8 +5436,14 @@ async function qCapKeyReady(key){
 /* ── เพดานรายร้าน (§7) - สูตรนี้ Surat เคาะเอง ห้ามเปลี่ยน ── */
 async function qShopCap(rule, shopCode){
   if(qtNorm(rule.share)!==qtNorm('ตามที่เคยซื้อ')) return null;      /* ก่อนได้ก่อน = ไม่มีเพดานรายร้าน */
-  if(!shopCode) return null;
   const key=rule.by+'|'+rule.val;
+  /* 🐛 v5.02 (Surat 07/10: "โต๋ ค้าส่งอ้อมน้อย สั่งสามแม่ครัวได้ 20 ลัง ทั้งที่ควรได้ลังเดียว")
+     เดิม: ร้านที่ "รหัสร้านว่าง" ในทะเบียน → return null = ข้ามเพดานรายร้านทั้งหมด เหลือแค่ก้อนรวม 1,000 ลัง
+     ร้านไม่มีรหัส = ไม่มีทางอยู่ในตาราง QuotaShopCap อยู่แล้ว → ใช้กติกาเดียวกับ "ร้านที่ไม่มีชื่อในตาราง" = 1 ลัง */
+  if(!shopCode){
+    if(!(await qCapKeyReady(key))) return null;                      /* ตารางเพดานของกติกานี้ยังไม่มี = เหมือน v4.79 */
+    return { cap:1, hist:0, why:'ร้านนี้ยังไม่มีรหัสร้านในระบบ - ซื้อได้สูงสุด 1 ลังทั้งรอบ' };
+  }
   const grp=qGrpOf(shopCode);   /* 👨‍👩‍👧 v4.82: ทุกรหัสของลูกค้าคนเดียวกัน (ไม่อยู่กลุ่มไหน = [รหัสตัวเอง] = เหมือนเดิมเป๊ะ) */
   const tq='select A,B,C,D where A = "'+key.replace(/"/g,'')+'" and '
     + (grp.length>1 ? qMatchesClause('B',grp) : ('B = "'+String(shopCode).replace(/"/g,'')+'"'));
@@ -5475,45 +5481,69 @@ function qMatchesClause(col, bcs){
    แก้: ไม่กรองรหัสร้านในคิวรี่แล้ว -> group by รหัสร้าน แล้วเทียบเองแบบ string (กันทั้ง number/text/0 นำหน้า)
    ผลพลอยได้: ได้ทั้ง "ก้อนรวม" และ "ยอดร้านนี้" จากคิวรี่เดียว -> คำขอลดจาก 8 เหลือ 4 ต่อ 1 แถวโควต้า */
 function qCode(v){ return String(v==null?'':v).trim().replace(/\.0+$/,''); }
+/* วันที่จาก gviz → 'YYYY/MM/DD' (คอลัมน์ date มาเป็น "Date(2026,9,7)" เดือนเริ่ม 0 · คอลัมน์ข้อความมาเป็น "2026/10/07") */
+function qDayKey(v){
+  const s=String(v==null?'':v), m=s.match(/^Date\((\d+),(\d+),(\d+)/);
+  if(m) return m[1]+'/'+String(+m[2]+1).padStart(2,'0')+'/'+String(+m[3]).padStart(2,'0');
+  const t=s.match(/^(\d{4})[\/-](\d{2})[\/-](\d{2})/); return t?(t[1]+'/'+t[2]+'/'+t[3]):'';
+}
+function qYesterday(){ const d=new Date(); d.setDate(d.getDate()-1); return d.getFullYear()+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+String(d.getDate()).padStart(2,'0'); }
 async function qUsedFor(rule, bcs, bcMap, shopCode, draftOid){
-  const today=qToday(), tISO=today.replace(/\//g,'-');
+  const today=qToday(), yday=qYesterday(), yISO=yday.replace(/\//g,'-');
   const from=rule.from||'2000/01/01', to=rule.to||'2999/12/31';
   const mBill=qMatchesClause('H',bcs), mOrd=qMatchesClause('J',bcs);
-  const rooJob=gid=>({ src:'roo', sheet:CFG.regSheetId, ref:{gid:gid},
+  const want=qCode(shopCode);
+  /* 🐛 v5.02 — ร้านไม่มีรหัสร้าน: นับยอดที่ใช้ไปในแท็บ ROO ด้วย "ชื่อร้าน" (คอลัมน์ G) แทน
+     (เดิม want ว่าง = ยอดร้านเป็น 0 ตลอด → ซื้อ 1 ลัง ยืนยัน แล้วซื้อได้อีก 1 ลังวนไม่จบ) */
+  const wantName=want ? '' : clean((currentCustomer||{}).name||'');
+  /* 🐛 v5.02 (Surat 07/10 — ร้านประสิทธิ์ กระทุ่มแบน เพดาน 10 ลัง ได้ไป 20: สั่ง 10 ตอน 20.40 น. แล้วอีก 10 ตอน 00.38 น.)
+     เดิม: ใช้ไป = บิลจริง + ที่คีย์ "เฉพาะวันนี้" → ข้ามเที่ยงคืนแล้ว ออเดอร์เมื่อวานที่ยังไม่ออกบิลหายจากการนับ
+     ตอนนี้: ใช้ไป = บิลจริง + คีย์วันนี้ + (คีย์เมื่อวาน − บิลที่ออกตั้งแต่เมื่อวาน) ถ้าเป็นบวก
+       = ออเดอร์เมื่อวานนับเฉพาะส่วนที่บิลยังตามไม่ทัน → ออกบิลแล้วไม่นับซ้ำ (สูตรเดิมของ Surat ไม่เปลี่ยน) */
+  const rooJob=gid=>({ src:'roo', sheet:CFG.regSheetId, ref:{gid:gid}, di:0,
     /* "วัน" ของแท็บ ROO เป็น type date (ต่างจาก DS_DC/Sales ที่เป็น text) -> ต้องใช้ date literal
        ตัดบิลร่างของตัวเองออก กันหักซ้ำกับตะกร้าในเครื่อง */
-    tq:'select H,J,N,sum(M) where ('+mOrd+') and A >= date "'+tISO+'" and (L is null or L = "")'
+    tq:'select A,'+(want?'H':'G')+',J,N,sum(M) where ('+mOrd+') and A >= date "'+yISO+'" and (L is null or L = "")'
        +' and (U = "รออนุมัติ" or U = "อนุมัติ")'
-       +(draftOid?(' and Q != "'+String(draftOid).replace(/"/g,'')+'"'):'')+' group by H,J,N' });
+       +(draftOid?(' and Q != "'+String(draftOid).replace(/"/g,'')+'"'):'')+' group by A,'+(want?'H':'G')+',J,N' });
   const jobs=[
-    { src:'bill', sheet:QCFG.erpSheet, ref:{sheet:'DS_DC'},
-      tq:'select C,H,J,sum(K) where ('+mBill+') and A >= "'+from+'" and A <= "'+to+'" group by C,H,J' },
-    { src:'sale', sheet:QCFG.salesSheet, ref:{sheet:'Order'},
+    { src:'bill', sheet:QCFG.erpSheet, ref:{sheet:'DS_DC'}, di:0,
+      tq:'select A,C,H,J,sum(K) where ('+mBill+') and A >= "'+from+'" and A <= "'+to+'" group by A,C,H,J' },
+    { src:'sale', sheet:QCFG.salesSheet, ref:{sheet:'Order'}, di:-1,
       tq:'select H,J,N,sum(M) where ('+mOrd+') and A = "'+today+'" and (L is null or L = "") group by H,J,N' },
     rooJob(QCFG.rooOrderGid), rooJob(QCFG.rooSpecialGid)
   ];
-  const want=qCode(shopCode);
   const wantSet=new Set(qGrpOf(shopCode));   /* 👨‍👩‍👧 v4.82: ยอดที่ใช้ไปต้องนับ "ทุกรหัสของลูกค้าคนเดียวกัน" ให้ตรงกับเพดานที่รวมกลุ่มแล้ว */
   const res=await Promise.all(jobs.map(async j=>{
     try{
       const t=await qGviz(j.sheet, j.ref, j.tq, QCFG.usedMs);   /* v4.83: งานเบื้องหลัง ให้เวลามากกว่า 12 วิ */
-      let pool=0, shop=0;
+      const o=j.di>=0?1:0;                                       /* มีคอลัมน์วันที่นำหน้า = ขยับ index 1 */
+      let pool=0, shop=0, poolY=0, shopY=0, poolR=0, shopR=0;
       t.rows.forEach(r=>{
-        const p=bcMap[qBc(r[1])] || bcMap[qBc(r[1]).replace(/^0+/,'')];
+        const p=bcMap[qBc(r[o+1])] || bcMap[qBc(r[o+1]).replace(/^0+/,'')];
         if(!p) return;
-        const cs=qToCases(p, qUnitLabel(r[2]), r[3]);
-        pool+=cs;
-        if(want && wantSet.has(qCode(r[0]))) shop+=cs;   /* v4.82: เดิมเทียบรหัสเดียว */
+        const cs=qToCases(p, qUnitLabel(r[o+2]), r[o+3]);
+        const mine=want ? wantSet.has(qCode(r[o])) : (!!wantName && clean(r[o])===wantName);   /* v4.82 กลุ่มรหัส · v5.02 ไม่มีรหัส = ชื่อร้าน */
+        const day=j.di>=0 ? qDayKey(r[j.di]) : today;
+        if(j.src==='bill'){
+          pool+=cs; if(mine) shop+=cs;
+          if(day && day>=yday){ poolR+=cs; if(mine) shopR+=cs; }      /* บิลที่ออกตั้งแต่เมื่อวาน (ไว้หักออเดอร์เมื่อวาน) */
+        }else if(day===today){ pool+=cs; if(mine) shop+=cs; }
+        else if(day===yday){ poolY+=cs; if(mine) shopY+=cs; }
       });
-      return { src:j.src, pool, shop, rows:t.rows.length };
+      return { src:j.src, pool, shop, poolY, shopY, poolR, shopR, rows:t.rows.length };
     }catch(e){ console.warn('[quota] '+j.src+' ล้ม:',e&&e.message); return { src:j.src, err:String(e&&e.message||e) }; }
   }));
   const bad=res.filter(r=>r.err);
   const sum=(k,f)=>res.filter(r=>!r.err&&(!f||f(r))).reduce((a,b)=>a+(b[k]||0),0);
+  /* บิลอ่านไม่ได้ = ไม่รู้ว่าออเดอร์เมื่อวานออกบิลไปหรือยัง → ไม่บวกส่วนนี้ (fail-open ทางเดียวกับเดิม) */
+  const billOk=res.some(r=>r.src==='bill'&&!r.err);
+  const lagPool=billOk ? Math.max(0, sum('poolY')-sum('poolR')) : 0;
+  const lagShop=billOk ? Math.max(0, sum('shopY')-sum('shopR')) : 0;
   return { ok:!bad.length, err:bad.map(b=>b.src).join(','),
     srcOk:res.length-bad.length, srcAll:res.length,   /* 🐛 v4.83: แหล่งไหนสำเร็จบ้าง — ใช้ตัดสินว่าด่านทำงานต่อได้ไหม */
-    pool:sum('pool'), shop:sum('shop'),
-    detail:{ bill:sum('shop',r=>r.src==='bill'), today:sum('shop',r=>r.src!=='bill') } };
+    pool:sum('pool')+lagPool, shop:sum('shop')+lagShop,
+    detail:{ bill:sum('shop',r=>r.src==='bill'), today:sum('shop',r=>r.src!=='bill'), yLag:lagShop } };
 }
 /* ── โหลดสถานะโควต้าทั้งหมด (เรียกหลังล็อกอิน + หลังยืนยันออเดอร์) ── */
 async function quotaBoot(force){
@@ -5877,6 +5907,7 @@ function quotaInfo(name){
   if(st.detail){
     rows.push(['ร้านนี้ออกบิลไปแล้ว', num(st.detail.bill)+' ลัง']);
     if(st.detail.today>0) rows.push(['สั่งวันนี้ (ยังไม่ออกบิล)', num(st.detail.today)+' ลัง']);
+    if(st.detail.yLag>0) rows.push(['สั่งเมื่อวาน (ยังไม่ออกบิล)', num(st.detail.yLag)+' ลัง']);   /* v5.02 */
   }
   if(inCart>0) rows.push(['อยู่ในตะกร้าตอนนี้', num(inCart)+' ลัง']);
   rows.push(['เหลือสั่งได้อีก', (left==null?'ไม่จำกัด':num(Math.max(0,left-inCart))+' ลัง')]);
