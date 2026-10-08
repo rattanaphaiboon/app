@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v5.04</title>
+<title>Rattana Online Order v5.05</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -1061,7 +1061,7 @@ body.dark .pdpa-body h4,body.dark .pdpa-body b{color:var(--gold-light,#e2c882)}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.04</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.05</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -5487,63 +5487,88 @@ function qDayKey(v){
   if(m) return m[1]+'/'+String(+m[2]+1).padStart(2,'0')+'/'+String(+m[3]).padStart(2,'0');
   const t=s.match(/^(\d{4})[\/-](\d{2})[\/-](\d{2})/); return t?(t[1]+'/'+t[2]+'/'+t[3]):'';
 }
-function qYesterday(){ const d=new Date(); d.setDate(d.getDate()-1); return d.getFullYear()+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+String(d.getDate()).padStart(2,'0'); }
+/* 🔴 v5.05 (Surat 08/10: "โควต้าหลุดหลายรอบแล้ว ต้องเด้งตั้งแต่ร้านเข้าระบบ")
+   ต้นเหตุ: แหล่ง "บิลจริง" DS_DC (8.3 หมื่นแถว) ตอบช้าเกิน 45 วิ **ทุกครั้ง** (วัด 08/10: ขอแค่ 3 แถวยังค้างเกิน 2 นาที)
+     ① ด่านต้องรอแหล่งนี้ → โหลดเสร็จ 46 วิหลังเข้าแอป · กดยืนยันในช่วงนั้นด่านสุดท้ายรอ 15 วิแล้วปล่อยผ่าน
+        เคสจริง: ร้านเฮียโต๋ค้าส่ง (อ้อมน้อย) เพดาน 1 ลัง → 07/10 แมกเคอเรล 20 ลัง · 08/10 ซาร์ดีน 10 ลัง
+     ② ยอดบิลไม่เคยถูกนับเลย = ซื้อเว้นวันได้เรื่อย ๆ (นับแค่ที่คีย์วันนี้)
+   แก้: ยอด ROO ทั้งรอบโควต้า (ตั้งแต่เริ่มโปรถึงเมื่อวาน) อ่านจาก **Supabase roo_sales + roo_special_sales** (~0.3 วิ เก็บย้อนหลัง 2 เดือน)
+        + ที่คีย์ "วันนี้" จากแท็บ ROO (รวมตะกร้า) + Sales App วันนี้ · เลิกยิง DS_DC (ไม่เคยตอบทัน + กินโควต้า gviz ของทุกเครื่อง)
+   ⚠️ ยอดบิลจากช่องทางอื่น (Sales App) ก่อนวันนี้ยังไม่ถูกนับ — เท่ากับของเดิมที่ DS_DC ไม่เคยตอบ */
+async function qSupaRows(table, bcs, fromISO, toISO){
+  const enc=s=>encodeURIComponent('"'+s+'"');
+  const sel='select='+[enc('รหัสร้าน'),enc('ชื่อร้าน'),'Barcode',enc('หน่วย'),enc('จำนวน'),enc('ยกเลิก')].join(',');
+  const list=[]; bcs.forEach(b=>qBcKeys(b).forEach(k=>{ if(list.indexOf(k)<0) list.push(k); }));
+  const flt='&Barcode=in.('+list.map(encodeURIComponent).join(',')+')'
+    +'&'+enc('วัน')+'=gte.'+fromISO+'&'+enc('วัน')+'=lt.'+toISO
+    +'&'+enc('สถานะอนุมัติ')+'=eq.'+encodeURIComponent('อนุมัติ');
+  const out=[];
+  for(let off=0; off<20000; off+=1000){
+    const ctl=(typeof AbortController!=='undefined')?new AbortController():null;
+    const tm=ctl?setTimeout(()=>{ try{ctl.abort();}catch(e){} },15000):null;
+    let rows;
+    try{
+      const r=await fetch(CFG.SUPABASE_URL+'/rest/v1/'+table+'?'+sel+flt+'&limit=1000&offset='+off,
+        { headers:{ apikey:CFG.SUPABASE_ANON_KEY, Authorization:'Bearer '+CFG.SUPABASE_ANON_KEY }, signal:ctl?ctl.signal:undefined });
+      if(!r.ok) throw new Error('supabase '+r.status);
+      rows=await r.json();
+    }finally{ if(tm) clearTimeout(tm); }
+    rows.forEach(x=>out.push(x));
+    if(rows.length<1000) break;
+  }
+  return out;
+}
 async function qUsedFor(rule, bcs, bcMap, shopCode, draftOid){
-  const today=qToday(), yday=qYesterday(), yISO=yday.replace(/\//g,'-');
-  const from=rule.from||'2000/01/01', to=rule.to||'2999/12/31';
-  const mBill=qMatchesClause('H',bcs), mOrd=qMatchesClause('J',bcs);
+  const today=qToday(), tISO=today.replace(/\//g,'-');
+  const from=rule.from||'2000/01/01';
+  const fISO=from.replace(/\//g,'-');
+  const mOrd=qMatchesClause('J',bcs);
   const want=qCode(shopCode);
-  /* 🐛 v5.02 — ร้านไม่มีรหัสร้าน: นับยอดที่ใช้ไปในแท็บ ROO ด้วย "ชื่อร้าน" (คอลัมน์ G) แทน
-     (เดิม want ว่าง = ยอดร้านเป็น 0 ตลอด → ซื้อ 1 ลัง ยืนยัน แล้วซื้อได้อีก 1 ลังวนไม่จบ) */
+  /* v5.02: ร้านไม่มีรหัสร้าน = จับยอดที่ใช้ไปด้วย "ชื่อร้าน" */
   const wantName=want ? '' : clean((currentCustomer||{}).name||'');
-  /* 🐛 v5.02 (Surat 07/10 — ร้านประสิทธิ์ กระทุ่มแบน เพดาน 10 ลัง ได้ไป 20: สั่ง 10 ตอน 20.40 น. แล้วอีก 10 ตอน 00.38 น.)
-     เดิม: ใช้ไป = บิลจริง + ที่คีย์ "เฉพาะวันนี้" → ข้ามเที่ยงคืนแล้ว ออเดอร์เมื่อวานที่ยังไม่ออกบิลหายจากการนับ
-     ตอนนี้: ใช้ไป = บิลจริง + คีย์วันนี้ + (คีย์เมื่อวาน − บิลที่ออกตั้งแต่เมื่อวาน) ถ้าเป็นบวก
-       = ออเดอร์เมื่อวานนับเฉพาะส่วนที่บิลยังตามไม่ทัน → ออกบิลแล้วไม่นับซ้ำ (สูตรเดิมของ Surat ไม่เปลี่ยน) */
-  const rooJob=gid=>({ src:'roo', sheet:CFG.regSheetId, ref:{gid:gid}, di:0,
-    /* "วัน" ของแท็บ ROO เป็น type date (ต่างจาก DS_DC/Sales ที่เป็น text) -> ต้องใช้ date literal
-       ตัดบิลร่างของตัวเองออก กันหักซ้ำกับตะกร้าในเครื่อง */
-    tq:'select A,'+(want?'H':'G')+',J,N,sum(M) where ('+mOrd+') and A >= date "'+yISO+'" and (L is null or L = "")'
+  const wantSet=new Set(qGrpOf(shopCode));   /* 👨‍👩‍👧 v4.82: ทุกรหัสของลูกค้าคนเดียวกัน */
+  const isMine=(code,name)=> want ? wantSet.has(qCode(code)) : (!!wantName && clean(name)===wantName);
+  const lookup=bc=>bcMap[qBc(bc)] || bcMap[qBc(bc).replace(/^0+/,'')];
+  /* วันนี้: แท็บ ROO (รวมตะกร้ารออนุมัติ · ตัดบิลร่างของตัวเอง) + Sales App */
+  const rooJob=gid=>({ src:'roo', sheet:CFG.regSheetId, ref:{gid:gid},
+    tq:'select '+(want?'H':'G')+',J,N,sum(M) where ('+mOrd+') and A >= date "'+tISO+'" and (L is null or L = "")'
        +' and (U = "รออนุมัติ" or U = "อนุมัติ")'
-       +(draftOid?(' and Q != "'+String(draftOid).replace(/"/g,'')+'"'):'')+' group by A,'+(want?'H':'G')+',J,N' });
-  const jobs=[
-    { src:'bill', sheet:QCFG.erpSheet, ref:{sheet:'DS_DC'}, di:0,
-      tq:'select A,C,H,J,sum(K) where ('+mBill+') and A >= "'+from+'" and A <= "'+to+'" group by A,C,H,J' },
-    { src:'sale', sheet:QCFG.salesSheet, ref:{sheet:'Order'}, di:-1,
+       +(draftOid?(' and Q != "'+String(draftOid).replace(/"/g,'')+'"'):'')+' group by '+(want?'H':'G')+',J,N' });
+  const gvizJobs=[
+    { src:'sale', sheet:QCFG.salesSheet, ref:{sheet:'Order'},
       tq:'select H,J,N,sum(M) where ('+mOrd+') and A = "'+today+'" and (L is null or L = "") group by H,J,N' },
     rooJob(QCFG.rooOrderGid), rooJob(QCFG.rooSpecialGid)
   ];
-  const wantSet=new Set(qGrpOf(shopCode));   /* 👨‍👩‍👧 v4.82: ยอดที่ใช้ไปต้องนับ "ทุกรหัสของลูกค้าคนเดียวกัน" ให้ตรงกับเพดานที่รวมกลุ่มแล้ว */
-  const res=await Promise.all(jobs.map(async j=>{
-    try{
-      const t=await qGviz(j.sheet, j.ref, j.tq, QCFG.usedMs);   /* v4.83: งานเบื้องหลัง ให้เวลามากกว่า 12 วิ */
-      const o=j.di>=0?1:0;                                       /* มีคอลัมน์วันที่นำหน้า = ขยับ index 1 */
-      let pool=0, shop=0, poolY=0, shopY=0, poolR=0, shopR=0;
-      t.rows.forEach(r=>{
-        const p=bcMap[qBc(r[o+1])] || bcMap[qBc(r[o+1]).replace(/^0+/,'')];
-        if(!p) return;
-        const cs=qToCases(p, qUnitLabel(r[o+2]), r[o+3]);
-        const mine=want ? wantSet.has(qCode(r[o])) : (!!wantName && clean(r[o])===wantName);   /* v4.82 กลุ่มรหัส · v5.02 ไม่มีรหัส = ชื่อร้าน */
-        const day=j.di>=0 ? qDayKey(r[j.di]) : today;
-        if(j.src==='bill'){
-          pool+=cs; if(mine) shop+=cs;
-          if(day && day>=yday){ poolR+=cs; if(mine) shopR+=cs; }      /* บิลที่ออกตั้งแต่เมื่อวาน (ไว้หักออเดอร์เมื่อวาน) */
-        }else if(day===today){ pool+=cs; if(mine) shop+=cs; }
-        else if(day===yday){ poolY+=cs; if(mine) shopY+=cs; }
-      });
-      return { src:j.src, pool, shop, poolY, shopY, poolR, shopR, rows:t.rows.length };
-    }catch(e){ console.warn('[quota] '+j.src+' ล้ม:',e&&e.message); return { src:j.src, err:String(e&&e.message||e) }; }
-  }));
+  const res=await Promise.all([
+    ...gvizJobs.map(async j=>{
+      try{
+        const t=await qGviz(j.sheet, j.ref, j.tq, QCFG.usedMs);
+        let pool=0, shop=0;
+        t.rows.forEach(r=>{ const p=lookup(r[1]); if(!p) return;
+          const cs=qToCases(p, qUnitLabel(r[2]), r[3]); pool+=cs;
+          if(j.src==='sale' ? (want && wantSet.has(qCode(r[0]))) : isMine(r[0], r[0])) shop+=cs; });
+        return { src:j.src, pool, shop };
+      }catch(e){ console.warn('[quota] '+j.src+' ล้ม:',e&&e.message); return { src:j.src, err:String(e&&e.message||e) }; }
+    }),
+    /* ทั้งรอบ (ตั้งแต่เริ่มโควต้าถึงเมื่อวาน) — ออเดอร์ ROO ที่ยืนยันแล้วใน Supabase */
+    (async()=>{
+      if(fISO>=tISO) return { src:'supa', pool:0, shop:0 };          /* โควต้าเริ่มวันนี้ = ยังไม่มีของเก่า */
+      try{
+        const rows=[].concat(...await Promise.all(['roo_sales','roo_special_sales'].map(tb=>qSupaRows(tb, bcs, fISO, tISO))));
+        let pool=0, shop=0;
+        rows.forEach(x=>{ if(clean(x['ยกเลิก'])) return; const p=lookup(x['Barcode']); if(!p) return;
+          const cs=qToCases(p, qUnitLabel(x['หน่วย']), x['จำนวน']); pool+=cs;
+          if(isMine(x['รหัสร้าน'], x['ชื่อร้าน'])) shop+=cs; });
+        return { src:'supa', pool, shop };
+      }catch(e){ console.warn('[quota] supa ล้ม:',e&&e.message); return { src:'supa', err:String(e&&e.message||e) }; }
+    })()
+  ]);
   const bad=res.filter(r=>r.err);
   const sum=(k,f)=>res.filter(r=>!r.err&&(!f||f(r))).reduce((a,b)=>a+(b[k]||0),0);
-  /* บิลอ่านไม่ได้ = ไม่รู้ว่าออเดอร์เมื่อวานออกบิลไปหรือยัง → ไม่บวกส่วนนี้ (fail-open ทางเดียวกับเดิม) */
-  const billOk=res.some(r=>r.src==='bill'&&!r.err);
-  const lagPool=billOk ? Math.max(0, sum('poolY')-sum('poolR')) : 0;
-  const lagShop=billOk ? Math.max(0, sum('shopY')-sum('shopR')) : 0;
   return { ok:!bad.length, err:bad.map(b=>b.src).join(','),
-    srcOk:res.length-bad.length, srcAll:res.length,   /* 🐛 v4.83: แหล่งไหนสำเร็จบ้าง — ใช้ตัดสินว่าด่านทำงานต่อได้ไหม */
-    pool:sum('pool')+lagPool, shop:sum('shop')+lagShop,
-    detail:{ bill:sum('shop',r=>r.src==='bill'), today:sum('shop',r=>r.src!=='bill'), yLag:lagShop } };
+    srcOk:res.length-bad.length, srcAll:res.length,
+    pool:sum('pool'), shop:sum('shop'),
+    detail:{ bill:sum('shop',r=>r.src==='supa'), today:sum('shop',r=>r.src!=='supa') } };
 }
 /* ── โหลดสถานะโควต้าทั้งหมด (เรียกหลังล็อกอิน + หลังยืนยันออเดอร์) ── */
 async function quotaBoot(force){
@@ -5557,6 +5582,7 @@ async function quotaBoot(force){
   try{
     /* 👨‍👩‍👧 v4.82: โหลดกลุ่มลูกค้าขนานไปกับกติกา · ล้มก็ไปต่อ (ใช้เพดานรายรหัสแบบเดิม) */
     const [rules]=await Promise.all([ qLoadRules(), qGroupBoot().catch(()=>null) ]);
+    QUOTA.rules=rules; QUOTA.err='';   /* 🔴 v5.05: รู้กติกาก่อนรู้ยอด → ระหว่างรอยอด สินค้าที่ติดโควต้าสั่งไม่ได้ (quotaRulePending) */
     const st={}, draft=(typeof draftOrderId==='function')?draftOrderId():'';
     /* ทุกแถว + ทุกคำขอ ยิงขนานกันหมด (เดิมวนทีละแถว รอ 30-60 วิกว่าป้ายจะขึ้น) */
     await Promise.all(rules.map(async rule=>{
@@ -5857,9 +5883,26 @@ function pdpaFlush(){
   }catch(e){ console.warn('[pdpa] flush',e); }
 }
 
+/* 🔴 v5.05 — สินค้านี้ติดกติกาโควต้า แต่ยังโหลดยอดของร้านไม่เสร็จ = "ยังห้ามสั่ง"
+   (เดิมปล่อยผ่าน → หลุดทุกครั้งที่ลูกค้ารีบสั่งหลังเปิดแอป · ร้านเฮียโต๋ 07-08/10 เพดาน 1 ลัง ได้ไป 20+10)
+   fail-open เหลือกรณีเดียว: อ่านแท็บกติกา (Quota) ไม่ได้เลย → QUOTA.rules ว่าง / QUOTA.err → ไม่รู้ว่าตัวไหนติด = ปล่อยผ่าน */
+function quotaRulePending(p){
+  try{
+    if(!p||!currentCustomer||isHead(currentCustomer)) return false;
+    if(QUOTA.err || !(QUOTA.rules||[]).length) return false;
+    for(const rule of QUOTA.rules){
+      if(!qRuleMatch(rule,p)) continue;
+      if(!qWhState(rule).apply) continue;
+      const st=QUOTA.st[rule._k];
+      if(!QUOTA.loaded || !st || !st.ready) return true;
+    }
+  }catch(e){}
+  return false;
+}
 function quotaGate(p, unitType, qty, mode, cartKey){
   try{
     if(!p||!currentCustomer) return null;
+    if(quotaRulePending(p)){ try{ quotaBoot(); }catch(e){} return { pending:true, lock:true, left:0, add:0 }; }
     const rule=quotaRuleFor(p);            if(!rule) return null;      /* ไม่มีโควต้า = ขายได้ปกติ */
     const st=quotaState(rule);             if(!st||!st.ready) return null;   /* ยังไม่รู้ยอด = ปล่อยผ่านเสมอ */
     const left0=quotaLeft(rule);           if(left0==null) return null;
@@ -5905,9 +5948,8 @@ function quotaInfo(name){
   if(st.wh.usePool && rule.pool>0) rows.push(['ก้อนรวมทั้งรอบ', num(rule.pool)+' ลัง'+(rule.wh?(' (คลัง '+rule.wh+')'):'')]);
   if(st.cap) rows.push(['เพดานร้านนี้', num(st.cap.cap)+' ลัง']);
   if(st.detail){
-    rows.push(['ร้านนี้ออกบิลไปแล้ว', num(st.detail.bill)+' ลัง']);
+    rows.push(['ร้านนี้สั่ง ROO ไปแล้วรอบนี้', num(st.detail.bill)+' ลัง']);   /* v5.05: ยอดจาก Supabase ไม่ใช่บิล DS_DC */
     if(st.detail.today>0) rows.push(['สั่งวันนี้ (ยังไม่ออกบิล)', num(st.detail.today)+' ลัง']);
-    if(st.detail.yLag>0) rows.push(['สั่งเมื่อวาน (ยังไม่ออกบิล)', num(st.detail.yLag)+' ลัง']);   /* v5.02 */
   }
   if(inCart>0) rows.push(['อยู่ในตะกร้าตอนนี้', num(inCart)+' ลัง']);
   rows.push(['เหลือสั่งได้อีก', (left==null?'ไม่จำกัด':num(Math.max(0,left-inCart))+' ลัง')]);
@@ -5971,6 +6013,7 @@ function quotaFinalCheck(){
 function quotaAllow(p, unitType, qty, mode, cartKey){
   const g=quotaGate(p, unitType, qty, mode, cartKey);
   if(!g) return true;
+  if(g.pending){ showToast('กำลังเช็คโควต้าสินค้านี้ของร้าน รอ 2-3 วินาทีแล้วกดอีกครั้งค่ะ','warning'); return false; }   /* v5.05 */
   if(g.lock){ showToast(quotaMsg(g),'error'); return false; }
   showToast(quotaMsg(g)+' (โหมดเตือน)','warning');
   return true;
@@ -7301,6 +7344,9 @@ async function submitOrder(force){
       catch(e){ console.warn('[quota] ข้ามด่าน ปล่อยผ่าน (fail-open):', (e&&e.message)||e); }   /* ⏱ v4.78 */
       finally{ hideSpinner(); }
     }
+    /* 🔴 v5.05: ในบิลมีสินค้าติดโควต้าที่ยังเช็คยอดไม่เสร็จ = ยังไม่ให้ส่ง (เดิมปล่อยผ่านทั้งใบ) */
+    const _qp=selItems.filter(it=>{ const p=findProduct(it.name); return p && quotaRulePending(p); });
+    if(_qp.length){ showToast('ยังเช็คโควต้าไม่เสร็จ ('+_qp[0].name+') กรุณากดยืนยันอีกครั้งใน 2-3 วินาทีค่ะ','warning'); try{ quotaBoot(true); }catch(e){} return; }
     const _qb=quotaFinalCheck();
     if(_qb.length){
       const _hard=_qb.filter(x=>x.lock);
