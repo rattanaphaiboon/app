@@ -1955,7 +1955,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-10-08 · 53';
+const BUILD = '2026-10-08 · 54';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -6416,6 +6416,43 @@ function renderQueueBadge() {
   el.textContent = GAS_URL ? `⏳ ค้างส่ง ${fmtN(n)}` : `⏳ รอต่อชีต ${fmtN(n)}`;
 }
 
+/* ═══ กันส่งซ้ำ (BUILD 54 · เจอ 08/10: ชุด "2 ฟิล์ม · ปลีก" 16 แถวของบรีส ลงชีต ยืนยันเช็ค 2 รอบ — _log 14:14:31 กับ 14:15:35)
+   ต้นเหตุ: ชุดถึงชีตแล้ว (Apps Script เขียนแล้ว) แต่คำตอบกลับมาไม่ถึงเครื่อง (สัญญาณในคลังหลุด/ตอบช้า)
+            แอปถือว่าส่งไม่ผ่าน → ยิงฟอร์มสำรอง/ส่งรอบถัดไป → แถวซ้ำทั้งชุด
+   แก้ 2 ชั้น: (1) ทุกชุดมีเลขประจำชุด (id) — Apps Script รุ่นใหม่จำเลขที่เขียนแล้ว 6 ชม. เจอซ้ำไม่เขียน
+               (2) ชุดที่ส่งไปแล้วแต่ไม่รู้ผล ก่อนส่งอีกครั้งอ่านชีตดูก่อนว่าแถวของชุดนี้ลงแล้วหรือยัง (ใช้ได้แม้ Apps Script ยังเป็นรุ่นเก่า)
+   เทียบแถวด้วยช่องที่บอกตัวตน: เครื่อง + เวลา (ถึงนาที/วินาที) + กลุ่ม + สินค้า … ชุดเดียวกันลงชีตทีเดียวทั้งก้อน (setValues ครั้งเดียว) */
+const newBatchId = () => DEVICE + '.' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const LAND_COLS = {
+  [SHEET_DONE]: ['เครื่อง','เวลาเช็ค','กลุ่มที่เช็ค','เลขที่ใบจอง','สินค้า','หน่วย','สรุป','ได้-ขาย','ได้-แถม'],
+  [SHEET_MOVE]: ['เครื่อง','เวลาโอน','กลุ่มที่เช็ค','สินค้า','หน่วย','โอนได้'],
+  [SHEET_LIVE]: ['เครื่อง','เวลายิง','กลุ่มที่เช็ค','สินค้า','-','ยิงแล้ว(EA)'],
+};
+/** เวลา "14.13" / "08/10/2569 14.13" / "14.13.05" → "1413" / "141305" · ชีตแปลง "14.10" เป็นตัวเลข 14.1 ก็ยังได้ "1410" */
+const landTime = v => { const s = String(v ?? '').trim(), m = s.match(/(\d{1,2})[.:](\d{1,2})(?:[.:](\d{1,2}))?$/);
+  return m ? m[1].padStart(2, '0') + m[2].padEnd(2, '0') + (m[3] ? m[3].padStart(2, '0') : '') : s; };
+const landVal = (k, v) => /^เวลา/.test(k) ? landTime(v) : /^(ได้-|โอนได้|ยิงแล้ว)/.test(k) ? String(numOf(v)) : cln(v);
+/** แถวของชุดนี้อยู่ในชีตครบแล้วหรือยัง → true / false / null (อ่านชีตไม่ได้ = ไม่รู้) */
+async function landedInSheet(item) {
+  const cols = LAND_COLS[item.kind], rows = item.rows || [];
+  if (!cols || !rows.length) return null;
+  try {
+    const res = await gvizJsonp(LOG_SRC.id, { sheet:item.kind,
+      tq:`select * where ${dayWhere('A', (item.meta && item.meta.date) || TODAY)}` }, 30000);
+    if (res.status === 'error') return null;
+    const head = ((res.table && res.table.cols) || []).map(c => nrm(c.label)), ix = cols.map(k => head.indexOf(k));
+    if (ix.some(i => i < 0)) return null;
+    const sig = get => cols.map((k, j) => landVal(k, get(k, j))).join('¦');
+    const need = {}, have = {};
+    rows.forEach(r => { const s = sig(k => r[k]); need[s] = (need[s] || 0) + 1; });
+    ((res.table && res.table.rows) || []).forEach(r => {
+      const c = (r.c || []).map(cellTxt), s = sig((k, j) => c[ix[j]]);
+      if (s in need) have[s] = (have[s] || 0) + 1;
+    });
+    return Object.keys(need).every(s => (have[s] || 0) >= need[s]);
+  } catch (e) { console.warn('landedInSheet', e); return null; }
+}
+
 let flushing = false;
 async function flushQueue(loud) {
   if (flushing || !GAS_URL) { renderQueueBadge(); return; }
@@ -6424,21 +6461,32 @@ async function flushQueue(loud) {
   try {
     while (getQueue().length) {
       const item = getQueue()[0];
+      if (!item.id) { item.id = newBatchId(); setQueue(getQueue()); }     // ชุดที่เข้าคิวก่อนรุ่น 54
       let ok = false, why = '';
-      try {
-        // text/plain กัน CORS preflight ที่ Apps Script ตอบไม่ได้
-        const res = await fetch(GAS_URL, { method:'POST', redirect:'follow',
-          headers:{ 'Content-Type':'text/plain;charset=utf-8' }, body: JSON.stringify(item) });
-        const txt = await res.text();
-        const j = JSON.parse(txt);
-        ok = j.ok === true; why = j.error || txt.slice(0,150);
-      } catch(e) {
-        // fetch ไม่ผ่าน (CORS / origin null) → ยิงฟอร์มแทน แล้วนับแถวเทียบว่าลงจริงมั้ย
-        const before = await sheetCount(item.kind);
-        await postViaForm(item);
-        const after = await sheetCount(item.kind);
-        ok = after > before;
-        why = ok ? '' : `ส่งแล้วแต่แถวในชีตไม่เพิ่ม (${before} → ${after})`;
+      // เคยส่งชุดนี้ไปแล้วแต่ไม่รู้ผล (ไม่มีคำตอบ / ปิดแอประหว่างส่ง) → ดูชีตก่อน ลงไปแล้วไม่ส่งซ้ำ
+      if (item.tries && await landedInSheet(item) === true) ok = true;
+      if (!ok) {
+        item.tries = (item.tries || 0) + 1; setQueue(getQueue());           // จำไว้ก่อนส่ง — รีโหลดกลางทางก็รู้ว่าเคยส่งแล้ว
+        try {
+          // text/plain กัน CORS preflight ที่ Apps Script ตอบไม่ได้
+          const res = await fetch(GAS_URL, { method:'POST', redirect:'follow',
+            headers:{ 'Content-Type':'text/plain;charset=utf-8' }, body: JSON.stringify(item) });
+          const txt = await res.text();
+          const j = JSON.parse(txt);
+          ok = j.ok === true; why = j.error || txt.slice(0,150);
+        } catch(e) {
+          /* ไม่ได้คำตอบ — ชีตอาจเขียนไปแล้ว (08/10 ซ้ำเพราะตรงนี้) ดูชีตก่อน ยังไม่มีค่อยยิงฟอร์มแทน
+             (fetch ไม่ผ่านเพราะ CORS / origin null ก็มาทางนี้) แล้วนับแถวเทียบว่าลงจริงมั้ย */
+          await new Promise(r => setTimeout(r, 3000));
+          if (await landedInSheet(item) === true) ok = true;
+          else {
+            const before = await sheetCount(item.kind);
+            await postViaForm(item);
+            const after = await sheetCount(item.kind);
+            ok = after > before || await landedInSheet(item) === true;   // Apps Script รุ่นใหม่เจอชุดซ้ำไม่เขียน แถวไม่เพิ่มแต่มีอยู่แล้ว
+            why = ok ? '' : `ส่งแล้วแต่แถวในชีตไม่เพิ่ม (${before} → ${after})`;
+          }
+        }
       }
       if (!ok) throw new Error(why || 'ฝั่งชีตตอบว่าไม่สำเร็จ');
       /* ยอดยืนยันที่เพิ่งส่งถึงชีต — จำไว้จนกว่าจะอ่านชีตกลับมาเจอ ไม่งั้นช่วงนั้นหน้าจอจะเหมือนยังไม่เคยยืนยัน */
@@ -6544,7 +6592,7 @@ function queueRows(rows, extra, kind, quiet) {
   /* ยังไม่ได้ตั้งที่บันทึกก็เข้าคิวไว้ก่อน ไม่ทิ้ง และไม่เด้งกล่องตั้งค่ามาขัดจังหวะ
      ตั้งเมื่อไหร่ ของที่ค้างในคิวถูกส่งขึ้นให้เองทั้งหมด */
   const q = getQueue();
-  q.push({ kind: kind || SHEET_DONE, rows, job:state.jobKey,
+  q.push({ id:newBatchId(), kind: kind || SHEET_DONE, rows, job:state.jobKey,     // id = เลขประจำชุด กันลงชีตซ้ำ
            meta: Object.assign({ date:TODAY, wh:WAREHOUSE, device:DEVICE, by:CHECKER,
                                  at:new Date().toISOString() }, extra) });
   setQueue(q); renderQueueBadge();
