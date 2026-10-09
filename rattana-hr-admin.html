@@ -17,6 +17,8 @@
        แท็บบันทึกการสแกน 🗑 ทุกแถว · ✎ ใส่เวลาชนิดเดิมคนละเวลา = ถามแทนที่ · ↩ ถอนใบแก้เวลา = เวลานั้นถูกลบด้วย
      ► v1.7 · 09/10/2026 — จัดการลางาน มีแท็บ "ขอตกเบิก (HR ตรวจ)" (ต้อง Apps Script 9.65 getReimburseDocs): ดู/อนุมัติ/ไม่อนุมัติ/ถอน
        ใบขอตกเบิกที่ไม่ผ่านหัวหน้า — เดิมหลังบ้านไม่มีที่ดูเลย (surat 09/10 "ขอปรับปรุงเวลาแต่ไม่ขึ้นให้อนุมัติ")
+     ► v1.8 · 09/10/2026 — แท็บขอตกเบิก: ปุ่ม "ปิดรอบใบเก่า…" (Apps Script 9.68 closeReimburseBefore) ปิดใบที่ยังค้างก่อนวันที่กำหนดทีเดียว
+       = สถานะ "ปิดรอบ" (ตรวจนอกแอปแล้ว) · surat รัน auditPendingDocs เจอใบตกเบิก 60+ ใบค้างตั้งแต่ มิ.ย.–ก.ค.
      ============================================================ -->
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700;800&display=swap">
 <style>
@@ -87,7 +89,7 @@ td.z { color:#b8bfcc; } td.abs { color:var(--bad); font-weight:700; } td.iss { c
 .st { display:inline-block; padding:3px 9px; border-radius:20px; font-size:11.5px; font-weight:700; color:#1a2230; white-space:nowrap; }
 .tag { display:inline-block; padding:3px 9px; border-radius:20px; font-size:11.5px; font-weight:700; }
 .t-pending { background:rgba(214,137,16,.14); color:#b26a00; } .t-approved { background:rgba(39,174,135,.14); color:#1e8e5a; }
-.t-rejected { background:rgba(226,87,76,.14); color:#c0392b; } .t-cancelled, .t-other { background:rgba(114,124,147,.16); color:#5b6478; }
+.t-rejected { background:rgba(226,87,76,.14); color:#c0392b; } .t-cancelled, .t-other, .t-closed { background:rgba(114,124,147,.16); color:#5b6478; }
 .pen { border:0; background:none; cursor:pointer; color:var(--info); font-size:14px; padding:2px 5px; }
 .muted { color:var(--muted); } .sm { font-size:12px; } .b { font-weight:700; }
 .empty { text-align:center; color:var(--muted); padding:28px 10px; }
@@ -182,7 +184,7 @@ const CFG = {
   api: 'https://script.google.com/macros/s/AKfycbzyZsYY9R3WAhy7LUiaIF_xPTK50vVgggrv6Ua5WYCdKOUHGNd_PjDcSojI39OSiRU/exec',
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ', usersTab: 'Sheet1',
   attendanceSheetId: '1aywVdJ5-zw70__3BHjE3itjZotiubaRUAMjWOzgCAts',
-  ver: '1.7',
+  ver: '1.8',
 };
 const S = { token: '', exp: 0, u: null, users: [], ptt: [], byId: {}, period: null, hr: null, settings: null, holidays: null, locations: null,
             faces: null, docs: null, docsRange: '', view: 'dashboard', sub: '', emp: null, empTab: 'time', empDays: {}, shifts: {}, audit: {}, quotaAll: null, busy: {} };
@@ -201,7 +203,7 @@ const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 const ST_BG = [['ทำงานเต็มวัน', '#c9f5ee'], ['ทำงาน (ลาบางส่วน)', '#b8e6cf'], ['ทำงานวันหยุด', '#ffd9a0'], ['ไม่ครบคู่ (วันหยุด)', '#ffe3b3'], ['ผิด', '#f8c7c4'], ['วันอาทิตย์', '#fff2a8'], ['วันนักขัตฯ', '#c8f7c5'], ['ลา', '#cfe2f3']];
 const stBg = (st) => { const s = String(st || ''); for (const [k, c] of ST_BG) if (s.indexOf(k) === 0) return c; return '#e8ecf3'; };
 const stChip = (st) => st ? `<span class="st" style="background:${stBg(st)}">${h(st)}</span>` : '';
-const DOC_ST = { pending: 'รออนุมัติ', approved: 'อนุมัติ', rejected: 'ไม่อนุมัติ', cancelled: 'ยกเลิก', other: 'อื่นๆ' };
+const DOC_ST = { pending: 'รออนุมัติ', approved: 'อนุมัติ', rejected: 'ไม่อนุมัติ', cancelled: 'ยกเลิก', closed: 'ปิดรอบ', other: 'อื่นๆ' };   // v1.8 closed = ปิดรอบ (ตกเบิกที่ตรวจนอกแอปแล้ว)
 const docTag = (st) => `<span class="tag t-${st}">${DOC_ST[st] || st}</span>`;
 const TA_WHY = ['ลืมลงเวลา', 'ระบบมีปัญหา', 'เครื่องลงเวลาใช้งานไม่ได้', 'ไฟฟ้าดับ', 'ทำงานนอกสถานที่', 'ทำงานเกินเวลา'];
 function methodLabel(sb) {
@@ -901,7 +903,7 @@ function paintReimb_() {
   const rows = all.filter(d => (st === 'all' || d.status === st) && (!q || [d.name, d.nick, d.empId, d.type, d.reason, d.deductDate].some(v => String(v || '').toLowerCase().indexOf(q) >= 0)));
   const chip = (k, l) => `<button class="btn sm${st === k ? ' p' : ''}" onclick="S.rbst='${k}';paintReimb_()">${l}${k === 'all' ? ' ' + all.length : cnt[k] ? ' ' + cnt[k] : ''}</button>`;
   el.innerHTML = `<div class="fl"><input type="text" placeholder="ค้นชื่อ / รหัส / รายละเอียด" value="${h(S.rbq || '')}" oninput="S.rbq=this.value;paintReimb_()"><span style="flex:1"></span><button class="btn sm" onclick="S.reimb=null;renderDocs($('#main'))">⟳</button></div>
-    <div class="fl">${chip('pending', 'รอ HR ตรวจ')}${chip('approved', 'อนุมัติ')}${chip('rejected', 'ไม่อนุมัติ')}${chip('cancelled', 'ยกเลิก')}${chip('all', 'ทั้งหมด')}<span class="sm muted">ขอตกเบิก = ขอเงินคืนวันที่ถูกหักไปแล้ว · HR ตรวจเอง ไม่ผ่านหัวหน้า${S.reimbTotal > all.length ? ` · แสดง ${all.length} จาก ${S.reimbTotal}` : ''}</span></div>
+    <div class="fl">${chip('pending', 'รอ HR ตรวจ')}${chip('approved', 'อนุมัติ')}${chip('rejected', 'ไม่อนุมัติ')}${chip('closed', 'ปิดรอบ')}${chip('cancelled', 'ยกเลิก')}${chip('all', 'ทั้งหมด')}<span class="sm muted">ขอตกเบิก = ขอเงินคืนวันที่ถูกหักไปแล้ว · HR ตรวจเอง ไม่ผ่านหัวหน้า${S.reimbTotal > all.length ? ` · แสดง ${all.length} จาก ${S.reimbTotal}` : ''}</span><span style="flex:1"></span>${cnt.pending ? `<button class="btn sm" onclick="reimbCloseOld_()" title="ใบที่ตรวจ/จ่ายใน HumanSoft ไปแล้วแต่ยังค้างเป็นรอในชีท">🗂 ปิดรอบใบเก่า…</button>` : ''}</div>
     <div class="tw"><table><thead><tr><th class="l">ยื่นเมื่อ</th><th class="l">พนักงาน</th><th class="l">ประเภท</th><th class="l">วันที่ถูกหัก</th><th class="l">งวดหัก → ขอจ่าย</th><th>จำนวนเงิน</th><th class="l">รายละเอียด</th><th>สถานะ</th><th class="l">ผู้อนุมัติ</th><th></th></tr></thead><tbody>${rows.map(d => { const i = all.indexOf(d); return `<tr>
     <td class="l sm">${h(d.date)}</td><td class="l"><a href="#" onclick="openEmp('${h(d.empId)}','time');return false">${h(d.name)}</a>${d.nick ? ' (' + h(d.nick) + ')' : ''}<br><span class="sm muted">${h(d.empId)}${d.branch ? ' · ' + h(d.branch) : ''}</span></td><td class="l">${h(String(d.type || '').replace(/^ขอตกเบิก\s*-\s*/, ''))}</td><td class="l">${h(d.deductDate)}</td><td class="l sm">${h(d.deductPeriod)}${d.approvePeriod ? ' → ' + h(d.approvePeriod) : ''}</td><td>${h(d.amount)}</td><td class="l" style="max-width:260px;white-space:normal">${h(d.reason)}${d.attach ? ` <a href="${h(d.attach)}" target="_blank" rel="noopener">📎</a>` : ''}</td><td>${docTag(d.status)}</td><td class="l sm">${h(d.approver)}${d.updatedAt ? '<br><span class="muted">' + h(d.updatedAt) + '</span>' : ''}</td>
     <td style="white-space:nowrap">${d.status === 'pending' ? `<button class="btn sm ok" onclick="reimbDecide_(${i},'approved')">อนุมัติ</button> <button class="btn sm bad" onclick="reimbDecide_(${i},'rejected')">ไม่อนุมัติ</button>` : d.status === 'approved' ? `<button class="btn sm" onclick="reimbRevoke_(${i})">↩ ถอน</button>` : ''}</td></tr>`; }).join('') || '<tr><td colspan="10" class="empty">ไม่มีใบตามตัวกรอง</td></tr>'}</tbody></table></div>`;
@@ -913,6 +915,22 @@ async function reimbDecide_(i, decision) {
   else if (!confirm(`อนุมัติขอตกเบิกของ ${d.name} · ${d.type} · ถูกหัก ${d.deductDate}${d.amount ? ' · ' + d.amount + ' บาท' : ''} ?`)) return;
   try { await api('approveAny', { sheet: d.sheet, row: d.row, decision, note, approverName: S.u.name, empId: d.empId, info: d.ainfo }); d.status = decision; d.approver = S.u.name; toast(decision === 'approved' ? '✓ อนุมัติแล้ว' : '✗ ไม่อนุมัติแล้ว', 'ok'); paintReimb_(); }
   catch (e) { toast('❌ ' + e.message, 'bad'); }
+}
+/* v1.8 ปิดรอบใบตกเบิกเก่าทีเดียว — ใบที่ยังค้าง "รอ" แต่ HR ตรวจ/จ่ายใน HumanSoft ไปแล้ว (เคส 09/10: 60+ ใบตั้งแต่ มิ.ย.–ก.ค.)
+   นับก่อน (dry) แล้วค่อยถามยืนยัน · สถานะกลายเป็น "ปิดรอบ" ไม่ใช่อนุมัติ/ไม่อนุมัติ (ไม่รู้ผลรายใบ) · Apps Script 9.68 */
+async function reimbCloseOld_() {
+  const d = new Date(), def = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01';
+  const before = prompt('ปิดรอบใบขอตกเบิกที่ยังค้าง "รอ" ซึ่งยื่นก่อนวันที่ (ปี-เดือน-วัน)\nใช้กับใบที่ตรวจ/จ่ายใน HumanSoft ไปแล้ว — ใบจะกลายเป็น "ปิดรอบ" (ไม่ใช่อนุมัติ)', def);
+  if (!before) return;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(before.trim())) { toast('รูปแบบวันที่ต้องเป็น ปี-เดือน-วัน เช่น ' + def, 'warn'); return; }
+  try {
+    const dry = await api('closeReimburseBefore', { before: before.trim(), dry: '1' });
+    if (!dry.closed) { toast('ไม่มีใบค้างที่ยื่นก่อน ' + dmy(before.trim()), 'info'); return; }
+    if (!confirm(`จะปิดรอบใบขอตกเบิกที่ค้างอยู่ ${dry.closed} ใบ (ยื่นก่อน ${dmy(before.trim())})\nสถานะเป็น "ปิดรอบ" โดย ${S.u.name} — ยืนยัน?`)) return;
+    const r = await api('closeReimburseBefore', { before: before.trim() });
+    toast(`✓ ปิดรอบแล้ว ${r.closed} ใบ`, 'ok');
+    S.reimb = null; renderDocs($('#main'));
+  } catch (e) { toast('❌ ' + (/Unknown action/i.test(String(e.message)) ? 'ต้อง Deploy Apps Script 9.68' : e.message), 'bad'); }
 }
 async function reimbRevoke_(i) {
   const d = (S.reimb || [])[i]; if (!d) return;
