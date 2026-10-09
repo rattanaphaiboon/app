@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>R-Flow — ติดตามงานทีม v5.0</title>
+<title>R-Flow — ติดตามงานทีม v5.1</title>
 <link rel="icon" type="image/png" href="r-flow-icon.png">
 <link rel="manifest" href="r-flow.webmanifest">
 <link rel="apple-touch-icon" href="r-flow-icon.png">
@@ -1869,7 +1869,7 @@ body.dark .rf-upnext{border:1px solid var(--border)}
    Design:  Claude Design "Team Task Tracker" (task-tracker/design/) */
 
 const CFG = {
-  version: '5.0',
+  version: '5.1',
   exec: 'https://script.google.com/macros/s/AKfycbx3lmJqh1WYDhKFE-0Il4A4ihdcCsbbHYN6c9JuAXWj3TU-oWHGvate7NmxSAwDYdWfww/exec',
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
   hubUrl: 'https://rattanaphaiboon.github.io/app/rattana-hub.html',
@@ -2738,7 +2738,7 @@ let _bootStale = 0;      // เวลาที่ cache ถูกบันทึ
 function saveCache(){
   const stamp = new Date().toISOString();
   const full = { email: S.me.email, ts: stamp, me: S.me, users: S.users, tasks: S.tasks,
-    comments: S.comments, plans: S.plans, forms: S.forms, sig: S.sig };
+    comments: S.comments, plans: S.plans, forms: S.forms, sig: S.sig, rev: _rev, revAt: _revAt };   // v5.1: rev ของก้อนนี้ — เปิดครั้งหน้าถามหลังบ้านได้เลยว่าเปลี่ยนไหม
   const put = function(o){ localStorage.setItem('rf_cache', JSON.stringify(o)); };
   try { put(full); return; } catch(e){}
   try { put(Object.assign({}, full, { sig: null })); return; } catch(e){}
@@ -2751,6 +2751,7 @@ function loadCache(){
     S.me = c.me; S.users = c.users || []; S.tasks = c.tasks || []; S.comments = c.comments || []; S.plans = c.plans || [];
     S.forms = c.forms || []; if (c.sig) S.sig = c.sig;   // v4.64: แม่แบบ + ลายเซ็น มาตั้งแต่เฟรมแรกด้วย
     _bootStale = Date.parse(c.ts || '') || -1;   // -1 = ของเก่าจากก่อนมีการประทับเวลา (ยังต้องขึ้นแถบ)
+    if (c.rev) { _rev = String(c.rev); _revAt = Number(c.revAt) || 0; }
     invalidateDec();
     initWarehouseFilter();   // เปิดจาก cache ก็ให้ชิปคลังเป็นคลังตัวเองตั้งแต่เฟรมแรก
     return true;
@@ -2925,6 +2926,10 @@ let _loadBusy = false, _loadT0 = 0, _loadErr = '', _loadTry = 0, _retryT = null,
    ⚠️ ไม่ส่ง rev (= ดึงเต็มก้อนเสมอ) เมื่อ: เปิดแอป/ดึงแบบไม่เงียบ · ถือ rev มานานเกิน 10 นาที
       (ครอบของที่เปลี่ยนนอกเส้นทางเขียนของแอป เช่นคนแก้ชีทตรงๆ) · มีงานจากลิงก์นอติรอเปิดอยู่ */
 const REV_MAX_AGE = 10 * 60 * 1000;
+/* v5.1: ตอนเปิดแอป (ยังโชว์ของจาก cache อยู่) ถาม rev ได้แม้ถือมานาน — วัดจริง: ดึงเต็มก้อน 5-7 วิ · ตอบ "ไม่เปลี่ยน" 2 วิ
+   ปลอดภัยเพราะ _revAt ไม่ถูกต่ออายุตอนได้ same → รอบ sync ถัดไป (~75 วิ) เกิน 10 นาทีอยู่แล้ว = ดึงเต็มเบื้องหลังตามเดิม
+   ของที่เปลี่ยนนอกเส้นทางแอป (job รายวัน) หลังบ้าน v1.94 ขยับ rev ให้แล้ว · เหลือแค่คนแก้ชีทตรงๆ ซึ่งรอบถัดไปก็เห็น */
+const REV_OPEN_MAX_AGE = 12 * 60 * 60 * 1000;
 let _rev = '', _revAt = 0;
 function loadTick(){
   const sec = document.getElementById('rfLoadSec');
@@ -2949,11 +2954,18 @@ async function loadAll(silent){
   startLoadTick();
   const seq0 = _writeSeq;   // จำจุดเริ่ม — ใช้เทียบว่ามีการเขียนแทรกเข้ามาระหว่างรอผลไหม
   try {
-    const askRev = silent && _rev && (Date.now() - _revAt < REV_MAX_AGE) && !_pendingTaskOpen && !S.taskPending;
+    const booting = !!_bootStale;   // ยังโชว์ของจาก cache อยู่ (ยังไม่เคยได้ของสดรอบนี้)
+    const askRev = silent && _rev && (Date.now() - _revAt < (booting ? REV_OPEN_MAX_AGE : REV_MAX_AGE)) && !_pendingTaskOpen && !S.taskPending &&
+      !(booting && (_pendingRoutine || _pendingRejects || _pendingSched || _pendingCase));   // มีลิงก์รอเปิด → ดึงเต็มแล้วไปทางปกติ
     const j = await api('list', askRev ? { rev: _rev } : null, { timeout: LOAD_TIMEOUT });
     if (j.same) {                              // v4.90: ไม่มีอะไรเปลี่ยน — จบตรงนี้ ข้อมูลบนจอถูกอยู่แล้ว
       S.loading = false; _bootStale = 0; _loadErr = ''; _loadTry = 0;
       wqApply();                               // ของที่ยังส่งไม่ถึงต้องยังเห็นอยู่ (เหมือนรอบเต็ม)
+      if (booting) {                           // v5.1: เปิดแอปแล้ว cache ตรงกับชีท → เอาแถบ "ข้อมูลเมื่อ…" ออก + งานที่ปกติทำหลังโหลดรอบแรก
+        if (!S.calSel) { const td = pd(todayIso()); S.calSel = todayIso(); S.calY = td.getFullYear(); S.calM = td.getMonth(); }
+        invalidateDec(); updateAppBadge(); render(); renderOverlays();
+        calSyncIfStale(); checkAppUpdate(); maybeFirstNag(); rtLoadMine(); resolvePendingOpen();
+      }
       return;
     }
     /* ระหว่างดึงข้อมูล ผู้ใช้เพิ่งกด/ติ๊ก/บันทึกอะไร → อย่าทับ state ด้วยข้อมูลเก่า (กัน "สั่งงานอยู่แล้วหาย")
