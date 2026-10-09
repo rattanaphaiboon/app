@@ -15,6 +15,8 @@
      ► ไม่มีความลับในไฟล์นี้ (URL/ID ชีทชุดเดียวกับที่อยู่ในแอปมือถืออยู่แล้ว)
      ► v1.6 · 07/10/2026 — ลบเวลา (สแกน) ที่ผิด (ต้อง Apps Script 9.64): ✎ แสดงเวลาที่มีอยู่ของวันนั้น + 🗑 ·
        แท็บบันทึกการสแกน 🗑 ทุกแถว · ✎ ใส่เวลาชนิดเดิมคนละเวลา = ถามแทนที่ · ↩ ถอนใบแก้เวลา = เวลานั้นถูกลบด้วย
+     ► v1.7 · 09/10/2026 — จัดการลางาน มีแท็บ "ขอตกเบิก (HR ตรวจ)" (ต้อง Apps Script 9.65 getReimburseDocs): ดู/อนุมัติ/ไม่อนุมัติ/ถอน
+       ใบขอตกเบิกที่ไม่ผ่านหัวหน้า — เดิมหลังบ้านไม่มีที่ดูเลย (surat 09/10 "ขอปรับปรุงเวลาแต่ไม่ขึ้นให้อนุมัติ")
      ============================================================ -->
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700;800&display=swap">
 <style>
@@ -180,7 +182,7 @@ const CFG = {
   api: 'https://script.google.com/macros/s/AKfycbzyZsYY9R3WAhy7LUiaIF_xPTK50vVgggrv6Ua5WYCdKOUHGNd_PjDcSojI39OSiRU/exec',
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ', usersTab: 'Sheet1',
   attendanceSheetId: '1aywVdJ5-zw70__3BHjE3itjZotiubaRUAMjWOzgCAts',
-  ver: '1.6',
+  ver: '1.7',
 };
 const S = { token: '', exp: 0, u: null, users: [], ptt: [], byId: {}, period: null, hr: null, settings: null, holidays: null, locations: null,
             faces: null, docs: null, docsRange: '', view: 'dashboard', sub: '', emp: null, empTab: 'time', empDays: {}, shifts: {}, audit: {}, quotaAll: null, busy: {} };
@@ -835,10 +837,13 @@ async function savePeriod() {
 }
 /* ══════════ จัดการลางาน ══════════ */
 function docsRange() { const y = new Date().getFullYear(); return S.dAll ? [y + '-01-01', (y + 1) + '-01-31'] : [S.period.fromIso, S.period.toIso]; }
+/* v1.7 แท็บบนหน้าจัดการลางาน: เอกสารลา/แก้เวลา (การลาApp) · ขอตกเบิก (ชีท ขอตกเบิก — HR ตรวจเอง) */
+const docTabs_ = () => `<div class="tabs" style="margin-bottom:10px">${[['leave', 'เอกสารลา / แก้เวลา'], ['reimb', 'ขอตกเบิก (HR ตรวจ)']].map(t => `<button class="${(S.docTab || 'leave') === t[0] ? 'on' : ''}" onclick="S.docTab='${t[0]}';renderDocs($('#main'))">${t[1]}</button>`).join('')}</div>`;
 function renderDocs(m) {
+  if (S.docTab === 'reimb') { renderReimb_(m); return; }   // v1.7
   if (!S.period) { m.innerHTML = loadingCard(); loadPeriod(false).then(() => { if (S.view === 'docs') render(); }).catch(e => { m.innerHTML = `<div class="card alert bad">${h(e.message)}</div>`; }); return; }
   const [f, t] = docsRange();
-  m.innerHTML = `<div class="card"><div id="docsBody">${loadingCard('กำลังโหลดเอกสาร…')}</div></div>`;
+  m.innerHTML = `<div class="card">${docTabs_()}<div id="docsBody">${loadingCard('กำลังโหลดเอกสาร…')}</div></div>`;
   loadDocs(f, t).then(() => paintDocs()).catch(e => { $('#docsBody').innerHTML = `<div class="alert bad">${h(e.message)}</div>`; });
 }
 function paintDocs() {
@@ -876,6 +881,46 @@ async function revoke(i) {
   catch (e) { toast('❌ ' + e.message, 'bad'); }
 }
 function xlsDocs() { const rows = S.docs || []; toXls('เอกสารลา_' + S.docsRange.replace('|', '_'), 'ทะเบียนเอกสารลา ' + S.docsRange.replace('|', ' – '), ['ยื่นเมื่อ', 'รหัส', 'ชื่อ', 'ชื่อเล่น', 'คลัง', 'ประเภท', 'วันที่', 'ถึงวันที่', 'ชั่วโมง', 'วันโควต้า', 'รายละเอียด', 'สถานะ', 'ผู้อนุมัติ', 'อนุมัติเมื่อ', 'แถวในชีท'], rows.map(d => [d.requestedAt, d.empId, d.name, d.nick, d.khlang, d.type, d.date, d.endDate, d.hours, d.quotaDays, d.info, DOC_ST[d.status] || d.status, d.approver, d.approvedAt, d.row])); }
+/* ══════════ v1.7 ขอตกเบิก (HR ตรวจ) — surat 09/10 "ขอปรับปรุงเวลาแต่ไม่ขึ้นให้อนุมัติ" ══════════
+   ขอตกเบิกไม่ผ่านหัวหน้า (Apps Script 9.54) และตั้งแต่ 9.61 ไม่ขึ้นหน้าอนุมัติในแอปของผู้บริหาร → หลังบ้านนี้เป็นที่เดียวที่เห็นครบ
+   (Apps Script 9.65 getReimburseDocs) · อนุมัติ/ไม่อนุมัติ/ถอน ใช้ approveAny / revokeApproval ชุดเดียวกับเอกสารลา (ข้อความยืนยัน = ainfo จากเซิร์ฟเวอร์) */
+async function loadReimb_(force) {
+  if (S.reimb && !force) return S.reimb;
+  const r = await api('getReimburseDocs', {});
+  S.reimb = r.items || []; S.reimbTotal = r.total || S.reimb.length;
+  return S.reimb;
+}
+function renderReimb_(m) {
+  m.innerHTML = `<div class="card">${docTabs_()}<div id="reimbBody">${loadingCard('กำลังโหลดใบขอตกเบิก…')}</div></div>`;
+  loadReimb_(false).then(() => paintReimb_()).catch(e => { const el = $('#reimbBody'); if (el) el.innerHTML = `<div class="alert bad">${/Unknown action/i.test(String(e.message)) ? 'เซิร์ฟเวอร์ยังไม่มีทะเบียนขอตกเบิก — ต้อง Deploy Apps Script 9.65' : h(e.message)}</div>`; });
+}
+function paintReimb_() {
+  const el = $('#reimbBody'); if (!el) return;
+  const all = S.reimb || []; const cnt = {}; all.forEach(d => { cnt[d.status] = (cnt[d.status] || 0) + 1; });
+  const q = (S.rbq || '').toLowerCase(), st = S.rbst || 'pending';
+  const rows = all.filter(d => (st === 'all' || d.status === st) && (!q || [d.name, d.nick, d.empId, d.type, d.reason, d.deductDate].some(v => String(v || '').toLowerCase().indexOf(q) >= 0)));
+  const chip = (k, l) => `<button class="btn sm${st === k ? ' p' : ''}" onclick="S.rbst='${k}';paintReimb_()">${l}${k === 'all' ? ' ' + all.length : cnt[k] ? ' ' + cnt[k] : ''}</button>`;
+  el.innerHTML = `<div class="fl"><input type="text" placeholder="ค้นชื่อ / รหัส / รายละเอียด" value="${h(S.rbq || '')}" oninput="S.rbq=this.value;paintReimb_()"><span style="flex:1"></span><button class="btn sm" onclick="S.reimb=null;renderDocs($('#main'))">⟳</button></div>
+    <div class="fl">${chip('pending', 'รอ HR ตรวจ')}${chip('approved', 'อนุมัติ')}${chip('rejected', 'ไม่อนุมัติ')}${chip('cancelled', 'ยกเลิก')}${chip('all', 'ทั้งหมด')}<span class="sm muted">ขอตกเบิก = ขอเงินคืนวันที่ถูกหักไปแล้ว · HR ตรวจเอง ไม่ผ่านหัวหน้า${S.reimbTotal > all.length ? ` · แสดง ${all.length} จาก ${S.reimbTotal}` : ''}</span></div>
+    <div class="tw"><table><thead><tr><th class="l">ยื่นเมื่อ</th><th class="l">พนักงาน</th><th class="l">ประเภท</th><th class="l">วันที่ถูกหัก</th><th class="l">งวดหัก → ขอจ่าย</th><th>จำนวนเงิน</th><th class="l">รายละเอียด</th><th>สถานะ</th><th class="l">ผู้อนุมัติ</th><th></th></tr></thead><tbody>${rows.map(d => { const i = all.indexOf(d); return `<tr>
+    <td class="l sm">${h(d.date)}</td><td class="l"><a href="#" onclick="openEmp('${h(d.empId)}','time');return false">${h(d.name)}</a>${d.nick ? ' (' + h(d.nick) + ')' : ''}<br><span class="sm muted">${h(d.empId)}${d.branch ? ' · ' + h(d.branch) : ''}</span></td><td class="l">${h(String(d.type || '').replace(/^ขอตกเบิก\s*-\s*/, ''))}</td><td class="l">${h(d.deductDate)}</td><td class="l sm">${h(d.deductPeriod)}${d.approvePeriod ? ' → ' + h(d.approvePeriod) : ''}</td><td>${h(d.amount)}</td><td class="l" style="max-width:260px;white-space:normal">${h(d.reason)}${d.attach ? ` <a href="${h(d.attach)}" target="_blank" rel="noopener">📎</a>` : ''}</td><td>${docTag(d.status)}</td><td class="l sm">${h(d.approver)}${d.updatedAt ? '<br><span class="muted">' + h(d.updatedAt) + '</span>' : ''}</td>
+    <td style="white-space:nowrap">${d.status === 'pending' ? `<button class="btn sm ok" onclick="reimbDecide_(${i},'approved')">อนุมัติ</button> <button class="btn sm bad" onclick="reimbDecide_(${i},'rejected')">ไม่อนุมัติ</button>` : d.status === 'approved' ? `<button class="btn sm" onclick="reimbRevoke_(${i})">↩ ถอน</button>` : ''}</td></tr>`; }).join('') || '<tr><td colspan="10" class="empty">ไม่มีใบตามตัวกรอง</td></tr>'}</tbody></table></div>`;
+}
+async function reimbDecide_(i, decision) {
+  const d = (S.reimb || [])[i]; if (!d) return;
+  let note = '';
+  if (decision === 'rejected') { note = prompt(`เหตุผลที่ไม่อนุมัติ — ${d.name} · ${d.type} · ถูกหัก ${d.deductDate}`) || ''; if (!note) return; }
+  else if (!confirm(`อนุมัติขอตกเบิกของ ${d.name} · ${d.type} · ถูกหัก ${d.deductDate}${d.amount ? ' · ' + d.amount + ' บาท' : ''} ?`)) return;
+  try { await api('approveAny', { sheet: d.sheet, row: d.row, decision, note, approverName: S.u.name, empId: d.empId, info: d.ainfo }); d.status = decision; d.approver = S.u.name; toast(decision === 'approved' ? '✓ อนุมัติแล้ว' : '✗ ไม่อนุมัติแล้ว', 'ok'); paintReimb_(); }
+  catch (e) { toast('❌ ' + e.message, 'bad'); }
+}
+async function reimbRevoke_(i) {
+  const d = (S.reimb || [])[i]; if (!d) return;
+  if (!confirm(`ถอนการอนุมัติขอตกเบิกของ ${d.name} · ถูกหัก ${d.deductDate}?\nใบนี้จะกลายเป็น "ยกเลิก"`)) return;
+  const reason = prompt('เหตุผลที่ถอน (ไม่บังคับ)') || '';
+  try { await api('revokeApproval', { sheet: d.sheet, row: d.row, reason }); d.status = 'cancelled'; toast('✓ ถอนการอนุมัติแล้ว', 'ok'); paintReimb_(); }
+  catch (e) { toast('❌ ' + e.message, 'bad'); }
+}
 /* ══════════ รายงาน ══════════ */
 function renderReports(m) {
   const sub = S.sub || 'scans';
