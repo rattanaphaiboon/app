@@ -19,6 +19,8 @@
        ใบขอตกเบิกที่ไม่ผ่านหัวหน้า — เดิมหลังบ้านไม่มีที่ดูเลย (surat 09/10 "ขอปรับปรุงเวลาแต่ไม่ขึ้นให้อนุมัติ")
      ► v1.8 · 09/10/2026 — แท็บขอตกเบิก: ปุ่ม "ปิดรอบใบเก่า…" (Apps Script 9.68 closeReimburseBefore) ปิดใบที่ยังค้างก่อนวันที่กำหนดทีเดียว
        = สถานะ "ปิดรอบ" (ตรวจนอกแอปแล้ว) · surat รัน auditPendingDocs เจอใบตกเบิก 60+ ใบค้างตั้งแต่ มิ.ย.–ก.ค.
+     ► v1.9 · 10/10/2026 — ✎ เพิ่ม/แก้เวลา = HR "ลงเวลาให้ตรง" (Apps Script 9.72 hrFixTime): เขียน CheckinLog เลย ไม่สร้างใบแก้เวลาย้อนหลังในนามพนักงาน ไม่มีช่องอนุมัติทันที
+       surat 10/10 "ไม่ต้องทำเป็นปรับปรุงเวลา ให้ Adjust เลย ทำได้แค่ HR" · เวลาชนิดเดิมคนละเวลา = ถามแทนที่ → ไม่แทนที่ = ถามเพิ่มอีกรายการ · ใบที่พนักงานยื่นค้างเวลาเดียวกันถูกปิดเป็นอนุมัติ · บันทึกการสแกนขึ้น "HR ลงเวลาให้ (ชื่อ)"
      ============================================================ -->
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700;800&display=swap">
 <style>
@@ -184,7 +186,7 @@ const CFG = {
   api: 'https://script.google.com/macros/s/AKfycbzyZsYY9R3WAhy7LUiaIF_xPTK50vVgggrv6Ua5WYCdKOUHGNd_PjDcSojI39OSiRU/exec',
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ', usersTab: 'Sheet1',
   attendanceSheetId: '1aywVdJ5-zw70__3BHjE3itjZotiubaRUAMjWOzgCAts',
-  ver: '1.8',
+  ver: '1.9',
 };
 const S = { token: '', exp: 0, u: null, users: [], ptt: [], byId: {}, period: null, hr: null, settings: null, holidays: null, locations: null,
             faces: null, docs: null, docsRange: '', view: 'dashboard', sub: '', emp: null, empTab: 'time', empDays: {}, shifts: {}, audit: {}, quotaAll: null, busy: {} };
@@ -213,6 +215,7 @@ function methodLabel(sb) {
   if (s.indexOf('supervisor:') === 0) return 'Kiosk (หัวหน้า ' + s.slice(11) + ')';
   if (s.indexOf('device:') === 0) return 'เครื่องสแกน (' + ({ finger: 'นิ้ว', face: 'หน้า', card: 'บัตร', password: 'รหัส' }[s.slice(7)] || s.slice(7)) + ')';
   if (s.indexOf('timeadjust:') === 0) return 'แก้เวลาย้อนหลัง (อนุมัติโดย ' + s.slice(11) + ')';
+  if (s.indexOf('hr-fix:') === 0) return 'HR ลงเวลาให้ (' + (((typeof empOf === 'function' && empOf(s.slice(7))) || {}).name || s.slice(7)) + ')';   // v1.9 ลงเวลาตรงจากหลังบ้าน (Apps Script 9.72)
   return s;
 }
 function toast(msg, kind) { const t = document.createElement('div'); t.className = kind || ''; t.textContent = msg; $('#toast').appendChild(t); setTimeout(() => t.remove(), kind === 'bad' ? 7000 : 3500); }
@@ -619,7 +622,7 @@ async function auditDay(iso) {
   if (!S.audit['day|' + iso]) { const r = await api('getAuditLog', { date: iso }); S.audit['day|' + iso] = (r.rows || []).map(x => Object.assign({}, x, { scanAt: x.scanAt || (x.date && x.time ? isoFromDmy(x.date) + 'T' + x.time : '') })); }
   return S.audit['day|' + iso];
 }
-/* เพิ่ม/แก้เวลาแทนพนักงาน — ยื่นคำขอ "แก้เวลาย้อนหลัง" ในนามพนักงาน (ชีทการลาApp) แล้วอนุมัติทันที → ระบบเติมสแกนให้ (backend v4.8) */
+/* เพิ่ม/แก้เวลาแทนพนักงาน — v1.9 HR "ลงเวลาให้ตรง" ลง CheckinLog เลย (Apps Script 9.72 hrFixTime) ไม่สร้างใบแก้เวลาย้อนหลังในนามพนักงานอีก (v1.0–1.8 ลงใบในการลาApp + อนุมัติทันที) */
 function openFix(id, iso, status, inTime, preset) {
   const e = empOf(id);
   // v1.2 ★ กะดึก: เข้าตอนเย็น (≥ 12:00) แล้ว "ไม่ครบคู่" = ขาดเวลาออก ซึ่งเกิดเช้าวันถัดไป (ระบบนับกะดึกแบบเที่ยงถึงเที่ยง)
@@ -635,8 +638,7 @@ function openFix(id, iso, status, inTime, preset) {
     <div id="fxRows"></div>
     <button class="btn sm" onclick="fxAdd()">＋ เพิ่มเวลาอีกรายการ</button>
     <div class="fld" style="margin-top:10px"><label>รายละเอียดเพิ่มเติม (ไม่บังคับ)</label><input id="fxDetail" placeholder="เช่น พนักงานแจ้งว่าลืมสแกนออก"></div>
-    <label class="ck" style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" id="fxAuto" checked> อนุมัติทันที (ระบบจะเติมสแกนเวลานี้ให้และสถานะในชีทเปลี่ยนตาม)</label>
-    <div class="sm muted" style="margin-top:8px">บันทึกเป็นใบ "แก้เวลาย้อนหลัง" ในชีทการลาApp ในนามพนักงาน โดยระบุว่ายื่นจากหลังบ้าน HR — มีร่องรอยตรวจสอบย้อนหลังได้</div>`,
+    <div class="sm muted" style="margin-top:8px">ลงเวลาให้ทันที ไม่ต้องรออนุมัติ (ทำได้เฉพาะ HR) — บันทึกใน CheckinLog ว่า "HR ลงเวลา" พร้อมเหตุผลและชื่อผู้ทำ ไม่สร้างใบแก้เวลาย้อนหลังในนามพนักงาน · ลบได้ด้วย 🗑 ด้านบน (สำเนาเก็บไว้แท็บ "สแกนที่ลบ")</div>`,
     `<button class="btn" onclick="closeModal()">ยกเลิก</button><button class="btn p" id="fxSave" onclick="fxSave('${h(id)}')">บันทึก</button>`);
   S.fx = [{ type: (preset && preset.type) || (status && /ไม่ครบคู่/.test(status) ? 'out' : 'in'), time: (preset && preset.time) || '' }];
   fxRender();
@@ -690,50 +692,43 @@ function fxRender() {
   $('#fxRows').innerHTML = S.fx.map((r, i) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><select onchange="S.fx[${i}].type=this.value" style="padding:8px;border:1.5px solid var(--line);border-radius:9px"><option value="in"${r.type === 'in' ? ' selected' : ''}>เข้า</option><option value="out"${r.type === 'out' ? ' selected' : ''}>ออก</option></select><input type="time" value="${r.time}" oninput="S.fx[${i}].time=this.value" style="padding:8px;border:1.5px solid var(--line);border-radius:9px">${S.fx.length > 1 ? `<button class="pen" onclick="S.fx.splice(${i},1);fxRender()">✕</button>` : ''}</div>`).join('');
 }
 async function fxSave(id) {
-  const e = empOf(id), date = $('#fxDate').value, why = $('#fxWhy').value, detail = $('#fxDetail').value.trim(), auto = $('#fxAuto').checked;
+  const date = $('#fxDate').value, why = $('#fxWhy').value, detail = $('#fxDetail').value.trim();
   const items = S.fx.filter(r => /^\d{2}:\d{2}$/.test(r.time));
   if (!date) { toast('เลือกวันที่', 'warn'); return; }
   if (!items.length) { toast('กรอกเวลาอย่างน้อย 1 รายการ', 'warn'); return; }
   const btn = $('#fxSave'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> กำลังบันทึก…';
   const dateThai = dmy(date);
-  const msgs = [];
+  const msgs = [], warns = [];
+  // v1.9 ★ HR ลงเวลาให้ "ตรง" — hrFixTime (Apps Script 9.72) เขียน CheckinLog เลย ไม่สร้างใบแก้เวลาย้อนหลังในนามพนักงาน (surat 10/10)
+  //   added = ลงแล้ว · exists = เวลานี้มีอยู่แล้ว · fixed_name = มีอยู่แล้วแต่ชื่อผิดคน แก้ให้ · conflict = มีชนิดเดิมคนละเวลา → ถามแทนที่ (ลบอันเดิม → ลงใหม่) ไม่แทนที่ → ถามเพิ่มอีกรายการ (force)
+  //   closed = ปิดใบที่พนักงานยื่นค้างเวลาเดียวกันให้แล้ว · otherPending = ใบค้างเวลาอื่นของวันนั้น (เตือน ไม่แตะ) · เซิร์ฟเวอร์ 9.71 ตอบ created/exists แบบเดิม ยังใช้ได้
+  const fix = (it, extra) => api('hrFixTime', Object.assign({ empId: id, date, type: it.type, time: it.time, why, detail }, extra || {}));
   try {
     for (const it of items) {
-      // v1.3 ★ อนุมัติทันที = hrFixTime (Apps Script 9.58) ทำครบในคำขอเดียว: มีสแกนอยู่แล้ว (ชื่อผิดคน = แก้ให้) ·
-      //   มีใบค้างรอ = อนุมัติใบนั้น · ไม่มี = ลงใบ+เติมสแกน — เดิม 3 คำขอ (ยื่น → ค้น → อนุมัติ) ขั้นค้นพลาดได้ (เคส 690030)
-      if (auto && S.hrFixOk !== false) {
-        try {
-          const r = await api('hrFixTime', { empId: id, date, type: it.type, time: it.time, why, detail });
-          const lb = it.type === 'out' ? 'ออก' : 'เข้า';
-          // v1.6 มีเวลาชนิดนี้จากใบแก้เวลาอยู่แล้วแต่คนละเวลา (เดิมได้แค่ "มีอยู่แล้ว" แก้ไม่ได้) → ถามว่าแทนที่ไหม
-          if (r.done === 'exists' && r.time && r.time !== it.time) {
-            if (!confirm(`วันที่ ${dateThai} มีเวลา${lb} ${r.time} (จากใบแก้เวลาเดิม) อยู่แล้ว\nแทนที่ด้วย ${it.time} ไหม?\n\nเวลาเดิมจะถูกลบ (สำเนาเก็บไว้แท็บ "สแกนที่ลบ")`)) { msgs.push('คงเวลา' + lb + ' ' + r.time + ' ไว้ตามเดิม'); continue; }
-            try { await api('hrDeleteScan', { empId: id, cid: 'TA-' + id + '-' + date.split('-').reverse().join('') + '-' + it.type, reason: 'แก้เป็น ' + it.time + ' · ' + why }); }
-            catch (e2) { throw new Error(/Unknown action/i.test(String(e2 && e2.message)) ? 'แทนที่เวลาไม่ได้ — ต้อง Deploy Apps Script 9.64' : e2.message); }
-            const r2 = await api('hrFixTime', { empId: id, date, type: it.type, time: it.time, why, detail });
-            msgs.push('แทนที่เวลา' + lb + ' ' + r.time + ' → ' + (r2.time || it.time));
-            continue;
-          }
-          msgs.push(r.done === 'fixed_name' ? 'มีเวลา' + lb + ' ' + r.time + ' อยู่แล้วแต่ลงชื่อผิดคน — แก้ชื่อให้แล้ว'
-                  : r.done === 'exists' ? 'มีเวลา' + lb + ' ' + r.time + ' ของวันนี้อยู่แล้ว'
-                  : r.done === 'approved_existing' ? 'อนุมัติใบที่ค้างอยู่ (' + lb + ' ' + r.time + ')'
-                  : 'เพิ่มเวลา' + lb + ' ' + r.time);
-          continue;
-        } catch (e1) {
-          if (!/Unknown action/i.test(String(e1 && e1.message))) throw e1;
-          S.hrFixOk = false;   // เซิร์ฟเวอร์ยังไม่ใช่ 9.58 — ใช้ทางเดิม
-        }
+      const lb = it.type === 'out' ? 'ออก' : 'เข้า';
+      let r;
+      try { r = await fix(it); }
+      catch (e1) { throw new Error(/Unknown action/i.test(String(e1 && e1.message)) ? 'ลงเวลาไม่ได้ — ต้อง Deploy Apps Script 9.72' : e1.message); }
+      if (r.done === 'conflict' || (r.done === 'exists' && r.time && r.time !== it.time)) {
+        const old = (r.sameType || []).slice(-1)[0] || { time: r.time };
+        if (confirm(`วันที่ ${dateThai} มีเวลา${lb} ${old.time} อยู่แล้ว\nแทนที่ด้วย ${it.time} ไหม?\n\nตกลง = ลบ ${old.time} (สำเนาเก็บไว้แท็บ "สแกนที่ลบ") แล้วลง ${it.time}\nยกเลิก = ถามต่อว่าจะเพิ่ม ${it.time} เป็นอีกรายการไหม`)) {
+          await api('hrDeleteScan', { empId: id, ts: old.ts || '', date: dateThai, time: old.time, reason: 'แก้เป็น ' + it.time + ' · ' + why });
+          r = await fix(it);
+          if (r.done === 'conflict') r = await fix(it, { force: '1' });
+          msgs.push('แทนที่เวลา' + lb + ' ' + old.time + ' → ' + it.time);
+        } else if (confirm(`เพิ่ม${lb} ${it.time} เป็นอีกรายการไหม? (วันนี้จะมีเวลา${lb} ${((r.sameType || []).length || 1) + 1} ครั้ง)`)) {
+          r = await fix(it, { force: '1' });
+          msgs.push('เพิ่มเวลา' + lb + ' ' + it.time + ' (อีกรายการ)');
+        } else { msgs.push('ข้าม' + lb + ' ' + it.time); continue; }
+      } else {
+        msgs.push(r.done === 'fixed_name' ? 'มีเวลา' + lb + ' ' + r.time + ' อยู่แล้วแต่ลงชื่อผิดคน — แก้ชื่อให้แล้ว'
+                : r.done === 'exists' ? 'มีเวลา' + lb + ' ' + r.time + ' ของวันนี้อยู่แล้ว'
+                : 'ลงเวลา' + lb + ' ' + (r.time || it.time));
       }
-      const reason = `${it.type === 'in' ? 'เข้า' : 'ออก'} ${it.time} · ${why} · หลังบ้าน HR (${S.u.name || S.u.empId})${detail ? ' · ' + detail : ''}`;
-      await api('submitLeaveApp', { reqId: reqId(), empId: id, name: e.name, nickname: e.nick || '', type: 'time_adjust', typeLabel: 'แก้เวลาย้อนหลัง', startDate: dateThai, endDate: dateThai, reason, photo: '' });
-      if (auto) {
-        const docs = (await api('getLeaveDocs', { from: date, to: date })).items || [];
-        const doc = docs.find(d => d.empId === id && d.status === 'pending' && /แก้เวลา/.test(d.type) && d.info === reason);
-        if (!doc) throw new Error('บันทึกใบแล้วแต่หาแถวเพื่ออนุมัติไม่พบ — ไปอนุมัติที่เมนู จัดการลางาน');
-        await api('approveAny', { sheet: doc.sheet, row: doc.row, decision: 'approved', approverName: S.u.name, empId: id, info: docAinfo_(doc) });
-      }
+      if (r.closed) warns.push('ปิดใบแก้เวลาที่พนักงานยื่นค้างไว้ (' + lb + ' ' + (r.time || it.time) + ') เป็นอนุมัติแล้ว');
+      if (r.otherPending && r.otherPending.length) warns.push('ยังมีใบแก้เวลา' + lb + 'ของวันนี้รออนุมัติอยู่ (' + r.otherPending.join(', ') + ') — ดูที่ จัดการลางาน');
     }
-    toast(msgs.length ? '✓ ' + msgs.join(' · ') : `✓ บันทึกเวลา ${items.length} รายการ${auto ? ' และอนุมัติแล้ว' : ' (รออนุมัติ)'}`, 'ok');
+    toast('✓ ' + msgs.join(' · ') + (warns.length ? ' · ⚠ ' + warns.join(' · ') : ''), 'ok');
     closeModal();
     S.empDays = {}; S.hr = null; S.docs = null; S.audit = {};
     loadPeriod(true).then(() => render()).catch(() => render());
