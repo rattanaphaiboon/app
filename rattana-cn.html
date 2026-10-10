@@ -677,17 +677,34 @@ function openMark(keys) {
 }
 /* ── ถ่ายรูปเอกสาร → OCR → เติมเลขที่ ── */
 let OCR = { busy: false, photo: '', seq: 0 };
-// รูปแบบเลขเอกสาร เช่น ISS6910/012, ISK6908/017  (บิลต้นทาง DS/DC/TS/CV ใช้ไว้ตรวจว่าถ่ายถูกใบ)
-const DOC_RE = /\b([A-Z]{2,5}[A-Z0-9]{0,3}\d{3,})\s*[\/|]\s*(\d{2,6})\b/g;
-const REF_PREFIX = /^(DS|DC|TS|CV)/;
+// เลข IS เช่น ISS6910/295, ISK6908/017 = IS + ตัวอักษร 1 ตัว + ปีเดือน 4 หลัก + / + เลขรัน
+// OCR มักอ่านพลาด: I→1/L/|, S→5/$, 0→O, 1→I/L → จับแบบหลวมแล้วแก้กลับ
+// ใบเดียวกันมักพิมพ์เลขซ้ำหลายจุด (มุมขวาบน / เลขที่ใบกำกับ / เลขที่เอกสาร) → เลขที่เจอบ่อยสุดขึ้นก่อน
+const IS_TOKEN = /([I1L|!]\s?[S5$])\s?([A-Z0-9$]?)\s?([0-9OILSB|]{4})\s*[\/|]\s*([0-9OILSB|]{2,5})(?![0-9])/g;
+const fixDigits = s => s.replace(/O/g, '0').replace(/[IL|]/g, '1').replace(/S/g, '5').replace(/B/g, '8');
+const fixLetter = c => ({ '5': 'S', '$': 'S', '0': 'D', '8': 'B', '1': 'I' })[c] || c;
 const squash = s => String(s || '').toUpperCase().replace(/\s+/g, '');
 function extractDocNos(text) {
-  const t = String(text || '').toUpperCase().replace(/(\d)O(?=\d)/g, '$10').replace(/(\d)O(?=\d)/g, '$10');
-  const found = [];
-  for (const m of t.matchAll(DOC_RE)) { const v = m[1] + '/' + m[2]; if (!found.includes(v)) found.push(v); }
-  const docs = found.filter(v => !REF_PREFIX.test(v));
-  docs.sort((a, b) => (/^(IS|CN|SR)/.test(b) ? 1 : 0) - (/^(IS|CN|SR)/.test(a) ? 1 : 0));
-  return docs;
+  const t = String(text || '').toUpperCase();
+  const count = {};
+  for (const m of t.matchAll(IS_TOKEN)) {
+    if (!/[A-Z$]/.test(m[1])) continue;                  // "15..." ล้วนเลข ไม่ใช่ IS
+    const v = 'IS' + fixLetter(m[2] || '') + fixDigits(m[3]) + '/' + fixDigits(m[4]);
+    count[v] = (count[v] || 0) + 1;
+  }
+  return Object.keys(count).sort((a, b) => count[b] - count[a] || (/^IS[A-Z]/.test(b) ? 1 : 0) - (/^IS[A-Z]/.test(a) ? 1 : 0));
+}
+// ใบ IS ไม่มีเลขบิล DS/DC → ตรวจว่าถ่ายถูกใบจาก บาร์โค้ดสินค้า / ยอดเงิน / ชื่อร้าน
+function matchCheck(d, text) {
+  const txt = squash(text);
+  if (d.bill && txt.includes(squash(d.bill))) return `<div class="chk-ok">✓ ตรงกับบิล ${esc(d.bill)}</div>`;
+  const bc = d.lines.find(l => l.bc && String(l.bc).length >= 8 && txt.includes(squash(l.bc)));
+  if (bc) return `<div class="chk-ok">✓ ตรงกับสินค้า ${esc(bc.name)}</div>`;
+  const amts = [d.amount.toFixed(2), d.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })];
+  if (amts.some(a => txt.includes(squash(a)))) return `<div class="chk-ok">✓ ยอดเงิน ${money(d.amount)} ตรง</div>`;
+  const store = squash(d.store).replace(/^ร้าน/, '');
+  if (store.length >= 4 && txt.includes(store)) return `<div class="chk-ok">✓ ตรงกับร้าน ${esc(d.store)}</div>`;
+  return `<div class="chk-warn">⚠️ ไม่เห็นสินค้า/ยอดเงินของ CN นี้ในรูป — ตรวจว่าถ่ายถูกใบ</div>`;
 }
 async function resizeImage(file, max = 2000, q = .85) {
   const url = URL.createObjectURL(file);
@@ -736,11 +753,11 @@ async function handleDocFile(file) {
     const cands = extractDocNos(j.text);
     const docInp = document.getElementById('mkDoc');
     if (cands.length) { docInp.value = cands[0]; docInp.classList.remove('flash'); void docInp.offsetWidth; docInp.classList.add('flash'); }
-    const txt = squash(j.text);
-    const chk = d.bill ? (txt.includes(squash(d.bill)) ? `<div class="chk-ok">✓ ตรงกับบิล ${esc(d.bill)}</div>` : txt.includes(squash(d.storeCode)) ? `<div class="chk-ok">✓ ตรงกับรหัสร้าน ${esc(d.storeCode)}</div>` : `<div class="chk-warn">⚠️ ไม่เห็นเลขบิล ${esc(d.bill)} ในรูป — ตรวจว่าถ่ายถูกใบ</div>`) : '';
+    const chk = j.text ? matchCheck(d, j.text) : '';
     box.querySelector('.ocr-info').innerHTML =
-      (cands.length ? `<div>อ่านได้ ${cands.length > 1 ? '— แตะเพื่อเลือก' : ''}</div><div class="cand-row">${cands.map((c, i) => `<button type="button" class="cand ${i === 0 ? 'on' : ''}" onclick="pickCand(this)">${esc(c)}</button>`).join('')}</div>`
-        : `<div class="chk-warn">อ่านเลขที่เอกสารไม่เจอ — พิมพ์เองได้ หรือถ่ายใหม่ให้ชัดขึ้น</div>`) +
+      (j.ocrError ? `<div class="chk-warn">อ่านตัวหนังสือไม่สำเร็จ (${esc(j.ocrError)}) — พิมพ์เลข IS เองได้</div>`
+        : cands.length ? `<div>อ่านได้ ${cands.length > 1 ? '— แตะเพื่อเลือก' : ''}</div><div class="cand-row">${cands.map((c, i) => `<button type="button" class="cand ${i === 0 ? 'on' : ''}" onclick="pickCand(this)">${esc(c)}</button>`).join('')}</div>`
+        : `<div class="chk-warn">ไม่เจอเลขที่ขึ้นต้นด้วย IS — พิมพ์เองได้ หรือถ่ายใหม่ให้ชัด/ใกล้ขึ้น</div>`) +
       chk +
       (OCR.photo ? `<div style="margin-top:4px"><a class="link" href="${esc(OCR.photo)}" target="_blank" rel="noopener">📷 เก็บรูปแล้ว</a></div>` : '') +
       `<details class="ocr-raw"><summary>ข้อความที่อ่านได้</summary><pre>${esc(j.text || '(ว่าง)')}</pre></details>`;
