@@ -1708,7 +1708,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
             <div class="home-alert-icon">!</div>
             <span id="incompleteAlertText">พบเวลาการทำงานผิดปกติ</span>
           </div>
-          <button class="home-alert-btn" onclick="showPage('timeadjust')">ตรวจสอบ →</button>
+          <button class="home-alert-btn" onclick="openIncompleteFix_()">ตรวจสอบ →</button>
         </div>
         <div id="incompleteList" style="display:none"></div>
       </div>
@@ -3886,7 +3886,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.30';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '13.31';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v13.11: LINE OA ฝ่ายบุคคล (surat 30/09) — ตัวเดียวกับที่แอป 360 / แปลงรูปเป็น PDF / สมัครงาน ใช้ · lin.ee พาไป line.me/R/ti/p/@712dqxgv */
 const HR_LINE_URL = 'https://lin.ee/uIN2DMR', HR_LINE_ID = '@712dqxgv';
 const HR_TEL = '0640978417', HR_TEL_TXT = '064-097-8417';   // v13.12: เบอร์ฝ่ายบุคคล (ตัวเดียวกับแอป 360 / img2pdf / jobs)
@@ -15369,42 +15369,58 @@ async function cancelMyRequest_(id, submittedAt) {
   finally { hideSpinner(); }
 }
 
+let _incompletePairs = [];   // v13.31 วันที่สแกนไม่ครบ (ล่าสุดก่อน) — ปุ่ม "ตรวจสอบ →" เปิดฟอร์มของวันแรกในนี้
 async function checkIncompletePairs() {
   const box = document.getElementById('incompleteAlert');
   const list = document.getElementById('incompleteList');
+  const txt = document.getElementById('incompleteAlertText');
   if (!box || !list || !currentUser) return;
   try {
     // v12.1: คำนวณจาก log ดิบในเครื่อง (เลิกพึ่งชีท "ลงเวลาApp" — ชีทนั้นเลิกเขียนแล้ว)
-    // v12.6: เกณฑ์ใหม่ = เตือนเฉพาะวันที่ขาดขาใดขาหนึ่ง (สแกนคี่แต่มีครบสองขา ไม่นับว่าผิด)
+    // v13.31 (surat 10/10 "ขึ้นผิดปกติ กดเข้ามาเป็นเตือนของวันนี้") — กติกาเดียวกับสรุปวัน/เซิร์ฟเวอร์ 9.65:
+    //   ตัดซ้อน ≤5 นาที · กะข้ามคืน (วันคี่ สแกนสุดท้าย ≥18:00 + วันถัดไปเริ่ม ≤12:00 = ย้ายสแกนแรกของวันถัดไปมาปิดคู่)
+    //   วันนี้ใช้แค่ปิดคู่ของเมื่อวาน ไม่เตือน · แถบบอกวันที่+อาการ · ปุ่มเปิดฟอร์มของวันที่ขาด ไม่ใช่วันนี้
     const today = todayKey();
-    const cutoff = Date.now() - 14 * 24 * 3600 * 1000;
+    const cutoff = Date.now() - 15 * 24 * 3600 * 1000;
     const byDay = {};
     logs.forEach(l => {
       if (String(l.empId) !== String(currentUser.empId)) return;
-      if (!l.dateKey || l.dateKey === today) return;             // วันนี้ยังไม่จบวัน ไม่นับ
+      if (!l.dateKey) return;
       const t = new Date(l.ts).getTime();
       if (isNaN(t) || t < cutoff) return;
-      (byDay[l.dateKey] = byDay[l.dateKey] || []).push(l);
+      (byDay[l.dateKey] = byDay[l.dateKey] || []).push({ ms: t, hhmm: l.timeStr ? String(l.timeStr).substring(0, 5) : '' });
     });
+    const keys = Object.keys(byDay).sort();
+    const C = {}; keys.forEach(k => { C[k] = scanCollapse_(byDay[k]); });
+    const hr = x => (x && x.ms) ? new Date(x.ms).getHours() : 0;
+    const nextKey = k => { const d = new Date(k + 'T12:00:00'); d.setDate(d.getDate() + 1); return localDateKey(d); };
+    keys.forEach(k => { const a = C[k], b = C[nextKey(k)]; if (a.length % 2 === 1 && b && b.length && hr(a[a.length - 1]) >= 18 && hr(b[0]) <= 12) a.push(b.shift()); });
     const pairs = [];
-    Object.keys(byDay).sort().reverse().forEach(dk => {
-      // v13.25 กติกาเดียวกับสรุปวัน: ตัดซ้อน ≤5 นาที แล้วนับจำนวน (ป้ายเข้า/ออกไม่มีผล) · วันที่ยื่นแก้เวลาแล้ว = ไม่เตือนซ้ำ
-      const arr = scanCollapse_(byDay[dk].map(l => ({ ms: new Date(l.ts).getTime() || 0, hhmm: l.timeStr ? String(l.timeStr).substring(0, 5) : '' })));
-      if (arr.length % 2 === 0 || taPendingFor_(dk).length) return;
-      const first = arr[0];
-      const h = first.ms ? new Date(first.ms).getHours() : 0;
-      pairs.push({ date: dk, missing: arr.length > 1 ? 'ODD' : (h < 12 ? 'OUT' : 'IN'), n: arr.length,
+    keys.slice().reverse().forEach(dk => {
+      if (dk >= today) return;                                   // วันนี้ยังไม่จบวัน ไม่นับ
+      const arr = C[dk];
+      if (!arr.length || arr.length % 2 === 0 || taPendingFor_(dk).length) return;
+      const first = arr[0], h = hr(first);
+      pairs.push({ date: dk, missing: arr.length > 1 ? 'ODD' : (h < 12 ? 'OUT' : 'IN'), n: arr.length, times: arr.map(x => x.hhmm),
                    firstIn: arr.length === 1 && h < 12 ? first.hhmm : '', lastOut: arr.length === 1 && h >= 12 ? first.hhmm : '' });
     });
+    _incompletePairs = pairs;
     if (pairs.length === 0) { box.style.display = 'none'; return; }
+    const say = p => `${_thaiShortDate_(new Date(p.date + 'T12:00:00'))} ${p.missing === 'ODD' ? `สแกน ${p.n} ครั้ง จับคู่ไม่ได้` : p.missing === 'OUT' ? `ไม่มีสแกนออก (เข้า ${p.firstIn})` : `ไม่มีสแกนเข้า (ออก ${p.lastOut})`}`;
+    if (txt) txt.textContent = `สแกนไม่ครบ ${pairs.length} วัน: ` + pairs.slice(0, 2).map(say).join(' · ') + (pairs.length > 2 ? ` และอีก ${pairs.length - 2} วัน` : '');
     box.style.display = '';
     list.innerHTML = pairs.slice(0, 5).map(p =>
-      `<div style="padding:6px 0;border-bottom:1px dashed var(--border)">
-        <strong>${formatThaiDate(p.date)}</strong> — ${p.missing === 'ODD' ? `สแกน <span style="color:var(--danger);font-weight:600">${p.n} ครั้ง จับคู่ไม่ได้</span>` : `ขาด <span style="color:var(--danger);font-weight:600">${p.missing === 'IN' ? 'การเข้า' : 'การออก'}</span>`}
-        ${p.firstIn ? ` (เข้า ${p.firstIn})` : ''}${p.lastOut ? ` (ออก ${p.lastOut})` : ''}
-      </div>`
+      `<div style="padding:6px 0;border-bottom:1px dashed var(--border)"><strong>${formatThaiDate(p.date)}</strong> — ${say(p).replace(/^\S+ \S+ \S+ /, '')}</div>`
     ).join('') + (pairs.length > 5 ? `<div class="text-sm text-muted" style="margin-top:6px">และอีก ${pairs.length-5} วัน</div>` : '');
   } catch(_) { box.style.display = 'none'; }
+}
+/* v13.31 ปุ่ม "ตรวจสอบ →" บนแถบ = เปิดฟอร์มแก้เวลาของวันแรกที่ขาด พร้อมชนิดที่ขาด (เดิมเปิดหน้าแก้เวลาเฉยๆ = วันนี้) */
+function openIncompleteFix_() {
+  const p = (_incompletePairs || [])[0];
+  if (!p) { showPage('timeadjust'); return; }
+  const dp = p.date.split('-');
+  const label = p.missing === 'ODD' ? `สแกน ${p.n} ครั้ง (${(p.times || []).join(' · ')}) จับคู่ไม่ได้` : p.missing === 'OUT' ? `เข้า ${p.firstIn} แล้วไม่มีเวลาออก` : `ไม่มีเวลาเข้า (มีแต่ ${p.lastOut})`;
+  tissOpenForm_({ empId: currentUser.empId, name: currentUser.name || currentUser.empId, iso: p.date, date: dp[2] + '/' + dp[1] + '/' + dp[0], label: label, need: p.missing === 'OUT' ? 'out' : p.missing === 'IN' ? 'in' : '' });
 }
 
 /* extend initApp: เรียก checkIncompletePairs หลัง app loaded */
