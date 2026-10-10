@@ -372,6 +372,8 @@ body.dark .home-today-date { color:var(--gold) }
 .tiss-row  { display:flex;align-items:center;gap:8px;margin-top:8px;padding:7px 9px;background:rgba(255,255,255,.72);border-radius:9px;cursor:pointer }
 .tiss-row .tr-nm { font-size:12.5px;font-weight:600;color:var(--text) }
 .tiss-row .tr-sub{ font-size:11px;color:#9a7333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis }
+.tiss-pick { display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0 2px 9px }   /* v13.29 ตัวเลือกใต้รายการ: แจ้งให้ยื่นเอง / ยื่นแทน */
+.tiss-pick .btn { padding:7px 11px;font-size:12.5px;border-radius:9px }
 .tiss-row .tr-go { color:#b07b12;font-size:15px;flex-shrink:0 }
 .tiss-more { text-align:center;font-size:11.5px;color:#9a7333;margin-top:8px;font-weight:700;padding:6px;cursor:pointer;border-top:1px dashed rgba(243,156,18,.35) }
 body.dark .tiss-card { background:#33240c;border-color:#6b4b12 }
@@ -3884,7 +3886,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.28';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
+const APP_VERSION = '13.29';   // ⚠️ บั๊มเลขนี้ทุกครั้งที่ deploy — ระบบเตือนเวอร์ชันใหม่อ่านค่านี้
 /* v13.11: LINE OA ฝ่ายบุคคล (surat 30/09) — ตัวเดียวกับที่แอป 360 / แปลงรูปเป็น PDF / สมัครงาน ใช้ · lin.ee พาไป line.me/R/ti/p/@712dqxgv */
 const HR_LINE_URL = 'https://lin.ee/uIN2DMR', HR_LINE_ID = '@712dqxgv';
 const HR_TEL = '0640978417', HR_TEL_TXT = '064-097-8417';   // v13.12: เบอร์ฝ่ายบุคคล (ตัวเดียวกับแอป 360 / img2pdf / jobs)
@@ -14148,19 +14150,76 @@ function renderTimeIssues_() {
              <div class="tr-sub">${escH_(it.label)}</div>${it.pending ? '<div class="tr-sub" style="color:#185FA5;font-weight:700">⏳ มีใบแก้เวลารออนุมัติ — แตะเพื่อไปอนุมัติ</div>' : ''}
            </div>
            <div class="tr-go">›</div>
-         </div>`).join('')}
+         </div>${_tissPick === i ? tissChooser_(it, i) : ''}`).join('')}
        ${list.length > 3
           ? `<div class="tiss-more" onclick="_tissOpen=!_tissOpen;renderTimeIssues_()">${
                _tissOpen ? '▲ ย่อลง' : `▼ ดูทั้งหมด (อีก ${list.length - 3} รายการ)`}</div>`
           : ''}
      </div>`;
 }
-/* แตะรายการ → เปิดฟอร์มแก้เวลาย้อนหลัง กรอกวัน/ชนิดที่ขาดไว้ให้ */
-function openTimeIssueFix(idx) {
+/* แตะรายการ → v13.29 (surat 10/10 "ขึ้นเตือนว่าสแกนไม่ครบ กดเข้าไปก็ครบ · แล้วหัวหน้าต้องกดปรับปรุงให้งี้หรอ")
+   1) ตรวจสดจากชีทก่อน: วันนั้นครบคู่แล้ว (นับหลังตัดซ้อน ≤5 นาที เหมือนสรุปวัน) = บอกว่าครบ เอาออกจากรายการ ไม่เปิดฟอร์ม
+      (รายการเก่าค้างในแอปได้ 10 นาที + ก่อน Apps Script 9.76 เซิร์ฟเวอร์อ่านแค่ 3000 แถวท้าย วันแรกของช่วงจึงเตือนผิด)
+   2) ของตัวเอง = เปิดฟอร์มแก้เวลาเหมือนเดิม
+   3) ของลูกทีม = ให้เลือก "แจ้งให้พนักงานยื่นเอง" (เด้งเตือนในแอปของเขา · Apps Script 9.76 notifyFixTime) หรือ "ยื่นแทน" — เดิมเปิดฟอร์มยื่นแทนทันที */
+let _tissPick = -1, _tissChecking = false;
+function tissCollapse_(logs) {
+  const L = [];
+  (logs || []).map(l => ({ ms: new Date(l.timestamp).getTime(), t: String(l.time || '').slice(0, 5) })).filter(x => isFinite(x.ms)).sort((a, b) => a.ms - b.ms)
+    .forEach(x => { if (L.length && x.ms - L[L.length - 1].ms <= 300000) return; L.push(x); });
+  return L;
+}
+function tissDrop_(idx) {
+  (_timeIssues || []).splice(idx, 1); _tissPick = -1;
+  try { localStorage.setItem(tissCacheKey_(), JSON.stringify(_timeIssues || [])); } catch (_) {}
+  renderTimeIssues_();
+}
+async function openTimeIssueFix(idx) {
   const it = (_timeIssues || [])[idx];
   if (!it) return;
   // v13.25 วันนั้นมีใบแก้เวลารออนุมัติอยู่แล้ว (Apps Script 9.65 ติดธงมา) → ไปหน้าอนุมัติ ไม่ต้องยื่นซ้ำ
   if (it.pending) { showPage('approvals'); toast(`${it.name || it.empId} · ${it.date} — มีใบแก้เวลารออนุมัติอยู่ กดอนุมัติได้เลย`, 'info'); return; }
+  if (_tissPick === idx) { _tissPick = -1; renderTimeIssues_(); return; }   // แตะซ้ำ = พับตัวเลือก
+  if (_tissChecking) return;
+  _tissChecking = true;
+  let L = null;
+  try {
+    const r = await callAppsScript('getCheckinLog', { empId: it.empId, date: it.date, limit: 60 });
+    if (r && r.ok !== false && Array.isArray(r.logs)) L = tissCollapse_(r.logs);
+  } catch (_) {} finally { _tissChecking = false; }
+  if (L && L.length >= 2 && L.length % 2 === 0) {
+    toast(`✓ ${it.name || it.empId} · ${it.date} ครบแล้ว (${L.map(x => x.t).join(' · ')}) — ไม่ต้องแก้`, 'success');
+    tissDrop_(idx); _tissAt = 0;
+    return;
+  }
+  if (L) {   // ยังไม่ครบจริง — อัปเดตข้อความ/ชนิดที่ขาดจากข้อมูลสด
+    const h0 = L.length ? parseInt(L[0].t, 10) : 0;
+    it.label = !L.length ? 'ไม่มีสแกนเลยทั้งวัน' : L.length === 1 ? (h0 < 12 ? 'เข้า ' + L[0].t + ' แล้วไม่มีเวลาออก' : 'ไม่มีเวลาเข้า (มีแต่ ' + L[0].t + ')') : 'สแกน ' + L.length + ' ครั้ง (' + L.map(x => x.t).join(' · ') + ') จับคู่ไม่ได้';
+    it.need = L.length === 1 ? (h0 < 12 ? 'out' : 'in') : (L.length ? '' : 'in');
+  }
+  const self = String(it.empId) === String(currentUser && currentUser.empId);
+  if (self) { tissOpenForm_(it); return; }
+  _tissPick = idx; renderTimeIssues_();
+}
+function tissChooser_(it, i) {
+  const nick = escH_(String(it.name || it.empId).split(' ')[0]);
+  return `<div class="tiss-pick" onclick="event.stopPropagation()">
+       <div class="tr-sub" style="white-space:normal">ตรวจสดแล้ว ยังไม่ครบ — ให้ใครแก้?</div>
+       <button type="button" class="btn btn-primary" onclick="tissNotify_(${i})">📨 แจ้งให้ ${nick} ยื่นเอง</button>
+       <button type="button" class="btn btn-outline" onclick="tissOpenForm_((_timeIssues||[])[${i}])">✍️ ยื่นแทน</button>
+     </div>`;
+}
+async function tissNotify_(i) {
+  const it = (_timeIssues || [])[i]; if (!it) return;
+  try {
+    const r = await callAppsScript('notifyFixTime', { empId: it.empId, iso: it.iso, label: it.label });
+    if (!r || r.ok === false) throw new Error((r && r.error) || 'แจ้งไม่สำเร็จ');
+    toast(r.dup ? `แจ้ง ${it.name || it.empId} ไปแล้วก่อนหน้านี้ (ภายใน 6 ชม.)` : `📨 แจ้ง ${it.name || it.empId} ให้ยื่นแก้เวลา ${it.date} แล้ว`, r.dup ? 'info' : 'success');
+    _tissPick = -1; renderTimeIssues_();
+  } catch (e) { toast('❌ ' + (/Unknown action/i.test(String(e && e.message)) ? 'ต้อง Deploy Apps Script 9.76 ก่อน' : (e && e.message)), 'error'); }
+}
+function tissOpenForm_(it) {
+  if (!it) return;
   showPage('timeadjust');
   setTimeout(() => {
     const self = String(it.empId) === String(currentUser && currentUser.empId);
