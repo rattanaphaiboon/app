@@ -1190,7 +1190,7 @@ body.ui2 .toast{border-radius:14px}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.379';
+const APP_VERSION='3.381';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -2446,6 +2446,99 @@ function allowedDeliverDates(){
    (loadJobs → loadAvailableJobs() แล้ว syncJobsFromSheet → loadAvailableJobs(force) อีกรอบ)
    คำขอชีท 1 ครั้งมีค่าคงที่ ~0.7 วิไม่ว่าข้อมูลเล็กแค่ไหน → ตัดรอบซ้ำ = เร็วขึ้นทันที
    15 วิสั้นพอที่กด ↻ ทีหลังยังได้ของสด (auto-refresh 180 วิอยู่แล้ว) */
+/* ★★ v3.381: พิกัดคลัง — ที่มา แท็บ Warehosue ในชีท Backend ของ Sales App · user ยืนยัน 10 ต.ค. 2026 ว่า HQ = ที่เดียวกับ W1 · C4 = W4 · W3 ของ Colgate = W3 */
+const WH_LL={W1:[13.441874390666026,100.03912834077977],W2:[14.631592473172725,100.1505306546475],W3:[13.529496714685116,99.84733486382437],W4:[13.954468059447054,100.05564209450324]};
+const WH_LL_ALIAS={HQ:'W1',C4:'W4'};
+function whLL_(wh){ const k=String(wh||'').trim().toUpperCase(); const p=WH_LL[k]||WH_LL[WH_LL_ALIAS[k]]; return p?{lat:p[0],lng:p[1]}:null; }
+/* ★★ v3.381: เรียงร้านตามพิกัด "แบบหน้าจัดรถ" (ยกวิธีจาก tspRoute ของ delivery-queue) — user สั่ง 10 ต.ค. 2026 สำหรับ Colgate
+   ร้านห่างกันไม่เกิน 300 ม. = จุดเดียวกัน · เริ่มจากคลัง วิ่งออกไปทางเดียว (ไม่คิดขากลับ) · มุมจากคลังกลับหัวเกิน 90° = บวกระยะลงโทษ กันซิกแซก
+   ต่างจากหน้าจัดรถ: ใช้ระยะเส้นตรงอย่างเดียว (ไม่ยิงเครื่องคิดระยะถนน — แอปคนขับต้องเปิดเร็ว) · ร้านเกิน 8 จุดลองแค่ 8 ทางเริ่ม (มือถือคิดไหว)
+   บิลที่ร้านไม่มีพิกัด ต่อท้ายตามลำดับเดิม · ผลจำไว้ต่อชุดบิล (sync ทุก 3 นาทีไม่ต้องคิดใหม่) */
+const _routeSortMemo={};
+function routeSortBills_(bills,start){
+  if(!start||!Array.isArray(bills)||bills.length<2) return bills;
+  const withLL=[], noLL=[];
+  bills.forEach(b=>{ const la=Number(b&&b.lat), lo=Number(b&&b.lng); ((isFinite(la)&&isFinite(lo)&&Math.abs(la)>0.1&&Math.abs(lo)>0.1)?withLL:noLL).push(b); });
+  if(withLL.length<2) return withLL.concat(noLL);
+  const sig=start.lat+','+start.lng+'|'+withLL.map(b=>String(b.doc||'')+'@'+Number(b.lat).toFixed(5)+','+Number(b.lng).toFixed(5)).join(';');
+  const memo=_routeSortMemo[sig];
+  if(memo){
+    const by={}; withLL.forEach(b=>{ by[String(b.doc||'')]=b; });
+    const out=memo.map(d=>by[d]).filter(Boolean);
+    if(out.length===withLL.length) return out.concat(noLL);
+  }
+  const clusters=[];
+  withLL.forEach(b=>{
+    const la=Number(b.lat), lo=Number(b.lng);
+    let hit=null;
+    for(const c of clusters){ if(geoDistM_(c.lat,c.lng,la,lo)<=300){ hit=c; break; } }
+    if(hit){ hit.bills.push(b); const n=hit.bills.length; hit.lat=hit.bills.reduce((s,x)=>s+Number(x.lat),0)/n; hit.lng=hit.bills.reduce((s,x)=>s+Number(x.lng),0)/n; }
+    else clusters.push({lat:la,lng:lo,bills:[b]});
+  });
+  const n=clusters.length;
+  let order=clusters.map((c,i)=>i);
+  if(n>1){
+    const P=clusters.concat([{lat:start.lat,lng:start.lng}]), S=n;
+    const D=P.map(a=>P.map(b=>geoDistM_(a.lat,a.lng,b.lat,b.lng)/1000));
+    const A=P.map(p=>Math.atan2(p.lat-start.lat,p.lng-start.lng));
+    const pen=(i,j)=>{ let d=Math.abs(A[i]-A[j]); if(d>Math.PI) d=2*Math.PI-d; return d>Math.PI/2?4.0*((d/Math.PI-0.5)*2):0; };
+    const cost=o=>{ let d=D[S][o[0]]; for(let i=1;i<o.length;i++) d+=D[o[i-1]][o[i]]+pen(o[i-1],o[i]); return d; };
+    const twoOpt=o=>{
+      const m=o.length; if(m<3) return o;
+      let imp=true, g=0;
+      while(imp&&g++<300){
+        imp=false;
+        for(let i=0;i<m;i++) for(let k=i+1;k<=m;k++){
+          const a=i===0?S:o[i-1], b=o[i], c=k>=m?o[m-1]:o[k-1], hasD=k<m, dd=hasD?o[k]:-1;
+          if(D[a][c]+(hasD?D[b][dd]:0)+1e-9<D[a][b]+(hasD?D[c][dd]:0)){
+            let lo=i, hi=Math.min(k-1,m-1); while(lo<hi){ const t=o[lo]; o[lo]=o[hi]; o[hi]=t; lo++; hi--; }
+            imp=true;
+          }
+        }
+      }
+      return o;
+    };
+    const orOpt=o=>{
+      const m=o.length; if(m<4) return o;
+      let imp=true, g=0;
+      while(imp&&g++<60){
+        imp=false;
+        for(let len=1;len<=Math.min(3,m-2)&&!imp;len++){
+          for(let i=0;i<=m-len&&!imp;i++){
+            const seg=o.slice(i,i+len), rest=o.slice(0,i).concat(o.slice(i+len));
+            let best=-1, bc=cost(o);
+            for(let j=0;j<=rest.length;j++){
+              if(j===i) continue;
+              const c=cost(rest.slice(0,j).concat(seg,rest.slice(j)));
+              if(c+1e-9<bc){ bc=c; best=j; }
+            }
+            if(best>=0){ o=rest.slice(0,best).concat(seg,rest.slice(best)); imp=true; }
+          }
+        }
+      }
+      return o;
+    };
+    if(n<=8){
+      const work=order.slice(); let best=work.slice(), bc=cost(best);
+      const heap=k=>{ if(k===1){ const c=cost(work); if(c<bc){ bc=c; best=work.slice(); } return; }
+        for(let i=0;i<k;i++){ heap(k-1); const j=(k%2)?0:i; const t=work[j]; work[j]=work[k-1]; work[k-1]=t; } };
+      heap(n); order=best;
+    }else{
+      const nn=s=>{ const rem=order.filter(x=>x!==s), out=[s]; let cur=s;
+        while(rem.length){ let bi=0, bd=Infinity; rem.forEach((x,i)=>{ if(D[cur][x]<bd){ bd=D[cur][x]; bi=i; } }); cur=rem.splice(bi,1)[0]; out.push(cur); }
+        return out; };
+      const starts=order.slice().sort((a,b)=>D[S][a]-D[S][b]).slice(0,6);
+      const sw=order.slice().sort((a,b)=>A[a]-A[b]);
+      const cands=starts.map(nn).concat([sw,sw.slice().reverse()]);
+      let best=null, bc=Infinity;
+      cands.forEach(t=>{ t=twoOpt(t); t=orOpt(t); t=twoOpt(t); const c=cost(t); if(c<bc){ bc=c; best=t; } });
+      order=best||order;
+    }
+  }
+  const out=[]; order.forEach(i=>out.push(...clusters[i].bills));
+  _routeSortMemo[sig]=out.map(b=>String(b.doc||''));
+  return out.concat(noLL);
+}
 let _availCache=null;
 async function loadAvailableJobs(fresh){
   /* ★★ v3.309: fresh=true ต้องข้าม memo 15 วิ ด้วย — เดิมเช็ค memo ก่อน fresh
@@ -2494,7 +2587,13 @@ async function loadAvailableJobs(fresh){
     const _out=Object.values(byCode).map(j=>{
       // เดาคลังจาก prefix เช่น TSW1 → W1
       const m=j.id.match(/W(\d)/i);
-      const warehouse=m?'W'+m[1]:'W1';
+      let warehouse=m?'W'+m[1]:'W1';
+      /* ★★ v3.381: Colgate — คลังเป็น W3 เสมอ + เรียงร้านตามพิกัดแบบหน้าจัดรถ เริ่มจากคลัง W3
+         (ชีทใบคุมของ Colgate เรียงตามเลขบิล ไม่ใช่ตามเส้นทาง → ลำดับแถวเดิมไล่ส่งจริงไม่ได้) · seq ใหม่ไหลต่อไปทุกจอผ่าน applyTicketSeq_ */
+      if(CO.key==='cg'){
+        warehouse='W3';
+        try{ j.bills=routeSortBills_(j.bills,whLL_('W3')); j.bills.forEach((b,i)=>{ b.seq=i; }); }catch(e){ console.warn('routeSortBills_ failed:',e); }
+      }
       return {
         id:j.id, team:null, driver:'', helper:'', plate:'', pickup:'',
         warehouse, status:'available', createdAt:Date.now(),
@@ -12307,7 +12406,7 @@ async function saveOwnCN_(){
   else showToast('บันทึกไม่สำเร็จ: '+((r&&r.error)||'ลองใหม่'),'error');
 }
 
-const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.367 — v3.367 ชีทเล็ก IS (isMirrorSync ทุก 30 นาที จาก DMAN_IS_export.csv) | v3.366 get_is อ่าน DMAN_IS_export.csv (PC ส่งออกจาก ORDER 15D.xlsx ทุก 30 นาที) | v3.364 action get_is: ใบรับคืน (IS) อ่านผ่านหลังบ้าน + แคช 5 นาที | v3.356 ถอดซิงก์ใบคุมออกทั้งชุด (ชีทดึงด้วย IMPORTRANGE แล้ว) | v3.353 กล่องสำรอง dman_inbox ใช้ร่วมสองบริษัท: กวาดเฉพาะของบริษัทตัวเอง (CO_SELF) | v3.349 คอลัมน์วัดเวลา กดบันทึก → ลงชีท | v3.337 (v3.337 อนุมัติ/ตีกลับ/ยกเลิก CN แยกตามเลข cnId · v3.336 ยกเลิกขออนุมัติล้างสถานะในชีทบิล · กันยกเลิกหลังอนุมัติ · v3.335 ตีกลับลงชีทใบคุมให้ทุกเครื่องเห็น · v3.322 เร่งความเร็วตอนบันทึก/อนุมัติ: แคชหัวคอลัมน์ต่อคำขอ (headerMap_ เดิมยิงอ่านหัวตารางใหม่ ~20 รอบต่อ save_job) + จัดรูปแบบคอลัมน์ครั้งเดียวพอ (fmtColsOnce_ · ล้างธงเมื่อ ensureHeaders_ เพิ่มคอลัมน์จริง) — ไม่เปลี่ยนข้อมูลที่เขียนลงชีทเลย | v3.321 cancel_job ห้ามลบใบคุมที่ปิดงาน/อนุมัติไปแล้ว — เดิมลบทั้งแถวทุกชีท (INPUT+Cin+CN+พิกัด) ตามคำขอจากเครื่องที่สถานะค้าง = งานที่อนุมัติแล้วหายทั้งใบโดยไม่เหลือร่องรอย | v3.320 save_job ไม่ล้าง "ผู้อนุมัติปิดงาน"/"วันเวลาอนุมัติ" อีกต่อไปเมื่อคำขอไม่มี approvedAt — เขียนเมื่อมีค่า · ล้างเฉพาะ data.clearApprove===true · ชีท Cin เขียน 3 ช่องอนุมัติเฉพาะรอบที่รู้สถานะจริง (อนุมัติ/ตีกลับ/กดส่งอนุมัติ) — เดิมคำขอเก่าที่ตามมาทีหลังลบการอนุมัติทิ้งเงียบๆ = "กดอนุมัติแล้วพอมาอีกวันหายไป" (บั๊กเดียวกับ v3.312 ที่ตกไป 2 บรรทัด) | v3.316 Status จ่าย = "ใบลดหนี้" เมื่อหักยอด CN/ลดหนี้ครอบคลุมทั้งบิลพอดีและไม่มีเงินจริง (เดิม v3.181 ลง "ไม่ชำระ" — บิลที่จ่ายครบด้วย CN ถูกมองว่าค้าง) · Status บิล "เรียบร้อย" อยู่แล้ว · backfillStatusColumns ใช้กติกาเดียวกัน | v3.315 ระยะทาง(กม.) คำนวณฝั่งชีทเสมอจากเลขไมล์เริ่ม/ปิดที่อยู่ในแถว (ไม่พึ่ง odoDist จากแอป — คำขอปิดงานที่มาทางกล่องสำรองไม่มีค่านี้ ช่องเลยว่าง) + odoDistBackfill_ พ่วง sbSyncTick ทุก 5 นาที เติมย้อนหลัง | v3.314 คอลัมน์ "อีเมลผู้รับงาน" ท้ายชีทบันทึกเที่ยวส่ง = อีเมลบัญชีที่กด "รับงาน" (setOrFix_: assign ตั้งค่า · บันทึกบิลเติมเฉพาะช่องว่าง · แก้ทีมไม่ทับ) — เผื่อกรอกชื่อคนขับเป็นคนอื่น | v3.312 save_job ไม่ล้าง "วันเวลาปิดงาน" อีกต่อไปเมื่อคำขอไม่มี submittedAt — เขียนเมื่อมีค่า · ล้างเฉพาะ data.clearSubmit===true (แอปส่งจาก "ยกเลิกขออนุมัติ") — เดิมเครื่องที่ยังไม่รู้ว่าปิดงานแล้วมาบันทึกบิล = ปลดสถานะปิดงานทั้งระบบ | v3.308 backfillCatCS รับพารามิเตอร์ silent + เพิ่ม backfillCatCSNow() รันจากหน้า Apps Script ได้โดยไม่ต้องกดเมนู (ใช้ตอนหน้าชีทหนักจนคลิกไม่ติด) | v3.303 แก้ชื่อแท็บชีทสินค้า Sheet1 → PDDT (ไฟล์ Stocksync ไม่มีแท็บ Sheet1 · gviz fallback ให้แต่ getSheetByName ไม่ให้) | v3.302 เมนู "🧮 เติมจำนวน CS ย้อนหลัง" (backfillCatCS): หาแถวที่ รวม(CS) ว่าง → อ่าน DS_DC (ไฟล์ Order) + CAT TYPE (ไฟล์สินค้า คอลัมน์ BB) → เติมชีท Cin แล้วรวมยอดต่อใบคุมเติมชีทบันทึกเที่ยวส่ง · รายงานก่อนถามยืนยัน · แตะเฉพาะ 5 คอลัมน์ CS | v3.299 ค่าพาเลท: action void_pallet = "ไม่อนุมัติ" (ปิดจบ ไม่จ่าย) แยกจาก reject_pallet = "ตีกลับ" (คนขับแก้แล้วส่งใหม่ได้) — เขียนคอลัมน์ สถานะพาเลท เดิม | v3.298 เลขไมล์รถ: คอลัมน์ใหม่ท้ายชีทบันทึกเที่ยวส่ง "เลขไมล์เริ่มงาน"(setOrFix_) "เลขไมล์ปิดงาน"+"ระยะทาง(กม.)"(setIf_ แก้ได้ตอนปิดงานใหม่) + ensureHeaders_ + fmtColsOpen_ 0.## | v3.297 จำนวน CS แยกหมวด ข้าว/น้ำตาล/บุหรี่/อื่นๆ/รวม "ต่อร้าน" ลงชีทบันทึกบิลและการชำระ (ensureHeaders_ ต่อท้าย + เขียนเฉพาะเมื่อแอปนับมาได้ + fmtColsOpen_ 0.## กันติดรูปแบบวันที่) — ระดับใบคุมทั้งใบอยู่ชีทบันทึกเที่ยวส่งแล้ว v3.293 | v3.270 รูปสินค้าในตู้ตอนรับใบคุม: คอลัมน์ใหม่ "รูปสินค้าในตู้" ต่อท้ายชีทบันทึกเที่ยวส่ง (ensureHeaders_) + save_job รับ data.loadPhoto (ลิงก์ Drive จากแอป หรือ base64 ถ้าออฟไลน์ → uploadPaymentPhoto_) · เขียนแบบ set-once ไม่ถูกลบตอน re-save | v3.261 create_cn_own กันซ้ำชั้นที่ 2 แบบ "เนื้อหาเดียวกัน" (บิล+รายการ+ยอด ตรงเป๊ะ ในวันเดียวกัน) — reqId กันได้แค่กดส่งซ้ำของคำขอเดิม พอแอปค้างแล้วทำใหม่ตั้งแต่ต้นจะได้ reqId ใหม่แล้วเล็ดลอด | v3.252 เมนูกู้แถว "บันทึกเที่ยวส่ง" ที่หายไป จากข้อมูลบิลในชีท Cin (ผู้ส่งสินค้า→ชื่อคนขับ · ทะเบียนรถ · Warehouse · U_ADD→วันเวลาที่รับงาน) แก้อาการงานผี คนขับ/ทะเบียน "–" คลัง W1 โผล่ในกล่องช่วยบันทึก · รายงานก่อน–ถามยืนยันแล้วค่อยต่อท้าย ไม่แก้/ไม่ลบแถวเดิม | v3.250 Sync ใบคุมอัตโนมัติเพิ่มเป็น 5 รอบ/วัน: 0:00 · 8:00 · 9:00 · 15:00 · 21:00 (setupJadRotTriggers · เดิม 9/15/21) | v3.246 sbCell_ ต้องคืนข้อความเหมือน gviz เป๊ะ: ปัดเป็นวินาที (Sheets เก็บทศนิยมของวัน gviz ปัด แต่ formatDate ตัดทิ้ง = ต่าง 1 วิ 3,399 ช่อง) + เที่ยงคืน = คืนวันที่ล้วน ไม่เติม 00:00:00 (3,281 ช่อง) — เทียบครบ 3,268 บิลแล้ว | v3.244 ★ นำร่อง Supabase: มิเรอร์ชีท Cin+INPUT ขึ้นตาราง dman_bills/dman_jobs (jsonb ทั้งแถว ไม่ต้องแก้ตารางเวลาชีทเพิ่มคอลัมน์) ผ่าน sbSyncNow_/sbSyncTick + เมนู ⚡ + trigger 5 นาที · โหมด delta ใช้คอลัมน์ "แก้ไขเมื่อ" · ตั้งค่าใน Script properties SB_URL/SB_SERVICE_KEY (ลบ SB_URL = ปิดทันที) · ทางเขียนเดิมไม่ถูกแตะเลย ชีทยังเป็นตัวจริง 100% | v3.241 กัน CN ซ้ำจาก timeout: create_cn_own รับ reqId (idempotency) → เจอ reqId เดิมในชีท = ไม่สร้างใบใหม่ คืนใบเดิม + เขียนคอลัมน์ reqId ต่อท้าย CN-Sale-dman | v3.237 เมนูจัดการบิลซ้ำในชีท Cin แบบปลอดภัย: 🔍 ตรวจ (รายงานอย่างเดียว) + 🗑 ล้าง (ถามยืนยัน · ลบเฉพาะแถวเก่า เก็บแถวล่างสุด · deleteRows เป็นช่วง ไม่ clearContents) | v3.236 ★ ใส่ LockService ครอบ "บันทึกใบคุม/บิล" (เดิมเป็น action เดียวที่ไม่มีล็อก) — batchUpsertByHeader_ เป็น read-modify-write พอ 2 คำขอของใบคุมเดียวกันคาบเกี่ยวกัน ต่างฝ่ายอ่านชีทก่อนอีกฝ่ายเขียนเสร็จ → เห็นว่ายังไม่มีแถว → ต่อท้ายทั้งคู่ = บิลเบิ้ลบรรทัด | v3.234 เมนู "📤 มิเรอร์ CN เก่า (รออนุมัติ) → ชีท Sale App" (backfillReturnToSale_) ไล่ใบที่ยังไม่มี cnLineId ลง CN-Sale-dman ย้อนหลัง + เติม cnLineId กลับ | v3.233 "ลง 2 ที่": save_return (ฟอร์มรับคืนเดิม) มิเรอร์ลงชีท CN-Sale-dman ด้วย ผ่าน saleCNMirrorFromReturn_ (cnId ขึ้นต้น CNR · ที่มา=ขนส่ง · เก็บแล้ว/รออนุมัติ) + เขียน cnLineId กลับลงชีท CN ของ D-Man ให้จับคู่กัน · re-save/ลบ CN = ลบเฉพาะแถว CNR ของบิลนั้น ไม่แตะแถว Sales App · approve_cn มิเรอร์ผลอนุมัติด้วยเกณฑ์ "มี cnLineId" (ครอบคลุมทั้ง CNT/CNR) · cancel_job มาร์กแถวที่ถูกลบเป็นปฏิเสธฝั่ง Sale App | v3.229 action void_cn: คลัง "ไม่อนุมัติ" = ยกเลิก CN ใบนั้นทันที (สถานะคืน="ไม่อนุมัติ" · ล้างเลขที่เอกสาร CN/ภาพอนุมัติ) ต่างจาก reject_cn ที่ตีกลับให้คนขับแก้ · แถวขนส่งเก็บเองมิเรอร์ไป CN-Sale-dman เป็น "ปฏิเสธ" + เหตุผล "❌ ไม่อนุมัติ (ยกเลิก CN)" | v3.226 คลังอนุมัติ/ตีกลับ/ยกเลิกอนุมัติ CN จากหน้าอนุมัติ D-Man → มิเรอร์กลับชีทต้นทาง CN-Sale-dman (ไฟล์ Sale App) เฉพาะแถวขนส่งเก็บเอง จับด้วย cnLineId (เดิมลงแต่ชีท CN ของ D-Man ฝั่งเซลล์ไม่เห็นว่าอนุมัติแล้ว) + เมนู "🔁 ซิงก์ผลอนุมัติ CN" ไล่ย้อนหลัง | v3.224 คอลัมน์ ชื่อ-สกุล ลงชื่อจริงอย่างเดียว ตัดชื่อเล่นในวงเล็บออก (ให้ตรงรูปแบบ Sale App) | v3.223 undo_cn_collect เขียนคอลัมน์ "ยกเลิกการเก็บ" ในชีท CN-Sale-dman (วันเวลา+ชื่อคนกด) ให้ฝั่งเซลล์รู้ว่ายกเลิก · เก็บใหม่แล้วล้างข้อความออก | v3.221 create_cn_own ลงชีท 'CN' ของ D-Man ทันทีที่กดบันทึก (สถานะคืน="รออนุมัติ") ไม่ต้องรอคลังอนุมัติ · อนุมัติ/ปฏิเสธค่อยอัปเดตแถวเดิม (idempotent ตาม cnLineId) | v3.215 เก็บเองบังคับเลขที่บิล → ชีท CN D-Man เก็บ "เลขที่บิล DS" ด้วย · กันข้อมูลหาย: save_return + cancel_job(delCNForJobExcept_) ข้ามแถว ประเภทคืน="ขนส่งเก็บ" ไม่ลบ | v3.213 เลิกก๊อปชีท CN ลง CNSaleapp — แอปอ่าน CN-Sale-dman (ไฟล์ Sale App) ตรงๆ อยู่แล้ว · ย้าย "ตรวจซ้ำ" ไปเขียนคอลัมน์ท้ายชีทต้นทางเอง (markCNDupOnSource_ + เมนู/trigger 30 นาที · ลบ trigger ก๊อปเก่าให้) | v3.198 INPUT บันทึกเที่ยว: เขียนทีม (คนขับ/ผู้ช่วย/ทะเบียน/การส่ง) เฉพาะเมื่อ editTeam:true (assign/แก้ทีม) เท่านั้น → บันทึกบิล/ช่วยบันทึกไม่ทับทีม กันชื่อคนขับ↔ผู้ช่วยสลับ | v3.197 create_cn_own รับช่องเพิ่มจากฟอร์มเต็ม (ประเภทคืน/ประเภทบิล/เลขที่บิล DS/ชื่อเซลล์/ผิดพลาดจาก) → เก็บใน CN-Sale-dman · ชีท CN D-Man พาประเภทบิลมาด้วย เลขที่บิล DS คงว่างกันชน save_return | v3.196 create_cn_own cnId เติมสุ่ม 3 หลักต่อท้าย CNT+timestamp กันชนกันเองในมิลลิวินาทีเดียว | v3.195 create_cn_own → ตอนคลังอนุมัติเก็บ ลงชีท 'CN' ของ D-Man ด้วย (2 ชีท) · idempotent ตาม cnLineId · reject/undo = มาร์กแถว CN D-Man เป็น "ยกเลิก" ไม่ลบ · เฉพาะที่มา=ขนส่ง | v3.194 action create_cn_own: ขนส่งเก็บเอง (ไม่มีใบสั่งเซลล์) เพิ่มแถวลง CN-Sale-dman ที่มา=ขนส่ง+หมายเหตุ"ขนส่งเก็บ"+เก็บแล้ว/รออนุมัติ (append) | v3.191 undo_cn_collect reset ครบ: รวมเลขที่เอกสาร CN + ภาพอนุมัติ CN (AE/AF) | v3.190 อนุมัติ CN: กรอกเลขที่เอกสาร CN + ภาพอนุมัติ CN ตอนคลังอนุมัติ (เขียนคอลัมน์เดิม AE/AF เฉพาะเมื่อกรอก) | v3.189 action approve_cn_collect: คลังอนุมัติ/ปฏิเสธรอบเก็บ CN (สถานะอนุมัติเก็บ/รหัสรอบเก็บ) + save_cn_collect ใส่รหัสรอบเก็บ+รออนุมัติ + undo ล็อกที่อนุมัติแล้ว | v3.188 action undo_cn_collect: ยกเลิกการเก็บ—เคลียร์เฉพาะคอลัมน์ระบบตาม cnLineId ไม่ลบแถว/ไม่แตะข้อมูลเดิม | v3.183 action save_cn_collect: ขนส่งเก็บของคืน CN → เขียนกลับ CN-Sale-dman ตาม cnLineId + คอลัมน์ ภาพเก็บขนส่ง/เวลาเก็บ | v3.182 Status บิล: ขาดโดยไม่มีเงินจริง (มีแต่ CN/ลดหนี้หัก) → "ยังไม่ชำระ" | v3.181 Status จ่าย: ไม่มีเงินจริงแม้มี CN/ลดหนี้หัก → "ไม่ชำระ" ไม่ปล่อยว่าง | CN: คอลัมน์ cnId + ชื่อเซลล์=เซลล์สั่งคืน จาก cnRef | รวมช่องหักยอด: creditNote รวม CN+นอกCN, ลดหนี้=ส่วนนอกCN subset ไม่บวกซ้ำ + เหตุผลลดหนี้ ชีท Cin | เมนู Sync CN-Sale-dman → CNSaleapp + trigger 5 นาที + มาร์ก CN ซ้ำ เนื้อหาทั้งใบ | คอลัมน์ "วันเครดิต" ชีท Cin จาก b.creditDays, ไม่มีวัน=0 | ขอสินค้าเพิ่มขึ้นรถ: request_load + approve/reject/delete_load_req + ชีท "ขอสินค้าเพิ่ม" + Discord | v3.130 CN คืนเต็มบิล → คอลัมน์ "ใบลดหนี้" ชีท Cin | v3.124 cancel_job เก็บ CN คนอื่น | v3.122 fixCinSalesmanColumn | v3.120 SLMN | v3.90 แท็ก [CN: ...]) */
+const APPS_SCRIPT_CODE=`/* D-MAN — Apps Script Backend v3.380 — v3.380 ชีท IS อ่าน ORDER 15D.xlsx บน Drive ตรง ทุก 1 ชม. (ดาวน์โหลดเฉพาะแท็บ IS ด้วย Range ราว 1MB) ไม่ต้องเปิดคอม · CSV ของ PC เป็นทางสำรอง | v3.367 v3.367 ชีทเล็ก IS (isMirrorSync ทุก 30 นาที จาก DMAN_IS_export.csv) | v3.366 get_is อ่าน DMAN_IS_export.csv (PC ส่งออกจาก ORDER 15D.xlsx ทุก 30 นาที) | v3.364 action get_is: ใบรับคืน (IS) อ่านผ่านหลังบ้าน + แคช 5 นาที | v3.356 ถอดซิงก์ใบคุมออกทั้งชุด (ชีทดึงด้วย IMPORTRANGE แล้ว) | v3.353 กล่องสำรอง dman_inbox ใช้ร่วมสองบริษัท: กวาดเฉพาะของบริษัทตัวเอง (CO_SELF) | v3.349 คอลัมน์วัดเวลา กดบันทึก → ลงชีท | v3.337 (v3.337 อนุมัติ/ตีกลับ/ยกเลิก CN แยกตามเลข cnId · v3.336 ยกเลิกขออนุมัติล้างสถานะในชีทบิล · กันยกเลิกหลังอนุมัติ · v3.335 ตีกลับลงชีทใบคุมให้ทุกเครื่องเห็น · v3.322 เร่งความเร็วตอนบันทึก/อนุมัติ: แคชหัวคอลัมน์ต่อคำขอ (headerMap_ เดิมยิงอ่านหัวตารางใหม่ ~20 รอบต่อ save_job) + จัดรูปแบบคอลัมน์ครั้งเดียวพอ (fmtColsOnce_ · ล้างธงเมื่อ ensureHeaders_ เพิ่มคอลัมน์จริง) — ไม่เปลี่ยนข้อมูลที่เขียนลงชีทเลย | v3.321 cancel_job ห้ามลบใบคุมที่ปิดงาน/อนุมัติไปแล้ว — เดิมลบทั้งแถวทุกชีท (INPUT+Cin+CN+พิกัด) ตามคำขอจากเครื่องที่สถานะค้าง = งานที่อนุมัติแล้วหายทั้งใบโดยไม่เหลือร่องรอย | v3.320 save_job ไม่ล้าง "ผู้อนุมัติปิดงาน"/"วันเวลาอนุมัติ" อีกต่อไปเมื่อคำขอไม่มี approvedAt — เขียนเมื่อมีค่า · ล้างเฉพาะ data.clearApprove===true · ชีท Cin เขียน 3 ช่องอนุมัติเฉพาะรอบที่รู้สถานะจริง (อนุมัติ/ตีกลับ/กดส่งอนุมัติ) — เดิมคำขอเก่าที่ตามมาทีหลังลบการอนุมัติทิ้งเงียบๆ = "กดอนุมัติแล้วพอมาอีกวันหายไป" (บั๊กเดียวกับ v3.312 ที่ตกไป 2 บรรทัด) | v3.316 Status จ่าย = "ใบลดหนี้" เมื่อหักยอด CN/ลดหนี้ครอบคลุมทั้งบิลพอดีและไม่มีเงินจริง (เดิม v3.181 ลง "ไม่ชำระ" — บิลที่จ่ายครบด้วย CN ถูกมองว่าค้าง) · Status บิล "เรียบร้อย" อยู่แล้ว · backfillStatusColumns ใช้กติกาเดียวกัน | v3.315 ระยะทาง(กม.) คำนวณฝั่งชีทเสมอจากเลขไมล์เริ่ม/ปิดที่อยู่ในแถว (ไม่พึ่ง odoDist จากแอป — คำขอปิดงานที่มาทางกล่องสำรองไม่มีค่านี้ ช่องเลยว่าง) + odoDistBackfill_ พ่วง sbSyncTick ทุก 5 นาที เติมย้อนหลัง | v3.314 คอลัมน์ "อีเมลผู้รับงาน" ท้ายชีทบันทึกเที่ยวส่ง = อีเมลบัญชีที่กด "รับงาน" (setOrFix_: assign ตั้งค่า · บันทึกบิลเติมเฉพาะช่องว่าง · แก้ทีมไม่ทับ) — เผื่อกรอกชื่อคนขับเป็นคนอื่น | v3.312 save_job ไม่ล้าง "วันเวลาปิดงาน" อีกต่อไปเมื่อคำขอไม่มี submittedAt — เขียนเมื่อมีค่า · ล้างเฉพาะ data.clearSubmit===true (แอปส่งจาก "ยกเลิกขออนุมัติ") — เดิมเครื่องที่ยังไม่รู้ว่าปิดงานแล้วมาบันทึกบิล = ปลดสถานะปิดงานทั้งระบบ | v3.308 backfillCatCS รับพารามิเตอร์ silent + เพิ่ม backfillCatCSNow() รันจากหน้า Apps Script ได้โดยไม่ต้องกดเมนู (ใช้ตอนหน้าชีทหนักจนคลิกไม่ติด) | v3.303 แก้ชื่อแท็บชีทสินค้า Sheet1 → PDDT (ไฟล์ Stocksync ไม่มีแท็บ Sheet1 · gviz fallback ให้แต่ getSheetByName ไม่ให้) | v3.302 เมนู "🧮 เติมจำนวน CS ย้อนหลัง" (backfillCatCS): หาแถวที่ รวม(CS) ว่าง → อ่าน DS_DC (ไฟล์ Order) + CAT TYPE (ไฟล์สินค้า คอลัมน์ BB) → เติมชีท Cin แล้วรวมยอดต่อใบคุมเติมชีทบันทึกเที่ยวส่ง · รายงานก่อนถามยืนยัน · แตะเฉพาะ 5 คอลัมน์ CS | v3.299 ค่าพาเลท: action void_pallet = "ไม่อนุมัติ" (ปิดจบ ไม่จ่าย) แยกจาก reject_pallet = "ตีกลับ" (คนขับแก้แล้วส่งใหม่ได้) — เขียนคอลัมน์ สถานะพาเลท เดิม | v3.298 เลขไมล์รถ: คอลัมน์ใหม่ท้ายชีทบันทึกเที่ยวส่ง "เลขไมล์เริ่มงาน"(setOrFix_) "เลขไมล์ปิดงาน"+"ระยะทาง(กม.)"(setIf_ แก้ได้ตอนปิดงานใหม่) + ensureHeaders_ + fmtColsOpen_ 0.## | v3.297 จำนวน CS แยกหมวด ข้าว/น้ำตาล/บุหรี่/อื่นๆ/รวม "ต่อร้าน" ลงชีทบันทึกบิลและการชำระ (ensureHeaders_ ต่อท้าย + เขียนเฉพาะเมื่อแอปนับมาได้ + fmtColsOpen_ 0.## กันติดรูปแบบวันที่) — ระดับใบคุมทั้งใบอยู่ชีทบันทึกเที่ยวส่งแล้ว v3.293 | v3.270 รูปสินค้าในตู้ตอนรับใบคุม: คอลัมน์ใหม่ "รูปสินค้าในตู้" ต่อท้ายชีทบันทึกเที่ยวส่ง (ensureHeaders_) + save_job รับ data.loadPhoto (ลิงก์ Drive จากแอป หรือ base64 ถ้าออฟไลน์ → uploadPaymentPhoto_) · เขียนแบบ set-once ไม่ถูกลบตอน re-save | v3.261 create_cn_own กันซ้ำชั้นที่ 2 แบบ "เนื้อหาเดียวกัน" (บิล+รายการ+ยอด ตรงเป๊ะ ในวันเดียวกัน) — reqId กันได้แค่กดส่งซ้ำของคำขอเดิม พอแอปค้างแล้วทำใหม่ตั้งแต่ต้นจะได้ reqId ใหม่แล้วเล็ดลอด | v3.252 เมนูกู้แถว "บันทึกเที่ยวส่ง" ที่หายไป จากข้อมูลบิลในชีท Cin (ผู้ส่งสินค้า→ชื่อคนขับ · ทะเบียนรถ · Warehouse · U_ADD→วันเวลาที่รับงาน) แก้อาการงานผี คนขับ/ทะเบียน "–" คลัง W1 โผล่ในกล่องช่วยบันทึก · รายงานก่อน–ถามยืนยันแล้วค่อยต่อท้าย ไม่แก้/ไม่ลบแถวเดิม | v3.250 Sync ใบคุมอัตโนมัติเพิ่มเป็น 5 รอบ/วัน: 0:00 · 8:00 · 9:00 · 15:00 · 21:00 (setupJadRotTriggers · เดิม 9/15/21) | v3.246 sbCell_ ต้องคืนข้อความเหมือน gviz เป๊ะ: ปัดเป็นวินาที (Sheets เก็บทศนิยมของวัน gviz ปัด แต่ formatDate ตัดทิ้ง = ต่าง 1 วิ 3,399 ช่อง) + เที่ยงคืน = คืนวันที่ล้วน ไม่เติม 00:00:00 (3,281 ช่อง) — เทียบครบ 3,268 บิลแล้ว | v3.244 ★ นำร่อง Supabase: มิเรอร์ชีท Cin+INPUT ขึ้นตาราง dman_bills/dman_jobs (jsonb ทั้งแถว ไม่ต้องแก้ตารางเวลาชีทเพิ่มคอลัมน์) ผ่าน sbSyncNow_/sbSyncTick + เมนู ⚡ + trigger 5 นาที · โหมด delta ใช้คอลัมน์ "แก้ไขเมื่อ" · ตั้งค่าใน Script properties SB_URL/SB_SERVICE_KEY (ลบ SB_URL = ปิดทันที) · ทางเขียนเดิมไม่ถูกแตะเลย ชีทยังเป็นตัวจริง 100% | v3.241 กัน CN ซ้ำจาก timeout: create_cn_own รับ reqId (idempotency) → เจอ reqId เดิมในชีท = ไม่สร้างใบใหม่ คืนใบเดิม + เขียนคอลัมน์ reqId ต่อท้าย CN-Sale-dman | v3.237 เมนูจัดการบิลซ้ำในชีท Cin แบบปลอดภัย: 🔍 ตรวจ (รายงานอย่างเดียว) + 🗑 ล้าง (ถามยืนยัน · ลบเฉพาะแถวเก่า เก็บแถวล่างสุด · deleteRows เป็นช่วง ไม่ clearContents) | v3.236 ★ ใส่ LockService ครอบ "บันทึกใบคุม/บิล" (เดิมเป็น action เดียวที่ไม่มีล็อก) — batchUpsertByHeader_ เป็น read-modify-write พอ 2 คำขอของใบคุมเดียวกันคาบเกี่ยวกัน ต่างฝ่ายอ่านชีทก่อนอีกฝ่ายเขียนเสร็จ → เห็นว่ายังไม่มีแถว → ต่อท้ายทั้งคู่ = บิลเบิ้ลบรรทัด | v3.234 เมนู "📤 มิเรอร์ CN เก่า (รออนุมัติ) → ชีท Sale App" (backfillReturnToSale_) ไล่ใบที่ยังไม่มี cnLineId ลง CN-Sale-dman ย้อนหลัง + เติม cnLineId กลับ | v3.233 "ลง 2 ที่": save_return (ฟอร์มรับคืนเดิม) มิเรอร์ลงชีท CN-Sale-dman ด้วย ผ่าน saleCNMirrorFromReturn_ (cnId ขึ้นต้น CNR · ที่มา=ขนส่ง · เก็บแล้ว/รออนุมัติ) + เขียน cnLineId กลับลงชีท CN ของ D-Man ให้จับคู่กัน · re-save/ลบ CN = ลบเฉพาะแถว CNR ของบิลนั้น ไม่แตะแถว Sales App · approve_cn มิเรอร์ผลอนุมัติด้วยเกณฑ์ "มี cnLineId" (ครอบคลุมทั้ง CNT/CNR) · cancel_job มาร์กแถวที่ถูกลบเป็นปฏิเสธฝั่ง Sale App | v3.229 action void_cn: คลัง "ไม่อนุมัติ" = ยกเลิก CN ใบนั้นทันที (สถานะคืน="ไม่อนุมัติ" · ล้างเลขที่เอกสาร CN/ภาพอนุมัติ) ต่างจาก reject_cn ที่ตีกลับให้คนขับแก้ · แถวขนส่งเก็บเองมิเรอร์ไป CN-Sale-dman เป็น "ปฏิเสธ" + เหตุผล "❌ ไม่อนุมัติ (ยกเลิก CN)" | v3.226 คลังอนุมัติ/ตีกลับ/ยกเลิกอนุมัติ CN จากหน้าอนุมัติ D-Man → มิเรอร์กลับชีทต้นทาง CN-Sale-dman (ไฟล์ Sale App) เฉพาะแถวขนส่งเก็บเอง จับด้วย cnLineId (เดิมลงแต่ชีท CN ของ D-Man ฝั่งเซลล์ไม่เห็นว่าอนุมัติแล้ว) + เมนู "🔁 ซิงก์ผลอนุมัติ CN" ไล่ย้อนหลัง | v3.224 คอลัมน์ ชื่อ-สกุล ลงชื่อจริงอย่างเดียว ตัดชื่อเล่นในวงเล็บออก (ให้ตรงรูปแบบ Sale App) | v3.223 undo_cn_collect เขียนคอลัมน์ "ยกเลิกการเก็บ" ในชีท CN-Sale-dman (วันเวลา+ชื่อคนกด) ให้ฝั่งเซลล์รู้ว่ายกเลิก · เก็บใหม่แล้วล้างข้อความออก | v3.221 create_cn_own ลงชีท 'CN' ของ D-Man ทันทีที่กดบันทึก (สถานะคืน="รออนุมัติ") ไม่ต้องรอคลังอนุมัติ · อนุมัติ/ปฏิเสธค่อยอัปเดตแถวเดิม (idempotent ตาม cnLineId) | v3.215 เก็บเองบังคับเลขที่บิล → ชีท CN D-Man เก็บ "เลขที่บิล DS" ด้วย · กันข้อมูลหาย: save_return + cancel_job(delCNForJobExcept_) ข้ามแถว ประเภทคืน="ขนส่งเก็บ" ไม่ลบ | v3.213 เลิกก๊อปชีท CN ลง CNSaleapp — แอปอ่าน CN-Sale-dman (ไฟล์ Sale App) ตรงๆ อยู่แล้ว · ย้าย "ตรวจซ้ำ" ไปเขียนคอลัมน์ท้ายชีทต้นทางเอง (markCNDupOnSource_ + เมนู/trigger 30 นาที · ลบ trigger ก๊อปเก่าให้) | v3.198 INPUT บันทึกเที่ยว: เขียนทีม (คนขับ/ผู้ช่วย/ทะเบียน/การส่ง) เฉพาะเมื่อ editTeam:true (assign/แก้ทีม) เท่านั้น → บันทึกบิล/ช่วยบันทึกไม่ทับทีม กันชื่อคนขับ↔ผู้ช่วยสลับ | v3.197 create_cn_own รับช่องเพิ่มจากฟอร์มเต็ม (ประเภทคืน/ประเภทบิล/เลขที่บิล DS/ชื่อเซลล์/ผิดพลาดจาก) → เก็บใน CN-Sale-dman · ชีท CN D-Man พาประเภทบิลมาด้วย เลขที่บิล DS คงว่างกันชน save_return | v3.196 create_cn_own cnId เติมสุ่ม 3 หลักต่อท้าย CNT+timestamp กันชนกันเองในมิลลิวินาทีเดียว | v3.195 create_cn_own → ตอนคลังอนุมัติเก็บ ลงชีท 'CN' ของ D-Man ด้วย (2 ชีท) · idempotent ตาม cnLineId · reject/undo = มาร์กแถว CN D-Man เป็น "ยกเลิก" ไม่ลบ · เฉพาะที่มา=ขนส่ง | v3.194 action create_cn_own: ขนส่งเก็บเอง (ไม่มีใบสั่งเซลล์) เพิ่มแถวลง CN-Sale-dman ที่มา=ขนส่ง+หมายเหตุ"ขนส่งเก็บ"+เก็บแล้ว/รออนุมัติ (append) | v3.191 undo_cn_collect reset ครบ: รวมเลขที่เอกสาร CN + ภาพอนุมัติ CN (AE/AF) | v3.190 อนุมัติ CN: กรอกเลขที่เอกสาร CN + ภาพอนุมัติ CN ตอนคลังอนุมัติ (เขียนคอลัมน์เดิม AE/AF เฉพาะเมื่อกรอก) | v3.189 action approve_cn_collect: คลังอนุมัติ/ปฏิเสธรอบเก็บ CN (สถานะอนุมัติเก็บ/รหัสรอบเก็บ) + save_cn_collect ใส่รหัสรอบเก็บ+รออนุมัติ + undo ล็อกที่อนุมัติแล้ว | v3.188 action undo_cn_collect: ยกเลิกการเก็บ—เคลียร์เฉพาะคอลัมน์ระบบตาม cnLineId ไม่ลบแถว/ไม่แตะข้อมูลเดิม | v3.183 action save_cn_collect: ขนส่งเก็บของคืน CN → เขียนกลับ CN-Sale-dman ตาม cnLineId + คอลัมน์ ภาพเก็บขนส่ง/เวลาเก็บ | v3.182 Status บิล: ขาดโดยไม่มีเงินจริง (มีแต่ CN/ลดหนี้หัก) → "ยังไม่ชำระ" | v3.181 Status จ่าย: ไม่มีเงินจริงแม้มี CN/ลดหนี้หัก → "ไม่ชำระ" ไม่ปล่อยว่าง | CN: คอลัมน์ cnId + ชื่อเซลล์=เซลล์สั่งคืน จาก cnRef | รวมช่องหักยอด: creditNote รวม CN+นอกCN, ลดหนี้=ส่วนนอกCN subset ไม่บวกซ้ำ + เหตุผลลดหนี้ ชีท Cin | เมนู Sync CN-Sale-dman → CNSaleapp + trigger 5 นาที + มาร์ก CN ซ้ำ เนื้อหาทั้งใบ | คอลัมน์ "วันเครดิต" ชีท Cin จาก b.creditDays, ไม่มีวัน=0 | ขอสินค้าเพิ่มขึ้นรถ: request_load + approve/reject/delete_load_req + ชีท "ขอสินค้าเพิ่ม" + Discord | v3.130 CN คืนเต็มบิล → คอลัมน์ "ใบลดหนี้" ชีท Cin | v3.124 cancel_job เก็บ CN คนอื่น | v3.122 fixCinSalesmanColumn | v3.120 SLMN | v3.90 แท็ก [CN: ...]) */
 const SHEET_INPUT='บันทึกเที่ยวส่ง';
 const SHEET_CIN='บันทึกบิลและการชำระ';
 const SHEET_CN='CN';
@@ -12390,7 +12489,7 @@ function doGet(e){
   }
   let drive='unknown';
   try{ DriveApp.getRootFolder().getName(); drive='OK'; }catch(err){ drive='NOT_AUTHORIZED'; }
-  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.367',drive:drive}))
+  return ContentService.createTextOutput(JSON.stringify({ok:true,ts:new Date(),version:'3.380',drive:drive}))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -12452,6 +12551,118 @@ function isReadCsvFile_(){
   if(!best) throw new Error('ไม่พบไฟล์ '+IS_CSV_NAME+' (ยังไม่ได้แชร์ให้บัญชีหลังบ้าน?)');
   return best;
 }
+/* ★★ v3.380: อ่านแท็บ IS จาก ORDER 15D.xlsx บน Drive ตรง ๆ (ไม่ต้องพึ่ง PC/ExportIS) — user 2026-10-09 เลือก "ข้อ 2"
+   ไฟล์ทั้งก้อน ~21MB (แตกแล้ว ~184MB เกินที่ Apps Script รับไหว) แต่ที่ต้องใช้จริงมีแค่ 4 ชิ้นในซิป:
+   workbook.xml + workbook.xml.rels (หาว่าแท็บ IS คือไฟล์ไหน) · sharedStrings.xml (~0.5MB บีบอัด) · sheetN.xml ของ IS (~0.4MB บีบอัด)
+   → ดาวน์โหลดแบบตัดช่วง (HTTP Range) เฉพาะสารบัญท้ายไฟล์ + 4 ชิ้นนั้น (รวม ~1MB) · คลาย deflate ด้วยการห่อเป็น gzip แล้ว Utilities.ungzip
+   ผลลัพธ์ = แถวเดียวกับ ExportIS.ps1 (คอลัมน์ A,B,C,I,K,M,N,O · ตัด _x000D_) → เขียนลงชีทเล็ก D-MAN IS แบบเดิม */
+var IS_XLSX_NAME='ORDER 15D.xlsx';
+var IS_XLSX_KEEP=['A','B','C','I','K','M','N','O'];
+function isU8_(b){ return b<0?b+256:b; }
+function isLE_(a,o,n){ var v=0; for(var i=n-1;i>=0;i--) v=v*256+isU8_(a[o+i]); return v; }
+function isSigned_(v){ v=v&255; return v>127?v-256:v; }
+function isUtf8_(a,o,n){ var s=''; for(var i=0;i<n;i++) s+=String.fromCharCode(isU8_(a[o+i])); try{ return decodeURIComponent(escape(s)); }catch(e){ return s; } }
+/* สารบัญซิป (central directory) จากท้ายไฟล์ → {ชื่อไฟล์: {method, csize, usize, crc, lho}} */
+function isZipDir_(fetchRange,size){
+  var tailLen=Math.min(size,65557), tailStart=size-tailLen;
+  var t=fetchRange(tailStart,size-1), e=-1;
+  for(var i=t.length-22;i>=0;i--){ if(isU8_(t[i])===0x50&&isU8_(t[i+1])===0x4b&&isU8_(t[i+2])===5&&isU8_(t[i+3])===6){ e=i; break; } }
+  if(e<0) throw new Error('ไม่ใช่ไฟล์ xlsx (หาสารบัญซิปไม่เจอ)');
+  var cdSize=isLE_(t,e+12,4), cdOff=isLE_(t,e+16,4);
+  var cd=(cdOff>=tailStart)?t.slice(cdOff-tailStart,cdOff-tailStart+cdSize):fetchRange(cdOff,cdOff+cdSize-1);
+  var out={}, p=0;
+  while(p+46<=cd.length&&isLE_(cd,p,4)===0x02014b50){
+    var nl=isLE_(cd,p+28,2), xl=isLE_(cd,p+30,2), cl=isLE_(cd,p+32,2);
+    out[isUtf8_(cd,p+46,nl)]={method:isLE_(cd,p+10,2),crc:isLE_(cd,p+16,4),csize:isLE_(cd,p+20,4),usize:isLE_(cd,p+24,4),lho:isLE_(cd,p+42,4)};
+    p+=46+nl+xl+cl;
+  }
+  return out;
+}
+/* ชิ้นเดียวในซิป → ไบต์ที่พร้อมคลาย: deflate ห่อหัว/ท้าย gzip (คลายด้วย ungzip ได้เลย) · ไม่บีบอัด = คืนดิบ */
+function isZipEntryBytes_(fetchRange,ent){
+  var hdr=fetchRange(ent.lho,ent.lho+29);
+  if(isLE_(hdr,0,4)!==0x04034b50) throw new Error('หัวชิ้นในซิปเสีย');
+  var start=ent.lho+30+isLE_(hdr,26,2)+isLE_(hdr,28,2);
+  var data=ent.csize?fetchRange(start,start+ent.csize-1):[];
+  if(ent.method===0) return {gz:false,bytes:data};
+  if(ent.method!==8) throw new Error('ซิปบีบอัดแบบที่ไม่รู้จัก '+ent.method);
+  var head=[0x1f,0x8b,8,0,0,0,0,0,0,255].map(isSigned_), c=ent.crc, u=ent.usize;
+  var tail=[c,c>>>8,c>>>16,c>>>24,u,u>>>8,u>>>16,u>>>24].map(isSigned_);
+  return {gz:true,bytes:head.concat(Array.prototype.slice.call(data),tail)};
+}
+function isXmlText_(s){
+  return String(s).replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'")
+    .replace(/&#x([0-9a-fA-F]+);/g,function(m,h){ return String.fromCharCode(parseInt(h,16)); })
+    .replace(/&#(\\d+);/g,function(m,d){ return String.fromCharCode(+d); }).replace(/&amp;/g,'&');
+}
+/* ชื่อไฟล์ในซิปของแท็บที่ต้องการ (เช่น IS → xl/worksheets/sheet3.xml) */
+function isXlsxSheetPath_(wbXml,relsXml,name){
+  var m=String(wbXml).match(new RegExp('<sheet\\\\b[^>]*\\\\bname="'+name+'"[^>]*>'));
+  if(!m) throw new Error('ไม่พบแท็บ '+name+' ใน xlsx');
+  var rid=(m[0].match(/\\br:id="([^"]+)"/)||m[0].match(/\\bid="([^"]+)"/)||[])[1];
+  var rels=String(relsXml).match(/<Relationship\\b[^>]*>/g)||[], tgt='';
+  rels.forEach(function(r){ if((r.match(/\\bId="([^"]+)"/)||[])[1]===rid) tgt=(r.match(/\\bTarget="([^"]+)"/)||[])[1]||''; });
+  if(!tgt) throw new Error('หาไฟล์ของแท็บ '+name+' ไม่เจอ');
+  return tgt.charAt(0)==='/'?tgt.slice(1):('xl/'+tgt.replace(/^\\.\\//,''));
+}
+function isSharedStrings_(ssXml){
+  var out=[], re=/<si>([\\s\\S]*?)<\\/si>|<si\\/>/g, m;
+  while((m=re.exec(ssXml))){
+    var inner=m[1]||'', txt='', tr=/<t(?:\\s[^>]*)?>([\\s\\S]*?)<\\/t>/g, t;
+    inner=inner.replace(/<rPh\\b[\\s\\S]*?<\\/rPh>/g,'');
+    while((t=tr.exec(inner))) txt+=t[1];
+    out.push(isXmlText_(txt));
+  }
+  return out;
+}
+/* แถวของแท็บ → [[A,B,C,I,K,M,N,O], ...] (กติกาเดียวกับ ExportIS.ps1: เก็บแถวที่มีค่าในคอลัมน์ที่ต้องการอย่างน้อย 1 ช่อง) */
+function isSheetRows_(sheetXml,ss){
+  var keep={}; IS_XLSX_KEEP.forEach(function(k){ keep[k]=1; });
+  var rows=[], rr=/<row\\b[^>]*?(?:\\/>|>([\\s\\S]*?)<\\/row>)/g, m;
+  while((m=rr.exec(sheetXml))){
+    var body=m[1]||'', cur={}, n=0, cr=/<c\\b([^>]*?)(?:\\/>|>([\\s\\S]*?)<\\/c>)/g, c;
+    while((c=cr.exec(body))){
+      var at=c[1], col=((at.match(/\\br="([A-Z]+)/)||[])[1])||''; if(!keep[col]) continue;
+      var typ=(at.match(/\\bt="([^"]+)"/)||[])[1]||'', inner=c[2]||'', v;
+      var vm=inner.match(/<v>([\\s\\S]*?)<\\/v>/);
+      if(typ==='inlineStr'){ var ts='', tr=/<t(?:\\s[^>]*)?>([\\s\\S]*?)<\\/t>/g, t; while((t=tr.exec(inner))) ts+=t[1]; v=isXmlText_(ts); }
+      else if(!vm) continue;
+      else if(typ==='s') v=ss[+vm[1]]; else v=isXmlText_(vm[1]);
+      cur[col]=String(v==null?'':v).replace(/_x000D_/g,'').replace(/\\r\\n?/g,'\\n'); n++;   /* XmlReader ของ ExportIS ยุบ \\r\\n เป็น \\n เอง — ทำให้ตรงกัน */
+    }
+    if(n) rows.push(IS_XLSX_KEEP.map(function(k){ return cur[k]||''; }));
+  }
+  return rows;
+}
+/* ประกอบทั้งหมด: fetchRange(start,end)→ไบต์ · unpack(ret of isZipEntryBytes_)→ข้อความ UTF-8 */
+function isXlsxIsRows_(fetchRange,size,unpack){
+  var dir=isZipDir_(fetchRange,size);
+  var get=function(n){ var e=dir[n]; if(!e) return ''; return unpack(isZipEntryBytes_(fetchRange,e)); };
+  var path=isXlsxSheetPath_(get('xl/workbook.xml'),get('xl/_rels/workbook.xml.rels'),'IS');
+  var ss=isSharedStrings_(get('xl/sharedStrings.xml'));
+  return isSheetRows_(get(path),ss);
+}
+/* หาไฟล์ ORDER 15D.xlsx ที่ใหม่สุดที่บัญชีหลังบ้านเห็น (โฟลเดอร์เดียวกับ DMAN_IS_export.csv แชร์ไว้แล้ว) */
+function isXlsxFile_(){
+  var it=DriveApp.getFilesByName(IS_XLSX_NAME), best=null;
+  while(it.hasNext()){ var fl=it.next(); if(!best||fl.getLastUpdated()>best.getLastUpdated()) best=fl; }
+  return best;
+}
+/* ดาวน์โหลดช่วงไบต์จาก Drive (HTTP Range) — ต้องได้ 206 เท่านั้น (ได้ 200 = เซิร์ฟเวอร์ส่งทั้งไฟล์ 21MB มา → หยุด) */
+function isXlsxRowsFromDrive_(fl){
+  var url='https://www.googleapis.com/drive/v3/files/'+fl.getId()+'?alt=media&supportsAllDrives=true';
+  var tok=ScriptApp.getOAuthToken();
+  var fetchRange=function(a,b){
+    var r=UrlFetchApp.fetch(url,{headers:{Authorization:'Bearer '+tok,Range:'bytes='+a+'-'+b},muteHttpExceptions:true});
+    if(r.getResponseCode()!==206) throw new Error('Drive range HTTP '+r.getResponseCode()+' '+String(r.getContentText()).slice(0,150));
+    return r.getContent();
+  };
+  var unpack=function(ret){
+    var bl=Utilities.newBlob(ret.bytes,ret.gz?'application/x-gzip':'application/octet-stream');
+    return (ret.gz?Utilities.ungzip(bl):bl).getDataAsString('UTF-8');
+  };
+  return isXlsxIsRows_(fetchRange,fl.getSize(),unpack);
+}
 function isMirrorSync(){
   var p=PropertiesService.getScriptProperties();
   var id=p.getProperty('IS_PUB_ID'), ss=null;
@@ -12461,11 +12672,29 @@ function isMirrorSync(){
     id=ss.getId(); p.setProperty('IS_PUB_ID',id);
     try{ DriveApp.getFileById(id).setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW); }catch(e){ p.setProperty('IS_PUB_SHARE_ERR',String(e)); }
   }
-  var fl=isReadCsvFile_();
-  var stamp=String(fl.getLastUpdated().getTime());
-  if(p.getProperty('IS_PUB_STAMP')===stamp) return {id:id,skipped:true,file:fl.getLastUpdated()};   /* ไฟล์ยังไม่เปลี่ยน ไม่ต้องเขียนซ้ำ */
-  var W=8;
-  var rows=Utilities.parseCsv(fl.getBlob().getDataAsString('UTF-8')).map(function(x){ var a=x.slice(0,W); while(a.length<W) a.push(''); return a; });
+  /* ★ v3.380: แหล่งข้อมูลหลัก = ORDER 15D.xlsx บน Drive เสมอ (อ่านตรง ไม่ต้องเปิดคอม · CSV ของ PC ก็แปลงจากไฟล์เดียวกัน) · อ่าน xlsx ไม่ได้ = ถอยไปใช้ CSV (เก็บสาเหตุไว้ที่ property IS_XLSX_ERR) */
+  var W=8, xf=null, cf=null, rows=null;
+  try{ xf=isXlsxFile_(); }catch(e){ xf=null; }
+  try{ cf=isReadCsvFile_(); }catch(e){ cf=null; }
+  if(!xf&&!cf) throw new Error('ไม่พบทั้ง '+IS_XLSX_NAME+' และ '+IS_CSV_NAME);
+  var useX=!!xf;
+  var fl=useX?xf:cf, src=useX?'xlsx':'csv';
+  var stamp=src+':'+fl.getLastUpdated().getTime();
+  if(p.getProperty('IS_PUB_STAMP')===stamp) return {id:id,skipped:true,src:src,file:fl.getLastUpdated()};   /* ไฟล์ยังไม่เปลี่ยน ไม่ต้องเขียนซ้ำ */
+  if(useX){
+    try{
+      rows=isXlsxRowsFromDrive_(xf);
+      if(!rows||rows.length<2||String(rows[0][1]).trim()!=='DI_REF') throw new Error('แท็บ IS ใน xlsx ว่าง/หัวคอลัมน์ไม่ตรง ('+(rows?rows.length:0)+' แถว)');
+      p.deleteProperty('IS_XLSX_ERR');
+    }catch(e){
+      p.setProperty('IS_XLSX_ERR',new Date().toISOString()+' '+String(e).slice(0,300)); rows=null;
+      if(!cf) throw e;
+      fl=cf; src='csv'; stamp='csv:'+cf.getLastUpdated().getTime();
+      if(p.getProperty('IS_PUB_STAMP')===stamp) return {id:id,skipped:true,src:src,file:fl.getLastUpdated(),xlsxErr:p.getProperty('IS_XLSX_ERR')};
+    }
+  }
+  if(!rows) rows=Utilities.parseCsv(fl.getBlob().getDataAsString('UTF-8'));
+  rows=rows.map(function(x){ var a=x.slice(0,W); while(a.length<W) a.push(''); return a; });
   if(rows.length<2) throw new Error('ไฟล์ IS ว่าง');
   var sh=ss.getSheets()[0];
   if(sh.getMaxColumns()<W) sh.insertColumnsAfter(sh.getMaxColumns(),W-sh.getMaxColumns());
@@ -12476,13 +12705,19 @@ function isMirrorSync(){
   rg.setValues(rows);
   if(sh.getMaxRows()>rows.length+50) sh.deleteRows(rows.length+51,sh.getMaxRows()-rows.length-50);
   p.setProperty('IS_PUB_STAMP',stamp);
-  p.setProperty('IS_PUB_SYNC',new Date().toISOString()+' rows='+(rows.length-1));
-  return {id:id,rows:rows.length-1,file:fl.getLastUpdated(),shareErr:p.getProperty('IS_PUB_SHARE_ERR')||''};
+  p.setProperty('IS_PUB_SYNC',new Date().toISOString()+' rows='+(rows.length-1)+' src='+src);
+  return {id:id,rows:rows.length-1,src:src,file:fl.getLastUpdated(),xlsxErr:p.getProperty('IS_XLSX_ERR')||'',shareErr:p.getProperty('IS_PUB_SHARE_ERR')||''};
 }
+/* ★ v3.380: รอบซิงก์ชีท IS = ทุก 1 ชั่วโมง (user 9 ต.ค. 2026 "ทำทุก 1 ชั่วโมงก็ได้") — เดิม 30 นาที
+   trigger บอกความถี่ตัวเองไม่ได้ → จำไว้ที่ property IS_TRIG_EVERY · ไม่ตรง = ลบของเดิมทั้งหมดแล้วสร้างใหม่ 1 ตัว (เรียกซ้ำได้ ไม่ซ้อน) */
 function isMirrorEnsureTrigger_(){
-  var has=ScriptApp.getProjectTriggers().some(function(t){ return t.getHandlerFunction()==='isMirrorSync'; });
-  if(!has) ScriptApp.newTrigger('isMirrorSync').timeBased().everyMinutes(30).create();
-  return !has;
+  var p=PropertiesService.getScriptProperties();
+  var ts=ScriptApp.getProjectTriggers().filter(function(t){ return t.getHandlerFunction()==='isMirrorSync'; });
+  if(ts.length===1&&p.getProperty('IS_TRIG_EVERY')==='1h') return false;
+  ts.forEach(function(t){ ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('isMirrorSync').timeBased().everyHours(1).create();
+  p.setProperty('IS_TRIG_EVERY','1h');
+  return true;
 }
 function isGet_(codes){
   var cache=CacheService.getScriptCache();
