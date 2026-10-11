@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>SupplyLink — คู่ค้ารัตนไพบูลย์ v1.37.1</title>
+<title>SupplyLink — คู่ค้ารัตนไพบูลย์ v1.37.2</title>
 <meta name="theme-color" content="#B8D5FF">
 <link rel="icon" type="image/png" sizes="64x64" href="icons/rattana-supplylink-64.png">
 <link rel="icon" type="image/png" sizes="256x256" href="icons/rattana-supplylink.png">
@@ -1876,7 +1876,7 @@ body{font-family:var(--font);
 
 /* ══ ตั้งค่า — แก้ตรงนี้ที่เดียว ══ */
 var CONFIG = {
-  APP_VERSION: 'v1.37.1',
+  APP_VERSION: 'v1.37.2',
   /* LIFF ของแอปนี้: LINE Developers → provider RTNPurchase → channel "RTNPurchase Supplier" (2011693023) → แท็บ LIFF
      ต้องอยู่ channel เดียวกับระบบลงทะเบียนเดิม ถึงจะได้ LINE User ID ตรงกับแท็บ Login Users · ว่าง = ยังไม่เปิดใช้จริง */
   LIFF_ID: '2011693023-xbdsN1K7',
@@ -2181,7 +2181,46 @@ function lsGet(k){ try { return localStorage.getItem(k); } catch (e) { return nu
 function lsSet(k, v){ try { localStorage.setItem(k, v); } catch (e) {} }
 function lsDel(k){ try { localStorage.removeItem(k); } catch (e) {} }
 function safe(fn, dflt){ try { var v = fn(); return (v === undefined || v === null) ? dflt : v; } catch (e) { return dflt; } }
-function errText(e){ return (e && (e.message || String(e))) || 'ไม่ทราบสาเหตุ'; }
+function errText(e){
+  if (isQuota(e)) return 'ที่เก็บข้อมูลของเบราว์เซอร์เต็ม — กดลองใหม่ ถ้ายังไม่ได้ ให้ล้างข้อมูลเว็บไซต์ rattanaphaiboon.github.io ในเบราว์เซอร์';
+  return (e && (e.message || String(e))) || 'ไม่ทราบสาเหตุ';
+}
+function isQuota(e){ return !!e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014 || /quota/i.test(String(e.message || e))); }
+/* ที่เก็บในเบราว์เซอร์ของ rattanaphaiboon.github.io ใช้ร่วมกันทุกแอปของรัตน (~5 MB) — เต็มเมื่อไร LINE เก็บ token ไม่ลง = "เชื่อมต่อ LINE ไม่สำเร็จ"
+   กันไว้ (2026-10-11): เขียนไม่ลง → ล้างข้อมูลที่จำไว้ของ SupplyLink เอง (sl_cache_*) แล้วลองใหม่ · ค่าของ LINE ยังไม่ลงอีก → เก็บใน sessionStorage แทน
+   ไม่แตะข้อมูลของแอปอื่นบนโดเมนเดียวกัน */
+(function () {
+  try {
+    var SP = Storage.prototype, set = SP.setItem, get = SP.getItem, del = SP.removeItem, LS = window.localStorage, SS = window.sessionStorage;
+    var mem = {};
+    function liffKey(k){ return String(k).indexOf('LIFF_STORE:') === 0; }
+    function freeOwn(){
+      var ks = [];
+      for (var i = 0; i < LS.length; i++) { var k = LS.key(i); if (/^sl_cache_/.test(k)) ks.push(k); }
+      ks.forEach(function (k) { del.call(LS, k); });
+      return ks.length;
+    }
+    function spare(k, v){ try { set.call(SS, k, v); delete mem[k]; } catch (e) { mem[k] = String(v); } }
+    SP.setItem = function (k, v) {
+      if (this !== LS) return set.call(this, k, v);
+      try { set.call(LS, k, v); if (liffKey(k)) { try { del.call(SS, k); } catch (e) {} delete mem[k]; } return; }
+      catch (e) {
+        if (!isQuota(e)) throw e;
+        if (freeOwn()) { try { set.call(LS, k, v); return; } catch (e2) {} }
+        if (liffKey(k)) { try { del.call(LS, k); } catch (e3) {} return spare(k, v); }   /* ค่าเก่าค้างใน localStorage = อ่านได้ token เก่า → ลบทิ้งก่อน */
+        throw e;
+      }
+    };
+    SP.getItem = function (k) {
+      if (this === LS && liffKey(k)) { var s = null; try { s = get.call(SS, k); } catch (e) {} if (s !== null) return s; if (k in mem) return mem[k]; }
+      return get.call(this, k);
+    };
+    SP.removeItem = function (k) {
+      if (this === LS && liffKey(k)) { try { del.call(SS, k); } catch (e) {} delete mem[k]; }
+      return del.call(this, k);
+    };
+  } catch (e) {}
+})();
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
   return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
 function round1(n){ return Math.round((+n || 0) * 10) / 10; }
@@ -6924,8 +6963,11 @@ function cacheRead(){
 }
 function cacheWrite(){
   if (MODE !== 'live' || !BUNDLE || !SES.uid) return;
-  lsSet(cacheKey(), JSON.stringify({ at:Date.now(), vendor:VENDOR.code, vendors:VENDORS, admin:ADMIN, cfgLinks:ADMIN ? CFGLINKS : {}, contact:CONTACT, profile:PROFILE, bundle:BUNDLE }));
+  var s = JSON.stringify({ at:Date.now(), vendor:VENDOR.code, vendors:VENDORS, admin:ADMIN, cfgLinks:ADMIN ? CFGLINKS : {}, contact:CONTACT, profile:PROFILE, bundle:BUNDLE });
+  if (s.length > CACHE_MAX_CHARS) return cacheClear();         /* ที่เก็บใช้ร่วมกันทุกแอป — ใหญ่เกินไม่จำ (เปิดครั้งหน้าโหลดสดแทน) กันแย่งที่ token ของ LINE */
+  lsSet(cacheKey(), s);
 }
+var CACHE_MAX_CHARS = 1200000;
 function cacheClear(){ lsDel(cacheKey()); }
 
 /* ══ LINE ══ */
