@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v5.07</title>
+<title>Rattana Online Order v5.08</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -1061,7 +1061,7 @@ body.dark .pdpa-body h4,body.dark .pdpa-body b{color:var(--gold-light,#e2c882)}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.07</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.08</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -5245,6 +5245,9 @@ const QCFG={
   maxBc:400                                                       /* บาร์โค้ดต่อ 1 แถวโควต้า (เกินนี้ = log เตือน) */
 };
 const QUOTA={ rules:[], st:{}, loaded:false, busy:false, ts:0, err:'', p:null };
+/* 🎟️ v5.08 — ยังไม่รู้ยอดของร้าน (กำลังโหลด / โหลดไม่ได้) = ให้สั่งสินค้าในกลุ่มโควต้าได้ไม่เกินเท่านี้ (ลัง · นับรวมของในตะกร้า) */
+const QPROV_CS = 1;
+const QRULES_KEY = 'rop_qrules_v1', QRULES_TTL = 3*864e5;   /* กติกาล่าสุดที่จำไว้ในเครื่อง (IndexedDB · 3 วัน) */
 
 const qtNorm = s => String(s==null?'':s).normalize('NFC').replace(/\s+/g,'').toLowerCase();
 /* บาร์โค้ดต้อง normalize ก่อน join - ERP ห้อย .0 มา และ 0 นำหน้าหาย (กับดักข้อ 8) */
@@ -5601,10 +5604,14 @@ async function quotaBoot(force){
   if(!force && QUOTA.loaded && Date.now()-QUOTA.ts<QCFG.ttl) return;
   QUOTA.busy=true;
   QUOTA.p=(async()=>{
+  /* 🎟️ v5.08 (Surat 10/10: "ยังโหลดไม่ได้ว่าร้านได้โควต้าเท่าไหร่ ให้ตีไว้ที่ 1 ลังก่อน") — ใช้กติกาที่จำไว้ในเครื่องตั้งแต่วินาทีแรก
+     เดิมช่วงที่แท็บ Quota ยังไม่ตอบ (QUOTA.rules ว่าง) = ไม่รู้ว่าสินค้าไหนติดโควต้า → ปล่อยผ่านหมด */
+  if(!(QUOTA.rules||[]).length){ try{ const c=await idbGet(QRULES_KEY); if(c && Array.isArray(c.rules) && c.rules.length && Date.now()-(+c.ts||0)<QRULES_TTL) QUOTA.rules=c.rules; }catch(e){} }
   try{
     /* 👨‍👩‍👧 v4.82: โหลดกลุ่มลูกค้าขนานไปกับกติกา · ล้มก็ไปต่อ (ใช้เพดานรายรหัสแบบเดิม) */
     const [rules]=await Promise.all([ qLoadRules(), qGroupBoot().catch(()=>null) ]);
-    QUOTA.rules=rules; QUOTA.err='';   /* 🔴 v5.05: รู้กติกาก่อนรู้ยอด → ระหว่างรอยอด สินค้าที่ติดโควต้าสั่งไม่ได้ (quotaRulePending) */
+    QUOTA.rules=rules; QUOTA.err='';   /* 🔴 v5.05: รู้กติกาก่อนรู้ยอด → ระหว่างรอยอด สินค้าที่ติดโควต้าสั่งได้ไม่เกิน 1 ลัง (v5.08 · quotaRulePending) */
+    try{ idbSet(QRULES_KEY, { ts:Date.now(), rules }); }catch(e){}   /* 🎟️ v5.08 */
     const st={}, draft=(typeof draftOrderId==='function')?draftOrderId():'';
     /* ทุกแถว + ทุกคำขอ ยิงขนานกันหมด (เดิมวนทีละแถว รอ 30-60 วิกว่าป้ายจะขึ้น) */
     await Promise.all(rules.map(async rule=>{
@@ -5908,23 +5915,48 @@ function pdpaFlush(){
 /* 🔴 v5.05 — สินค้านี้ติดกติกาโควต้า แต่ยังโหลดยอดของร้านไม่เสร็จ = "ยังห้ามสั่ง"
    (เดิมปล่อยผ่าน → หลุดทุกครั้งที่ลูกค้ารีบสั่งหลังเปิดแอป · ร้านเฮียโต๋ 07-08/10 เพดาน 1 ลัง ได้ไป 20+10)
    fail-open เหลือกรณีเดียว: อ่านแท็บกติกา (Quota) ไม่ได้เลย → QUOTA.rules ว่าง / QUOTA.err → ไม่รู้ว่าตัวไหนติด = ปล่อยผ่าน */
-function quotaRulePending(p){
+/* 🎟️ v5.08: เหลือกรณี fail-open เดียว = ไม่เคยรู้กติกาเลย (แท็บ Quota ไม่ตอบ + ในเครื่องไม่มีกติกาที่จำไว้) · โหลดล้มแต่มีกติกาเก่า = ยังจำกัด 1 ลัง */
+function quotaPendingRules(p){
+  const out=[];
   try{
-    if(!p||!currentCustomer||isHead(currentCustomer)) return false;
-    if(QUOTA.err || !(QUOTA.rules||[]).length) return false;
+    if(!p||!currentCustomer||isHead(currentCustomer)) return out;
+    if(!(QUOTA.rules||[]).length) return out;
     for(const rule of QUOTA.rules){
       if(!qRuleMatch(rule,p)) continue;
       if(!qWhState(rule).apply) continue;
       const st=QUOTA.st[rule._k];
-      if(!QUOTA.loaded || !st || !st.ready) return true;
+      if(!QUOTA.loaded || !st || !st.ready) out.push(rule);   /* โหลดรอบใหม่ล้มแต่ยอดรอบก่อนยังอยู่ = ใช้ยอดรอบก่อน */
     }
   }catch(e){}
-  return false;
+  return out;
+}
+function quotaRulePending(p){ return quotaPendingRules(p).length>0; }
+/* ลังในตะกร้าของกติกานี้ — ไม่ต้องรอสถานะโหลด (ใช้ตอนยังไม่รู้ยอด) */
+function quotaCartCasesRaw(rule, skipKey){
+  let cs=0;
+  Object.values(cart||{}).forEach(it=>{
+    if(!it||!it.qty) return;
+    if(skipKey && it.key===skipKey) return;
+    const p=findProduct(it.name); if(!p||!qRuleMatch(rule,p)) return;
+    cs += qToCases(p, unitLabelOfCartItem(it), it.qty);
+  });
+  return cs;
 }
 function quotaGate(p, unitType, qty, mode, cartKey){
   try{
     if(!p||!currentCustomer) return null;
-    if(quotaRulePending(p)){ try{ quotaBoot(); }catch(e){} return { pending:true, lock:true, left:0, add:0 }; }
+    const _pend=quotaPendingRules(p);
+    if(_pend.length){                       /* 🎟️ v5.08: ยังไม่รู้ยอด = เพดานชั่วคราว QPROV_CS ลัง (เดิม v5.05 ห้ามสั่งเลย) */
+      try{ quotaBoot(); }catch(e){}
+      const units=unitsFor(p)||[], u=units.find(x=>x.type===unitType)||units[0];
+      const addCs=qToCases(p, qUnitLabel(u?(u.detail||u.name||''):''), qty);
+      if(addCs<=0) return null;
+      let worst=null;
+      _pend.forEach(rule=>{ const other=quotaCartCasesRaw(rule, mode==='set'?cartKey:null), left=Math.max(0, QPROV_CS-other);
+        if(addCs>left+1e-6 && (!worst || left<worst.left)) worst={ left:Math.floor(left*10)/10 }; });
+      if(!worst) return null;
+      return { pending:true, lock:true, left:worst.left, add:Math.round(addCs*10)/10 };
+    }
     const rule=quotaRuleFor(p);            if(!rule) return null;      /* ไม่มีโควต้า = ขายได้ปกติ */
     const st=quotaState(rule);             if(!st||!st.ready) return null;   /* ยังไม่รู้ยอด = ปล่อยผ่านเสมอ */
     const left0=quotaLeft(rule);           if(left0==null) return null;
@@ -6035,7 +6067,7 @@ function quotaFinalCheck(){
 function quotaAllow(p, unitType, qty, mode, cartKey){
   const g=quotaGate(p, unitType, qty, mode, cartKey);
   if(!g) return true;
-  if(g.pending){ showToast('กำลังเช็คโควต้าสินค้านี้ของร้าน รอ 2-3 วินาทีแล้วกดอีกครั้งค่ะ','warning'); return false; }   /* v5.05 */
+  if(g.pending){ showToast('ยังเช็คโควต้าของร้านไม่เสร็จ ระหว่างนี้สั่งได้ไม่เกิน '+QPROV_CS+' ลัง'+(g.left>0?(' (เหลือ '+g.left+' ลัง)'):''),'warning'); return false; }   /* v5.05 · v5.08 */
   if(g.lock){ showToast(quotaMsg(g),'error'); return false; }
   showToast(quotaMsg(g)+' (โหมดเตือน)','warning');
   return true;
@@ -7367,8 +7399,11 @@ async function submitOrder(force){
       finally{ hideSpinner(); }
     }
     /* 🔴 v5.05: ในบิลมีสินค้าติดโควต้าที่ยังเช็คยอดไม่เสร็จ = ยังไม่ให้ส่ง (เดิมปล่อยผ่านทั้งใบ) */
-    const _qp=selItems.filter(it=>{ const p=findProduct(it.name); return p && quotaRulePending(p); });
-    if(_qp.length){ showToast('ยังเช็คโควต้าไม่เสร็จ ('+_qp[0].name+') กรุณากดยืนยันอีกครั้งใน 2-3 วินาทีค่ะ','warning'); try{ quotaBoot(true); }catch(e){} return; }
+    /* 🎟️ v5.08: ยังเช็คไม่เสร็จ = ส่งได้ถ้ากลุ่มนั้นในบิลไม่เกิน QPROV_CS ลัง (เดิม v5.05 ห้ามส่งเลย) */
+    { const _pr=new Map();
+      selItems.forEach(it=>{ const p=findProduct(it.name); if(!p) return; quotaPendingRules(p).forEach(r=>_pr.set(r._k||(r.by+'|'+r.val), r)); });
+      const _over=[..._pr.values()].map(r=>({ r, cs:selItems.reduce((a,it)=>{ const p=findProduct(it.name); return a+((p&&qRuleMatch(r,p))?qToCases(p,unitLabelOfCartItem(it),it.qty):0); },0) })).filter(x=>x.cs>QPROV_CS+1e-6);
+      if(_over.length){ showToast('ยังเช็คโควต้าไม่เสร็จ - '+_over[0].r.val+' สั่งได้ไม่เกิน '+QPROV_CS+' ลังก่อน (ในบิล '+(Math.round(_over[0].cs*10)/10)+' ลัง) กรุณาลดจำนวนหรือกดยืนยันอีกครั้งใน 2-3 วินาทีค่ะ','warning'); try{ quotaBoot(true); }catch(e){} return; } }
     const _qb=quotaFinalCheck();
     if(_qb.length){
       const _hard=_qb.filter(x=>x.lock);
