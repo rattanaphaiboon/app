@@ -7613,33 +7613,63 @@ function _subFixPrice(rows, A, warns){
 /* ══ v5.17 (Surat 12/10: "สั่งมาเป็นลัง แต่ตอนเช็ค เช็คเป็นแพ็ค ตอนเปิดบิลราคาเลยเป็น 0 บาท · คีย์ลังมาต้องเปิดลัง คีย์แพ็คเปิดแพ็ค")
  *    เคสจริง 10/10 มีน(ตลาดห้วยพลู) BK10691010/022: ฟ้าไทย น้ำก๋วยเตี๋ยวน้ำใส สั่ง 1 ลังx36 ฿830 → เช็คเกอร์ยิงบาร์แพ็ค 6 แพ็คx6 → DC ได้ 6 แพ็ค ราคา 0
  *    ราคาหาด้วย "รหัสร้าน|บาร์ที่ยิง" แต่ใบจองมีแต่บาร์ลัง → ไม่เจอ = 0
- * วิธี: บรรทัดที่บาร์ไม่ตรงใบจอง → หาสินค้าตัวเดียวกัน (รหัส EA เดียวกัน) ในใบจองใบเดียวกัน → แปลงเป็น "หน่วยที่คีย์ขายมา" ด้วยจำนวนชิ้น
- *    ครบหน่วย = บรรทัดเดียวในหน่วยใบจอง ราคาใบจอง (6 แพ็ค = 1 ลัง ฿830) · เศษไม่ครบหน่วย = บรรทัดเศษในหน่วยที่ยิง ราคาเฉลี่ยต่อชิ้นจากใบจอง
- *    บรรทัดที่บาร์ตรงใบจองอยู่แล้ว = ไม่แตะ (ไม่ได้แปลงแพ็คเป็นลังทุกตัว — ยึดหน่วยที่คีย์ขายเท่านั้น) */
+ * วิธี (ต่อ ใบจอง × สินค้าตัวเดียวกัน = รหัส EA เดียวกัน):
+ *    ① หน่วยที่ยิง = หน่วยที่คีย์ขายทุกตัวอยู่แล้ว (บาร์ตรงใบจองหมด และไม่มีหน่วยที่คีย์แต่ไม่ได้ยิง) → ไม่แตะเลย
+ *    ② ไม่ตรง → รวมของที่ยิงเป็น "ชิ้น" แล้วแจกกลับตามบรรทัดที่คีย์ขาย จากหน่วยใหญ่ไปเล็ก ไม่เกินจำนวนที่คีย์
+ *       ใบจอง 2 ลัง + 3 แพ็ค · ยิงแพ็คมา 15 → 2 ลัง ฿ลัง + 3 แพ็ค ฿แพ็ค (Surat 12/10: "มีทั้งแพ็คทั้งลัง ต้องตรงตามที่คีย์")
+ *    ③ ชิ้นที่เหลือ (ได้ไม่ครบหน่วย / ได้เกินที่คีย์) → หน่วยเล็กสุดที่คีย์ถ้าหารลงตัว ไม่งั้นหน่วยที่ยิง ราคาเฉลี่ยต่อชิ้นจากใบจอง + เตือนให้ตรวจ
+ *    ของแถมแจกแยกกับของขาย (ตามบรรทัดแถมในใบจอง · ไม่มี = คงหน่วยที่ยิง) · ไม่ปล่อย 0 บาท */
 function _unitFixToBooking(rows, warns){
   const byRef={}; (DATA.bkbv||[]).forEach(x=>{ const rf=String(x.ref||'').trim(); if(rf) (byRef[rf]=byRef[rf]||[]).push(x); });
-  const out=[], fixed=[], partial=[];
-  for(const r of rows){
+  const grp=new Map(), keep=[];
+  rows.forEach((r,i)=>{
     const bk=r.bkRef ? (byRef[r.bkRef]||[]) : [];
-    const bcR=String(r.barcode||'').trim();
-    if(r.subOf || !bk.length || bk.some(x=>String(x.barcode).trim()===bcR && x.price>0)){ out.push(r); continue; }
-    const ck=_canonKey(bcR), b=bk.find(x=>x.price>0 && _canonKey(String(x.barcode).trim())===ck);
-    if(!b){ out.push(r); continue; }
-    const rEa=parseUnit(r.unit).eaPer||1, bEa=b.eaPer||parseUnit(b.unit).eaPer||1, perEa=b.price/bEa;
-    if(rEa===bEa){ out.push({...r, barcode:b.barcode, unit:b.unit, price:b.price}); fixed.push(r.store+' · '+r.name+' ฿'+b.price); continue; }
-    const cut=n=>{ const ea=(+n||0)*rEa, whole=Math.floor(ea/bEa+1e-9), rem=(ea-whole*bEa)/rEa; return {whole, rem:Math.round(rem*1000)/1000}; };
-    const s=cut(r.qty), f=cut(r.free);
-    const remOk=Math.abs(s.rem-Math.round(s.rem))<1e-6 && Math.abs(f.rem-Math.round(f.rem))<1e-6;
-    if(!remOk){   /* เศษเป็นเศษส่วนของหน่วยที่ยิง (หายาก) → คงบรรทัดเดิม แต่ใส่ราคาเฉลี่ยต่อชิ้น ไม่ปล่อย 0 */
-      out.push({...r, price:Math.round(perEa*rEa*100)/100}); partial.push(r.store+' · '+r.name+' '+r.qty+' '+r.unit+' (ราคาเฉลี่ย)'); continue; }
-    if(s.whole>0 || f.whole>0) out.push({...r, barcode:b.barcode, unit:b.unit, qty:s.whole, free:f.whole, price:b.price, unitFrom:r.qty+' '+r.unit});
-    if(s.rem>0 || f.rem>0){ out.push({...r, qty:Math.round(s.rem), free:Math.round(f.rem), price:Math.round(perEa*rEa*100)/100});
-      partial.push(r.store+' · '+r.name+' เศษ '+(Math.round(s.rem)+Math.round(f.rem))+' '+r.unit); }
-    fixed.push(r.store+' · '+r.name+' '+((+r.qty||0)+(+r.free||0))+' '+r.unit+' → '+(s.whole+f.whole)+' '+b.unit+' ฿'+b.price);
+    if(r.subOf || !bk.length){ keep.push([i,[r]]); return; }
+    const ck=_canonKey(String(r.barcode||'').trim());
+    if(!bk.some(x=>_canonKey(String(x.barcode).trim())===ck)){ keep.push([i,[r]]); return; }
+    const k=r.bkRef+'|'+r.code+'|'+ck;
+    if(!grp.has(k)) grp.set(k,{i, ck, bk:bk.filter(x=>_canonKey(String(x.barcode).trim())===ck), rows:[]});
+    grp.get(k).rows.push(r);
+  });
+  const fixed=[], partial=[], outAt=keep.slice();
+  for(const g of grp.values()){
+    const saleLn=g.bk.filter(x=>(+x.sale||0)>0 && x.price>0), freeLn=g.bk.filter(x=>(+x.freeQ||0)>0);
+    const bcs=new Set(g.bk.map(x=>String(x.barcode).trim()));
+    const scanSale=new Set(g.rows.filter(r=>(+r.qty||0)>0).map(r=>String(r.barcode).trim()));
+    const scanFree=new Set(g.rows.filter(r=>(+r.free||0)>0).map(r=>String(r.barcode).trim()));
+    const sameSet=(a,b)=>a.size===b.size && [...a].every(x=>b.has(x));
+    const okSale=sameSet(scanSale, new Set(saleLn.map(x=>String(x.barcode).trim()))) || !scanSale.size;
+    const okFree=sameSet(scanFree, new Set(freeLn.map(x=>String(x.barcode).trim()))) || !scanFree.size;
+    if(g.rows.every(r=>bcs.has(String(r.barcode).trim())) && okSale && okFree){ outAt.push([g.i, g.rows]); continue; }   /* ① ตรงที่คีย์อยู่แล้ว */
+    const base=g.rows[0], eaOf=r=>parseUnit(r.unit).eaPer||1;
+    const eaSale=g.rows.reduce((a,r)=>a+(+r.qty||0)*eaOf(r),0), eaFree=g.rows.reduce((a,r)=>a+(+r.free||0)*eaOf(r),0);
+    const perEa=(()=>{ const l=saleLn[0]||g.bk.find(x=>x.price>0); return l ? l.price/(l.eaPer||1) : 0; })();
+    const scanUnit=g.rows.slice().sort((a,b)=>eaOf(a)-eaOf(b))[0];   /* หน่วยเล็กสุดที่ยิง = ใช้กับเศษ */
+    const lines=new Map(), add=(bc,unit,price,q,f)=>{ const k=bc+'|'+unit; const o=lines.get(k)||{barcode:bc,unit,price,qty:0,free:0}; o.qty+=q; o.free+=f; lines.set(k,o); };
+    const deal=(ea, lns, isFree)=>{
+      const ls=lns.slice().sort((a,b)=>(b.eaPer||1)-(a.eaPer||1)); let rem=ea;
+      for(const l of ls){ const per=l.eaPer||1, cap=isFree?(+l.freeQ||0):(+l.sale||0), n=Math.min(cap, Math.floor(rem/per+1e-9));
+        if(n>0){ add(l.barcode, l.unit, l.price, isFree?0:n, isFree?n:0); rem-=n*per; } }
+      if(rem>1e-9){
+        const sm=ls[ls.length-1], smPer=sm?(sm.eaPer||1):0;
+        if(sm && Math.abs(rem/smPer-Math.round(rem/smPer))<1e-9){ add(sm.barcode, sm.unit, sm.price, isFree?0:Math.round(rem/smPer), isFree?Math.round(rem/smPer):0); }
+        else { const su=eaOf(scanUnit), n=rem/su;
+          if(Math.abs(n-Math.round(n))<1e-9) add(scanUnit.barcode, scanUnit.unit, Math.round(perEa*su*100)/100, isFree?0:Math.round(n), isFree?Math.round(n):0);
+          else add('E:'+g.ck, 'ชิ้นx1(EA)', Math.round(perEa*100)/100, isFree?0:Math.round(rem), isFree?Math.round(rem):0);
+          partial.push(base.store+' · '+base.name+' เศษ '+Math.round(rem)+' ชิ้น'+(isFree?' (แถม)':'')); }
+      }
+    };
+    if(eaSale>0){ if(saleLn.length) deal(eaSale, saleLn, false); else g.rows.forEach(r=>{ if(+r.qty>0) add(r.barcode, r.unit, r.price||Math.round(perEa*eaOf(r)*100)/100, +r.qty, 0); }); }
+    if(eaFree>0){ if(freeLn.length) deal(eaFree, freeLn, true); else g.rows.forEach(r=>{ if(+r.free>0) add(r.barcode, r.unit, r.price||Math.round(perEa*eaOf(r)*100)/100, 0, +r.free); }); }
+    const outs=[...lines.values()].map(o=>{ const bc=String(o.barcode).indexOf('E:')===0 ? (((DATA.prodIdx[String(base.barcode).trim()]||{}).codeEA)||base.barcode) : o.barcode;
+      return {...base, barcode:bc, unit:o.unit, qty:o.qty, free:o.free, price:o.price, unitFrom:g.rows.map(r=>((+r.qty||0)+(+r.free||0))+' '+r.unit).join(' + ')}; });
+    outAt.push([g.i, outs]);
+    fixed.push(base.store+' · '+base.name+' ยิง '+g.rows.map(r=>((+r.qty||0)+(+r.free||0))+' '+r.unit).join('+')+' → '+outs.map(o=>(o.qty+o.free)+' '+o.unit+' ฿'+o.price).join('+'));
   }
-  rows.length=0; out.forEach(x=>rows.push(x));
-  if(fixed.length) warns.push('📦 ยิงเช็คคนละหน่วยกับที่คีย์ขาย '+fixed.length+' บรรทัด — แปลงกลับเป็นหน่วยในใบจอง + ใช้ราคาใบจองแล้ว: '+fixed.join(' · '));
-  if(partial.length) warns.push('⚠️ ได้ไม่ครบหน่วยที่คีย์ขาย '+partial.length+' บรรทัด — เศษออกเป็นหน่วยที่ยิง ราคาเฉลี่ยต่อชิ้นจากใบจอง (ตรวจก่อนนำเข้า): '+partial.join(' · '));
+  outAt.sort((a,b)=>a[0]-b[0]);
+  rows.length=0; outAt.forEach(([,rs])=>rs.forEach(x=>rows.push(x)));
+  if(fixed.length) warns.push('📦 ยิงเช็คคนละหน่วยกับที่คีย์ขาย '+fixed.length+' รายการ — แปลงกลับเป็นหน่วยในใบจอง + ใช้ราคาใบจองแล้ว: '+fixed.join(' · '));
+  if(partial.length) warns.push('⚠️ ได้ไม่ครบหน่วยที่คีย์ขาย '+partial.length+' รายการ — เศษออกเป็นหน่วยที่ยิง ราคาเฉลี่ยต่อชิ้นจากใบจอง (ตรวจก่อนนำเข้า): '+partial.join(' · '));
 }
 function buildShareExportSheet(){
   const warns=[]; let rows=[];
