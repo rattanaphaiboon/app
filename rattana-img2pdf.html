@@ -10,7 +10,7 @@
 <link rel="icon" type="image/png" sizes="32x32" href="img2pdf-icon-32.png">
 <link rel="icon" type="image/png" sizes="192x192" href="img2pdf-icon-192.png">
 <link rel="apple-touch-icon" href="img2pdf-icon-180.png">
-<title>Rattana Scanner v8.1</title>
+<title>Rattana Scanner v8.2</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -369,6 +369,11 @@ body.dark .spinner-box{background:var(--card-bg)}
 body.dark .folder-btns .b-pick{color:#8db4ff;border-color:#8db4ff}
 body.dark .folder-btns .b-using{color:#58d68d}
 .folder-item:not(.active){cursor:pointer}
+/* การ์ด Drive ของฉัน */
+.md-card{border-style:dashed;border-color:#2563c9;background:rgba(37,99,201,.05)}
+.md-card.active{border-style:solid}
+.md-desc{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.5}
+.md-forget{display:block;margin:8px auto 0;background:none;border:none;color:var(--muted);font-size:11px;text-decoration:underline;font-family:inherit}
 .folder-item.flash{animation:fiFlash .9s ease}
 @keyframes fiFlash{0%{box-shadow:0 0 0 0 rgba(201,168,76,0)}30%{box-shadow:0 0 0 5px rgba(201,168,76,.6)}100%{box-shadow:0 0 0 0 rgba(201,168,76,0)}}
 .folder-item.active{border-color:var(--gold);border-width:1.5px;background:rgba(201,168,76,.10)}
@@ -589,7 +594,7 @@ footer a{color:inherit;text-decoration:underline}
 
 <header>
   <button class="icon-btn" onclick="openDrawer()" title="เมนู">☰</button>
-  <span class="logo-text">RATTANA <span>SCANNER</span> <span class="badge badge-gold">v8.1</span></span>
+  <span class="logo-text">RATTANA <span>SCANNER</span> <span class="badge badge-gold">v8.2</span></span>
   <span class="badge badge-gold hidden" id="userNameChip" style="margin-left:2px"></span>
   <div class="spacer"></div>
   <button class="icon-btn hidden" id="logoutBtn" onclick="logout()" title="ออกจากระบบ">🚪</button>
@@ -1370,7 +1375,7 @@ footer a{color:inherit;text-decoration:underline}
 </div>
 
 <footer>
-  Rattana Scanner v8.1<br>
+  Rattana Scanner v8.2<br>
   มีปัญหาการใช้งาน? แอดไลน์ HR <a href="https://lin.ee/uIN2DMR" target="_blank" rel="noopener">@712dqxgv</a> หรือโทร <a href="tel:0640978417">064-097-8417</a>
 </footer>
 
@@ -1619,6 +1624,145 @@ function arrayBufferToBase64(buf){
   return btoa(binary);
 }
 
+/* ---------- บันทึกลง Google Drive ของตัวเอง ----------
+   user 13/10/2569: "ควรเป็นของใครของมัน … ล็อกอินแล้วเลือกจากโฟลเดอร์ในไดร์ฟตัวเองได้เลย ไม่ต้องแปะลิงก์"
+   ล็อกอิน Google → เลือกโฟลเดอร์ด้วยหน้าต่างของ Google เอง (Picker) → แอปอัปโหลดตรงเข้า Drive API ด้วยสิทธิ์ของผู้ใช้
+   เจ้าของไฟล์ = คนสแกน และเร็วกว่าผ่าน Apps Script (ไม่มีหน่วง ~3 วิ)
+   สิทธิ์ drive.file = เห็น/เขียนได้เฉพาะโฟลเดอร์ที่ผู้ใช้เลือกให้แอป ไม่เห็นไฟล์อื่นใน Drive */
+const G_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';  // ตัวเดียวกับแอปอื่นของบริษัท
+const G_APP_ID = '615875645128';
+const G_PICKER_KEY = '';           // API key ของ Google Picker (โปรเจกต์เดียวกับ client ID) — ว่างไว้ก่อนจนกว่าจะได้จาก user
+const G_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const MYDRIVE_ID = '__mydrive__';
+const MYDRIVE_KEY = 'rattana_scan_mydrive';
+var myDrive = (() => { try { return JSON.parse(localStorage.getItem(MYDRIVE_KEY) || 'null') || {}; } catch (e) { return {}; } })();
+var gToken = null, gTokenExp = 0;
+
+function saveMyDrive(){ try { localStorage.setItem(MYDRIVE_KEY, JSON.stringify(myDrive)); } catch (e) {} }
+
+function loadScriptOnce(id, src){
+  return new Promise((res, rej) => {
+    const old = document.getElementById(id);
+    if (old) { if (old.dataset.ok) return res(); old.addEventListener('load', res); old.addEventListener('error', rej); return; }
+    const s = document.createElement('script');
+    s.id = id; s.src = src; s.async = true;
+    s.onload = () => { s.dataset.ok = '1'; res(); };
+    s.onerror = () => rej(new Error('load ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+// ขอสิทธิ์ Drive — ต้องเริ่มจากการกดปุ่ม ไม่งั้นเบราว์เซอร์บล็อกป๊อปอัป Google
+// มีโทเคนที่ยังไม่หมดอายุอยู่แล้วก็ใช้เลย (อายุ 1 ชม.)
+async function getDriveToken(selectAccount){
+  if (!selectAccount && gToken && Date.now() < gTokenExp - 60000) return gToken;
+  await loadScriptOnce('gsiScript', 'https://accounts.google.com/gsi/client');
+  return new Promise((resolve, reject) => {
+    const client = google.accounts.oauth2.initTokenClient({
+      client_id: G_CLIENT_ID,
+      scope: G_DRIVE_SCOPE,
+      login_hint: myDrive.email || currentUser?.email || '',
+      callback: r => {
+        if (!r || r.error) return reject(new Error((r && r.error) || 'denied'));
+        gToken = r.access_token;
+        gTokenExp = Date.now() + (Number(r.expires_in) || 3600) * 1000;
+        resolve(gToken);
+      },
+      error_callback: e => reject(new Error('popup ' + ((e && e.type) || ''))),
+    });
+    client.requestAccessToken({ prompt: selectAccount ? 'select_account' : '' });
+  });
+}
+
+// กดแปลงไฟล์ตอนที่เลือก Drive ของฉันไว้ → ขอโทเคนไว้ก่อนเลย (ยังอยู่ในจังหวะกดปุ่ม ป๊อปอัปไม่โดนบล็อก)
+function warmDriveToken(){
+  if (activeFolderId === MYDRIVE_ID && !(gToken && Date.now() < gTokenExp - 120000)) getDriveToken(false).catch(() => {});
+}
+
+async function pickMyDriveFolder(){
+  let token;
+  try { token = await getDriveToken(!myDrive.email); }
+  catch (e) { showToast('ยังไม่ได้อนุญาตให้แอปเข้า Drive ของคุณ', 'warning'); return; }
+  try {
+    if (!myDrive.email) {
+      const a = await (await fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)', { headers: { Authorization: 'Bearer ' + token } })).json();
+      myDrive.email = (a.user && a.user.emailAddress) || '';
+      saveMyDrive();
+    }
+    await loadScriptOnce('gapiScript', 'https://apis.google.com/js/api.js');
+    await new Promise(r => gapi.load('picker', r));
+  } catch (e) { showToast('เปิดหน้าเลือกโฟลเดอร์ไม่ได้ ลองใหม่อีกครั้ง', 'error'); return; }
+  closeDrawer();   // หน้าต่าง Google อยู่ชั้นต่ำกว่าลิ้นชักเมนู ต้องปิดก่อนไม่งั้นโดนบัง
+  const P = google.picker;
+  const folders1 = new P.DocsView(P.ViewId.FOLDERS).setIncludeFolders(true).setSelectFolderEnabled(true)
+    .setMimeTypes('application/vnd.google-apps.folder');
+  const drives = new P.DocsView(P.ViewId.FOLDERS).setIncludeFolders(true).setSelectFolderEnabled(true)
+    .setEnableDrives(true).setMimeTypes('application/vnd.google-apps.folder');
+  const b = new P.PickerBuilder()
+    .addView(folders1).addView(drives)
+    .enableFeature(P.Feature.SUPPORT_DRIVES)
+    .setOAuthToken(token).setAppId(G_APP_ID).setLocale('th')
+    .setTitle('เลือกโฟลเดอร์ใน Drive ของคุณ สำหรับเก็บไฟล์สแกน')
+    .setCallback(d => {
+      if (d.action !== P.Action.PICKED || !d.docs || !d.docs[0]) return;
+      myDrive.folderId = d.docs[0].id;
+      myDrive.folderName = d.docs[0].name || 'โฟลเดอร์ของฉัน';
+      saveMyDrive();
+      setActiveFolder(MYDRIVE_ID);
+    });
+  if (G_PICKER_KEY) b.setDeveloperKey(G_PICKER_KEY);
+  b.build().setVisible(true);
+}
+
+function forgetMyDrive(){
+  myDrive = {}; gToken = null; saveMyDrive();
+  if (activeFolderId === MYDRIVE_ID) setActiveFolder(''); else { renderFolderList(); updateFolderChip(); }
+  showToast('เลิกเชื่อม Drive ของคุณแล้ว', 'success');
+}
+
+// อัปโหลดตรงเข้า Drive ของผู้ใช้ — ไฟล์เป็นของเขาเอง
+async function uploadToMyDrive(blob, filename, folderId){
+  const token = await getDriveToken(false);
+  const meta = { name: filename, parents: [folderId], mimeType: 'application/pdf',
+                 description: `สแกนด้วย Rattana Scanner · ${currentUser?.empId || ''} ${currentUser?.name || ''}`.trim() };
+  const body = new FormData();
+  body.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
+  body.append('file', blob, filename);
+  const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,webViewLink',
+    { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body });
+  let json = {}; try { json = await res.json(); } catch (e) {}
+  if (res.status === 401) { gToken = null; throw new Error('drive auth'); }
+  if (!res.ok) throw new Error('drive ' + res.status + ' ' + ((json.error && json.error.message) || ''));
+  return json;
+}
+
+// การ์ด "Drive ของฉัน" บนสุดของรายการโฟลเดอร์
+function myDriveCardHtml(){
+  if (!myDrive.folderId) {
+    return `<div class="folder-item md-card">
+      <div class="folder-top"><div class="folder-ic">☁️</div><div class="folder-info">
+        <div class="folder-name"><span>Drive ของฉัน</span></div>
+        <div class="md-desc">เก็บไฟล์ลงโฟลเดอร์ใน Google Drive ของคุณเอง · คุณเป็นเจ้าของไฟล์ ไม่ต้องแปะลิงก์</div>
+      </div></div>
+      <div class="folder-btns"><button type="button" class="b-pick" onclick="pickMyDriveFolder()">🔑 เลือกโฟลเดอร์จาก Drive ของฉัน</button></div>
+    </div>`;
+  }
+  const on = activeFolderId === MYDRIVE_ID;
+  return `<div class="folder-item md-card ${on ? 'active' : ''}" onclick="pickFolderCard(event, '${MYDRIVE_ID}')">
+    <div class="folder-top"><div class="folder-ic">☁️</div><div class="folder-info">
+      <div class="folder-name"><span>${esc(myDrive.folderName)}</span>${on ? '<span class="folder-badge b-here">✅ เก็บที่นี่</span>' : ''}</div>
+      <div class="folder-meta">Drive ของฉัน · ${esc(myDrive.email || 'บัญชี Google ของคุณ')} · คุณเป็นเจ้าของไฟล์</div>
+    </div></div>
+    <div class="folder-btns">
+      ${on ? '<button type="button" class="b-using" disabled>✅ ใช้อยู่</button>'
+           : `<button type="button" class="b-pick" onclick="setActiveFolder('${MYDRIVE_ID}')">📥 เก็บที่นี่</button>`}
+      <button type="button" class="b-open" onclick="window.open('https://drive.google.com/drive/folders/${encodeURIComponent(myDrive.folderId)}', '_blank')">📂 เปิดใน Drive</button>
+      <button type="button" onclick="pickMyDriveFolder()">🔁 เปลี่ยน</button>
+    </div>
+    <button type="button" class="md-forget" onclick="forgetMyDrive()">เลิกเชื่อม Drive ของฉัน</button>
+  </div>`;
+}
+
 /* ---------- บันทึกเข้า Drive แบบเห็นสถานะ ----------
    เดิมยิงไฟล์ไปเงียบ ๆ ไม่อ่านผลตอบกลับ ผู้ใช้ไม่รู้เลยว่าเข้า Drive หรือยัง (user ทัก 01/10/2569)
    ตอนนี้ทุกไฟล์เป็น "งานบันทึก" มีสถานะ กำลังบันทึก → บันทึกแล้ว / ไม่สำเร็จ (กดลองใหม่ได้)
@@ -1628,7 +1772,8 @@ var saveJobSeq = 0;
 var saveTicker = 0;
 
 function logScanHistory(entry, blob){
-  if (!HISTORY_SCRIPT_URL) return null;
+  if (activeFolderId === MYDRIVE_ID && myDrive.folderId) entry = { ...entry, myDrive: { folderId: myDrive.folderId, folderName: myDrive.folderName } };
+  if (!HISTORY_SCRIPT_URL && !entry.myDrive) return null;
   const job = { id: ++saveJobSeq, entry, blob, state: 'saving', started: Date.now(), tries: 0,
                 sizeKB: entry.sizeKB, filename: entry.filename };
   saveJobs.push(job);
@@ -1650,6 +1795,17 @@ async function runSaveJob(job){
   renderSaveStatus();
   try {
     // ลองใหม่: เช็กก่อนว่ารอบที่แล้วเข้าไปแล้วหรือยัง — เน็ตหลุดตอนรอคำตอบ ไฟล์อาจเข้า Drive ไปแล้ว จะได้ไม่ซ้ำ
+    if (job.entry.myDrive) {
+      const md = job.entry.myDrive;
+      const r = await uploadToMyDrive(job.blob, job.entry.filename, md.folderId);
+      // ลงประวัติด้วย (ไม่ส่งตัวไฟล์ — ไฟล์อยู่ใน Drive ของเจ้าตัวแล้ว)
+      if (HISTORY_SCRIPT_URL) {
+        const { myDrive: _x, ...rest } = job.entry;
+        fetch(HISTORY_SCRIPT_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ ...rest, fileBase64: null }) }).catch(() => {});
+      }
+      finishSaveJob(job, { fileId: r.id, folderId: MYDRIVE_ID, folderName: '☁️ ' + md.folderName, link: r.webViewLink || '' });
+      return;
+    }
     if (job.tries > 1 && await saveAlreadyLanded(job)) { finishSaveJob(job, {}); return; }
     const fileBase64 = job.blob ? arrayBufferToBase64(await job.blob.arrayBuffer()) : null;
     const ctrl = new AbortController();
@@ -1678,6 +1834,7 @@ function finishSaveJob(job, json){
   job.fileId = json.fileId || job.fileId || '';
   job.folderId = json.folderId != null ? String(json.folderId) : String(job.entry.folderId || '');
   job.folderName = json.folderName || '';
+  job.link = json.link || '';
   job.blob = null;                                   // เข้า Drive แล้ว ไม่ต้องถือไฟล์ไว้ในหน่วยความจำ
   renderSaveStatus();
   loadHistory();                                     // ให้รายการใหม่ขึ้นในแท็บประวัติทันที
@@ -1700,6 +1857,9 @@ function retrySaveJob(id){
 
 function saveErrorText(err){
   if (err === 'timeout') return 'ใช้เวลานานผิดปกติ';
+  if (/denied|popup|access_denied|drive auth/.test(err)) return 'ต้องอนุญาตให้แอปเข้า Drive ของคุณ — กดลองใหม่';
+  if (/^drive 40[34]/.test(err)) return 'เข้าโฟลเดอร์ใน Drive ของคุณไม่ได้ (ถูกลบ/ไม่มีสิทธิ์) — เลือกโฟลเดอร์ใหม่';
+  if (/^drive /.test(err)) return 'Google Drive ตอบกลับไม่สำเร็จ';
   if (/folder not allowed/.test(err)) return 'ไม่มีสิทธิ์ใช้โฟลเดอร์ที่เลือก';
   if (/Failed to fetch|NetworkError|Load failed|network/i.test(err)) return 'อินเทอร์เน็ตมีปัญหา';
   return 'ระบบ Drive ตอบกลับไม่สำเร็จ';
@@ -1725,7 +1885,12 @@ function renderSaveStatus(){
           <small>ไฟล์ ${job.sizeKB} KB · ปิดหน้านี้ได้ ระบบบันทึกต่อให้ แต่อย่าเพิ่งปิดแอปจนกว่าจะขึ้น ✅</small>
           <div class="ss-bar"></div></div>`;
       } else if (job.state === 'done') {
-        box.innerHTML = `<span class="ss-ic">✅</span><div class="ss-txt">
+        box.innerHTML = job.entry.myDrive
+          ? `<span class="ss-ic">✅</span><div class="ss-txt">
+          <b>บันทึกลง Drive ของคุณแล้ว</b>
+          <small>${esc(saveFolderLabel(job))} · คุณเป็นเจ้าของไฟล์ · ใช้เวลา ${secsText(job.ms)}</small>
+          ${job.link ? `<button type="button" class="ss-btn" onclick="window.open('${esc(job.link)}', '_blank')">📂 เปิดใน Google Drive</button>` : ''}</div>`
+          : `<span class="ss-ic">✅</span><div class="ss-txt">
           <b>บันทึกเข้า Drive แล้ว</b>
           <small>📁 ${esc(saveFolderLabel(job))} · ใช้เวลา ${secsText(job.ms)}</small>
           <button type="button" class="ss-btn" onclick="openFolderFiles('${esc(job.folderId || '')}')">📂 ดูไฟล์ในโฟลเดอร์</button></div>`;
@@ -1864,10 +2029,13 @@ var activeFolderId = '';       // '' = เก็บไว้ที่โฟล�
 var foldersSupported = null;   // null = ยังไม่รู้ · false = หลังบ้านยังเป็นรุ่นเก่า ยังไม่มีระบบโฟลเดอร์
 var ACTIVE_FOLDER_KEY = 'rattana_scan_folder';
 
-function activeFolder(){ return folders.find(f => f.id === activeFolderId) || null; }
+function activeFolder(){
+  if (activeFolderId === MYDRIVE_ID) return myDrive.folderId ? { id: MYDRIVE_ID, name: myDrive.folderName, visibility: 'private', myDrive: true } : null;
+  return folders.find(f => f.id === activeFolderId) || null;
+}
 
 // ส่งไปกับทุกครั้งที่บันทึกไฟล์ — ถ้าโฟลเดอร์ที่เลือกไว้หายไปแล้ว ให้ตกกลับไปโฟลเดอร์หลัก
-function folderIdForSave(){ return activeFolder() ? activeFolderId : ''; }
+function folderIdForSave(){ const f = activeFolder(); return f && !f.myDrive ? activeFolderId : ''; }   // Drive ของฉันไม่ผ่านหลังบ้าน
 
 async function loadFolders(){
   if (!HISTORY_SCRIPT_URL || !currentUser?.empId) return;
@@ -1881,7 +2049,7 @@ async function loadFolders(){
   }
   // โฟลเดอร์ที่เคยเลือกไว้อาจถูกลบไปแล้ว หรือเป็นของเครื่องอื่น — เช็กก่อนใช้
   const saved = (() => { try { return localStorage.getItem(ACTIVE_FOLDER_KEY) || ''; } catch (e) { return ''; } })();
-  activeFolderId = folders.some(f => f.id === saved) ? saved : '';
+  activeFolderId = folders.some(f => f.id === saved) || (saved === MYDRIVE_ID && myDrive.folderId) ? saved : '';
   renderFolderList();
   updateFolderChip();
 }
@@ -1895,7 +2063,7 @@ function pickFolderCard(e, id){
 }
 
 function setActiveFolder(id){
-  activeFolderId = folders.some(f => f.id === id) ? id : '';
+  activeFolderId = folders.some(f => f.id === id) || (id === MYDRIVE_ID && myDrive.folderId) ? id : '';
   try { localStorage.setItem(ACTIVE_FOLDER_KEY, activeFolderId); } catch (e) {}
   renderFolderList();
   updateFolderChip();
@@ -1913,7 +2081,7 @@ function updateFolderChip(){
   if (wrap) wrap.classList.toggle('hidden', foldersSupported === false);
   const f = activeFolder();
   el.textContent = f
-    ? `${f.visibility === 'all' ? '🌐' : '🔒'} ${f.name}`
+    ? `${f.myDrive ? '☁️' : f.visibility === 'all' ? '🌐' : '🔒'} ${f.name}`
     : '📁 โฟลเดอร์หลักของฉัน';
 }
 
@@ -1947,8 +2115,8 @@ function renderFolderList(){
   // เมื่อก่อนแตะการ์ด = เปลี่ยนที่เก็บ ซึ่งชนกับความคาดหวังว่าแตะแล้วน่าจะเปิดดูข้างใน
   // ถ้ากำลังเปิดตัวเลือกอยู่ (iPhone) ห้ามแทนที่ตัวเลือกกลางทาง ไม่งั้นค่าที่เลือกหาย
   if (dest && document.activeElement === dest) dest.value = activeFolderId;
-  else if (dest) dest.innerHTML = rows.map(f =>
-    `<option value="${f.id}"${f.id === activeFolderId ? ' selected' : ''}>${esc(f.name)}</option>`).join('');
+  else if (dest) dest.innerHTML = (myDrive.folderId ? `<option value="${MYDRIVE_ID}"${activeFolderId === MYDRIVE_ID ? ' selected' : ''}>☁️ Drive ของฉัน: ${esc(myDrive.folderName)}</option>` : '')
+    + rows.map(f => `<option value="${f.id}"${f.id === activeFolderId ? ' selected' : ''}>${esc(f.name)}</option>`).join('');
 
   list.innerHTML = rows.map(f => {
     const isMine = f.ownerEmpId === mine;
@@ -1974,6 +2142,7 @@ function renderFolderList(){
       </div>
     </div>`;
   }).join('');
+  list.innerHTML = myDriveCardHtml() + list.innerHTML;
 }
 
 // คำสั้น ๆ บอกสิทธิ ใช้ทั้งในการ์ดโฟลเดอร์และในหน้าตั้งค่า
@@ -4463,6 +4632,7 @@ function setAppMode(mode){
 }
 function handleConvertClick(){
   warmBackend();
+  warmDriveToken();
   if (appMode === 'merge') mergePdfFiles();
   else if (appMode === 'split') runSplit();
   else if (appMode === 'watermark') runWatermarkFiles();
