@@ -1414,7 +1414,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.305</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.306</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -3254,6 +3254,7 @@ let _dscPickupRefSet=new Set();
 // v9.183: หมายเหตุบิล (DI_REMARK) บอกว่าลูกค้า "รับสินค้าเอง" เช่น "รับของ: รับสินค้าเองที่รัตนไพบูลย์" → ไม่ต้องจัดรถ
 //   ชุดนี้ = ใบจองพวกนั้น + ใบส่ง DS_DC วันนี้ที่อ้างใบจองนั้น (ใช้ตอนกรอง + ปุ่มตรวจบิลหาย)
 let _selfPickupRefSet=new Set();
+let _spTodayRefs=new Set();   /* v9.306: ใบ "ลูกค้ารับเองหน้าร้าน" ลงวันนี้ — โชว์ฝั่งรอจัดรถของหน้าจัดรถ (ไม่อยู่ใน bills) */
 function _isSelfPickupRmk(s){ return /รับ\s*สินค้า\s*เอง/.test(String(s||'')); }
 // v9.150: เก็บไว้ให้ "ใบค้างส่ง" ใช้ตรวจย้อนหลัง — เดิมข้อมูลพวกนี้ถูกทิ้งหลังคำนวณเสร็จ
 let _bkDocMap={};                  // ใบจอง BK/BV → Set(เลขใบส่ง DS_DC ที่อ้างถึงมัน)
@@ -3799,9 +3800,22 @@ async function loadData(){
       (dsDcTodayRows||[]).forEach(r=>{ const k=norm(r['DI_REF']); if(!k)return; const bk=_parseBkRef(r['DI_REMARK']);
         if(_isSelfPickupRmk(r['DI_REMARK'])||(bk&&set.has(bk)))set.add(k); });
       _selfPickupRefSet=set;
+      _spTodayRefs=new Set();
       if(!set.size)return;
+      /* ══ v9.306: ใบที่ลงวันนี้ "ไม่ตัดทิ้ง" — ให้เห็นฝั่งรอจัดรถของหน้าจัดรถ ══
+         ยังเอาออกจาก bills เหมือนเดิม → หน้าอื่นที่วน bills (พรีปลีก/ค้างส่ง/เช็คสต็อก/รถทั้งหมด)
+         และ auto-assign ไม่เปลี่ยนพฤติกรรมเลย · แต่ "ไม่ลบออกจาก billMap"
+         เพื่อให้ getFilteredBills() ดึงกลับมาต่อท้ายได้เฉพาะตารางหน้าจัดรถ */
+      const _spToday=[];
+      const _pdSP=s=>{ const p=String(s||'').trim().split(/[\/\-\.]/); if(p.length<3)return 0;
+        let d,m,y; if(p[0].length===4){y=+p[0];m=+p[1];d=+p[2];}else{d=+p[0];m=+p[1];y=+p[2];}
+        if(y>2400)y-=543; if(!d||!m||!y||y<1990)return 0; return new Date(y,m-1,d).setHours(0,0,0,0); };
+      const _todaySP=new Date().setHours(0,0,0,0);
       const dropped=[];
-      bills=bills.filter(b=>{ if(!set.has(norm(b.ref)))return true; dropped.push(b.ref); delete billMap[b.ref]; return false; });
+      bills=bills.filter(b=>{ if(!set.has(norm(b.ref)))return true;
+        if(_pdSP(b.date)===_todaySP){ b._selfPickup=true; _spTodayRefs.add(b.ref); _spToday.push(b.ref); return false; }
+        dropped.push(b.ref); delete billMap[b.ref]; return false; });
+      if(_spToday.length) console.log(`🙋 v9.306 รับเองหน้าร้าน (ลงวันนี้) โชว์ฝั่งรอจัดรถ: ${_spToday.length} ใบ — ${_spToday.slice(0,8).join(', ')}`);
       console.log(`🙋 v9.183 ตัดบิลลูกค้ารับสินค้าเอง (DI_REMARK): ${dropped.length} ใบ`+(dropped.length?` — ${dropped.slice(0,8).join(', ')}${dropped.length>8?' ...':''}`:''));
     })();
     // ══ v8.55: กรอง "ใบจอง BK/BV ที่ถูกส่งแล้ว" (ถูกอ้างในแท็บ DS_DC) ออกก่อนจัดรถ ══
@@ -4090,7 +4104,10 @@ function getFilteredBills(){
   const fStatus=document.getElementById('fStatus')?.value||'';
   const fSort=document.getElementById('fSort')?.value||'weight';
 
-  let list=bills.filter(b=>{
+  /* v9.306: ต่อท้ายด้วยใบ "ลูกค้ารับเองหน้าร้าน" ของวันนี้ (อยู่ใน billMap แต่ไม่อยู่ใน bills)
+     ใช้เฉพาะตารางหน้าจัดรถ — ตัวกรอง ค้นหา/วันที่/สถานะ ยังทำงานกับมันเหมือนบิลปกติ */
+  const _spRows=_spTodayRefs.size?[..._spTodayRefs].map(r=>billMap[r]).filter(Boolean):[];
+  let list=(_spRows.length?bills.concat(_spRows):bills).filter(b=>{
     // ซ่อนเฉพาะบิลที่บันทึกแล้ว + ไม่อยู่ใน queue (ถ้าถูก re-assign กลับ → แสดง)
     if(savedRefs.has(b.ref)&&!queue[b.ref])return false;
     if(srch&&!b.arName.toLowerCase().includes(srch)&&!b.ref.toLowerCase().includes(srch))return false;
@@ -4318,7 +4335,7 @@ function renderBillTable(){
     } else { _lastTrip=0; }
     const col=plate?getTruckCol(plate):'';
     const rowCls=`bill-row${isOnActive?' on-truck':''}${isSel?' selected':''}`;
-    return divider+`<tr class="${rowCls}" draggable="true" ondragstart="dragStartBill(event,'${b.ref}')" ondragend="dragEndBill(this)" onclick="handleBillClick('${b.ref}')">
+    return divider+`<tr class="${rowCls}" draggable="${b._selfPickup?'false':'true'}" ondragstart="dragStartBill(event,'${b.ref}')" ondragend="dragEndBill(this)" onclick="handleBillClick('${b.ref}')">
       <td onclick="event.stopPropagation();toggleSel('${b.ref}',this)">
         <input type="checkbox" ${isSel?'checked':''} onchange="toggleSel('${b.ref}',this)" style="cursor:pointer;accent-color:#C9A84C"/>
       </td>
@@ -4366,6 +4383,8 @@ function renderBillTable(){
           </div>
         `:(function(){
           // v8.21 (แบบ A): ตัด "ลากไปวางบนรถ" + คำเตือนยาว → เหลือจุดเดียว แตะดูเหตุผล
+          // v9.306: ลูกค้ารับเองหน้าร้าน — โชว์ให้เห็นว่ามีบิลนี้ แต่ไม่ต้องจัดรถ
+          if(b._selfPickup)return `<span title="DI_REMARK ระบุว่าลูกค้ารับสินค้าเอง — ไม่ต้องจัดรถ" style="background:#FFF8EC;color:#B45309;border:1px solid #E4C46E;border-radius:8px;padding:2px 8px;font-size:10px;font-weight:700;white-space:nowrap">🙋 รับเองหน้าร้าน</span>`;
           const w=whyNotAuto(b);
           if(!w)return `<span title="ผ่านทุกเงื่อนไข — กด จัดอัตโนมัติ อีกครั้ง" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#15803D"></span>`;
           const isHint=w.startsWith('💡');
@@ -4391,7 +4410,8 @@ function renderBillTable(){
   const done=Object.keys(queue).filter(r=>queue[r]).length;
   const pend=bills.length-done;
   document.getElementById('tableFoot').innerHTML=
-    `<span>แสดง ${list.length}/${bills.length}</span>
+    `<span>แสดง ${list.length}/${bills.length+_spTodayRefs.size}</span>
+     ${_spTodayRefs.size?`<span style="color:#B45309;font-weight:600">🙋 รับเองหน้าร้าน: ${_spTodayRefs.size}</span>`:''}
      <span style="color:#B45309;font-weight:600">รอจัด: ${pend}</span>
      <span style="color:#15803D;font-weight:600">จัดแล้ว: ${done}</span>`;
 
