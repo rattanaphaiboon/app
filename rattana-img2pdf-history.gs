@@ -3,9 +3,9 @@
 //         (Execute as: Me / Who has access: Anyone)
 //
 // เช็กว่า deploy เวอร์ชันใหม่แล้วจริงไหม: เปิด URL ต่อท้าย ?action=ping
-//   ต้องเห็น {"ok":true,"version":"5.6", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
+//   ต้องเห็น {"ok":true,"version":"5.7", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
 
-var VERSION = '5.6';
+var VERSION = '5.7';
 var FOLDER_NAME = 'Rattana Scanner Files';
 var SHARED_FOLDER_NAME = 'ส่วนกลาง (ทุกคนเห็นได้)';
 var RETENTION_DAYS = 90;
@@ -185,6 +185,24 @@ function folderById_(id) {
   var list = allFolders_();
   for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
   return null;
+}
+
+// โอนไฟล์ให้ "เจ้าของโฟลเดอร์ตัวจริง" ใน Drive (user 13/10/2569: แปะลิงก์โฟลเดอร์ของใครมา ไฟล์ต้องเป็นของคนนั้น)
+// สคริปต์รันในนามคน deploy ไฟล์ที่สร้างจึงเป็นของคน deploy เสมอ ต้องโอนหลังสร้าง
+// องค์กรเดียวกัน (Workspace) โอนได้ทันที · คน deploy ยังเป็นผู้แก้ไขต่อ ปุ่มดาวน์โหลดในประวัติจึงยังใช้ได้
+// โฟลเดอร์ที่แอปสร้างเอง / Shared drive = ไม่ต้องโอน
+function giveToFolderOwner_(file, folder) {
+  try {
+    var owner = folder.getOwner();
+    if (!owner) return { email: '' };
+    var email = owner.getEmail();
+    var me = Session.getEffectiveUser().getEmail();
+    if (!email || email === me) return { email: '' };
+    file.setOwner(email);
+    return { email: email };
+  } catch (e) {
+    return { email: '', error: String(e && e.message || e) };
+  }
 }
 
 // ใช้เก็บไฟล์ได้ไหม — กติกาเดียวกับการมองเห็น
@@ -480,10 +498,13 @@ function doPost(e) {
     }
     if (!target) { target = getUserFolder_(empId, data.name); folderId = ''; folderName = ''; }
 
-    var fileId = '';
+    var fileId = '', given = { email: '' };
     if (data.fileBase64) {
       var blob = Utilities.newBlob(Utilities.base64Decode(data.fileBase64), 'application/pdf', data.filename || 'scan.pdf');
-      fileId = target.createFile(blob).getId();
+      var made = target.createFile(blob);
+      fileId = made.getId();
+      try { made.setDescription('สแกนโดย ' + empId + ' ' + (data.name || '') + ' · Rattana Scanner'); } catch (e3) {}
+      if (folderId) given = giveToFolderOwner_(made, target);
     }
     sheet.appendRow([
       data.timestamp || new Date().toISOString(),
@@ -498,7 +519,7 @@ function doPost(e) {
       folderName,
     ]);
     cleanupOldEntries_(sheet);
-    return json_({ ok: true, fileId: fileId, folderId: folderId, folderName: folderName });
+    return json_({ ok: true, fileId: fileId, folderId: folderId, folderName: folderName, ownerEmail: given.email || '', ownerError: given.error || '' });
   } catch (err) {
     return json_({ ok: false, error: String(err) });
   }
