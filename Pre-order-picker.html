@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rattana Pre-order Picker v5.27</title>
+<title>Rattana Pre-order Picker v5.28</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -384,7 +384,7 @@
     <button type="button" class="login-bypass" id="previewBypassBtn" onclick="bypassLogin()" style="display:none;margin-top:10px">🔓 เข้าโหมดพรีวิว (ทดสอบในเครื่อง — ไม่ผ่าน Google Login)</button>
     <div id="loginSpinner">⏳ กำลังเข้าสู่ระบบ…</div>
     <div id="loginError"></div>
-    <div class="login-ver">เวอร์ชัน v5.27</div>
+    <div class="login-ver">เวอร์ชัน v5.28</div>
   </div>
 </div>
 
@@ -412,7 +412,7 @@
         </div>
       </div>
     </div>
-    <div class="title">📦 Pre-order Picker <span class="ver">v5.27</span></div>
+    <div class="title">📦 Pre-order Picker <span class="ver">v5.28</span></div>
     <div class="spacer"></div>
     <div class="who" id="whoBox"></div>
     <a class="hub-btn" href="https://rattanaphaiboon.github.io/app/rattana-hub.html">
@@ -796,10 +796,21 @@ async function loadDocBooks(force){
 }
 /* หา "เลขรันล่าสุด" ต่อเล่ม DC จากชีต DS_DC (ในไฟล์ DS DC เดียวกับ BK_BV · DI_REF เช่น DSW46907/00130)
  * DI_REF = {เล่ม DC}{YYMM พ.ศ.}/{เลขรัน} · เล่ม+YYMM = ส่วนก่อน "/" (เช่น DC596907) → เก็บ max เลขรันต่อคีย์ ไว้รันต่อ (+1) */
+let DCRUN_SRC='';
 async function loadDcRunning(force){
   if(dcRunLoadedAt && !force) return DC_MAX;
   try{
-    const {matrix}=await gvizFetch(CONFIG.bkbvId,{sheet:'DS_DC', tq:'select A,B', headers:0, bust:force});   // A=วันที่ B=DI_REF (เช็คชีตเก่า + max รันต่อเล่ม)
+    /* 🩹 v5.28 (Surat 13/10: "ทำข้อ 2 เลย") — DS_DC ใน DS DC 7D_W4 ค้าง (13/10: DSI ล่าสุดในไฟล์ 00584 · ออกจริงถึง 00602 → เลขจะซ้ำ)
+     * → อ่าน DS_DC ใน ORDER 15D ของแอดมินก่อน (รีทุกวัน · 1 แถว/บิล ด้วย group by) · อ่านไม่ได้ = ถอยไฟล์เดิม */
+    let matrix=null; DCRUN_SRC='15d';
+    try{ const r=await _docGvizJsonp(BPRO_FILE,{sheet:'DS_DC', tq:'select max(A), B group by B'},90000);
+      if(r && r.status==='error') throw new Error(((r.errors||[])[0]||{}).detailed_message||'gviz error');
+      const lab=((r.table&&r.table.cols)||[]).map(c=>String(c.label||''));
+      if(!/DI_REF/.test(lab[1]||'')) throw new Error('หัวคอลัมน์ไม่ใช่ DS_DC: '+lab.join(','));
+      matrix=((r.table&&r.table.rows)||[]).map(x=>(x.c||[]).map(_docCell));
+      if(!matrix.length) throw new Error('ว่าง');
+    }catch(e){ console.warn('[v5.28] อ่าน DS_DC จาก ORDER 15D ไม่ได้ → ใช้ DS DC 7D', e); matrix=null; }
+    if(!matrix){ matrix=(await gvizFetch(CONFIG.bkbvId,{sheet:'DS_DC', tq:'select A,B', headers:0, bust:force})).matrix; DCRUN_SRC='dsdc'; }   // A=วันที่ B=DI_REF
     const max={}; let lastDate='';
     for(const r of matrix){
       const date=String((r&&r[0])||'').trim().replace(/\//g,'-'), ref=String((r&&r[1])||'').trim(), s=ref.indexOf('/');
@@ -810,7 +821,7 @@ async function loadDcRunning(force){
       if(!(key in max) || run>max[key]) max[key]=run;
     }
     DC_MAX=max; dcRunLastDate=lastDate; dcRunLoadedAt=nowStamp();
-    console.log('[dcRun] books:', Object.keys(max).length, 'lastDate', lastDate, 'loadedAt', dcRunLoadedAt);
+    console.log('[dcRun] books:', Object.keys(max).length, 'lastDate', lastDate, 'src', DCRUN_SRC, 'loadedAt', dcRunLoadedAt);
   }catch(e){ console.warn('[dcRun] load failed', e); }
   return DC_MAX;
 }
@@ -5701,7 +5712,16 @@ function coSrcLabel(){ return coSource==='prep' ? 'ใบเตรียมบ�
 const CO_SYNC_HEADER=['วันที่','คลัง','บาร์โค้ด','สินค้า','หน่วย','ต้องออก','ยิงแล้ว','ขาด','-','-','ชื่อผู้ยิง','วันที่ยิง','เวลายิง','เครื่อง'];   // 14 คอลัมน์ ตำแหน่งตรง TF_SYNC_HEADER (col2=บาร์โค้ด col6=จำนวน col13=เครื่อง)
 async function loadDsdc(force){
   if(DATA.dsdc && !force) return DATA.dsdc;
-  const rows=asObjects(await gvizFetch(CONFIG.bkbvId,{sheet:CONFIG.dsdcTab, bust:force}));   // ชื่อแท็บ (gid เปลี่ยนทุก re-upload)
+  let rows=null;   // 🩹 v5.28: ORDER 15D ก่อน (ย้อน 7 วัน · DI_DATE → DATE) · ถอย DS DC 7D
+  try{ const d0=new Date(Date.now()+7*3600e3-7*86400e3).toISOString().slice(0,10).replace(/-/g,'/');
+    const r=await _docGvizJsonp(BPRO_FILE,{sheet:'DS_DC', tq:`select A,B,C,D,E,F,G,H,I,J,K,L,M where A >= '${d0}'`},90000);
+    if(r && r.status==='error') throw new Error(((r.errors||[])[0]||{}).detailed_message||'gviz error');
+    const cols=((r.table&&r.table.cols)||[]).map(c=>String(c.label||'').trim());
+    if(cols[0]!=='DI_DATE' || cols.indexOf('TRD_SH_CODE')<0) throw new Error('หัวคอลัมน์ไม่ใช่ DS_DC: '+cols.slice(0,4).join(','));
+    rows=((r.table&&r.table.rows)||[]).map(x=>{ const o={}; (x.c||[]).forEach((c,i)=>{ o[cols[i]==='DI_DATE'?'DATE':cols[i]]=c==null?'':(typeof c.v==='number'?c.v:_docCell(c)); }); return o; });
+    if(!rows.length) rows=null;
+  }catch(e){ console.warn('[v5.28] อ่าน DS_DC (เช็คออก) จาก ORDER 15D ไม่ได้ → ใช้ DS DC 7D', e); rows=null; }
+  if(!rows) rows=asObjects(await gvizFetch(CONFIG.bkbvId,{sheet:CONFIG.dsdcTab, bust:force}));   // ชื่อแท็บ (gid เปลี่ยนทุก re-upload)
   DATA.dsdc=rows.map((r,i)=>{ const pu=parseUnit(String(r['TRD_UTQNAME']||''));
     return { seq:i, date:String(r['DATE']||'').trim().replace(/\//g,'-'), ref:String(r['DI_REF']||'').trim(),
       storeCode:String(r['AR_CODE']||'').trim(), store:String(r['AR_NAME']||'').trim(),
@@ -6622,11 +6642,17 @@ function tfRestoreLS(){ try{ const o=JSON.parse(localStorage.getItem(tfLsKey())|
 let BKBV_SRC='';
 async function _bkbvFromDoc(){
   const cfg=docSrcCfg();
-  const r=await _docGvizJsonp(cfg.ord,{sheet:cfg.bSheet||'B', tq:'select A,B,C,D,E,F,G,H,I,J,K,L,M'},90000);
+  const r=await _docGvizJsonp(cfg.ord,{sheet:cfg.bSheet||'B', tq:'select A,B,C,D,E,F,G,H,I,J,K,L,M,P'},90000);
   if(r && r.status==='error') throw new Error(((r.errors||[])[0]||{}).detailed_message||'gviz error');
   const cols=((r.table&&r.table.cols)||[]).map(c=>String(c.label||'').trim());
   if(cols[0]!=='DATE' || cols.indexOf('TRD_SH_CODE')<0) throw new Error('หัวคอลัมน์ไม่ใช่ BK_BV: '+cols.slice(0,4).join(','));   // gviz ขอแท็บผิดชื่อ = ได้แท็บอื่นเงียบ ๆ
-  return ((r.table&&r.table.rows)||[]).map(x=>{ const o={}; (x.c||[]).forEach((c,i)=>{ o[cols[i]]=c==null?'':(typeof c.v==='number'?c.v:_docCell(c)); }); return o; });
+  const out=((r.table&&r.table.rows)||[]).map(x=>{ const o={}; (x.c||[]).forEach((c,i)=>{ o[cols[i]]=c==null?'':(typeof c.v==='number'?c.v:_docCell(c)); }); return o; });
+  // 🕙 v5.28: เวลาใบจอง (TIME) → รอบ 1/2 ของหน้า Export DC — ชุดเดียวกับใบจองที่เพิ่งโหลด (ใบจองใหม่ = มีเวลาทันที)
+  const tc=cols.indexOf('TIME');
+  if(tc>=0){ const m={}; ((r.table&&r.table.rows)||[]).forEach(x=>{ const c=x.c||[], ref=_docCell(c[1]), t=_docCell(c[tc]).slice(0,5);
+      if(!ref || !/^\d{1,2}:\d{2}$/.test(t)) return; const tt=t.padStart(5,'0'); if(!m[ref] || tt<m[ref]) m[ref]=tt; });
+    if(Object.keys(m).length){ DOCTIME.map=Object.assign({}, DOCTIME.map, m); DOCTIME.at=Date.now(); DOCTIME.err=''; } }
+  return out;
 }
 let BKBV_FILL={dates:[], err:''};
 async function _bkbvFill15D(force){
@@ -6819,7 +6845,7 @@ function tfRenderHead(){
       ${chip(!tfSalesman.size,"tfSmAll()",'ทั้งหมด')}${sms.map(s=>chip(!tfSalesman.has(s),`tfToggleSm('${s}')`,`${esc(s)}${smNm[s]?' '+esc(smNm[s]):''}`)).join('')}
     </div>
     <div style="display:flex;gap:6px 12px;flex-wrap:wrap;align-items:center;margin-top:6px;background:#f0f9ff;border:1px solid #7dd3fc;border-radius:8px;padding:5px 10px;font-size:11.5px">
-      ${bkbvDriveAt?`<span style="color:#166534">📁 DS DC (excel) ถูก replace ล่าสุด: <b>${esc(bkbvDriveAt)}</b></span>`:`<span class="muted" title="เวลาที่มีคนอัปโหลดทับไฟล์ DS DC (excel) ใน Google Drive ล่าสุด">📁 DS DC ถูก replace ล่าสุด: <b>${/อนุญาต|authoriz|permission|Drive/i.test(driveTimeLastErr)?'⚠️ ต้องอนุญาตสิทธิ์ Drive ใน Apps Script ก่อน (Run fileModified_ → Allow)':'(กำลังโหลด…)'}</b></span>`}
+      ${bkbvDriveAt?`<span style="color:#166534">📁 ใบจอง ${BKBV_SRC==='doc'?'Doc.xlsx แท็บ B':'DS DC 7D'} อัปล่าสุด: <b>${esc(bkbvDriveAt)}</b></span>`:`<span class="muted" title="เวลาที่มีคนอัปโหลดทับไฟล์ DS DC (excel) ใน Google Drive ล่าสุด">📁 DS DC ถูก replace ล่าสุด: <b>${/อนุญาต|authoriz|permission|Drive/i.test(driveTimeLastErr)?'⚠️ ต้องอนุญาตสิทธิ์ Drive ใน Apps Script ก่อน (Run fileModified_ → Allow)':'(กำลังโหลด…)'}</b></span>`}
       ${bkbvLoadedAt?`<span style="color:#0369a1">🕒 โหลดเข้าแอป: <b>${esc(bkbvLoadedAt)}</b></span>`:''}
       <span style="flex:1;min-width:8px"></span>
       <button onclick="tfRefresh()" style="padding:4px 10px;border-radius:7px;border:1px solid #7dd3fc;background:#fff;cursor:pointer;font-size:12px;font-weight:700">🔄 รีเฟรช DS DC</button>
@@ -8332,7 +8358,7 @@ function renderShareExport(){
       <span>🧾 <b>${dcBills||0}</b> บิล DC · <b>${rows.length}</b> บรรทัด · <b>${stores}</b> ร้าน</span>
       <span>🔁 โอนย้าย: <b>${ncRows.length}</b> (ยิง ${tfN} · คลัง ${esc(tfWh||'-')} · ${esc(tfDate||'-')})</span>
       <span>💰 แบ่ง CS: <b>${csRows.length}</b> (คลังส่ง ${esc((M&&M.wh)||'-')})</span>
-      <span class="muted">${dcRunLoadedAt?('เลขรัน DC จากชีต DS_DC · อัปเดต '+esc(dcRunLoadedAt)):'⏳ ยังไม่ดึงเลขรัน DC'}</span>
+      <span class="muted">${dcRunLoadedAt?('เลขรัน DC จากชีต DS_DC '+(DCRUN_SRC==='15d'?'(ORDER 15D)':'(DS DC 7D)')+' · อัปเดต '+esc(dcRunLoadedAt)):'⏳ ยังไม่ดึงเลขรัน DC'}</span>
     </div>
   </div>`;
   /* v5.14 (Surat 10/10: "พวกที่ไม่ได้อ่าน เอาออกได้ไหม"): แจ้งเตือนทั้งหมดพับเป็นบรรทัดเดียว กดดูได้ (ไม่ทิ้งข้อมูล) · ตัดกล่อง "ไม่มีราคา" ที่ซ้ำกับแจ้งเตือน */
