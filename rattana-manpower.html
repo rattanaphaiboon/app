@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana กำลังคน v1.0</title>
+<title>Rattana กำลังคน v1.1</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -110,7 +110,7 @@ body.dark .pos-card{border-top-color:var(--gold)}
 </head>
 <body>
 <header>
-  <span class="logo-text">RATTANA <span>กำลังคน</span><small>v1.0</small></span>
+  <span class="logo-text">RATTANA <span>กำลังคน</span><small>v1.1</small></span>
   <button class="icon-btn" id="btnRefresh" type="button" title="ดึงข้อมูลล่าสุด"><span class="ic">⟳</span><span class="lbl-hide">อัปเดต</span></button>
   <button class="icon-btn" id="themeBtn" type="button" title="สลับโหมดสว่าง/มืด">🌙</button>
   <a href="https://rattanaphaiboon.github.io/app/rattana-hub.html" class="hub-btn" title="กลับ Hub"><span class="hub-btn-icon">R</span><span>Hub</span></a>
@@ -139,7 +139,8 @@ body.dark .pos-card{border-top-color:var(--gold)}
 
 <script>
 const CONFIG={
-  gasUrl:'',              // ← ใส่ URL ที่ลงท้าย /exec หลัง deploy rattana-manpower.gs
+  csvUrl:'',              // ← ลิงก์ CSV จาก ไฟล์ › แชร์ › เผยแพร่ไปยังเว็บ (เฉพาะแท็บ "แอปกำลังคน")
+  gasUrl:'',              // (ทางเลือก) URL /exec ของ rattana-manpower.gs ถ้า deploy ได้
   refreshSec:60
 };
 const CENTERS={
@@ -264,8 +265,38 @@ function setStatus(kind,txt){const s=$('status');s.className='status '+kind;$('s
 let lastOk=0,loading=false;
 const withTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),ms))]);
 
+// CSV (RFC-4180) → array of rows
+function parseCsvRows(text){
+  if(text.charCodeAt(0)===0xFEFF)text=text.slice(1);
+  const out=[];let row=[],cell='',q=false;
+  for(let i=0;i<text.length;i++){const ch=text[i];
+    if(q){if(ch==='"'){if(text[i+1]==='"'){cell+='"';i++}else q=false}else cell+=ch}
+    else if(ch==='"')q=true;else if(ch===','){row.push(cell);cell=''}else if(ch==='\r'){}else if(ch==='\n'){row.push(cell);out.push(row);row=[];cell=''}else cell+=ch}
+  if(cell.length||row.length){row.push(cell);out.push(row)}
+  return out;
+}
+// แถวดิบจากแท็บ "แอปกำลังคน" → สรุป [ศูนย์, ฝ่าย, ตำแหน่ง, ต้องมี, มีคนแล้ว] — นับเฉพาะ L=เปิด
+function summarize(values){
+  const clean=s=>String(s??'').replace(/[​‌‍﻿]/g,'').replace(/ /g,' ').trim();
+  const H=(values[0]||[]).map(clean);
+  const at=(n,fb)=>{const i=H.indexOf(n);return i>=0?i:fb};
+  const iC=at('คลัง',0),iD=at('แผนก',1),iP=at('ชื่อตำแหน่ง',2),iL=at('ตำแหน่ง เปิด/ปิด',3),iM=at('Status ตำแหน่ง',4);
+  const map=new Map();let closedN=0;
+  for(const v of values.slice(1)){
+    const c=clean(v[iC]);if(!c)continue;
+    const L=clean(v[iL]),M=clean(v[iM]);
+    if(L!=='เปิด'||M==='ปิด'){if(L==='ปิด'||M==='ปิด')closedN++;continue}
+    const k=c+'\t'+clean(v[iD])+'\t'+clean(v[iP]);
+    const o=map.get(k)||[c,clean(v[iD]),clean(v[iP]),0,0];
+    o[3]++;if(M==='เปิด')o[4]++;map.set(k,o);
+  }
+  if(!map.size)throw new Error('ไม่พบข้อมูลในแท็บ');
+  return{ok:true,rows:[...map.values()],closed:closedN};
+}
+const LIVE=()=>!!(CONFIG.csvUrl||CONFIG.gasUrl);
+
 async function loadData(fresh){
-  if(!CONFIG.gasUrl){
+  if(!LIVE()){
     setData(SNAP,SNAP_CLOSED);
     setStatus('warn',`ข้อมูล ณ ${SNAP_DATE} · ยังไม่ได้เชื่อมชีทแบบสด`);
     return false;
@@ -273,15 +304,23 @@ async function loadData(fresh){
   if(loading)return false;
   loading=true;
   try{
-    const url=CONFIG.gasUrl+'?action=data'+(fresh?'&fresh=1':'')+'&t='+Date.now();
-    const res=await withTimeout(fetch(url),25000);
-    const out=await res.json();
+    let out;
+    if(CONFIG.csvUrl){
+      const res=await withTimeout(fetch(CONFIG.csvUrl+(CONFIG.csvUrl.includes('?')?'&':'?')+'t='+Date.now(),{cache:'no-store'}),25000);
+      if(!res.ok)throw new Error('HTTP '+res.status);
+      out=summarize(parseCsvRows(await res.text()));
+      out.updated=new Date().toISOString();
+    }else{
+      const url=CONFIG.gasUrl+'?action=data'+(fresh?'&fresh=1':'')+'&t='+Date.now();
+      const res=await withTimeout(fetch(url),25000);
+      out=await res.json();
+    }
     if(!out.ok||!Array.isArray(out.rows))throw new Error(out.error||'ข้อมูลผิดรูปแบบ');
     setData(out.rows,out.closed||0);
     const d=out.updated?new Date(out.updated):new Date();
     lastOk=d.getTime();
     try{localStorage.setItem('rattana_manpower_cache',JSON.stringify(out))}catch(e){}
-    setStatus('on',`ข้อมูลสดจากชีท · อัปเดต ${thDate(d)} ${thTime(d)} น. · ดึงใหม่ทุก 1 นาที`);
+    setStatus('on',`ข้อมูลสดจากชีท · ดึงล่าสุด ${thDate(d)} ${thTime(d)} น. · แก้ชีทแล้วขึ้นในแอปภายใน ~5 นาที`);
     return true;
   }catch(err){
     if(!rows.length)setData(SNAP,SNAP_CLOSED);
@@ -299,7 +338,7 @@ $('btnRefresh').addEventListener('click',async()=>{
   const b=$('btnRefresh');b.disabled=true;b.classList.add('spin');
   const ok=await loadData(true);
   setTimeout(()=>{b.classList.remove('spin');b.disabled=false},600);
-  if(CONFIG.gasUrl)showToast(ok?'อัปเดตเรียบร้อย ✓':'ดึงข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง',ok?'success':'error');
+  if(LIVE())showToast(ok?'อัปเดตเรียบร้อย ✓':'ดึงข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง',ok?'success':'error');
   else showToast(`ยังไม่ได้เชื่อมชีท · แสดงข้อมูล ณ ${SNAP_DATE}`,'info');
 });
 
@@ -315,12 +354,12 @@ $('backToTop').addEventListener('click',()=>window.scrollTo({top:0,behavior:'smo
 /* start: แสดงแคชล่าสุดทันที แล้วค่อยดึงใหม่ */
 (function start(){
   let cached=null;
-  if(CONFIG.gasUrl){try{cached=JSON.parse(localStorage.getItem('rattana_manpower_cache')||'null')}catch(e){}}
+  if(LIVE()){try{cached=JSON.parse(localStorage.getItem('rattana_manpower_cache')||'null')}catch(e){}}
   if(cached&&cached.ok&&Array.isArray(cached.rows)){setData(cached.rows,cached.closed||0);setStatus('warn','กำลังดึงข้อมูลล่าสุด…')}
   else setData(SNAP,SNAP_CLOSED);
   loadData(false);
-  if(CONFIG.gasUrl)setInterval(()=>{if(!document.hidden)loadData(false)},CONFIG.refreshSec*1000);
-  document.addEventListener('visibilitychange',()=>{if(!document.hidden&&CONFIG.gasUrl&&Date.now()-lastOk>CONFIG.refreshSec*1000)loadData(false)});
+  if(LIVE())setInterval(()=>{if(!document.hidden)loadData(false)},CONFIG.refreshSec*1000);
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden&&LIVE()&&Date.now()-lastOk>CONFIG.refreshSec*1000)loadData(false)});
 })();
 </script>
 </body>
