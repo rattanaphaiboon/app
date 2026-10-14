@@ -1687,7 +1687,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.333</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.334</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -3327,6 +3327,7 @@ function orderCutoffStr(){
 //         ได้ของใหม่ = เก็บลงแคช + ขึ้นแถบ "มีข้อมูลใหม่ · อัปเดตเลย" ให้กดตอนพร้อม (ไม่กระชากของที่กำลังจัดอยู่)
 const _OCDB='dqOrderCache', _OCST='rows', _OCMAXAGE=36*3600*1000;   // แคชเก่าเกิน 36 ชม. ไม่เอา รอของสด
 let _ocDbP=null, _ocHit=0, _ocAt=0, _ocFresh=false, _ocBgDone=false, _ocBgLeft=0, _ocChanged=false;
+let _ocOld=false, _rfBusy=false;   // v9.334: _ocOld = ของในแคชเก่ากว่ากำหนด (ยังเปิดใช้ได้) · _rfBusy = กำลังเช็คของใหม่เบื้องหลัง
 function _ocDb(){
   if(_ocDbP)return _ocDbP;
   _ocDbP=new Promise((res,rej)=>{ try{
@@ -3345,21 +3346,38 @@ function _ocPut(k,v){ return _ocDb().then(d=>new Promise((res,rej)=>{
     t.oncomplete=()=>res(true); t.onerror=()=>rej(t.error);
   })).catch(()=>false); }
 const _ocSig=rows=>rows.length+'|'+((rows[0]&&(rows[0].DI_REF||rows[0].DI_DATE))||'')+'|'+((rows[rows.length-1]&&(rows[rows.length-1].DI_REF||rows[rows.length-1].DI_DATE))||'');
-const _ocTime=ms=>new Date(ms).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+const _ocTime=ms=>{ const d=new Date(ms), n=new Date();   // v9.334: ข้ามวันแล้วบอกวันที่ด้วย
+  const sameDay=d.toDateString()===n.toDateString();
+  return sameDay?d.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'})
+    :d.toLocaleString('th-TH',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}); };
 async function _ocWrap(key,net){
   const k=key+'|'+ORDER_WL;
+  let c=null;
   if(!_ocFresh){
-    const c=await _ocGet(k);
-    if(c&&c.rows&&c.rows.length&&(Date.now()-(c.at||0))<_OCMAXAGE){
+    c=await _ocGet(k);
+    // v9.334: มีของในเครื่อง = เปิดใช้ก่อนเสมอ (เดิมเก่าเกิน 36 ชม. จะทิ้งแล้วไปรอชีทที่ช้ามาก)
+    if(c&&c.rows&&c.rows.length){
+      const age=Date.now()-(c.at||0);
       _ocHit++; if(!_ocAt||c.at<_ocAt)_ocAt=c.at;
-      console.log('⚡ '+key+': ใช้ข้อมูลในเครื่อง '+c.rows.length+' แถว (เก็บเมื่อ '+_ocTime(c.at)+') — เช็คของใหม่จากชีทเบื้องหลัง');
+      if(age>=_OCMAXAGE)_ocOld=true;
+      console.log('⚡ '+key+': ใช้ข้อมูลในเครื่อง '+c.rows.length+' แถว (เก็บเมื่อ '+_ocTime(c.at)+')'+(age>=_OCMAXAGE?' ⚠ เก่ากว่า 36 ชม.':'')+' — เช็คของใหม่จากชีทเบื้องหลัง');
       _ocBarWait(); _ocBg(k,net,c.sig||_ocSig(c.rows));
       return c.rows;
     }
   }
-  const rows=await net();
-  if(rows&&rows.length)_ocPut(k,{at:Date.now(),wl:ORDER_WL,sig:_ocSig(rows),rows});
-  return rows;
+  // v9.334: ชีทไม่ตอบ / ได้ 0 แถว -> ย้อนไปใช้ของเก่าที่มี ดีกว่าค้างหน้าโหลด
+  let rows=null, err=null;
+  try{ rows=await net(); }catch(e){ err=e; }
+  if(rows&&rows.length){ _ocPut(k,{at:Date.now(),wl:ORDER_WL,sig:_ocSig(rows),rows}); return rows; }
+  const old=c||await _ocGet(k);
+  if(old&&old.rows&&old.rows.length){
+    _ocHit++; _ocOld=true; if(!_ocAt||old.at<_ocAt)_ocAt=old.at;
+    console.warn('⚠ '+key+': ชีท Order ไม่ตอบ — ใช้ข้อมูลในเครื่องเมื่อ '+_ocTime(old.at)+' ('+old.rows.length+' แถว)');
+    _ocBarWait();
+    return old.rows;
+  }
+  if(err)throw err;
+  return rows||[];
 }
 function _ocBg(k,net,oldSig){
   if(_ocBgDone)return;            // เช็คของใหม่รอบเดียวต่อการเปิดแอป
@@ -3378,8 +3396,9 @@ function _ocBarEl(){ let b=document.getElementById('ocBar');
   if(!b){ b=document.createElement('div'); b.id='ocBar'; b.className='oc-bar'; document.body.appendChild(b); }
   b.style.display='flex'; return b; }
 function _ocBarWait(){ if(_ocHit!==1)return;
-  const b=_ocBarEl(); b.className='oc-bar';
-  b.innerHTML='⚡ เปิดด้วยข้อมูลที่เก็บไว้เมื่อ <b>'+_ocTime(_ocAt)+'</b> · กำลังเช็คของใหม่จากชีท Order…<button type="button" class="x" onclick="_ocBarHide()" title="ปิด">✕</button>'; }
+  const b=_ocBarEl(); b.className='oc-bar'+(_ocOld?' new':'');
+  b.innerHTML=(_ocOld?'⚠️ ชีท Order ตอบช้า — เปิดด้วยข้อมูลที่เก็บไว้เมื่อ <b>':'⚡ เปิดด้วยข้อมูลที่เก็บไว้เมื่อ <b>')
+    +_ocTime(_ocAt)+'</b> · กำลังเช็คของใหม่จากชีท Order…<button type="button" class="x" onclick="_ocBarHide()" title="ปิด">✕</button>'; }
 function _ocBarDone(){
   if(!_ocHit)return;
   const b=_ocBarEl();
@@ -4222,11 +4241,28 @@ async function loadData(){
   }
 }
 
+// v9.334 (user: "แอปค้างบ่อยมาก" → เลือก "รีเฟรชเบื้องหลัง ไม่บล็อกหน้า"):
+//   กด 🔄 = ไปถามชีท Order เบื้องหลัง เก็บลงแคช · ได้ของใหม่ค่อยขึ้นแถบ "🆕 อัปเดตเลย" ให้กดตอนพร้อม
+//   เดิม: เปิดหน้าโหลดทับจอแล้ว await ชีทที่ช้า 20-60 วิ (บางวันเป็นนาที) = กดอะไรไม่ได้เลย
 function refreshData(){
-  _ocFresh=true; _ocChanged=false; _ocBarHide();   // v9.233: กด 🔄 = เอาของสดจากชีทจริง ไม่เอาแคชในเครื่อง
-  document.getElementById('ls').classList.remove('hide');
-  setLoad('🔄 รีเฟรชจากชีทจริง (ชีท Order ใหญ่ อาจรอ 20-60 วิ)...',10);
-  loadData();
+  if(_rfBusy){ if(typeof showToast==='function')showToast('กำลังเช็คของใหม่จากชีทอยู่ — ใช้งานต่อได้เลย','ok'); return; }
+  _rfBusy=true; _ocChanged=false;
+  const b=_ocBarEl(); b.className='oc-bar';
+  b.innerHTML='🔄 กำลังเช็คของใหม่จากชีท Order เบื้องหลัง — ใช้งานต่อได้เลย<button type="button" class="x" onclick="_ocBarHide()" title="ปิด">✕</button>';
+  if(typeof showToast==='function')showToast('🔄 เช็คของใหม่จากชีทเบื้องหลัง — ใช้งานต่อได้เลย','ok');
+  _ocRefreshBg();
+}
+async function _ocRefreshBg(){
+  const keys=['bk','dstoday'], was={};
+  try{
+    for(const k of keys){ const c=await _ocGet(k+'|'+ORDER_WL); was[k]=(c&&c.sig)||''; }
+    _ocFresh=true;                      // บังคับให้ _ocWrap ไปถามชีทจริง (เขียนลงแคชให้เอง)
+    try{ await fetchOrderBills(); }catch(e){ console.warn('[refresh-bg] bk',(e&&e.message)||e); }
+    try{ await fetchDsDcTodayBills(); }catch(e){ console.warn('[refresh-bg] dstoday',(e&&e.message)||e); }
+  }finally{ _ocFresh=false; _rfBusy=false; }
+  let changed=false;
+  for(const k of keys){ const c=await _ocGet(k+'|'+ORDER_WL); if(c&&c.sig&&c.sig!==was[k])changed=true; }
+  _ocChanged=changed; _ocHit=1; _ocAt=Date.now(); _ocBarDone();
 }
 
 // ══════════════════════════════════════════
