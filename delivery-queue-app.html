@@ -1687,7 +1687,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.334</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.336</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -9131,9 +9131,15 @@ async function fetchOsrmMatrix(coords,truckType){
 }
 
 // ── Global TSP: v7.90 = A cluster + B road-matrix (cached) + C direction penalty ──
+const _tspMemo=new Map();   // v9.335: คีย์พิกัด -> ลำดับ (index ของ bs) · กันคิดซ้ำทุกครั้งที่วาดหน้าใหม่
+function _tspMemoPut(k,v){ _tspMemo.set(k,v); if(_tspMemo.size>80)_tspMemo.delete(_tspMemo.keys().next().value); }
 function tspRoute(bs){
   if(bs.length<2)return bs;
   const HQp={lat:HQ.lat,lng:HQ.lng};
+  const _T0=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+  const _now=()=>((typeof performance!=='undefined'&&performance.now)?performance.now():Date.now());
+  const _BUDGET=bs.length>80?700:(bs.length>40?1000:2500);   // ms — เกินนี้หยุดขัดเกลา ใช้ของที่ได้
+  const _over=()=>(_now()-_T0)>_BUDGET;
 
   // ── A: Cluster stops within 300m into super-stops ──
   const CLUSTER_KM=0.3;
@@ -9158,6 +9164,9 @@ function tspRoute(bs){
   const coords=[[HQ.lat,HQ.lng],...bs.map(b=>[b.lat,b.lng])];
   const matrix=_osrmMatrixCache.get(_coordsKey(coords));
   const useMatrix=matrix && matrix.length===coords.length;
+  // v9.335: จำผลไว้ — หน้าเล่มของฉัน/จัดรถ วาดใหม่หลายรอบต่อการกด 1 ครั้ง ไม่ต้องคิดเส้นทางซ้ำ
+  const _tk=(useMatrix?'R|':'H|')+bs.length+'|'+bs.map(b=>(+b.lat).toFixed(4)+','+(+b.lng).toFixed(4)).join(';');
+  { const h=_tspMemo.get(_tk); if(h&&h.length===bs.length)return h.map(i=>bs[i]); }
   console.log(`%c[TSP]%c ${bs.length} bills → ${clusters.length} clusters — %c${useMatrix?'✓ ROAD':'✗ haversine'}`,'color:#888','color:inherit',useMatrix?'color:#0a0;font-weight:700':'color:#c60;font-weight:700');
 
   const hav=(a,b)=>haversine(a.lat,a.lng,b.lat,b.lng);
@@ -9214,7 +9223,7 @@ function tspRoute(bs){
   function twoOpt(o){
     const n=o.length;if(n<3)return o;
     let improved=true,g=0;
-    while(improved&&g++<300){
+    while(improved&&g++<300&&!_over()){
       improved=false;
       for(let i=0;i<n;i++){
         for(let k=i+1;k<=n;k++){
@@ -9238,9 +9247,9 @@ function tspRoute(bs){
     return o;
   }
   function orOpt(o){
-    const n=o.length;if(n<4)return o;
+    const n=o.length;if(n<4||n>60)return o;   // v9.335: O(n³) — ร้านเยอะเกิน 60 ไม่คุ้ม (twoOpt เอาอยู่)
     let improved=true,g=0;
-    while(improved&&g++<100){
+    while(improved&&g++<100&&!_over()){
       improved=false;
       for(let segLen=1;segLen<=Math.min(3,n-2);segLen++){
         for(let i=0;i<=n-segLen;i++){
@@ -9278,11 +9287,14 @@ function tspRoute(bs){
   }else{
     let best=null,bestC=Infinity;
     const cands=[];
-    for(let s=0;s<clusters.length;s++)cands.push(greedyNN(s));
+    // v9.335: จุดเริ่มทุกจุด = O(n²) ต่อ 1 candidate · ร้านเยอะให้สุ่มเลือกแบบกระจาย 8 จุดพอ
+    const _nS=clusters.length<=24?clusters.length:8, _st=Math.max(1,Math.floor(clusters.length/_nS));
+    for(let s=0;s<clusters.length;s+=_st)cands.push(greedyNN(s));
     // Angular sweep = clean loop pattern (no radial zigzag)
     const sw=[...clusters].sort((a,b)=>ang(a)-ang(b));
     cands.push(sw);cands.push([...sw].reverse());
     cands.forEach(t=>{
+      if(best&&_over()){ const c0=tourCost(t); if(c0<bestC){bestC=c0;best=t;} return; }   // v9.335: หมดงบเวลา = เทียบดิบ ๆ พอ
       t=twoOpt(t);t=orOpt(t);t=twoOpt(t);t=orOpt(t);t=twoOpt(t);
       const c=tourCost(t);
       if(c<bestC){bestC=c;best=t;}
@@ -9292,6 +9304,11 @@ function tspRoute(bs){
 
   const out=[];
   ordered.forEach(c=>out.push(...c.bills));
+  try{ const ix=new Map(); bs.forEach((b,i)=>ix.set(b,i));
+    const ord=out.map(b=>ix.get(b));
+    if(ord.every(i=>i!=null))_tspMemoPut(_tk,ord);
+    const _ms=Math.round(_now()-_T0); if(_ms>300)console.log(`[TSP] ${bs.length} จุด ใช้ ${_ms} ms${_over()?' (ตัดงบเวลา)':''}`);
+  }catch(e){}
   return out;
 }
 
@@ -13497,7 +13514,18 @@ function _prRenderAll(){   // พรีปลีกทุกเล่ม (หน
 //   เช่น เลือกห้องเอกสารนี้ แล้วจะมีกรอบขึ้นมา ให้เลือกรถกับคนขับและสามารถเพิ่มหรือลบร้านออกได้"
 //   เลือกเล่ม (จำต่อ คน+คลัง+แหล่ง ในเครื่องนี้) → การ์ดเฉพาะเล่มที่เลือก · ✏️ รถ/คนขับ · ➕ เพิ่มร้าน · ✕ เอาออก
 //   💾 = บันทึกเฉพาะเล่มของฉันที่แก้ (+ เล่มต้นทาง/ปลายทางของร้านที่ย้าย) — คนอื่นบันทึกเล่มของเขาพร้อมกันได้
-function _mbKey(){ const u=(typeof currentUser!=='undefined'&&currentUser)||{}; return 'dq_v4_mybk|'+(u.email||'-')+'|'+(currentWarehouse||'')+'|'+_prSrc; }
+function _mbKeyBase(){ const u=(typeof currentUser!=='undefined'&&currentUser)||{}; return 'dq_v4_mybk|'+(u.email||'-')+'|'+(currentWarehouse||'')+'|'+_prSrc; }
+function _mbKey(){ return _mbKeyBase()+'|'+((typeof _prDayKey==='function'&&_prDayKey())||'');   /* v9.336: แยกตามวันที่เอกสาร */ }
+// v9.336: เก็บไว้แค่ 7 วันล่าสุด (คีย์เป็น ...|YYYY-MM-DD เรียงตัวอักษรได้ตรงกับเรียงวัน) + ทิ้งคีย์แบบเก่าที่ไม่มีวัน
+function _mbPruneKeys(){
+  try{
+    const base=_mbKeyBase(), pre=base+'|', mine=[];
+    for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(!k)continue;
+      if(k===base){ localStorage.removeItem(k); i--; continue; }       // คีย์เก่า (ไม่แยกวัน) — ไม่ใช้แล้ว
+      if(k.indexOf(pre)===0)mine.push(k); }
+    if(mine.length>7){ mine.sort(); mine.slice(0,mine.length-7).forEach(k=>localStorage.removeItem(k)); }
+  }catch(e){}
+}
 // ══ v9.242: เลือกหลายเล่ม = รวมเป็นการ์ดเดียว คันเดียว ══
 //   user: "ถ้าเลือก 2 อันแล้วให้รวมกัน เป็นคันเดียว" (เลือกกี่เล่มก็ได้ → รวมอัตโนมัติ)
 //   รวมเฉพาะ "มุมมอง" — ในชีทยังเก็บแยกรายเล่มเหมือนเดิม ร้านแต่ละร้านยังรู้ว่าอยู่เล่มไหน
@@ -13587,6 +13615,7 @@ function _mbSel(){ const k=_mbKey();
   return Array.isArray(a)?a.map(String):[]; }
 function _mbSetSel(a){ const k=_mbKey(), v=[...new Set((a||[]).map(String))];
   _mbSelMem[k]=v;
+  _mbPruneKeys();   // v9.336
   try{ localStorage.setItem(k,JSON.stringify(v)); }
   catch(e){ console.warn('[เล่มของฉัน] เก็บค่าที่เลือกไม่ได้',e);
     if(!_mbSelWarn){ _mbSelWarn=1; if(typeof showToast==='function')showToast('⚠ เครื่องนี้เก็บค่าที่เลือกไม่ได้ (พื้นที่เต็ม) — จำได้แค่รอบนี้','warn'); } } }
