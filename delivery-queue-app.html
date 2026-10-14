@@ -851,6 +851,7 @@ body.dark .mb-find input{border-color:#334155;color:#E5E7EB}
 .mb-ord button{flex:1;min-width:150px;font-family:inherit;font-size:12px;font-weight:700;border:1.5px solid #CFE3F7;background:#EAF3FF;color:#1A5FA5;border-radius:9px;padding:6px 10px;cursor:pointer}
 .mb-ord button:hover{background:#DCEBFC}
 .mb-ord button.rst{border-color:#E0E5ED;background:#F4F6F9;color:#6B7A90}
+.mb-ord button.side{border-color:#93B8DE;background:#EAF3FF;color:#1A5FA5}   /* v9.354 */
 body.dark .mb-ord button{background:#16304A;border-color:#2B4A6B;color:#93C5FD}
 .mbw-r .pr-row.mb-hi{background:#FFF7E0;box-shadow:inset 3px 0 0 #E4A11B;border-radius:6px}   /* v9.265: แถวที่กดอยู่ */
 body.dark .mbw-r .pr-row.mb-hi{background:#33290F}
@@ -1754,7 +1755,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.353</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.355</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -9865,7 +9866,8 @@ function _renderStopsList(stops){
         ${_hasOrd?`<button onclick="prResetStopOrder('${rMapPlate}')" style="margin-left:auto;background:#FEF6E4;border:1px solid #E6C26E;color:#7D6428;border-radius:6px;padding:2px 8px;font-size:10px;font-weight:600;cursor:pointer">↺ อัตโนมัติ</button>`:''}
       </div>
       <div style="display:flex;gap:5px">
-        <button onclick="prCopyStops('${rMapPlate}')" style="flex:1;background:#F0FDF4;border:1.5px solid #86EFAC;color:#15803D;border-radius:7px;padding:5px;font-size:11px;font-weight:700;cursor:pointer;font-family:IBM Plex Sans Thai">📋 คัดลอกลำดับร้าน</button>
+        <button onclick="prSideByPlate('${rMapPlate}')" title="จัดเป็นวงรอบ: เก็บฝั่งไป (ใกล้→ไกล) แล้วค่อยฝั่งกลับ (ไกล→ใกล้)" style="flex:1;background:#EAF3FF;border:1.5px solid #93B8DE;color:#1A5FA5;border-radius:7px;padding:5px;font-size:11px;font-weight:700;cursor:pointer;font-family:IBM Plex Sans Thai">↩️ จัดตามฝั่งถนน</button>
+        <button onclick="prCopyStops('${rMapPlate}')" style="flex-shrink:0;background:#F0FDF4;border:1.5px solid #86EFAC;color:#15803D;border-radius:7px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;font-family:IBM Plex Sans Thai">📋 คัดลอกร้าน</button>
       </div>
     </div>`;
   } else if(canReorder){
@@ -9907,6 +9909,55 @@ function _renderStopsList(stops){
   }).join('');
   window._rStopsData=sorted;
 }
+// ══ v9.354: จัดตามฝั่งถนน (พรีปลีก) — สูตรเดียวกับ reorderBySide ของหน้าส่ง ══
+function _prSideAxis(units){
+  const gps=(units||[]).filter(u=>u.lat&&u.lng);
+  if(gps.length<2)return null;
+  let far=gps[0],fd=-1;
+  gps.forEach(u=>{ const d=haversine(HQ.lat,HQ.lng,u.lat,u.lng); if(d>fd){ fd=d; far=u; } });
+  const ax=far.lng-HQ.lng, ay=far.lat-HQ.lat, alen=Math.hypot(ax,ay)||1;
+  return { proj:u=>((u.lng-HQ.lng)*ax+(u.lat-HQ.lat)*ay)/alen,
+           cross:u=>ax*(u.lat-HQ.lat)-ay*(u.lng-HQ.lng) };
+}
+function _prSideOf(A,us){   // เรียงวงรอบด้วยแกนที่ให้มา
+  const gps=us.filter(u=>u.lat&&u.lng), no=us.filter(u=>!u.lat||!u.lng);
+  const go=gps.filter(u=>A.cross(u)>=0).sort((a,b)=>A.proj(a)-A.proj(b));     // ฝั่งไป ใกล้→ไกล
+  const back=gps.filter(u=>A.cross(u)<0).sort((a,b)=>A.proj(b)-A.proj(a));    // ฝั่งกลับ ไกล→ใกล้
+  return {keys:[...go,...back,...no].map(u=>u.key), nGo:go.length, nBack:back.length};
+}
+function _prSideBooks(books,all,gk){   // books = {เล่ม: [ร้าน]} · all = ร้านทั้งกอง · gk = คีย์กลุ่ม (มี = คิดรวมข้ามเล่ม)
+  const A=_prSideAxis(all); if(!A)return null;
+  const bk=Object.keys(books).filter(px=>(books[px]||[]).length);
+  if(!bk.length)return null;
+  if(gk&&bk.length>1){   // v9.355: ไปคันเดียวกัน = จัดวงรอบทีเดียวข้ามเล่ม
+    const r=_prSideOf(A,all);
+    _prManOrd[gk]=r.keys; _prSaveOrd();
+    return {nGo:r.nGo,nBack:r.nBack,nBook:bk.length,merged:1};
+  }
+  let nGo=0,nBack=0;
+  bk.forEach(px=>{ const r=_prSideOf(A,books[px]); _prManOrd[px]=r.keys; nGo+=r.nGo; nBack+=r.nBack; });
+  _prSaveOrd();
+  return {nGo,nBack,nBook:bk.length};
+}
+function prSideByPlate(plate){   // หน้าสายส่ง › ปลีก (รายคัน)
+  const d=(typeof _prData==='function')?_prData():null;
+  const all=(d&&d.byPlate&&d.byPlate[plate])||[];
+  const books={}; all.forEach(u=>{ const px=_prHome(u.key); (books[px]=books[px]||[]).push(u); });
+  const r=_prSideBooks(books,all,'TRK|'+plate);   // v9.355
+  if(!r){ if(typeof showToast==='function')showToast('ต้องมีอย่างน้อย 2 ร้านที่มีพิกัด','warn'); return; }
+  if(typeof rUpdateMap==='function')rUpdateMap();
+  if(typeof showToast==='function')showToast(`↩️ จัดตามฝั่ง: 🟢ไป ${r.nGo} · 🟠กลับ ${r.nBack} ร้าน — กด 💾 ที่หน้าเล่มของฉัน เพื่อเก็บลงชีท`,'ok');
+}
+function mbSideByBook(px){   // หน้าเล่มของฉัน (รายเล่ม · การ์ดรวม = ทุกเล่มที่เลือก)
+  const d=(typeof _prData==='function')?_prData():null; if(!d)return;
+  const L=(px===MB_MERGE)?_mbSel():[px];
+  const books={}; let all=[];
+  (d.cards||[]).forEach(c=>{ if(L.indexOf(c.px)<0)return; books[c.px]=(c.units||[]).slice(); all=all.concat(c.units||[]); });
+  const r=_prSideBooks(books,all,(L.length>1)?_prGrpKeyOf(L,d.cards):null);   // v9.355
+  if(!r){ if(typeof showToast==='function')showToast('ต้องมีอย่างน้อย 2 ร้านที่มีพิกัด','warn'); return; }
+  if(typeof renderPreRetail==='function')renderPreRetail();
+  if(typeof showToast==='function')showToast(`↩️ จัดตามฝั่ง: 🟢ไป ${r.nGo} · 🟠กลับ ${r.nBack} ร้าน — กด 💾 บันทึกลงชีท เพื่อเก็บ`,'ok');
+}
 // ══ v9.353: จัดลำดับร้านพรีปลีกจากหน้าสายส่ง — ใช้ที่เก็บเดียวกับหน้าเล่มของฉัน ══
 function _prKeysOfPlate(plate){
   const d=(typeof _prData==='function')?_prData():null;
@@ -9916,13 +9967,10 @@ function prMoveStop(plate,key,dir){
   const keys=_prKeysOfPlate(plate);
   const i=keys.indexOf(key); if(i<0)return;
   const j=i+dir; if(j<0||j>=keys.length)return;
-  const home=_prHome(key);
-  if(home!==_prHome(keys[j])){
-    if(typeof showToast==='function')showToast('ร้านคนละเล่มเอกสารกัน สลับข้ามเล่มไม่ได้ — ย้ายเล่มที่หน้า 📄 เล่มของฉัน','warn');
-    return;
-  }
   const t=keys[i]; keys[i]=keys[j]; keys[j]=t;
-  _prManOrd[home]=keys.filter(k=>_prHome(k)===home);   // เก็บเฉพาะลำดับในเล่มนั้น
+  const books=_prBooksOfUnits(keys.map(k=>({key:k})));
+  if(books.length>1)_prManOrd['TRK|'+plate]=keys;                       // v9.355: คันหลายเล่ม = เก็บลำดับรวมทั้งคัน
+  else _prManOrd[books[0]||_prHome(key)]=keys;                          // คันเล่มเดียว = เก็บรายเล่มเหมือนเดิม
   _prSaveOrd();
   if(typeof rUpdateMap==='function')rUpdateMap();
   if(typeof showToast==='function')showToast('↕ ปรับลำดับแล้ว — กด 💾 บันทึกลงชีท ที่หน้า 📄 เล่มของฉัน เพื่อเก็บ','ok');
@@ -9931,6 +9979,7 @@ function prResetStopOrder(plate){
   const books=[...new Set(_prKeysOfPlate(plate).map(k=>_prHome(k)))].filter(Boolean);
   if(!books.length)return;
   books.forEach(px=>{ _prManOrd[px]='auto'; });
+  if(books.length>1)_prManOrd['TRK|'+plate]='auto';   // v9.355
   _prSaveOrd();
   if(typeof rUpdateMap==='function')rUpdateMap();
   if(typeof showToast==='function')showToast('↺ กลับเป็นลำดับเส้นทางอัตโนมัติ — กด 💾 บันทึกลงชีท ที่หน้า 📄 เล่มของฉัน','ok');
@@ -12961,6 +13010,9 @@ function _prData(){
   cards.forEach(c=>{ c.loss=loss[_prLk(c)+'||1']||null; });
   const byPlate={};   // หน้าสายส่ง (แผนที่ปลีก) ยังอ่านตามคัน — ร้านของทุกเล่มในคันนั้นตามลำดับเที่ยว
   cards.forEach(c=>{ const k=c.plate||('📄 '+c.px); (byPlate[k]=byPlate[k]||[]).push(...c.units); });   // v9.219: เล่มที่ยังไม่เลือกรถ = คีย์ "📄 เล่ม"
+  // v9.355: คันเดียวกันแต่หลายเล่ม = ถือว่าไปคันเดียวกัน คิดลำดับรวมข้ามเล่ม (ไม่ต่อกันทีละเล่มแล้ว)
+  Object.keys(byPlate).forEach(k=>{ const us=byPlate[k];
+    if(_prBooksOfUnits(us).length>1)byPlate[k]=_prGroupOrder('TRK|'+k,us); });
   out.sort(_prNoGpsLast);   // v9.165: ถาดเรียงหนัก→เบา แต่ร้านไม่มีพิกัดลงท้ายสุด
   _prCardsLast=cards; _prOutLast=out; _prPlaceLast=place;
   return {cards,byPlate,out,none:[],stores,loss,sv,place};
@@ -13364,6 +13416,15 @@ function _prDirty(d){   // เล่มที่ต้องบันทึก �
             if(nowK.join('|')!==so.join('|'))dirty[px]=true; } } } }
     else if(c.out.length||(c.refs.length&&(c.plate||(px in st.baseId))))dirty[px]=true;   // ยังไม่เคยบันทึก: เลือกรถแล้ว / แก้แล้ว
   });
+  // v9.355: คันที่มีหลายเล่ม — ลำดับรวมข้ามเล่มต่างจากในชีท = ทุกเล่มในคันนั้นต้องบันทึก (เลขลำดับขยับหมด)
+  Object.keys(d.byPlate||{}).forEach(k=>{
+    const us=d.byPlate[k]||[], bk=_prBooksOfUnits(us);
+    if(bk.length<2||bk.every(px=>dirty[px]))return;
+    const so=_prTruckSeqKeys(us);
+    if(!so||so.length<2)return;
+    const now=us.map(u=>u.key).filter(x=>so.indexOf(x)>=0);
+    if(now.join('|')!==so.join('|'))bk.forEach(px=>{ dirty[px]=true; });
+  });
   return dirty;
 }
 function _prSaveKeys(d,scope){   // scope = Set เล่มของฉัน · null = ทุกเล่ม
@@ -13376,12 +13437,21 @@ function _prSaveKeys(d,scope){   // scope = Set เล่มของฉัน �
 }
 function _prRowsFor(d,keys,docDt,dt,now,who,saveId,costs){   // v9.251: costs = {เล่ม: ต้นทุน} → แถวแรกของเล่ม
   const K=new Set(keys), rows=[], srcTx=_prSrc==='sale'?'ใบขาย':'ใบจอง';
+  // v9.355: "ลำดับร้าน" นับต่อเนื่องทั้งคัน (หลายเล่มในคันเดียว เลขไม่ซ้ำ) — เปิดใหม่อ่านลำดับข้ามเล่มกลับได้
+  const seqOf={};
+  { const byTrk={};
+    (d.cards||[]).forEach(c=>{ const k=c.plate||('📄 '+c.px); (byTrk[k]=byTrk[k]||[]).push(c); });
+    Object.keys(byTrk).forEach(k=>{
+      const list=(d.byPlate&&d.byPlate[k]&&d.byPlate[k].length)?d.byPlate[k]
+        :[].concat.apply([],byTrk[k].map(c=>c.units||[]));
+      list.forEach((u,i)=>{ seqOf[u.key]=i+1; });
+    }); }
   const mk=(u,ref,c,i)=>{   // c = การ์ดเล่ม · null = ร้านที่เอาออก (แถวสถานะ "เอาออก" ไม่มีรถ)
     const b=(ref&&billMap[ref])||{}, t=(c&&c.truck)||{}, drv=c?String(c.driver||'').trim():'';
     const gps=!!(u.lat&&u.lng&&(typeof validGps!=='function'||validGps(u.lat,u.lng)));
     return [_prIsoD(docDt), _prIsoD(dt), srcTx, ref, b.arCode||u.arCode||'', b.arName||u.name||'',
       b.province||u.province||'', b.district||u.district||'', gps?(+u.lat).toFixed(6):'', gps?(+u.lng).toFixed(6):'',
-      c?(c.plate||''):'', c?1:'', c?(_prDrvNick(drv)||t.nick||''):'', drv, c?(t.type||''):'', c?i+1:'',
+      c?(c.plate||''):'', c?1:'', c?(_prDrvNick(drv)||t.nick||''):'', drv, c?(t.type||''):'', c?(seqOf[u.key]||i+1):'',   /* v9.355 */
       Math.round(b.totalW||0), (+(b.totalV||0)).toFixed(3), ref?((_catCsOfRefs([ref])||{}).total||0):0,
       Math.round(_netOfBill(b)), Math.round(_cigOfBill(b)), currentWarehouse||'', who, now,
       c?c.px:u.px, c?'':'เอาออก', saveId];
@@ -13401,7 +13471,9 @@ function _prAfterSave(d,keys,rows){
   // ② ล้างที่แก้ในเครื่องของเล่มที่บันทึกแล้ว (ชีท = ที่แก้แล้ว) → ถ้ามีคนแก้เล่มนี้ต่อ เราจะเห็นของเขา
   const st=_prSt();
   K.forEach(k=>{ delete st.card[k]; delete st.baseId[k]; });
-  try{ let ch=false; K.forEach(k=>{ if(k in _prManOrd){ delete _prManOrd[k]; ch=true; } }); if(ch)_prSaveOrd(); }catch(e){}   // v9.271: ลำดับอยู่ในชีทแล้ว ไม่ต้องจำในเครื่องซ้ำ
+  try{ let ch=false; K.forEach(k=>{ if(k in _prManOrd){ delete _prManOrd[k]; ch=true; } });
+    Object.keys(_prManOrd).forEach(k=>{ if(/^(TRK|SEL)\|/.test(k)){ delete _prManOrd[k]; ch=true; } });   // v9.355: คีย์กลุ่มอ่านกลับจาก seq ในชีทได้แล้ว
+    if(ch)_prSaveOrd(); }catch(e){}   // v9.271: ลำดับอยู่ในชีทแล้ว ไม่ต้องจำในเครื่องซ้ำ
   (d.stores||[]).forEach(u=>{ const a=st.assign[u.key];
     if((st.removed.has(u.key)&&K.has(u.px))||(a&&K.has(a))){ st.removed.delete(u.key); delete st.assign[u.key]; } });
   renderPreRetail();
@@ -13720,7 +13792,7 @@ function _mbMerge(cards){
   if(mine.length<2)return null;
   const M=Object.assign({},mine[0]);
   M.px=MB_MERGE; M.pxList=mine.map(c=>c.px); M.parts=mine;
-  M.units=_prRoute([].concat.apply([],mine.map(c=>c.units)));   // จัดลำดับส่งใหม่รวมทุกเล่มเป็นเส้นทางเดียว
+  M.units=_prGroupOrder(_prGrpKeyOf(M.pxList,mine),[].concat.apply([],mine.map(c=>c.units)));   // v9.355: ลำดับรวมข้ามเล่ม (ตรงกับหน้าสายส่ง) · เดิม _prRoute ล้วน
   M.fullOrder=null; M.mates=[]; M.saved=null; M.defPlate=''; M.votes={n:0,by:{}};
   M.gone=[].concat.apply([],mine.map(c=>c.gone||[]));   // v9.243: Top คิดรวมร้านที่เอาออกด้วย
   const pl=[...new Set(mine.map(c=>String(c.plate||'')))];
@@ -14136,6 +14208,34 @@ function _prSheetOrdKeys(px,units){
   a.sort((x,y)=>x.q-y.q);
   return a.map(x=>x.k);
 }
+// v9.355: ลำดับระดับ "กลุ่ม" (ทั้งคัน / ทั้งชุดที่เลือก) — ข้ามเล่มได้
+function _prTruckSeqKeys(units){   // อ่านลำดับที่บันทึกไว้ในชีท (seq นับต่อเนื่องทั้งคัน) ข้ามเล่ม
+  const sv=_prSavedPlan(); if(!sv||!sv.books)return null;
+  const a=[];
+  (units||[]).forEach(u=>{ const b=sv.books[_prHome(u.key)]; if(!b||!b.seq)return;
+    let q=0; (u.bills||[]).forEach(r=>{ const x=b.seq[r]; if(x>0&&(!q||x<q))q=x; });
+    if(q>0)a.push({k:u.key,q}); });
+  if(a.length<2)return null;
+  a.sort((x,y)=>x.q-y.q);
+  return a.map(x=>x.k);
+}
+function _prGroupOrder(gk,units){
+  if(!units||units.length<2)return units||[];
+  let ord=_prManOrd[gk];
+  if(ord==='auto')return _prRoute(units);
+  if(!Array.isArray(ord)||!ord.length)ord=_prTruckSeqKeys(units);   // ยังไม่ได้จัดในเครื่อง → ใช้ของในชีท
+  if(!ord||!ord.length)return _prRoute(units);
+  const pos=new Map(ord.map((k,i)=>[k,i]));
+  const got=units.filter(u=>pos.has(u.key)).sort((a,b)=>pos.get(a.key)-pos.get(b.key));
+  const rest=units.filter(u=>!pos.has(u.key));
+  return rest.length?got.concat(_prRoute(rest)):got;   // ร้านใหม่ที่ยังไม่มีลำดับ ต่อท้ายตามเส้นทาง
+}
+function _prGrpKeyOf(pxList,cards){   // ชุดเล่ม -> คีย์กลุ่ม (คันเดียวกัน = ผูกกับทะเบียน)
+  const L=(pxList||[]).slice().sort();
+  const pl=[...new Set((cards||_prCardsLast||[]).filter(c=>L.indexOf(c.px)>=0).map(c=>String(c.plate||'')))];
+  return (pl.length===1&&pl[0])?('TRK|'+pl[0]):('SEL|'+L.join('+'));
+}
+function _prBooksOfUnits(units){ return [...new Set((units||[]).map(u=>_prHome(u.key)))].filter(Boolean); }
 function _prApplyOrd(px,arr){
   if(!arr||arr.length<2)return arr;
   let ord=_prManOrd[px];
@@ -14162,7 +14262,9 @@ function mbCopyOrder(px){
   if(typeof copyText==='function')copyText(tx,`✅ คัดลอกลำดับร้าน ${rows.length} ร้านแล้ว`);
 }
 function mbResetOrder(px){
-  _prManOrd[px]='auto'; _prSaveOrd();   // v9.271: ทับลำดับที่อยู่ในชีทด้วย · กดบันทึกแล้วชีทจะเก็บลำดับอัตโนมัติแทน
+  _prManOrd[px]='auto';
+  if(px===MB_MERGE){ _mbSel().forEach(k=>{ _prManOrd[k]='auto'; }); _prManOrd[_prGrpKeyOf(_mbSel())]='auto'; }   // v9.355
+  _prSaveOrd();   // v9.271: ทับลำดับที่อยู่ในชีทด้วย · กดบันทึกแล้วชีทจะเก็บลำดับอัตโนมัติแทน
   if(typeof renderPreRetail==='function')renderPreRetail();
   if(typeof showToast==='function')showToast('↺ กลับเป็นลำดับเส้นทางอัตโนมัติ — กด 💾 บันทึกลงชีท เพื่อเก็บ','ok');
 }
@@ -14171,7 +14273,7 @@ function _mbDropOrder(w,fromK,toK){
   const keys=_mbRowsOf(w).map(r=>r.getAttribute('data-k'));
   const i=keys.indexOf(fromK), j=keys.indexOf(toK); if(i<0||j<0)return;
   keys.splice(j,0,keys.splice(i,1)[0]);
-  _prManOrd[px]=keys; _prSaveOrd();
+  _prManOrd[(px===MB_MERGE)?_prGrpKeyOf(_mbSel()):px]=keys; _prSaveOrd();   // v9.355: การ์ดรวม = เก็บลำดับรวมข้ามเล่ม (เดิมเก็บคีย์ __ALL__ ที่ไม่เคยถูกอ่าน)
   if(typeof renderPreRetail==='function')renderPreRetail();
   if(typeof showToast==='function')showToast('↕ ปรับลำดับร้านแล้ว — กด 💾 บันทึกลงชีท เพื่อเก็บลงคอลัมน์ "ลำดับร้าน"','ok');
 }
@@ -14333,6 +14435,7 @@ function renderMyBooks(){
         const _gp=(c.units||[]).filter(u=>u.lat&&u.lng); _mbMapData[_mi]={u:_gp,type:((c.truck||{}).type)||''};   // v9.260: ร้านที่มีพิกัด → หมุดบนแผนที่คอลัมน์กลาง · v9.264: +ชนิดรถ ใช้คิดเส้นทางถนน
         return `${_mbTabsHtml(_gp.length||(c.units||[]).length)}<div class="mbw hasmap mbm-${_mbMView}" data-px="${_prEsc(c.px)}"><div class="mbw-l">${left}</div>${_mbMapHtml(_mi,_gp.length,(c.units||[]).length-_gp.length)}<div class="mbw-r" style="border-color:${ro.col||'#E0E5ED'}">${_mbFindHtml()}<div class="mbw-rows">${ro.html||''}</div><button type="button" class="mb-add" onclick="mbAddOpen('${_prJs(c.px)}')" title="ย้ายร้านจากเล่มอื่น หรือร้านที่เอาออก มาใส่เล่มนี้">➕ เพิ่มร้านเข้าเล่มนี้</button>
         <div class="mb-ord no-print">
+          <button type="button" class="side" onclick="mbSideByBook('${_prJs(c.px)}')" title="จัดเป็นวงรอบ: เก็บฝั่งไป (ใกล้→ไกล) แล้วค่อยฝั่งกลับ (ไกล→ใกล้) — สูตรเดียวกับหน้าจัดรถ">↩️ จัดตามฝั่งถนน</button>
           <button type="button" onclick="mbCopyOrder('${_prJs(c.px)}')" title="คัดลอกลำดับ + ชื่อร้านตามที่เรียงอยู่ตอนนี้ (ไม่เอาร้านที่ตัดออก)">📋 คัดลอกลำดับร้าน</button>
           <button type="button" class="rst" onclick="mbResetOrder('${_prJs(c.px)}')" title="ทิ้งลำดับที่ลากจัดเอง (รวมลำดับที่บันทึกไว้ในชีท) กลับไปใช้ลำดับเส้นทางอัตโนมัติ — กด 💾 บันทึกลงชีท เพื่อเก็บ">↺ ลำดับอัตโนมัติ</button>
         </div></div></div>`;
