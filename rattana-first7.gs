@@ -1,20 +1,22 @@
-// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v2.0
-// พนักงานใหม่ลงทะเบียนด้วยเบอร์โทร → เช็คอินเข้างานด้วย GPS 7 วันแรก (ต้องอยู่ในพิกัดที่ทำงานเท่านั้น)
-// + ตอบแบบประเมินการสอนงาน 3 ข้อ รอบวันที่ 3 และวันที่ 7 · ฝ่ายบุคคลติดตามผล
+// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v2.2
+// พนักงานใหม่ลงทะเบียนด้วยเบอร์โทร (+รูปหน้า) → 7 วันแรก ทำวันละ 2 ครั้ง ต้องอยู่ในพิกัดที่ทำงานเท่านั้น
+//   เช้า  = เช็คอินเข้างาน + ชื่อพี่เลี้ยง/คนสอนงานวันนี้          → แท็บ "เข้างาน"
+//   เย็น  = ตอบคำถามการสอนงาน + เช็คเอาท์เลิกงาน                → แท็บ "เลิกงาน" + แท็บ "คำตอบ"
+//   วันไหนไม่ได้ทำ → ทำย้อนหลังได้ (ต้องอยู่ที่ทำงาน + เวลาจริง + เหตุผล) ช่อง "วิธี" = ทำย้อนหลัง
 //
 // ══════════════ วิธีติดตั้ง / อัปเดต ══════════════
 //  1. เปิดชีต "Rattana 7 วันแรก" ▸ ส่วนขยาย (Extensions) ▸ Apps Script → ลบโค้ดเดิม วางไฟล์นี้ทั้งไฟล์ → Ctrl+S
 //  2. เลือกฟังก์ชัน setupSheet ▸ Run (ถ้าขอสิทธิ์เพิ่ม — กดอนุญาต) → Execution log ต้องขึ้น "พร้อมใช้งาน" + จำนวนจุดพิกัด
 //  3. Deploy ▸ Manage deployments ▸ ✏️ ▸ Version: New version ▸ Deploy   (URL เดิม ไม่ต้องส่งใหม่)
 //     ครั้งแรก: Deploy ▸ New deployment ▸ Web app ▸ Execute as: Me / Who has access: Anyone (ทุกคน)
-//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.1"
+//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.2"
 //  v2.1 ใช้ Google Drive เก็บรูปหน้า → ตอน Run setupSheet จะขอสิทธิ์ Drive เพิ่ม (กดอนุญาต)
 //
 //  ตัวเลือก (Project Settings ▸ Script Properties):
 //    ALERT_EMAILS = hr@rattanaphaiboon.com, …  ← อีเมลเตือนทันทีเมื่อน้องใหม่ "เสี่ยงสูง" + สรุปรายวัน (ถ้าเปิด)
-//  สรุปรายวัน (ไม่บังคับ): Run setupDailyTrigger ครั้งเดียว → ทุกวัน 10 โมง ส่งรายชื่อน้องใหม่ที่ยังไม่เช็คอินวันนี้
+//  สรุปรายวัน (ไม่บังคับ): Run setupDailyTrigger ครั้งเดียว → 10.00 น. คนที่ยังไม่เช็คอินเข้างาน · 19.00 น. คนที่ยังไม่เช็คเอาท์
 
-var VERSION = '2.1';
+var VERSION = '2.2';
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';    // ทะเบียนพนักงาน — ใช้ตรวจสิทธิ์ล็อกอินของ HR เท่านั้น
 var STRUCT_SHEET_ID = '1tkJoaZj72MG9HIOkd-uM_Tvng-l2uqH61jUwqqiRTMI'; // ชีต "โครงสร้าง" — พิกัด/รัศมีที่ทำงาน + ตำแหน่งงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -47,23 +49,29 @@ var R_HEAD = ['รหัสลงทะเบียน', 'เวลาลงท�
               'รหัสเข้าใช้ (ห้ามแก้)', 'สถานะ', 'รหัสพนักงาน', 'อุปกรณ์', 'หมายเหตุ HR',
               'รูปหน้า (ย่อ · ห้ามแก้)', 'ไฟล์รูปหน้า'];
 var PHOTO_FOLDER = 'Rattana 7 วันแรก - รูปหน้าพนักงานใหม่';
-// ── แท็บ "เช็คอิน" ──
-var CHK_TAB = 'เช็คอิน';
-var K_TS = 1, K_ID = 2, K_NAME = 3, K_PHONE = 4, K_W = 5, K_DATE = 6, K_DAY = 7, K_LAT = 8, K_LNG = 9, K_ACC = 10,
-    K_DIST = 11, K_SITE = 12, K_OK = 13, K_UA = 14;
-var K_HEAD = ['เวลา', 'รหัสลงทะเบียน', 'ชื่อ - นามสกุล', 'เบอร์โทร', 'จังหวัด', 'วันที่', 'ทำงานวันที่', 'ละติจูด', 'ลองติจูด',
-              'ความแม่น GPS (ม.)', 'ระยะจากที่ทำงาน (ม.)', 'จุดที่ใกล้สุด', 'ผล', 'อุปกรณ์'];
+// ── แท็บ "เข้างาน" (เช้า) และ "เลิกงาน" (เย็น) แยกกัน — คอลัมน์ตรงกัน ต่างแค่คอลัมน์ 11 ──
+var IN_TAB = 'เข้างาน', OUT_TAB = 'เลิกงาน';
+var K_TS = 1, K_ID = 2, K_NAME = 3, K_PHONE = 4, K_W = 5, K_DATE = 6, K_DAY = 7, K_TIME = 8, K_MODE = 9, K_REASON = 10,
+    K_EXTRA = 11, K_DIST = 12, K_SITE = 13, K_OK = 14, K_LAT = 15, K_LNG = 16, K_ACC = 17, K_UA = 18;
+function kHead_(type) {
+  return ['เวลาที่กดบันทึก', 'รหัสลงทะเบียน', 'ชื่อ - นามสกุล', 'เบอร์โทร', 'จังหวัด', 'วันที่', 'ทำงานวันที่',
+          type === 'in' ? 'เวลาเข้างาน' : 'เวลาเลิกงาน', 'วิธี (GPS / ทำย้อนหลัง)', 'เหตุผลที่ทำย้อนหลัง',
+          type === 'in' ? 'พี่เลี้ยง / คนสอนงานวันนี้' : 'รหัสคำตอบ (แท็บ คำตอบ)',
+          'ระยะจากที่ทำงาน (ม.)', 'จุดที่ใกล้สุด', 'ผล', 'ละติจูด', 'ลองติจูด', 'ความแม่น GPS (ม.)', 'อุปกรณ์'];
+}
+var K_N = 18;
 // ── แท็บ "คำตอบ" (คอลัมน์เดิมจาก v1 — ไม่เลื่อน) ──
 var RESP_SHEET = 'คำตอบ';
 var C_ID = 1, C_TS = 2, C_CODE = 3, C_NAME = 4, C_NICK = 5, C_W = 6, C_DEPT = 7, C_SUP = 8, C_START = 9,
     C_DAY = 10, C_ROUND = 11, C_TAUGHT = 12, C_TEACHER = 13, C_READY = 14, C_STAY = 15, C_HELP = 16,
     C_COMMENT = 17, C_RISK = 18, C_UA = 19, C_HANDLED = 20, C_HBY = 21, C_HAT = 22, C_HNOTE = 23,
-    C_TOPICS = 24, C_LEARN = 25;
+    C_TOPICS = 24, C_LEARN = 25;   // C_DATE = 26 (ต่อท้าย)
 var C_HEAD = ['รหัสรายการ', 'เวลา', 'รหัสลงทะเบียน', 'ชื่อ - สกุล', 'เบอร์โทร', 'จังหวัด', 'ตำแหน่ง', 'หัวหน้างาน',
               'วันเริ่มงาน', 'ทำงานวันที่', 'รอบ', '1. การสอนงาน', 'ผู้สอนงาน (ชื่อ)', '2. ความพร้อมทำงาน (1-5)',
               '3. ความรู้สึก/อยากทำงานต่อ (1-5)', 'อยากให้ HR ช่วย', 'ความคิดเห็น', 'ระดับความเสี่ยง',
               'อุปกรณ์', 'ติดตามแล้ว', 'ผู้ติดตาม', 'เวลาติดตาม', 'บันทึกการช่วยเหลือ',
-              'สอนงานเรื่องอะไร', 'อยากเรียนรู้อะไรเพิ่ม'];
+              'สอนงานเรื่องอะไร', 'อยากเรียนรู้อะไรเพิ่ม', 'วันที่'];
+var C_DATE = 26;
 
 // ───────────────────────── เครื่องมือทั่วไป ─────────────────────────
 function json_(obj) {
@@ -83,8 +91,7 @@ function dayNo_(start) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(start || '')) return 0;
   return Math.floor((utcOf_(ymd_(new Date())) - utcOf_(start)) / 864e5) + 1;
 }
-// วันที่ 3–6 = รอบวันที่ 3 (ตอบช้าได้ถึงวันที่ 6) · วันที่ 7 ขึ้นไป = รอบวันที่ 7
-function roundOf_(day) { return day && day <= 6 ? 'วันที่ 3' : 'วันที่ 7'; }
+function daysBetween_(a, b) { return Math.round((utcOf_(b) - utcOf_(a)) / 864e5); }
 function riskOf_(taught, ready, stay, helps) {
   if (taught === 'none' || stay <= 2) return 'red';
   if (taught === 'part' || ready <= 2 || stay === 3 || helps.length) return 'yellow';
@@ -120,10 +127,13 @@ function getTab_(name, head, widths, textCols) {
   return sh;
 }
 function regSheet_() { return getTab_(REG_TAB, R_HEAD, [130, 140, 200, 110, 200, 110, 100, 120, 90, 100, 160, 240, 80, 260], [R_PHONE, R_START, R_KEY, R_EMPCODE]); }
-function chkSheet_() { return getTab_(CHK_TAB, K_HEAD, [140, 130, 200, 110, 110, 100, 80, 100, 100, 90, 100, 200, 90, 160], [K_PHONE, K_DATE]); }
+function attSheet_(type) {
+  return getTab_(type === 'in' ? IN_TAB : OUT_TAB, kHead_(type), [140, 130, 190, 110, 110, 95, 70, 80, 120, 180, 200, 90, 180, 90, 100, 100, 80, 160],
+                 [K_PHONE, K_DATE, K_TIME]);
+}
 function respSheet_() {
-  return getTab_(RESP_SHEET, C_HEAD, [110, 140, 130, 190, 110, 100, 160, 140, 95, 70, 70, 140, 160, 90, 90, 220, 300, 90, 150, 70, 150, 140, 260, 300, 300],
-                 [C_CODE, C_NICK, C_START]);
+  return getTab_(RESP_SHEET, C_HEAD, [110, 140, 130, 190, 110, 100, 160, 140, 95, 70, 70, 140, 160, 90, 90, 220, 300, 90, 150, 70, 150, 140, 260, 300, 300, 95],
+                 [C_CODE, C_NICK, C_START, C_DATE]);
 }
 function rows_(sh, n) {
   var last = sh.getLastRow();
@@ -190,27 +200,33 @@ function needReg_(p) {
   if (f.reg.status === 'ลาออก') throw { message: 'บัญชีนี้ถูกปิดแล้ว กรุณาติดต่อฝ่ายบุคคล' };
   return f;
 }
-function checkinsOf_(id) {
-  return rows_(chkSheet_(), K_HEAD.length).filter(function (r) { return String(r[K_ID - 1]) === id; }).map(chkObj_);
+function allAtt_() {
+  var out = [];
+  ['in', 'out'].forEach(function (type) {
+    rows_(attSheet_(type), K_N).forEach(function (r) { if (r[K_ID - 1]) out.push(attObj_(r, type)); });
+  });
+  return out;
 }
-function chkObj_(r) {
-  var ts = r[K_TS - 1];
-  return { ts: ts instanceof Date ? ts.toISOString() : String(ts || ''), id: String(r[K_ID - 1] || ''),
+function checkinsOf_(id) { return allAtt_().filter(function (c) { return c.id === id; }); }
+function cellHm_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Bangkok', 'HH.mm');
+  var m = clean_(v).match(/^(\d{1,2})[:.](\d{2})/); return m ? ('0' + m[1]).slice(-2) + '.' + m[2] : clean_(v);
+}
+function attObj_(r, type) {
+  var ts = r[K_TS - 1], extra = clean_(r[K_EXTRA - 1]);
+  return { ts: ts instanceof Date ? ts.toISOString() : String(ts || ''), id: String(r[K_ID - 1] || ''), type: type,
            name: clean_(r[K_NAME - 1]), phone: clean_(r[K_PHONE - 1]), w: wOf_(r[K_W - 1]),
-           lat: Number(r[K_LAT - 1]) || 0, lng: Number(r[K_LNG - 1]) || 0,
-           date: cellYmd_(r[K_DATE - 1]), day: Number(r[K_DAY - 1]) || 0, time: ts instanceof Date ? hm_(ts) : '',
-           dist: Number(r[K_DIST - 1]) || 0, acc: Number(r[K_ACC - 1]) || 0, site: clean_(r[K_SITE - 1]),
-           ok: clean_(r[K_OK - 1]) === 'ผ่าน' };
-}
-function answeredOf_(id) {
-  return rows_(respSheet_(), C_HEAD.length).filter(function (r) { return String(r[C_CODE - 1]) === id; })
-    .map(function (r) { return String(r[C_ROUND - 1] || ''); });
+           date: cellYmd_(r[K_DATE - 1]), day: Number(r[K_DAY - 1]) || 0, time: cellHm_(r[K_TIME - 1]),
+           mode: clean_(r[K_MODE - 1]) === 'ทำย้อนหลัง' ? 'fix' : 'gps', reason: clean_(r[K_REASON - 1]),
+           mentors: type === 'in' ? extra.split(/\s*,\s*/).filter(String) : [], resp: type === 'out' ? extra : '',
+           dist: Number(r[K_DIST - 1]) || 0, site: clean_(r[K_SITE - 1]), ok: clean_(r[K_OK - 1]) === 'ผ่าน',
+           lat: Number(r[K_LAT - 1]) || 0, lng: Number(r[K_LNG - 1]) || 0, acc: Number(r[K_ACC - 1]) || 0 };
 }
 function me_(f) {
   var g = f.reg, day = dayNo_(g.start);
   return { id: g.id, name: g.name, phone: g.phone, pos: g.pos, w: g.w, prov: PROV[g.w] || '', start: g.start, status: g.status, photo: g.photo,
-           day: day, round: roundOf_(day), today: ymd_(new Date()), trackDays: TRACK_DAYS,
-           checkins: checkinsOf_(g.id).filter(function (c) { return c.ok; }), answered: answeredOf_(g.id),
+           day: day, today: ymd_(new Date()), trackDays: TRACK_DAYS,
+           checkins: checkinsOf_(g.id).filter(function (c) { return c.ok; }),
            sites: provSites_(g.w), mates: mates_(g.w) };
 }
 // รายชื่อพนักงานในจังหวัดเดียวกัน (ชื่อ/ชื่อเล่น/แผนก เท่านั้น) ไว้แนะนำตอนพิมพ์ชื่อคนสอนงาน
@@ -264,62 +280,91 @@ function savePhoto_(dataUrl, fileName) {
   var blob = Utilities.newBlob(Utilities.base64Decode(dataUrl.split(',')[1]), 'image/jpeg', fileName);
   return folder.createFile(blob).getUrl();
 }
-// เช็คอินเข้างาน — เซิร์ฟเวอร์คำนวณระยะเองจากพิกัดในชีตโครงสร้าง (ไม่เชื่อผลจากเครื่องผู้ใช้)
-function checkin_(p) {
-  var f = needReg_(p), g = f.reg, day = dayNo_(g.start);
-  if (day < 1) return { ok: false, error: 'ยังไม่ถึงวันเริ่มงาน (เริ่ม ' + g.start + ')' };
-  if (day > TRACK_DAYS) return { ok: false, error: 'ครบ ' + TRACK_DAYS + ' วันแรกแล้ว ไม่ต้องเช็คอินในแอปนี้แล้วค่ะ' };
+// เช็คอิน (in) / เช็คเอาท์ (out) — เซิร์ฟเวอร์คำนวณระยะเองจากพิกัดในชีตโครงสร้าง (ไม่เชื่อผลจากเครื่องผู้ใช้)
+// p.date + p.time + p.reason = ทำย้อนหลังของวันนั้น (ต้องอยู่ที่ทำงานตอนกดเหมือนกัน)
+function attend_(p, type) {
+  if (clean_(p.hp)) return { ok: false, error: 'x' };
+  var f = needReg_(p), g = f.reg, today = ymd_(new Date()), fix = !!p.date;
+  var date = fix ? clean_(p.date) : today;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { ok: false, error: 'วันที่ไม่ถูกต้อง' };
+  if (dayNo_(g.start) < 1) return { ok: false, error: 'ยังไม่ถึงวันเริ่มงาน (เริ่ม ' + g.start + ')' };
+  var day = daysBetween_(g.start, date) + 1;
+  if (day < 1 || day > TRACK_DAYS || date > today)
+    return { ok: false, error: fix ? 'ทำย้อนหลังได้เฉพาะ 7 วันแรก และวันที่ผ่านมาแล้ว' : 'ครบ ' + TRACK_DAYS + ' วันแรกแล้ว ไม่ต้องเช็คอินในแอปนี้แล้วค่ะ' };
+  var time = '', reason = '';
+  if (fix) {
+    var m = clean_(p.time).match(/^(\d{1,2})[:.](\d{2})$/);
+    reason = clean_(p.reason).slice(0, 200);
+    if (!m || +m[1] > 23 || +m[2] > 59 || reason.length < 2) return { ok: false, error: 'กรุณาใส่เวลาจริงและเหตุผล' };
+    time = ('0' + m[1]).slice(-2) + '.' + m[2];
+  }
   var lat = parseFloat(p.lat), lng = parseFloat(p.lng), acc = Math.round(parseFloat(p.acc) || 0);
   if (!(Math.abs(lat) > 0 && Math.abs(lng) > 0)) return { ok: false, error: 'อ่านตำแหน่ง GPS ไม่ได้' };
-  var today = ymd_(new Date());
-  var done = checkinsOf_(g.id).filter(function (c) { return c.ok && c.date === today; })[0];
-  if (done) return { ok: true, inside: true, already: true, time: done.time, site: done.site, dist: done.dist, me: me_(f) };
+  var label = type === 'in' ? 'เข้างาน' : 'เลิกงาน';
+  var done = checkinsOf_(g.id).filter(function (c) { return c.ok && c.type === type && c.date === date; })[0];
+  if (done) return { ok: false, error: (fix ? 'วันนั้น' : 'วันนี้') + 'บันทึก' + label + 'ไว้แล้ว (' + done.time + ' น.)' };
+  var mentors = [], sv = null;
+  if (type === 'in') {
+    mentors = (p.mentors || []).map(function (t) { return clean_(t).replace(/,/g, ' ').slice(0, 60); }).filter(function (t) { return t.length >= 2; }).slice(0, 5);
+    if (!mentors.length) return { ok: false, error: 'กรุณาใส่ชื่อพี่เลี้ยง / คนสอนงานวันนี้' };
+  } else {
+    sv = surveyCheck_(p);
+    if (sv.error) return { ok: false, error: sv.error };
+  }
   var best = null;
   provSites_(g.w).forEach(function (s) {
     var d = distM_(lat, lng, s.lat, s.lng);
     if (!best || d - s.r < best.d - best.s.r) best = { s: s, d: d };
   });
   if (!best) return { ok: false, error: 'ยังไม่ได้ตั้งพิกัดที่ทำงานของจังหวัดนี้ กรุณาติดต่อฝ่ายบุคคล' };
-  var dist = Math.round(best.d), inside = dist - Math.min(acc, GPS_GRACE) <= best.s.r;
-  var now = new Date();
-  chkSheet_().appendRow([now, g.id, g.name, g.phone, g.w + ' ' + PROV[g.w], today, day, lat, lng, acc, dist, best.s.name,
-                         inside ? 'ผ่าน' : 'นอกพื้นที่', clean_(p.ua).slice(0, 120)]);
-  return { ok: true, inside: inside, dist: dist, r: best.s.r, acc: acc, site: best.s.name, time: hm_(now), me: inside ? me_(f) : null };
-}
-
-// ───────────────────────── รับคำตอบแบบประเมิน ─────────────────────────
-function submit_(p) {
-  if (clean_(p.hp)) return { ok: true, id: 'x' };
-  var g = needReg_(p).reg, day = dayNo_(g.start);
-  if (day > MAX_DAYS) return { ok: false, error: 'แบบประเมินนี้สำหรับพนักงานใหม่ในช่วงแรกของการทำงานเท่านั้น' };
-  var taught = clean_(p.taught);
-  if (!TAUGHT[taught]) return { ok: false, error: 'กรุณาตอบข้อ 1 การสอนงาน' };
-  var ready = parseInt(p.ready, 10), stay = parseInt(p.stay, 10);
-  if (!(ready >= 1 && ready <= 5)) return { ok: false, error: 'กรุณาตอบข้อ 2 ความพร้อมทำงาน' };
-  if (!(stay >= 1 && stay <= 5)) return { ok: false, error: 'กรุณาตอบข้อ 3 ความรู้สึกต่องาน' };
-  var teachers = (p.teachers || []).map(function (t) { return clean_(t).replace(/,/g, ' ').slice(0, 60); })
-                                    .filter(function (t) { return t.length >= 2; }).slice(0, 5);
-  if (taught === 'none') teachers = [];
-  else if (!teachers.length) return { ok: false, error: 'กรุณาพิมพ์ชื่อคนที่สอนงานคุณ' };
-  var topics = taught === 'none' ? '' : clean_(p.topics).slice(0, 500), learn = clean_(p.learn).slice(0, 500);
-  if (taught !== 'none' && topics.length < 3) return { ok: false, error: 'กรุณาพิมพ์ว่าสอนงานเรื่องอะไร' };
-  if (taught !== 'full' && learn.length < 3) return { ok: false, error: 'กรุณาพิมพ์ว่าอยากเรียนรู้อะไรเพิ่ม' };
-  var helps = (p.helps || []).map(clean_).filter(function (h) { return HELPS.indexOf(h) >= 0; });
-  var comment = clean_(p.comment).slice(0, 1000), ua = clean_(p.ua).slice(0, 120);
-  var risk = riskOf_(taught, ready, stay, helps), round = roundOf_(day);
-  var id = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyMMdd') + '-' + Utilities.getUuid().slice(0, 6).toUpperCase();
+  var dist = Math.round(best.d), inside = dist - Math.min(acc, GPS_GRACE) <= best.s.r, now = new Date();
+  if (!fix) time = hm_(now);
+  var ua = clean_(p.ua).slice(0, 120), respId = '';
+  var row = function (extra, ok) {
+    return [now, g.id, g.name, g.phone, g.w + ' ' + PROV[g.w], date, day, time, fix ? 'ทำย้อนหลัง' : 'GPS', reason, extra,
+            dist, best.s.name, ok ? 'ผ่าน' : 'นอกพื้นที่', lat, lng, acc, ua];
+  };
   var lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
-    respSheet_().appendRow([id, new Date(), g.id, g.name, g.phone, g.w + ' ' + (PROV[g.w] || ''), g.pos, '', g.start,
-                            day || '', round, TAUGHT[taught], teachers.join(', '), ready, stay, helps.join(', '),
-                            comment, RISK[risk], ua, '', '', '', '', topics, learn]);
+    if (!inside) {
+      attSheet_(type).appendRow(row(type === 'in' ? mentors.join(', ') : '', false));
+      return { ok: true, inside: false, dist: dist, r: best.s.r, acc: acc, site: best.s.name };
+    }
+    if (type === 'out') {
+      respId = Utilities.formatDate(now, 'Asia/Bangkok', 'yyMMdd') + '-' + Utilities.getUuid().slice(0, 6).toUpperCase();
+      respSheet_().appendRow([respId, now, g.id, g.name, g.phone, g.w + ' ' + (PROV[g.w] || ''), g.pos, '', g.start,
+                              day, 'วันที่ ' + day, TAUGHT[sv.taught], sv.teachers.join(', '), sv.ready, sv.stay, sv.helps.join(', '),
+                              sv.comment, RISK[sv.risk], ua, '', '', '', '', sv.topics, sv.learn, date]);
+    }
+    attSheet_(type).appendRow(row(type === 'in' ? mentors.join(', ') : respId, true));
   } finally { lock.releaseLock(); }
-  try {
-    alertRisk_(g, day, round, taught, teachers, ready, stay, helps,
-               comment + (topics ? '\n[สอนเรื่อง] ' + topics : '') + (learn ? '\n[อยากเรียนรู้เพิ่ม] ' + learn : ''), risk, id);
-  } catch (e) { /* ส่งเมลไม่ได้ ไม่กระทบการบันทึก */ }
-  return { ok: true, id: id, risk: risk, round: round, day: day };
+  if (type === 'out') {
+    try {
+      alertRisk_(g, day, 'วันที่ ' + day + (fix ? ' (ทำย้อนหลัง)' : ''), sv.taught, sv.teachers, sv.ready, sv.stay, sv.helps,
+                 sv.comment + (sv.topics ? '\n[สอนเรื่อง] ' + sv.topics : '') + (sv.learn ? '\n[อยากเรียนรู้เพิ่ม] ' + sv.learn : ''), sv.risk, respId);
+    } catch (e) { /* ส่งเมลไม่ได้ ไม่กระทบการบันทึก */ }
+  }
+  return { ok: true, inside: true, type: type, time: time, dist: dist, r: best.s.r, acc: acc, site: best.s.name,
+           risk: sv ? sv.risk : '', me: me_(f) };
+}
+// ตรวจคำตอบก่อนกลับบ้าน (ตรงกับ surveyCheck ในหน้าเว็บ)
+function surveyCheck_(p) {
+  var taught = clean_(p.taught);
+  if (!TAUGHT[taught]) return { error: 'กรุณาตอบข้อ 1 การสอนงาน' };
+  var ready = parseInt(p.ready, 10), stay = parseInt(p.stay, 10);
+  if (!(ready >= 1 && ready <= 5)) return { error: 'กรุณาตอบข้อ 2 ความพร้อมทำงาน' };
+  if (!(stay >= 1 && stay <= 5)) return { error: 'กรุณาตอบข้อ 3 ความรู้สึกต่องาน' };
+  var teachers = (p.teachers || []).map(function (t) { return clean_(t).replace(/,/g, ' ').slice(0, 60); })
+                                    .filter(function (t) { return t.length >= 2; }).slice(0, 5);
+  if (taught === 'none') teachers = [];
+  else if (!teachers.length) return { error: 'กรุณาใส่ชื่อคนที่สอนงานคุณ' };
+  var topics = taught === 'none' ? '' : clean_(p.topics).slice(0, 500), learn = clean_(p.learn).slice(0, 500);
+  if (taught !== 'none' && topics.length < 3) return { error: 'กรุณาพิมพ์ว่าสอนงานเรื่องอะไร' };
+  if (taught !== 'full' && learn.length < 3) return { error: 'กรุณาพิมพ์ว่าอยากเรียนรู้อะไรเพิ่ม' };
+  var helps = (p.helps || []).map(clean_).filter(function (h) { return HELPS.indexOf(h) >= 0; });
+  return { taught: taught, ready: ready, stay: stay, teachers: teachers, topics: topics, learn: learn, helps: helps,
+           comment: clean_(p.comment).slice(0, 1000), risk: riskOf_(taught, ready, stay, helps) };
 }
 function alertRisk_(g, day, round, taught, teachers, ready, stay, helps, comment, risk, id) {
   if (risk !== 'red') return;
@@ -398,13 +443,13 @@ function respObj_(row) {
     comment: String(row[C_COMMENT - 1] || ''), risk: keyOf_(RISK, String(row[C_RISK - 1] || '')) || 'green',
     handled: String(row[C_HANDLED - 1] || '') === 'Y', handledBy: String(row[C_HBY - 1] || ''),
     handledAt: hat instanceof Date ? hat.toISOString() : String(hat || ''), note: String(row[C_HNOTE - 1] || ''),
-    topics: String(row[C_TOPICS - 1] || ''), learn: String(row[C_LEARN - 1] || '')
+    topics: String(row[C_TOPICS - 1] || ''), learn: String(row[C_LEARN - 1] || ''), date: cellYmd_(row[C_DATE - 1])
   };
 }
 function list_() {
   var regs = rows_(regSheet_(), R_HEAD.length).filter(function (r) { return r[R_ID - 1]; })
     .map(function (r) { var o = regObj_(r); o.w = wOf_(r[R_W - 1]); return o; });
-  var chks = rows_(chkSheet_(), K_HEAD.length).filter(function (r) { return r[K_ID - 1]; }).map(chkObj_);
+  var chks = allAtt_();
   var resp = rows_(respSheet_(), C_HEAD.length).filter(function (r) { return r[C_ID - 1]; }).map(respObj_);
   return { ok: true, regs: regs, checkins: chks, rows: resp, sites: sites_(), today: ymd_(new Date()) };
 }
@@ -438,8 +483,8 @@ function doPost(e) {
       case 'plogin': return json_(plogin_(p));
       case 'register': return json_(register_(p));
       case 'state': return json_({ ok: true, me: me_(needReg_(p)) });
-      case 'checkin': return json_(checkin_(p));
-      case 'submit': return json_(submit_(p));
+      case 'checkin': return json_(attend_(p, 'in'));
+      case 'checkout': return json_(attend_(p, 'out'));
       case 'login': return json_(login_(p.credential));
       case 'logout':
         if (/^[0-9a-f]{64}$/.test(String(p.token || ''))) CacheService.getScriptCache().remove('s_' + p.token);
@@ -482,30 +527,33 @@ function positions_() {
 function dailyDigest() {
   var to = PropertiesService.getScriptProperties().getProperty('ALERT_EMAILS');
   if (!to) return;
-  var d = list_(), today = d.today, lines = [];
+  // ก่อนเที่ยง = ใครยังไม่เช็คอินเข้างาน · บ่าย/เย็น = ใครยังไม่เช็คเอาท์ (ตอบคำถาม)
+  var d = list_(), today = d.today, type = +Utilities.formatDate(new Date(), 'Asia/Bangkok', 'H') < 12 ? 'in' : 'out', lines = [];
+  var label = type === 'in' ? 'ยังไม่เช็คอินเข้างาน' : 'ยังไม่ตอบคำถาม + เช็คเอาท์';
   d.regs.forEach(function (g) {
     var day = dayNo_(g.start);
     if (g.status === 'ลาออก' || day < 1 || day > TRACK_DAYS) return;
-    var ok = d.checkins.some(function (c) { return c.id === g.id && c.ok && c.date === today; });
+    var ok = d.checkins.some(function (c) { return c.id === g.id && c.ok && c.type === type && c.date === today; });
     if (!ok) lines.push('• ' + g.name + ' (' + g.pos + ' · ' + (PROV[g.w] || '') + ') วันที่ ' + day + ' — โทร ' + g.phone);
   });
   if (!lines.length) return;
-  MailApp.sendEmail({ to: to, name: 'Rattana 7 วันแรก', subject: '[7 วันแรก] น้องใหม่ยังไม่เช็คอินวันนี้ ' + lines.length + ' คน',
-    body: 'รายชื่อพนักงานใหม่ (7 วันแรก) ที่ยังไม่เช็คอินเข้างานวันนี้ ณ เวลา ' + hm_(new Date()) + ' น.\n\n' + lines.join('\n') + '\n\nดูรายละเอียด: ' + APP_URL });
+  MailApp.sendEmail({ to: to, name: 'Rattana 7 วันแรก', subject: '[7 วันแรก] น้องใหม่' + label + 'วันนี้ ' + lines.length + ' คน',
+    body: 'รายชื่อพนักงานใหม่ (7 วันแรก) ที่' + label + 'วันนี้ ณ เวลา ' + hm_(new Date()) + ' น.\n\n' + lines.join('\n') + '\n\nดูรายละเอียด: ' + APP_URL });
 }
 function setupDailyTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'dailyDigest') ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('dailyDigest').timeBased().everyDays(1).atHour(10).inTimezone('Asia/Bangkok').create();
-  Logger.log('ตั้งสรุปรายวัน 10.00 น. แล้ว ✓');
+  ScriptApp.newTrigger('dailyDigest').timeBased().everyDays(1).atHour(19).inTimezone('Asia/Bangkok').create();
+  Logger.log('ตั้งสรุปรายวันแล้ว ✓ 10.00 น. (ยังไม่เช็คอิน) และ 19.00 น. (ยังไม่เช็คเอาท์)');
 }
 
 // ───────────────────────── ตั้งค่าครั้งแรก (Run ในตัวแก้ไข) ─────────────────────────
 function setupSheet() {
-  regSheet_(); chkSheet_(); respSheet_();
+  regSheet_(); attSheet_('in'); attSheet_('out'); respSheet_();
   DriveApp.getRootFolder();   // ขอสิทธิ์ Drive ไว้ก่อน (ใช้เก็บรูปหน้า)
   CacheService.getScriptCache().removeAll(['f7_sites_v2', 'reg_f7_v2']);
   var s = sites_();
-  Logger.log('พร้อมใช้งาน ✓ v' + VERSION + '  แท็บ: ' + REG_TAB + ' / ' + CHK_TAB + ' / ' + RESP_SHEET);
+  Logger.log('พร้อมใช้งาน ✓ v' + VERSION + '  แท็บ: ' + REG_TAB + ' / ' + IN_TAB + ' / ' + OUT_TAB + ' / ' + RESP_SHEET);
   for (var w in PROV) Logger.log('  ' + PROV[w] + ': ' + s.filter(function (x) { return x.w === w; }).map(function (x) { return x.name + ' (' + x.r + ' ม.)'; }).join(', '));
   Logger.log('ตำแหน่งงานจากชีตโครงสร้าง ' + positions_().length + ' ตำแหน่ง');
   var to = PropertiesService.getScriptProperties().getProperty('ALERT_EMAILS');
