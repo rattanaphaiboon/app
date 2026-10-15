@@ -7,13 +7,14 @@
 //  2. เลือกฟังก์ชัน setupSheet ▸ Run (ถ้าขอสิทธิ์เพิ่ม — กดอนุญาต) → Execution log ต้องขึ้น "พร้อมใช้งาน" + จำนวนจุดพิกัด
 //  3. Deploy ▸ Manage deployments ▸ ✏️ ▸ Version: New version ▸ Deploy   (URL เดิม ไม่ต้องส่งใหม่)
 //     ครั้งแรก: Deploy ▸ New deployment ▸ Web app ▸ Execute as: Me / Who has access: Anyone (ทุกคน)
-//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.0"
+//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.1"
+//  v2.1 ใช้ Google Drive เก็บรูปหน้า → ตอน Run setupSheet จะขอสิทธิ์ Drive เพิ่ม (กดอนุญาต)
 //
 //  ตัวเลือก (Project Settings ▸ Script Properties):
 //    ALERT_EMAILS = hr@rattanaphaiboon.com, …  ← อีเมลเตือนทันทีเมื่อน้องใหม่ "เสี่ยงสูง" + สรุปรายวัน (ถ้าเปิด)
 //  สรุปรายวัน (ไม่บังคับ): Run setupDailyTrigger ครั้งเดียว → ทุกวัน 10 โมง ส่งรายชื่อน้องใหม่ที่ยังไม่เช็คอินวันนี้
 
-var VERSION = '2.0';
+var VERSION = '2.1';
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';    // ทะเบียนพนักงาน — ใช้ตรวจสิทธิ์ล็อกอินของ HR เท่านั้น
 var STRUCT_SHEET_ID = '1tkJoaZj72MG9HIOkd-uM_Tvng-l2uqH61jUwqqiRTMI'; // ชีต "โครงสร้าง" — พิกัด/รัศมีที่ทำงาน + ตำแหน่งงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -41,9 +42,11 @@ var RISK = { red: 'เสี่ยงสูง', yellow: 'ต้องดูแ�
 // ── แท็บ "ลงทะเบียน" (เลขคอลัมน์ตายตัว) ──
 var REG_TAB = 'ลงทะเบียน';
 var R_ID = 1, R_TS = 2, R_NAME = 3, R_PHONE = 4, R_POS = 5, R_W = 6, R_START = 7, R_KEY = 8, R_STATUS = 9,
-    R_EMPCODE = 10, R_UA = 11, R_NOTE = 12;
+    R_EMPCODE = 10, R_UA = 11, R_NOTE = 12, R_THUMB = 13, R_PHOTO = 14;
 var R_HEAD = ['รหัสลงทะเบียน', 'เวลาลงทะเบียน', 'ชื่อ - นามสกุล', 'เบอร์โทร', 'ตำแหน่ง', 'จังหวัด', 'วันเริ่มงาน',
-              'รหัสเข้าใช้ (ห้ามแก้)', 'สถานะ', 'รหัสพนักงาน', 'อุปกรณ์', 'หมายเหตุ HR'];
+              'รหัสเข้าใช้ (ห้ามแก้)', 'สถานะ', 'รหัสพนักงาน', 'อุปกรณ์', 'หมายเหตุ HR',
+              'รูปหน้า (ย่อ · ห้ามแก้)', 'ไฟล์รูปหน้า'];
+var PHOTO_FOLDER = 'Rattana 7 วันแรก - รูปหน้าพนักงานใหม่';
 // ── แท็บ "เช็คอิน" ──
 var CHK_TAB = 'เช็คอิน';
 var K_TS = 1, K_ID = 2, K_NAME = 3, K_PHONE = 4, K_W = 5, K_DATE = 6, K_DAY = 7, K_LAT = 8, K_LNG = 9, K_ACC = 10,
@@ -116,7 +119,7 @@ function getTab_(name, head, widths, textCols) {
   }
   return sh;
 }
-function regSheet_() { return getTab_(REG_TAB, R_HEAD, [130, 140, 200, 110, 200, 110, 100, 120, 90, 100, 160, 240], [R_PHONE, R_START, R_KEY, R_EMPCODE]); }
+function regSheet_() { return getTab_(REG_TAB, R_HEAD, [130, 140, 200, 110, 200, 110, 100, 120, 90, 100, 160, 240, 80, 260], [R_PHONE, R_START, R_KEY, R_EMPCODE]); }
 function chkSheet_() { return getTab_(CHK_TAB, K_HEAD, [140, 130, 200, 110, 110, 100, 80, 100, 100, 90, 100, 200, 90, 160], [K_PHONE, K_DATE]); }
 function respSheet_() {
   return getTab_(RESP_SHEET, C_HEAD, [110, 140, 130, 190, 110, 100, 160, 140, 95, 70, 70, 140, 160, 90, 90, 220, 300, 90, 150, 70, 150, 140, 260, 300, 300],
@@ -166,7 +169,8 @@ function regObj_(row) {
     id: String(row[R_ID - 1] || ''), ts: row[R_TS - 1] instanceof Date ? row[R_TS - 1].toISOString() : String(row[R_TS - 1] || ''),
     name: clean_(row[R_NAME - 1]), phone: phone_(row[R_PHONE - 1]) || clean_(row[R_PHONE - 1]), pos: clean_(row[R_POS - 1]),
     w: clean_(row[R_W - 1]).toUpperCase(), start: cellYmd_(row[R_START - 1]), status: clean_(row[R_STATUS - 1]) || 'ทำงานอยู่',
-    empCode: clean_(row[R_EMPCODE - 1]), note: clean_(row[R_NOTE - 1])
+    empCode: clean_(row[R_EMPCODE - 1]), note: clean_(row[R_NOTE - 1]),
+    photo: /^data:image\/jpeg;base64,/.test(String(row[R_THUMB - 1] || '')) ? String(row[R_THUMB - 1]) : '', photoUrl: clean_(row[R_PHOTO - 1])
   };
 }
 // R_W เก็บรหัส W1–W4 ไว้หน้าข้อความ เช่น "W1 สมุทรสงคราม" → อ่านกลับแค่รหัส
@@ -204,7 +208,7 @@ function answeredOf_(id) {
 }
 function me_(f) {
   var g = f.reg, day = dayNo_(g.start);
-  return { id: g.id, name: g.name, phone: g.phone, pos: g.pos, w: g.w, prov: PROV[g.w] || '', start: g.start, status: g.status,
+  return { id: g.id, name: g.name, phone: g.phone, pos: g.pos, w: g.w, prov: PROV[g.w] || '', start: g.start, status: g.status, photo: g.photo,
            day: day, round: roundOf_(day), today: ymd_(new Date()), trackDays: TRACK_DAYS,
            checkins: checkinsOf_(g.id).filter(function (c) { return c.ok; }), answered: answeredOf_(g.id),
            sites: provSites_(g.w), mates: mates_(g.w) };
@@ -234,6 +238,10 @@ function register_(p) {
   if (!PROV[w]) return { ok: false, error: 'กรุณาเลือกจังหวัดที่ทำงาน' };
   var d = dayNo_(start);
   if (!d || d > 31 || d < -13) return { ok: false, error: 'วันเริ่มงานไม่ถูกต้อง' };
+  var photo = String(p.photo || ''), thumb = String(p.thumb || '');
+  var JPG = /^data:image\/jpeg;base64,[A-Za-z0-9+\/=]+$/;
+  if (!JPG.test(photo) || photo.length > 400000) return { ok: false, error: 'กรุณาถ่ายรูปหน้าตัวเองจากกล้อง' };
+  if (!JPG.test(thumb) || thumb.length > 40000) thumb = '';
   var lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
@@ -241,10 +249,20 @@ function register_(p) {
     if (f) return { ok: true, me: me_(f), key: f.key, existed: true };   // เคยลงทะเบียนแล้ว → เข้าสู่ระบบให้เลย
     var id = 'NH' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyMMdd') + '-' + Utilities.getUuid().slice(0, 4).toUpperCase();
     var key = Utilities.getUuid().replace(/-/g, '');
-    regSheet_().appendRow([id, new Date(), name, ph, pos, w + ' ' + PROV[w], start, key, 'ทำงานอยู่', '', clean_(p.ua).slice(0, 120), '']);
+    var url = '';
+    try { url = savePhoto_(photo, start + ' ' + name + ' ' + ph + '.jpg'); } catch (e) { url = 'บันทึกรูปไม่สำเร็จ: ' + e.message; }
+    regSheet_().appendRow([id, new Date(), name, ph, pos, w + ' ' + PROV[w], start, key, 'ทำงานอยู่', '', clean_(p.ua).slice(0, 120), '', thumb, url]);
     SpreadsheetApp.flush();
     return { ok: true, me: me_(findReg_('id', id)), key: key, created: true };
   } finally { lock.releaseLock(); }
+}
+// รูปหน้าเต็ม → โฟลเดอร์ใน Drive ของเจ้าของสคริปต์ (ไม่แชร์สาธารณะ) · รูปย่อเก็บในชีตไว้โชว์หน้า HR
+function savePhoto_(dataUrl, fileName) {
+  var props = PropertiesService.getScriptProperties(), fid = props.getProperty('PHOTO_FOLDER_ID'), folder = null;
+  if (fid) { try { folder = DriveApp.getFolderById(fid); } catch (e) { folder = null; } }
+  if (!folder) { folder = DriveApp.createFolder(PHOTO_FOLDER); props.setProperty('PHOTO_FOLDER_ID', folder.getId()); }
+  var blob = Utilities.newBlob(Utilities.base64Decode(dataUrl.split(',')[1]), 'image/jpeg', fileName);
+  return folder.createFile(blob).getUrl();
 }
 // เช็คอินเข้างาน — เซิร์ฟเวอร์คำนวณระยะเองจากพิกัดในชีตโครงสร้าง (ไม่เชื่อผลจากเครื่องผู้ใช้)
 function checkin_(p) {
@@ -484,6 +502,7 @@ function setupDailyTrigger() {
 // ───────────────────────── ตั้งค่าครั้งแรก (Run ในตัวแก้ไข) ─────────────────────────
 function setupSheet() {
   regSheet_(); chkSheet_(); respSheet_();
+  DriveApp.getRootFolder();   // ขอสิทธิ์ Drive ไว้ก่อน (ใช้เก็บรูปหน้า)
   CacheService.getScriptCache().removeAll(['f7_sites_v2', 'reg_f7_v2']);
   var s = sites_();
   Logger.log('พร้อมใช้งาน ✓ v' + VERSION + '  แท็บ: ' + REG_TAB + ' / ' + CHK_TAB + ' / ' + RESP_SHEET);
