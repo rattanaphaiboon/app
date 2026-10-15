@@ -43,11 +43,29 @@ APPS=(
   rattana-onboard.html
   rattana-hr-docs.html
   rattana-jobs.html
+  rattana-jobs.webmanifest
+  jobs-icon-32.png
+  jobs-icon-180.png
+  jobs-icon-192.png
+  jobs-icon-512.png
   rattana-quote.html
   rattana-quote-brief.html
   rattana-carcheck-brief.html
+  rattana-carcheck-brief.mp4
+  rattana-carcheck-brief-poster.jpg
   rattana-360.html
   rattana-360.gs
+  rattana-first7.html
+  rattana-first7.gs
+  rattana-clip.html
+  rattana-emergency.html
+  rattana-emergency.gs
+  rattana-emergency.webmanifest
+  rattana-emergency-areas.json
+  emergency-icon-32.png
+  emergency-icon-180.png
+  emergency-icon-192.png
+  emergency-icon-512.png
   rattana-repair-doc.webmanifest
   rattana-repair-doc-sw.js
   carcheck-icon-180.png
@@ -72,6 +90,8 @@ APPS=(
   pc-icon-512.png
   pc-icon-mask.png
   pc-icon-180.png
+  rattana-manpower.html
+  rattana-manpower.gs
 )
 
 DRY=0
