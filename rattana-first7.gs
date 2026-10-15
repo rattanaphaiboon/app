@@ -1,4 +1,4 @@
-// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v2.4
+// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v2.6
 // พนักงานใหม่ลงทะเบียนด้วยเบอร์โทร (+รูปหน้า) → 7 วันแรก ทำวันละ 2 ครั้ง ต้องอยู่ในพิกัดที่ทำงานเท่านั้น
 //   เช้า  = เช็คอินเข้างาน + ชื่อพี่เลี้ยง/คนสอนงานวันนี้          → แท็บ "เข้า-ออกงาน" (ประเภท = เข้างาน)
 //   เย็น  = ตอบคำถามการสอนงาน + เช็คเอาท์เลิกงาน                → แท็บ "เข้า-ออกงาน" (ประเภท = เลิกงาน) + แท็บ "คำตอบ"
@@ -9,7 +9,8 @@
 //  2. เลือกฟังก์ชัน setupSheet ▸ Run (ถ้าขอสิทธิ์เพิ่ม — กดอนุญาต) → Execution log ต้องขึ้น "พร้อมใช้งาน" + จำนวนจุดพิกัด
 //  3. Deploy ▸ Manage deployments ▸ ✏️ ▸ Version: New version ▸ Deploy   (URL เดิม ไม่ต้องส่งใหม่)
 //     ครั้งแรก: Deploy ▸ New deployment ▸ Web app ▸ Execute as: Me / Who has access: Anyone (ทุกคน)
-//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.4"
+//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.6"
+//  v2.6 วันที่ 1 = วันที่ลงทะเบียน (ไม่ให้เลือกวันเริ่มงาน) · ประเมิน 7 วันทำงาน ข้ามวันอาทิตย์
 //  v2.4 รวมเข้างาน/เลิกงานไว้แท็บเดียว "เข้า-ออกงาน" — setupSheet ย้ายข้อมูลจากแท็บ "เข้างาน"/"เลิกงาน" เดิมให้ แล้วซ่อนแท็บเดิมไว้เป็นสำรอง
 //  v2.1 ใช้ Google Drive เก็บรูปหน้า → ตอน Run setupSheet จะขอสิทธิ์ Drive เพิ่ม (กดอนุญาต)
 //
@@ -17,13 +18,14 @@
 //    ALERT_EMAILS = hr@rattanaphaiboon.com, …  ← อีเมลเตือนทันทีเมื่อน้องใหม่ "เสี่ยงสูง" + สรุปรายวัน (ถ้าเปิด)
 //  สรุปรายวัน (ไม่บังคับ): Run setupDailyTrigger ครั้งเดียว → 10.00 น. คนที่ยังไม่เช็คอินเข้างาน · 19.00 น. คนที่ยังไม่เช็คเอาท์
 
-var VERSION = '2.4';
+var VERSION = '2.6';
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';    // ทะเบียนพนักงาน — ใช้ตรวจสิทธิ์ล็อกอินของ HR เท่านั้น
 var STRUCT_SHEET_ID = '1tkJoaZj72MG9HIOkd-uM_Tvng-l2uqH61jUwqqiRTMI'; // ชีต "โครงสร้าง" — พิกัด/รัศมีที่ทำงาน + ตำแหน่งงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 var APP_URL = 'https://rattanaphaiboon.github.io/app/rattana-first7.html';
 var SESSION_TTL = 21600;   // session หน้า HR 6 ชม.
-var TRACK_DAYS = 7;        // เช็คอินติดตาม 7 วันแรก (วันเริ่มงาน = วันที่ 1)
+var TRACK_DAYS = 7;        // ประเมิน 7 วันทำงาน — วันที่ 1 = วันที่ลงทะเบียน · ข้ามวันหยุด OFF_DAYS
+var OFF_DAYS = [0];        // 0 = วันอาทิตย์ (วันหยุดบริษัท) ไม่นับเป็นวันประเมิน ไม่ต้องเช็คอิน
 var MAX_DAYS = 45;         // ตอบแบบประเมินได้ถึงวันที่ 45 (เผื่อตอบช้า)
 var GPS_GRACE = 50;        // ยอมให้คลาดเคลื่อนตามความแม่น GPS ได้ไม่เกิน 50 ม. (แบบเดียวกับแอปเช็คอิน PC)
 var DEFAULT_RADIUS = 100;
@@ -46,7 +48,7 @@ var RISK = { red: 'เสี่ยงสูง', yellow: 'ต้องดูแ�
 var REG_TAB = 'ลงทะเบียน';
 var R_ID = 1, R_TS = 2, R_NAME = 3, R_PHONE = 4, R_POS = 5, R_W = 6, R_START = 7, R_KEY = 8, R_STATUS = 9,
     R_EMPCODE = 10, R_UA = 11, R_NOTE = 12, R_THUMB = 13, R_PHOTO = 14;
-var R_HEAD = ['รหัสลงทะเบียน', 'เวลาลงทะเบียน', 'ชื่อ - นามสกุล', 'เบอร์โทร', 'ตำแหน่ง', 'จังหวัด', 'วันเริ่มงาน',
+var R_HEAD = ['รหัสลงทะเบียน', 'เวลาลงทะเบียน', 'ชื่อ - นามสกุล', 'เบอร์โทร', 'ตำแหน่ง', 'จังหวัด', 'วันที่ 1 (วันเริ่มประเมิน)',
               'รหัสเข้าใช้ (ห้ามแก้)', 'สถานะ', 'รหัสพนักงาน', 'อุปกรณ์', 'หมายเหตุ HR',
               'รูปหน้า (ย่อ · ห้ามแก้)', 'ไฟล์รูปหน้า'];
 var PHOTO_FOLDER = 'Rattana 7 วันแรก - รูปหน้าพนักงานใหม่';
@@ -93,6 +95,18 @@ function dayNo_(start) {
   return Math.floor((utcOf_(ymd_(new Date())) - utcOf_(start)) / 864e5) + 1;
 }
 function daysBetween_(a, b) { return Math.round((utcOf_(b) - utcOf_(a)) / 864e5); }
+// 7 วันประเมินของคนหนึ่ง: นับจากวันที่ 1 ข้ามวันอาทิตย์ จนครบ 7 วัน (ตรงกับ trackDates ในหน้าเว็บ)
+function trackDates_(start) {
+  var out = [];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start || '')) return out;
+  var t = utcOf_(start);
+  for (var g = 0; out.length < TRACK_DAYS && g < 40; g++, t += 864e5) {
+    var d = new Date(t);
+    if (OFF_DAYS.indexOf(d.getUTCDay()) < 0) out.push(Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd'));
+  }
+  return out;
+}
+function trackDay_(start, date) { return trackDates_(start).indexOf(date) + 1; }   // 0 = ไม่ใช่วันประเมิน
 function riskOf_(taught, ready, stay, helps) {
   if (taught === 'none' || stay <= 2) return 'red';
   if (taught === 'part' || ready <= 2 || stay === 3 || helps.length) return 'yellow';
@@ -220,7 +234,7 @@ function attObj_(r) {
            lat: Number(r[K_LAT - 1]) || 0, lng: Number(r[K_LNG - 1]) || 0, acc: Number(r[K_ACC - 1]) || 0 };
 }
 function me_(f) {
-  var g = f.reg, day = dayNo_(g.start);
+  var g = f.reg, day = trackDay_(g.start, ymd_(new Date()));
   return { id: g.id, name: g.name, phone: g.phone, pos: g.pos, w: g.w, prov: PROV[g.w] || '', start: g.start, status: g.status, photo: g.photo,
            day: day, today: ymd_(new Date()), trackDays: TRACK_DAYS,
            checkins: checkinsOf_(g.id).filter(function (c) { return c.ok; }),
@@ -244,13 +258,11 @@ function plogin_(p) {
 function register_(p) {
   if (clean_(p.hp)) return { ok: false, error: 'x' };
   var ph = phone_(p.phone), name = clean_(p.name).slice(0, 100), pos = clean_(p.pos).slice(0, 80), w = clean_(p.w).toUpperCase();
-  var start = clean_(p.start);
+  var start = ymd_(new Date());   // วันที่ 1 = วันที่ลงทะเบียนเสมอ (ไม่ให้เลือกเอง)
   if (!/\S+\s+\S+/.test(name)) return { ok: false, error: 'กรุณากรอกชื่อและนามสกุล (เว้นวรรคระหว่างชื่อกับนามสกุล)' };
   if (!ph) return { ok: false, error: 'เบอร์โทรไม่ถูกต้อง (ต้องเป็นเบอร์ 10 หลัก ขึ้นต้นด้วย 0)' };
   if (pos.length < 2) return { ok: false, error: 'กรุณาเลือกตำแหน่ง' };
   if (!PROV[w]) return { ok: false, error: 'กรุณาเลือกจังหวัดที่ทำงาน' };
-  var d = dayNo_(start);
-  if (!d || d > 31 || d < -13) return { ok: false, error: 'วันเริ่มงานไม่ถูกต้อง' };
   var photo = String(p.photo || ''), thumb = String(p.thumb || '');
   var JPG = /^data:image\/jpeg;base64,[A-Za-z0-9+\/=]+$/;
   if (!JPG.test(photo) || photo.length > 400000) return { ok: false, error: 'กรุณาถ่ายรูปหน้าตัวเองจากกล้อง' };
@@ -284,10 +296,12 @@ function attend_(p, type) {
   var f = needReg_(p), g = f.reg, today = ymd_(new Date()), fix = !!p.date;
   var date = fix ? clean_(p.date) : today;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { ok: false, error: 'วันที่ไม่ถูกต้อง' };
-  if (dayNo_(g.start) < 1) return { ok: false, error: 'ยังไม่ถึงวันเริ่มงาน (เริ่ม ' + g.start + ')' };
-  var day = daysBetween_(g.start, date) + 1;
-  if (day < 1 || day > TRACK_DAYS || date > today)
-    return { ok: false, error: fix ? 'ทำย้อนหลังได้เฉพาะ 7 วันแรก และวันที่ผ่านมาแล้ว' : 'ครบ ' + TRACK_DAYS + ' วันแรกแล้ว ไม่ต้องเช็คอินในแอปนี้แล้วค่ะ' };
+  if (date < g.start) return { ok: false, error: 'ยังไม่ถึงวันที่ 1 (' + g.start + ')' };
+  var day = trackDay_(g.start, date);
+  if (!day || date > today) {
+    if (OFF_DAYS.indexOf(new Date(utcOf_(date)).getUTCDay()) >= 0) return { ok: false, error: 'วันอาทิตย์เป็นวันหยุด ไม่ต้องเช็คอิน' };
+    return { ok: false, error: fix ? 'ทำย้อนหลังได้เฉพาะ 7 วันประเมิน และวันที่ผ่านมาแล้ว' : 'ครบ ' + TRACK_DAYS + ' วันแล้ว ไม่ต้องเช็คอินในแอปนี้แล้วค่ะ' };
+  }
   var time = '', reason = '';
   if (fix) {
     var m = clean_(p.time).match(/^(\d{1,2})[:.](\d{2})$/);
@@ -528,8 +542,8 @@ function dailyDigest() {
   var d = list_(), today = d.today, type = +Utilities.formatDate(new Date(), 'Asia/Bangkok', 'H') < 12 ? 'in' : 'out', lines = [];
   var label = type === 'in' ? 'ยังไม่เช็คอินเข้างาน' : 'ยังไม่ตอบคำถาม + เช็คเอาท์';
   d.regs.forEach(function (g) {
-    var day = dayNo_(g.start);
-    if (g.status === 'ลาออก' || day < 1 || day > TRACK_DAYS) return;
+    var day = trackDay_(g.start, today);
+    if (g.status === 'ลาออก' || !day) return;
     var ok = d.checkins.some(function (c) { return c.id === g.id && c.ok && c.type === type && c.date === today; });
     if (!ok) lines.push('• ' + g.name + ' (' + g.pos + ' · ' + (PROV[g.w] || '') + ') วันที่ ' + day + ' — โทร ' + g.phone);
   });
