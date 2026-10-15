@@ -1,4 +1,4 @@
-// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v1.0
+// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v1.1
 // ติดตามการสอนงานพนักงานใหม่ใน 7 วันแรก (พนักงานใหม่ตอบเอง 3 ข้อ · ฝ่ายบุคคลดูผล)
 //
 // ══════════════ วิธีติดตั้ง (ทำครั้งเดียว) ══════════════
@@ -16,7 +16,7 @@
 //  ตัวเลือกเพิ่มเติม (Project Settings ▸ Script Properties):
 //    ALERT_EMAILS = hr@rattanaphaiboon.com, …   ← ส่งอีเมลทันทีเมื่อน้องใหม่ "เสี่ยงสูง" (ยังไม่มีใครสอน / อยากลาออก)
 
-var VERSION = '1.0';
+var VERSION = '1.1';
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน (ชีตบริษัท แท็บหลัก)
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 var RESP_SHEET = 'คำตอบ';
@@ -24,9 +24,8 @@ var SESSION_TTL = 21600;           // อายุ session ของหน้า
 var MAX_DAYS = 45;                 // รับคำตอบได้ถึงวันที่ 45 นับจากวันเริ่มงาน (เผื่อตอบช้า)
 var APP_URL = 'https://rattanaphaiboon.github.io/app/rattana-first7.html';
 
-// ข้อความต้องตรงกับฝั่งหน้าเว็บ (TAUGHT / TEACHERS / HELPS ใน rattana-first7.html)
+// ข้อความต้องตรงกับฝั่งหน้าเว็บ (TAUGHT / HELPS ใน rattana-first7.html) · ผู้สอนงาน = ชื่อที่น้องใหม่พิมพ์เอง (สูงสุด 5 ชื่อ)
 var TAUGHT = { full: 'สอนแล้ว เข้าใจงาน', part: 'สอนบ้าง ยังไม่ครบ', none: 'ยังไม่มีใครสอน' };
-var TEACHERS = ['หัวหน้างาน', 'พี่เลี้ยง', 'เพื่อนร่วมงาน'];
 var HELPS = ['สอนงานเพิ่ม', 'อุปกรณ์/เครื่องมือ', 'เพื่อนร่วมงาน/หัวหน้า', 'เวลา/กะ/วันหยุด', 'เงินเดือน/สวัสดิการ', 'เดินทาง/ที่พัก'];
 var RISK = { red: 'เสี่ยงสูง', yellow: 'ต้องดูแล', green: 'ปกติ' };
 var BRANCH = { HQ: 'สำนักงานใหญ่', W1: 'สมุทรสงคราม', W2: 'สุพรรณบุรี', W3: 'ราชบุรี', W4: 'นครปฐม', C4: 'รัตนมาร์ท ดอนตูม' };
@@ -37,7 +36,7 @@ var C_ID = 1, C_TS = 2, C_CODE = 3, C_NAME = 4, C_NICK = 5, C_W = 6, C_DEPT = 7,
     C_COMMENT = 17, C_RISK = 18, C_UA = 19, C_HANDLED = 20, C_HBY = 21, C_HAT = 22, C_HNOTE = 23;
 var N_COLS = 23;
 var HEADERS = ['รหัสรายการ', 'เวลา', 'รหัสพนักงาน', 'ชื่อ - สกุล', 'ชื่อเล่น', 'สาขา', 'แผนก', 'หัวหน้างาน',
-               'วันเริ่มงาน', 'ทำงานวันที่', 'รอบ', '1. การสอนงาน', 'ผู้สอน', '2. ความพร้อมทำงาน (1-5)',
+               'วันเริ่มงาน', 'ทำงานวันที่', 'รอบ', '1. การสอนงาน', 'ผู้สอนงาน (ชื่อ)', '2. ความพร้อมทำงาน (1-5)',
                '3. ความรู้สึก/อยากทำงานต่อ (1-5)', 'อยากให้ HR ช่วย', 'ความคิดเห็น', 'ระดับความเสี่ยง',
                'อุปกรณ์', 'ติดตามแล้ว', 'ผู้ติดตาม', 'เวลาติดตาม', 'บันทึกการช่วยเหลือ'];
 
@@ -126,10 +125,14 @@ function findEmp_(code) {
   return null;
 }
 // ข้อมูลที่ส่งให้หน้าแบบประเมินได้ — ชื่อ ชื่อเล่น แผนก สาขา รูป วันเริ่มงาน เท่านั้น
+// + รายชื่อเพื่อนร่วมงานสาขาเดียวกัน (ชื่อ/ชื่อเล่น/แผนก) ไว้แนะนำตอนพิมพ์ชื่อคนสอนงาน — หัวหน้างาน + แผนกเดียวกันขึ้นก่อน
 function publicEmp_(e) {
-  var day = dayNo_(e.start);
+  var day = dayNo_(e.start), supKey = norm_(e.sup);
+  var mates = getRegistry_().filter(function (m) { return m.active && m.w === e.w && m.code !== e.code; })
+    .map(function (m) { return { name: m.name, nick: m.nick, dept: m.dept, sup: !!supKey && norm_(m.name) === supKey }; })
+    .sort(function (a, b) { return (b.sup - a.sup) || ((b.dept === e.dept) - (a.dept === e.dept)); });
   return { code: e.code, name: e.name, nick: e.nick, w: e.w, wName: wName_(e.w), dept: e.dept, photo: e.photo,
-           start: e.start, day: day, round: roundOf_(day) };
+           start: e.start, day: day, round: roundOf_(day), mates: mates };
 }
 function findUserByEmail_(email) {
   email = norm_(email);
@@ -250,8 +253,10 @@ function submit_(p) {
   var ready = parseInt(p.ready, 10), stay = parseInt(p.stay, 10);
   if (!(ready >= 1 && ready <= 5)) return { ok: false, error: 'กรุณาตอบข้อ 2 ความพร้อมทำงาน' };
   if (!(stay >= 1 && stay <= 5)) return { ok: false, error: 'กรุณาตอบข้อ 3 ความรู้สึกต่องาน' };
-  var teachers = (p.teachers || []).map(clean_).filter(function (t) { return TEACHERS.indexOf(t) >= 0; });
+  var teachers = (p.teachers || []).map(function (t) { return clean_(t).replace(/,/g, ' ').slice(0, 60); })
+                                    .filter(function (t) { return t.length >= 2; }).slice(0, 5);
   if (taught === 'none') teachers = [];
+  else if (!teachers.length) return { ok: false, error: 'กรุณาพิมพ์ชื่อคนที่สอนงานคุณ' };
   var helps = (p.helps || []).map(clean_).filter(function (h) { return HELPS.indexOf(h) >= 0; });
   var comment = clean_(p.comment).slice(0, 1000), ua = clean_(p.ua).slice(0, 120);
   var risk = riskOf_(taught, ready, stay, helps);
@@ -278,7 +283,7 @@ function alertRisk_(emp, day, round, taught, teachers, ready, stay, helps, comme
     'สาขา/แผนก: ' + wName_(emp.w) + ' / ' + emp.dept + '\n' +
     'หัวหน้างาน: ' + (emp.sup || '-') + '\n' +
     'เริ่มงาน: ' + (emp.start || '-') + (day ? '  (ทำงานวันที่ ' + day + ')' : '') + ' · รอบ ' + round + '\n\n' +
-    '1. การสอนงาน: ' + TAUGHT[taught] + (teachers.length ? ' — โดย ' + teachers.join(', ') : '') + '\n' +
+    '1. การสอนงาน: ' + TAUGHT[taught] + (teachers.length ? ' — สอนโดย ' + teachers.join(', ') : '') + '\n' +
     '2. ความพร้อมทำงาน: ' + ready + '/5\n' +
     '3. ความรู้สึก/อยากทำงานต่อ: ' + stay + '/5\n' +
     'อยากให้ HR ช่วย: ' + (helps.length ? helps.join(', ') : '-') + '\n\n' +
