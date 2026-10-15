@@ -1,7 +1,7 @@
-// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v2.2
+// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v2.4
 // พนักงานใหม่ลงทะเบียนด้วยเบอร์โทร (+รูปหน้า) → 7 วันแรก ทำวันละ 2 ครั้ง ต้องอยู่ในพิกัดที่ทำงานเท่านั้น
-//   เช้า  = เช็คอินเข้างาน + ชื่อพี่เลี้ยง/คนสอนงานวันนี้          → แท็บ "เข้างาน"
-//   เย็น  = ตอบคำถามการสอนงาน + เช็คเอาท์เลิกงาน                → แท็บ "เลิกงาน" + แท็บ "คำตอบ"
+//   เช้า  = เช็คอินเข้างาน + ชื่อพี่เลี้ยง/คนสอนงานวันนี้          → แท็บ "เข้า-ออกงาน" (ประเภท = เข้างาน)
+//   เย็น  = ตอบคำถามการสอนงาน + เช็คเอาท์เลิกงาน                → แท็บ "เข้า-ออกงาน" (ประเภท = เลิกงาน) + แท็บ "คำตอบ"
 //   วันไหนไม่ได้ทำ → ทำย้อนหลังได้ (ต้องอยู่ที่ทำงาน + เวลาจริง + เหตุผล) ช่อง "วิธี" = ทำย้อนหลัง
 //
 // ══════════════ วิธีติดตั้ง / อัปเดต ══════════════
@@ -9,14 +9,15 @@
 //  2. เลือกฟังก์ชัน setupSheet ▸ Run (ถ้าขอสิทธิ์เพิ่ม — กดอนุญาต) → Execution log ต้องขึ้น "พร้อมใช้งาน" + จำนวนจุดพิกัด
 //  3. Deploy ▸ Manage deployments ▸ ✏️ ▸ Version: New version ▸ Deploy   (URL เดิม ไม่ต้องส่งใหม่)
 //     ครั้งแรก: Deploy ▸ New deployment ▸ Web app ▸ Execute as: Me / Who has access: Anyone (ทุกคน)
-//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.2"
+//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.4"
+//  v2.4 รวมเข้างาน/เลิกงานไว้แท็บเดียว "เข้า-ออกงาน" — setupSheet ย้ายข้อมูลจากแท็บ "เข้างาน"/"เลิกงาน" เดิมให้ แล้วซ่อนแท็บเดิมไว้เป็นสำรอง
 //  v2.1 ใช้ Google Drive เก็บรูปหน้า → ตอน Run setupSheet จะขอสิทธิ์ Drive เพิ่ม (กดอนุญาต)
 //
 //  ตัวเลือก (Project Settings ▸ Script Properties):
 //    ALERT_EMAILS = hr@rattanaphaiboon.com, …  ← อีเมลเตือนทันทีเมื่อน้องใหม่ "เสี่ยงสูง" + สรุปรายวัน (ถ้าเปิด)
 //  สรุปรายวัน (ไม่บังคับ): Run setupDailyTrigger ครั้งเดียว → 10.00 น. คนที่ยังไม่เช็คอินเข้างาน · 19.00 น. คนที่ยังไม่เช็คเอาท์
 
-var VERSION = '2.2';
+var VERSION = '2.4';
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';    // ทะเบียนพนักงาน — ใช้ตรวจสิทธิ์ล็อกอินของ HR เท่านั้น
 var STRUCT_SHEET_ID = '1tkJoaZj72MG9HIOkd-uM_Tvng-l2uqH61jUwqqiRTMI'; // ชีต "โครงสร้าง" — พิกัด/รัศมีที่ทำงาน + ตำแหน่งงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -49,17 +50,17 @@ var R_HEAD = ['รหัสลงทะเบียน', 'เวลาลงท�
               'รหัสเข้าใช้ (ห้ามแก้)', 'สถานะ', 'รหัสพนักงาน', 'อุปกรณ์', 'หมายเหตุ HR',
               'รูปหน้า (ย่อ · ห้ามแก้)', 'ไฟล์รูปหน้า'];
 var PHOTO_FOLDER = 'Rattana 7 วันแรก - รูปหน้าพนักงานใหม่';
-// ── แท็บ "เข้างาน" (เช้า) และ "เลิกงาน" (เย็น) แยกกัน — คอลัมน์ตรงกัน ต่างแค่คอลัมน์ 11 ──
-var IN_TAB = 'เข้างาน', OUT_TAB = 'เลิกงาน';
-var K_TS = 1, K_ID = 2, K_NAME = 3, K_PHONE = 4, K_W = 5, K_DATE = 6, K_DAY = 7, K_TIME = 8, K_MODE = 9, K_REASON = 10,
-    K_EXTRA = 11, K_DIST = 12, K_SITE = 13, K_OK = 14, K_LAT = 15, K_LNG = 16, K_ACC = 17, K_UA = 18;
-function kHead_(type) {
-  return ['เวลาที่กดบันทึก', 'รหัสลงทะเบียน', 'ชื่อ - นามสกุล', 'เบอร์โทร', 'จังหวัด', 'วันที่', 'ทำงานวันที่',
-          type === 'in' ? 'เวลาเข้างาน' : 'เวลาเลิกงาน', 'วิธี (GPS / ทำย้อนหลัง)', 'เหตุผลที่ทำย้อนหลัง',
-          type === 'in' ? 'พี่เลี้ยง / คนสอนงานวันนี้' : 'รหัสคำตอบ (แท็บ คำตอบ)',
-          'ระยะจากที่ทำงาน (ม.)', 'จุดที่ใกล้สุด', 'ผล', 'ละติจูด', 'ลองติจูด', 'ความแม่น GPS (ม.)', 'อุปกรณ์'];
-}
-var K_N = 18;
+// ── แท็บ "เข้า-ออกงาน" — เข้างานและเลิกงานอยู่แท็บเดียว แยกด้วยคอลัมน์ "ประเภท" ──
+var ATT_TAB = 'เข้า-ออกงาน';
+var OLD_TABS = { 'เข้างาน': 'in', 'เลิกงาน': 'out' };   // แท็บแยกของ v2.2 — setupSheet ย้ายข้อมูลมาแท็บนี้
+var TYPE_LB = { in: 'เข้างาน', out: 'เลิกงาน' };
+var K_TS = 1, K_ID = 2, K_NAME = 3, K_PHONE = 4, K_W = 5, K_DATE = 6, K_DAY = 7, K_TYPE = 8, K_TIME = 9, K_MODE = 10,
+    K_REASON = 11, K_MENTOR = 12, K_RESP = 13, K_DIST = 14, K_SITE = 15, K_OK = 16, K_LAT = 17, K_LNG = 18, K_ACC = 19, K_UA = 20;
+var K_HEAD = ['เวลาที่กดบันทึก', 'รหัสลงทะเบียน', 'ชื่อ - นามสกุล', 'เบอร์โทร', 'จังหวัด', 'วันที่', 'ทำงานวันที่',
+              'ประเภท (เข้างาน / เลิกงาน)', 'เวลา', 'วิธี (GPS / ทำย้อนหลัง)', 'เหตุผลที่ทำย้อนหลัง',
+              'พี่เลี้ยง / คนสอนงานวันนี้ (เข้างาน)', 'รหัสคำตอบ (เลิกงาน → แท็บ คำตอบ)',
+              'ระยะจากที่ทำงาน (ม.)', 'จุดที่ใกล้สุด', 'ผล', 'ละติจูด', 'ลองติจูด', 'ความแม่น GPS (ม.)', 'อุปกรณ์'];
+var K_N = K_HEAD.length;
 // ── แท็บ "คำตอบ" (คอลัมน์เดิมจาก v1 — ไม่เลื่อน) ──
 var RESP_SHEET = 'คำตอบ';
 var C_ID = 1, C_TS = 2, C_CODE = 3, C_NAME = 4, C_NICK = 5, C_W = 6, C_DEPT = 7, C_SUP = 8, C_START = 9,
@@ -127,8 +128,8 @@ function getTab_(name, head, widths, textCols) {
   return sh;
 }
 function regSheet_() { return getTab_(REG_TAB, R_HEAD, [130, 140, 200, 110, 200, 110, 100, 120, 90, 100, 160, 240, 80, 260], [R_PHONE, R_START, R_KEY, R_EMPCODE]); }
-function attSheet_(type) {
-  return getTab_(type === 'in' ? IN_TAB : OUT_TAB, kHead_(type), [140, 130, 190, 110, 110, 95, 70, 80, 120, 180, 200, 90, 180, 90, 100, 100, 80, 160],
+function attSheet_() {
+  return getTab_(ATT_TAB, K_HEAD, [140, 130, 190, 110, 110, 95, 70, 110, 70, 120, 180, 200, 150, 90, 180, 90, 100, 100, 80, 160],
                  [K_PHONE, K_DATE, K_TIME]);
 }
 function respSheet_() {
@@ -201,24 +202,20 @@ function needReg_(p) {
   return f;
 }
 function allAtt_() {
-  var out = [];
-  ['in', 'out'].forEach(function (type) {
-    rows_(attSheet_(type), K_N).forEach(function (r) { if (r[K_ID - 1]) out.push(attObj_(r, type)); });
-  });
-  return out;
+  return rows_(attSheet_(), K_N).filter(function (r) { return r[K_ID - 1]; }).map(attObj_);
 }
 function checkinsOf_(id) { return allAtt_().filter(function (c) { return c.id === id; }); }
 function cellHm_(v) {
   if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Bangkok', 'HH.mm');
   var m = clean_(v).match(/^(\d{1,2})[:.](\d{2})/); return m ? ('0' + m[1]).slice(-2) + '.' + m[2] : clean_(v);
 }
-function attObj_(r, type) {
-  var ts = r[K_TS - 1], extra = clean_(r[K_EXTRA - 1]);
+function attObj_(r) {
+  var ts = r[K_TS - 1], type = clean_(r[K_TYPE - 1]) === TYPE_LB.out ? 'out' : 'in';
   return { ts: ts instanceof Date ? ts.toISOString() : String(ts || ''), id: String(r[K_ID - 1] || ''), type: type,
            name: clean_(r[K_NAME - 1]), phone: clean_(r[K_PHONE - 1]), w: wOf_(r[K_W - 1]),
            date: cellYmd_(r[K_DATE - 1]), day: Number(r[K_DAY - 1]) || 0, time: cellHm_(r[K_TIME - 1]),
            mode: clean_(r[K_MODE - 1]) === 'ทำย้อนหลัง' ? 'fix' : 'gps', reason: clean_(r[K_REASON - 1]),
-           mentors: type === 'in' ? extra.split(/\s*,\s*/).filter(String) : [], resp: type === 'out' ? extra : '',
+           mentors: clean_(r[K_MENTOR - 1]).split(/\s*,\s*/).filter(String), resp: clean_(r[K_RESP - 1]),
            dist: Number(r[K_DIST - 1]) || 0, site: clean_(r[K_SITE - 1]), ok: clean_(r[K_OK - 1]) === 'ผ่าน',
            lat: Number(r[K_LAT - 1]) || 0, lng: Number(r[K_LNG - 1]) || 0, acc: Number(r[K_ACC - 1]) || 0 };
 }
@@ -320,15 +317,15 @@ function attend_(p, type) {
   var dist = Math.round(best.d), inside = dist - Math.min(acc, GPS_GRACE) <= best.s.r, now = new Date();
   if (!fix) time = hm_(now);
   var ua = clean_(p.ua).slice(0, 120), respId = '';
-  var row = function (extra, ok) {
-    return [now, g.id, g.name, g.phone, g.w + ' ' + PROV[g.w], date, day, time, fix ? 'ทำย้อนหลัง' : 'GPS', reason, extra,
-            dist, best.s.name, ok ? 'ผ่าน' : 'นอกพื้นที่', lat, lng, acc, ua];
+  var row = function (resp, ok) {
+    return [now, g.id, g.name, g.phone, g.w + ' ' + PROV[g.w], date, day, TYPE_LB[type], time, fix ? 'ทำย้อนหลัง' : 'GPS', reason,
+            mentors.join(', '), resp, dist, best.s.name, ok ? 'ผ่าน' : 'นอกพื้นที่', lat, lng, acc, ua];
   };
   var lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
     if (!inside) {
-      attSheet_(type).appendRow(row(type === 'in' ? mentors.join(', ') : '', false));
+      attSheet_().appendRow(row('', false));
       return { ok: true, inside: false, dist: dist, r: best.s.r, acc: acc, site: best.s.name };
     }
     if (type === 'out') {
@@ -337,7 +334,7 @@ function attend_(p, type) {
                               day, 'วันที่ ' + day, TAUGHT[sv.taught], sv.teachers.join(', '), sv.ready, sv.stay, sv.helps.join(', '),
                               sv.comment, RISK[sv.risk], ua, '', '', '', '', sv.topics, sv.learn, date]);
     }
-    attSheet_(type).appendRow(row(type === 'in' ? mentors.join(', ') : respId, true));
+    attSheet_().appendRow(row(respId, true));
   } finally { lock.releaseLock(); }
   if (type === 'out') {
     try {
@@ -547,13 +544,55 @@ function setupDailyTrigger() {
   Logger.log('ตั้งสรุปรายวันแล้ว ✓ 10.00 น. (ยังไม่เช็คอิน) และ 19.00 น. (ยังไม่เช็คเอาท์)');
 }
 
+// ── v2.2 เคยแยกแท็บ "เข้างาน"/"เลิกงาน" (18 คอลัมน์: …7 ทำงานวันที่, 8 เวลา, 9 วิธี, 10 เหตุผล, 11 พี่เลี้ยง|รหัสคำตอบ, 12 ระยะ, 13 จุด, 14 ผล, 15-17 lat/lng/acc, 18 อุปกรณ์)
+//    → ย้ายทุกแถวมาแท็บ "เข้า-ออกงาน" แล้วเปลี่ยนชื่อแท็บเดิมเป็น "สำรอง-…" และซ่อนไว้ (ไม่ลบข้อมูล)
+function migrateOldTabs_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(), out = [], moved = 0;
+  for (var name in OLD_TABS) {
+    var sh = ss.getSheetByName(name);
+    if (!sh) continue;
+    var type = OLD_TABS[name];
+    rows_(sh, 18).forEach(function (r) {
+      if (!r[1]) return;
+      out.push([r[0], r[1], r[2], r[3], r[4], r[5], r[6], TYPE_LB[type], r[7], r[8], r[9],
+                type === 'in' ? r[10] : '', type === 'out' ? r[10] : '', r[11], r[12], r[13], r[14], r[15], r[16], r[17]]);
+    });
+    sh.setName('สำรอง-' + name + '-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyMMdd-HHmm'));
+    sh.hideSheet();
+  }
+  if (out.length) {
+    out.sort(function (a, b) { return new Date(a[0]) - new Date(b[0]); });
+    var att = attSheet_();
+    att.getRange(att.getLastRow() + 1, 1, out.length, K_N).setValues(out);
+    moved = out.length;
+  }
+  return moved;
+}
+// แต่งสีคอลัมน์ "ประเภท" ให้แยกง่าย: เข้างาน = เขียว · เลิกงาน = ฟ้า · ผลนอกพื้นที่ = แดง
+function styleAttTab_() {
+  try {
+    var sh = attSheet_(), n = Math.max(sh.getMaxRows() - 1, 1);
+    var tCol = sh.getRange(2, K_TYPE, n, 1), okCol = sh.getRange(2, K_OK, n, 1);
+    var rules = sh.getConditionalFormatRules().filter(function (r) {
+      return !r.getRanges().some(function (g) { return g.getColumn() === K_TYPE || g.getColumn() === K_OK; });
+    });
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(TYPE_LB.in).setBackground('#d9f2e3').setFontColor('#1e8449').setBold(true).setRanges([tCol]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(TYPE_LB.out).setBackground('#dbe8fb').setFontColor('#1a4fa3').setBold(true).setRanges([tCol]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('นอกพื้นที่').setBackground('#fde2df').setFontColor('#c0392b').setRanges([okCol]).build());
+    sh.setConditionalFormatRules(rules);
+  } catch (e) { /* แต่งสีไม่ได้ก็ไม่เป็นไร */ }
+}
+
 // ───────────────────────── ตั้งค่าครั้งแรก (Run ในตัวแก้ไข) ─────────────────────────
 function setupSheet() {
-  regSheet_(); attSheet_('in'); attSheet_('out'); respSheet_();
+  regSheet_(); attSheet_(); respSheet_();
+  var moved = migrateOldTabs_();
+  if (moved) Logger.log('ย้ายข้อมูลจากแท็บ เข้างาน/เลิกงาน เดิม ' + moved + ' แถว → "' + ATT_TAB + '" (แท็บเดิมซ่อนไว้เป็นสำรอง)');
+  styleAttTab_();
   DriveApp.getRootFolder();   // ขอสิทธิ์ Drive ไว้ก่อน (ใช้เก็บรูปหน้า)
   CacheService.getScriptCache().removeAll(['f7_sites_v2', 'reg_f7_v2']);
   var s = sites_();
-  Logger.log('พร้อมใช้งาน ✓ v' + VERSION + '  แท็บ: ' + REG_TAB + ' / ' + IN_TAB + ' / ' + OUT_TAB + ' / ' + RESP_SHEET);
+  Logger.log('พร้อมใช้งาน ✓ v' + VERSION + '  แท็บ: ' + REG_TAB + ' / ' + ATT_TAB + ' / ' + RESP_SHEET);
   for (var w in PROV) Logger.log('  ' + PROV[w] + ': ' + s.filter(function (x) { return x.w === w; }).map(function (x) { return x.name + ' (' + x.r + ' ม.)'; }).join(', '));
   Logger.log('ตำแหน่งงานจากชีตโครงสร้าง ' + positions_().length + ' ตำแหน่ง');
   var to = PropertiesService.getScriptProperties().getProperty('ALERT_EMAILS');
