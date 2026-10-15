@@ -1,4 +1,4 @@
-// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v1.1
+// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v1.2
 // ติดตามการสอนงานพนักงานใหม่ใน 7 วันแรก (พนักงานใหม่ตอบเอง 3 ข้อ · ฝ่ายบุคคลดูผล)
 //
 // ══════════════ วิธีติดตั้ง (ทำครั้งเดียว) ══════════════
@@ -16,7 +16,7 @@
 //  ตัวเลือกเพิ่มเติม (Project Settings ▸ Script Properties):
 //    ALERT_EMAILS = hr@rattanaphaiboon.com, …   ← ส่งอีเมลทันทีเมื่อน้องใหม่ "เสี่ยงสูง" (ยังไม่มีใครสอน / อยากลาออก)
 
-var VERSION = '1.1';
+var VERSION = '1.2';
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน (ชีตบริษัท แท็บหลัก)
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
 var RESP_SHEET = 'คำตอบ';
@@ -33,12 +33,14 @@ var BRANCH = { HQ: 'สำนักงานใหญ่', W1: 'สมุทร�
 // ตำแหน่งคอลัมน์ตายตัว (1-based) ของแท็บ "คำตอบ" — โค้ดอ้างด้วยเลข ไม่พึ่งข้อความหัวตาราง
 var C_ID = 1, C_TS = 2, C_CODE = 3, C_NAME = 4, C_NICK = 5, C_W = 6, C_DEPT = 7, C_SUP = 8, C_START = 9,
     C_DAY = 10, C_ROUND = 11, C_TAUGHT = 12, C_TEACHER = 13, C_READY = 14, C_STAY = 15, C_HELP = 16,
-    C_COMMENT = 17, C_RISK = 18, C_UA = 19, C_HANDLED = 20, C_HBY = 21, C_HAT = 22, C_HNOTE = 23;
-var N_COLS = 23;
+    C_COMMENT = 17, C_RISK = 18, C_UA = 19, C_HANDLED = 20, C_HBY = 21, C_HAT = 22, C_HNOTE = 23,
+    C_TOPICS = 24, C_LEARN = 25;   // v1.2 ต่อท้าย ไม่แทรกกลาง — ชีตที่มีข้อมูลเดิมไม่เลื่อน
+var N_COLS = 25;
 var HEADERS = ['รหัสรายการ', 'เวลา', 'รหัสพนักงาน', 'ชื่อ - สกุล', 'ชื่อเล่น', 'สาขา', 'แผนก', 'หัวหน้างาน',
                'วันเริ่มงาน', 'ทำงานวันที่', 'รอบ', '1. การสอนงาน', 'ผู้สอนงาน (ชื่อ)', '2. ความพร้อมทำงาน (1-5)',
                '3. ความรู้สึก/อยากทำงานต่อ (1-5)', 'อยากให้ HR ช่วย', 'ความคิดเห็น', 'ระดับความเสี่ยง',
-               'อุปกรณ์', 'ติดตามแล้ว', 'ผู้ติดตาม', 'เวลาติดตาม', 'บันทึกการช่วยเหลือ'];
+               'อุปกรณ์', 'ติดตามแล้ว', 'ผู้ติดตาม', 'เวลาติดตาม', 'บันทึกการช่วยเหลือ',
+               'สอนงานเรื่องอะไร', 'อยากเรียนรู้อะไรเพิ่ม'];
 
 // ───────────────────────── เครื่องมือทั่วไป ─────────────────────────
 function json_(obj) {
@@ -190,7 +192,7 @@ function getRespSheet_() {
     try {
       sheet.setFrozenRows(1);
       sheet.getRange(1, 1, 1, N_COLS).setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff').setWrap(true);
-      var widths = [110, 140, 90, 190, 80, 70, 130, 160, 95, 70, 70, 140, 160, 90, 90, 220, 300, 90, 150, 70, 150, 140, 260];
+      var widths = [110, 140, 90, 190, 80, 70, 130, 160, 95, 70, 70, 140, 160, 90, 90, 220, 300, 90, 150, 70, 150, 140, 260, 300, 300];
       for (var i = 0; i < widths.length; i++) sheet.setColumnWidth(i + 1, widths[i]);
       var n = Math.max(sheet.getMaxRows() - 1, 1);
       sheet.getRange(2, C_TS, n, 1).setNumberFormat('dd/MM/yyyy HH:mm');
@@ -219,7 +221,8 @@ function rowToObj_(row) {
     handled: String(row[C_HANDLED - 1] || '') === 'Y',
     handledBy: String(row[C_HBY - 1] || ''),
     handledAt: hat instanceof Date ? hat.toISOString() : String(hat || ''),
-    note: String(row[C_HNOTE - 1] || '')
+    note: String(row[C_HNOTE - 1] || ''),
+    topics: String(row[C_TOPICS - 1] || ''), learn: String(row[C_LEARN - 1] || '')
   };
 }
 function listRows_() {
@@ -257,6 +260,9 @@ function submit_(p) {
                                     .filter(function (t) { return t.length >= 2; }).slice(0, 5);
   if (taught === 'none') teachers = [];
   else if (!teachers.length) return { ok: false, error: 'กรุณาพิมพ์ชื่อคนที่สอนงานคุณ' };
+  var topics = taught === 'none' ? '' : clean_(p.topics).slice(0, 500), learn = clean_(p.learn).slice(0, 500);
+  if (taught !== 'none' && topics.length < 3) return { ok: false, error: 'กรุณาพิมพ์ว่าสอนงานเรื่องอะไร' };
+  if (taught !== 'full' && learn.length < 3) return { ok: false, error: 'กรุณาพิมพ์ว่าอยากเรียนรู้อะไรเพิ่ม' };
   var helps = (p.helps || []).map(clean_).filter(function (h) { return HELPS.indexOf(h) >= 0; });
   var comment = clean_(p.comment).slice(0, 1000), ua = clean_(p.ua).slice(0, 120);
   var risk = riskOf_(taught, ready, stay, helps);
@@ -267,9 +273,9 @@ function submit_(p) {
   try {
     getRespSheet_().appendRow([id, new Date(), emp.code, emp.name, emp.nick, emp.w, emp.dept, emp.sup, emp.start,
                                day || '', round, TAUGHT[taught], teachers.join(', '), ready, stay, helps.join(', '),
-                               comment, RISK[risk], ua, '', '', '', '']);
+                               comment, RISK[risk], ua, '', '', '', '', topics, learn]);
   } finally { lock.releaseLock(); }
-  try { alertRisk_(emp, day, round, taught, teachers, ready, stay, helps, comment, risk, id); } catch (e) { /* ส่งเมลไม่ได้ ไม่กระทบการบันทึก */ }
+  try { alertRisk_(emp, day, round, taught, teachers, ready, stay, helps, comment + (topics ? '\n[สอนเรื่อง] ' + topics : '') + (learn ? '\n[อยากเรียนรู้เพิ่ม] ' + learn : ''), risk, id); } catch (e) { /* ส่งเมลไม่ได้ ไม่กระทบการบันทึก */ }
   return { ok: true, id: id, risk: risk, round: round, day: day };
 }
 // เสี่ยงสูง (ยังไม่มีใครสอน / อยากลาออก) → อีเมลถึง HR ทันที ถ้าตั้ง ALERT_EMAILS ไว้
