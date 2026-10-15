@@ -1,7 +1,8 @@
-// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v2.6
+// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v2.8
 // พนักงานใหม่ลงทะเบียนด้วยเบอร์โทร (+รูปหน้า) → 7 วันแรก ทำวันละ 2 ครั้ง ต้องอยู่ในพิกัดที่ทำงานเท่านั้น
-//   เช้า  = เช็คอินเข้างาน + ชื่อพี่เลี้ยง/คนสอนงานวันนี้          → แท็บ "เข้า-ออกงาน" (ประเภท = เข้างาน)
-//   เย็น  = ตอบคำถามการสอนงาน + เช็คเอาท์เลิกงาน                → แท็บ "เข้า-ออกงาน" (ประเภท = เลิกงาน) + แท็บ "คำตอบ"
+//   เช้า  = เช็คอินเข้างานอย่างเดียว                              → แท็บ "เข้า-ออกงาน" (ประเภท = เข้างาน)
+//   เย็น  = ชื่อพี่เลี้ยง/คนที่ไปด้วย + ตอบคำถาม + เช็คเอาท์        → แท็บ "เข้า-ออกงาน" (ประเภท = เลิกงาน) + แท็บ "คำตอบ"
+//          ไม่ทันตอนเย็น → ทำเช้าวันประเมินถัดไปได้ (วิธี = ทำเช้าวันถัดไป ไม่ต้องใส่เหตุผล)
 //   วันไหนไม่ได้ทำ → ทำย้อนหลังได้ (ต้องอยู่ที่ทำงาน + เวลาจริง + เหตุผล) ช่อง "วิธี" = ทำย้อนหลัง
 //
 // ══════════════ วิธีติดตั้ง / อัปเดต ══════════════
@@ -9,7 +10,7 @@
 //  2. เลือกฟังก์ชัน setupSheet ▸ Run (ถ้าขอสิทธิ์เพิ่ม — กดอนุญาต) → Execution log ต้องขึ้น "พร้อมใช้งาน" + จำนวนจุดพิกัด
 //  3. Deploy ▸ Manage deployments ▸ ✏️ ▸ Version: New version ▸ Deploy   (URL เดิม ไม่ต้องส่งใหม่)
 //     ครั้งแรก: Deploy ▸ New deployment ▸ Web app ▸ Execute as: Me / Who has access: Anyone (ทุกคน)
-//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.6"
+//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.8"
 //  v2.6 วันที่ 1 = วันที่ลงทะเบียน (ไม่ให้เลือกวันเริ่มงาน) · ประเมิน 7 วันทำงาน ข้ามวันอาทิตย์
 //  v2.4 รวมเข้างาน/เลิกงานไว้แท็บเดียว "เข้า-ออกงาน" — setupSheet ย้ายข้อมูลจากแท็บ "เข้างาน"/"เลิกงาน" เดิมให้ แล้วซ่อนแท็บเดิมไว้เป็นสำรอง
 //  v2.1 ใช้ Google Drive เก็บรูปหน้า → ตอน Run setupSheet จะขอสิทธิ์ Drive เพิ่ม (กดอนุญาต)
@@ -18,7 +19,7 @@
 //    ALERT_EMAILS = hr@rattanaphaiboon.com, …  ← อีเมลเตือนทันทีเมื่อน้องใหม่ "เสี่ยงสูง" + สรุปรายวัน (ถ้าเปิด)
 //  สรุปรายวัน (ไม่บังคับ): Run setupDailyTrigger ครั้งเดียว → 10.00 น. คนที่ยังไม่เช็คอินเข้างาน · 19.00 น. คนที่ยังไม่เช็คเอาท์
 
-var VERSION = '2.6';
+var VERSION = '2.8';
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';    // ทะเบียนพนักงาน — ใช้ตรวจสิทธิ์ล็อกอินของ HR เท่านั้น
 var STRUCT_SHEET_ID = '1tkJoaZj72MG9HIOkd-uM_Tvng-l2uqH61jUwqqiRTMI'; // ชีต "โครงสร้าง" — พิกัด/รัศมีที่ทำงาน + ตำแหน่งงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -60,7 +61,7 @@ var K_TS = 1, K_ID = 2, K_NAME = 3, K_PHONE = 4, K_W = 5, K_DATE = 6, K_DAY = 7,
     K_REASON = 11, K_MENTOR = 12, K_RESP = 13, K_DIST = 14, K_SITE = 15, K_OK = 16, K_LAT = 17, K_LNG = 18, K_ACC = 19, K_UA = 20;
 var K_HEAD = ['เวลาที่กดบันทึก', 'รหัสลงทะเบียน', 'ชื่อ - นามสกุล', 'เบอร์โทร', 'จังหวัด', 'วันที่', 'ทำงานวันที่',
               'ประเภท (เข้างาน / เลิกงาน)', 'เวลา', 'วิธี (GPS / ทำย้อนหลัง)', 'เหตุผลที่ทำย้อนหลัง',
-              'พี่เลี้ยง / คนสอนงานวันนี้ (เข้างาน)', 'รหัสคำตอบ (เลิกงาน → แท็บ คำตอบ)',
+              'พี่เลี้ยง / คนที่ไปทำงานด้วย (เลิกงาน)', 'รหัสคำตอบ (เลิกงาน → แท็บ คำตอบ)',
               'ระยะจากที่ทำงาน (ม.)', 'จุดที่ใกล้สุด', 'ผล', 'ละติจูด', 'ลองติจูด', 'ความแม่น GPS (ม.)', 'อุปกรณ์'];
 var K_N = K_HEAD.length;
 // ── แท็บ "คำตอบ" (คอลัมน์เดิมจาก v1 — ไม่เลื่อน) ──
@@ -107,6 +108,8 @@ function trackDates_(start) {
   return out;
 }
 function trackDay_(start, date) { return trackDates_(start).indexOf(date) + 1; }   // 0 = ไม่ใช่วันประเมิน
+// วันประเมินล่าสุดก่อน "today" — คำถามเย็นของวันนั้นทำเช้าวันถัดไปได้
+function prevTrack_(start, today) { return trackDates_(start).filter(function (d) { return d < today; }).pop() || ''; }
 function riskOf_(taught, ready, stay, helps) {
   if (taught === 'none' || stay <= 2) return 'red';
   if (taught === 'part' || ready <= 2 || stay === 3 || helps.length) return 'yellow';
@@ -228,7 +231,7 @@ function attObj_(r) {
   return { ts: ts instanceof Date ? ts.toISOString() : String(ts || ''), id: String(r[K_ID - 1] || ''), type: type,
            name: clean_(r[K_NAME - 1]), phone: clean_(r[K_PHONE - 1]), w: wOf_(r[K_W - 1]),
            date: cellYmd_(r[K_DATE - 1]), day: Number(r[K_DAY - 1]) || 0, time: cellHm_(r[K_TIME - 1]),
-           mode: clean_(r[K_MODE - 1]) === 'ทำย้อนหลัง' ? 'fix' : 'gps', reason: clean_(r[K_REASON - 1]),
+           mode: { 'ทำย้อนหลัง': 'fix', 'ทำเช้าวันถัดไป': 'next' }[clean_(r[K_MODE - 1])] || 'gps', reason: clean_(r[K_REASON - 1]),
            mentors: clean_(r[K_MENTOR - 1]).split(/\s*,\s*/).filter(String), resp: clean_(r[K_RESP - 1]),
            dist: Number(r[K_DIST - 1]) || 0, site: clean_(r[K_SITE - 1]), ok: clean_(r[K_OK - 1]) === 'ผ่าน',
            lat: Number(r[K_LAT - 1]) || 0, lng: Number(r[K_LNG - 1]) || 0, acc: Number(r[K_ACC - 1]) || 0 };
@@ -302,11 +305,11 @@ function attend_(p, type) {
     if (OFF_DAYS.indexOf(new Date(utcOf_(date)).getUTCDay()) >= 0) return { ok: false, error: 'วันอาทิตย์เป็นวันหยุด ไม่ต้องเช็คอิน' };
     return { ok: false, error: fix ? 'ทำย้อนหลังได้เฉพาะ 7 วันประเมิน และวันที่ผ่านมาแล้ว' : 'ครบ ' + TRACK_DAYS + ' วันแล้ว ไม่ต้องเช็คอินในแอปนี้แล้วค่ะ' };
   }
-  var time = '', reason = '';
+  var time = '', reason = '', next = fix && type === 'out' && date === prevTrack_(g.start, today);
   if (fix) {
     var m = clean_(p.time).match(/^(\d{1,2})[:.](\d{2})$/);
-    reason = clean_(p.reason).slice(0, 200);
-    if (!m || +m[1] > 23 || +m[2] > 59 || reason.length < 2) return { ok: false, error: 'กรุณาใส่เวลาจริงและเหตุผล' };
+    reason = clean_(p.reason).slice(0, 200) || (next ? 'ทำเช้าวันถัดไป' : '');
+    if (!m || +m[1] > 23 || +m[2] > 59 || reason.length < 2) return { ok: false, error: next ? 'กรุณาใส่เวลาเลิกงาน' : 'กรุณาใส่เวลาจริงและเหตุผล' };
     time = ('0' + m[1]).slice(-2) + '.' + m[2];
   }
   var lat = parseFloat(p.lat), lng = parseFloat(p.lng), acc = Math.round(parseFloat(p.acc) || 0);
@@ -315,10 +318,10 @@ function attend_(p, type) {
   var done = checkinsOf_(g.id).filter(function (c) { return c.ok && c.type === type && c.date === date; })[0];
   if (done) return { ok: false, error: (fix ? 'วันนั้น' : 'วันนี้') + 'บันทึก' + label + 'ไว้แล้ว (' + done.time + ' น.)' };
   var mentors = [], sv = null;
-  if (type === 'in') {
+  if (type === 'out') {   // เช้าเช็คอินอย่างเดียว · ชื่อพี่เลี้ยงใส่ตอนเย็น
     mentors = (p.mentors || []).map(function (t) { return clean_(t).replace(/,/g, ' ').slice(0, 60); }).filter(function (t) { return t.length >= 2; }).slice(0, 5);
-    if (!mentors.length) return { ok: false, error: 'กรุณาใส่ชื่อพี่เลี้ยง / คนสอนงานวันนี้' };
-  } else {
+    if (!mentors.length) return { ok: false, error: 'กรุณาใส่ชื่อพี่เลี้ยง / คนที่ไปทำงานด้วย' };
+    p.teachers = clean_(p.taught) === 'none' ? [] : mentors;
     sv = surveyCheck_(p);
     if (sv.error) return { ok: false, error: sv.error };
   }
@@ -332,7 +335,7 @@ function attend_(p, type) {
   if (!fix) time = hm_(now);
   var ua = clean_(p.ua).slice(0, 120), respId = '';
   var row = function (resp, ok) {
-    return [now, g.id, g.name, g.phone, g.w + ' ' + PROV[g.w], date, day, TYPE_LB[type], time, fix ? 'ทำย้อนหลัง' : 'GPS', reason,
+    return [now, g.id, g.name, g.phone, g.w + ' ' + PROV[g.w], date, day, TYPE_LB[type], time, next ? 'ทำเช้าวันถัดไป' : fix ? 'ทำย้อนหลัง' : 'GPS', reason,
             mentors.join(', '), resp, dist, best.s.name, ok ? 'ผ่าน' : 'นอกพื้นที่', lat, lng, acc, ua];
   };
   var lock = LockService.getScriptLock();
@@ -352,7 +355,7 @@ function attend_(p, type) {
   } finally { lock.releaseLock(); }
   if (type === 'out') {
     try {
-      alertRisk_(g, day, 'วันที่ ' + day + (fix ? ' (ทำย้อนหลัง)' : ''), sv.taught, sv.teachers, sv.ready, sv.stay, sv.helps,
+      alertRisk_(g, day, 'วันที่ ' + day + (next ? ' (ทำเช้าวันถัดไป)' : fix ? ' (ทำย้อนหลัง)' : ''), sv.taught, sv.teachers, sv.ready, sv.stay, sv.helps,
                  sv.comment + (sv.topics ? '\n[สอนเรื่อง] ' + sv.topics : '') + (sv.learn ? '\n[อยากเรียนรู้เพิ่ม] ' + sv.learn : ''), sv.risk, respId);
     } catch (e) { /* ส่งเมลไม่ได้ ไม่กระทบการบันทึก */ }
   }
@@ -540,7 +543,7 @@ function dailyDigest() {
   if (!to) return;
   // ก่อนเที่ยง = ใครยังไม่เช็คอินเข้างาน · บ่าย/เย็น = ใครยังไม่เช็คเอาท์ (ตอบคำถาม)
   var d = list_(), today = d.today, type = +Utilities.formatDate(new Date(), 'Asia/Bangkok', 'H') < 12 ? 'in' : 'out', lines = [];
-  var label = type === 'in' ? 'ยังไม่เช็คอินเข้างาน' : 'ยังไม่ตอบคำถาม + เช็คเอาท์';
+  var label = type === 'in' ? 'ยังไม่เช็คอินเข้างาน' : 'ยังไม่ตอบคำถาม + เช็คเอาท์ (ทำเช้าพรุ่งนี้ได้)';
   d.regs.forEach(function (g) {
     var day = trackDay_(g.start, today);
     if (g.status === 'ลาออก' || !day) return;
