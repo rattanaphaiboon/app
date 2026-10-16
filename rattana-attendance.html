@@ -1723,6 +1723,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
             <div class="home-time-value" id="homeTodayOut" style="color:var(--muted)">--:--</div>
           </div>
         </div>
+        <div id="homeTodaySync" style="margin-top:8px;font-size:12px;line-height:1.5"></div>
       </div>
 
       <!-- SECTION 2: Alert banner (incomplete pairs) -->
@@ -3916,7 +3917,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.39';
+const APP_VERSION = '13.40';
 /* ══════ v13.37 รูปแบบวัน/เวลามาตรฐานเดียวกันทุกเครื่อง (surat 13/10 "แก้วันเดือนปีและเวลาให้เป็นมาตรฐานเดียวกันทุกเครื่อง") ══════
    เดิมใช้ toLocaleDateString และ toLocaleTimeString แบบ th-TH ของเบราว์เซอร์ ซึ่งแต่ละเครื่อง/เบราว์เซอร์ให้ผลไม่เหมือนกัน (ปี พ.ศ./ค.ศ. · 12/24 ชม. · เลขศูนย์นำหน้า · คำว่า "น.")
    และ timeStr ของ log ในเครื่องก็มาจากตัวนี้ → เครื่องที่ให้ "8:05" แทน "08:05" ทำให้ข้อความ/การตัดอักษรเพี้ยน
@@ -5379,20 +5380,20 @@ async function resyncPendingLogs() {
   try { await resyncPendingLogsOnce_(); } finally { _resyncBusy = false; }
 }
 async function resyncPendingLogsOnce_() {
-  const cutoff = Date.now() - 3 * 24 * 3600 * 1000;   // ย้อนหลังไม่เกิน 3 วัน
+  const cutoff = Date.now() - 15 * 24 * 3600 * 1000;   // v13.40: ย้อนหลังไม่เกิน 15 วัน (เดิม 3 — สแกนที่ค้างนานกว่านั้นไม่เคยถูกส่ง)
   // v10.3: รวม log ที่ "รูปยังไม่ขึ้น" (photoPending) ด้วย — backend เส้นทาง dup จะเติมรูปให้
   const pending = logs.filter(l =>
     (!l.remote || (l.photoPending && l.photo && (l.photoTries || 0) < 5)) &&
     l.empId && l.type && l.ts &&
     new Date(l.ts).getTime() > cutoff
-  ).slice(0, 20);
+  ).slice(0, 30);
   if (!pending.length) return;
   let ok = 0;
   const rejected = []; let rejMsg = '';   // v13.03: ระบบไม่รับ (หน้าไม่ตรง) — เลิกวนส่ง + แจ้งเจ้าของ
   for (const l of pending) {
     try {
       const r = await apiCheckin(l);
-      l.remote = true; ok++;
+      l.remote = true; l.srv = (r && r.guard) ? 'guard' : (r && r.dup) ? 'dup' : 'ok'; l.srvAt = Date.now(); delete l.err; ok++;   // v13.40
       if (l.photoPending) {
         if (r && r.photoSaved) { l.photoPending = false; delete l.photoTries; }        // รูปขึ้นแล้ว ✓
         else if (!l.photo) { l.photoPending = false; }                                 // ไม่มีรูปให้ส่งแล้ว — เลิกวน
@@ -5409,10 +5410,12 @@ async function resyncPendingLogsOnce_() {
         continue;
       }
       if (e && e.timeout) break;   // v13.03: เซิร์ฟเวอร์ช้า — พักไว้รอบหน้า ไม่ยิงต่อทั้งกอง
+      l.err = String((e && e.message) || e).slice(0, 120); l.errAt = Date.now();   // v13.40
       /* ยังส่งไม่ได้ — ไว้รอบหน้า */
     }
   }
   if (ok) { saveLogs(); console.log('[resync] ดันขึ้นระบบ ' + ok + '/' + pending.length + ' รายการ'); }
+  if (pending.length) { try { saveLogs(); renderHomeTodayCard(); } catch (_) {} }   // v13.40 สถานะบนการ์ดหน้าแรก
   if (rejected.length) {
     dropRejectedLogs_(rejected);
     const mine = rejected.filter(l => empKey_(l.empId) === empKey_(currentUser && currentUser.empId));
@@ -7973,7 +7976,8 @@ async function doSelfCheckIn() {
   const timeStr = fmtTime_(new Date());
   cancelCheckinFlow();
   renderTodayStatus(); renderHomeTodayCard();
-  toast(`${type === 'out' ? '✓ บันทึกออกงาน' : '✓ บันทึกเข้างาน'} ${timeStr} น. · กำลังส่งขึ้นระบบ...`, 'success');
+  // v13.40 ยังไม่ขึ้น ✓ จนกว่าชีทจะรับ (surat 16/10 "ให้ข้อมูลลงในชีทก่อนค่อยขึ้นสำเร็จ") — การ์ดหน้าแรกขึ้น ⏳ กำลังบันทึก… จนกว่าเซิร์ฟเวอร์ตอบ
+  toast(`⏳ ${type === 'out' ? 'ออกงาน' : 'เข้างาน'} ${timeStr} น. — กำลังบันทึกลงระบบ…`, 'info');
 
   // v13.03: บันทึกในเครื่อง + ปิดจอสแกนแล้ว → ปล่อยปุ่มทันที ไม่ต้องรอเน็ต
   //   เดิมถือปุ่มไว้จนส่งขึ้นระบบเสร็จ — เน็ตค้าง = ปุ่มสแกนกดไม่ติด (เงียบ) จนกว่าจะปิดแอป
@@ -8018,11 +8022,12 @@ async function doSelfCheckIn() {
     showCheckinRejectedModal_(syncError, [saved]);
     return;
   }
+  if (!synced && syncError) { saved.err = String(syncError).slice(0, 120); saved.errAt = Date.now(); saveLogs(); }   // v13.40 จดสาเหตุไว้ให้การ์ดหน้าแรก/ประวัติ
   if (!synced && config.appsScriptUrl) setTimeout(() => { resyncPendingLogs().catch(() => {}); }, 120000);   // v13.03: ส่งซ้ำเองใน 2 นาที ไม่ต้องรอเปิดแอปใหม่
   // v11.0: ตั้งธงรูปค้าง "ก่อน" saveLogs — ไม่งั้น pruneLogs_ เห็น remote+ไม่มีธง → ลบรูปทิ้งก่อนได้ส่งซ้ำ
   if (synced) {
     if (syncRes && syncRes.photoSaved === false) { saved.photoPending = true; saved.photoTries = 0; }
-    saved.remote = true; saveLogs();   // v8.7: mark synced กัน re-sync ซ้ำ
+    saved.remote = true; saved.srv = (syncRes && syncRes.guard) ? 'guard' : (syncRes && syncRes.dup) ? 'dup' : 'ok'; saved.srvAt = Date.now(); delete saved.err; saveLogs();   // v8.7: mark synced กัน re-sync ซ้ำ · v13.40 จดผลเซิร์ฟเวอร์
   }
   // v12.54: เซิร์ฟเวอร์ตัดสิน เข้า/ออก จากชีทจริง — ถ้าไม่ตรงกับที่แอปเดาไว้ ให้แก้ตามชีท
   // (แอปเดาผิดได้เมื่อ log ในเครื่องว่าง: เปลี่ยนเครื่อง/ล้างแคช/กดก่อน sync กลับมา)
@@ -8040,12 +8045,13 @@ async function doSelfCheckIn() {
   }
 
   // Toast แสดง error จริง ไม่ใช่ generic message
-  const baseMsg = (type === 'out' ? '✓ บันทึกออกงาน' : '✓ บันทึกเข้างาน') + ' ' + timeStr + ' น.';
+  const lblMsg = (type === 'out' ? 'ออกงาน' : 'เข้างาน') + ' ' + timeStr + ' น.';   // v13.40
+  const baseMsg = '✓ ' + lblMsg;
   if (synced && syncRes && syncRes.guard) {
     // v10.8: ด่านเซิร์ฟเวอร์กันซ้ำ — เคยสแกนชนิดนี้ไปแล้วใน 1 ชม. (ระบบมีเวลาเดิมอยู่แล้ว ไม่บันทึกเพิ่ม)
     toast('ℹ️ ' + (syncRes.msg || 'สแกนไปแล้ว — ไม่บันทึกซ้ำ'), 'info');
   } else if (synced) {
-    toast(baseMsg + ' · ☁️ ขึ้นระบบแล้ว', 'success');
+    toast(baseMsg + ' · บันทึกลงระบบแล้ว ✓', 'success');
   } else if (config.appsScriptUrl) {
     const isAuthErr = syncError && (syncError.toLowerCase().includes('unauthorized') || syncError.toLowerCase().includes('invalid idtoken'));
     if (isAuthErr) {
@@ -8055,7 +8061,7 @@ async function doSelfCheckIn() {
       sessionClear_();   // v13.09
       toast(baseMsg + (_authFailShown ? ' · เก็บไว้ในเครื่อง — ส่งขึ้นระบบหลังเข้าสู่ระบบใหม่' : ' (local) · ⚠ Token หมดอายุ — กด Logout แล้ว Login ใหม่'), 'warning');   // v13.10
     } else {
-      toast(`${baseMsg} · ⚠ ${syncError}`, 'warning');
+      toast(`⚠ ${lblMsg} ยังไม่ลงระบบ (${syncError}) — เก็บไว้ในเครื่อง จะส่งซ้ำอัตโนมัติ · ถ้าพรุ่งนี้ยังไม่ขึ้น แจ้ง HR`, 'warning');
     }
   } else {
     toast(baseMsg, 'success');
@@ -8063,7 +8069,7 @@ async function doSelfCheckIn() {
 
   // v2.7: หลัง sync สำเร็จ → sync logs กลับมาจาก Sheet → update today card
   window._forceNextType = null;
-  renderTodayStatus(); renderTodayPage(); renderHistory(); renderDashboard();
+  renderTodayStatus(); renderTodayPage(); renderHistory(); renderDashboard(); renderHomeTodayCard();   // v13.40 การ์ดหน้าแรกอัปเดตสถานะลงระบบแม้ส่งไม่ผ่าน
   if (synced) {
     // v13.19: ไม่ดึงประวัติวันนี้ซ้ำหลังลงเวลา — เซิร์ฟเวอร์ตอบชนิดเข้า/ออกที่ลงจริงมาแล้ว (แก้ในเครื่องไปข้างบน)
     //   เดิมทุกการสแกนตามด้วย getCheckinLog อีก 1 คำขอ (อ่านท้ายชีท 6,000 แถว) = งานเซิร์ฟเวอร์ช่วงเข้างานเป็นสองเท่า
@@ -9871,7 +9877,7 @@ function renderHistoryLegacy(){
     <tr><td>${l.dateKey}</td><td>${l.timeStr}</td>
     <td><span class="tag ${l.type==='in'?'tag-in':'tag-out'}">${l.type==='in'?'เข้า':'ออก'}</span>
         ${l.retroactive?'<span class="tag tag-retro">ย้อน</span>':''}
-        ${l.remote?'<span class="tag" style="background:rgba(52,152,219,.15);color:var(--info)">☁️</span>':''}</td>
+        ${l.remote?'<span class="tag" style="background:rgba(52,152,219,.15);color:var(--info)">☁️</span>':'<span class="tag" style="background:rgba(243,156,18,.15);color:var(--warning)" title="ยังไม่ลงระบบ">⏳</span>'}</td>
     <td>${l.name}</td><td>${l.locName||l.branch||'-'}</td>
     <td>${l.scannedBy==='self'?'ตนเอง':l.scannedBy?.startsWith('supervisor:')?'หัวหน้า':l.scannedBy||'-'}</td></tr>`).join('');
 }
@@ -17150,6 +17156,29 @@ function renderHomeTodayCard() {
     outEl.textContent = outEvt ? fmtT(outEvt) : '--:--';
     outEl.style.color = outEvt ? 'var(--text)'   : 'var(--muted)';
   }
+  // v13.40 ลงระบบแล้วหรือยัง: สแกนวันนี้ที่ยังไม่ถึงชีท + สแกนวันก่อนที่ค้างในเครื่อง (surat 16/10 "ให้ข้อมูลลงในชีทก่อนค่อยขึ้นสำเร็จ")
+  try { renderHomeSyncLine_(tl, fmtT); } catch (e) { console.warn('[homeSync]', e && e.message); }
+}
+function renderHomeSyncLine_(tl, fmtT) {
+  const el = document.getElementById('homeTodaySync'); if (!el) return;
+  const me = currentUser ? empKey_(currentUser.empId) : '';
+  const pendToday = tl.filter(l => !l.remote);
+  const pendOld = me ? logs.filter(l => !l.remote && empKey_(l.empId) === me && l.dateKey && l.dateKey < todayKey()) : [];
+  const lbl = l => (l.type === 'out' ? 'ออก' : 'เข้า') + ' ' + fmtT(l);
+  if (!tl.length && !pendOld.length) { el.innerHTML = ''; return; }
+  if (!pendToday.length && !pendOld.length) { el.innerHTML = '<span style="color:var(--success)">☁️ ลงระบบแล้วทุกรายการ</span>'; return; }
+  // เพิ่งสแกนไม่ถึง 3 นาทีและยังไม่มีคำตอบผิดพลาด = กำลังส่ง
+  const busy = (typeof _ckSyncing === 'number' && _ckSyncing > 0) || (typeof _resyncBusy !== 'undefined' && _resyncBusy) || pendToday.some(l => !l.err && Date.now() - new Date(l.ts).getTime() < 180000);
+  el.innerHTML = (pendToday.length ? `<div style="color:var(--warning)">${busy ? '⏳ กำลังบันทึกลงระบบ… ' : '⚠ ยังไม่ลงระบบ: '}${pendToday.map(lbl).join(', ')}</div>` : '') +
+    (pendOld.length ? `<div style="color:var(--danger)">⚠ สแกนวันก่อน ${pendOld.length} รายการยังไม่ลงระบบ (${pendOld.slice(0, 3).map(l => fmtDateTh_(l.dateKey + 'T00:00:00') + ' ' + lbl(l)).join(' · ')}${pendOld.length > 3 ? ' …' : ''})</div>` : '') +
+    (busy ? '' : `<button onclick="event.stopPropagation();homeResyncNow_()" style="margin-top:4px;background:none;border:1px solid var(--border);border-radius:8px;padding:4px 10px;font:inherit;font-size:12px;color:var(--navy);cursor:pointer">🔄 ส่งอีกครั้ง</button> <span style="color:var(--muted)">ถ้ายังไม่ขึ้น แจ้ง HR ให้หยอดเวลา</span>`);
+}
+async function homeResyncNow_() {
+  const el = document.getElementById('homeTodaySync'); if (el) el.innerHTML = '<span style="color:var(--muted)">⏳ กำลังส่ง…</span>';
+  try { await resyncPendingLogs(); } catch (_) {}
+  try { renderHomeTodayCard(); renderTodayStatus(); } catch (_) {}
+  const left = currentUser ? logs.filter(l => !l.remote && empKey_(l.empId) === empKey_(currentUser.empId)).length : 0;
+  toast(left ? `⚠ ยังส่งไม่ได้ ${left} รายการ — เช็คอินเทอร์เน็ตแล้วลองใหม่ หรือแจ้ง HR` : '✓ ส่งขึ้นระบบครบแล้ว', left ? 'warning' : 'success');
 }
 
 function feedIcon(kind) {
