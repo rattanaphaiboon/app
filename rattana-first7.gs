@@ -1,4 +1,4 @@
-// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v2.9
+// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v3.0
 // พนักงานใหม่ลงทะเบียนด้วยเบอร์โทร (+รูปหน้า) → 7 วันแรก ทำวันละ 2 ครั้ง ต้องอยู่ในพิกัดที่ทำงานเท่านั้น
 //   เช้า  = เช็คอินเข้างานอย่างเดียว                              → แท็บ "เข้า-ออกงาน" (ประเภท = เข้างาน)
 //   เย็น  = ชื่อพี่เลี้ยง/คนที่ไปด้วย + ตอบคำถาม + เช็คเอาท์        → แท็บ "เข้า-ออกงาน" (ประเภท = เลิกงาน) + แท็บ "คำตอบ"
@@ -10,7 +10,8 @@
 //  2. เลือกฟังก์ชัน setupSheet ▸ Run (ถ้าขอสิทธิ์เพิ่ม — กดอนุญาต) → Execution log ต้องขึ้น "พร้อมใช้งาน" + จำนวนจุดพิกัด
 //  3. Deploy ▸ Manage deployments ▸ ✏️ ▸ Version: New version ▸ Deploy   (URL เดิม ไม่ต้องส่งใหม่)
 //     ครั้งแรก: Deploy ▸ New deployment ▸ Web app ▸ Execute as: Me / Who has access: Anyone (ทุกคน)
-//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.9"
+//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"3.0"
+//  v3.0 ไม่บังคับพิกัดแล้ว — บันทึกได้ทุกที่ ช่อง "ผล" ลงว่า อยู่ในพิกัด / นอกพิกัด / ไม่มีพิกัด (เปิด GPS ไม่ได้)
 //  v2.9 แก้ชีตตัด 0 หน้าเบอร์โทร (0891234567 → 891234567) ทำให้ล็อกอินด้วยเบอร์ไม่เจอ → อ่านเบอร์เติม 0 คืน + บันทึกเบอร์/วันที่/เวลาเป็นข้อความ
 //  v2.6 วันที่ 1 = วันที่ลงทะเบียน (ไม่ให้เลือกวันเริ่มงาน) · ประเมิน 7 วันทำงาน ข้ามวันอาทิตย์
 //  v2.4 รวมเข้างาน/เลิกงานไว้แท็บเดียว "เข้า-ออกงาน" — setupSheet ย้ายข้อมูลจากแท็บ "เข้างาน"/"เลิกงาน" เดิมให้ แล้วซ่อนแท็บเดิมไว้เป็นสำรอง
@@ -20,7 +21,8 @@
 //    ALERT_EMAILS = hr@rattanaphaiboon.com, …  ← อีเมลเตือนทันทีเมื่อน้องใหม่ "เสี่ยงสูง" + สรุปรายวัน (ถ้าเปิด)
 //  สรุปรายวัน (ไม่บังคับ): Run setupDailyTrigger ครั้งเดียว → 10.00 น. คนที่ยังไม่เช็คอินเข้างาน · 19.00 น. คนที่ยังไม่เช็คเอาท์
 
-var VERSION = '2.9';
+var VERSION = '3.0';
+var AREA = { in: 'อยู่ในพิกัด', out: 'นอกพิกัด', none: 'ไม่มีพิกัด' };
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';    // ทะเบียนพนักงาน — ใช้ตรวจสิทธิ์ล็อกอินของ HR เท่านั้น
 var STRUCT_SHEET_ID = '1tkJoaZj72MG9HIOkd-uM_Tvng-l2uqH61jUwqqiRTMI'; // ชีต "โครงสร้าง" — พิกัด/รัศมีที่ทำงาน + ตำแหน่งงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -63,7 +65,7 @@ var K_TS = 1, K_ID = 2, K_NAME = 3, K_PHONE = 4, K_W = 5, K_DATE = 6, K_DAY = 7,
 var K_HEAD = ['เวลาที่กดบันทึก', 'รหัสลงทะเบียน', 'ชื่อ - นามสกุล', 'เบอร์โทร', 'จังหวัด', 'วันที่', 'ทำงานวันที่',
               'ประเภท (เข้างาน / เลิกงาน)', 'เวลา', 'วิธี (GPS / ทำย้อนหลัง)', 'เหตุผลที่ทำย้อนหลัง',
               'พี่เลี้ยง / คนที่ไปทำงานด้วย (เลิกงาน)', 'รหัสคำตอบ (เลิกงาน → แท็บ คำตอบ)',
-              'ระยะจากที่ทำงาน (ม.)', 'จุดที่ใกล้สุด', 'ผล', 'ละติจูด', 'ลองติจูด', 'ความแม่น GPS (ม.)', 'อุปกรณ์'];
+              'ระยะจากที่ทำงาน (ม.)', 'จุดที่ใกล้สุด', 'พิกัด (อยู่ในพิกัด / นอกพิกัด)', 'ละติจูด', 'ลองติจูด', 'ความแม่น GPS (ม.)', 'อุปกรณ์'];
 var K_N = K_HEAD.length;
 // ── แท็บ "คำตอบ" (คอลัมน์เดิมจาก v1 — ไม่เลื่อน) ──
 var RESP_SHEET = 'คำตอบ';
@@ -242,7 +244,9 @@ function attObj_(r) {
            date: cellYmd_(r[K_DATE - 1]), day: Number(r[K_DAY - 1]) || 0, time: cellHm_(r[K_TIME - 1]),
            mode: { 'ทำย้อนหลัง': 'fix', 'ทำเช้าวันถัดไป': 'next' }[clean_(r[K_MODE - 1])] || 'gps', reason: clean_(r[K_REASON - 1]),
            mentors: clean_(r[K_MENTOR - 1]).split(/\s*,\s*/).filter(String), resp: clean_(r[K_RESP - 1]),
-           dist: Number(r[K_DIST - 1]) || 0, site: clean_(r[K_SITE - 1]), ok: clean_(r[K_OK - 1]) === 'ผ่าน',
+           dist: Number(r[K_DIST - 1]) || 0, site: clean_(r[K_SITE - 1]),
+           ok: clean_(r[K_OK - 1]) !== 'นอกพื้นที่',   // 'นอกพื้นที่' = ระบบเก่า (v2.x) ที่บล็อกไม่ให้บันทึก
+           area: { 'นอกพิกัด': 'out', 'นอกพื้นที่': 'out', 'ไม่มีพิกัด': 'none' }[clean_(r[K_OK - 1])] || 'in',
            lat: Number(r[K_LAT - 1]) || 0, lng: Number(r[K_LNG - 1]) || 0, acc: Number(r[K_ACC - 1]) || 0 };
 }
 function me_(f) {
@@ -322,7 +326,8 @@ function attend_(p, type) {
     time = ('0' + m[1]).slice(-2) + '.' + m[2];
   }
   var lat = parseFloat(p.lat), lng = parseFloat(p.lng), acc = Math.round(parseFloat(p.acc) || 0);
-  if (!(Math.abs(lat) > 0 && Math.abs(lng) > 0)) return { ok: false, error: 'อ่านตำแหน่ง GPS ไม่ได้' };
+  var hasGps = Math.abs(lat) > 0 && Math.abs(lng) > 0;   // ไม่บังคับ — เปิด GPS ไม่ได้ก็ยังบันทึกได้ (ไม่มีพิกัด)
+  if (!hasGps) { lat = ''; lng = ''; acc = ''; }
   var label = type === 'in' ? 'เข้างาน' : 'เลิกงาน';
   var done = checkinsOf_(g.id).filter(function (c) { return c.ok && c.type === type && c.date === date; })[0];
   if (done) return { ok: false, error: (fix ? 'วันนั้น' : 'วันนี้') + 'บันทึก' + label + 'ไว้แล้ว (' + done.time + ' น.)' };
@@ -334,26 +339,23 @@ function attend_(p, type) {
     sv = surveyCheck_(p);
     if (sv.error) return { ok: false, error: sv.error };
   }
+  // ไม่บล็อกแล้ว — คำนวณระยะไว้ลงชีตว่า อยู่ในพิกัด / นอกพิกัด
   var best = null;
-  provSites_(g.w).forEach(function (s) {
+  if (hasGps) provSites_(g.w).forEach(function (s) {
     var d = distM_(lat, lng, s.lat, s.lng);
     if (!best || d - s.r < best.d - best.s.r) best = { s: s, d: d };
   });
-  if (!best) return { ok: false, error: 'ยังไม่ได้ตั้งพิกัดที่ทำงานของจังหวัดนี้ กรุณาติดต่อฝ่ายบุคคล' };
-  var dist = Math.round(best.d), inside = dist - Math.min(acc, GPS_GRACE) <= best.s.r, now = new Date();
+  var dist = best ? Math.round(best.d) : '', area = !best ? 'none' : (dist - Math.min(acc, GPS_GRACE) <= best.s.r ? 'in' : 'out');
+  var site = best ? best.s.name : '', now = new Date();
   if (!fix) time = hm_(now);
   var ua = clean_(p.ua).slice(0, 120), respId = '';
   var row = function (resp, ok) {
     return [now, g.id, g.name, txt_(g.phone), g.w + ' ' + PROV[g.w], txt_(date), day, TYPE_LB[type], txt_(time), next ? 'ทำเช้าวันถัดไป' : fix ? 'ทำย้อนหลัง' : 'GPS', reason,
-            mentors.join(', '), resp, dist, best.s.name, ok ? 'ผ่าน' : 'นอกพื้นที่', lat, lng, acc, ua];
+            mentors.join(', '), resp, dist, site, AREA[area], lat, lng, acc, ua];
   };
   var lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
-    if (!inside) {
-      attSheet_().appendRow(row('', false));
-      return { ok: true, inside: false, dist: dist, r: best.s.r, acc: acc, site: best.s.name };
-    }
     if (type === 'out') {
       respId = Utilities.formatDate(now, 'Asia/Bangkok', 'yyMMdd') + '-' + Utilities.getUuid().slice(0, 6).toUpperCase();
       respSheet_().appendRow([respId, now, g.id, g.name, txt_(g.phone), g.w + ' ' + (PROV[g.w] || ''), g.pos, '', txt_(g.start),
@@ -368,7 +370,8 @@ function attend_(p, type) {
                  sv.comment + (sv.topics ? '\n[สอนเรื่อง] ' + sv.topics : '') + (sv.learn ? '\n[อยากเรียนรู้เพิ่ม] ' + sv.learn : ''), sv.risk, respId);
     } catch (e) { /* ส่งเมลไม่ได้ ไม่กระทบการบันทึก */ }
   }
-  return { ok: true, inside: true, type: type, time: time, dist: dist, r: best.s.r, acc: acc, site: best.s.name,
+  styleOnce_();
+  return { ok: true, inside: true, area: area, type: type, time: time, dist: dist, acc: acc, site: site,
            risk: sv ? sv.risk : '', me: me_(f) };
 }
 // ตรวจคำตอบก่อนกลับบ้าน (ตรงกับ surveyCheck ในหน้าเว็บ)
@@ -594,7 +597,15 @@ function migrateOldTabs_() {
   }
   return moved;
 }
-// แต่งสีคอลัมน์ "ประเภท" ให้แยกง่าย: เข้างาน = เขียว · เลิกงาน = ฟ้า · ผลนอกพื้นที่ = แดง
+// แต่งสีครั้งเดียวหลังอัปเดตเวอร์ชัน (ไม่ต้อง Run setupSheet)
+function styleOnce_() {
+  try {
+    var pr = PropertiesService.getScriptProperties();
+    if (pr.getProperty('STYLE_VER') === VERSION) return;
+    styleAttTab_(); pr.setProperty('STYLE_VER', VERSION);
+  } catch (e) {}
+}
+// แต่งสีคอลัมน์ "ประเภท" ให้แยกง่าย: เข้างาน = เขียว · เลิกงาน = ฟ้า · พิกัด: อยู่ในพิกัด = เขียว · นอกพิกัด = แดง · ไม่มีพิกัด = เหลือง
 function styleAttTab_() {
   try {
     var sh = attSheet_(), n = Math.max(sh.getMaxRows() - 1, 1);
@@ -604,7 +615,10 @@ function styleAttTab_() {
     });
     rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(TYPE_LB.in).setBackground('#d9f2e3').setFontColor('#1e8449').setBold(true).setRanges([tCol]).build());
     rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(TYPE_LB.out).setBackground('#dbe8fb').setFontColor('#1a4fa3').setBold(true).setRanges([tCol]).build());
-    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('นอกพื้นที่').setBackground('#fde2df').setFontColor('#c0392b').setRanges([okCol]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(AREA.in).setBackground('#d9f2e3').setFontColor('#1e8449').setRanges([okCol]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(AREA.out).setBackground('#fde2df').setFontColor('#c0392b').setBold(true).setRanges([okCol]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(AREA.none).setBackground('#fef3d7').setFontColor('#a87800').setRanges([okCol]).build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('นอกพื้นที่').setBackground('#eeeeee').setFontColor('#777777').setRanges([okCol]).build());
     sh.setConditionalFormatRules(rules);
   } catch (e) { /* แต่งสีไม่ได้ก็ไม่เป็นไร */ }
 }
