@@ -1789,7 +1789,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.371</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.373</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -12150,7 +12150,7 @@ function _pvPreData(dd){
       totStores+=stores.length; totTrips++;
       const refs=rs.map(r=>r.ref).filter(Boolean);
       const tcat=_catCsOfRefs(refs);
-      if(!tcat.total){ const cs=Math.round(rs.reduce((s,r)=>s+(r.cs||0),0)); if(cs){ tcat.total=cs; tcat.other=cs; } }   // บิลหลุดกรอบโหลด → ใช้ลังที่บันทึกไว้
+      if(!tcat.total){ const cs=Math.round(rs.reduce((s,r)=>s+(r.cs||0),0)); if(cs){ tcat.total=cs; tcat.other=cs; tcat.fromSheet=1; } }   // v9.372: ธง = เลขลังมาจากคอลัมน์ "จำนวนลัง" ในชีท (เทียบได้ แต่แยกหมวดไม่ได้)   // บิลหลุดกรอบโหลด → ใช้ลังที่บันทึกไว้
       return {tr, man:_manOrd, stores, scs:stores.map(nm=>_csLabel(seen.get(nm))), sct:stores.map(nm=>_csTitle(seen.get(nm))),
         scat:stores.map(nm=>_catCsLine(_catCsOfRefs(seen.get(nm)),{tracked:1})), tcat, refs, srefs:stores.map(nm=>seen.get(nm)), pu:[],
         area:(typeof _lineAreaOf==='function')?_lineAreaOf(rs):null,   // v9.283: แถบ 📍 จังหวัด · อำเภอ ต่อเที่ยว (เหมือนแท็บส่ง)
@@ -12164,7 +12164,7 @@ function _pvPreData(dd){
   });
   return {rows, totTrucks:rows.length, totTrips, totStores, dateStr:dd};
 }
-function pvSetDate(d){ _pvDate=d; renderPhotoView(); }
+function pvSetDate(d){ _pvDate=d; _pvBillKey=''; renderPhotoView(); }   // v9.373: เปลี่ยนวัน = ลองเติมใบของวันใหม่
 function _pvCats(c,lab){                      // แถบลังแยกหมวด (เว้นหมวดที่ไม่มี)
   if(!c)return '';
   const P=[['rice','ข้าว'],['sugar','น้ำตาล'],['cig','บุหรี่'],['other','อื่นๆ']];
@@ -12430,20 +12430,83 @@ function _pvPlanCsMiss(refs){
   const bm=(typeof billMap!=='undefined')?billMap:null; if(!bm)return 0;
   return refs.filter(x=>{ const b=bm[x]; return !(b&&b.skus&&Object.keys(b.skus).length); }).length;
 }
+// ══ v9.373: เติมรายการสินค้าของ "ใบในแผน" ที่ยังไม่มีใน billMap ══
+//   ทั้ง 2 แท็บใช้ชื่อคอลัมน์ชุดเดียวกัน (DI_REF/AR_CODE/AR_NAME/DI_DATE/SKU_NAME/TRD_QTY/TRD_Q_FREE/TRD_UTQNAME/TRD_G_AMT)
+let _pvBillTried=new Set(), _pvBillBusy=false, _pvBillKey='';
+function _pvRefTab(ref){ return /^(BK|BV)/i.test(String(ref||'').replace(/\s+/g,''))?ORDER_SHEET_TAB:DSDC_SHEET_TAB; }
+function _pvNeedBills(refs){
+  const bm=(typeof billMap!=='undefined')?billMap:null; if(!bm)return [];
+  return [...new Set((refs||[]).filter(Boolean))].filter(x=>{
+    if(_pvBillTried.has(x))return false;
+    const b=bm[x]; return !(b&&b.skus&&Object.keys(b.skus).length);
+  });
+}
+async function _pvFillBills(refs){
+  const need=_pvNeedBills(refs); if(!need.length)return 0;
+  if(!await _pvEnsureProducts())return 0;
+  const byTab={}; need.forEach(x=>{ const t=_pvRefTab(x); (byTab[t]=byTab[t]||[]).push(x); });
+  let got=0;
+  for(const tab of Object.keys(byTab)){
+    const list=byTab[tab];
+    for(let i=0;i<list.length;i+=60){
+      const part=list.slice(i,i+60);
+      part.forEach(x=>_pvBillTried.add(x));           // จำไว้ก่อน ยิงพลาดก็ไม่วนซ้ำรัว ๆ
+      try{
+        const tq=`SELECT A,B,C,D,I,J,K,L,N WHERE ${part.map(x=>`B='${String(x).replace(/'/g,"")}'`).join(' or ')}`;
+        const rows=await fetchSheet(tab,ORDER_SHEET_ID,{timeoutMs:60000,retries:1,tq});
+        // ★ ตัดสิน "ทับได้ไหม" ครั้งเดียวต่อใบ ก่อนวนแถว — ถ้าเช็คในลูป พอใส่ SKU แรกไปแล้ว
+        //   ใบนั้นจะมี skus ทันที แถวที่เหลือของใบเดียวกันจะโดนกันหมด (ได้ SKU เดียวต่อใบ)
+        const want=new Set(part), skip=new Set(), made=new Set();
+        part.forEach(x=>{ const b=billMap[x]; if(b&&b.skus&&Object.keys(b.skus).length)skip.add(x); });
+        (rows||[]).forEach(rw=>{
+          const ref=String(rw['DI_REF']||'').trim(); if(!ref||skip.has(ref)||!want.has(ref))return;
+          if(!made.has(ref)){ made.add(ref);
+            const arCode=String(rw['AR_CODE']||'').trim(), ci=(typeof customerInfoMap!=='undefined'&&customerInfoMap[arCode])||null, o=billMap[ref]||{};
+            billMap[ref]={...o,ref,arCode,arName:rw['AR_NAME']||o.arName||'',date:rw['DI_DATE']||o.date||'',
+              district:(ci?ci.dist:'')||o.district||'', province:(ci?ci.prov:'')||o.province||'',
+              pvFilled:1, totalW:0,totalV:0,totalAmt:0,cigAmt:0,skus:{}};
+          }
+          const b=billMap[ref];
+          const sku=String(rw['SKU_NAME']||'').trim(); if(!sku)return;
+          const ea=eaOf(rw), amt=parseFloat(String(rw['TRD_G_AMT']||'0').replace(/,/g,''))||0;
+          const pr=products[sku]||{w:0,v:0}, wEa=_dqWPerEa(sku,rw['TRD_UTQNAME']);
+          b.totalW+=wEa*ea; b.totalV+=(pr.v||0)*ea; b.totalAmt+=amt;
+          if(pr.cat==='cig')b.cigAmt=(b.cigAmt||0)+amt;
+          const e=b.skus[sku]||(b.skus[sku]={ea:0,cs:0,w:0,v:0});
+          const cs=(parseFloat(rw['TRD_QTY']||0)||0)+(parseFloat(rw['TRD_Q_FREE']||0)||0);
+          e.ea+=ea; e.cs+=cs; e.w+=wEa*ea; e.v+=(pr.v||0)*ea; got++;
+        });
+      }catch(e){ console.warn('[เทียบรูปตู้] เติมรายการสินค้าไม่ได้ ('+tab+')',e); }
+    }
+  }
+  if(got)console.log(`🧾 เทียบรูปตู้: เติมรายการสินค้าให้ใบในแผน ${need.length} ใบ (${got} บรรทัด)`);
+  return got;
+}
+function _pvBillKick(refs){
+  const key=((typeof currentWarehouse!=='undefined'&&currentWarehouse)||'')+'|'+_pvDate;
+  if(_pvBillBusy||_pvBillKey===key)return;
+  if(!_pvNeedBills(refs).length){ _pvBillKey=key; return; }
+  _pvBillBusy=true;
+  _pvFillBills(refs).then(n=>{ _pvBillBusy=false; _pvBillKey=key;
+    if(n&&document.getElementById('pvList'))renderPhotoView(); })
+   .catch(()=>{ _pvBillBusy=false; _pvBillKey=key; });
+}
 function _pvPhotoCard(t,planCs,ls,m,r,refs,tp){
   if(!t)return `<div class="pv-none">ยังไม่มีใบคุมของคันนี้ในวันที่เลือก<br><span style="font-size:11px;color:#9BAAB8">คนขับยังไม่รับงาน หรือใบคุมลงคนละวัน</span></div>`;
   const th=_pvThumb(t.photo), alt=_pvAlt(t.photo);
   // เทียบกับ "ยอดที่ควรได้" = แผน − ของไม่พอ (สต็อกไม่พอตั้งแต่แรก ไม่ใช่ของขาดตอนขึ้นรถ)
   const pt0=(planCs&&planCs.total)||0, lost=(ls&&ls.lostCs>0)?ls.lostCs:0;
   const pt=Math.max(0,pt0-lost), ac=t.cs.total;
-  const csMiss=_pvPlanCsMiss(refs);   // v9.304: แผนนับลังไม่ครบ = ห้ามเทียบ
+  // v9.372: พรีปลีกเก็บ "จำนวนลัง" ไว้ในชีทอยู่แล้ว ไม่ต้องพึ่ง billMap (คีย์คนละชุด: ใบขาย DC vs ใบจอง BK/BV)
+  const _csSheet=!!(planCs&&planCs.fromSheet);
+  const csMiss=_csSheet?0:_pvPlanCsMiss(refs);   // v9.304: แผนนับลังไม่ครบ = ห้ามเทียบ
   let diff='';
   if(csMiss){ diff=`<span class="pv-kv" style="background:#FFF4E6;color:#9A4A06;font-weight:700" title="ใบจอง ${csMiss} ใบจาก ${refs.length} ใบของเที่ยวนี้ ไม่มีรายการสินค้าในข้อมูลที่โหลด (ใบจองที่ส่งไปแล้วถูกตัดออกตั้งแต่ตอนโหลด) — เลข &quot;แผน ... ลัง&quot; จึงนับไม่ครบ เทียบกับของจริงไม่ได้&#10;น้ำหนัก/ปริมาตรของแผนยังครบ เพราะอ่านจากชีท Keepdata ที่บันทึกไว้ตอนจัดรถ&#10;กด 🔍 ดูรายการสินค้าได้">⚠ เทียบลังไม่ได้ · แผนไม่มีรายการสินค้า ${csMiss}/${refs.length} ใบ</span>`; }
   else if(ac!=null&&pt){ const d=Math.round(ac-pt), tol=Math.max(3,Math.round(pt*0.02));
     diff=Math.abs(d)<=tol?`<span class="pv-ok">ตรงกับแผน${d?` (${d>0?'+':''}${d})`:''}</span>`
-      :`<span class="${Math.abs(d)/pt>0.1?'pv-bad':'pv-kv'}" style="${Math.abs(d)/pt>0.1?'':'font-weight:700'}" title="เทียบกับยอดที่ควรได้ ${pt.toLocaleString('en-US')} ลัง${lost?` (แผน ${Math.round(pt0).toLocaleString('en-US')} − ของไม่พอ ${Math.round(lost).toLocaleString('en-US')})`:''}">${d>0?'มากกว่าแผน +':'น้อยกว่าแผน '}${d.toLocaleString('en-US')} ลัง</span>`; }
+      :`<span class="${Math.abs(d)/pt>0.1?'pv-bad':'pv-kv'}" style="${Math.abs(d)/pt>0.1?'':'font-weight:700'}" title="เทียบกับยอดที่ควรได้ ${pt.toLocaleString('en-US')} ลัง${lost?` (แผน ${Math.round(pt0).toLocaleString('en-US')} − ของไม่พอ ${Math.round(lost).toLocaleString('en-US')})`:''}${_csSheet?'&#10;เลขลังของแผน = คอลัมน์ &quot;จำนวนลัง&quot; ที่บันทึกไว้ในชีทพรีปลีก':''}">${d>0?'มากกว่าแผน +':'น้อยกว่าแผน '}${d.toLocaleString('en-US')} ลัง</span>`; }
   // v9.274: กดป้ายแล้วดูได้ว่าต่างกันที่สินค้าอะไร (user: "อยากรู้ว่าเป็นสินค้าอะไร")
-  if(diff&&t&&t.ticket&&refs&&refs.length){
+  if(diff&&t&&t.ticket&&refs&&refs.length&&!_csSheet){   // v9.372: พรีปลีก — ป๊อปอัปรายสินค้าอ่านฝั่งแผนจาก billMap จะได้ 0 ทั้งตาราง จึงไม่เปิดให้กด
     const _i=_pvDiffCtx.push({ticket:t.ticket,refs,plate:t.plateRaw||'',lost:lost,card:Math.round(ac-pt)})-1;
     diff=`<span class="pvd-btn" onclick="event.stopPropagation();pvDiffOpen(${_i})" title="กดดูว่าต่างกันที่สินค้าอะไรบ้าง (แยกตามร้านด้วย)">${diff}<span style="font-size:10px;margin-left:3px">🔍</span></span>`;
   }
@@ -12524,6 +12587,7 @@ function renderPhotoView(){
   if(!h)h=`<div class="pv-none">วันที่ ${_pvDate} ยังไม่มีแผนจัดรถหรือใบคุมให้เทียบ</div>`;
   else h=`<div style="font-size:12px;color:#6B7A90;margin-bottom:10px">วันส่ง <b>${_pvDate}</b> · เทียบได้ ${nPair} เที่ยว${nSwap?` · <b style="color:#C2410C">เปลี่ยนรถ ${nSwap}</b>`:''}${nMiss?` · ยังไม่มีใบคุม ${nMiss} เที่ยว`:''}${extra.length?` · ใบคุมนอกแผน ${extra.length} ใบ`:''}</div>`+h;
   host.innerHTML=h;
+  try{ _pvBillKick([].concat.apply([],trips.map(x=>(x.tp&&x.tp.refs)||[]))); }catch(e){ console.warn('[เทียบรูปตู้] bills',e); }   // v9.373: เติมรายการสินค้าฝั่งแผน (ใบจอง+ใบขาย)
   try{ _pvWVKick(tks.map(x=>x.ticket)); }catch(e){ console.warn('[เทียบรูปตู้] wv',e); }   // v9.296: น้ำหนัก/ปริมาตรจริง (โหลดหลังวาด แล้ววาดซ้ำรอบเดียว)
 }
 // ══ v9.40: จัดการค้างส่ง (เลือกใบที่ให้ขึ้นค้างส่ง) ══
