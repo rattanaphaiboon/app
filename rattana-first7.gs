@@ -1,4 +1,4 @@
-// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v2.8
+// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v2.9
 // พนักงานใหม่ลงทะเบียนด้วยเบอร์โทร (+รูปหน้า) → 7 วันแรก ทำวันละ 2 ครั้ง ต้องอยู่ในพิกัดที่ทำงานเท่านั้น
 //   เช้า  = เช็คอินเข้างานอย่างเดียว                              → แท็บ "เข้า-ออกงาน" (ประเภท = เข้างาน)
 //   เย็น  = ชื่อพี่เลี้ยง/คนที่ไปด้วย + ตอบคำถาม + เช็คเอาท์        → แท็บ "เข้า-ออกงาน" (ประเภท = เลิกงาน) + แท็บ "คำตอบ"
@@ -10,7 +10,8 @@
 //  2. เลือกฟังก์ชัน setupSheet ▸ Run (ถ้าขอสิทธิ์เพิ่ม — กดอนุญาต) → Execution log ต้องขึ้น "พร้อมใช้งาน" + จำนวนจุดพิกัด
 //  3. Deploy ▸ Manage deployments ▸ ✏️ ▸ Version: New version ▸ Deploy   (URL เดิม ไม่ต้องส่งใหม่)
 //     ครั้งแรก: Deploy ▸ New deployment ▸ Web app ▸ Execute as: Me / Who has access: Anyone (ทุกคน)
-//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.8"
+//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"2.9"
+//  v2.9 แก้ชีตตัด 0 หน้าเบอร์โทร (0891234567 → 891234567) ทำให้ล็อกอินด้วยเบอร์ไม่เจอ → อ่านเบอร์เติม 0 คืน + บันทึกเบอร์/วันที่/เวลาเป็นข้อความ
 //  v2.6 วันที่ 1 = วันที่ลงทะเบียน (ไม่ให้เลือกวันเริ่มงาน) · ประเมิน 7 วันทำงาน ข้ามวันอาทิตย์
 //  v2.4 รวมเข้างาน/เลิกงานไว้แท็บเดียว "เข้า-ออกงาน" — setupSheet ย้ายข้อมูลจากแท็บ "เข้างาน"/"เลิกงาน" เดิมให้ แล้วซ่อนแท็บเดิมไว้เป็นสำรอง
 //  v2.1 ใช้ Google Drive เก็บรูปหน้า → ตอน Run setupSheet จะขอสิทธิ์ Drive เพิ่ม (กดอนุญาต)
@@ -19,7 +20,7 @@
 //    ALERT_EMAILS = hr@rattanaphaiboon.com, …  ← อีเมลเตือนทันทีเมื่อน้องใหม่ "เสี่ยงสูง" + สรุปรายวัน (ถ้าเปิด)
 //  สรุปรายวัน (ไม่บังคับ): Run setupDailyTrigger ครั้งเดียว → 10.00 น. คนที่ยังไม่เช็คอินเข้างาน · 19.00 น. คนที่ยังไม่เช็คเอาท์
 
-var VERSION = '2.8';
+var VERSION = '2.9';
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';    // ทะเบียนพนักงาน — ใช้ตรวจสิทธิ์ล็อกอินของ HR เท่านั้น
 var STRUCT_SHEET_ID = '1tkJoaZj72MG9HIOkd-uM_Tvng-l2uqH61jUwqqiRTMI'; // ชีต "โครงสร้าง" — พิกัด/รัศมีที่ทำงาน + ตำแหน่งงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -117,10 +118,14 @@ function riskOf_(taught, ready, stay, helps) {
 }
 // เบอร์โทร → 0xxxxxxxxx (ตัดขีด/ช่องว่าง, +66 → 0)
 function phone_(p) {
-  var d = String(p || '').replace(/\D/g, '');
+  var d = String(p == null ? '' : p).replace(/\.0+$/, '').replace(/\D/g, '');
   if (/^66\d{9}$/.test(d)) d = '0' + d.slice(2);
+  // ชีตแปลงเบอร์เป็นตัวเลขแล้วตัด 0 ข้างหน้า: มือถือเหลือ 9 หลัก (8x/9x/6x) · บ้านเหลือ 8 หลัก → เติม 0 คืน
+  if (/^[1-9]\d{7,8}$/.test(d)) d = '0' + d;
   return /^0\d{8,9}$/.test(d) ? d : '';
 }
+// เขียนลงชีตเป็นข้อความ (กันชีตแปลง 0891234567 → 891234567 · 08.10 → 8.1 · 2026-10-16 → วันที่)
+function txt_(v) { v = String(v == null ? '' : v); return v ? "'" + v : ''; }
 function distM_(lat1, lng1, lat2, lng2) {
   var R = 6371000, rad = Math.PI / 180;
   var dLat = (lat2 - lat1) * rad, dLng = (lng2 - lng1) * rad;
@@ -224,6 +229,10 @@ function allAtt_() {
 function checkinsOf_(id) { return allAtt_().filter(function (c) { return c.id === id; }); }
 function cellHm_(v) {
   if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Bangkok', 'HH.mm');
+  if (typeof v === 'number' && v >= 0 && v < 24) {   // 08.10 ถูกแปลงเป็นเลข 8.1
+    var h = Math.floor(v), mi = Math.round((v - h) * 100);
+    return ('0' + h).slice(-2) + '.' + ('0' + mi).slice(-2);
+  }
   var m = clean_(v).match(/^(\d{1,2})[:.](\d{2})/); return m ? ('0' + m[1]).slice(-2) + '.' + m[2] : clean_(v);
 }
 function attObj_(r) {
@@ -279,7 +288,7 @@ function register_(p) {
     var key = Utilities.getUuid().replace(/-/g, '');
     var url = '';
     try { url = savePhoto_(photo, start + ' ' + name + ' ' + ph + '.jpg'); } catch (e) { url = 'บันทึกรูปไม่สำเร็จ: ' + e.message; }
-    regSheet_().appendRow([id, new Date(), name, ph, pos, w + ' ' + PROV[w], start, key, 'ทำงานอยู่', '', clean_(p.ua).slice(0, 120), '', thumb, url]);
+    regSheet_().appendRow([id, new Date(), name, txt_(ph), pos, w + ' ' + PROV[w], txt_(start), txt_(key), 'ทำงานอยู่', '', clean_(p.ua).slice(0, 120), '', thumb, url]);
     SpreadsheetApp.flush();
     return { ok: true, me: me_(findReg_('id', id)), key: key, created: true };
   } finally { lock.releaseLock(); }
@@ -335,7 +344,7 @@ function attend_(p, type) {
   if (!fix) time = hm_(now);
   var ua = clean_(p.ua).slice(0, 120), respId = '';
   var row = function (resp, ok) {
-    return [now, g.id, g.name, g.phone, g.w + ' ' + PROV[g.w], date, day, TYPE_LB[type], time, next ? 'ทำเช้าวันถัดไป' : fix ? 'ทำย้อนหลัง' : 'GPS', reason,
+    return [now, g.id, g.name, txt_(g.phone), g.w + ' ' + PROV[g.w], txt_(date), day, TYPE_LB[type], txt_(time), next ? 'ทำเช้าวันถัดไป' : fix ? 'ทำย้อนหลัง' : 'GPS', reason,
             mentors.join(', '), resp, dist, best.s.name, ok ? 'ผ่าน' : 'นอกพื้นที่', lat, lng, acc, ua];
   };
   var lock = LockService.getScriptLock();
@@ -347,9 +356,9 @@ function attend_(p, type) {
     }
     if (type === 'out') {
       respId = Utilities.formatDate(now, 'Asia/Bangkok', 'yyMMdd') + '-' + Utilities.getUuid().slice(0, 6).toUpperCase();
-      respSheet_().appendRow([respId, now, g.id, g.name, g.phone, g.w + ' ' + (PROV[g.w] || ''), g.pos, '', g.start,
+      respSheet_().appendRow([respId, now, g.id, g.name, txt_(g.phone), g.w + ' ' + (PROV[g.w] || ''), g.pos, '', txt_(g.start),
                               day, 'วันที่ ' + day, TAUGHT[sv.taught], sv.teachers.join(', '), sv.ready, sv.stay, sv.helps.join(', '),
-                              sv.comment, RISK[sv.risk], ua, '', '', '', '', sv.topics, sv.learn, date]);
+                              sv.comment, RISK[sv.risk], ua, '', '', '', '', sv.topics, sv.learn, txt_(date)]);
     }
     attSheet_().appendRow(row(respId, true));
   } finally { lock.releaseLock(); }
