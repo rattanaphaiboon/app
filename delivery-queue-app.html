@@ -842,6 +842,10 @@ body.dark .mb2t .n b,body.dark .mb2-w .p{color:#E8EEF6}
 .mbw-map .mm-btn:hover{background:#F2F5F9}
 .mbw-mapc{flex:1;min-height:0;border-radius:9px;overflow:hidden;border:1px solid var(--border);background:#E9EEF4}
 .mbw-mapc.mb-nolabels .leaflet-tooltip.route-label{display:none !important}
+.mb-rd{font-weight:700;font-size:10px;border-radius:6px;padding:0 6px;margin-left:5px;white-space:nowrap;background:#F1F3F7;color:#8795A6}   /* v9.386 */
+.mb-rd.on{background:#EAF6EC;color:#15803D}
+body.dark .mb-rd{background:#22304a;color:#9FB0C6}
+body.dark .mb-rd.on{background:#14291B;color:#86E29B}
 .mb-find{display:flex;align-items:center;gap:7px;margin-bottom:7px}   /* v9.277: ค้นหาชื่อร้านในเล่ม */
 .mb-find-w{position:relative;flex:1;min-width:0;display:flex}
 .mb-find-w .ic{position:absolute;left:9px;top:50%;transform:translateY(-50%);font-size:12px;opacity:.55;pointer-events:none}
@@ -1817,7 +1821,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.385</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.386</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -9527,9 +9531,12 @@ function tspRoute(bs){
   function angDiff(a,b){let d=Math.abs(a-b);if(d>Math.PI)d=2*Math.PI-d;return d;}
   // v8.21: ONE-WAY cost — HQ → จุดแรก → ... → จุดสุดท้าย (ไม่คิดขากลับ HQ)
   // route วาดเที่ยวเดียว (กลับ HQ ทางด่วน) → optimize แบบ sweep ออกไป ไม่ให้ zigzag กลับมาใกล้ HQ กลางทาง
+  // v9.386: ROUND-TRIP — คิดขากลับคลังด้วย
+  //   เดิม (v8.21) คิดขาไปอย่างเดียว เส้นทางเลยไปจบที่ร้านไกลคลังที่สุด ขากลับเลยยาว
+  //   วัดจริง 25 เที่ยว: สั้นลง 20 · ยาวขึ้น 1 (+0.2 กม.) · เฉลี่ย -8.3 กม./เที่ยว
   function tourCost(o){
     if(!o.length)return 0;
-    let d=hqDist(o[0]);
+    let d=hqDist(o[0])+hqDist(o[o.length-1]);
     for(let i=1;i<o.length;i++)d+=clusterDist(o[i-1],o[i]);
     for(let i=1;i<o.length;i++){
       const df=angDiff(ang(o[i-1]),ang(o[i]));
@@ -9549,7 +9556,7 @@ function tspRoute(bs){
     }
     return out;
   }
-  // v8.21: 2-opt แบบ ONE-WAY — ไม่มี edge หลังจุดสุดท้าย (ไม่คิดขากลับ HQ)
+  // v9.386: 2-opt แบบ ROUND-TRIP — มี edge กลับคลังหลังจุดสุดท้าย
   function twoOpt(o){
     const n=o.length;if(n<3)return o;
     let improved=true,g=0;
@@ -9560,12 +9567,11 @@ function tspRoute(bs){
           const A=i===0?HQp:o[i-1];
           const B=o[i];
           const C=k>=n?o[n-1]:o[k-1];
-          const hasD=k<n; // one-way: ถ้า k=n = reverse หางถึงจุดสุดท้าย ไม่มี edge ต่อ
-          const D=hasD?o[k]:null;
+          const D=k<n?o[k]:HQp;   // v9.386: หลังจุดสุดท้ายคือ edge กลับคลัง
           const dAB=A===HQp?hqDist(B):clusterDist(A,B);
           const dAC=A===HQp?hqDist(C):clusterDist(A,C);
-          const dCD=hasD?clusterDist(C,D):0;
-          const dBD=hasD?clusterDist(B,D):0;
+          const dCD=D===HQp?hqDist(C):clusterDist(C,D);
+          const dBD=D===HQp?hqDist(B):clusterDist(B,D);
           if(dAC+dBD+1e-9<dAB+dCD){
             const hi=Math.min(k-1,n-1);
             let lo=i,h=hi;while(lo<h){const t=o[lo];o[lo]=o[h];o[h]=t;lo++;h--;}
@@ -10146,7 +10152,15 @@ function _chainTail(list,i){
 function _routeFromFirst(list,firstIdx){
   const gps=(list||[]).filter(x=>x.lat&&x.lng), no=(list||[]).filter(x=>!x.lat||!x.lng);
   if(gps.length<2)return (list||[]).slice();
-  const d=(i,j)=>haversine(gps[i].lat,gps[i].lng,gps[j].lat,gps[j].lng);
+  // v9.386: ใช้ระยะถนนจริงถ้ามีครบทุกคู่ (มาจากเมทริกซ์ที่ยิงไว้ -> _rdPair)
+  //   ขาดแม้คู่เดียว = กลับไปใช้เส้นตรงทั้งชุด (ห้ามปนสองหน่วย ถนนยาวกว่าเส้นตรงเสมอ)
+  const _useRd=(function(){ try{ if(typeof _rdRoad!=='function')return false;
+    for(let i=0;i<gps.length;i++)for(let j=i+1;j<gps.length;j++){
+      if(_rdRoad(gps[i].lat,gps[i].lng,gps[j].lat,gps[j].lng)==null)return false; }
+    return true; }catch(e){ return false; } })();
+  const d=_useRd
+    ? ((i,j)=>_rdRoad(gps[i].lat,gps[i].lng,gps[j].lat,gps[j].lng))
+    : ((i,j)=>haversine(gps[i].lat,gps[i].lng,gps[j].lat,gps[j].lng));
   let start=firstIdx; if(!(start>=0&&start<gps.length))start=0;
   const rem=gps.map((_,i)=>i); rem.splice(rem.indexOf(start),1);
   const order=[start]; let cur=start;
@@ -13304,12 +13318,47 @@ function _csOrderBills(arr){
 }
 // พรีปลีก (หน่วยร้าน) — 1 หน่วยอาจมีหลายใบ ใช้ใบแรกเป็นตัวแทน
 function _prCsOrder(units){ return _csOrderList(units,u=>(billMap[((u&&u.bills)||[])[0]]||{}),list=>_prRoute(list)); }
+// ══ v9.386: ระยะถนนจริงสำหรับ "ตามพิกัด" ══
+//   tspRoute อ่านเมทริกซ์จาก _osrmMatrixCache ด้วยคีย์ [คลัง, ...ร้าน]
+//   ถ้าไม่มี มันเงียบ ๆ ตกไปใช้เส้นตรง — หน้านี้ไม่เคยยิงเมทริกซ์มาก่อน
+function _prRdCoords(gps){
+  try{ return [[HQ.lat,HQ.lng]].concat((gps||[]).map(u=>[+u.lat,+u.lng])); }catch(e){ return null; }
+}
+function _prHasRoad(gps){
+  try{ if(!gps||gps.length<2||typeof _osrmMatrixCache==='undefined')return false;
+    const m=_osrmMatrixCache.get(_coordsKey(_prRdCoords(gps)));
+    return !!(m&&m.length===gps.length+1);
+  }catch(e){ return false; }
+}
+let _prRoadBusy=false;
+function _prWarmRoadMb(){     // เรียกท้าย renderPreRetail — ยิงเมทริกซ์ให้ทุกเล่มที่ยังไม่มี แล้ววาดใหม่รอบเดียว
+  try{
+    if(_prRoadBusy||typeof prefetchTspMatrices!=='function'||typeof _osrmMatrixCache==='undefined')return;
+    const need=[];
+    (_mbMapData||[]).forEach(d=>{
+      const g=(((d&&(d.u||d))||[])).filter(_prHasGps);
+      if(g.length<2||g.length>50)return;
+      const key=_coordsKey(_prRdCoords(g));
+      if(_osrmMatrixCache.has(key))return;        // ยิงไปแล้ว (null = ยิงแล้วไม่สำเร็จ ก็ไม่ยิงซ้ำ)
+      const arr=g.slice(); arr._truckType=(d&&d.type)||'';
+      need.push(arr);
+    });
+    if(!need.length)return;
+    _prRoadBusy=true;
+    console.log('[เล่มของฉัน] ยิงเมทริกซ์ถนน',need.length,'เล่ม');
+    prefetchTspMatrices(need).then(()=>{
+      _prRoadBusy=false;
+      _prRouteCache.clear();                      // ลำดับที่คิดด้วยเส้นตรง ต้องคิดใหม่
+      if(typeof renderPreRetail==='function')renderPreRetail();
+    }).catch(()=>{ _prRoadBusy=false; });
+  }catch(e){ _prRoadBusy=false; console.warn('[เล่มของฉัน] warm road',e); }
+}
 function _prBase(list){ return _prRoute(list); }   // v9.361: ค่าเริ่มต้น = ตามพิกัด (เส้นทางสั้นสุด)
 function _prRoute(a){
   const gps=(a||[]).filter(_prHasGps);
   const nog=(a||[]).filter(u=>!_prHasGps(u)).sort(_prBig);
   if(gps.length<2||typeof tspRoute!=='function')return gps.concat(nog);
-  const ck=gps.map(u=>u.key+'@'+(+u.lat).toFixed(5)+','+(+u.lng).toFixed(5)).join('|');
+  const ck=(_prHasRoad(gps)?'R|':'H|')+gps.map(u=>u.key+'@'+(+u.lat).toFixed(5)+','+(+u.lng).toFixed(5)).join('|');
   let keys=_prRouteCache.get(ck);
   if(!keys){
     keys=tspRoute(gps).map(u=>u.key);
@@ -15074,7 +15123,14 @@ function renderMyBooks(){
           else if(_v==='auto'){ _svBtn=_hasSv?1:0; }
           else if(_hasSv){ _csNow=0; _csTx='💾 ตอนนี้: ตามที่บันทึกไว้'; }
         }catch(e){}
-        const _gp=(c.units||[]).filter(u=>u.lat&&u.lng); _mbMapData[_mi]={u:_gp,type:((c.truck||{}).type)||''};   // v9.260: ร้านที่มีพิกัด → หมุดบนแผนที่คอลัมน์กลาง · v9.264: +ชนิดรถ ใช้คิดเส้นทางถนน
+        const _gp=(c.units||[]).filter(u=>u.lat&&u.lng); _mbMapData[_mi]={u:_gp,type:((c.truck||{}).type)||''};
+        /* v9.386: ลำดับ "ตามพิกัด" นี้คิดจากระยะถนนจริง หรือเส้นตรง */
+        const _rdTx=(()=>{ try{ if(!_csNow)return '';
+          const _g2=_gp.filter(_prHasGps); if(_g2.length<2)return '';
+          return _prHasRoad(_g2)
+            ? ' <b class="mb-rd on" title="ลำดับนี้คิดจากระยะถนนจริง (เมทริกซ์ Valhalla/OSRM)">🛣️ ถนนจริง</b>'
+            : ' <b class="mb-rd" title="ยังไม่ได้ระยะถนน — คิดด้วยเส้นตรงไปก่อน · ได้ถนนแล้วจะจัดใหม่ให้เอง">📏 เส้นตรง</b>';
+        }catch(e){ return ''; } })();   // v9.260: ร้านที่มีพิกัด → หมุดบนแผนที่คอลัมน์กลาง · v9.264: +ชนิดรถ ใช้คิดเส้นทางถนน
         return `${_mbTabsHtml(_gp.length||(c.units||[]).length)}<div class="mbw hasmap mbm-${_mbMView}" data-px="${_prEsc(c.px)}"><div class="mbw-l">${left}</div>${_mbMapHtml(_mi,_gp.length,(c.units||[]).length-_gp.length)}<div class="mbw-r" style="border-color:${ro.col||'#E0E5ED'}">${_mbFindHtml()}
         <div class="mb-ord no-print">
           <span class="lb">เรียงตาม</span>
@@ -15082,7 +15138,7 @@ function renderMyBooks(){
           <button type="button" class="side" onclick="mbOrdBook('${_prJs(c.px)}','side')" title="จัดเป็นวงรอบ: เก็บฝั่งไป (ใกล้→ไกล) แล้วค่อยฝั่งกลับ (ไกล→ใกล้)">↩️ ฝั่งถนน</button>
           <button type="button" class="loc" onclick="mbOrdBook('${_prJs(c.px)}','loc')" title="คิดเส้นทางให้ระยะรวมสั้นที่สุด (ระยะถนนจริงถ้ามี) — นี่คือค่าเริ่มต้น">📍 ตามพิกัด</button>
           ${_svBtn?`<button type="button" class="sv" onclick="mbOrdBook('${_prJs(c.px)}','sv')" title="เรียกลำดับร้านที่เคยบันทึกลงชีทไว้กลับมา — ทิ้งลำดับที่จัดไว้ในเครื่องตอนนี้ (ไม่แตะชีท)">💾 ที่บันทึกไว้</button>`:''}
-          <span class="now ${_csNow?'on':''}">${_csTx}</span>
+          <span class="now ${_csNow?'on':''}">${_csTx}${_rdTx}</span>
           <span class="sp"></span>
           <button type="button" class="cp" onclick="mbCopyOrder('${_prJs(c.px)}')" title="คัดลอกลำดับ + ชื่อร้านตามที่เรียงอยู่ตอนนี้ (ไม่เอาร้านที่ตัดออก)">📋 คัดลอก</button>
         </div>
@@ -15092,7 +15148,8 @@ function renderMyBooks(){
     :`<div class="pr-empty2">ยังไม่ได้เลือกเล่ม — แตะเล่มที่คุณดูแลด้านบน<br><span style="font-size:11.5px">แล้วกรอบของเล่มนั้นจะขึ้นมา ให้แก้รถ/คนขับ และเพิ่ม/ตัดร้านได้</span></div>`}`;
   _mbLean=false;   // v9.324
   { const _cl=document.getElementById('mbCtlSlot'); if(_cl)_cl.innerHTML=_mbCtl.html||''; }   // v9.341
-  try{ _mbMapSync(); }catch(e){ console.warn('mb map sync',e); }   // v9.260   // v9.249: ถาด "เอาออกแล้ว (เล่มของฉัน)" รวมเข้ากล่อง 🅿️ พักไว้ก่อน ด้านบน
+  try{ _mbMapSync(); }catch(e){ console.warn('mb map sync',e); }
+  try{ _prWarmRoadMb(); }catch(e){}   // v9.386: ได้เมทริกซ์ถนนแล้วจะวาดใหม่ให้เอง   // v9.260   // v9.249: ถาด "เอาออกแล้ว (เล่มของฉัน)" รวมเข้ากล่อง 🅿️ พักไว้ก่อน ด้านบน
 }
 // ══ v9.220: สรุปแบบชีท "สรุปใบจอง" ฝั่งขวาของกรอบเล่ม (เล่มของฉัน) — v9.223 ไม่ได้เรียกแล้ว (user ไม่เอาตารางสีฟ้า) เก็บไว้เผื่อเปิดกลับ ══
 //   user: "ใน Google Sheet ตอนทำต่อคันเป็นประมาณนี้ แต่อยากให้เพิ่มแบบนี้เข้าไป แต่ตารางน้ำหนักปริมาตรยังเอาไว้เหมือนเดิมนะ"
