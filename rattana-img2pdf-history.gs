@@ -3,9 +3,9 @@
 //         (Execute as: Me / Who has access: Anyone)
 //
 // เช็กว่า deploy เวอร์ชันใหม่แล้วจริงไหม: เปิด URL ต่อท้าย ?action=ping
-//   ต้องเห็น {"ok":true,"version":"5.8", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
+//   ต้องเห็น {"ok":true,"version":"5.9", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
 
-var VERSION = '5.8';
+var VERSION = '5.9';
 var FOLDER_NAME = 'Rattana Scanner Files';
 var SHARED_FOLDER_NAME = 'ส่วนกลาง (ทุกคนเห็นได้)';
 var RETENTION_DAYS = 90;
@@ -589,4 +589,32 @@ function doGet(e) {
   } catch (err) {
     return json_({ ok: false, error: String(err) });
   }
+}
+
+// ---------- แก้ย้อนหลัง: เติม .pdf ให้ไฟล์เก่าที่ชื่อไม่มี .pdf ----------
+// รันครั้งเดียวจากหน้า Apps Script: เลือกฟังก์ชัน fixPdfNames ตรงแถบบน → Run → ดูผลใน Execution log
+// ไล่ทุกโฟลเดอร์ใต้ "Rattana Scanner Files" + ทุกโฟลเดอร์ที่เชื่อมมาจาก Drive (user 20/10/2569)
+function fixPdfNames() {
+  var seen = {}, fixed = [], checked = 0;
+  function walk(folder, depth) {
+    if (!folder || depth > 6 || seen[folder.getId()]) return;
+    seen[folder.getId()] = true;
+    var files = folder.getFilesByType('application/pdf');
+    while (files.hasNext()) {
+      var f = files.next(); checked++;
+      var n = f.getName();
+      if (/\.pdf$/i.test(n)) continue;
+      try { f.setName(n + '.pdf'); fixed.push(n + '  →  ' + n + '.pdf'); }
+      catch (e) { fixed.push(n + '  (แก้ไม่ได้: ' + (e && e.message || e) + ')'); }
+    }
+    var subs = folder.getFolders();
+    while (subs.hasNext()) walk(subs.next(), depth + 1);
+  }
+  walk(getOrCreateFolder_(), 0);
+  allFolders_().forEach(function (fo) {
+    if (!fo.driveFolderId) return;
+    try { walk(DriveApp.getFolderById(fo.driveFolderId), 0); } catch (e) {}
+  });
+  Logger.log('ตรวจแล้ว ' + checked + ' ไฟล์ · เติม .pdf ให้ ' + fixed.length + ' ไฟล์\n' + fixed.join('\n'));
+  return fixed;
 }
