@@ -1966,7 +1966,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.435</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.436</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -4586,6 +4586,7 @@ async function loadData(){
       const norm=s=>(s||'').toString().replace(/\s+/g,'').toUpperCase();
       const bkByRef={}; bills.forEach(b=>{if(!b.isDsDc)bkByRef[norm(b.ref)]=b;});   // ใบจอง BK/BV ที่รอดในพูล
       const dsToBk={}; dsDcTodayRows.forEach(r=>{const ds=r['DI_REF'],bk=_parseBkRef(r['DI_REMARK']); if(ds&&bk&&!dsToBk[ds])dsToBk[ds]=norm(bk);});
+      bills.forEach(b=>{ if(b&&b.isDsDc&&dsToBk[b.ref])b.bkRef=dsToBk[b.ref]; });   // v9.436: ใบส่ง -> ใบจองที่อ้าง (ใช้ตรวจ "จัดแล้วหรือยัง" ข้ามเลข)
       const before=bills.length, dropped=[]; let mismatch=0;
       bills=bills.filter(b=>{
         if(b.isDsDc){ const bk=dsToBk[b.ref]; const bkBill=bk?bkByRef[bk]:null;
@@ -11727,8 +11728,20 @@ function _gbOtherStops(plate,tr){
 function _gbWaiting(){
   try{
     if(typeof bills==='undefined'||!bills||!bills.length)return [];
+    // ══ v9.436: "จัดแล้วหรือยัง" ตรวจข้ามเลข ใบส่ง <-> ใบจอง ══
+    //   user: "อันที่เปิดบิลแล้วไปตรวจ BKBV ด้วยว่าได้เอาไปจัดหรือยัง"
+    //   แผนบันทึกไว้ด้วยเลขใบจอง (BK/BV) -> พอเปิดบิลเป็นใบส่ง (DS/DC) เลขเปลี่ยน -> เดิมขึ้น "ยังไม่ได้จัด" ทั้งที่จัดแล้ว
+    //   · ใบส่ง: ใบจองที่มันอ้าง (b.bkRef จาก DI_REMARK) อยู่ในแผน = จัดแล้ว
+    //   · ใบจอง: มีใบส่งที่อ้างมัน (_bkDocMap) อยู่ในแผน = จัดแล้ว
+    const _n=s=>String(s||'').replace(/\s+/g,'').toUpperCase();
     const used=new Set();
-    (keepData||[]).forEach(r=>{ if(!dashFilterDate||r.deliveryDate===dashFilterDate){ if(r.ref)used.add(String(r.ref).trim()); } });
+    (keepData||[]).forEach(r=>{ if(!dashFilterDate||r.deliveryDate===dashFilterDate){ if(r.ref)used.add(_n(r.ref)); } });
+    const _bkm=(typeof _bkDocMap!=='undefined'&&_bkDocMap)||{};
+    const _isUsed=b=>{ const r=_n(b.ref);
+      if(used.has(r))return true;
+      if(b.bkRef&&used.has(_n(b.bkRef)))return true;
+      const ds=_bkm[r]; if(ds)for(const d of ds)if(used.has(_n(d)))return true;
+      return false; };
     // v9.418: user — "ร้านที่ยังไม่จัด ไม่ต้องเอาร้านปลีกมา"
     //   ดูแท็บ 🚚 ส่ง = ตัดบิลพรีปลีกออก · ดูแท็บ 🛒 ปลีก = เอาเฉพาะบิลพรีปลีก
     //   ใช้ _prBillOk ตัวเดียวกับหน้าพรีปลีก (ร้านสาย "ส่ง-" ไม่นับเป็นปลีก · ≤1 ตัน · หรือเซลล์มีรถประจำ)
@@ -11737,7 +11750,7 @@ function _gbWaiting(){
       :(!String(b.slmnCode||'').toUpperCase().startsWith('HS')&&(b.totalW||0)<=1000); }catch(e){ return false; } };
     const seen=new Set(), out=[]; let cut=0;
     bills.forEach(b=>{ if(!b||!b.lat||!b.lng)return;
-      if(used.has(String(b.ref||'').trim()))return;
+      if(_isUsed(b))return;   // v9.436: ตรวจข้ามเลขใบส่ง<->ใบจองด้วย
       if(_isPre(b)!==_pre){ cut++; return; }
       const k=(b.arCode||b.arName||b.ref)+'';
       if(seen.has(k))return; seen.add(k);
@@ -11795,7 +11808,15 @@ function _gbMapDraw(stops,plate,tr,noXY){
         .bindPopup('<b>'+_prEsc(p.name)+'</b>'+(p.days?'<br>วันส่ง '+_prEsc(p.days):'')
           +'<br><span style="color:#1D4ED8;font-weight:700">'+_prEsc(p.who)+'</span>');
       _sideB.push({name:p.name,days:p.days,sub:p.who,mk}); });
-    _gbWaiting().filter(p=>!mine.has(p.name)&&near(p)).forEach(p=>{ nC++;
+    // ══ v9.436: "ค้างเฉพาะวันนี้" — เอาเฉพาะร้านที่วันส่งตรงกับวันของกระดาน ══
+    //   user: "เอาค้างเฉพาะวันนี้" · ร้านที่ไม่มีข้อมูลวันส่ง = เก็บไว้ (ตัดสินไม่ได้ ห้ามซ่อนงานจริง)
+    //   ที่ซ่อนไปนับไว้โชว์ท้ายป้ายกำกับ จะได้รู้ว่ามีของวันอื่นค้างอยู่อีกเท่าไร
+    const _bdDt=(function(){ try{ return (typeof parseAnyDate==='function')
+      ?parseAnyDate((_gbLast&&_gbLast.d&&_gbLast.d.dateStr)||''):null; }catch(e){ return null; } })();
+    let nSkip=0;
+    _gbWaiting().filter(p=>!mine.has(p.name)&&near(p))
+      .filter(p=>{ if(_gbDayOk(p.days,_bdDt))return true; nSkip++; return false; })
+      .forEach(p=>{ nC++;
       const mk=L.marker([p.lat,p.lng],{icon:_gbDot('#EA580C','',15)}).addTo(m)
         .bindPopup('<b>'+_prEsc(p.name)+'</b>'+(p.days?'<br>วันส่ง '+_prEsc(p.days):'')
           +'<br><span style="color:#EA580C;font-weight:700">ยังไม่ได้จัดรถ</span>');
@@ -11808,7 +11829,7 @@ function _gbMapDraw(stops,plate,tr,noXY){
         .bindTooltip('<span style="font-weight:700;color:#9B1C1C">'+s.n+'. </span>'+_prEsc(s.name),
           {permanent:true,direction:'right',offset:[12,0],className:'route-label',opacity:.95});
       _sideA.push({name:s.name,days:s.days,sub:s.cs,n:s.n,mk}); });
-    try{ _gbSideDraw(_sideA,_sideB,_sideC,noXY||[],m); }catch(e){ console.warn('[กระดานสรุป] แถบรายชื่อ',e); }
+    try{ _gbSideDraw(_sideA,_sideB,_sideC,noXY||[],m,nSkip); }catch(e){ console.warn('[กระดานสรุป] แถบรายชื่อ',e); }
     if(stops.length>1){
       const line=L.polyline(stops.map(s=>[s.lat,s.lng]),{color:'#9B1C1C',weight:3,opacity:.75,lineJoin:'round'}).addTo(m);
       if(typeof fetchOsrmRoute==='function')fetchOsrmRoute(stops.map(s=>[s.lat,s.lng]),(_gbLast&&'')||'')
@@ -11816,7 +11837,7 @@ function _gbMapDraw(stops,plate,tr,noXY){
     }
     const lg=document.querySelector('#gbMapOv .gbm-lg s.b'), lc=document.querySelector('#gbMapOv .gbm-lg s.c');
     if(lg)lg.textContent='คันอื่น/เที่ยวอื่นในแผนวันเดียวกัน ('+nB+')';
-    if(lc)lc.textContent='ยังไม่ได้จัดรถ'+((typeof _gbSrc!=='undefined'&&_gbSrc==='pre')?' (เฉพาะปลีก) ':' (ไม่รวมปลีก) ')+'('+nC+')';
+    if(lc)lc.textContent='ยังไม่ได้จัดรถ วันนี้'+((typeof _gbSrc!=='undefined'&&_gbSrc==='pre')?' (เฉพาะปลีก) ':' (ไม่รวมปลีก) ')+'('+nC+')'+(nSkip>0?' · ซ่อนของวันอื่น '+nSkip:'');   // v9.436
     m.fitBounds(L.latLngBounds(pts).pad(0.14),{animate:false});
     _gbMapObj=m; setTimeout(()=>{try{m.invalidateSize();}catch(e){}},120);
   }catch(e){ console.warn('[กระดานสรุป] แผนที่',e); }
@@ -11828,7 +11849,7 @@ function _gbSideGo(i){
   const o=_gbSideMk[i]; if(!o||!o.mk||!_gbMapObj)return;
   try{ _gbMapObj.setView(o.mk.getLatLng(),Math.max(_gbMapObj.getZoom(),13),{animate:true}); o.mk.openPopup(); }catch(e){}
 }
-function _gbSideDraw(A,B,C,noXY,m){
+function _gbSideDraw(A,B,C,noXY,m,nSkip){
   const host=document.getElementById('gbSide'); if(!host)return;
   const E=s=>(typeof _prEsc==='function')?_prEsc(s):String(s==null?'':s);
   _gbSideMk=[];
@@ -11843,7 +11864,8 @@ function _gbSideDraw(A,B,C,noXY,m){
     +sec('a','ร้านในเที่ยวนี้',A)
     +sec('a','ร้านในเที่ยวนี้ (ไม่มีพิกัด)',noXY,'ไม่มีหมุดบนแผนที่')
     +sec('b','คันอื่น/เที่ยวอื่นในแผนวันเดียวกัน',B)
-    +sec('c','ยังไม่ได้จัดรถ',C)
+    +sec('c','ยังไม่ได้จัดรถ (วันนี้)',C,(nSkip>0)?('ซ่อนของวันอื่น '+nSkip):'')
+    +((!C.length&&nSkip>0)?'<div class="gs-s"><div class="gs-h c">ยังไม่ได้จัดรถ (วันนี้) <b>0</b><i>ซ่อนของวันอื่น '+nSkip+'</i></div></div>':'')
     +((A.length+B.length+C.length+noXY.length)?'':'<div class="gs-e">— ไม่มีร้านในรัศมีนี้ —</div>');
 }
 function _svkHtml(){
