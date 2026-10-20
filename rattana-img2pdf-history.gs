@@ -3,9 +3,9 @@
 //         (Execute as: Me / Who has access: Anyone)
 //
 // เช็กว่า deploy เวอร์ชันใหม่แล้วจริงไหม: เปิด URL ต่อท้าย ?action=ping
-//   ต้องเห็น {"ok":true,"version":"5.7", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
+//   ต้องเห็น {"ok":true,"version":"5.8", ...} ถ้าเห็นเวอร์ชันเก่า/ไม่มี version = ยัง deploy ไม่ติด
 
-var VERSION = '5.7';
+var VERSION = '5.8';
 var FOLDER_NAME = 'Rattana Scanner Files';
 var SHARED_FOLDER_NAME = 'ส่วนกลาง (ทุกคนเห็นได้)';
 var RETENTION_DAYS = 90;
@@ -370,6 +370,16 @@ function fileInAllowedFolder_(fileId, empId) {
 }
 
 // รายการไฟล์ในโฟลเดอร์ — ใหม่สุดก่อน · folderId ว่าง = โฟลเดอร์หลักของตัวเอง
+// ไฟล์ PDF ที่ถูกเปลี่ยนชื่อใน Drive จน .pdf หาย (เช่น "46_6 ม.1") → เติมคืนให้ใน Drive เลย
+// คนที่ดาวน์โหลดจากหน้า Drive ตรง ๆ จะได้ไฟล์ที่เปิดได้ด้วย ไม่ใช่แค่ในแอป (user 20/10/2569)
+function pdfName_(f) {
+  var n = f.getName();
+  try {
+    if (f.getMimeType() === 'application/pdf' && !/\.pdf$/i.test(n)) { n = n + '.pdf'; f.setName(n); }
+  } catch (e) {}
+  return n;
+}
+
 function listFolderFiles_(empId, ownerName, folderId) {
   var target = null, fname = 'โฟลเดอร์หลักของฉัน';
   if (folderId) {
@@ -386,7 +396,7 @@ function listFolderFiles_(empId, ownerName, folderId) {
     var f = it.next();
     var size = 0;
     try { size = Math.round(f.getSize() / 1024); } catch (e) {}
-    out.push({ id: f.getId(), name: f.getName(), sizeKB: size, createdAt: f.getDateCreated().toISOString() });
+    out.push({ id: f.getId(), name: pdfName_(f), sizeKB: size, createdAt: f.getDateCreated().toISOString() });
   }
   out.sort(function (a, b) { return new Date(b.createdAt) - new Date(a.createdAt); });
   return { ok: true, folderName: fname, files: out };
@@ -565,7 +575,8 @@ function doGet(e) {
       var mine = hit && String(hit[C_EMPID - 1]) === empId;
       if (!mine && !fileInAllowedFolder_(fileId, empId)) return json_({ ok: false, error: 'not found or not authorized' });
       var file = DriveApp.getFileById(fileId);
-      var fname2 = mine ? String(hit[C_FILENAME - 1] || 'scan.pdf') : file.getName();
+      var fname2 = mine ? String(hit[C_FILENAME - 1] || 'scan.pdf') : pdfName_(file);
+      if (!/\.pdf$/i.test(fname2)) fname2 += '.pdf';
       return json_({ ok: true, fileBase64: Utilities.base64Encode(file.getBlob().getBytes()), filename: fname2 });
     }
 
