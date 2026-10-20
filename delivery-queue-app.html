@@ -1966,7 +1966,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.436</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.437</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -11725,7 +11725,21 @@ function _gbOtherStops(plate,tr){
   return out;
 }
 // บิลที่ยังไม่ได้จัดรถของวันนั้น (ใช้พูลบิลที่หน้าจัดรถโหลดไว้) → [{name,lat,lng,who}]
-function _gbWaiting(){
+// v9.437: วันที่ → คีย์ 'ปี-เดือน-วัน' (รับได้ทั้ง 2026/10/20 และ 20/10/2026)
+function _gbDk(s){
+  const d=(s instanceof Date)?s:((typeof parseAnyDate==='function')?parseAnyDate(String(s||'').trim()):null);
+  return (d&&!isNaN(d))?(d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate()):'';
+}
+// v9.437: วันที่บิลของรอบนี้ = วันที่บิลที่พบบ่อยสุดในแผนของกระดาน (ไม่มีแผนค่อยใช้วันนี้)
+//   รอบส่งพุธ 21/10 -> ใบจองลง 20/10 · เปิดกระดานเช้าวันรุ่งขึ้นก็ยังได้วันที่ถูก (ไม่ผูกกับนาฬิกาเครื่อง)
+function _gbBillDay(){
+  const m={};
+  (keepData||[]).forEach(r=>{ if(dashFilterDate&&r.deliveryDate!==dashFilterDate)return;
+    const k=_gbDk(r.billDate); if(k)m[k]=(m[k]||0)+1; });
+  const ks=Object.keys(m).sort((a,b)=>m[b]-m[a]);
+  return ks.length?ks[0]:_gbDk(new Date());
+}
+function _gbWaiting(dayKey){
   try{
     if(typeof bills==='undefined'||!bills||!bills.length)return [];
     // ══ v9.436: "จัดแล้วหรือยัง" ตรวจข้ามเลข ใบส่ง <-> ใบจอง ══
@@ -11748,15 +11762,21 @@ function _gbWaiting(){
     const _pre=(typeof _gbSrc!=='undefined'&&_gbSrc==='pre');
     const _isPre=b=>{ try{ return (typeof _prBillOk==='function')?!!_prBillOk(b)
       :(!String(b.slmnCode||'').toUpperCase().startsWith('HS')&&(b.totalW||0)<=1000); }catch(e){ return false; } };
-    const seen=new Set(), out=[]; let cut=0;
+    // ══ v9.437: รวมต่อร้าน — แยกใบของรอบนี้ กับใบค้างวันอื่น ══
+    //   user: "ใบจองเอาแค่วันนี้ ที่ค้างวันอื่นไม่ต้องเอามา"
+    //   ร้านที่มีแต่ใบวันอื่น -> skip (ผู้เรียกนับไว้โชว์ "ซ่อนใบค้างวันอื่น N" ไม่หายเงียบ)
+    //   ★ ต้องกรองก่อนยุบต่อร้าน — ไม่งั้นร้านที่มีทั้งใบเก่าและใบวันนี้ อาจโดนยุบเหลือใบเก่าแล้วหายทั้งร้าน
+    const st={}, order=[]; let cut=0;
     bills.forEach(b=>{ if(!b||!b.lat||!b.lng)return;
       if(_isUsed(b))return;   // v9.436: ตรวจข้ามเลขใบส่ง<->ใบจองด้วย
       if(_isPre(b)!==_pre){ cut++; return; }
       const k=(b.arCode||b.arName||b.ref)+'';
-      if(seen.has(k))return; seen.add(k);
-      out.push({name:b.arName||b.ref,lat:+b.lat,lng:+b.lng,who:'ยังไม่ได้จัดรถ',days:String(b.days||'').trim()}); });   // v9.435
+      let o=st[k];
+      if(!o){ o=st[k]={name:b.arName||b.ref,lat:+b.lat,lng:+b.lng,who:'ยังไม่ได้จัดรถ',days:String(b.days||'').trim(),refs:[],old:[]}; order.push(k); }
+      if(!dayKey||_gbDk(b.date)===dayKey)o.refs.push(b.ref); else o.old.push(b.ref);
+    });
     if(cut)console.log('🗺️ แผนที่เที่ยว: ตัดบิล'+(_pre?'ที่ไม่ใช่ปลีก':'ปลีก')+' ออกจากหมุด "ยังไม่ได้จัดรถ" '+cut+' ใบ');
-    return out;
+    return order.map(k=>{ const o=st[k]; o.skip=!o.refs.length; return o; });
   }catch(e){ return []; }
 }
 function gbMap(plate,tr){
@@ -11808,19 +11828,21 @@ function _gbMapDraw(stops,plate,tr,noXY){
         .bindPopup('<b>'+_prEsc(p.name)+'</b>'+(p.days?'<br>วันส่ง '+_prEsc(p.days):'')
           +'<br><span style="color:#1D4ED8;font-weight:700">'+_prEsc(p.who)+'</span>');
       _sideB.push({name:p.name,days:p.days,sub:p.who,mk}); });
-    // ══ v9.436: "ค้างเฉพาะวันนี้" — เอาเฉพาะร้านที่วันส่งตรงกับวันของกระดาน ══
-    //   user: "เอาค้างเฉพาะวันนี้" · ร้านที่ไม่มีข้อมูลวันส่ง = เก็บไว้ (ตัดสินไม่ได้ ห้ามซ่อนงานจริง)
-    //   ที่ซ่อนไปนับไว้โชว์ท้ายป้ายกำกับ จะได้รู้ว่ามีของวันอื่นค้างอยู่อีกเท่าไร
-    const _bdDt=(function(){ try{ return (typeof parseAnyDate==='function')
-      ?parseAnyDate((_gbLast&&_gbLast.d&&_gbLast.d.dateStr)||''):null; }catch(e){ return null; } })();
+    // ══ v9.437: "ยังไม่ได้จัดรถ" = เฉพาะใบของรอบนี้ (วันที่บิล) · ใบค้างวันอื่นไม่เอามา ══
+    //   user: "ใบจองเอาแค่วันนี้ ที่ค้างวันอื่นไม่ต้องเอามา"  (แทนกติกาวันส่งร้านของ v9.436)
+    //   ที่ซ่อนไปนับไว้โชว์ท้ายป้ายกำกับ จะได้รู้ว่ายังมีใบเก่าค้างอยู่อีกเท่าไร
+    const _bdKey=_gbBillDay(), _bdLbl=(function(){ const a=String(_bdKey).split('-'); return a.length===3?(a[2]+'/'+a[1]):''; })();
     let nSkip=0;
-    _gbWaiting().filter(p=>!mine.has(p.name)&&near(p))
-      .filter(p=>{ if(_gbDayOk(p.days,_bdDt))return true; nSkip++; return false; })
+    _gbWaiting(_bdKey).filter(p=>!mine.has(p.name)&&near(p))
+      .filter(p=>{ if(!p.skip)return true; nSkip++; return false; })
       .forEach(p=>{ nC++;
+      const _rf=(p.refs||[]).join(', ');
       const mk=L.marker([p.lat,p.lng],{icon:_gbDot('#EA580C','',15)}).addTo(m)
         .bindPopup('<b>'+_prEsc(p.name)+'</b>'+(p.days?'<br>วันส่ง '+_prEsc(p.days):'')
+          +(_rf?'<br>'+_prEsc(_rf):'')
           +'<br><span style="color:#EA580C;font-weight:700">ยังไม่ได้จัดรถ</span>');
-      _sideC.push({name:p.name,days:p.days,sub:'',mk}); });
+      _sideC.push({name:p.name,days:p.days,sub:_rf,mk}); });   // v9.437: บรรทัดรอง = เลขใบที่ค้าง
+    _gbCLbl='ยังไม่ได้จัดรถ'+(_bdLbl?' (ใบวันที่ '+_bdLbl+')':'');
     // ร้านในเที่ยว + เส้นทาง
     const _sideA=[];
     stops.forEach(s=>{ pts.push([s.lat,s.lng]);
@@ -11837,14 +11859,14 @@ function _gbMapDraw(stops,plate,tr,noXY){
     }
     const lg=document.querySelector('#gbMapOv .gbm-lg s.b'), lc=document.querySelector('#gbMapOv .gbm-lg s.c');
     if(lg)lg.textContent='คันอื่น/เที่ยวอื่นในแผนวันเดียวกัน ('+nB+')';
-    if(lc)lc.textContent='ยังไม่ได้จัดรถ วันนี้'+((typeof _gbSrc!=='undefined'&&_gbSrc==='pre')?' (เฉพาะปลีก) ':' (ไม่รวมปลีก) ')+'('+nC+')'+(nSkip>0?' · ซ่อนของวันอื่น '+nSkip:'');   // v9.436
+    if(lc)lc.textContent=_gbCLbl+((typeof _gbSrc!=='undefined'&&_gbSrc==='pre')?' (เฉพาะปลีก) ':' (ไม่รวมปลีก) ')+'('+nC+')'+(nSkip>0?' · ซ่อนใบค้างวันอื่น '+nSkip:'');   // v9.437
     m.fitBounds(L.latLngBounds(pts).pad(0.14),{animate:false});
     _gbMapObj=m; setTimeout(()=>{try{m.invalidateSize();}catch(e){}},120);
   }catch(e){ console.warn('[กระดานสรุป] แผนที่',e); }
 }
 // ══ v9.435: แถบรายชื่อร้านข้างแผนที่ — แยกตามสีหมุด (user: "อยากได้ detail ... แยกตามจุดสี") ══
 //   กดแถวไหน = แผนที่เลื่อนไปที่ร้านนั้นแล้วเปิดป้ายให้
-let _gbSideMk=[];
+let _gbSideMk=[], _gbCLbl='ยังไม่ได้จัดรถ';   // v9.437: หัวข้อกลุ่มส้ม (มีวันที่บิลของรอบ)
 function _gbSideGo(i){
   const o=_gbSideMk[i]; if(!o||!o.mk||!_gbMapObj)return;
   try{ _gbMapObj.setView(o.mk.getLatLng(),Math.max(_gbMapObj.getZoom(),13),{animate:true}); o.mk.openPopup(); }catch(e){}
@@ -11864,8 +11886,8 @@ function _gbSideDraw(A,B,C,noXY,m,nSkip){
     +sec('a','ร้านในเที่ยวนี้',A)
     +sec('a','ร้านในเที่ยวนี้ (ไม่มีพิกัด)',noXY,'ไม่มีหมุดบนแผนที่')
     +sec('b','คันอื่น/เที่ยวอื่นในแผนวันเดียวกัน',B)
-    +sec('c','ยังไม่ได้จัดรถ (วันนี้)',C,(nSkip>0)?('ซ่อนของวันอื่น '+nSkip):'')
-    +((!C.length&&nSkip>0)?'<div class="gs-s"><div class="gs-h c">ยังไม่ได้จัดรถ (วันนี้) <b>0</b><i>ซ่อนของวันอื่น '+nSkip+'</i></div></div>':'')
+    +sec('c',_gbCLbl,C,(nSkip>0)?('ซ่อนใบค้างวันอื่น '+nSkip):'')
+    +((!C.length&&nSkip>0)?'<div class="gs-s"><div class="gs-h c">'+E(_gbCLbl)+' <b>0</b><i>ซ่อนใบค้างวันอื่น '+nSkip+'</i></div></div>':'')
     +((A.length+B.length+C.length+noXY.length)?'':'<div class="gs-e">— ไม่มีร้านในรัศมีนี้ —</div>');
 }
 function _svkHtml(){
