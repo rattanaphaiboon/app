@@ -1966,7 +1966,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.442</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.443</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -4237,7 +4237,7 @@ async function loadData(){
     // v8.21: timeout ยาวขึ้นสำหรับชีทใหญ่/สำคัญ — Customer (5107 แถว) + Route ให้ข้อมูล "วันส่ง"
     //         ถ้า Customer timeout → บิลไม่มีวันส่ง → กดจัดอัตโนมัติไม่ได้ (v7.137 guard บล็อก)
     const BIG={timeoutMs:35000,retries:2};
-    const [orderBills,productWeightData,routeData,productVolumeData,customerData,slmnTruckData,configData,_setRows,dsDcRefSet,dsDcTodayRows]=await Promise.all([
+    const [orderBills,productWeightData,customerData,slmnTruckData,configData,_setRows,dsDcRefSet,dsDcTodayRows]=await Promise.all([
       // v8.21: ต้นทางหลัก — ชีท Order แท็บ BK_BV (กรอง W1 + ย้อนหลัง 7 วัน ฝั่ง Google)
       fetchOrderBills().catch(e=>{console.warn('[Order] โหลดไม่ได้:',e?.message||e);return [];}),
       // น้ำหนัก: จากชีทแยก (PRODUCT NAME + GOODS_WEIGHT หน่วย กก./CS)
@@ -4246,9 +4246,8 @@ async function loadData(){
       //        A=PRODUCT NAME · Q=QTY CS · DS=GOODS_WEIGHT · DV=GOODS_VOLUME (ลิตร/ลัง · v9.48) → ~1.3MB
       fetchSheet('Sheet1',PRODUCT_SHEET_ID,{timeoutMs:30000,retries:1,tq:'SELECT A, Q, R, DS, DV, BB, BH, BN, BO, BP, BQ, BR'}) // v9.62: +STOCK W1/W2/W3/W4/C4 (BN..BR) · v9.305: +R = CS PALLET (ลังต่อพาเลท)
         .catch(()=>fetchSheet('Product',PRODUCT_SHEET_ID,{timeoutMs:20000,retries:0})).catch(()=>[]),
-      fetchSheet('Route',null,BIG),
-      // ปริมาตร (fallback): ชีทเดิม ปริมาตร EA ลิตร/EA — v9.48 หลักใช้ GOODS_VOLUME แล้ว (แม่นกว่า จับ SKU ตรง)
-      fetchSheet('Product').catch(()=>[]),
+      // v9.443: เลิกโหลดแท็บ Route + Product ของชีทแผน — user: "ต้องการลบ Product กับ Route"
+      //   สายส่ง/วันส่ง/รูท/พิกัด มาจากชีท Customer ทั้งหมด · ปริมาตรมาจาก GOODS_VOLUME (Product เดิมเติมให้แค่ 2 สินค้า)
       // Customer master (5107 แถว): รหัสบีพลัส → Location + วันส่ง — timeout ยาว, retry, ไม่ fallback เงียบ
       fetchSheet('Customer',CUSTOMER_SHEET_ID,BIG).catch(e=>{console.error('❌ Customer sheet โหลดไม่ได้ — บิลจะไม่มีวันส่ง!',e?.message||e);return [];}),
       // ชีท "เลือกรถ" — SLMN_CODE + SLCAT_NAME + รถประจำ (ขายปลีก)
@@ -4409,15 +4408,7 @@ async function loadData(){
       if(name)products[name]={...(products[name]||{}),w:wPerEA||0,wPerCS:wPerCS||0,qtyPerCS:qtyPerCS||0,v:vPerEA||(products[name]?.v||0),cat:_cat,csPal,
         stock:{W1:_sc('STOCK W1'),W2:_sc('STOCK W2'),W3:_sc('STOCK W3'),W4:_sc('STOCK W4'),C4:_sc('STOCK C4')}};
     });
-    // (2) v9.48: ปริมาตร fallback — ชีทเดิม (ปริมาตร EA ลิตร) เฉพาะสินค้าที่ GOODS_VOLUME ไม่มี (GOODS_VOLUME มาก่อน)
-    productVolumeData.forEach(p=>{
-      const name=(p['ชื่อสินค้า']||p['SKU_NAME']||p['']||'').trim();
-      const vPerEA=parseFloat(p['ปริมาตร EA (ลิตร)']||p['ปริมาตร EA']||0)/1000;
-      if(name){
-        if(!products[name])products[name]={w:0,wPerCS:0,qtyPerCS:0,v:0};
-        if(!(products[name].v>0))products[name].v=vPerEA||0;
-      }
-    });
+    // (2) v9.443: ถอดปริมาตร fallback จากแท็บ Product (ชีทแผน) — ไม่มี GOODS_VOLUME → ใช้ค่าเฉลี่ยต่อลังด้านล่าง
     const _withQty=Object.values(products).filter(p=>p.qtyPerCS>0).length;
     console.log(`📦 Products: weight=${Object.values(products).filter(p=>p.w>0).length}, volume=${Object.values(products).filter(p=>p.v>0).length}, qty/CS=${_withQty} (total ${Object.keys(products).length})`);
     if(_withQty===0)console.warn(`⚠️ ไม่พบ field "จำนวนต่อ CS" ในชีท Products — ใช้ GOODS_WEIGHT เป็น kg/EA แทน. ตรวจชื่อ header อีกครั้ง.`);
@@ -4459,38 +4450,9 @@ async function loadData(){
       _wStat.byAvg++;return _avgW||_defKgCase;              // ขายเป็นชิ้น → เฉลี่ย
     };
 
-    // Routes (with GPS) — โลเคชันใช้ Customer master เป็นหลัก, fallback Route sheet
+    // v9.443: routeMap สร้างจากชีท Customer ล้วน (เลิกโหลดแท็บ Route) · routeCode (Serial Route จด) ว่างทุกร้าน
+    //   → กฎจัดอัตโนมัติ RC/GR (มัดตาม Serial Route) ไม่ทำงาน · กฎสายส่ง (saiSong จาก Customer) ทำหน้าที่แทน
     routeMap={};
-    routeData.forEach(r=>{
-      const code=(r['รหัสร้านค้า']||r['AR_CODE']||'').toString().trim();
-      if(!code)return;
-      // ใช้ Customer master ก่อน
-      const cg=customerGpsMap[code];
-      let lat=cg?cg.lat:null,lng=cg?cg.lng:null;
-      // fallback: โลเคชันจาก Route sheet
-      if(lat===null||lng===null){
-        const gps=r['โลเคชัน']||'';
-        if(gps&&gps.includes(',')){const p=gps.split(',');const _la=parseFloat(p[0]),_ln=parseFloat(p[1]);
-          if(!isNaN(_la))lat=_la;if(!isNaN(_ln))lng=_ln;}
-      }
-      const newDays=r['วันส่ง']||'';
-      if(routeMap[code]){
-        const existing=routeMap[code].days||'';
-        const merged=[...new Set([...existing.split(/[,\s\/]+/),
-                                  ...newDays.split(/[,\s\/]+/)].filter(Boolean))].join(',');
-        routeMap[code].days=merged;
-        if(!routeMap[code].lat&&lat)routeMap[code].lat=lat;
-        if(!routeMap[code].lng&&lng)routeMap[code].lng=lng;
-      } else {
-        routeMap[code]={
-          route:r['ชื่อสายจด']||r['สาย']||'',
-          days:newDays,
-          routeCode:r['Serial Route จด']||'',
-          saiSong:(r['สายส่ง']||'').trim(),
-          lat:isNaN(lat)?null:lat, lng:isNaN(lng)?null:lng
-        };
-      }
-    });
     // เพิ่ม entry สำหรับ AR_CODE ที่อยู่ใน Customer master แต่ไม่อยู่ใน Route sheet → จะได้มี GPS ใช้
     Object.entries(customerGpsMap).forEach(([code,cg])=>{
       if(!routeMap[code]){
@@ -5105,7 +5067,7 @@ function renderBillTable(){
     }
     if(!b.lat||!b.lng)return '❌ ไม่มี GPS';
     if(!b.days)return '❌ ไม่มีวันส่ง';
-    if(!routeMap[b.arCode])return '❌ ไม่มีข้อมูลรูท (Route sheet)';
+    if(!routeMap[b.arCode])return '❌ ไม่มีข้อมูลร้านในชีท Customer';
     if(_hasSlmn){
       const c=b.slmnCode||'';
       if(!c.startsWith('TL')&&!c.startsWith('HS')&&!slmnTruckMap[c])return `❌ SLMN "${c}" ไม่ใช่ TL/HS + ไม่มีในชีท เลือกรถ`;
@@ -14297,7 +14259,7 @@ function _prParseSaleRows(rows){
       const lat=(ri.lat||gp.lat)||null, lng=(ri.lng||gp.lng)||null;
       b=map[ref]={ref,arCode,arName:r['AR_NAME']||'',date:r['DI_DATE']||'',isSale:true,
         district:(ci?ci.dist:'')||'', province:(ci?ci.prov:'')||'', wh:(ci&&ci.wh)||'',
-        route:ri.route||'', days:(ci&&ci.days)||ri.days||'', routeCode:ri.routeCode||'', saiSong:ri.saiSong||'',
+        route:ri.route||'', days:(ci&&ci.days)||ri.days||'', routeCode:ri.routeCode||'', saiSong:_prSaiOf({arCode,arName:r['AR_NAME']||''})||'',   // v9.443: สายส่งจาก Customer
         slmnCode:(r['SLMN_CODE']||r['SLM_CODE']||'').toString().trim().toUpperCase(),
         storeOrder:ci?ci.order:9999, vmax:_storeVmax(((ci||{}).vt)||''),
         remark:(r['DI_REMARK']||'').toString().trim(),
