@@ -3980,7 +3980,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.47';
+const APP_VERSION = '13.48';
 /* ══════ v13.37 รูปแบบวัน/เวลามาตรฐานเดียวกันทุกเครื่อง (surat 13/10 "แก้วันเดือนปีและเวลาให้เป็นมาตรฐานเดียวกันทุกเครื่อง") ══════
    เดิมใช้ toLocaleDateString และ toLocaleTimeString แบบ th-TH ของเบราว์เซอร์ ซึ่งแต่ละเครื่อง/เบราว์เซอร์ให้ผลไม่เหมือนกัน (ปี พ.ศ./ค.ศ. · 12/24 ชม. · เลขศูนย์นำหน้า · คำว่า "น.")
    และ timeStr ของ log ในเครื่องก็มาจากตัวนี้ → เครื่องที่ให้ "8:05" แทน "08:05" ทำให้ข้อความ/การตัดอักษรเพี้ยน
@@ -9145,8 +9145,44 @@ function openRegisterMemberFace(empId) {
 /* ============================================================
    DASHBOARD (Supervisor)
    ============================================================ */
+/* v13.48 สแกนวันนี้ของลูกทีมจากระบบ — เดิม Dashboard ทีม/การ์ด "ยังไม่มาสแกน" ดูแค่สแกนในเครื่องนี้ (logs)
+   ลูกทีมสแกนจากมือถือตัวเองจึงขึ้น "ยังไม่มา" ทั้งที่สแกนแล้ว (surat 21/10) · getTeamToday = Apps Script 9.90 (ลูกทีมต่างสาขาก็เห็น)
+   เซิร์ฟเวอร์เก่า → getCheckinLog วันนี้ (เห็นตามสิทธิ์ดูสาขา) · แคช 2 นาที */
+let _teamToday = { key: '', at: 0, ok: false, rows: [] }, _teamTodayP = null;
+function teamTodayFresh_() { return _teamToday.key === todayKey() && Date.now() - _teamToday.at < 120000; }
+async function teamTodayRefresh_(force) {
+  if (!force && teamTodayFresh_()) return _teamToday;
+  if (_teamTodayP) return _teamTodayP;
+  const key = todayKey(), ids = (team || []).map(m => String(m.empId)).filter(Boolean);
+  if (!ids.length || !config.appsScriptUrl) return _teamToday;
+  const d = new Date(), dm = String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+  const idSet = new Set(ids);
+  _teamTodayP = (async () => {
+    let rows = null;
+    try {
+      const r = await callAppsScript('getTeamToday', { empIds: ids.slice(0, 400).join(',') });
+      if (r && r.ok !== false && Array.isArray(r.rows)) rows = r.rows;
+      else if (r && /unknown action/i.test(String(r.error || ''))) {
+        const g = await callAppsScript('getCheckinLog', { date: dm, limit: 3000 });
+        if (g && g.ok !== false && Array.isArray(g.logs)) rows = g.logs.filter(x => String(x.date || dm) === dm);
+      }
+    } catch (e) { console.warn('[teamToday]', e && e.message); }
+    if (rows) _teamToday = { key, at: Date.now(), ok: true, rows: rows.filter(x => idSet.has(String(x.empId))).map(x => {
+      const t = String(x.time || '').match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+      const ts = t ? new Date(d.getFullYear(), d.getMonth(), d.getDate(), +t[1], +t[2], +(t[3] || 0)) : new Date(x.timestamp);
+      return { empId: String(x.empId), type: x.type === 'out' ? 'out' : 'in', ts: ts.toISOString(), timeStr: fmtTime_(ts), dateKey: key, srv: true };
+    }).filter(x => !isNaN(new Date(x.ts).getTime())) };
+    else _teamToday = _teamToday.key === key ? Object.assign({}, _teamToday, { at: Date.now() }) : { key, at: Date.now(), ok: false, rows: [] };   // พลาด = ลองใหม่อีก 2 นาที (ไม่วนยิง)
+    _teamTodayP = null;
+    return _teamToday;
+  })();
+  return _teamTodayP;
+}
 function getMemberStatus(member) {
-  const tl = logs.filter(l => l.dateKey === todayKey() && l.empId === member.empId).sort((a,b) => new Date(a.ts)-new Date(b.ts));
+  const eid = String(member.empId), tk = todayKey();
+  const loc = logs.filter(l => l.dateKey === tk && String(l.empId) === eid);
+  const srv = (_teamToday.key === tk ? _teamToday.rows : []).filter(l => l.empId === eid && !loc.some(k => k.type === l.type && Math.abs(new Date(k.ts) - new Date(l.ts)) < 90000));
+  const tl = loc.concat(srv).sort((a,b) => new Date(a.ts)-new Date(b.ts));   // v13.48 + สแกนจากระบบ
   if (tl.length === 0) return { status:'absent', label:'ยังไม่มา', time:null, log:null };
   const last = tl[tl.length-1];
   if (last.type === 'out') return { status:'out', label:`ออก ${last.timeStr}`, time:last.timeStr, log:last };
@@ -9159,6 +9195,7 @@ function getMemberStatus(member) {
 function renderDashboard() {
   const grid = document.getElementById('teamGrid');
   if (!grid) return;
+  if (team.length && !teamTodayFresh_() && !_teamTodayP) teamTodayRefresh_().then(() => { const pg = document.getElementById('page-dashboard'); if (pg && pg.classList.contains('active')) renderDashboard(); try { renderNotInCard_(); } catch (_) {} });   // v13.48
   if (team.length === 0) {
     grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><div class="ico"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>ยังไม่มีลูกน้อง</div>`;
     document.getElementById('dashKpi').innerHTML = '';
@@ -10224,6 +10261,8 @@ async function renderNotInCard_() {
     (days[now.getDate()] || []).forEach(i => { if (i.status === 'approved') onLeave[String(i.empId)] = i.type; });
   } catch (_) {}
   const short = m => m.nickname || String(m.name || '').split(' ')[0];
+  await teamTodayRefresh_();   // v13.48 สแกนวันนี้ของลูกทีมจากระบบ — ดึงไม่ได้ = ไม่เตือน (เดิมเตือนผิดทั้งทีม)
+  if (!_teamToday.ok || _teamToday.key !== todayKey()) { el.innerHTML = ''; return; }
   const missing = team.filter(m => getMemberStatus(m).status === 'absent' && !onLeave[String(m.empId)]);
   const leave = team.filter(m => onLeave[String(m.empId)]);
   if (!missing.length) { el.innerHTML = ''; return; }
