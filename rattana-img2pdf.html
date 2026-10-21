@@ -10,7 +10,7 @@
 <link rel="icon" type="image/png" sizes="32x32" href="img2pdf-icon-32.png">
 <link rel="icon" type="image/png" sizes="192x192" href="img2pdf-icon-192.png">
 <link rel="apple-touch-icon" href="img2pdf-icon-180.png">
-<title>Rattana Scanner v8.7</title>
+<title>Rattana Scanner v8.8</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -594,7 +594,7 @@ footer a{color:inherit;text-decoration:underline}
 
 <header>
   <button class="icon-btn" onclick="openDrawer()" title="เมนู">☰</button>
-  <span class="logo-text">RATTANA <span>SCANNER</span> <span class="badge badge-gold">v8.7</span></span>
+  <span class="logo-text">RATTANA <span>SCANNER</span> <span class="badge badge-gold">v8.8</span></span>
   <span class="badge badge-gold hidden" id="userNameChip" style="margin-left:2px"></span>
   <div class="spacer"></div>
   <button class="icon-btn hidden" id="logoutBtn" onclick="logout()" title="ออกจากระบบ">🚪</button>
@@ -1375,7 +1375,7 @@ footer a{color:inherit;text-decoration:underline}
 </div>
 
 <footer>
-  Rattana Scanner v8.7<br>
+  Rattana Scanner v8.8<br>
   มีปัญหาการใช้งาน? แอดไลน์ HR <a href="https://lin.ee/uIN2DMR" target="_blank" rel="noopener">@712dqxgv</a> หรือโทร <a href="tel:0640978417">064-097-8417</a>
 </footer>
 
@@ -3610,22 +3610,30 @@ async function addFiles(fileList){
   renderList();
 }
 
-async function rotateImage(id, deg){
-  const item = images.find(i => i.id === id);
-  if (!item) return;
-  const img = await loadImageFromDataUrl(item.baseDataUrl);
+async function rotateDataUrl(dataUrl, w, h, deg){
+  const img = await loadImageFromDataUrl(dataUrl);
   const swapped = (((deg % 360) + 360) % 360) !== 180;
-  const nw = swapped ? item.height : item.width;
-  const nh = swapped ? item.width : item.height;
+  const nw = swapped ? h : w, nh = swapped ? w : h;
   const canvas = document.createElement('canvas');
   canvas.width = nw; canvas.height = nh;
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#fff'; ctx.fillRect(0,0,nw,nh);
   ctx.translate(nw/2, nh/2);
   ctx.rotate(deg * Math.PI/180);
-  ctx.drawImage(img, -item.width/2, -item.height/2);
-  item.baseDataUrl = canvas.toDataURL('image/jpeg', 0.95);
-  item.width = nw; item.height = nh;
+  ctx.drawImage(img, -w/2, -h/2);
+  return { dataUrl: canvas.toDataURL('image/jpeg', 0.95), width: nw, height: nh };
+}
+
+async function rotateImage(id, deg){
+  const item = images.find(i => i.id === id);
+  if (!item) return;
+  const r = await rotateDataUrl(item.baseDataUrl, item.width, item.height, deg);
+  item.baseDataUrl = r.dataUrl; item.width = r.width; item.height = r.height;
+  // หมุนภาพต้นฉบับเต็มตามไปด้วย — หน้าครอบตัดใช้ต้นฉบับ จะได้หมุนตรงกัน
+  if (item.origDataUrl) {
+    const o = await rotateDataUrl(item.origDataUrl, item.origWidth, item.origHeight, deg);
+    item.origDataUrl = o.dataUrl; item.origWidth = o.width; item.origHeight = o.height;
+  }
   item.dataUrl = await applyDocFilter(item.baseDataUrl, item.width, item.height, docFilter);
   renderList();
 }
@@ -3635,10 +3643,14 @@ let cropState = null;
 async function openCropModal(id){
   const item = images.find(i => i.id === id);
   if (!item) return;
-  cropState = { itemId: id, natW: item.width, natH: item.height, quad: null, dragIdx: -1 };
-  document.getElementById('cropImg').src = item.baseDataUrl;
-  document.getElementById('cropStage').style.aspectRatio = `${item.width} / ${item.height}`;
-  document.getElementById('cropSvg').setAttribute('viewBox', `0 0 ${item.width} ${item.height}`);
+  // ใช้ภาพต้นฉบับเต็มเสมอ — ถ้าใช้ภาพที่ถูกครอบอัตโนมัติไปแล้ว ส่วนที่ระบบตัดพลาด (เช่น หัวกระดาษ) จะไม่มีให้ลากคืน
+  // (user 21/10/2569: "รูปภาพไม่เต็ม")
+  const src = item.origDataUrl || item.baseDataUrl;
+  const W = item.origDataUrl ? item.origWidth : item.width, H = item.origDataUrl ? item.origHeight : item.height;
+  cropState = { itemId: id, natW: W, natH: H, quad: null, dragIdx: -1 };
+  document.getElementById('cropImg').src = src;
+  document.getElementById('cropStage').style.aspectRatio = `${W} / ${H}`;
+  document.getElementById('cropSvg').setAttribute('viewBox', `0 0 ${W} ${H}`);
   document.getElementById('cropModal').classList.add('open');
   await autoDetectCrop();
 }
@@ -3709,9 +3721,9 @@ async function applyCrop(){
   if (!item) { closeCropModal(); return; }
   showSpinner('กำลังครอบตัด...');
   try {
-    const img = await loadImageFromDataUrl(item.baseDataUrl);
+    const img = await loadImageFromDataUrl(item.origDataUrl || item.baseDataUrl);
     const srcCanvas = document.createElement('canvas');
-    srcCanvas.width = item.width; srcCanvas.height = item.height;
+    srcCanvas.width = cropState.natW; srcCanvas.height = cropState.natH;
     srcCanvas.getContext('2d').drawImage(img, 0, 0);
 
     const q = cropState.quad;
@@ -3724,6 +3736,7 @@ async function applyCrop(){
     const warped = warpQuadToRect(srcCanvas, q, outW, outH);
     item.baseDataUrl = warped.toDataURL('image/jpeg', 0.95);
     item.width = outW; item.height = outH;
+    if (item.origDataUrl) item.autoCropped = true;   // ให้ปุ่ม ⤢ คืนภาพเต็มโผล่เหมือนครอบอัตโนมัติ
     item.dataUrl = await applyDocFilter(item.baseDataUrl, item.width, item.height, docFilter);
     closeCropModal();
     renderList();
@@ -5709,6 +5722,7 @@ async function applyAppUpdate(){
 // คนที่ปิดแอปแล้วเปิดใหม่จึงได้ของใหม่ทันทีโดยไม่เคยเห็นแถบ "มีเวอร์ชันใหม่" เลย → เข้าใจว่าแอปไม่อัปเดต
 // (user 17/10/2569: "ไม่ขึ้นให้อัปเดตเลยค่ะ") → เปิดเวอร์ชันใหม่ครั้งแรกให้ขึ้นแถบเขียวบอกว่ามีอะไรใหม่
 const WHATS_NEW = {
+  '8.8': 'หน้าครอบตัดแสดงรูปถ่ายเต็มใบเสมอ ลากมุมคืนส่วนที่ระบบตัดพลาดได้',
   '8.7': 'ไฟล์ที่ดาวน์โหลดจากประวัติ/โฟลเดอร์ จะมี .pdf ต่อท้ายเสมอ เปิดได้ทุกเครื่อง',
   '8.6': 'แก้เงามือ/ขอบภาพที่ยังเป็นก้อนดำ — ตอนนี้ออกเป็นกระดาษขาว อ่านตัวหนังสือได้',
   '8.5': 'ลบเงาดำได้ดีขึ้น — มุม/ขอบที่เคยดำทึบ ออกมาเป็นกระดาษขาว อ่านตัวหนังสือได้',
