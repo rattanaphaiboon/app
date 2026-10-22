@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Near Me v1.3</title>
+<title>Rattana Near Me v1.5</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -113,6 +113,15 @@ body.dark .chip.on{background:var(--gold);color:var(--navy);border-color:var(--g
 .pp-act{display:flex;gap:6px;margin-top:8px}
 .pp-act a{flex:1;text-align:center;background:#0d1b3e;color:#fff;border-radius:6px;padding:6px 8px;text-decoration:none;font-weight:600;font-size:12px}
 .pp-act a.g{background:#c9a84c;color:#0d1b3e}
+/* ── ไอคอนร้านใกล้ ── */
+.sp-wrap{background:none;border:none}
+.sp{position:relative;width:34px;height:34px}
+.sp-ico{width:34px;height:34px;display:flex;align-items:center;justify-content:center;font-size:30px;line-height:1;cursor:pointer;filter:drop-shadow(0 2px 3px rgba(0,0,0,.45))}
+.sp-lbl{position:absolute;left:38px;top:50%;transform:translateY(-50%);background:#fff;color:#0d1b3e;border:1.5px solid #c9a84c;border-radius:8px;padding:3px 8px;box-shadow:0 2px 6px rgba(0,0,0,.25);font-family:'Sarabun',sans-serif;line-height:1.25;white-space:nowrap;max-width:190px;cursor:pointer}
+.sp-lbl b{display:block;font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis}
+.sp-lbl a,.sp-lbl .sp-none{display:block;font-size:12px;font-weight:600;color:#1a6fb8;text-decoration:none}
+.sp-lbl .sp-none{color:#8a98b8;font-weight:500}
+.nolbl .sp-lbl{display:none}
 
 /* ── Shop list ── */
 .list{display:flex;flex-direction:column}
@@ -159,7 +168,7 @@ body.dark .shop .d .km{color:var(--gold-light)}
 <div id="spinner"><div class="box"><div class="ring"></div><p id="spinnerMsg">กำลังโหลด...</p></div></div>
 
 <header>
-  <div class="logo-text">Rattana <span>Near Me</span><span class="ver-badge">v1.3 · 2026-10-22</span></div>
+  <div class="logo-text">Rattana <span>Near Me</span><span class="ver-badge">v1.5 · 2026-10-22</span></div>
   <button class="icon-btn" id="btnRefresh" title="โหลดข้อมูลร้านใหม่" onclick="refreshData()">⟳</button>
   <button class="icon-btn" id="btnDark" title="โหมดมืด" onclick="toggleDark()">🌙</button>
 </header>
@@ -217,7 +226,7 @@ if (/\bLine\//i.test(navigator.userAgent || '') && !/[?&]openExternalBrowser=1/.
 }
 
 /* ════════ Config ════════ */
-const APP_VER   = '1.3';
+const APP_VER   = '1.5';
 const SHEET_ID  = '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI';
 const SHEET_TAB = 'Customer';
 const PROVINCES = ['สมุทรสาคร', 'เพชรบุรี', 'สมุทรสงคราม'];
@@ -442,23 +451,78 @@ function drawShopMarkers(){
     markerById.set(s.id, m);
   });
 }
-function styleMarkers(nearIds){
+function styleMarkers(nearIds, iconIds){
   const pv = prefs.prov;
+  iconIds = iconIds || new Set();
   markerById.forEach((m, id) => {
     const s = m._shop || (m._shop = shops.find(x => x.id === id));
     const inProv = pv === 'all' || s.prov === pv;
     const near = nearIds.has(id);
+    const hasIcon = iconIds.has(id);   // ร้านที่มีไอคอน 🏪 แล้ว ซ่อนจุดวงกลมไว้
     m.setStyle({
       radius: near ? 8 : 5,
       fillColor: near ? '#c9a84c' : '#8a98b8',
       color: near ? '#0d1b3e' : '#fff',
       weight: near ? 2 : 1,
-      fillOpacity: inProv ? (near ? 1 : .75) : .15,
-      opacity: inProv ? 1 : .2
+      fillOpacity: hasIcon ? 0 : inProv ? (near ? 1 : .75) : .15,
+      opacity: hasIcon ? 0 : inProv ? 1 : .2
     });
     if (near) m.bringToFront();
   });
 }
+
+/* ════════ ร้านใกล้: ไอคอนรูปร้าน + ชื่อร้าน + เบอร์โทร ════════ */
+const MAX_NEAR_ICONS = 80;
+const nearLayer = L.layerGroup().addTo(map);
+const nearIconById = new Map();   // id → {marker, sig}
+let nearOrder = [];
+function nearIconHtml(s){
+  const tel = firstPhone(s.phone);
+  return '<div class="sp"><div class="sp-ico">🏪</div><div class="sp-lbl"><b>' + esc(s.name) + '</b>' +
+    (tel ? '<a href="tel:' + tel + '" onclick="event.stopPropagation()">📞 ' + esc(tel) + '</a>' : '<span class="sp-none">ไม่มีเบอร์โทร</span>') +
+    '</div></div>';
+}
+function renderNearIcons(list){
+  const keep = new Set();
+  list.forEach(s => {
+    const sig = s.name + '|' + s.phone + '|' + s.lat + ',' + s.lng;
+    let o = nearIconById.get(s.id);
+    if (o && o.sig !== sig) { nearLayer.removeLayer(o.marker); o = null; }
+    if (!o) {
+      const m = L.marker([s.lat, s.lng], {
+        icon: L.divIcon({className:'sp-wrap', html:nearIconHtml(s), iconSize:[34,34], iconAnchor:[17,17]}),
+        zIndexOffset: 500, riseOnHover: true
+      });
+      m.on('click', () => selectShop(s.id, false));
+      m.addTo(nearLayer);
+      o = {marker:m, sig};
+      nearIconById.set(s.id, o);
+    }
+    keep.add(s.id);
+  });
+  nearIconById.forEach((o, id) => { if (!keep.has(id)) { nearLayer.removeLayer(o.marker); nearIconById.delete(id); } });
+  nearOrder = list.map(s => s.id);   // เรียงจากใกล้ → ไกล ร้านที่ใกล้กว่าได้แสดงป้ายก่อน
+  layoutNearLabels();
+}
+// ป้ายชื่อที่ทับกันให้ซ่อน (ยังเห็นไอคอน แตะเพื่อดูรายละเอียด) — ร้านใกล้สุดได้แสดงก่อน
+function layoutNearLabels(){
+  const placed = [];
+  nearOrder.forEach(id => {
+    const o = nearIconById.get(id); if (!o) return;
+    const el = o.marker.getElement(); if (!el) return;
+    el.classList.remove('nolbl');
+    const ico = el.querySelector('.sp-ico').getBoundingClientRect();
+    const lbl = el.querySelector('.sp-lbl').getBoundingClientRect();
+    const box = {l:Math.min(ico.left, lbl.left) - 2, t:Math.min(ico.top, lbl.top) - 2, r:Math.max(ico.right, lbl.right) + 2, b:Math.max(ico.bottom, lbl.bottom) + 2};
+    const hit = placed.some(p => box.l < p.r && box.r > p.l && box.t < p.b && box.b > p.t);
+    if (hit) {
+      el.classList.add('nolbl');
+      placed.push({l:ico.left, t:ico.top, r:ico.right, b:ico.bottom});
+    } else placed.push(box);
+    o.marker.setZIndexOffset(hit ? 500 : 3000);   // ร้านที่มีป้ายอยู่บนไอคอนอื่น ป้ายจะไม่ถูกบัง
+  });
+}
+map.on('zoomend', layoutNearLabels);
 function drawMe(){
   if (!me) return;
   const ll = [me.lat, me.lng];
@@ -662,13 +726,15 @@ function doUpdate(){
     if (me) renderMsg([], []);
     return;
   }
-  if (!me) { styleMarkers(new Set()); return; }
+  if (!me) { styleMarkers(new Set()); renderNearIcons([]); return; }
   const list = filteredShops();
   list.forEach(s => s._d = haversine(me.lat, me.lng, s.lat, s.lng));
   list.sort((a, b) => a._d - b._d);
   const inR = list.filter(s => s._d <= prefs.radius);
   lastResult = inR.length ? inR : list.slice(0, NEAREST_FALLBACK);
-  styleMarkers(new Set(inR.map(s => s.id)));
+  const iconShops = inR.slice(0, MAX_NEAR_ICONS);
+  styleMarkers(new Set(inR.map(s => s.id)), new Set(iconShops.map(s => s.id)));
+  renderNearIcons(iconShops);
   renderMsg(inR, list);
   renderList(inR.length > 0);
   checkVeryNear(list);
