@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.27</title>
+<title>Rattana Shop Location v1.28</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -141,6 +141,9 @@ body.dark .btn-primary{background:var(--navy-light);border-color:var(--navy-ligh
 .ce-row i{font-style:normal;color:var(--gold);font-weight:700}
 .ce-act{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
 .backup-row{margin:4px 0 6px}
+.hidden-link{display:block;margin:6px 4px 0;background:transparent;border:none;color:var(--muted);font-size:12px;text-align:left;cursor:pointer;padding:2px 0}
+.hidden-link:hover{color:var(--gold)}
+.pop button.pbtn.danger{background:#c62828}
 .to-map{font-size:12.5px;margin-bottom:8px;padding:5px 8px;border-radius:6px;background:rgba(201,168,76,.12)}
 .txt-muted{color:var(--muted);font-size:11.5px}
 /* Home (map gallery) */
@@ -279,7 +282,7 @@ body.dark .ms-result .big{color:var(--gold-light)}
 
 <header>
   <button class="icon-btn" id="btnHome" title="แผนที่ทั้งหมด" onclick="goHome()" style="display:none">⌂</button>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.27 · 2026-10-01</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.28 · 2026-10-22</span></div>
   <div class="hdr-right">
     <span class="cur-map" id="curMapName"></span>
     <span class="sync-badge" id="syncBadge" title=""></span>
@@ -311,6 +314,7 @@ body.dark .ms-result .big{color:var(--gold-light)}
         <span class="fc-act"><button class="fp-clear edit-only" onclick="event.preventDefault();addLayer()" title="เพิ่มแผนที่อีกชั้นในไฟล์นี้">＋ เพิ่มแผนที่</button><span class="chev">▶</span></span></summary>
       <div class="card-body">
         <div id="mapList" class="map-list"></div>
+        <button class="btn btn-outline btn-sm btn-block edit-only" style="margin:4px 0" onclick="removeShopsByNames()">🚫 เอาร้านออกจากแผนที่ (วางรายชื่อ)</button>
         <div class="btn-row backup-row">
           <button class="btn btn-outline btn-sm" onclick="backupData()" title="ดาวน์โหลดทุกแผนที่เก็บเป็นไฟล์">💾 สำรองข้อมูล</button>
           <button class="btn btn-outline btn-sm edit-only" onclick="$('restoreIn').click()" title="เปิดไฟล์สำรองเพื่อกู้คืน">📂 กู้คืนจากไฟล์</button>
@@ -430,6 +434,7 @@ body.dark .ms-result .big{color:var(--gold-light)}
     <div class="ask-title" id="askTitle"></div>
     <div class="ask-msg" id="askMsg"></div>
     <input class="input" id="askInput" autocomplete="off">
+    <textarea class="input" id="askArea" rows="9" style="display:none;height:auto;font-size:14px;line-height:1.5;padding:8px 10px" placeholder="วางชื่อร้าน 1 บรรทัด = 1 ร้าน"></textarea>
     <div class="ask-btns">
       <button type="button" class="btn btn-outline" onclick="askDone(false)">ยกเลิก</button>
       <button type="submit" class="btn btn-gold" id="askOk">ตกลง</button>
@@ -557,8 +562,11 @@ function ask(title, opt = {}) {
     askResolve = res;
     $('askTitle').textContent = title;
     $('askMsg').textContent = opt.message || '';
-    const inp = $('askInput');
-    inp.style.display = opt.confirm ? 'none' : '';
+    const area = $('askArea');
+    const inp = opt.multiline ? area : $('askInput');
+    $('askInput').style.display = (opt.confirm || opt.multiline) ? 'none' : '';
+    area.style.display = opt.multiline ? '' : 'none';
+    $('askForm').dataset.multi = opt.multiline ? '1' : '';
     inp.value = opt.value || '';
     $('askOk').textContent = opt.ok || 'ตกลง';
     $('askForm').classList.toggle('danger', !!opt.danger);
@@ -569,7 +577,7 @@ function ask(title, opt = {}) {
 }
 function askDone(ok) {
   const isConfirm = $('askForm').dataset.confirm === '1';
-  const v = $('askInput').value;
+  const v = $('askForm').dataset.multi === '1' ? $('askArea').value : $('askInput').value;
   $('askOv').style.display = 'none';
   const r = askResolve; askResolve = null;
   if (r) r(isConfirm ? !!ok : (ok ? v : null));
@@ -742,9 +750,13 @@ function parseRows(rows) {
 }
 
 /* ===== Add shops ===== */
+/* shops taken off a map (the Google Sheet is not touched): key = name + coords (~100 m) */
+const hideKey = (name, lat, lng) => clean(name).replace(/\s+/g, '').toLowerCase() + '|' + (+lat).toFixed(3) + '|' + (+lng).toFixed(3);
+const isHidden = (mapId, r) => { const m = mapById(mapId); return !!(m && m.hidden && m.hidden.includes(hideKey(r.name, r.lat, r.lng))); };
 function addShops(list, src = 'manual', mapId = activeMapId) {
   const added = [];
   list.forEach(r => {
+    if (isHidden(mapId, r)) return;
     const s = { id: newId(), name: r.name, lat: r.lat, lng: r.lng, group: clean(r.group) || DEFAULT_GROUP, sale: clean(r.sale), src, mapId };
     // Keep area data if the same shop/coord was already looked up
     const k = s.lat.toFixed(4) + ',' + s.lng.toFixed(4);
@@ -884,6 +896,7 @@ function renderMaps() {
       <button class="dd-trigger ${fs.length ? 'set' : ''}" onclick="openDD(this,'${m.id}','sale')">👤 <span class="dd-lbl">${esc(ddLabel(fs, 'เซลล์: ทั้งหมด'))}</span><span class="dd-arr">▼</span></button>
       <button class="dd-trigger ${fr.length ? 'set' : ''}" onclick="openDD(this,'${m.id}','route')">🚚 <span class="dd-lbl">${esc(ddLabel(fr, 'รูท: ทั้งหมด'))}</span><span class="dd-arr">▼</span></button>
     </div>
+    ${(m.hidden || []).length ? `<button class="hidden-link edit-only" onclick="restoreHidden('${m.id}')">🚫 เอาออกไว้ ${m.hidden.length} ร้าน · ↺ คืน</button>` : ''}
     ${colorOpen === m.id ? colorEditorHtml(m) : ''}</div>`;
   }).join('');
   document.querySelectorAll('.toMapName').forEach(el => el.textContent = activeMap().name);
@@ -969,10 +982,53 @@ function setActiveMap(id) {
 async function removeShop(id) {
   const s = shops.find(x => x.id === id);
   if (!s) return;
-  if (ONLINE && s.src === 'sheet') { showToast('ร้านนี้มาจาก Google Sheet — ลบในชีต แล้วกด "ดึงข้อมูล" ใหม่', 'warning'); return; }
-  if (!await askConfirm('ลบร้านนี้ ?', s.name, 'ลบ', true)) return;
+  const fromSheet = s.src === 'sheet';
+  if (!await askConfirm('เอาร้านนี้ออกจากแผนที่ ?', fromSheet
+      ? `${s.name}\nข้อมูลใน Google Sheet ไม่ถูกลบ — แค่ไม่แสดงบนแผนที่นี้ (คืนได้ภายหลัง)`
+      : s.name, 'เอาออก', true)) return;
+  map.closePopup();
+  if (fromSheet) {   // remember it so the next sheet import keeps it off the map
+    const m = mapById(s.mapId);
+    if (m) { m.hidden = m.hidden || []; const k = hideKey(s.name, s.lat, s.lng); if (!m.hidden.includes(k)) m.hidden.push(k); }
+  }
   shops = shops.filter(x => x.id !== id);
   touchMap(s.mapId); save(); renderAll();
+  showToast(`เอา "${s.name}" ออกจากแผนที่แล้ว`, 'success');
+}
+const nameKey = n => clean(n).replace(/\s+/g, '').toLowerCase();
+async function removeShopsByNames() {
+  const ids = (view === 'map' && openIds.length ? openIds : [activeMapId]).filter(mapById);
+  const text = await ask('เอาร้านออกจากแผนที่ (หลายร้าน)', { multiline: true, ok: 'ค้นหา',
+    message: 'วางชื่อร้าน 1 บรรทัด = 1 ร้าน — ข้อมูลใน Google Sheet ไม่ถูกลบ แค่ไม่แสดงบนแผนที่นี้' });
+  if (!text) return;
+  const wanted = [...new Set(text.split(/\r?\n/).map(clean).filter(Boolean))];
+  const keys = new Set(wanted.map(nameKey));
+  const hits = shops.filter(x => ids.includes(x.mapId) && keys.has(nameKey(x.name)));
+  const foundKeys = new Set(hits.map(x => nameKey(x.name)));
+  const missing = wanted.filter(n => !foundKeys.has(nameKey(n)));
+  if (!hits.length) { await askConfirm('ไม่พบร้านในแผนที่นี้', 'ตรวจชื่อร้านให้ตรงกับในชีตอีกครั้ง', 'ตกลง'); return; }
+  const msg = `เจอ ${foundKeys.size} ชื่อ (${hits.length} หมุด)` +
+    (missing.length ? `\nไม่เจอ ${missing.length} ชื่อ: ${missing.slice(0, 8).join(', ')}${missing.length > 8 ? ' …' : ''}` : '');
+  if (!await askConfirm('เอาร้านเหล่านี้ออกจากแผนที่ ?', msg, 'เอาออก', true)) return;
+  hits.forEach(x => {
+    if (x.src === 'sheet') {
+      const m = mapById(x.mapId); m.hidden = m.hidden || [];
+      const k = hideKey(x.name, x.lat, x.lng); if (!m.hidden.includes(k)) m.hidden.push(k);
+    }
+  });
+  const gone = new Set(hits.map(x => x.id));
+  shops = shops.filter(x => !gone.has(x.id));
+  ids.forEach(touchMap); save(); renderAll();
+  showToast(`เอาออกจากแผนที่ ${hits.length} หมุดแล้ว` + (missing.length ? ` · ไม่เจอ ${missing.length} ชื่อ` : ''), missing.length ? 'warning' : 'success');
+  return { hits: hits.length, missing };
+}
+async function restoreHidden(mapId) {
+  const m = mapById(mapId); if (!m || !(m.hidden || []).length) return;
+  if (!await askConfirm('คืนร้านที่เอาออก ?', `${m.hidden.length} ร้านในแผนที่ "${m.name}" จะกลับมาแสดงบนแผนที่`, 'คืนทั้งหมด')) return;
+  m.hidden = [];
+  touchMap(m.id); save();
+  if (m.sheet.url) await importSheet(true, m.id); else renderAll();
+  showToast('คืนร้านทั้งหมดแล้ว', 'success');
 }
 async function clearAll() {   // clears the active map only
   const m = activeMap();
@@ -1136,7 +1192,8 @@ function popupHtml(s) {
     <div class="p-coord">${s.lat.toFixed(6)}, ${s.lng.toFixed(6)}</div>
     <div class="p-btns"><a href="${gmapsUrl(s)}" target="_blank" rel="noopener">Google Maps</a>
     <a class="gold" href="https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}" target="_blank" rel="noopener">นำทาง</a>
-    <button class="pbtn" onclick="measureFrom('${s.id}')">📏 วัดระยะจากร้านนี้</button></div></div>`;
+    <button class="pbtn" onclick="measureFrom('${s.id}')">📏 วัดระยะจากร้านนี้</button>
+    ${canEdit ? `<button class="pbtn danger" onclick="removeShop('${s.id}')">🚫 เอาออก</button>` : ''}</div></div>`;
 }
 function refreshMarker(s) {
   const m = markers[s.id];
@@ -1452,7 +1509,7 @@ function renderSide() {
       </div>
       <div class="shop-act">
         <a class="mini" href="${gmapsUrl(s)}" target="_blank" rel="noopener" title="เปิด Google Maps" onclick="event.stopPropagation()">🗺</a>
-        <button class="mini edit-only" title="ลบ" onclick="event.stopPropagation();removeShop('${s.id}')">✕</button>
+        <button class="mini edit-only" title="เอาออกจากแผนที่" onclick="event.stopPropagation();removeShop('${s.id}')">✕</button>
       </div>
     </li>`).join('') + (more > 0 ? `<li class="list-more"><button class="btn btn-outline btn-block" onclick="showMoreList()">แสดงเพิ่มอีก ${Math.min(more, LIST_STEP).toLocaleString('th-TH')} ร้าน (เหลือ ${more.toLocaleString('th-TH')})</button></li>` : '')
     : `<li class="empty">${visShops().length ? 'ไม่พบร้านที่ค้นหา' : 'ยังไม่มีร้านในแผนที่นี้ — ดึงจาก Google Sheet หรือเพิ่มร้านด้านบน'}</li>`;
@@ -1511,7 +1568,7 @@ function setSync(state, text, title) {
 /* the part of the data everyone shares; per-viewer things (show/hide, filters, active map) stay local */
 function sharedSnapshot() {
   return {
-    maps: maps.map(m => ({ id: m.id, name: m.name, sheet: { url: m.sheet.url || '', tab: m.sheet.tab || '' }, routeColors: m.routeColors || {}, createdAt: m.createdAt || 0, updatedAt: m.updatedAt || 0, fileId: m.fileId || '' })),
+    maps: maps.map(m => ({ id: m.id, name: m.name, sheet: { url: m.sheet.url || '', tab: m.sheet.tab || '' }, routeColors: m.routeColors || {}, createdAt: m.createdAt || 0, updatedAt: m.updatedAt || 0, fileId: m.fileId || '', hidden: m.hidden || [] })),
     manualShops: shops.filter(x => x.src !== 'sheet').map(({ region, prov, amphoe, tambon, geoFail, ...rest }) => rest),
     groupColors
   };
@@ -1600,7 +1657,7 @@ function applyServer(data) {
     const old = prev[sm.id] || {};
     const sheet = Object.assign(newSheetCfg(), old.sheet || {}, { url: sm.sheet?.url || '', tab: sm.sheet?.tab || '', replace: true, auto: true });
     if (!old.sheet || old.sheet.url !== sheet.url || old.sheet.tab !== sheet.tab) changed.push(sm.id);
-    return { id: sm.id, name: sm.name, sheet, routeColors: sm.routeColors || {}, createdAt: sm.createdAt || 0, updatedAt: sm.updatedAt || 0, fileId: sm.fileId || '',
+    return { id: sm.id, name: sm.name, sheet, routeColors: sm.routeColors || {}, createdAt: sm.createdAt || 0, updatedAt: sm.updatedAt || 0, fileId: sm.fileId || '', hidden: sm.hidden || [],
              visible: old.visible !== false, fSales: old.fSales || [], fRoutes: old.fRoutes || [] };
   });
   const ids = new Set(maps.map(m => m.id));
@@ -1608,6 +1665,7 @@ function applyServer(data) {
   shops = [...shops.filter(x => x.src === 'sheet' && ids.has(x.mapId) && !changed.includes(x.mapId)), ...manual];
   if (data.groupColors) groupColors = data.groupColors;
   if (!mapById(activeMapId)) activeMapId = maps[0].id;
+  shops = shops.filter(x => !isHidden(x.mapId, x));   // shops someone took off the map
   applyGeo();
   lastPushed = JSON.stringify(sharedSnapshot());
   return changed;
