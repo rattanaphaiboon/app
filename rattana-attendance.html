@@ -3982,7 +3982,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.51';
+const APP_VERSION = '13.52';
 /* ══════ v13.37 รูปแบบวัน/เวลามาตรฐานเดียวกันทุกเครื่อง (surat 13/10 "แก้วันเดือนปีและเวลาให้เป็นมาตรฐานเดียวกันทุกเครื่อง") ══════
    เดิมใช้ toLocaleDateString และ toLocaleTimeString แบบ th-TH ของเบราว์เซอร์ ซึ่งแต่ละเครื่อง/เบราว์เซอร์ให้ผลไม่เหมือนกัน (ปี พ.ศ./ค.ศ. · 12/24 ชม. · เลขศูนย์นำหน้า · คำว่า "น.")
    และ timeStr ของ log ในเครื่องก็มาจากตัวนี้ → เครื่องที่ให้ "8:05" แทน "08:05" ทำให้ข้อความ/การตัดอักษรเพี้ยน
@@ -9151,6 +9151,7 @@ function openRegisterMemberFace(empId) {
    ลูกทีมสแกนจากมือถือตัวเองจึงขึ้น "ยังไม่มา" ทั้งที่สแกนแล้ว (surat 21/10) · getTeamToday = Apps Script 9.90 (ลูกทีมต่างสาขาก็เห็น)
    เซิร์ฟเวอร์เก่า → getCheckinLog วันนี้ (เห็นตามสิทธิ์ดูสาขา) · แคช 2 นาที */
 let _teamToday = { key: '', at: 0, ok: false, rows: [] }, _teamTodayP = null;
+let _teamTodayMeta = { err: '', denied: null, total: 0 };   // v13.52 บอกสถานะบนหน้า Dashboard
 function teamTodayFresh_() { return _teamToday.key === todayKey() && Date.now() - _teamToday.at < 120000; }
 async function teamTodayRefresh_(force) {
   if (!force && teamTodayFresh_()) return _teamToday;
@@ -9162,13 +9163,15 @@ async function teamTodayRefresh_(force) {
   _teamTodayP = (async () => {
     let rows = null;
     try {
+      _teamTodayMeta = { err: '', denied: null, total: ids.length };
       const r = await callAppsScript('getTeamToday', { empIds: ids.slice(0, 400).join(',') });
-      if (r && r.ok !== false && Array.isArray(r.rows)) rows = r.rows;
+      if (r && r.ok !== false && Array.isArray(r.rows)) { rows = r.rows; if (Array.isArray(r.denied)) _teamTodayMeta.denied = r.denied; }
+      else if (r && r.error && !/unknown action/i.test(String(r.error))) _teamTodayMeta.err = String(r.error);
       else if (r && /unknown action/i.test(String(r.error || ''))) {
         const g = await callAppsScript('getCheckinLog', { date: dm, limit: 3000 });
         if (g && g.ok !== false && Array.isArray(g.logs)) rows = g.logs.filter(x => String(x.date || dm) === dm);
       }
-    } catch (e) { console.warn('[teamToday]', e && e.message); }
+    } catch (e) { console.warn('[teamToday]', e && e.message); _teamTodayMeta.err = (e && e.message) || 'เชื่อมต่อไม่ได้'; }
     if (rows) _teamToday = { key, at: Date.now(), ok: true, rows: rows.filter(x => idSet.has(String(x.empId))).map(x => {
       const t = String(x.time || '').match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
       const ts = t ? new Date(d.getFullYear(), d.getMonth(), d.getDate(), +t[1], +t[2], +(t[3] || 0)) : new Date(x.timestamp);
@@ -9222,6 +9225,15 @@ function renderDashboard() {
     <div class="kpi"><div class="num warning">${cLate}</div><div class="label">สาย</div></div>
     <div class="kpi"><div class="num">${cOut}</div><div class="label">ออกแล้ว</div></div>
     <div class="kpi"><div class="num danger">${cAbs}</div><div class="label">ยังไม่มา</div></div>`;
+  // v13.52 สถานะการดึงสแกนวันนี้จากระบบ (เห็นว่าข้อมูลสดแค่ไหน / ติดอะไร)
+  let note = document.getElementById('dashSyncNote');
+  if (!note) { note = document.createElement('div'); note.id = 'dashSyncNote'; note.style.cssText = 'font-size:12px;color:var(--muted);margin:-4px 0 10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap'; grid.parentNode.insertBefore(note, grid); }
+  const tm = _teamTodayMeta, nm = id => { const x = team.find(m => String(m.empId) === String(id)); return x ? (x.nickname || String(x.name || '').split(' ')[0]) : id; };
+  const hhmm = t => { const d = new Date(t); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+  note.innerHTML = (_teamTodayP ? '⏳ กำลังดึงสแกนวันนี้จากระบบ…'
+    : (_teamToday.ok && _teamToday.key === todayKey()) ? `✓ สแกนจากระบบ อัปเดต ${hhmm(_teamToday.at)} · ${_teamToday.rows.length} รายการ` + (tm.denied && tm.denied.length ? ` · <span style="color:var(--danger)">⚠ ดูสแกนไม่ได้ ${tm.denied.length} คน (${_h(tm.denied.slice(0, 5).map(nm).join(', '))}${tm.denied.length > 5 ? '…' : ''}) — แจ้ง HR</span>` : '')
+    : `<span style="color:var(--danger)">⚠ ดึงสแกนวันนี้จากระบบไม่สำเร็จ${tm.err ? ' — ' + _h(tm.err) : ''} · ตัวเลขด้านล่างอาจไม่ครบ</span>`)
+    + (_teamTodayP ? '' : ` <button type="button" onclick="teamTodayRefresh_(true).then(() => renderDashboard())" style="background:none;border:1px solid var(--border);border-radius:8px;padding:2px 8px;font:inherit;font-size:12px;cursor:pointer;color:var(--text)">⟳ รีเฟรช</button>`);
   // also update home page kpi for supervisor
   const supKpi = document.getElementById('supHomeKpi');
   if (supKpi) {
