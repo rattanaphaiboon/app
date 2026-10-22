@@ -14,7 +14,7 @@
 //  4. คัดลอก URL ที่ลงท้าย /exec ส่งให้ Claude ใส่ใน CONFIG.gasUrl ของ rattana-emergency.html
 //     (ถ้า URL มี /a/macros/rattanaphaiboon.com/ ให้ตัดส่วนนั้นออก เหลือ script.google.com/macros/s/…/exec)
 //  แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ Version: New version ▸ Deploy (URL เดิม)
-//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น {"ok":true,"version":"1.0",…}
+//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น {"ok":true,"version":"1.2",…}
 //
 //  ตัวเลือกเพิ่มเติม (Project Settings ▸ Script Properties):
 //    ALERT_EMAILS = hr@rattanaphaiboon.com, …   ← ส่งอีเมลด่วนเมื่อมีคนแจ้ง "วิกฤต" / ขออพยพ / ขอไปโรงพยาบาล
@@ -64,10 +64,10 @@ function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 function clean_(s) {
-  return String(s == null ? '' : s).replace(/[​-‍﻿]/g, '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
+  return String(s == null ? '' : s).replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
 }
 function cleanMulti_(s, max) { // เก็บขึ้นบรรทัดใหม่ไว้ (ข้อความยาว)
-  return String(s == null ? '' : s).replace(/[​-‍﻿]/g, '').replace(/\r/g, '').trim().slice(0, max || 1000);
+  return String(s == null ? '' : s).replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\r/g, '').trim().slice(0, max || 1000);
 }
 function norm_(s) { return clean_(s).toLowerCase(); }
 function blank_(s) { s = clean_(s); return !s || s === '-' || s === '0'; }
