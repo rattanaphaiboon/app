@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Near Me v1.5</title>
+<title>Rattana Near Me v1.6</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -168,7 +168,7 @@ body.dark .shop .d .km{color:var(--gold-light)}
 <div id="spinner"><div class="box"><div class="ring"></div><p id="spinnerMsg">กำลังโหลด...</p></div></div>
 
 <header>
-  <div class="logo-text">Rattana <span>Near Me</span><span class="ver-badge">v1.5 · 2026-10-22</span></div>
+  <div class="logo-text">Rattana <span>Near Me</span><span class="ver-badge">v1.6 · 2026-10-22</span></div>
   <button class="icon-btn" id="btnRefresh" title="โหลดข้อมูลร้านใหม่" onclick="refreshData()">⟳</button>
   <button class="icon-btn" id="btnDark" title="โหมดมืด" onclick="toggleDark()">🌙</button>
 </header>
@@ -189,7 +189,7 @@ body.dark .shop .d .km{color:var(--gold-light)}
     <div class="card card-gold ctrl">
       <div class="card-body" style="display:flex;flex-direction:column;gap:12px">
         <div>
-          <div class="lbl">รัศมีค้นหา</div>
+          <div class="lbl">รัศมีค้นหา (ระยะตามถนนจริง)</div>
           <div class="chips" id="radiusChips"></div>
         </div>
         <div>
@@ -226,7 +226,7 @@ if (/\bLine\//i.test(navigator.userAgent || '') && !/[?&]openExternalBrowser=1/.
 }
 
 /* ════════ Config ════════ */
-const APP_VER   = '1.5';
+const APP_VER   = '1.6';
 const SHEET_ID  = '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI';
 const SHEET_TAB = 'Customer';
 const PROVINCES = ['สมุทรสาคร', 'เพชรบุรี', 'สมุทรสงคราม'];
@@ -234,6 +234,8 @@ const RADII     = [300, 500, 1000, 2000, 5000];
 const VERY_NEAR = 100;            // เมตร — แจ้งเตือนเด้งเมื่อเข้าใกล้ร้านในระยะนี้
 const NEAREST_FALLBACK = 10;      // ถ้าไม่มีร้านในรัศมี แสดงร้านที่ใกล้ที่สุดกี่ร้าน
 const PAGE = 50;
+const OSRM_URL = 'https://router.project-osrm.org';   // คำนวณระยะ/เส้นทางตามถนนจริง
+const ROAD_MAX = 99;      // คำนวณระยะตามถนนได้ครั้งละไม่เกิน 99 ร้าน (ที่เหลือใช้ระยะเส้นตรง)
 const CACHE_KEY = 'rns_shops_v1';
 const PREF_KEY  = 'rns_prefs_v1';
 // คอลัมน์ในชีต Customer (อ้างอิงด้วยชื่อหัวคอลัมน์)
@@ -430,17 +432,17 @@ const shopLayer = L.layerGroup().addTo(map);
 let meMarker = null, accCircle = null, radiusCircle = null;
 const markerById = new Map();
 
-function shopPopup(s, dist){
+function shopPopup(s, distHtml){
   const tel = firstPhone(s.phone);
   return '<div class="pp-name">' + esc(s.name) + '</div>' +
-    (dist != null ? '<div class="pp-row"><b>' + fmtDist(dist) + '</b> จากคุณ</div>' : '') +
+    (distHtml ? '<div class="pp-row pp-dist">' + distHtml + '</div>' : '') +
     '<div class="pp-row">' + esc(s.addr) + '</div>' +
     (s.type ? '<div class="pp-row">ประเภท: ' + esc(s.type) + '</div>' : '') +
     (s.sales.length ? '<div class="pp-row">เซลล์: ' + esc(s.sales.join(', ')) + '</div>' : '') +
     '<div class="pp-act"><a class="g" target="_blank" rel="noopener" href="' + navUrl(s) + '">🧭 นำทาง</a>' +
     (tel ? '<a href="tel:' + tel + '">📞 โทร</a>' : '') + '</div>';
 }
-function navUrl(s){ return 'https://www.google.com/maps/dir/?api=1&destination=' + s.lat + ',' + s.lng; }
+function navUrl(s){ return 'https://www.google.com/maps/dir/?api=1&destination=' + s.lat + ',' + s.lng + '&travelmode=driving'; }
 
 function drawShopMarkers(){
   shopLayer.clearLayers(); markerById.clear();
@@ -728,8 +730,18 @@ function doUpdate(){
   }
   if (!me) { styleMarkers(new Set()); renderNearIcons([]); return; }
   const list = filteredShops();
-  list.forEach(s => s._d = haversine(me.lat, me.lng, s.lat, s.lng));
+  list.forEach(s => s._s = haversine(me.lat, me.lng, s.lat, s.lng));   // _s = ระยะเส้นตรง
+  list.sort((a, b) => a._s - b._s);
+  // ระยะตามถนนจริง: ร้านที่ห่างตามถนนไม่เกินรัศมี ต้องห่างเส้นตรงไม่เกินรัศมีด้วย → ส่งเฉพาะร้านกลุ่มนี้ไปคำนวณ
+  const nIn = list.findIndex(s => s._s > prefs.radius);
+  const cands = list.slice(0, Math.min(ROAD_MAX, Math.max(nIn < 0 ? list.length : nIn, NEAREST_FALLBACK + 5)));
+  const rc = roadValid();
+  list.forEach(s => {
+    const r = rc && rc.byId.get(s.id);
+    s._road = !!r; s._d = r ? Math.max(r.d, s._s) : s._s; s._t = r ? r.t : null;
+  });
   list.sort((a, b) => a._d - b._d);
+  requestRoad(cands);
   const inR = list.filter(s => s._d <= prefs.radius);
   lastResult = inR.length ? inR : list.slice(0, NEAREST_FALLBACK);
   const iconShops = inR.slice(0, MAX_NEAR_ICONS);
@@ -739,6 +751,55 @@ function doUpdate(){
   renderList(inR.length > 0);
   checkVeryNear(list);
 }
+/* ════════ ระยะทางตามถนนจริง (OSRM) ════════ */
+let road = null;            // {lat,lng,ts,byId: Map(id → {d เมตร, t วินาที})}
+let roadBusy = false, roadFailAt = 0, roadWarned = false;
+function roadValid(){
+  // ใช้ผลเดิมได้ถ้ายังขยับไม่เกิน 300 ม. จากจุดที่คำนวณ
+  return road && haversine(road.lat, road.lng, me.lat, me.lng) <= 300 ? road : null;
+}
+function requestRoad(cands){
+  if (roadBusy || !cands.length || Date.now() - roadFailAt < 60000) return;
+  const moved = road ? haversine(road.lat, road.lng, me.lat, me.lng) : Infinity;
+  const missing = !road || cands.some(s => !road.byId.has(s.id));
+  if (moved < 30 && !missing) return;                        // ยังอยู่จุดเดิม ข้อมูลครบแล้ว
+  if (road && moved < 300 && !missing && Date.now() - road.ts < 15000) return;   // ไม่ถี่เกิน 15 วิ
+  fetchRoad({lat:me.lat, lng:me.lng}, cands);
+}
+async function fetchRoad(origin, cands){
+  roadBusy = true;
+  try {
+    const pts = [origin].concat(cands).map(p => p.lng.toFixed(6) + ',' + p.lat.toFixed(6)).join(';');
+    const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 15000);
+    const res = await fetch(OSRM_URL + '/table/v1/driving/' + pts + '?sources=0&annotations=distance,duration', {signal:ctl.signal});
+    clearTimeout(to);
+    const j = await res.json();
+    if (j.code !== 'Ok') throw new Error(j.message || j.code);
+    const byId = (road && haversine(road.lat, road.lng, origin.lat, origin.lng) < 30) ? road.byId : new Map();
+    const srcSnap = (j.sources[0] && j.sources[0].distance) || 0;   // ระยะจากจุดที่ยืนถึงถนน
+    cands.forEach((s, i) => {
+      const d = j.distances[0][i+1];
+      if (d == null) return;
+      const snap = srcSnap + ((j.destinations[i+1] && j.destinations[i+1].distance) || 0);   // + ถนนถึงหน้าร้าน
+      byId.set(s.id, {d: d + snap, t: (j.durations[0][i+1] || 0)});
+    });
+    road = {lat:origin.lat, lng:origin.lng, ts:Date.now(), byId};
+  } catch (e) {
+    roadFailAt = Date.now();
+    if (!roadWarned) { roadWarned = true; showToast('คำนวณระยะตามถนนไม่ได้ชั่วคราว — แสดงระยะเส้นตรงแทน', 'warning'); }
+  } finally {
+    roadBusy = false;
+    update();
+  }
+}
+function fmtMin(sec){
+  const m = Math.max(1, Math.round(sec / 60));
+  return m < 60 ? m + ' นาที' : Math.floor(m/60) + ' ชม. ' + (m % 60) + ' นาที';
+}
+function distKind(s){
+  return s._road ? '🛣️ ตามถนน' + (s._t ? ' ~' + fmtMin(s._t) : '') : (roadBusy ? '⏳ กำลังคำนวณตามถนน' : '📏 เส้นตรง');
+}
+
 function renderMsg(inR, list){
   const el = $('msg');
   const t = me ? formatThaiTime(me.ts) : '';
@@ -751,7 +812,7 @@ function renderMsg(inR, list){
   const provTxt = prefs.prov === 'all' ? '' : ' (จ.' + prefs.prov + ')';
   const nearHtml = n ? '<div class="m-near" onclick="selectShop(' + n.id + ', true)">' +
       '<div class="dist">' + fmtDist(n._d) + '</div>' +
-      '<div style="min-width:0"><div style="font-size:11px;opacity:.75">ร้านที่ใกล้ที่สุด · ' + bearingTh(me.lat, me.lng, n.lat, n.lng) + '</div>' +
+      '<div style="min-width:0"><div style="font-size:11px;opacity:.75">ร้านที่ใกล้ที่สุด · ' + distKind(n) + '</div>' +
       '<div class="nm">' + esc(n.name) + '</div></div></div>' : '';
   if (inR.length) {
     el.className = 'msg';
@@ -785,7 +846,9 @@ function renderList(inRadius){
       '<div class="tags">' + tags.join('') + '</div>' +
       '<div class="acts"><a class="btn btn-gold btn-sm" target="_blank" rel="noopener" href="' + navUrl(s) + '" onclick="event.stopPropagation()">🧭 นำทาง</a>' +
       (tel ? '<a class="btn btn-outline btn-sm" href="tel:' + tel + '" onclick="event.stopPropagation()">📞 ' + esc(tel) + '</a>' : '') + '</div></div>' +
-      '<div class="d"><div class="km">' + fmtDist(s._d) + '</div><div class="dir">' + bearingTh(me.lat, me.lng, s.lat, s.lng) + '</div></div>' +
+      '<div class="d"><div class="km">' + fmtDist(s._d) + '</div><div class="dir">' + distKind(s) + '</div>' +
+      (s._road ? '<div class="dir">เส้นตรง ' + fmtDist(s._s) + '</div>' : '') +
+      '<div class="dir">' + bearingTh(me.lat, me.lng, s.lat, s.lng) + '</div></div>' +
     '</div>';
   });
   if (lastResult.length > shown) rows.push('<div class="more"><button class="btn btn-outline btn-sm" onclick="shown+=PAGE;renderList(' + inRadius + ')">แสดงเพิ่ม (' + fmtNum(lastResult.length - shown) + ')</button></div>');
@@ -797,24 +860,54 @@ function selectShop(id, fromList){
   document.querySelectorAll('.shop.sel').forEach(e => e.classList.remove('sel'));
   const row = document.querySelector('.shop[data-id="' + id + '"]');
   if (row) { row.classList.add('sel'); if (!fromList) row.scrollIntoView({behavior:'smooth', block:'nearest'}); }
-  const d = me ? haversine(me.lat, me.lng, s.lat, s.lng) : null;
   if (fromList) {
     map.setView([s.lat, s.lng], Math.max(map.getZoom(), 16));
     if (window.innerWidth < 1024) $('map').scrollIntoView({behavior:'smooth', block:'center'});
   }
-  L.popup({offset:[0,-4]}).setLatLng([s.lat, s.lng]).setContent(shopPopup(s, d)).openOn(map);
+  const straight = me ? haversine(me.lat, me.lng, s.lat, s.lng) : null;
+  const popup = L.popup({offset:[0,-4]}).setLatLng([s.lat, s.lng])
+    .setContent(shopPopup(s, me ? '⏳ กำลังหาเส้นทางตามถนน... (เส้นตรง ' + fmtDist(straight) + ')' : '')).openOn(map);
+  if (me) drawRoute(s, popup, straight, fromList);
 }
+
+/* ════════ เส้นทางตามถนนจริง จากตำแหน่งของฉัน → ร้าน ════════ */
+let routeLine = null, routeSeq = 0;
+function clearRoute(){ if (routeLine) { map.removeLayer(routeLine); routeLine = null; } }
+async function drawRoute(s, popup, straight, fit){
+  const seq = ++routeSeq;
+  clearRoute();
+  try {
+    const url = OSRM_URL + '/route/v1/driving/' + me.lng.toFixed(6) + ',' + me.lat.toFixed(6) + ';' +
+                s.lng.toFixed(6) + ',' + s.lat.toFixed(6) + '?overview=full&geometries=geojson';
+    const j = await (await fetch(url)).json();
+    if (seq !== routeSeq) return;   // ผู้ใช้เลือกร้านอื่นไปแล้ว
+    if (j.code !== 'Ok' || !j.routes || !j.routes.length) throw new Error(j.code);
+    const r = j.routes[0];
+    const snap = j.waypoints.reduce((a, w) => a + (w.distance || 0), 0);   // ระยะเดินจากจุดยืน/หน้าร้านถึงถนน
+    const pts = [[me.lat, me.lng]].concat(r.geometry.coordinates.map(c => [c[1], c[0]]), [[s.lat, s.lng]]);
+    routeLine = L.polyline(pts, {color:'#1a73e8', weight:6, opacity:.85, lineJoin:'round'}).addTo(map);
+    routeLine.bringToBack();
+    if (popup.isOpen()) popup.setContent(shopPopup(s,
+      '🛣️ ตามถนน <b>' + fmtDist(r.distance + snap) + '</b> · ~' + fmtMin(r.duration) + '<br><span style="color:#8a98b8">เส้นตรง ' + fmtDist(straight) + '</span>'));
+    if (fit) map.fitBounds(routeLine.getBounds(), {padding:[40, 40], maxZoom:17});
+  } catch (e) {
+    if (seq !== routeSeq) return;
+    if (popup.isOpen()) popup.setContent(shopPopup(s, '📏 เส้นตรง <b>' + fmtDist(straight) + '</b> (หาเส้นทางตามถนนไม่ได้)'));
+  }
+}
+map.on('popupclose', () => { routeSeq++; clearRoute(); });
 
 /* ════════ แจ้งเตือนเมื่อเข้าใกล้ร้าน ════════ */
 let alertTimer = null;
 function checkVeryNear(list){
   if (!me || me.manual) return;
-  const hit = list.find(s => s._d <= VERY_NEAR && !alerted.has(s.id));
+  // แจ้งเตือนเมื่อตัวคุณอยู่ใกล้ร้านจริง (ระยะเส้นตรง)
+  const hit = list.find(s => s._s <= VERY_NEAR && !alerted.has(s.id));
   if (!hit) return;
-  list.filter(s => s._d <= VERY_NEAR).forEach(s => alerted.add(s.id));
+  list.filter(s => s._s <= VERY_NEAR).forEach(s => alerted.add(s.id));
   alertShopId = hit.id;
   $('nearAlertName').textContent = hit.name;
-  $('nearAlertSub').textContent = 'ห่าง ' + fmtDist(hit._d) + ' · ' + bearingTh(me.lat, me.lng, hit.lat, hit.lng) + ' · แตะเพื่อดู';
+  $('nearAlertSub').textContent = 'ห่าง ' + fmtDist(hit._s) + ' · ' + bearingTh(me.lat, me.lng, hit.lat, hit.lng) + ' · แตะเพื่อดู';
   $('nearAlert').classList.add('show');
   if (navigator.vibrate) { try { navigator.vibrate([150, 80, 150]); } catch(e){} }
   clearTimeout(alertTimer); alertTimer = setTimeout(() => $('nearAlert').classList.remove('show'), 8000);
