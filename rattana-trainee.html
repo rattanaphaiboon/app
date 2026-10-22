@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Trainee v1.0</title>
+<title>Rattana Trainee v1.1</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -431,7 +431,7 @@ textarea.input{resize:vertical;min-height:72px;line-height:1.5}
 
 <script>
 /* =====================================================================
- * Rattana Trainee — Core business rules (v1.0 · 21/10/2569)
+ * Rattana Trainee — Core business rules (v1.1 · 22/10/2569: ผู้ใช้งานดึงจาก Rattana Users for apps)
  * ใช้ร่วมกันทั้ง "โหมดทดลองในเบราว์เซอร์" และ "Google Apps Script (หลังบ้านจริง)"
  * แก้กฎที่ไฟล์นี้ไฟล์เดียว แล้วรัน `node build-trainee.js` เพื่อสร้างไฟล์ใช้งาน
  * ===================================================================== */
@@ -469,7 +469,9 @@ var TraineeCore = (function () {
   };
   var EXT_DAY_OPTIONS = [3, 5, 7];
   var ROLES = { HR: 'ฝ่ายบุคคล', SUP: 'หัวหน้างาน', MENTOR: 'พี่เลี้ยง' };
-  var WAREHOUSES = { W1: 'สมุทรสงคราม', W2: 'สุพรรณบุรี', W3: 'ราชบุรี', W4: 'นครปฐม', HQ: 'สำนักงานใหญ่' };
+  var WAREHOUSES = { W1: 'สมุทรสงคราม', W2: 'สุพรรณบุรี', W3: 'ราชบุรี', W4: 'นครปฐม', HQ: 'สำนักงานใหญ่', C4: 'รัตนมาร์ท', STATION: 'สถานีบริการ' };
+  /** กำหนดบทบาทอัตโนมัติจากชีต Rattana Users for apps — HR แก้เฉพาะคนได้ในแอป (เก็บในชีต Staff) */
+  var USER_RULES = { HR_DEPT: /ทรัพยากรบุคคล|ฝ่ายบุคคล|^hr$/i, HR_MIN_ROLE: 8, SUP_ALL_MIN_ROLE: 6, SUP_MIN_ROLE: 4, RECENT_HIRE_DAYS: 45 };
   var ACTION_LABEL = {
     ADD: 'เพิ่มพนักงานใหม่', LOG_M: 'พี่เลี้ยงบันทึกรายวัน', LOG_E: 'น้องบันทึกรายวัน', SELF: 'น้องประเมินตัวเอง',
     EVAL: 'ส่งผลประเมิน', HR_APPROVE: 'HR อนุมัติผล', HR_RETURN: 'HR ส่งกลับให้แก้', EDIT: 'แก้ข้อมูลพนักงาน',
@@ -582,7 +584,62 @@ var TraineeCore = (function () {
   function normLog(l) { var o = copy(l); o.day = num(l.day, 0); o.taught = arr(l.taught); return o; }
   function normEval(e) { var o = copy(e); o.round = num(e.round, 1); o.scores = arr(e.scores).map(Number); o.extDays = num(e.extDays, 0); return o; }
   function normSelf(s) { var o = copy(s); o.round = num(s.round, 1); o.scores = arr(s.scores).map(Number); o.fbScore = num(s.fbScore, 0); return o; }
-  function normStaff(s) { return { email: lower(s.email), name: String(s.name || '').trim(), role: String(s.role || '').toUpperCase().trim(), wh: String(s.wh || '').toUpperCase().trim(), phone: String(s.phone || '').trim(), status: String(s.status || 'Active').trim() }; }
+  function normStaff(s) {
+    return { email: lower(s.email), name: String(s.name || '').trim(), role: String(s.role || '').toUpperCase().trim(), wh: String(s.wh || '').toUpperCase().trim(),
+      phone: String(s.phone || '').trim(), status: String(s.status || 'Active').trim(), source: s.source || 'manual', dept: s.dept || '', base: s.base || null };
+  }
+
+  /* ---------- รายชื่อพนักงานจากชีต Rattana Users for apps ---------- */
+  /** เบอร์โทร: ชีตอาจตัดเลข 0 ข้างหน้าทิ้ง → เติมคืนและจัดรูป 0xx-xxx-xxxx */
+  function fmtPhone(p) {
+    var d = String(p || '').split(/[,/]/)[0].replace(/\D/g, '');
+    if (d.length === 9 && /^[689]/.test(d)) d = '0' + d;
+    return d.length === 10 ? d.slice(0, 3) + '-' + d.slice(3, 6) + '-' + d.slice(6) : d;
+  }
+  /** วันเริ่มงานในชีตเป็น d/m/yyyy (ค.ศ. หรือ พ.ศ.) → YYYY-MM-DD */
+  function parseStart(s) {
+    var m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(String(s || '').trim());
+    if (!m) return parseYMD(s) ? ymd(parseYMD(s)) : '';
+    var y = +m[3]; if (y > 2400) y -= 543;
+    var d = new Date(y, +m[2] - 1, +m[1]);
+    return d.getMonth() === +m[2] - 1 ? ymd(d) : '';
+  }
+  /** แถวจากชีต (object ตามหัวคอลัมน์) → ข้อมูลที่แอปใช้ */
+  function usersFromRows(rows) {
+    return rows.map(function (r) {
+      return {
+        email: lower(r['E-mail']), name: String(r['ชื่อ - สกุล'] || '').trim(), nick: String(r['ชื่อเล่น'] || '').trim(),
+        wh: String(r['W'] || '').toUpperCase().trim(), role: parseInt(r['User Role'], 10) || 1, dept: String(r['แผนก'] || '').trim(),
+        phone: fmtPhone(r['เบอร์โทรพนง.']), position: String(r['ตำแหน่ง'] || '').trim(), start: parseStart(r['เริ่มงาน']),
+        empCode: String(r['รหัสพนักงาน'] || '').trim(), active: String(r['Status'] || '').trim().toLowerCase() === 'active'
+      };
+    }).filter(function (u) { return u.active && u.name; });
+  }
+  /** บทบาทอัตโนมัติ: ฝ่ายบุคคล = HR · User Role 6–7 = หัวหน้างานทุกสาขา · 4–5 = หัวหน้างานสาขาตัวเอง · ที่เหลือ = พี่เลี้ยง */
+  function staffFromUser(u) {
+    var role = 'MENTOR', wh = u.wh;
+    if (u.role >= USER_RULES.HR_MIN_ROLE || USER_RULES.HR_DEPT.test(u.dept)) role = 'HR';
+    else if (u.role >= USER_RULES.SUP_ALL_MIN_ROLE) { role = 'SUP'; wh = 'ALL'; }
+    else if (u.role >= USER_RULES.SUP_MIN_ROLE) role = 'SUP';
+    return { email: u.email, name: u.name, role: role, wh: wh, phone: u.phone, status: 'Active', source: 'users', dept: u.dept };
+  }
+  /** รวมรายชื่อบริษัท + ค่าที่ HR กำหนดเอง (ชีต Staff) — ชื่อใช้จากรายชื่อบริษัทเสมอ */
+  function mergeStaff(users, overrides) {
+    var map = {}, out = [];
+    users.forEach(function (u) { if (u.email && u.email.indexOf('@') > 0 && !map[u.email]) { map[u.email] = staffFromUser(u); out.push(map[u.email]); } });
+    overrides.forEach(function (o) {
+      var e = lower(o.email); if (!e) return;
+      var b = map[e];
+      if (!b) { out.push({ email: e, name: String(o.name || '').trim() || e.split('@')[0], role: String(o.role || 'MENTOR').toUpperCase(), wh: String(o.wh || '').toUpperCase(), phone: String(o.phone || ''), status: String(o.status || 'Active'), source: 'manual' }); return; }
+      b.base = { role: b.role, wh: b.wh, phone: b.phone };
+      if (o.role) b.role = String(o.role).toUpperCase();
+      if (o.wh) b.wh = String(o.wh).toUpperCase();
+      if (o.phone) b.phone = String(o.phone);
+      if (o.status) b.status = String(o.status);
+      b.source = 'override';
+    });
+    return out;
+  }
   function isActiveRow(x) { return String(x.status || x.active || 'Active').toLowerCase().replace('true', 'active') === 'active'; }
   function total(a) { var s = 0; for (var i = 0; i < a.length; i++) s += Number(a[i]) || 0; return s; }
   function level(s) { return s >= 21 ? 'ดีมาก' : s >= 16 ? 'ดี' : s >= 11 ? 'พอใช้' : 'ต้องปรับปรุง'; }
@@ -642,7 +699,9 @@ var TraineeCore = (function () {
    * create(store, opts) → { dispatch(me, action, payload), authTrainee(id, code) }
    * store: staff(), trainees(), logs(), evals(), selfs(), templates(), positions(), audit(empId)
    *        insertTrainee(t), updateTrainee(id, patch), upsertLog(row), upsertEval(row), upsertSelf(row),
-   *        replaceTemplate(pos, day, items), insertPosition(p), upsertStaff(s), insertAudit(a)
+   *        replaceTemplate(pos, day, items), insertPosition(p), upsertStaff(s), removeStaff(email), insertAudit(a)
+   *        users() — รายชื่อจาก Rattana Users for apps (ผ่าน usersFromRows) ใช้หาพนักงานที่เพิ่งเริ่มงาน
+   *        staff() ต้องคืนรายชื่อที่รวมแล้วด้วย mergeStaff(users, แถวในชีต Staff)
    * opts:  { now(): Date, randomId(): string }
    * me:    { kind:'staff', email, name, role:'HR'|'SUP'|'MENTOR', wh, phone } หรือ trainee ที่ผ่าน authTrainee
    * ================================================================= */
@@ -730,8 +789,19 @@ var TraineeCore = (function () {
         me: profile(me), today: ymd(today()), serverTime: iso(), trainees: list,
         positions: positionsAll(),
         templates: isHR(me) ? templatesObj() : null,
-        staff: isHR(me) ? staff : isSup(me) ? staff.filter(function (s) { return isActiveRow(s) && (sameWh(me, s) || s.wh === 'ALL' || !s.wh); }) : []
+        staff: isHR(me) ? staff : isSup(me) ? staff.filter(function (s) { return isActiveRow(s) && (sameWh(me, s) || s.wh === 'ALL' || !s.wh); }) : [],
+        recentHires: recentHires(me)
       };
+    }
+    /** พนักงานที่เพิ่งเริ่มงาน (จากรายชื่อบริษัท) ที่ยังไม่ได้เพิ่มเป็นน้องใหม่ — ใช้เลือกตอนเพิ่มน้องใหม่ จะได้ไม่ต้องพิมพ์ */
+    function recentHires(me) {
+      if (!canAdd(me) || !store.users) return [];
+      var key = function (n) { return String(n || '').replace(/\s+/g, ' ').trim(); }, have = {};
+      store.trainees().forEach(function (t) { have[key(t.name)] = 1; });
+      var t0 = today().getTime(), from = ymd(new Date(t0 - USER_RULES.RECENT_HIRE_DAYS * 86400000)), to = ymd(new Date(t0 + 30 * 86400000));
+      return store.users().filter(function (u) { return u.start && u.start >= from && u.start <= to && !have[key(u.name)] && (isHR(me) || sameWh(me, u)); })
+        .sort(function (a, b) { return b.start.localeCompare(a.start); }).slice(0, 100)
+        .map(function (u) { return { name: u.name, nick: u.nick, phone: u.phone, wh: u.wh, start: u.start, position: u.position, empCode: u.empCode }; });
     }
 
     function addTrainee(me, p) {
@@ -921,17 +991,27 @@ var TraineeCore = (function () {
 
     function saveStaff(me, p) {
       if (!isHR(me)) throw err('เฉพาะ HR เท่านั้น', 'FORBIDDEN');
-      var s = normStaff(p);
+      var s = normStaff(p), cur = staffByEmail(s.email);
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s.email)) throw err('อีเมลไม่ถูกต้อง');
+      if (!s.name && cur) s.name = cur.name;
       if (s.name.length < 3) throw err('กรุณากรอกชื่อ-สกุล');
       if (!ROLES[s.role]) throw err('กรุณาเลือกบทบาท');
       if (s.wh && s.wh !== 'ALL' && !WAREHOUSES[s.wh]) throw err('สาขาไม่ถูกต้อง');
       s.status = /^inactive$/i.test(s.status) ? 'Inactive' : 'Active';
       if (s.email === me.email && (s.role !== 'HR' || s.status !== 'Active')) throw err('แก้บทบาทหรือปิดบัญชีของตัวเองไม่ได้ กรุณาให้ HR ท่านอื่นทำ');
       s.phone = clean(s.phone, 20);
-      var old = staffByEmail(s.email);
-      store.upsertStaff(s);
-      audit(me, '', 'STAFF', (old ? 'แก้ ' : 'เพิ่ม ') + s.name + ' · ' + ROLES[s.role] + ' · ' + (s.wh || 'ทุกสาขา') + ' · ' + s.status);
+      store.upsertStaff({ email: s.email, name: s.name, role: s.role, wh: s.wh, phone: s.phone, status: s.status });
+      audit(me, '', 'STAFF', (cur ? 'กำหนดสิทธิ์ ' : 'เพิ่ม ') + s.name + ' · ' + ROLES[s.role] + ' · ' + (s.wh === 'ALL' ? 'ทุกสาขา' : s.wh || '-') + ' · ' + s.status);
+      return staffAll();
+    }
+    /** ล้างค่าที่ HR กำหนดเอง → กลับไปใช้บทบาทอัตโนมัติจากรายชื่อบริษัท (หรือลบออก ถ้าเป็นคนนอกรายชื่อ) */
+    function resetStaff(me, p) {
+      if (!isHR(me)) throw err('เฉพาะ HR เท่านั้น', 'FORBIDDEN');
+      var e = lower(p.email), cur = staffByEmail(e);
+      if (!cur || (cur.source !== 'override' && cur.source !== 'manual')) throw err('คนนี้ใช้ค่าจากรายชื่อบริษัทอยู่แล้ว');
+      if (e === me.email) throw err('แก้สิทธิ์ของตัวเองไม่ได้ กรุณาให้ HR ท่านอื่นทำ');
+      store.removeStaff(e);
+      audit(me, '', 'STAFF', (cur.source === 'manual' ? 'ลบ ' : 'กลับไปใช้ค่าจากรายชื่อบริษัท · ') + cur.name);
       return staffAll();
     }
 
@@ -988,10 +1068,10 @@ var TraineeCore = (function () {
     }
 
     var STAFF_ACTIONS = { sync: sync, addTrainee: addTrainee, editTrainee: editTrainee, resetCode: resetCode, closeTrainee: closeTrainee,
-      saveLog: saveLog, submitEval: submitEval, hrDecide: hrDecide, history: history, saveTemplate: saveTemplate, addPosition: addPosition, saveStaff: saveStaff };
+      saveLog: saveLog, submitEval: submitEval, hrDecide: hrDecide, history: history, saveTemplate: saveTemplate, addPosition: addPosition, saveStaff: saveStaff, resetStaff: resetStaff };
     var TRAINEE_ACTIONS = { tsync: tsync, tsaveLog: tsaveLog, tsaveSelf: tsaveSelf };
     return {
-      WRITE_ACTIONS: ['addTrainee', 'editTrainee', 'resetCode', 'closeTrainee', 'saveLog', 'submitEval', 'hrDecide', 'saveTemplate', 'addPosition', 'saveStaff', 'tsaveLog', 'tsaveSelf'],
+      WRITE_ACTIONS: ['addTrainee', 'editTrainee', 'resetCode', 'closeTrainee', 'saveLog', 'submitEval', 'hrDecide', 'saveTemplate', 'addPosition', 'saveStaff', 'resetStaff', 'tsaveLog', 'tsaveSelf'],
       authTrainee: authTrainee,
       dispatch: function (me, action, payload) {
         if (!me) throw err('ไม่พบผู้ใช้งาน', 'AUTH');
@@ -1004,7 +1084,8 @@ var TraineeCore = (function () {
 
   return {
     BASE_DAYS: BASE_DAYS, THEMES: THEMES, THEME_DESC: THEME_DESC, CRIT: CRIT, MOOD_M: MOOD_M, MOOD_E: MOOD_E, DEC: DEC,
-    EXT_DAY_OPTIONS: EXT_DAY_OPTIONS, ROLES: ROLES, WAREHOUSES: WAREHOUSES, ACTION_LABEL: ACTION_LABEL,
+    EXT_DAY_OPTIONS: EXT_DAY_OPTIONS, ROLES: ROLES, WAREHOUSES: WAREHOUSES, ACTION_LABEL: ACTION_LABEL, USER_RULES: USER_RULES,
+    fmtPhone: fmtPhone, parseStart: parseStart, usersFromRows: usersFromRows, staffFromUser: staffFromUser, mergeStaff: mergeStaff,
     DEFAULT_POSITIONS: DEFAULT_POSITIONS, DEFAULT_TEMPLATES: DEFAULT_TEMPLATES,
     ymd: ymd, parseYMD: parseYMD, thDate: thDate, startOfDay: startOfDay, daysBetween: daysBetween, dayDate: dayDate,
     workIndex: workIndex, startForDay: startForDay, themeOf: themeOf, descOf: descOf, total: total, level: level,
@@ -1015,9 +1096,9 @@ var TraineeCore = (function () {
 </script>
 <script>
 /* =====================================================================
- * Rattana Trainee v1.0 — Front-end (21/10/2569)
+ * Rattana Trainee v1.1 — Front-end (22/10/2569: ผู้ใช้งานดึงจาก Rattana Users for apps)
  * ===================================================================== */
-const APP_VERSION = '1.0', APP_DATE = '21/10/2569';
+const APP_VERSION = '1.1', APP_DATE = '22/10/2569';
 const CONFIG = {
   // ใส่ URL (/exec) ของ Google Apps Script ที่ดีพอยแล้ว เพื่อใช้งานจริง — เว้นว่าง = โหมดทดลอง (เก็บข้อมูลในเบราว์เซอร์)
   GAS_URL: 'https://script.google.com/macros/s/AKfycbz8DeEozIwwGVEeJPonjaEI1gkk0l-O1wyTs_o0VnCqqJsnvIkqTTpEsnt9mckX-4Ie/exec',
@@ -1039,7 +1120,7 @@ function fmtDT(iso) { if (!iso) return '-'; const d = new Date(iso); return isNa
 const todayDate = () => TC.parseYMD(S.today) || TC.startOfDay(new Date());
 const ini = s => { const ch = [...String(s || '?')]; return ch.find(c => !'เแโใไ'.includes(c)) || ch[0]; };
 const badge = st => `<span class="badge b-${st.tone}">${esc(st.t)}</span>`;
-const whLine = wh => wh ? `${wh} ${TC.WAREHOUSES[wh] || ''}`.trim() : 'ทุกสาขา';
+const whLine = wh => !wh || wh === 'ALL' ? 'ทุกสาขา' : `${wh} ${TC.WAREHOUSES[wh] || ''}`.trim();
 const dayLabel = (t, d) => { const dd = TC.dayDate(t.start, d); return dd ? `${TH_DAYS[dd.getDay()]} ${fmtD(dd)}` : ''; };
 const lsGet = (k, def) => { try { const v = localStorage.getItem(k); return v == null ? def : JSON.parse(v); } catch (e) { return def; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
@@ -1086,7 +1167,8 @@ const DemoServer = (() => {
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) {} };
   const by = (list, f) => list.find(f);
   const store = {
-    staff: () => db.staff, trainees: () => db.trainees, logs: () => db.logs, evals: () => db.evals, selfs: () => db.selfs,
+    staff: () => TC.mergeStaff(db.users, db.staffOv), users: () => db.users,
+    trainees: () => db.trainees, logs: () => db.logs, evals: () => db.evals, selfs: () => db.selfs,
     templates: () => db.templates, positions: () => db.positions, audit: id => db.audit.filter(a => a.empId === id),
     insertTrainee: t => { db.trainees.push(JSON.parse(JSON.stringify(t))); save(); },
     updateTrainee: (id, p) => { Object.assign(by(db.trainees, x => x.id === id), JSON.parse(JSON.stringify(p))); save(); },
@@ -1095,21 +1177,31 @@ const DemoServer = (() => {
     upsertSelf: r => { const i = db.selfs.findIndex(x => x.empId === r.empId && +x.round === +r.round); if (i >= 0) db.selfs[i] = r; else db.selfs.push(r); save(); },
     replaceTemplate: (pos, day, items) => { db.templates = db.templates.filter(r => !(r.pos === pos && +r.day === +day)).concat(items.map((it, i) => ({ pos, day, order: i + 1, item: it }))); save(); },
     insertPosition: p => { db.positions.push(p); save(); },
-    upsertStaff: s => { const i = db.staff.findIndex(x => TC.lower(x.email) === s.email); if (i >= 0) db.staff[i] = s; else db.staff.push(s); save(); },
+    upsertStaff: s => { const i = db.staffOv.findIndex(x => TC.lower(x.email) === s.email); if (i >= 0) db.staffOv[i] = s; else db.staffOv.push(s); save(); },
+    removeStaff: e => { db.staffOv = db.staffOv.filter(x => TC.lower(x.email) !== e); save(); },
     insertAudit: a => { db.audit.push(a); if (db.audit.length > 800) db.audit.splice(0, db.audit.length - 800); save(); },
   };
   const core = TC.create(store, { now });
-  const STAFF = [
-    { email: 'wichai@demo.local', name: 'วิชัย ทองดี', role: 'SUP', wh: 'W1', phone: '081-234-5678', status: 'Active' },
-    { email: 'sunisa@demo.local', name: 'สุนิสา วงศ์ใหญ่', role: 'MENTOR', wh: 'HQ', phone: '086-410-2233', status: 'Active' },
-    { email: 'prasert@demo.local', name: 'ประเสริฐ คงมั่น', role: 'MENTOR', wh: 'W3', phone: '092-118-7740', status: 'Active' },
-    { email: 'anucha@demo.local', name: 'อนุชา เพชรรัตน์', role: 'MENTOR', wh: 'W2', phone: '084-907-1566', status: 'Active' },
-    { email: 'napa@demo.local', name: 'นภา ศรีสุข', role: 'HR', wh: 'HQ', phone: '080-555-0190', status: 'Active' },
-  ];
-  const staffMe = email => { const s = TC.lower(email), r = by(db.staff, x => x.email === s); return { kind: 'staff', email: r.email, name: r.name, role: r.role, wh: r.wh, phone: r.phone }; };
+  // จำลองชีต Rattana Users for apps — บทบาทคำนวณเองจากแผนก/User Role เหมือนของจริง
+  const U = (email, name, nick, wh, role, dept, phone, start, position) => ({ email, name, nick, wh, role, dept, phone, start: start || '', position: position || '', empCode: '', active: true });
+  function demoUsers(T) {
+    const ago = n => TC.ymd(new Date(T.getFullYear(), T.getMonth(), T.getDate() - n));
+    return [
+      U('wichai@demo.local', 'วิชัย ทองดี', 'ชัย', 'W1', 5, 'คลังและขนส่ง', '081-234-5678', '', 'หัวหน้าคลัง'),
+      U('sunisa@demo.local', 'สุนิสา วงศ์ใหญ่', 'นิสา', 'HQ', 3, 'ธุรการขาย', '086-410-2233', '', 'ธุรการ'),
+      U('prasert@demo.local', 'ประเสริฐ คงมั่น', 'เสริฐ', 'W3', 3, 'คลังและขนส่ง', '092-118-7740', '', 'พนักงานขับรถ'),
+      U('anucha@demo.local', 'อนุชา เพชรรัตน์', 'ชา', 'W2', 3, 'ขาย', '084-907-1566', '', 'พนักงานขาย'),
+      U('napa@demo.local', 'นภา ศรีสุข', 'นภา', 'HQ', 4, 'ทรัพยากรบุคคล', '080-555-0190', '', 'เจ้าหน้าที่บุคคล'),
+      U('somsak@demo.local', 'สมศักดิ์ ใจกล้า', 'ศักดิ์', 'W4', 6, 'บริหาร', '089-120-3344', '', 'ผู้จัดการเขต'),
+      U('', 'ภัทรา แก้วมณี', 'แพท', 'W1', 1, 'คลังและขนส่ง', '063-554-2210', ago(1), 'พนักงานคลังสินค้า'),
+      U('', 'วรวุฒิ สายทอง', 'เต้', 'W2', 1, 'ขาย', '095-880-4471', ago(6), 'พนักงานขาย'),
+      U('', 'ชลธิชา บุญเรือง', 'ฟ้า', 'HQ', 1, 'ธุรการขาย', '084-222-9015', ago(12), 'ธุรการ'),
+    ];
+  }
+  const staffMe = email => { const s = TC.lower(email), r = by(store.staff(), x => x.email === s); return { kind: 'staff', email: r.email, name: r.name, role: r.role, wh: r.wh, phone: r.phone }; };
 
   function seed() {
-    db = { staff: STAFF.map(s => ({ ...s })), trainees: [], logs: [], evals: [], selfs: [], templates: [], positions: [], audit: [] };
+    db = { users: demoUsers(TC.startOfDay(new Date())), staffOv: [], trainees: [], logs: [], evals: [], selfs: [], templates: [], positions: [], audit: [] };
     db.positions = TC.DEFAULT_POSITIONS.map(p => ({ key: p.key, name: p.name, active: 'Active' }));
     Object.keys(TC.DEFAULT_TEMPLATES).forEach(pos => Object.keys(TC.DEFAULT_TEMPLATES[pos]).forEach(d =>
       TC.DEFAULT_TEMPLATES[pos][d].forEach((item, i) => db.templates.push({ pos, day: +d, order: i + 1, item }))));
@@ -1174,14 +1266,14 @@ const DemoServer = (() => {
   }
   function init() {
     try { db = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { db = null; }
-    if (!db || !db.staff) seed();
+    if (!db || !db.users) seed();
   }
   const currentId = () => { try { return localStorage.getItem(UKEY) || 's:wichai@demo.local'; } catch (e) { return 's:wichai@demo.local'; } };
   return {
     init,
     reset() { try { localStorage.removeItem(KEY); } catch (e) {} seed(); },
     users() {
-      const list = db.staff.filter(s => s.status === 'Active').map(s => ({ id: 's:' + s.email, label: `${s.name} — ${TC.ROLES[s.role]}${s.wh ? ' ' + s.wh : ''}` }));
+      const list = store.staff().filter(s => s.status === 'Active').map(s => ({ id: 's:' + s.email, label: `${s.name} — ${TC.ROLES[s.role]}${s.wh ? ' ' + (s.wh === 'ALL' ? 'ทุกสาขา' : s.wh) : ''}` }));
       db.trainees.filter(t => t.status === 'ACTIVE' || TC.daysBetween(new Date(t.closedAt), new Date()) <= 14).forEach(t => {
         const n = TC.normTrainee(t), d = Math.min(TC.workIndex(n.start, new Date()), n.totalDays);
         list.push({ id: 't:' + t.id, label: `น้องใหม่ · ${t.nick} (${n.status === 'ACTIVE' ? `วันที่ ${d}/${n.totalDays}` : 'จบแล้ว'})` });
@@ -1193,7 +1285,7 @@ const DemoServer = (() => {
     identity() {
       const id = currentId();
       if (id.startsWith('t:')) { const t = by(db.trainees, x => x.id === id.slice(2)); return t ? { kind: 'trainee', id: t.id, code: t.code } : null; }
-      const s = by(db.staff, x => x.email === id.slice(2));
+      const s = by(store.staff(), x => x.email === id.slice(2));
       return s ? { kind: 'staff', email: s.email } : null;
     },
     call(action, payload) {
@@ -1377,7 +1469,7 @@ async function loadData(opts = {}) {
   } else {
     const d = await api('sync', {}, opts);
     S.me = d.me; S.today = d.today; S.serverTime = d.serverTime;
-    S.trainees = d.trainees.map(normT); S.positions = d.positions; S.templates = d.templates; S.staff = d.staff;
+    S.trainees = d.trainees.map(normT); S.positions = d.positions; S.templates = d.templates; S.staff = d.staff; S.recentHires = d.recentHires || [];
     if (S.view === 'emp' && !byId(S.empId)) { S.view = 'home'; S.empId = null; }
     if (!S.me.isHR && ['queue', 'tpl', 'staff'].includes(S.tab)) S.tab = 'overview';
   }
@@ -1408,7 +1500,7 @@ const hasDrafts = () => Object.keys(S.drafts).length || Object.keys(S.evalDrafts
  * RENDER
  * ===================================================================== */
 function renderAll() {
-  const sub = S.mode === 'trainee' ? (S.tdata ? `น้องใหม่ · ${S.tdata.me.name}` : '') : (S.me ? `${S.me.roleLabel}${S.me.wh && S.me.role !== 'HR' ? ' ' + S.me.wh : ''} · ${S.me.name}` : '');
+  const sub = S.mode === 'trainee' ? (S.tdata ? `น้องใหม่ · ${S.tdata.me.name}` : '') : (S.me ? `${S.me.roleLabel}${S.me.wh && S.me.role !== 'HR' ? ' ' + (S.me.wh === 'ALL' ? 'ทุกสาขา' : S.me.wh) : ''} · ${S.me.name}` : '');
   $('hdSub').textContent = sub;
   document.querySelector('.hub-btn').classList.toggle('hidden', S.mode === 'trainee');   // น้องใหม่ไม่มีบัญชี Hub
   const tabs = $('tabs'), hr = S.mode === 'staff' && S.me && S.me.isHR;
@@ -1690,13 +1782,30 @@ function vTpl() {
   <section class="card"><div class="card-head"><h3>เกณฑ์ประเมิน</h3><span class="badge b-gold">ทุกตำแหน่ง</span></div>
     <div class="card-body">${TC.CRIT.map(c => `<div><b>${c.t}</b> · <span class="muted">${c.d}</span></div>`).join('')}<p class="small muted">คะแนน 1–5 ต่อด้าน รวม 25 · ผลตัดสิน: ผ่าน / ขยายเวลาสอน 3–7 วัน / ไม่ผ่าน</p></div></section>`;
 }
+const SRC_LABEL = { users: 'อัตโนมัติ', override: 'กำหนดเอง', manual: 'คนนอกรายชื่อ' };
 function vStaff() {
-  const list = S.staff.slice().sort((a, b) => (a.status === b.status ? 0 : a.status === 'Active' ? -1 : 1) || ['HR', 'SUP', 'MENTOR'].indexOf(a.role) - ['HR', 'SUP', 'MENTOR'].indexOf(b.role) || a.name.localeCompare(b.name, 'th'));
+  const R = TC.USER_RULES, cnt = r => S.staff.filter(s => s.role === r && s.status === 'Active').length;
+  const own = S.staff.filter(s => s.source !== 'users').length;
   return `
-  <section class="hello"><h1>ผู้ใช้งาน</h1><p>คนที่เข้าแอปด้วยบัญชี Google ได้ · พี่เลี้ยงเห็นเฉพาะน้องที่ตัวเองดูแล · หัวหน้างานเห็นทั้งสาขาและเพิ่มน้องใหม่ได้ · HR เห็นทุกสาขา</p></section>
-  <button class="btn btn-gold btn-lg btn-block" onclick="openStaff()">+ เพิ่มผู้ใช้งาน</button>
-  <div class="tbl-wrap"><table class="tbl"><thead><tr><th>ชื่อ</th><th>บทบาท</th><th>สาขา</th><th>เบอร์โทร</th><th>สถานะ</th><th></th></tr></thead><tbody>${list.map(s => `<tr><td><b>${esc(s.name)}</b><div class="small muted">${esc(s.email)}</div></td><td>${esc(TC.ROLES[s.role] || s.role)}</td><td>${esc(s.wh || 'ทุกสาขา')}</td><td class="num">${esc(s.phone || '-')}</td><td>${s.status === 'Active' ? '<span class="badge b-ok">ใช้งาน</span>' : '<span class="badge b-muted">ปิด</span>'}</td><td><button class="btn btn-outline btn-sm" onclick="openStaff('${esc(s.email)}')">แก้ไข</button></td></tr>`).join('')}</tbody></table></div>`;
+  <section class="hello"><h1>ผู้ใช้งาน</h1><p>ดึงอัตโนมัติจาก <b>Rattana Users for apps</b> (คนที่มีอีเมลและ Status = Active) ไม่ต้องเพิ่มเอง · อัปเดตทุก 10 นาที</p></section>
+  <section class="card"><div class="card-body">
+    <div class="small"><b>บทบาทอัตโนมัติ</b> · แผนกทรัพยากรบุคคล = <b>ฝ่ายบุคคล</b> · User Role ${R.SUP_ALL_MIN_ROLE}–7 = <b>หัวหน้างานทุกสาขา</b> · User Role ${R.SUP_MIN_ROLE}–${R.SUP_ALL_MIN_ROLE - 1} = <b>หัวหน้างานสาขาตัวเอง</b> · ที่เหลือ = <b>พี่เลี้ยง</b></div>
+    <div class="small muted">พี่เลี้ยงเห็นเฉพาะน้องที่ตัวเองดูแล · หัวหน้างานเห็นทั้งสาขาและเพิ่มน้องใหม่ได้ · HR เห็นทุกสาขาและอนุมัติผล · ถ้าคนไหนไม่ตรง กด "แก้ไข" เพื่อกำหนดเฉพาะคนนั้น</div>
+    <div class="chips"><span class="chip">ฝ่ายบุคคล ${cnt('HR')}</span><span class="chip">หัวหน้างาน ${cnt('SUP')}</span><span class="chip">พี่เลี้ยง ${cnt('MENTOR')}</span><span class="chip">กำหนดเอง ${own}</span></div>
+  </div></section>
+  <div class="filters" role="group" aria-label="กรองบทบาท">${[['all', 'ทั้งหมด'], ['HR', 'ฝ่ายบุคคล'], ['SUP', 'หัวหน้างาน'], ['MENTOR', 'พี่เลี้ยง'], ['own', 'กำหนดเอง']].map(([k, t]) => `<button class="fchip ${(S.staffFilter || 'all') === k ? 'on' : ''}" onclick="S.staffFilter='${k}';rerender()">${t}</button>`).join('')}</div>
+  <input class="input search" id="stSearch" type="search" placeholder="🔍 ค้นหาชื่อ อีเมล หรือสาขา" value="${esc(S.staffSearch || '')}" oninput="S.staffSearch=this.value;renderStaffTable()">
+  <div id="stTable">${staffTableHTML()}</div>
+  <button class="btn btn-outline btn-block" onclick="openStaff()">+ เพิ่มคนที่ไม่มีในรายชื่อบริษัท</button>`;
 }
+function staffTableHTML() {
+  const f = S.staffFilter || 'all', q = (S.staffSearch || '').trim().toLowerCase();
+  const list = S.staff.filter(s => (f === 'all' || (f === 'own' ? s.source !== 'users' : s.role === f)) && (!q || [s.name, s.email, s.wh].join(' ').toLowerCase().includes(q)))
+    .sort((a, b) => (a.status === b.status ? 0 : a.status === 'Active' ? -1 : 1) || ['HR', 'SUP', 'MENTOR'].indexOf(a.role) - ['HR', 'SUP', 'MENTOR'].indexOf(b.role) || a.name.localeCompare(b.name, 'th'));
+  const shown = list.slice(0, 200);
+  return `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>ชื่อ</th><th>บทบาท</th><th>สาขา</th><th>เบอร์โทร</th><th>ที่มา</th><th></th></tr></thead><tbody>${shown.map(s => `<tr><td><b>${esc(s.name)}</b><div class="small muted">${esc(s.email)}${s.dept ? ' · ' + esc(s.dept) : ''}</div></td><td>${esc(TC.ROLES[s.role] || s.role)}${s.status !== 'Active' ? ' <span class="badge b-muted">ปิด</span>' : ''}</td><td>${esc(s.wh === 'ALL' ? 'ทุกสาขา' : s.wh || '-')}</td><td class="num">${esc(s.phone || '-')}</td><td><span class="badge ${s.source === 'users' ? 'b-muted' : 'b-gold'}">${SRC_LABEL[s.source] || s.source}</span></td><td><button class="btn btn-outline btn-sm" onclick="openStaff('${esc(s.email)}')">แก้ไข</button></td></tr>`).join('') || '<tr><td colspan="6" class="muted" style="text-align:center;padding:28px">ไม่พบรายชื่อ</td></tr>'}</tbody></table></div>${list.length > shown.length ? `<p class="small muted">แสดง ${shown.length} จาก ${list.length} คน · พิมพ์ค้นหาเพื่อหาคนที่ต้องการ</p>` : ''}`;
+}
+function renderStaffTable() { const el = $('stTable'); if (el) el.innerHTML = staffTableHTML(); }
 
 /* ---------- น้องใหม่ ---------- */
 function traineeSummary() {
@@ -1834,7 +1943,7 @@ async function submitEval(btn) {
 /* ---------- เพิ่ม / แก้ / ยุติ / ประวัติ ---------- */
 function mentorOptions(wh) {
   return S.staff.filter(s => s.status === 'Active').sort((a, b) => (a.wh === wh ? -1 : 0) - (b.wh === wh ? -1 : 0) || a.name.localeCompare(b.name, 'th'))
-    .map(s => ({ v: s.email, l: s.name, sub: `${TC.ROLES[s.role] || s.role} · ${s.wh || 'ทุกสาขา'}${s.phone ? ' · ' + s.phone : ''}` }));
+    .map(s => ({ v: s.email, l: s.name, sub: `${TC.ROLES[s.role] || s.role} · ${s.wh === 'ALL' || !s.wh ? 'ทุกสาขา' : s.wh}${s.phone ? ' · ' + s.phone : ''}` }));
 }
 function openAdd() {
   if (!S.me.canAdd) return;
@@ -1842,14 +1951,22 @@ function openAdd() {
   const pos = S.positions.filter(p => p.active === 'Active');
   openModal(`<div class="modal" role="dialog" aria-labelledby="addT"><div class="m-head"><h3 id="addT">เพิ่มพนักงานใหม่</h3><button class="m-close" onclick="closeModal()" aria-label="ปิด">×</button></div>
     <div class="m-body">
+      ${S.recentHires.length ? `<div class="field"><label>เลือกจากพนักงานที่เพิ่งเริ่มงาน (Rattana Users for apps)</label>${ddHTML('fHire', S.recentHires.map((h, i) => ({ v: String(i), l: h.name + (h.nick ? ` (${h.nick})` : ''), sub: `${h.wh || '-'}${h.position ? ' · ' + h.position : ''} · เริ่ม ${fmtD(h.start)}` })), '', `เลือกชื่อ (${S.recentHires.length} คน) หรือกรอกเองด้านล่าง`, 'pickHire')}</div>` : ''}
       <div class="field"><label for="fName">ชื่อ-สกุล</label><input id="fName" class="input" maxlength="80" placeholder="เช่น สมหญิง ใจเย็น"></div>
       <div class="grid2"><div class="field"><label for="fNick">ชื่อเล่น</label><input id="fNick" class="input" maxlength="30"></div><div class="field"><label for="fPhone">เบอร์โทร</label><input id="fPhone" class="input" inputmode="tel" maxlength="20" placeholder="08x-xxx-xxxx"></div></div>
-      <div class="field"><label for="fPos">ตำแหน่ง</label><select id="fPos" class="input">${pos.map(p => `<option value="${esc(p.key)}">${esc(p.name)}</option>`).join('')}</select><span class="small muted">เช็คลิสต์ 7 วันดึงจากแม่แบบของตำแหน่งนี้</span></div>
+      <div class="field"><label for="fPos">ตำแหน่ง</label><select id="fPos" class="input">${pos.map(p => `<option value="${esc(p.key)}">${esc(p.name)}</option>`).join('')}</select><span class="small muted" id="fPosHint">เช็คลิสต์ 7 วันดึงจากแม่แบบของตำแหน่งนี้</span></div>
       <div class="grid2"><div class="field"><label for="fWh">สาขา</label><select id="fWh" class="input">${whs.map(k => `<option value="${k}">${k} ${TC.WAREHOUSES[k]}</option>`).join('')}</select></div><div class="field"><label for="fStart">วันเริ่มงาน</label><input id="fStart" type="date" class="input" value="${S.today}"></div></div>
       <div class="field"><label>พี่เลี้ยง</label>${ddHTML('fMentor', mentorOptions(whs[0]), '', 'เลือกพี่เลี้ยง')}${S.me.isHR ? '' : '<span class="small muted">ไม่เจอชื่อ ให้ HR เพิ่มในเมนูผู้ใช้งาน</span>'}</div>
     </div>
     <div class="m-foot"><button class="btn btn-outline" onclick="closeModal()">ยกเลิก</button><button class="btn btn-gold" onclick="saveAdd(this)">เพิ่มพนักงาน</button></div></div>`);
   setTimeout(() => { const f = $('fName'); if (f) f.focus(); }, 60);
+}
+function pickHire(i) {
+  const h = S.recentHires[+i]; if (!h) return;
+  $('fName').value = h.name; $('fNick').value = h.nick || ''; $('fPhone').value = h.phone || '';
+  if (h.start) $('fStart').value = h.start;
+  const wh = $('fWh'); if ([...wh.options].some(o => o.value === h.wh)) wh.value = h.wh;
+  const ph = $('fPosHint'); if (ph) ph.textContent = h.position ? `ตำแหน่งในรายชื่อบริษัท: ${h.position} — เลือกแม่แบบที่ใกล้ที่สุด` : 'เช็คลิสต์ 7 วันดึงจากแม่แบบของตำแหน่งนี้';
 }
 async function saveAdd(btn) {
   const p = { name: $('fName').value.trim(), nick: $('fNick').value.trim(), phone: $('fPhone').value.trim(), pos: $('fPos').value, wh: $('fWh').value, start: $('fStart').value, mentorEmail: $('fMentor').value };
@@ -1989,22 +2106,31 @@ async function savePosition(btn) {
   });
 }
 function openStaff(email) {
-  const s = email ? S.staff.find(x => x.email === email) : { email: '', name: '', role: 'MENTOR', wh: 'W1', phone: '', status: 'Active' };
-  openModal(`<div class="modal" role="dialog" aria-labelledby="stT"><div class="m-head"><h3 id="stT">${email ? 'แก้ผู้ใช้งาน' : 'เพิ่มผู้ใช้งาน'}</h3><button class="m-close" onclick="closeModal()" aria-label="ปิด">×</button></div>
+  const s = email ? S.staff.find(x => x.email === email) : { email: '', name: '', role: 'MENTOR', wh: 'W1', phone: '', status: 'Active', source: 'manual' };
+  const fromCo = s.source === 'users' || s.source === 'override';
+  const base = s.base ? `${TC.ROLES[s.base.role]} · ${s.base.wh === 'ALL' ? 'ทุกสาขา' : s.base.wh}` : '';
+  openModal(`<div class="modal" role="dialog" aria-labelledby="stT"><div class="m-head"><h3 id="stT">${email ? (fromCo ? 'กำหนดสิทธิ์เฉพาะคน' : 'แก้ผู้ใช้งาน') : 'เพิ่มคนที่ไม่มีในรายชื่อบริษัท'}</h3><button class="m-close" onclick="closeModal()" aria-label="ปิด">×</button></div>
     <div class="m-body">
+      ${fromCo ? `<p class="note-info">ชื่อและอีเมลมาจาก Rattana Users for apps${s.source === 'override' ? ` · ค่าอัตโนมัติคือ ${esc(base)}` : ''} · แก้ที่นี่มีผลเฉพาะแอปนี้</p>` : ''}
       <div class="field"><label for="sEmail">อีเมล (บัญชี Google ที่ใช้เข้าแอป)</label><input id="sEmail" class="input" type="email" value="${esc(s.email)}" ${email ? 'disabled' : ''} placeholder="name@rattanaphaiboon.com"></div>
-      <div class="field"><label for="sName">ชื่อ-สกุล</label><input id="sName" class="input" maxlength="80" value="${esc(s.name)}"></div>
+      <div class="field"><label for="sName">ชื่อ-สกุล</label><input id="sName" class="input" maxlength="80" value="${esc(s.name)}" ${fromCo ? 'disabled' : ''}></div>
       <div class="grid2"><div class="field"><label for="sRole">บทบาท</label><select id="sRole" class="input">${Object.entries(TC.ROLES).map(([k, v]) => `<option value="${k}" ${s.role === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
       <div class="field"><label for="sWh">สาขา</label><select id="sWh" class="input">${Object.keys(TC.WAREHOUSES).concat(['ALL']).map(k => `<option value="${k}" ${s.wh === k ? 'selected' : ''}>${k === 'ALL' ? 'ทุกสาขา' : k + ' ' + TC.WAREHOUSES[k]}</option>`).join('')}</select></div></div>
       <div class="grid2"><div class="field"><label for="sPhone">เบอร์โทร (น้องเห็น)</label><input id="sPhone" class="input" inputmode="tel" maxlength="20" value="${esc(s.phone)}"></div>
       <div class="field"><label for="sStatus">สถานะ</label><select id="sStatus" class="input"><option value="Active" ${s.status === 'Active' ? 'selected' : ''}>ใช้งาน</option><option value="Inactive" ${s.status !== 'Active' ? 'selected' : ''}>ปิดการใช้งาน</option></select></div></div>
     </div>
-    <div class="m-foot"><button class="btn btn-outline" onclick="closeModal()">ยกเลิก</button><button class="btn btn-gold" onclick="saveStaff(this)">บันทึก</button></div></div>`);
+    <div class="m-foot">${email && s.source !== 'users' ? `<button class="btn btn-outline" style="margin-right:auto" onclick="resetStaff('${esc(s.email)}',this)">${s.source === 'manual' ? 'ลบออก' : 'กลับไปใช้ค่าอัตโนมัติ'}</button>` : ''}<button class="btn btn-outline" onclick="closeModal()">ยกเลิก</button><button class="btn btn-gold" onclick="saveStaff(this)">บันทึก</button></div></div>`);
 }
 async function saveStaff(btn) {
   const p = { email: $('sEmail').value.trim(), name: $('sName').value.trim(), role: $('sRole').value, wh: $('sWh').value, phone: $('sPhone').value.trim(), status: $('sStatus').value };
   await busy(btn, 'กำลังบันทึก…', async () => {
-    try { S.staff = await api('saveStaff', p); closeModal(); showToast('บันทึกผู้ใช้งานแล้ว ✓', 'success'); rerender(); }
+    try { S.staff = await api('saveStaff', p); closeModal(); showToast('บันทึกแล้ว ✓', 'success'); rerender(); }
+    catch (e) { showToast(e.message, 'error'); }
+  });
+}
+async function resetStaff(email, btn) {
+  await busy(btn, 'กำลังบันทึก…', async () => {
+    try { S.staff = await api('resetStaff', { email }); closeModal(); showToast('กลับไปใช้ค่าอัตโนมัติแล้ว ✓', 'success'); rerender(); }
     catch (e) { showToast(e.message, 'error'); }
   });
 }
@@ -2092,16 +2218,16 @@ window.addEventListener('afterprint', () => { $('printArea').innerHTML = ''; });
 
 /* ---------- บัญชี ---------- */
 function openAccount() {
-  const info = S.mode === 'trainee' && S.tdata ? `<p><b>${esc(S.tdata.me.name)}</b><br><span class="muted">น้องใหม่ · ${esc(S.tdata.me.posName)}</span></p>` : S.me ? `<p><b>${esc(S.me.name)}</b><br><span class="muted">${esc(S.me.email)}<br>${esc(S.me.roleLabel)} · ${esc(S.me.wh || 'ทุกสาขา')}</span></p>` : '';
+  const info = S.mode === 'trainee' && S.tdata ? `<p><b>${esc(S.tdata.me.name)}</b><br><span class="muted">น้องใหม่ · ${esc(S.tdata.me.posName)}</span></p>` : S.me ? `<p><b>${esc(S.me.name)}</b><br><span class="muted">${esc(S.me.email)}<br>${esc(S.me.roleLabel)} · ${esc(whLine(S.me.wh))}</span></p>` : '';
   openModal(`<div class="modal" role="dialog" aria-labelledby="acT"><div class="m-head"><h3 id="acT">บัญชีของฉัน</h3><button class="m-close" onclick="closeModal()" aria-label="ปิด">×</button></div>
     <div class="m-body">${info}<p class="small muted">Rattana Trainee v${APP_VERSION} · ${APP_DATE}</p></div>
     <div class="m-foot">${DEMO ? '<button class="btn btn-outline" onclick="closeModal();resetDemo()">รีเซ็ตข้อมูลตัวอย่าง</button>' : '<button class="btn btn-danger" onclick="logout()">ออกจากระบบ</button>'}</div></div>`);
 }
 
 /* ---------- dropdown ค้นหาได้ ---------- */
-function ddHTML(id, options, value, label) {
+function ddHTML(id, options, value, label, onPick) {
   const cur = options.find(o => o.v === value);
-  return `<div class="dd-wrap" id="${id}Wrap"><input type="hidden" id="${id}" value="${esc(value || '')}">
+  return `<div class="dd-wrap" id="${id}Wrap" data-pick="${esc(onPick || '')}"><input type="hidden" id="${id}" value="${esc(value || '')}">
     <button type="button" class="dd-trigger" onclick="toggleDD('${id}')"><span id="${id}Label">${esc(cur ? cur.l : (value ? label : label || '-- เลือก --'))}</span> ▾</button>
     <div class="dd-panel hidden" id="${id}Panel"><input class="dd-search" type="text" placeholder="🔍 ค้นหา..." oninput="filterDD('${id}',this.value)" autocomplete="off">
       <ul class="dd-list">${options.map(o => `<li data-v="${esc(o.v)}" class="${o.v === value ? 'on' : ''}" onclick="pickDD('${id}',this)">${esc(o.l)}${o.sub ? `<small>${esc(o.sub)}</small>` : ''}</li>`).join('') || '<li class="muted">ไม่มีรายชื่อ</li>'}</ul></div></div>`;
@@ -2117,6 +2243,7 @@ function pickDD(id, li) {
   $(id).value = li.dataset.v; $(id + 'Label').textContent = li.firstChild.textContent;
   $(id + 'Panel').querySelectorAll('li').forEach(x => x.classList.toggle('on', x === li));
   $(id + 'Panel').classList.add('hidden');
+  const cb = $(id + 'Wrap').dataset.pick; if (cb && typeof window[cb] === 'function') window[cb](li.dataset.v);
 }
 document.addEventListener('click', e => { if (!e.target.closest('.dd-wrap')) document.querySelectorAll('.dd-panel').forEach(x => x.classList.add('hidden')); });
 
