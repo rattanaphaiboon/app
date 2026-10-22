@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.664</title>
+<title>Rattana Sales — v8.665</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -6949,7 +6949,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.664 · 2026-10-22</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.665 · 2026-10-22</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -6960,7 +6960,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.664</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.665</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -8145,6 +8145,7 @@ const CONFIG = {
   priceRequestTab:     'ขอปรับราคา',
   // v6.5.175: Purchase Actions sheet (procurement requests — สั่งซื้อ / โอนย้าย)
   purchaseSheetId:     '1CqHARklgveAeJ6rTkNeyUSku__puTiNE7-c6ebn93W8',
+  ibCostSheetId:       '1-6Ql0cJ51NlwaIYjBB5GsZHGfkIcUUcSZZCFjojZ7zA',   // v8.665: ทุนหลังปันทุนต่อบาร์โค้ด×คลัง (Code.gs buildIbCostCache สร้างทุก 6 ชม.) · แท็บ IBCost
   cnSheetId:           '1nqxRB3h0168e1bd2pquuW7DV1Y4hAo-TOiheXbLuA1c',   // v8.56: PO_IB_sync — CN (ใบลดหนี้) จาก ERP
   cnGid:               '81031268',                                        // CN tab gid
   purchaseTab:         'สั่งซื้อ-โอนย้าย',
@@ -34948,6 +34949,90 @@ function _copyFallback(txt, done) {
   } catch (e) {}
   if (typeof showToast === 'function') showToast('คัดลอกไม่ได้ — บาร์โค้ดคือ ' + txt, 'warning');
 }
+/* ═══ v8.665 (Surat 22/10): แถว "รับเข้าครั้งล่าสุดต่อคลัง" → ราคาทุนหลังปันทุน (+ ชีทต้นทุนในวงเล็บ) ═══
+   ทุนหลังปันทุน = COST_ALLOCATION ของใบรับเข้าล่าสุด (IB2Y → Code.gs ย่อลงชีท IBCost) · ต่อหน่วยที่ซื้อ รวม VAT → แปลงเป็นต่อลังด้วย QTY CS ÷ EAPERUNIT
+   ชีทต้นทุน = Purchase Actions › ต้นทุน (ราคาทุนสุทธิVat ต่อลัง) · จับ PRODUCT NAME → CAT SIZE → CAT BRAND (กติกาเดียวกับ Exec Dashboard)
+   🔴 ห้ามทำให้ popup ช้าลง: ดึงตอนกาง "คลิกเพื่อดูเพิ่ม" เท่านั้น · แคชต่อสินค้า · ดึงไม่ได้ = คงราคาเดิมจาก PDDT ไว้เงียบๆ */
+const _ibcCache = new Map();
+let _ibcCostSheetP = null;
+function _ibcFmt(n) { return '฿' + (Math.round(n * 100) / 100).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
+function _ibcNorm(x) { return String(x || '').trim().replace(/\s+/g, ' '); }
+function _ibcCostSheet() {
+  if (!_ibcCostSheetP) {
+    _ibcCostSheetP = fetchSheet(CONFIG.purchaseSheetId, 'ต้นทุน', null, null, { tries: 1 }).then(function (rows) {
+      const M = { 'PRODUCT NAME': {}, 'CAT SIZE': {}, 'CAT BRAND': {} };
+      (rows || []).forEach(function (r) {
+        const by = _ibcNorm(r['วิธีวัด']).toUpperCase(), nm = _ibcNorm(r['ชื่อ']), m = M[by];
+        if (!m || !nm) return;
+        const u = _ibcNorm(r['รูปแบบขาย']).toUpperCase();
+        const net = parseFloat(String(r['ราคาทุนสุทธิVat'] == null ? '' : r['ราคาทุนสุทธิVat']).replace(/[^0-9.\-]/g, '')) || 0;
+        if (!(net > 0) || (u && u !== 'CS')) return;
+        if (!m[nm]) m[nm] = { net: net, t: _ibcNorm(r['หัวข้อ']) || 'ทุนสุทธิ' };
+      });
+      return M;
+    }).catch(function (e) { console.warn('[ibCost] ชีทต้นทุน:', e && e.message); _ibcCostSheetP = null; return null; });
+  }
+  return _ibcCostSheetP;
+}
+function _ibcFetch(codes) {
+  const key = codes.join(',');
+  if (_ibcCache.has(key)) return _ibcCache.get(key);
+  if (!CONFIG.ibCostSheetId) return Promise.resolve(null);
+  const tq = 'select * where ' + codes.map(c => "A = '" + c.replace(/'/g, "''") + "'").join(' or ');
+  const pr = fetchSheet(CONFIG.ibCostSheetId, 'IBCost', null, tq, { tries: 1 })
+    .catch(function (e) { console.warn('[ibCost]', e && e.message); _ibcCache.delete(key); return null; });
+  _ibcCache.set(key, pr);
+  return pr;
+}
+window._ibCostFill = function (det) {
+  try {
+    if (!det || det.dataset.ibcDone) return;
+    det.dataset.ibcDone = '1';
+    const codes = String(det.dataset.ibcCodes || '').split(',').filter(Boolean);
+    if (!codes.length) return;
+    const qcs = parseFloat(det.dataset.ibcQcs) || 0;
+    Promise.all([_ibcFetch(codes), _ibcCostSheet()]).then(function (res) {
+      const rows = res[0] || [], cm = res[1];
+      const byWh = {};
+      rows.forEach(function (r) {
+        const wh = String(r['WL'] || '').trim().toUpperCase(), d = String(r['DATE'] || '');
+        if (!wh) return;
+        if (!byWh[wh] || d > byWh[wh].d) byWh[wh] = { d: d, r: r };
+      });
+      // ช่อง IB C4 ใน PDDT เป็นใบซื้อเข้าคลังอื่นได้ (วัดจริง: ลิโพ/ดีโด้ C4 = ใบ W4 วันเดียวกัน จำนวนเท่ากัน) → คลังไม่ตรง ให้จับด้วย วันที่ + จำนวนซื้อ
+      const byDateQty = function (d, vol) {
+        let f = null;
+        rows.forEach(function (r) { if (String(r['DATE'] || '') === d && Math.abs((parseFloat(r['BUY']) || 0) - vol) < 0.001) f = { d: d, r: r }; });
+        return f;
+      };
+      let fx = null;
+      if (cm) fx = cm['PRODUCT NAME'][_ibcNorm(det.dataset.ibcName)] || cm['CAT SIZE'][_ibcNorm(det.dataset.ibcSize)] || cm['CAT BRAND'][_ibcNorm(det.dataset.ibcBrand)] || null;
+      det.querySelectorAll('.oc-ibc[data-ibc-wh]').forEach(function (sp) {
+        const spD = String(sp.dataset.ibcDate || ''), spV = parseFloat(sp.dataset.ibcVol) || 0;
+        let hit = byWh[sp.dataset.ibcWh];
+        if (!(hit && hit.d === spD) && spV > 0) hit = byDateQty(spD, spV);
+        let main = '', tip = '';
+        // ทุนต้องเป็นของ "ใบเดียวกับที่แถวนี้โชว์" — วันไม่ตรง (เช่น PDDT เป็นใบโอน 0.20 ลัง แต่ IB2Y ล่าสุดเป็นใบซื้อเก่ากว่า) = ไม่เติม คงของเดิม
+        if (hit && hit.d === spD) {
+          const r = hit.r, num = function (v) { return parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')) || 0; };
+          const eap = num(r['EAPERUNIT']), ca = num(r['COST_ALLOCATION']);
+          const perCs = ca > 0 ? ((eap > 0 && qcs > 0 && eap !== qcs) ? ca / eap * qcs : ca) : 0;
+          if (perCs > 0) {
+            const pending = String(r['ALLOCATION'] || '').trim().toUpperCase() !== 'Y' && num(r['FREE']) > 0;
+            main = '<span style="color:' + (pending ? '#B45309' : 'var(--text)') + ';font-weight:800">' + _ibcFmt(perCs) + '</span>';   // ส้ม = ใบนี้ยังไม่ปันของแถม (คำเต็มอยู่ใน title)
+            tip = 'ทุนหลังปันทุน · ' + String(r['DOC'] || '') + ' · ' + String(r['DATE'] || '') + (pending ? ' · ใบนี้ยังไม่ได้ปันของแถม' : '');
+          }
+        }
+        if (fx && fx.net > 0) {
+          main = (main || sp.innerHTML) + ' <span style="color:var(--muted);font-weight:700">(' + _ibcFmt(fx.net) + ')</span>';
+          tip = (tip ? tip + ' · ' : '') + 'วงเล็บ = ชีทต้นทุน: ' + fx.t;
+        }
+        if (main) { sp.innerHTML = main; if (tip) sp.title = tip; }
+      });
+    }).catch(function (e) { console.warn('[ibCostFill]', e && e.message); });
+  } catch (e) { console.warn('[ibCostFill]', e && e.message); }
+};
+
 function buildInternalStockHtml(p) {
   const role = Number((currentUser && currentUser.role) || 0);
   /* v8.608: บาร์โค้ดทุกหน่วย — แตะคัดลอก · เซล (role 3-4) เห็นเฉพาะส่วนนี้ */
@@ -34972,11 +35057,11 @@ function buildInternalStockHtml(p) {
     const yy = String(ib.date.getFullYear()).slice(2);
     const today = new Date(); today.setHours(0,0,0,0);
     const daysAgo = Math.floor((today.getTime() - ib.date.getTime()) / 86400000);
-    return { wh, empty: false, dd, mm, yy, daysAgo, volume: ib.volume, free: ib.free, value: ib.value };
+    return { wh, empty: false, dd, mm, yy, daysAgo, volume: ib.volume, free: ib.free, value: ib.value, ymd: ib.date.getFullYear() + '/' + mm + '/' + dd };
   });
   const hasAnyIB = ibRows.some(r => !r.empty);
   const ibHtml = hasAnyIB ? `
-    <div style="margin:6px 0 4px;font-size:11px;font-weight:800;color:#16A34A">📥 รับเข้าครั้งล่าสุดต่อคลัง</div>
+    <div style="margin:6px 0 4px;font-size:11px;font-weight:800;color:#16A34A;display:flex;gap:6px;align-items:baseline;white-space:nowrap">📥 รับเข้าครั้งล่าสุดต่อคลัง<span style="margin-left:auto;font-size:10px;color:var(--muted);font-weight:700" title="ราคาต่อลัง รวม VAT · ตัวแรก = ทุนหลังปันทุน (สีส้ม = ใบนี้ยังไม่ปันของแถม) · วงเล็บ = ชีทต้นทุน">ทุน/ลัง (ชีทต้นทุน)</span></div>
     <div style="display:flex;flex-direction:column;gap:3px">
       ${ibRows.map(r => {
         if (r.empty) {
@@ -34987,12 +35072,12 @@ function buildInternalStockHtml(p) {
         const stale = r.daysAgo >= 60 ? 'color:#DC2626' : (r.daysAgo >= 30 ? 'color:#E89C1B' : 'color:#16A34A');
         const csVal = r.volume.toFixed(r.volume % 1 === 0 ? 0 : 2);
         const freePart = r.free > 0 ? ` <span style="color:#9C27B0;font-weight:800">+${r.free.toFixed(r.free % 1 === 0 ? 0 : 1)} แถม</span>` : '';
-        return `<div style="display:flex;align-items:center;gap:6px;padding:4px 8px;background:var(--row-alt);border-radius:6px;font-size:10px;font-family:ui-monospace,monospace;flex-wrap:wrap">
+        return `<div style="display:flex;align-items:center;gap:6px;padding:4px 8px;background:var(--row-alt);border-radius:6px;font-size:10px;font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden">
           <b style="min-width:24px;color:var(--text)">${r.wh}</b>
           <span style="${stale};font-weight:700">${r.dd}/${r.mm}/${r.yy}</span>
           <span style="opacity:.65;font-weight:600">(${r.daysAgo}ว.)</span>
-          <span style="margin-left:auto;color:var(--text);font-weight:800">${csVal} CS${freePart}</span>
-          ${r.value > 0 ? `<span style="color:var(--muted)">·</span><span style="color:var(--muted);font-weight:700">฿${Math.round(r.value).toLocaleString()}/CS</span>` : ''}
+          <span title="${csVal} CS${r.free > 0 ? ' + แถม ' + r.free : ''}" style="margin-left:auto;color:var(--text);font-weight:800;min-width:0;overflow:hidden;text-overflow:ellipsis">${csVal} CS${freePart}</span>
+          <span class="oc-ibc" data-ibc-wh="${r.wh}" data-ibc-date="${r.ymd}" data-ibc-vol="${r.volume}" style="color:var(--muted);font-weight:700;white-space:nowrap;flex:none">${r.value > 0 ? `฿${Math.round(r.value).toLocaleString()}` : ''}</span>
         </div>`;
       }).join('')}
     </div>` : '';
@@ -35045,8 +35130,13 @@ function buildInternalStockHtml(p) {
   } else if (hasInfo) {
     summaryDot = `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#E89C1B;margin-left:8px" title="มีข้อมูลในสต็อกเพิ่มเติม"></span>`;
   }
+  /* v8.665: ทุนหลังปันทุน — เติมเข้าแถวรับเข้าตอนกางเท่านั้น (ontoggle) · ไม่ดึงอะไรตอนเปิด popup = เร็วเท่าเดิม */
+  const _ibcCodes = ['CODE EA', 'CODE PA', 'CODE BP', 'CODE CS'].map(k => String(p[k] || '').trim()).filter(Boolean).join(',');
+  const _ibcAttr = hasAnyIB && _ibcCodes
+    ? ` data-ibc-codes="${escapeAttr(_ibcCodes)}" data-ibc-qcs="${escapeAttr(String(p['QTY CS'] || ''))}" data-ibc-name="${escapeAttr(String(p['PRODUCT NAME'] || ''))}" data-ibc-size="${escapeAttr(String(p['CAT SIZE'] || ''))}" data-ibc-brand="${escapeAttr(String(p['CAT BRAND'] || ''))}" ontoggle="if(this.open&&window._ibCostFill)window._ibCostFill(this)"`
+    : '';
   return `
-    <details class="oc-internal-stock" style="margin-top:6px;border:1px dashed var(--border);border-radius:8px;padding:4px 8px;background:rgba(0,0,0,.015)">
+    <details class="oc-internal-stock"${_ibcAttr} style="margin-top:6px;border:1px dashed var(--border);border-radius:8px;padding:4px 8px;background:rgba(0,0,0,.015)">
       <summary style="cursor:pointer;font-size:11px;font-weight:700;color:var(--muted);padding:4px 0;list-style:none;display:flex;align-items:center;white-space:nowrap">
         ▼ คลิกเพื่อดูเพิ่ม${summaryDot}
       </summary>
