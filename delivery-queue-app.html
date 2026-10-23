@@ -1580,6 +1580,7 @@ body.dark .ls-area b{color:#BFDBFE}
 .gbc-tr{display:flex;align-items:center;gap:7px;margin-bottom:6px}
 .gbc-tr .pl{font-size:11px;font-weight:700;color:#4B5563;background:#F1F2F4;border-radius:5px;padding:1px 7px}
 .gbc-tr .z{font-size:12px;font-weight:700;color:#111827}
+.gbc-stale{font-size:10.5px;font-weight:700;color:#B22222;background:#FDECEC;border:1px solid #F3C6C6;border-radius:6px;padding:2px 6px;margin:-1px 0 6px;line-height:1.4}   /* v9.452 */
 .gbc-hero{border-radius:8px;padding:6px clamp(6px,.6vw,10px) 7px;margin-bottom:7px;background:#FDF3DC;color:#78350F}
 .gbc-hero .l{font-size:11px;font-weight:700;opacity:.9}
 .gbc.k-over .gbc-hero .v{padding:6px 0 5px}   /* v9.447: ไม่มีบรรทัดป้าย — เติมความสูงให้เท่ากล่องอื่น */
@@ -2015,7 +2016,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.451</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.452</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -8143,11 +8144,39 @@ function _ksPlanMem(){   // แผนที่จะบันทึก: ทะ�
   _dqSaveBills().forEach(b=>{ const pl=queue[b.ref]; if(!pl||(pr&&!pr.has(b.ref)))return; (m[pl]||(m[pl]=[])).push(b.ref+':'+(tripMap[b.ref]||1)); });
   return m;
 }
+// ══ v9.452: ใบเดิมมีออเดอร์เพิ่ม/ลดหลังบันทึก ══
+//   user: "ถ้าในใบเดิม มีเพิ่มออเดอร์เข้ามา ข้อมูลจะอัปเดตให้ไหม" -> ทำ 2 ข้อ: กดบันทึกแล้วส่งคันนั้นใหม่ + ป้ายเตือน
+//   เดิม _ksSig ดูแค่ บิล/เที่ยว/ลำดับ/คนขับ -> ใบที่แค่ของเปลี่ยน = "ไม่ได้แก้" ชีทค้างเลขเก่า (นน./คิว/ยอด/ต้นทุน)
+//   เทียบ "บิลสด (billMap)" กับ "แถวในชีท Keepdata" ด้วยสูตรเดียวกับที่ doSave เขียน (คอลัมน์ U/V/AA)
+//   ยอดเงินต่าง > 1 บาท หรือ น้ำหนักต่าง > 2 กก. และ > 1% = ของในใบเปลี่ยน · ไม่มีบิลสด (เกินกรอบวันโหลด) = ไม่เทียบ
+function _ksBillStale(b,kd){
+  if(!b||!kd)return null;
+  const net=Math.round(_netOfBill(b)), cig=Math.round(_cigOfBill(b));
+  const a=(kd.cigAmount==null)?net+cig:net, ka=Math.round(kd.amount||0);   // แถวเก่า (ก่อน v9.197) มูลค่ารวมบุหรี่
+  const w=Math.round(b.totalW||0), kw=Math.round(kd.weight||0);
+  if(Math.abs(a-ka)>1||Math.abs(w-kw)>Math.max(2,kw*0.01))return {ref:b.ref,w,kw,a,ka};
+  return null;
+}
+function _kdStaleRefs(refs,dd){
+  if(typeof billMap==='undefined'||!billMap)return [];
+  const kd={}; ((typeof keepData!=='undefined'&&keepData)||[]).forEach(r=>{ if(r.ref&&(!dd||r.deliveryDate===dd))kd[r.ref]=r; });
+  const out=[]; (refs||[]).forEach(ref=>{ const x=_ksBillStale(billMap[ref],kd[ref]); if(x)out.push(x); });
+  return out;
+}
+function _kdStaleTip(st){
+  const f=n=>Math.round(n||0).toLocaleString('en-US');
+  return st.map(x=>x.ref+': '+(x.a!==x.ka?'฿'+f(x.ka)+' → ฿'+f(x.a):'')+(x.a!==x.ka&&x.w!==x.kw?' · ':'')+(x.w!==x.kw?f(x.kw)+' → '+f(x.w)+' กก.':'')).join('\n');
+}
 function _ksDiff(){   // dirty = คันที่ต่างจากฐาน · removed = คันที่อยู่ในฐานแต่ตอนนี้ไม่มีบิลแล้ว (ต้องลบออกจากชีท)
   const mem=_ksPlanMem(), base=_ksBase(), sig={}, dirty=[], removed=[];
   Object.keys(mem).forEach(p=>{ const s=sig[p]=_ksSig(p,mem[p]), b=base[p]; if(!b||b.mem!==s.mem||b.ord!==s.ord||b.drv!==s.drv)dirty.push(p); });
   Object.keys(base).forEach(p=>{ if(!mem[p]&&base[p].mem)removed.push(p); });
-  return {mem,sig,base,dirty,removed};
+  // v9.452: คันที่แผนเหมือนเดิม แต่ของในใบเปลี่ยนหลังบันทึก -> ส่งใหม่ด้วย (ชีทจะได้ นน./คิว/ยอด/ต้นทุน ล่าสุด)
+  const stale={};
+  Object.keys(mem).forEach(p=>{ if(dirty.indexOf(p)>=0)return;
+    const st=_kdStaleRefs(mem[p].map(x=>String(x).split(':')[0]),_deliveryDate);
+    if(st.length){ stale[p]=st; dirty.push(p); } });
+  return {mem,sig,base,dirty,removed,stale};
 }
 function _ksSheetPlates(dd){   // Keepdata ที่โหลดล่าสุด ของวันส่งนี้ → ทะเบียน → {mem, id, by, at}
   const bset=new Set(_dqSaveBills().map(b=>b.ref)), pl={}, byRef={};   // v9.308: +ใบรับเองหน้าร้านที่อยู่ในกลุ่ม
@@ -8366,7 +8395,9 @@ async function doSave(silent){
         if(x&&x.plate!==r[14]&&!kset.has(x.plate)){ const m=mv[x.plate]||(mv[x.plate]={n:0,by:x.savedBy||''}); m.n++; } });
       const rmTx=df.removed.map(p=>{ const t=TRUCKS.find(x=>x.plate===p); return `• ${p}${t&&t.nick?' · '+t.nick:''}`; }).join('\n');
       const mvTx=Object.keys(mv).map(p=>`• ${p}${mv[p].by?' (บันทึกโดย '+mv[p].by+')':''} — ${mv[p].n} บิล`).join('\n');
-      const ans=await dqForm(`บันทึกเฉพาะรถที่แก้ ${df.dirty.length} คัน${df.dirty.length?': '+df.dirty.join(' · '):''}${nSame>0?`\nรถที่ไม่ได้แก้ ${nSame} คัน ไม่ต้องส่ง`:''}`
+      const _stK=Object.keys(df.stale||{});   // v9.452
+      const ans=await dqForm(`บันทึกเฉพาะรถที่แก้ ${df.dirty.length} คัน${df.dirty.length?': '+df.dirty.join(' · '):''}`
+          +(_stK.length?`\nในนี้ ${_stK.length} คันส่งใหม่เพราะออเดอร์ในใบเปลี่ยนหลังบันทึก: ${_stK.map(p=>p+' ('+df.stale[p].length+' ใบ)').join(' · ')}`:'')+`${nSame>0?`\nรถที่ไม่ได้แก้ ${nSame} คัน ไม่ต้องส่ง`:''}`
           +(rmTx?`\n\nรถที่ไม่มีบิลแล้ว — จะลบออกจากแผนในชีท ${df.removed.length} คัน:\n${rmTx}`:'')
           +(mvTx?`\n\nบิลที่ในชีทอยู่รถคันอื่น (คันที่เครื่องนี้ไม่ได้แก้) จะย้ายมาตามแผนนี้:\n${mvTx}`:''),
         [await _ksNameField()],
@@ -11740,6 +11771,9 @@ function _gbHtml(){
       h+='<div class="gbc k-'+H.k+'" onclick="gbMap(\''+_prJs(t.plate)+'\','+tp.tr+')"'
         +' title="กดเพื่อดูแผนที่เที่ยวนี้ + ร้านใกล้เคียงในรัศมี '+DQ_NEAR_KM+' กม.">'
         +'<div class="gbc-tr"><span class="pl">'+E(t.plate)+'</span><span class="z">เที่ยว '+tp.tr+'</span></div>'
+        +(function(){ if(_gbSrc!=='send')return '';   // v9.452: ออเดอร์ในใบเปลี่ยนหลังบันทึก
+            const st=_kdStaleRefs(tp.refs,d.dateStr||dashFilterDate); if(!st.length)return '';
+            return '<div class="gbc-stale" title="'+E(_kdStaleTip(st))+'">⚠ ออเดอร์เปลี่ยนหลังบันทึก '+st.length+' ใบ · กดบันทึกใหม่</div>'; })()
         +((_mdrv&&tp.drv)?'<div class="gb-dv" title="คนขับของเที่ยวนี้">🧑‍✈️ '+E(tp.drv)+'</div>':'')
         +'<div class="gbc-hero">'+(H.l?'<div class="l">'+H.l+'</div>':'')+'<div class="v">'+E(H.v)+'</div></div>'
         +'<div class="gbc-m"><span class="k'+(wOn?'':' g')+'">นน.</span>'+_gbBar(t.wp,wOn)+'<span class="p'+(wOn?'':' g')+'">'+t.wp+'%</span>'
@@ -12252,7 +12286,9 @@ function _svkHtml(){
       const w=[]; let cl='';   // v9.321: cl = แถบล่าง ใช้ _dqCostLine ชุดเดียวกับการ์ดหน้าอื่น (user วงมาให้ทำเหมือนกัน)
       if(ls.lostCs>0||(ls.items||[]).length)w.push(`<span class="svk-g amber" title="สต็อกไม่พอตั้งแต่ตอนจัดรถ">⚠ ของไม่พอ ${fmtN((ls.items||[]).length)} รายการ${ls.lostCs>0?` · ${fmtN(Math.round(ls.lostCs))} ลัง`:''} · ${fmtKg(ls.lostW||0)}</span>`);
       if(it.nFar)w.push(`<span class="svk-g amber" title="ร้านที่ห่างจากร้านก่อนหน้าเกินเกณฑ์">⚠ ร้านห่างเกิน ${it.nFar} จุด</span>`);
-      if(x&&x.drift!=null)w.push(`<span class="svk-g amber">⚠ บิลแก้หลังบันทึก (ตอนนี้ ${fmtKg(x.drift)})</span>`);
+      const _st=(_lineSumMode==='saved')?_kdStaleRefs(tp.refs,dashFilterDate):[];   // v9.452 (แท็บปลีก: เลขใบไม่อยู่ใน Keepdata = ไม่ขึ้นเอง)
+      if(_st.length)w.push(`<span class="svk-g red" title="${E(_kdStaleTip(_st))}">⚠ ออเดอร์เปลี่ยนหลังบันทึก ${fmtN(_st.length)} ใบ · กดบันทึกใหม่</span>`);
+      else if(x&&x.drift!=null)w.push(`<span class="svk-g amber">⚠ บิลแก้หลังบันทึก (ตอนนี้ ${fmtKg(x.drift)})</span>`);
       try{ cl=(typeof _dqCostLine==='function')?(_dqCostLine(c,{sv:1,fill:x})||''):''; }catch(e){ cl=''; }
       // เที่ยวที่บันทึกไว้ก่อนเริ่มเก็บต้นทุน ไม่มีแถบต้นทุน → ยังต้องบอก "เติมอีกกี่ลัง"
       if(!cl&&x&&x.need&&x.full>0)cl=`<div class="ls-fill" title="ประมาณจากขนาดลังเฉลี่ยของที่อยู่บนเที่ยวนี้">＋ เติมอีก ≈${fmtN(x.full)} ลัง ให้เต็มคัน</div>`;
