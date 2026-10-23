@@ -2022,7 +2022,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.466</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.467</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -13897,9 +13897,10 @@ function orderedTripBills(plate,tr){
   const tb=tripBillsFor(plate,tr);
   // v9.361: ค่าเริ่มต้น = เส้นทางสั้นสุด (กด 🏷️ ลำดับร้าน เพื่อใช้ลำดับจากชีท Customer)
   const wg=tb.filter(b=>b.lat&&b.lng);
-  const base=(wg.length>1&&typeof tspRoute==='function')
+  let base=(wg.length>1&&typeof tspRoute==='function')
     ? [..._tspOrderCached(plate,tr,wg),...tb.filter(b=>!b.lat||!b.lng)]
     : tb;
+  base=_ordLearn(base,b=>b.arCode);   // v9.467: เรียงตามที่คนขับวิ่งจริง (ประวัติ GPS + D-MAN) — ยังไม่โหลด = เส้นทางสั้นสุด
   return finalizeOrder(plate,tr,base); // v8.25: manual override + cluster + จำลำดับที่แสดง
 }
 // v9.361: จัดตามลำดับร้านของชีท Customer (เดิมเป็นค่าเริ่มต้น ตอนนี้เป็นตัวเลือก)
@@ -14420,7 +14421,7 @@ function _dmSame(units, ord){   // ลำดับที่เก็บไว้
     return k.length === ord.length && k.every((x,i)=>x === ord[i]);
   }catch(e){ return false; }
 }
-function _prBase(list){ return _prRoute(list); }   // v9.361: ค่าเริ่มต้น = ตามพิกัด (เส้นทางสั้นสุด)
+function _prBase(list){ return _ordLearn(_prRoute(list),_unitCode); }   // v9.361: ค่าเริ่มต้น = ตามพิกัด · v9.467: + เรียงตามที่คนขับวิ่งจริง (ปุ่ม 📍 ยังใช้ _prRoute ล้วน)
 function _prRoute(a){
   const gps=(a||[]).filter(_prHasGps);
   const nog=(a||[]).filter(u=>!_prHasGps(u)).sort(_prBig);
@@ -16948,10 +16949,37 @@ function _svRealOrdOf(tp,dd){
   for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){ tot++; const a=codes[i],b=codes[j]; if(a&&b&&((_ordHist.m.get(a+'|'+b)||0)+(_ordHist.m.get(b+'|'+a)||0)))known++; }
   return {idx:out, known, tot, same:out.every((v,i)=>v===i)};
 }
+// v9.467: เรียงตามประวัติการวิ่งจริง เริ่มจากลำดับ base (เส้นทางสั้นสุด) แล้วแทรกทีละร้านตำแหน่งที่ตรงประวัติสุด
+//   ยังไม่โหลดประวัติ / ร้านน้อยกว่า 2 = คืน base เดิม · ร้านไม่มีประวัติ = อยู่ตำแหน่งเดิมตาม base
+function _ordLearn(list,codeOf){
+  if(!_ordHist||!list||list.length<2)return list;
+  const codes=list.map(x=>{ try{ return String(codeOf(x)||''); }catch(e){ return ''; } });
+  if(!codes.some(Boolean))return list;
+  const ck=codes.join('|'), hit=_ordLearnCache.get(ck); if(hit)return hit.map(i=>list[i]);   // แคช (พรีปลีกร้านเยอะ วาดบ่อย)
+  const out=[];
+  for(let c=0;c<list.length;c++){ let best=out.length, bs=null;
+    for(let pos=0;pos<=out.length;pos++){ let sc=0;
+      for(let k=0;k<pos;k++)sc+=(codes[out[k]]&&codes[c])?_ordPref(codes[out[k]],codes[c]):0;
+      for(let k=pos;k<out.length;k++)sc+=(codes[out[k]]&&codes[c])?_ordPref(codes[c],codes[out[k]]):0;
+      if(bs==null||sc>bs+1e-9){ bs=sc; best=pos; } }
+    out.splice(best,0,c); }
+  if(_ordLearnCache.size>500)_ordLearnCache.clear(); _ordLearnCache.set(ck,out);
+  return out.map(i=>list[i]);
+}
+const _ordLearnCache=new Map();
+function _unitCode(u){ const b=(typeof billMap!=='undefined'&&billMap)?billMap[((u&&u.bills)||[])[0]]:null; return (u&&u.arCode)||(b&&b.arCode)||''; }
 function _tpReorder(tp,ro){
   if(!ro)return tp; const pick=a=>a?ro.idx.map(i=>a[i]):a;
   return Object.assign({},tp,{stores:pick(tp.stores),srefs:pick(tp.srefs),sxy:pick(tp.sxy),scs:pick(tp.scs),scat:pick(tp.scat)});
 }
+// v9.467: โหลดประวัติการวิ่งจริงตั้งแต่เปิดแอป (ลำดับเริ่มต้นหน้าจัดรถ/พรีปลีกใช้) แล้ววาดหน้าปัจจุบันใหม่
+setTimeout(()=>{ _ordHistLoad().then(()=>{ try{
+    if(typeof currentTab==='undefined')return;
+    if(currentTab==='saved'&&typeof renderSavedView==='function')renderSavedView();
+    else if(currentTab==='routes'&&typeof rUpdateMap==='function')rUpdateMap();
+    else if(currentTab==='preretail'&&typeof renderPreRetail==='function')renderPreRetail();
+    else if(typeof renderAll==='function')renderAll();
+  }catch(e){} }).catch(e=>console.warn('[ลำดับวิ่งจริง] โหลดไม่ได้',(e&&e.message)||e)); },1500);
 function svRealOrdToggle(){
   _svRealOrd=!_svRealOrd;
   if(_svRealOrd&&!_ordHist){
