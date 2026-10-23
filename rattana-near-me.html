@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Near Me v2.6</title>
+<title>Rattana Near Me v2.7</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -259,7 +259,7 @@ body.dark .shop .dl b{color:var(--gold-light)}
 <div id="spinner"><div class="box"><div class="ring"></div><p id="spinnerMsg">กำลังโหลด...</p></div></div>
 
 <header id="hdr">
-  <div class="logo-text">Rattana <span>Near Me</span><span class="ver-badge">v2.6 · 2026-10-23</span></div>
+  <div class="logo-text">Rattana <span>Near Me</span><span class="ver-badge">v2.7 · 2026-10-23</span></div>
   <div class="user-chip" id="userChip" style="display:none" title=""><b>👤</b><span id="userName"></span></div>
   <button class="icon-btn" id="btnRefresh" title="โหลดข้อมูลร้านใหม่" onclick="refreshData()">⟳</button>
   <button class="icon-btn" id="btnDark" title="โหมดมืด" onclick="toggleDark()">🌙</button>
@@ -347,7 +347,7 @@ if (/\bLine\//i.test(navigator.userAgent || '') && !/[?&]openExternalBrowser=1/.
 }
 
 /* ════════ Config ════════ */
-const APP_VER   = '2.6';
+const APP_VER   = '2.7';
 const SHEET_ID  = '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI';
 const SHEET_TAB = 'Customer';
 const PROVINCES = ['สมุทรสาคร', 'เพชรบุรี', 'สมุทรสงคราม'];
@@ -357,7 +357,7 @@ const NEAREST_FALLBACK = 10;      // ถ้าไม่มีร้านใน�
 const PAGE = 50;
 const MAX_CARDS = 40;             // การ์ดปัดซ้าย-ขวาด้านล่าง (มือถือ)
 const OSRM_URL = 'https://router.project-osrm.org';   // คำนวณระยะ/เส้นทางตามถนนจริง
-const ROAD_MAX = 99;      // คำนวณระยะตามถนนได้ครั้งละไม่เกิน 99 ร้าน (ที่เหลือใช้ระยะเส้นตรง)
+const ROAD_MAX = 99;      // คำนวณระยะตามถนนได้ครั้งละไม่เกิน 99 ร้าน (ที่เหลือใช้ระยะโดยประมาณ)
 const IMG_PROXY = 'https://wsrv.nl/?url=';             // ย่อรูปหน้าร้านให้โหลดเร็ว (~12KB แทน ~300KB)
 const CACHE_KEY = 'rns_shops_v2';
 const PREF_KEY  = 'rns_prefs_v1';
@@ -722,22 +722,117 @@ function applyActiveMarker(){
     if (on) o.marker.setZIndexOffset(6000);
   });
 }
+let rawDot = null, snapLine = null, reachPoly = null;
 function drawMe(){
   if (!me) return;
-  const ll = [me.lat, me.lng];
+  const ll = [me.lat, me.lng];                 // ตำแหน่งที่ปักลงบนถนนแล้ว
+  const raw = [me.rawLat, me.rawLng];          // ตำแหน่งจาก GPS ตรงๆ
   if (!meMarker) {
     const html = '<div class="me-wrap"><div class="me-pulse"></div><div class="me-pulse p2"></div>' +
       '<div class="me-center"></div><div class="me-pin"><span>🧍</span></div><div class="me-label">คุณอยู่ที่นี่</div></div>';
     meMarker = L.marker(ll, {icon: L.divIcon({className:'', html, iconSize:[44,52], iconAnchor:[22,50]}), zIndexOffset:10000}).addTo(map);
     meMarker.on('click', () => centerMe());
-    accCircle = L.circle(ll, {radius: me.acc || 0, color:'#1a73e8', weight:1, fillColor:'#1a73e8', fillOpacity:.1, interactive:false}).addTo(map);
-    radiusCircle = L.circle(ll, {radius: prefs.radius, color:'#c9a84c', weight:2, dashArray:'6 6', fill:false, interactive:false}).addTo(map);
+    accCircle = L.circle(raw, {radius: me.acc || 0, color:'#1a73e8', weight:1, fillColor:'#1a73e8', fillOpacity:.1, interactive:false}).addTo(map);
+    snapLine = L.polyline([raw, ll], {color:'#1a73e8', weight:2, dashArray:'3 5', opacity:.7, interactive:false}).addTo(map);
+    rawDot = L.circleMarker(raw, {radius:4, color:'#fff', weight:1.5, fillColor:'#6b7896', fillOpacity:1, interactive:false}).addTo(map);
+    // วงกลมสำรอง — ใช้ระหว่างรอคำนวณพื้นที่ตามถนน
+    radiusCircle = L.circle(ll, {radius: prefs.radius, color:'#c9a84c', weight:1.5, dashArray:'4 8', opacity:.45, fill:false, interactive:false}).addTo(map);
   } else {
-    meMarker.setLatLng(ll); accCircle.setLatLng(ll); radiusCircle.setLatLng(ll);
+    meMarker.setLatLng(ll); accCircle.setLatLng(raw); radiusCircle.setLatLng(ll);
+    snapLine.setLatLngs([raw, ll]); rawDot.setLatLng(raw);
   }
   accCircle.setRadius(me.manual ? 0 : (me.acc || 0));
   radiusCircle.setRadius(prefs.radius);
+  const showSnap = me.snapped && me.snapDist > 3;   // GPS อยู่นอกถนน → จุดเทาเล็ก + เส้นประไปหาจุดบนถนน
+  snapLine.setStyle({opacity: showSnap ? .7 : 0}); rawDot.setStyle({opacity: showSnap ? 1 : 0, fillOpacity: showSnap ? 1 : 0});
+  drawReach();
   styleMe();
+}
+
+/* ════════ ปักตำแหน่งของฉันลงบนเส้นถนนที่ใกล้ที่สุด (OSRM nearest) ════════ */
+let lastSnap = null, snapBusy = false, snapPending = null, snapFailAt = 0;
+const SNAP_MAX = 500;   // ห่างถนนเกินนี้ (เมตร) ไม่ปักลงถนน
+function applySnap(){
+  if (!me) return;
+  if (lastSnap && haversine(lastSnap.rawLat, lastSnap.rawLng, me.rawLat, me.rawLng) < 15 && lastSnap.dist <= SNAP_MAX) {
+    me.lat = lastSnap.lat; me.lng = lastSnap.lng; me.snapped = true; me.snapDist = lastSnap.dist;
+    return true;
+  }
+  return false;
+}
+async function requestSnap(raw){
+  if (Date.now() - snapFailAt < 30000) return;
+  if (snapBusy) { snapPending = raw; return; }
+  snapBusy = true;
+  try {
+    const j = await (await fetch(OSRM_URL + '/nearest/v1/driving/' + raw.lng.toFixed(6) + ',' + raw.lat.toFixed(6) + '?number=1')).json();
+    if (j.code !== 'Ok' || !j.waypoints || !j.waypoints.length) throw new Error(j.code);
+    const w = j.waypoints[0];
+    lastSnap = {rawLat:raw.lat, rawLng:raw.lng, lat:w.location[1], lng:w.location[0], dist:w.distance || 0, road:w.name || ''};
+    if (me && applySnap()) { drawMe(); update(); }
+  } catch (e) { snapFailAt = Date.now(); }
+  finally {
+    snapBusy = false;
+    if (snapPending) { const p = snapPending; snapPending = null; requestSnap(p); }
+  }
+}
+
+/* ════════ พื้นที่รัศมีตามถนนจริง: ระยะขับรถจริงไม่เกินรัศมีที่เลือก ════════ */
+let reach = null, reachBusy = false, reachFailAt = 0, reachFit = true;   // reachFit: ได้พื้นที่แล้วซูมให้พอดี
+const REACH_DIRS = 24, REACH_RINGS = 4;   // 24 ทิศ × 4 ระยะ = 96 จุด (+ จุดเริ่ม = 97 ≤ 100 จุดที่ OSRM รับได้)
+function destPoint(lat, lng, brng, dist){
+  const R = 6371000, toR = Math.PI/180, d = dist / R, b = brng * toR, p1 = lat * toR, l1 = lng * toR;
+  const p2 = Math.asin(Math.sin(p1)*Math.cos(d) + Math.cos(p1)*Math.sin(d)*Math.cos(b));
+  const l2 = l1 + Math.atan2(Math.sin(b)*Math.sin(d)*Math.cos(p1), Math.cos(d) - Math.sin(p1)*Math.sin(p2));
+  return {lat: p2 / toR, lng: l2 / toR};
+}
+function reachValid(){
+  return reach && me && reach.radius === prefs.radius && haversine(reach.lat, reach.lng, me.lat, me.lng) < 100;
+}
+function requestReach(){
+  if (!me || reachBusy || reachValid() || Date.now() - reachFailAt < 60000) return;
+  fetchReach({lat:me.lat, lng:me.lng}, prefs.radius);
+}
+async function fetchReach(o, R){
+  reachBusy = true;
+  try {
+    const pts = [];
+    for (let i = 0; i < REACH_DIRS; i++) for (let k = 1; k <= REACH_RINGS; k++) pts.push(destPoint(o.lat, o.lng, i * 360 / REACH_DIRS, R * k / REACH_RINGS));
+    const coords = [o].concat(pts).map(p => p.lng.toFixed(6) + ',' + p.lat.toFixed(6)).join(';');
+    const j = await (await fetch(OSRM_URL + '/table/v1/driving/' + coords + '?sources=0&annotations=distance')).json();
+    if (j.code !== 'Ok') throw new Error(j.message || j.code);
+    const src = (j.sources[0] && j.sources[0].distance) || 0;
+    const verts = [];
+    for (let i = 0; i < REACH_DIRS; i++) {
+      // ไล่จากใกล้ไปไกลในแต่ละทิศ หาจุดที่ระยะตามถนนเท่ากับรัศมีพอดี
+      let prevR = 0, prevD = 0, rr = R;
+      for (let k = 1; k <= REACH_RINGS; k++) {
+        const idx = 1 + i * REACH_RINGS + (k - 1), rk = R * k / REACH_RINGS;
+        let d = j.distances[0][idx];
+        if (d != null) d += src + ((j.destinations[idx] && j.destinations[idx].distance) || 0);
+        if (d == null || d > R) {
+          const f = (d == null || d <= prevD) ? 0 : Math.min(1, Math.max(0, (R - prevD) / (d - prevD)));
+          rr = prevR + f * (rk - prevR);
+          break;
+        }
+        prevR = rk; prevD = d;
+      }
+      verts.push(destPoint(o.lat, o.lng, i * 360 / REACH_DIRS, Math.max(rr, R * 0.03)));
+    }
+    reach = {lat:o.lat, lng:o.lng, radius:R, poly:verts.map(p => [p.lat, p.lng])};
+    drawReach();
+    if (reachFit && !selectedId) { reachFit = false; centerMe(); }
+  } catch (e) { reachFailAt = Date.now(); }
+  finally { reachBusy = false; }
+}
+function drawReach(){
+  const ok = reachValid();
+  if (ok) {
+    if (!reachPoly) reachPoly = L.polygon(reach.poly, {color:'#c9a84c', weight:2.5, dashArray:'8 6', fillColor:'#c9a84c', fillOpacity:.08, interactive:false, smoothFactor:1.5}).addTo(map);
+    else reachPoly.setLatLngs(reach.poly);
+    reachPoly.bringToBack();
+  } else if (reachPoly) { map.removeLayer(reachPoly); reachPoly = null; }
+  if (radiusCircle) radiusCircle.setStyle({opacity: ok ? 0 : .45});
 }
 function styleMe(){
   const el = meMarker && meMarker.getElement() && meMarker.getElement().querySelector('.me-wrap');
@@ -761,7 +856,8 @@ map.addControl(new MeControl());
 function centerMe(){
   if (!me) { showToast('ยังไม่ได้ตำแหน่งของคุณ', 'warning'); startGeo(); return; }
   const p = mapPad();
-  map.fitBounds(L.latLng(me.lat, me.lng).toBounds(prefs.radius * 2.2), {paddingTopLeft:p.tl, paddingBottomRight:p.br});
+  const b = reachPoly ? reachPoly.getBounds().extend([me.lat, me.lng]) : L.latLng(me.lat, me.lng).toBounds(prefs.radius * 2.2);
+  map.fitBounds(b, {paddingTopLeft:p.tl, paddingBottomRight:p.br});
 }
 map.on('click', e => {
   if (!pinMode) return;
@@ -898,7 +994,8 @@ if (navigator.permissions && navigator.permissions.query) {
   }).catch(() => {});
 }
 function setMe(pos, fit){
-  me = pos;
+  me = Object.assign({}, pos, {rawLat: pos.lat, rawLng: pos.lng, snapped: false, snapDist: 0});
+  if (!applySnap()) requestSnap({lat: pos.lat, lng: pos.lng});   // ปักลงถนน (ใช้ผลเดิมถ้าขยับไม่ถึง 15 ม.)
   drawMe();
   update();
   if (fit) centerMe();
@@ -954,6 +1051,7 @@ function doUpdate(){
   });
   list.sort((a, b) => a._d - b._d);
   requestRoad(cands);
+  requestReach();
   const inR = list.filter(s => s._d <= prefs.radius);
   lastResult = inR.length ? inR : list.slice(0, NEAREST_FALLBACK);
   lastInRadius = inR.length > 0;
@@ -1001,7 +1099,7 @@ async function fetchRoad(origin, cands){
     road = {lat:origin.lat, lng:origin.lng, ts:Date.now(), byId};
   } catch (e) {
     roadFailAt = Date.now();
-    if (!roadWarned) { roadWarned = true; showToast('คำนวณระยะตามถนนไม่ได้ชั่วคราว — แสดงระยะเส้นตรงแทน', 'warning'); }
+    if (!roadWarned) { roadWarned = true; showToast('คำนวณระยะตามถนนไม่ได้ชั่วคราว — แสดงระยะโดยประมาณแทน', 'warning'); }
   } finally {
     roadBusy = false;
     update();
@@ -1012,13 +1110,16 @@ function fmtMin(sec){
   return m < 60 ? m + ' นาที' : Math.floor(m/60) + ' ชม. ' + (m % 60) + ' นาที';
 }
 function distKind(s){
-  return s._road ? '🛣️ ตามถนน' + (s._t ? ' ~' + fmtMin(s._t) : '') : (roadBusy ? '⏳ กำลังคำนวณตามถนน' : '📏 เส้นตรง');
+  return s._road ? '🛣️ ตามถนน' + (s._t ? ' ~' + fmtMin(s._t) : '') : (roadBusy ? '⏳ กำลังคำนวณตามถนน' : '≈ โดยประมาณ');
 }
+// ระยะที่ใช้ตัดสินว่า "ใกล้มาก" — ตามถนนเท่านั้น (ถ้าบริการคำนวณถนนล่ม ค่อยใช้ระยะโดยประมาณ)
+function nearDist(s){ return s._road ? s._d : (roadFailAt ? s._s : Infinity); }
 
 function renderMsg(inR, list){
   const el = $('msg');
   const t = me ? formatThaiTime(me.ts) : '';
-  const accTxt = me.manual ? '📌 ตำแหน่งจากการปักหมุด' : ('ความแม่นยำ ±' + Math.round(me.acc || 0) + ' ม.');
+  const accTxt = (me.manual ? '📌 ตำแหน่งจากการปักหมุด' : ('ความแม่นยำ ±' + Math.round(me.acc || 0) + ' ม.')) +
+    (me.snapped ? ' · 🛣️ ปักบนถนน' + (lastSnap && lastSnap.road ? ' ' + esc(lastSnap.road) : '') : '');
   const sub = '<div class="m-sub">' + accTxt + ' · อัปเดต ' + t + ' น.</div>';
   if (!shops.length) {
     el.className = 'msg'; el.innerHTML = '<div class="m-title">ได้ตำแหน่งแล้ว — กำลังโหลดข้อมูลร้านค้า...</div>' + sub; return;
@@ -1047,7 +1148,7 @@ let cardsSig = '', cardsTimer = null;
 function cardDist(s){ return '<b>' + fmtDist(s._d) + '</b>' + distKind(s); }
 function cardHtml(s, i){
   const tel = firstPhone(s.phone);
-  return '<div class="card-shop' + (s._s <= VERY_NEAR ? ' very' : '') + (s.id === activeId ? ' active' : '') + '" data-cid="' + s.id + '" onclick="selectShop(' + s.id + ', true)">' +
+  return '<div class="card-shop' + (nearDist(s) <= VERY_NEAR ? ' very' : '') + (s.id === activeId ? ' active' : '') + '" data-cid="' + s.id + '" onclick="selectShop(' + s.id + ', true)">' +
     '<div class="phw">' + photoHtml(s, 216, 216, 'cph') + '<span class="rk">' + (i+1) + '</span></div>' +
     '<div class="ci"><div class="cn">' + esc(s.name) + '</div>' +
     '<div class="cd">' + cardDist(s) + '</div>' +
@@ -1110,10 +1211,10 @@ function renderList(inRadius){
     if (s.type) tags.push('<span class="badge badge-info">' + esc(s.type) + '</span>');
     tags.push('<span class="badge badge-gold">' + esc(s.prov) + '</span>');
     if (s.pending) tags.push('<span class="badge badge-warn">รออนุมัติ</span>');
-    return '<div class="shop' + (s._s <= VERY_NEAR ? ' very' : '') + (s.id === selectedId ? ' sel' : '') + '" data-id="' + s.id + '" onclick="selectShop(' + s.id + ', true)">' +
+    return '<div class="shop' + (nearDist(s) <= VERY_NEAR ? ' very' : '') + (s.id === selectedId ? ' sel' : '') + '" data-id="' + s.id + '" onclick="selectShop(' + s.id + ', true)">' +
       '<div class="phw">' + photoHtml(s, 176, 176, 'ph') + '<span class="rk">' + (i+1) + '</span></div>' +
       '<div class="info"><div class="nm">' + esc(s.name) + '</div>' +
-      '<div class="dl"><b>' + fmtDist(s._d) + '</b>' + distKind(s) + (s._road ? ' · เส้นตรง ' + fmtDist(s._s) : '') + ' · ' + bearingTh(me.lat, me.lng, s.lat, s.lng) + '</div>' +
+      '<div class="dl"><b>' + fmtDist(s._d) + '</b>' + distKind(s) + ' · ' + bearingTh(me.lat, me.lng, s.lat, s.lng) + '</div>' +
       '<div class="tags">' + tags.join('') + '</div>' +
       '<div class="addr">' + (s.code ? 'รหัส ' + esc(s.code) + ' · ' : '') + esc(s.addr) + '</div>' +
       (s.sales.length ? '<div class="addr">👤 ' + esc(s.sales.join(', ')) + (s.wh.length ? ' · ' + esc(s.wh.join('/')) : '') + '</div>' : '') +
@@ -1141,7 +1242,7 @@ function selectShop(id, fromList){
   else {
     const p = mapPad();
     popup = L.popup({offset:[0,-6], minWidth:230, maxWidth:280, autoPanPaddingTopLeft:p.tl, autoPanPaddingBottomRight:p.br}).setLatLng([s.lat, s.lng])
-      .setContent(shopPopup(s, me ? '⏳ กำลังหาเส้นทางตามถนน... (เส้นตรง ' + fmtDist(straight) + ')' : '')).openOn(map);
+      .setContent(shopPopup(s, me ? '⏳ กำลังหาเส้นทางตามถนน...' + (s._road ? ' (' + fmtDist(s._d) + ')' : '') : '')).openOn(map);
   }
   if (me) drawRoute(s, popup, straight, fromList && !(popup && isMobile()));
 }
@@ -1164,11 +1265,11 @@ async function drawRoute(s, popup, straight, fit){
     routeLine = L.polyline(pts, {color:'#1a73e8', weight:6, opacity:.85, lineJoin:'round'}).addTo(map);
     routeLine.bringToBack();
     if (popup && popup.isOpen()) popup.setContent(shopPopup(s,
-      '🛣️ ตามถนน <b>' + fmtDist(r.distance + snap) + '</b> · ~' + fmtMin(r.duration) + '<br><span style="color:#8a98b8">เส้นตรง ' + fmtDist(straight) + '</span>'));
+      '🛣️ ตามถนน <b>' + fmtDist(r.distance + snap) + '</b> · ~' + fmtMin(r.duration)));
     if (fit) { const p = mapPad(); map.fitBounds(routeLine.getBounds(), {paddingTopLeft:[p.tl[0] + 20, p.tl[1] + 20], paddingBottomRight:[p.br[0] + 20, p.br[1] + 20], maxZoom:17}); }
   } catch (e) {
     if (seq !== routeSeq) return;
-    if (popup && popup.isOpen()) popup.setContent(shopPopup(s, '📏 เส้นตรง <b>' + fmtDist(straight) + '</b> (หาเส้นทางตามถนนไม่ได้)'));
+    if (popup && popup.isOpen()) popup.setContent(shopPopup(s, s._road ? '🛣️ ตามถนน <b>' + fmtDist(s._d) + '</b>' + (s._t ? ' · ~' + fmtMin(s._t) : '') + ' (วาดเส้นทางไม่ได้)' : '≈ <b>' + fmtDist(straight) + '</b> (หาเส้นทางตามถนนไม่ได้)'));
   }
 }
 map.on('popupclose', () => { routeSeq++; clearRoute(); });
@@ -1177,14 +1278,14 @@ map.on('popupclose', () => { routeSeq++; clearRoute(); });
 let alertTimer = null;
 function checkVeryNear(list){
   if (!me || me.manual) return;
-  // แจ้งเตือนเมื่อตัวคุณอยู่ใกล้ร้านจริง (ระยะเส้นตรง)
-  const hit = list.find(s => s._s <= VERY_NEAR && !alerted.has(s.id));
+  // แจ้งเตือนเมื่อเข้าใกล้ร้านในระยะตามถนน
+  const hit = list.find(s => nearDist(s) <= VERY_NEAR && !alerted.has(s.id));
   if (!hit) return;
-  list.filter(s => s._s <= VERY_NEAR).forEach(s => alerted.add(s.id));
+  list.filter(s => nearDist(s) <= VERY_NEAR).forEach(s => alerted.add(s.id));
   alertShopId = hit.id;
   $('nearAlertPh').innerHTML = photoHtml(hit, 112, 112, 'na-ph');
   $('nearAlertName').textContent = hit.name;
-  $('nearAlertSub').textContent = 'ห่าง ' + fmtDist(hit._s) + ' · ' + bearingTh(me.lat, me.lng, hit.lat, hit.lng) + ' · แตะเพื่อดู';
+  $('nearAlertSub').textContent = 'ห่าง ' + fmtDist(nearDist(hit)) + (hit._road ? ' ตามถนน' : '') + ' · ' + bearingTh(me.lat, me.lng, hit.lat, hit.lng) + ' · แตะเพื่อดู';
   $('nearAlert').classList.add('show');
   if (navigator.vibrate) { try { navigator.vibrate([150, 80, 150]); } catch(e){} }
   clearTimeout(alertTimer); alertTimer = setTimeout(() => $('nearAlert').classList.remove('show'), 8000);
@@ -1206,7 +1307,7 @@ function renderProvChips(){
   const opts = [['all','ทั้ง 3 จังหวัด']].concat(PROVINCES.map(p => [p, p]));
   $('provChips').innerHTML = opts.map(o => '<button class="chip' + (o[0] === prefs.prov ? ' on' : '') + '" onclick="setProv(\'' + o[0] + '\')">' + o[1] + '<span class="n">' + fmtNum(cnt[o[0]] || 0) + '</span></button>').join('');
 }
-function setRadius(r){ prefs.radius = r; savePrefs(); shown = PAGE; renderRadiusChips(); if (radiusCircle) radiusCircle.setRadius(r); update(); if (me) centerMe(); }
+function setRadius(r){ prefs.radius = r; savePrefs(); shown = PAGE; renderRadiusChips(); if (radiusCircle) radiusCircle.setRadius(r); drawReach(); reachFit = true; update(); if (me) centerMe(); }
 function setProv(p){ prefs.prov = p; savePrefs(); shown = PAGE; renderProvChips(); update(); }
 let searchTimer = null;
 function onSearch(){ clearTimeout(searchTimer); searchTimer = setTimeout(() => { shown = PAGE; update(); }, 200); }
