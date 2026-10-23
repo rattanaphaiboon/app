@@ -1219,7 +1219,7 @@ body.ui2 .toast{border-radius:14px}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.428';
+const APP_VERSION='3.429';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -10350,6 +10350,16 @@ async function submitForApproval(){
   const j=state.jobs.find(x=>x.id===state.activeJobId); if(!j) return;
   if(j.bills.some(b=>b.status==='pending')){ showToast('ยังมีบิลค้างอยู่','warning'); return; }
   if(j._submitting) return;
+  /* ★★ v3.429: ก่อนปิดงาน ดึงชีทใบคุมสด — แอดมินเพิ่มบิลเข้าใบคุมหลังรับงาน ต้องกรอกให้ครบก่อน */
+  { showToast('กำลังตรวจบิลในใบคุม…','info');
+    const _tk=await ticketSyncNewBills_(j);
+    if(_tk.added.length){
+      try{ renderActiveJob(); }catch(e){}
+      await showConfirm(`ใบคุมนี้มีบิลเพิ่มในชีท ${_tk.added.length} บิล ที่ยังไม่ได้กรอก\n\n`+_tk.added.slice(0,8).map(b=>`• ${b.doc} ${b.name||''} ${fmt(b.amount||0)}`).join('\n')+(_tk.added.length>8?`\n… อีก ${_tk.added.length-8} บิล`:'')+`\n\nเพิ่มเข้ารายการบิลแล้ว — กรอกให้ครบก่อนปิดงาน`,
+        {title:'⚠️ ยังปิดงานไม่ได้',okLabel:'ตกลง',cancelLabel:'ปิด',icon:'📄'});
+      return;
+    }
+  }
   /* ★★ v3.281: ปิดงานได้ต่อเมื่อทุกรายการของใบคุมนี้ "ถึงชีทแล้ว" หรือ "ยืนยันเข้าระบบสำรองแล้ว"
      (กติกาที่ user เลือก: ออฟไลน์บันทึกได้ แต่ปิดงานไม่ได้จนกว่ายืนยันครบ — กันเคสข้อมูลอยู่แค่ในมือถือแล้วหาย) */
   {
@@ -11040,6 +11050,7 @@ function openReview(id){
           <div class="stat-card"><div class="s-label">เก็บได้</div><div class="s-value txt-gold">${fmt(collected)}</div></div>
           <div class="stat-card"><div class="s-label">ยอดบิล</div><div class="s-value">${fmt(total)}</div></div>
         </div>
+        ${(()=>{ const _p=(j.bills||[]).filter(b=>!b.status||b.status==='pending'); return _p.length?`<div class="banner-warn mb-12"><b>⚠️ ยังมี ${_p.length} บิลที่คนขับยังไม่ได้กรอก</b> (ยอด ${fmt(_p.reduce((s,b)=>s+(parseFloat(b.amount)||0),0))}) — อนุมัติไม่ได้ ให้กด "ตีกลับ"</div>`:''; })()}
         ${payKindSummaryHtml_(j.bills)}
         ${billSearchBox_('rv',j.bills.length)}${j.bills.length>5?`<div class="txt-xs txt-muted mb-8" id="rvBillCount">${j.bills.length} บิล</div>`:''}
         <div id="rvBillList">${j.bills.map((b,i)=>renderReviewBill(b,i)).join('')}</div>
@@ -11334,6 +11345,16 @@ async function approveJob(id){
   const j=state.jobs.find(x=>x.id===id); if(!j) return;
   if(isMyTeamJob_(j)){ showToast('ใบคุมนี้มีชื่อคุณ (คนขับ/ผู้ช่วย) — อนุมัติเองไม่ได้ ให้คนอื่นอนุมัติ','warning'); return; }   // ★ v3.425
   { const _ab=assetBlock_(j); if(_ab){ showToast(_ab,'warning'); return; } }   // ★ v3.278
+  /* ★★ v3.429: ห้ามอนุมัติใบที่ยังมีบิลไม่ได้กรอก (เดิมไม่เช็ค → CVMW1/004506 อนุมัติผ่านทั้งที่ค้าง 8 บิล)
+     + ดึงชีทใบคุมสดก่อน เผื่อแอดมินเพิ่มบิลหลังคนขับปิดงาน */
+  { const _tk=await ticketSyncNewBills_(j);
+    const _pend=(j.bills||[]).filter(b=>!b.status||b.status==='pending');
+    if(_pend.length){
+      if(_tk.added.length) try{ openReview(id); }catch(e){}
+      showToast(`อนุมัติไม่ได้ — ยังมี ${_pend.length} บิลที่คนขับยังไม่ได้กรอก (${_pend.slice(0,3).map(b=>b.doc).join(', ')}${_pend.length>3?' …':''}) · กด "ตีกลับ" ให้คนขับกรอกให้ครบ`,'warning');
+      return;
+    }
+  }
   // v2.56: ให้ feedback ทันทีที่กด — ปิดปุ่ม + toast + วนหาปุ่มอนุมัติในหน้า
   _approvingJob=true;
   const btn=document.querySelector('#sec-sup-review .btn-success');
@@ -12514,6 +12535,26 @@ function hasLocalPaymentEdits_(p){
 /* ★ v3.251: เติม "ลำดับใบคุม" (seq) ให้บิลทุกใบของงาน จากชีทใบคุมล่าสุด
    จำเป็นเพราะบิลที่บันทึกแล้วถูกสร้างจากชีท Cin ซึ่งไม่มีคอลัมน์ลำดับ
    และใบคุมอาจถูกจัดลำดับใหม่ตอน sync (9:00/15:00/21:00 ฯลฯ) → ยึดของล่าสุดเสมอ */
+/* ★★ v3.429 (user 23 ต.ค. 2026 · เคส CVMW1/004506): ใบคุมในชีทมี 29 บิล แต่เครื่องคนขับมี 21 → ปิดงานได้ + หัวหน้าอนุมัติผ่าน
+   ทั้งที่ 8 บิล (65,138 บาท) ไม่เคยถูกกรอก · ตัวนี้ดึงชีทใบคุมสด แล้วเติมบิลที่ชีทมีแต่ในเครื่องไม่มี (สถานะรอส่ง)
+   ใช้ก่อนปิดงาน + ก่อนอนุมัติ · ใบส่งซ้ำ (·ส่งซ้ำ) มีแค่บางบิลของใบเดิม = ข้าม · ดึงไม่ได้/ใบไม่อยู่ในช่วงวันที่ = ไม่บล็อก */
+async function ticketSyncNewBills_(j){
+  try{
+    if(!j||/·ส่งซ้ำ$/.test(String(j.id||''))) return {ok:false,added:[]};
+    const av=await loadAvailableJobs(true);
+    const t=(av||[]).find(a=>normJobId(a.id)===normJobId(j.id));
+    if(!t||!Array.isArray(t.bills)||!t.bills.length) return {ok:false,added:[]};
+    const have=new Set((j.bills||[]).map(b=>String(b&&b.doc||'').trim()));
+    const add=t.bills.filter(b=>!have.has(String(b&&b.doc||'').trim()));
+    if(add.length){
+      add.forEach(b=>j.bills.push({...b,status:'pending',payment:{}}));
+      applyTicketSeq_(j,t.bills);
+      try{ enrichBills(); }catch(e){}
+      persistJobs();
+    }
+    return {ok:true,added:add};
+  }catch(e){ console.warn('ticketSyncNewBills_',e); return {ok:false,added:[]}; }
+}
 function applyTicketSeq_(job,ticketBills){
   if(!job||!Array.isArray(job.bills)||!Array.isArray(ticketBills)||!ticketBills.length) return;
   const by={};
