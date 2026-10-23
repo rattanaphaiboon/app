@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Near Me v2.7</title>
+<title>Rattana Near Me v2.9</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -259,7 +259,7 @@ body.dark .shop .dl b{color:var(--gold-light)}
 <div id="spinner"><div class="box"><div class="ring"></div><p id="spinnerMsg">กำลังโหลด...</p></div></div>
 
 <header id="hdr">
-  <div class="logo-text">Rattana <span>Near Me</span><span class="ver-badge">v2.7 · 2026-10-23</span></div>
+  <div class="logo-text">Rattana <span>Near Me</span><span class="ver-badge">v2.9 · 2026-10-23</span></div>
   <div class="user-chip" id="userChip" style="display:none" title=""><b>👤</b><span id="userName"></span></div>
   <button class="icon-btn" id="btnRefresh" title="โหลดข้อมูลร้านใหม่" onclick="refreshData()">⟳</button>
   <button class="icon-btn" id="btnDark" title="โหมดมืด" onclick="toggleDark()">🌙</button>
@@ -347,7 +347,7 @@ if (/\bLine\//i.test(navigator.userAgent || '') && !/[?&]openExternalBrowser=1/.
 }
 
 /* ════════ Config ════════ */
-const APP_VER   = '2.7';
+const APP_VER   = '2.9';
 const SHEET_ID  = '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI';
 const SHEET_TAB = 'Customer';
 const PROVINCES = ['สมุทรสาคร', 'เพชรบุรี', 'สมุทรสงคราม'];
@@ -658,14 +658,14 @@ function styleMarkers(nearIds, iconIds){
 }
 
 /* ════════ ร้านใกล้: ไอคอนรูปร้าน + ป้าย (รูปหน้าร้าน ชื่อ เบอร์ รูท) ════════ */
-const MAX_NEAR_ICONS = 80;
+const MAX_NEAR_ICONS = 500;   // ร้านในรัศมีได้ไอคอน 🏪 ทุกร้าน (กันเครื่องช้า ถ้าเกินนี้ค่อยเป็นจุดสีทอง)
 const nearLayer = L.layerGroup().addTo(map);
 const nearIconById = new Map();   // id → {marker, sig}
 let nearOrder = [];
 function nearIconHtml(s){
   const tel = firstPhone(s.phone);
   return '<div class="sp"><div class="sp-ico">🏪</div><div class="sp-lbl' + (s.photo ? '' : ' nop') + '">' +
-    (s.photo ? '<img class="sp-ph" src="' + esc(photoSrc(s.photo, 96, 96)) + '" alt="" onerror="this.remove()">' : '') +
+    (s.photo ? '<img class="sp-ph" src="' + esc(photoSrc(s.photo, 96, 96)) + '" alt="" loading="lazy" onerror="this.remove()">' : '') +
     '<div class="sp-txt"><b>' + esc(s.name) + '</b>' +
     (tel ? '<a href="tel:' + tel + '" onclick="event.stopPropagation()">📞 ' + esc(tel) + '</a>' : '<span class="sp-none">ไม่มีเบอร์โทร</span>') +
     (s.route ? '<span class="sp-route">🚚 ' + esc(routeText(s)) + '</span>' : '<span class="sp-none">ไม่มีรูท</span>') +
@@ -673,6 +673,7 @@ function nearIconHtml(s){
 }
 function renderNearIcons(list){
   const keep = new Set();
+  let created = false;
   list.forEach(s => {
     const sig = s.name + '|' + s.phone + '|' + routeText(s) + '|' + s.photo + '|' + s.lat + ',' + s.lng;
     let o = nearIconById.get(s.id);
@@ -686,33 +687,46 @@ function renderNearIcons(list){
       m.addTo(nearLayer);
       o = {marker:m, sig};
       nearIconById.set(s.id, o);
+      created = true;
     }
     keep.add(s.id);
   });
   nearIconById.forEach((o, id) => { if (!keep.has(id)) { nearLayer.removeLayer(o.marker); nearIconById.delete(id); } });
-  nearOrder = list.map(s => s.id);   // เรียงจากใกล้ → ไกล ร้านที่ใกล้กว่าได้แสดงป้ายก่อน
-  layoutNearLabels();
+  const order = list.map(s => s.id);   // เรียงจากใกล้ → ไกล ร้านที่ใกล้กว่าได้แสดงป้ายก่อน
+  const changed = order.join(',') !== nearOrder.join(',');
+  nearOrder = order;
+  if (changed || created) layoutNearLabels(); else applyActiveMarker();
 }
 // ป้ายชื่อที่ทับกันให้ซ่อน (ยังเห็นไอคอน แตะเพื่อดูรายละเอียด) — ร้านใกล้สุดได้แสดงก่อน
+// อ่านขนาดทั้งหมดก่อน แล้วค่อยเขียน class ทีเดียว (ไม่สลับอ่าน/เขียน ซึ่งทำให้เครื่องช้า) และข้ามร้านที่อยู่นอกจอ
 function layoutNearLabels(){
-  const placed = [];
+  const sz = map.getSize(), M = 260;
+  const items = [];
   nearOrder.forEach(id => {
     const o = nearIconById.get(id); if (!o) return;
     const el = o.marker.getElement(); if (!el) return;
-    el.classList.remove('nolbl');
-    const ico = el.querySelector('.sp-ico').getBoundingClientRect();
-    const lbl = el.querySelector('.sp-lbl').getBoundingClientRect();
+    const pt = map.latLngToContainerPoint(o.marker.getLatLng());
+    items.push({id, o, el, vis: pt.x > -M && pt.y > -M && pt.x < sz.x + M && pt.y < sz.y + M});
+  });
+  items.forEach(it => { if (it.vis) it.el.classList.remove('nolbl'); });                       // เขียน
+  items.forEach(it => { if (it.vis) { it.ico = it.el.querySelector('.sp-ico').getBoundingClientRect(); it.lbl = it.el.querySelector('.sp-lbl').getBoundingClientRect(); } });   // อ่าน
+  const placed = [];
+  items.forEach(it => {
+    if (!it.vis) { it.hit = true; return; }                                                       // นอกจอ: ซ่อนป้ายไว้ก่อน
+    const ico = it.ico, lbl = it.lbl;
     const box = {l:Math.min(ico.left, lbl.left) - 2, t:Math.min(ico.top, lbl.top) - 2, r:Math.max(ico.right, lbl.right) + 2, b:Math.max(ico.bottom, lbl.bottom) + 2};
-    const hit = placed.some(p => box.l < p.r && box.r > p.l && box.t < p.b && box.b > p.t);
-    if (hit) {
-      el.classList.add('nolbl');
-      placed.push({l:ico.left, t:ico.top, r:ico.right, b:ico.bottom});
-    } else placed.push(box);
-    o.marker.setZIndexOffset(hit ? 500 : 3000);   // ร้านที่มีป้ายอยู่บนไอคอนอื่น ป้ายจะไม่ถูกบัง
+    it.hit = placed.some(p => box.l < p.r && box.r > p.l && box.t < p.b && box.b > p.t);
+    placed.push(it.hit ? {l:ico.left, t:ico.top, r:ico.right, b:ico.bottom} : box);
+  });
+  items.forEach(it => {                                                                           // เขียน
+    it.el.classList.toggle('nolbl', it.hit);
+    const z = it.hit ? 500 : 3000;   // ร้านที่มีป้ายอยู่บนไอคอนอื่น ป้ายจะไม่ถูกบัง
+    if (it.o.z !== z) { it.o.z = z; it.o.marker.setZIndexOffset(z); }
   });
   applyActiveMarker();
 }
-map.on('zoomend', layoutNearLabels);
+let layoutTimer = null;
+map.on('zoomend moveend', () => { clearTimeout(layoutTimer); layoutTimer = setTimeout(layoutNearLabels, 120); });
 // ร้านที่กำลังเลือก/การ์ดที่อยู่ตรงกลาง → ไอคอนใหญ่ขึ้น + แสดงป้ายเสมอ
 function applyActiveMarker(){
   nearIconById.forEach((o, id) => {
@@ -779,7 +793,8 @@ async function requestSnap(raw){
 
 /* ════════ พื้นที่รัศมีตามถนนจริง: ระยะขับรถจริงไม่เกินรัศมีที่เลือก ════════ */
 let reach = null, reachBusy = false, reachFailAt = 0, reachFit = true;   // reachFit: ได้พื้นที่แล้วซูมให้พอดี
-const REACH_DIRS = 24, REACH_RINGS = 4;   // 24 ทิศ × 4 ระยะ = 96 จุด (+ จุดเริ่ม = 97 ≤ 100 จุดที่ OSRM รับได้)
+// คำนวณ 2 รอบ: หยาบก่อนให้เห็นเร็ว (24 ทิศ × 4 ระยะ) → ละเอียด (72 ทิศ × 6 ระยะ = 432 จุด)
+const REACH_PASSES = [{dirs:24, rings:4}, {dirs:72, rings:6}];
 function destPoint(lat, lng, brng, dist){
   const R = 6371000, toR = Math.PI/180, d = dist / R, b = brng * toR, p1 = lat * toR, l1 = lng * toR;
   const p2 = Math.asin(Math.sin(p1)*Math.cos(d) + Math.cos(p1)*Math.sin(d)*Math.cos(b));
@@ -790,46 +805,86 @@ function reachValid(){
   return reach && me && reach.radius === prefs.radius && haversine(reach.lat, reach.lng, me.lat, me.lng) < 100;
 }
 function requestReach(){
-  if (!me || reachBusy || reachValid() || Date.now() - reachFailAt < 60000) return;
-  fetchReach({lat:me.lat, lng:me.lng}, prefs.radius);
+  if (!me || reachBusy || Date.now() - reachFailAt < 60000) return;
+  const ok = reachValid();
+  if (ok && reach.level >= REACH_PASSES.length - 1) return;   // ละเอียดสุดแล้ว
+  fetchReach({lat:me.lat, lng:me.lng}, prefs.radius, ok ? reach.level + 1 : 0);
 }
-async function fetchReach(o, R){
-  reachBusy = true;
-  try {
-    const pts = [];
-    for (let i = 0; i < REACH_DIRS; i++) for (let k = 1; k <= REACH_RINGS; k++) pts.push(destPoint(o.lat, o.lng, i * 360 / REACH_DIRS, R * k / REACH_RINGS));
-    const coords = [o].concat(pts).map(p => p.lng.toFixed(6) + ',' + p.lat.toFixed(6)).join(';');
+// ระยะตามถนนจากจุดเริ่มไปหลายจุด — OSRM รับได้ครั้งละ 100 จุด จึงแบ่งส่งทีละชุด
+async function roadDistances(o, pts){
+  const out = [];
+  for (let s = 0; s < pts.length; s += 99) {
+    if (s) await new Promise(r => setTimeout(r, 250));   // เว้นจังหวะ ไม่ยิงถี่เกินไป
+    const chunk = pts.slice(s, s + 99);
+    const coords = [o].concat(chunk).map(p => p.lng.toFixed(6) + ',' + p.lat.toFixed(6)).join(';');
     const j = await (await fetch(OSRM_URL + '/table/v1/driving/' + coords + '?sources=0&annotations=distance')).json();
     if (j.code !== 'Ok') throw new Error(j.message || j.code);
     const src = (j.sources[0] && j.sources[0].distance) || 0;
-    const verts = [];
-    for (let i = 0; i < REACH_DIRS; i++) {
-      // ไล่จากใกล้ไปไกลในแต่ละทิศ หาจุดที่ระยะตามถนนเท่ากับรัศมีพอดี
-      let prevR = 0, prevD = 0, rr = R;
-      for (let k = 1; k <= REACH_RINGS; k++) {
-        const idx = 1 + i * REACH_RINGS + (k - 1), rk = R * k / REACH_RINGS;
-        let d = j.distances[0][idx];
-        if (d != null) d += src + ((j.destinations[idx] && j.destinations[idx].distance) || 0);
-        if (d == null || d > R) {
-          const f = (d == null || d <= prevD) ? 0 : Math.min(1, Math.max(0, (R - prevD) / (d - prevD)));
-          rr = prevR + f * (rk - prevR);
-          break;
-        }
-        prevR = rk; prevD = d;
+    chunk.forEach((p, i) => {
+      const d = j.distances[0][i+1];
+      // d = ระยะตามถนน (รวมจากตัวเราถึงถนน), snap = จุดนั้นห่างจากถนนที่ใกล้ที่สุดเท่าไร
+      out.push({d: d == null ? null : d + src, snap: (j.destinations[i+1] && j.destinations[i+1].distance) || 0});
+    });
+  }
+  return out;
+}
+async function fetchReach(o, R, level){
+  reachBusy = true;
+  try {
+    const {dirs, rings} = REACH_PASSES[level];
+    const pts = [];
+    for (let i = 0; i < dirs; i++) for (let k = 1; k <= rings; k++) pts.push(destPoint(o.lat, o.lng, i * 360 / dirs, R * k / rings));
+    const dist = await roadDistances(o, pts);
+    if (prefs.radius !== R || !me || haversine(o.lat, o.lng, me.lat, me.lng) >= 100) return;   // ระหว่างคำนวณ เปลี่ยนรัศมี/ย้ายที่แล้ว
+    // แต่ละทิศ: ไกลสุดเท่าที่ยังมีถนนอยู่ใกล้จุดนั้น และขับไปถึงได้ภายในรัศมี
+    // (จุดที่ตกกลางทุ่ง/แม่น้ำไม่ตัดพื้นที่ทิ้ง — ข้ามไปดูจุดถัดไปที่อยู่บนถนน)
+    const step = R / rings, tol = Math.max(120, step * 0.6);
+    const near = x => x.d != null && x.snap <= tol;
+    const rr = [];
+    for (let i = 0; i < dirs; i++) {
+      let best = 0, bestD = 0, bestK = 0;
+      for (let k = 1; k <= rings; k++) {
+        const x = dist[i * rings + (k - 1)];
+        if (near(x) && x.d + x.snap <= R) { best = step * k; bestD = x.d + x.snap; bestK = k; }
       }
-      verts.push(destPoint(o.lat, o.lng, i * 360 / REACH_DIRS, Math.max(rr, R * 0.03)));
+      // ต่อจากจุดไกลสุดที่ไปถึง ไปทางจุดถัดไป ตามสัดส่วนระยะที่ยังเหลือ
+      const nx = bestK < rings ? dist[i * rings + bestK] : null;
+      if (nx && near(nx) && nx.d + nx.snap > bestD) best += step * Math.min(1, Math.max(0, (R - bestD) / (nx.d + nx.snap - bestD)));
+      rr.push(Math.max(best, R * 0.04));
     }
-    reach = {lat:o.lat, lng:o.lng, radius:R, poly:verts.map(p => [p.lat, p.lng])};
+    reach = {lat:o.lat, lng:o.lng, radius:R, level, dirs, rr};
     drawReach();
     if (reachFit && !selectedId) { reachFit = false; centerMe(); }
   } catch (e) { reachFailAt = Date.now(); }
-  finally { reachBusy = false; }
+  finally {
+    reachBusy = false;
+    requestReach();   // ต่อรอบละเอียด (หรือคำนวณใหม่ถ้าย้ายที่/เปลี่ยนรัศมีระหว่างทำ)
+  }
+}
+function bearingDeg(a, b, c, d){
+  const toR = Math.PI/180;
+  const y = Math.sin((d-b)*toR)*Math.cos(c*toR);
+  const x = Math.cos(a*toR)*Math.sin(c*toR) - Math.sin(a*toR)*Math.cos(c*toR)*Math.cos((d-b)*toR);
+  return (Math.atan2(y, x)/toR + 360) % 360;
+}
+// จุดขอบพื้นที่ + ขยายให้ครอบร้านที่อยู่ในรัศมีตามถนนทุกร้าน (ร้านในรายการต้องอยู่ในพื้นที่เสมอ)
+function reachPolyPoints(){
+  const rr = reach.rr.slice(), n = reach.dirs, sec = 360 / n;
+  if (lastInRadius) lastResult.forEach(s => {
+    if (!s._road) return;
+    // ขยายจุดขอบทั้ง 2 ทิศที่ร้านอยู่ระหว่างกลาง เส้นขอบจึงผ่านนอกตัวร้านเสมอ
+    const f = bearingDeg(reach.lat, reach.lng, s.lat, s.lng) / sec;
+    const r = haversine(reach.lat, reach.lng, s.lat, s.lng) + 30;
+    [Math.floor(f) % n, Math.ceil(f) % n].forEach(i => { if (r > rr[i]) rr[i] = r; });
+  });
+  return rr.map((r, i) => { const p = destPoint(reach.lat, reach.lng, i * sec, r); return [p.lat, p.lng]; });
 }
 function drawReach(){
   const ok = reachValid();
   if (ok) {
-    if (!reachPoly) reachPoly = L.polygon(reach.poly, {color:'#c9a84c', weight:2.5, dashArray:'8 6', fillColor:'#c9a84c', fillOpacity:.08, interactive:false, smoothFactor:1.5}).addTo(map);
-    else reachPoly.setLatLngs(reach.poly);
+    const pts = reachPolyPoints();
+    if (!reachPoly) reachPoly = L.polygon(pts, {color:'#c9a84c', weight:2.5, dashArray:'8 6', fillColor:'#c9a84c', fillOpacity:.08, interactive:false, smoothFactor:1.5}).addTo(map);
+    else reachPoly.setLatLngs(pts);
     reachPoly.bringToBack();
   } else if (reachPoly) { map.removeLayer(reachPoly); reachPoly = null; }
   if (radiusCircle) radiusCircle.setStyle({opacity: ok ? 0 : .45});
@@ -1058,6 +1113,7 @@ function doUpdate(){
   const iconShops = inR.slice(0, MAX_NEAR_ICONS);
   styleMarkers(new Set(inR.map(s => s.id)), new Set(iconShops.map(s => s.id)));
   renderNearIcons(iconShops);
+  drawReach();
   renderMsg(inR, list);
   renderCards();
   $('fabCount').textContent = fmtNum(lastResult.length);
