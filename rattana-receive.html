@@ -75,6 +75,10 @@ header{background:var(--navy);color:#fff;padding:12px 16px;position:sticky;top:0
 .vd.today{border-left-color:var(--gold)}
 .vd.tmr{border-left-color:var(--info)}
 .vd.in{opacity:.62}
+.vd.soon{border-left-color:var(--muted)}
+.vd.bk{border-left-style:dashed}
+.bk-line{display:flex;flex-wrap:wrap;gap:5px 10px;align-items:center;margin-top:7px;font-size:12px;color:var(--muted)}
+.bk-slot{font-family:'Courier New',monospace;font-weight:700;font-size:13px;color:var(--text);background:var(--strip-bg);border:1px solid var(--gold);border-radius:var(--radius-sm);padding:2px 7px}
 .vd-refs{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .ref-btn{font-family:'Courier New',monospace;font-size:12px;font-weight:700;color:var(--muted);background:transparent;border:1px solid var(--border);border-radius:var(--radius-sm);padding:5px 8px;display:flex;align-items:center;gap:5px;min-height:30px}
 .ref-btn.on{background:var(--strip-bg);border-color:var(--gold);color:var(--text)}
@@ -295,9 +299,10 @@ body.dark .badge-gold{color:var(--gold-light)}
   <section id="tab-today">
     <div class="me-bar" id="meBar"></div>
     <div class="chips" id="tdWhChips"></div>
-    <div class="stat-grid g3">
+    <div class="stat-grid">
       <div class="stat-card"><div class="s-label" id="tdLabToday">วันนี้</div><div class="s-value" id="tdNToday">0</div></div>
       <div class="stat-card i"><div class="s-label" id="tdLabTmr">พรุ่งนี้</div><div class="s-value" id="tdNTmr">0</div></div>
+      <div class="stat-card w"><div class="s-label">จองล่วงหน้า</div><div class="s-value" id="tdNSoon">0</div></div>
       <div class="stat-card d"><div class="s-label">เกินกำหนด</div><div class="s-value" id="tdNLate">0</div></div>
     </div>
     <div id="todayList"></div>
@@ -1200,6 +1205,9 @@ function renderTopNote(){
     ? ok+'งานที่ยิงค้างไว้ <b>ไม่หาย</b> ปิดแอพหรือรีเฟรชแล้วกลับมานับต่อได้'
     : bad+'<b>เครื่องนี้จำข้อมูลไม่ได้</b> ปิดแอพหรือรีเฟรชแล้วงานที่ยิงค้างจะหาย'
       +' — เปิดแอพจากลิงก์ปกติ (อย่าเปิดในโหมดไม่ระบุตัวตน) และอย่าปิดคุกกี้');
+  rows.push(BK_ERR
+    ? warn+'<b>คิวจองลงสินค้าอ่านไม่ได้</b> — '+esc(BK_ERR)+' (แท็บงานวันนี้ยังใช้วันนัดส่งในใบสั่งซื้อแทน)'
+    : ok+'คิวจองลงสินค้าจากผู้ขาย <b>'+nf(BK.length)+' คิว</b>'+(BK_AT?' · อัปเดตล่าสุด '+thTime(BK_AT)+' น.':''));
   var n=Object.keys(BCMAP).length;
   if(n)rows.push(ok+'บาร์โค้ดที่ผูกไว้เองแล้ว <b>'+n+' รายการ</b> ยิงครั้งหน้ารู้จักเอง');
   document.getElementById('topNote').innerHTML=
@@ -1210,14 +1218,98 @@ function renderTopNote(){
     +'<a href="javascript:void(0)" onclick="resetAll()" style="color:var(--danger);font-weight:600">ล้างข้อมูลเครื่องนี้</a></div>';
 }
 
+/* ═══════════ คิวจองลงสินค้า (Bookings) ═══════════
+   ผู้ขายจองสล็อตลงของไว้ล่วงหน้าเองผ่านแอพ SupplyLink (LINE OA) → ชีท "ข้อมูลแอป" แท็บ Bookings
+   ของจริงกว่า TRH_SHIP_DATE เพราะ TRH_SHIP_DATE เป็นวันที่จัดซื้อตั้งไว้ในระบบ
+   แต่คิวจองคือผู้ขายยืนยันเองว่า "จะมาวันนี้ กี่โมง ทะเบียนอะไร กี่พาเลท"
+   แท็บ Bookings มี 2 ชนิดปนกัน — เอาแค่ Kind = ลงสินค้า
+   ส่วน "นัดจัดซื้อ" คือนัดคุยงานที่ออฟฟิศ ไม่ใช่รถเข้าคลัง ตัดออก */
+var BKSRC={id:'1HlkNjJmFiRm_amQh0Oep6nHpF3_WgSLaiPxQigJ430c',tab:{gid:'2072372109'}};
+var BK_KIND='ลงสินค้า';
+var BK=[], BK_BY_REF={}, BK_ERR='', BK_AT=null;
+
+/* HQ จองไว้ก็คือของลง W1 — กฎเดียวกับ myWh() ไม่งั้นคลัง W1 มองไม่เห็นคิวที่จองในชื่อ HQ */
+function bkWh(w){w=String(w||'').trim().toUpperCase();return !w?'':((w==='HQ'||w==='STATION')?'W1':w);}
+function bkDays(b){if(!b||!b.date)return null;var t=new Date();t.setHours(0,0,0,0);return Math.round((b.date-t)/DAY);}
+function bkBucket(n){return n==null?null:(n===0?'today':(n===1?'tmr':(n<0?'late':'soon')));}
+function bkSlot(b){
+  if(!b.start)return '';
+  var f=function(x){return String(x||'').trim().replace(':','.');};
+  return f(b.start)+(b.end?'–'+f(b.end):'')+' น.';
+}
+/* a มาก่อน b ไหม — เรียงตามวัน แล้วตามเวลาเริ่มสล็อต */
+function bkEarlier(a,b){
+  if(!b)return true; if(!a)return false;
+  var d=a.date-b.date;
+  return d<0||(d===0&&String(a.start)<String(b.start));
+}
+/* ใบเดียวจองซ้ำได้ (เลื่อนคิว เช่น ORT6909/763 จองทั้ง 10/10 และ 12/10)
+   เอารอบที่ "ยังไม่ถึง และใกล้วันนี้ที่สุด" ถ้าผ่านมาหมดแล้วก็เอารอบล่าสุด */
+function bkPrefer(b,o){
+  var nb=bkDays(b),no=bkDays(o);
+  if(nb==null)return false; if(no==null)return true;
+  if(nb>=0&&no<0)return true;
+  if(nb<0&&no>=0)return false;
+  return nb>=0?nb<no:nb>no;
+}
+function loadBookings(cb){
+  /* ดึงย้อนหลัง 45 วัน + อนาคตทั้งหมด — Date เป็นสตริง yyyy-mm-dd เทียบแบบข้อความได้ตรง */
+  var t=new Date(Date.now()-45*DAY);
+  var from=t.getFullYear()+'-'+String(t.getMonth()+1).padStart(2,'0')+'-'+String(t.getDate()).padStart(2,'0');
+  gvizQuery(BKSRC.id,BKSRC.tab,
+    "select A,C,D,F,H,I,J,K,P,Q,R,S,T,U,AB,AE,AG,AH where I >= '"+from+"' order by I, J",
+    function(r,err){
+      if(err||!r||!r.rows){BK_ERR=err||'อ่านชีทคิวจองไม่ได้';cb&&cb(BK_ERR);return;}
+      var out=[],skipKind=0,skipCancel=0;
+      r.rows.forEach(function(c){
+        if(String(c[3]||'').trim()!==BK_KIND){skipKind++;return;}          /* F Kind */
+        var st=String(c[14]||'').trim();                                    /* AB Status */
+        if(/ยกเลิก|cancel/i.test(st)){skipCancel++;return;}
+        var d=parseDue(String(c[5]||'').trim());                            /* I Date */
+        if(!d)return;
+        out.push({id:String(c[0]||'').trim(),vcode:String(c[1]||'').trim(),vendor:String(c[2]||'').trim(),
+                  wh:bkWh(c[4]),date:d,start:String(c[6]||'').trim(),end:String(c[7]||'').trim(),
+                  pos:String(c[8]||'').split(/[,\s;]+/).map(function(x){return x.trim();}).filter(Boolean),
+                  pallets:String(c[9]||'').trim(),plate:String(c[10]||'').trim(),
+                  truck:String(c[11]||'').trim(),driver:String(c[12]||'').trim(),
+                  phone:String(c[13]||'').trim(),st:st,note:String(c[15]||'').trim(),
+                  toWh:String(c[16]||'').trim(),whNote:String(c[17]||'').trim()});
+      });
+      BK=out;BK_ERR='';BK_AT=new Date();
+      BK_BY_REF={};
+      BK.forEach(function(b){b.pos.forEach(function(ref){
+        if(!BK_BY_REF[ref]||bkPrefer(b,BK_BY_REF[ref]))BK_BY_REF[ref]=b;
+      });});
+      cb&&cb(null,BK.length,{kind:skipKind,cancel:skipCancel});
+    });
+}
+/* บรรทัดรายละเอียดคิวจอง — เวลา ทะเบียน พาเลท คนขับ ใช้ร่วมกันทั้งการ์ดผู้ขายและการ์ดคิวลอย */
+function bkLineHtml(b){
+  var n=bkDays(b),when;
+  if(n===0)when='วันนี้'; else if(n===1)when='พรุ่งนี้';
+  else if(n>1)when='อีก '+nf(n)+' วัน'; else when='ผ่านมาแล้ว '+nf(-n)+' วัน';
+  return '<div class="bk-line">'
+    +'<span class="bk-slot">'+esc(bkSlot(b)||'ไม่ระบุเวลา')+'</span>'
+    +'<span>'+thDate(b.date)+' · '+when+'</span>'
+    +(b.plate?'<span>ทะเบียน <b style="color:var(--text)">'+esc(b.plate)+'</b></span>':'')
+    +(b.truck?'<span>'+esc(b.truck)+'</span>':'')
+    +(b.pallets?'<span>'+esc(b.pallets)+' พาเลท</span>':'')
+    +(b.driver?'<span>คนขับ '+esc(b.driver)+(b.phone?' '+esc(b.phone):'')+'</span>':'')
+    +(b.whNote?'<span style="color:var(--warning)">คลังหมายเหตุ: '+esc(b.whNote)+'</span>':'')
+    +(b.note?'<span>หมายเหตุ: '+esc(b.note)+'</span>':'')
+    +'</div>';
+}
+
 /* ═══════════ งานวันนี้ ═══════════
    TRH_SHIP_DATE = วันนัดส่ง → แยกเป็น วันนี้ / พรุ่งนี้ / เกินกำหนดแล้วยังไม่เข้า
+   ถ้าใบไหนมีคิวจองจากผู้ขาย ให้ยึดวันที่จองแทน TRH_SHIP_DATE
    จัดกลุ่มตามผู้ขาย เพราะคำถามหน้าลานคือ "วันนี้ใครจะมาส่งบ้าง" ไม่ใช่ "มีใบอะไรบ้าง"
    กรองด้วยคลังของเครื่องนี้ (CFG.wh) ตัวเดียวกับที่ใช้ในหน้าเลือก PO */
-var TD_GRP=[{k:'today',t:'วันนี้',s:'นัดส่งวันนี้',c:'var(--gold)',e:'วันนี้ไม่มีใครนัดส่งเข้าคลังนี้'},
-            {k:'tmr',t:'พรุ่งนี้',s:'นัดส่งพรุ่งนี้',c:'var(--info)',e:'พรุ่งนี้ยังไม่มีใครนัดส่ง'},
-            {k:'late',t:'เกินกำหนด — นัดก่อนวันนี้แล้วยังไม่เข้า',s:'ที่เกินกำหนด',c:'var(--danger)',e:'ไม่มีใบค้างเกินกำหนด'}];
-var TD_ROWS=[], TD_PAGE=20, tdLateShow=TD_PAGE;
+var TD_GRP=[{k:'today',t:'วันนี้',s:'นัดส่งวันนี้',c:'var(--gold)',n:'tdNToday',e:'วันนี้ไม่มีใครนัดส่งเข้าคลังนี้'},
+            {k:'tmr',t:'พรุ่งนี้',s:'นัดส่งพรุ่งนี้',c:'var(--info)',n:'tdNTmr',e:'พรุ่งนี้ยังไม่มีใครนัดส่ง'},
+            {k:'soon',t:'จองคิวไว้ล่วงหน้า',s:'ที่จองคิวไว้',c:'var(--warning)',n:'tdNSoon',e:'ยังไม่มีใครจองคิวล่วงหน้า'},
+            {k:'late',t:'เกินกำหนด — นัดก่อนวันนี้แล้วยังไม่เข้า',s:'ที่เกินกำหนด',c:'var(--danger)',n:'tdNLate',e:'ไม่มีใบค้างเกินกำหนด'}];
+var TD_ROWS=[], TD_BK=[], TD_PAGE=20, tdLateShow=TD_PAGE;
 /* ใบไหนกางดูรายการสินค้าอยู่ — key เป็นเลข PO จะได้ไม่หายตอน re-render */
 var tdOpen={};
 function tdToggleRef(ev,ref){
@@ -1242,7 +1334,14 @@ function poItemsHtml(p){
     }).join('')+'</div>';
 }
 
-function tdBucket(p){var n=dueDays(p);if(n==null)return null;return n===0?'today':(n===1?'tmr':(n<0?'late':null));}
+/* คิวจองชนะ TRH_SHIP_DATE — ผู้ขายยืนยันเองว่าจะมาวันไหน ถือว่าแม่นกว่าวันที่ตั้งไว้ในระบบ
+   ใบที่มีคิวจองไกลกว่าพรุ่งนี้ไปอยู่กลุ่ม soon ไม่ปล่อยให้หายไปเฉย ๆ */
+function tdBucket(p){
+  var b=BK_BY_REF[p.ref];
+  if(b)return bkBucket(bkDays(b));
+  var n=dueDays(p);if(n==null)return null;
+  return n===0?'today':(n===1?'tmr':(n<0?'late':null));
+}
 function tdPool(){return PO.filter(function(p){return openQty(p)>0&&tdBucket(p);});}
 function setTdWh(w){
   if(!isSuper())return;   /* คนทั่วไปล็อกที่คลังตัวเอง กดเปลี่ยนไม่ได้ */
@@ -1255,18 +1354,41 @@ function tdVendors(list,late){
   var by={},order=[];
   list.forEach(function(p){
     var k=p.vendor||'ไม่ระบุผู้ขาย';
-    if(!by[k]){by[k]={vendor:k,pos:[],qty:0,val:0,lines:0,inflight:0,worst:0,whs:{}};order.push(k);}
+    if(!by[k]){by[k]={vendor:k,pos:[],qty:0,val:0,lines:0,inflight:0,worst:0,whs:{},bk:null};order.push(k);}
     var g=by[k],n=dueDays(p);
     g.pos.push(p);g.qty+=openQty(p);g.val+=openVal(p);g.lines+=p.lines.length;
     g.whs[p.wh||'ไม่ระบุ']=1;
     if(poInFlight(p.ref))g.inflight++;
     if(n!=null&&-n>g.worst)g.worst=-n;
+    var b=BK_BY_REF[p.ref];
+    if(b&&bkEarlier(b,g.bk))g.bk=b;     /* เจ้าเดียวอาจจองหลายรอบ เอารอบที่มาก่อน */
   });
   var out=order.map(function(k){return by[k];});
   /* เกินกำหนด เรียง "เพิ่งเลยกำหนด" ขึ้นก่อน — พวกนี้มีโอกาสมาส่งวันนี้จริง
-     ส่วนที่ค้างมาครึ่งปีเป็นงานตามทวง ไม่ใช่งานหน้าลานวันนี้ */
+     ส่วนที่ค้างมาครึ่งปีเป็นงานตามทวง ไม่ใช่งานหน้าลานวันนี้
+     กลุ่มอื่นเอาเจ้าที่จองคิวไว้ขึ้นก่อน เรียงตามเวลาสล็อต — หน้าลานอ่านเป็นลำดับรถเข้าได้เลย */
   return out.sort(late?function(a,b){return a.worst-b.worst||b.val-a.val;}
-                      :function(a,b){return b.val-a.val;});
+                      :function(a,b){
+                          if(!!a.bk!==!!b.bk)return a.bk?-1:1;
+                          if(a.bk&&b.bk)return (a.bk.date-b.bk.date)
+                            ||String(a.bk.start).localeCompare(String(b.bk.start))||b.val-a.val;
+                          return b.val-a.val;
+                        });
+}
+/* คิวจองที่จับกับใบสั่งซื้อในมือไม่ได้ — ไม่ได้ผูกเลขใบไว้ หรือใบนั้นรับครบ/ปิดไปแล้ว
+   รถก็ยังมาตามนัด ต้องขึ้นให้หน้าลานเห็น ไม่ใช่เงียบหายเพราะจับใบไม่ได้ */
+function tdLooseBk(k,cur,refsInPool){
+  return BK.filter(function(b){
+    if(bkBucket(bkDays(b))!==k)return false;
+    if(cur&&b.wh&&b.wh!==cur)return false;        /* คลังว่าง = บอกไม่ได้ ปล่อยให้เห็น */
+    if(b.pos.some(function(r){return refsInPool[r];}))return false;  /* จับใบได้ → ไปขึ้นที่การ์ดผู้ขายแล้ว */
+    if(k==='late'){
+      /* คิวที่ผ่านไปแล้ว + ผูกเลขใบไว้ + ไม่มีใบค้างรับเหลือ = ของเข้าครบไปแล้ว ไม่ต้องรกหน้าจอ */
+      if(b.pos.length)return false;
+      if(bkDays(b)<-7)return false;               /* คิวเปล่าที่เก่าเกินสัปดาห์ ไม่ใช่งานหน้าลานแล้ว */
+    }
+    return true;
+  }).sort(function(a,b){return (a.date-b.date)||String(a.start).localeCompare(String(b.start));});
 }
 function renderToday(){
   var all=tdPool(), mine=myWh(), cur=viewWh();
@@ -1303,29 +1425,50 @@ function renderToday(){
   document.getElementById('tdLabToday').textContent='วันนี้ '+thDate(t);
   document.getElementById('tdLabTmr').textContent='พรุ่งนี้ '+thDate(tm);
 
-  TD_ROWS=[];var h='';
+  var refsInPool={};pool.forEach(function(p){refsInPool[p.ref]=1;});
+
+  TD_ROWS=[];TD_BK=[];var h='';
   TD_GRP.forEach(function(g){
     var late=g.k==='late';
     var all=tdVendors(pool.filter(function(p){return tdBucket(p)===g.k;}),late);
+    var loose=tdLooseBk(g.k,cur,refsInPool);
     var nPo=all.reduce(function(s,r){return s+r.pos.length;},0);
-    document.getElementById(g.k==='today'?'tdNToday':(g.k==='tmr'?'tdNTmr':'tdNLate')).textContent=nf(all.length);
+    var nBk=all.filter(function(r){return r.bk;}).length+loose.length;
+    document.getElementById(g.n).textContent=nf(all.length+loose.length);
     /* กลุ่มเกินกำหนดมีเป็นร้อยเจ้า — โชว์ทีละ 20 ไม่งั้นเลื่อนไม่จบและมือถือหน่วง */
     var rows=late?all.slice(0,tdLateShow):all;
     h+='<div class="grp"><div class="grp-head"><span class="grp-dot" style="background:'+g.c+'"></span>'
       +'<span class="grp-title">'+g.t+'</span><span class="grp-n">'
       +(late&&all.length>rows.length?nf(rows.length)+' จาก ':'')
-      +nf(all.length)+' เจ้า · '+nf(nPo)+' ใบ</span></div>'
+      +nf(all.length+loose.length)+' เจ้า · '+nf(nPo)+' ใบ'
+      +(nBk?' · จองคิวแล้ว '+nf(nBk):'')+'</span></div>'
+      /* เจ้าที่จองคิวมาเอง ขึ้นก่อนเจ้าที่ยังไม่จอง */
+      +loose.map(function(b){
+          var i=TD_BK.push(b)-1;
+          return '<div class="vd bk '+g.k+'" onclick="tdBkCheckin('+i+')">'
+            +'<div class="po-vendor">'+esc(b.vendor||b.vcode||'ไม่ระบุผู้ขาย')+'</div>'
+            +'<div class="po-meta">'
+            +(b.wh?'<span class="badge badge-gold">'+esc(b.wh)+'</span>':'')
+            +'<span class="badge badge-info">จองคิวไว้</span>'
+            +(b.pos.length
+              ?'<span>ใบ '+b.pos.map(esc).join(' , ')+' — ไม่มีรายการค้างรับในมือ</span>'
+              :'<span>ไม่ได้ผูกเลขใบสั่งซื้อไว้ — เลือกใบตอนเช็คอิน</span>')
+            +'</div>'+bkLineHtml(b)+'</div>';
+        }).join('')
       +(rows.length?rows.map(function(r){
-          r.bk=g.k;
+          r.grp=g.k;
           var i=TD_ROWS.push(r)-1, waiting=r.pos.length-r.inflight;
           return '<div class="vd '+g.k+(waiting?'':' in')+'" onclick="tdCheckin('+i+')">'
             +'<div class="po-vendor">'+esc(r.vendor)+'</div>'
             +'<div class="po-meta">'
             +Object.keys(r.whs).map(function(w){return '<span class="badge badge-gold">'+esc(w)+'</span>';}).join('')
+            +(r.bk?'<span class="badge badge-info">จองคิวไว้</span>':'')
             +(g.k==='late'?'<span class="badge badge-danger">เลยกำหนด '+nf(r.worst)+' วัน</span>':'')
             +(r.inflight?'<span class="badge badge-info">รถเข้าแล้ว '+nf(r.inflight)+' ใบ</span>':'')
             +'<span>'+nf(r.pos.length)+' ใบ &middot; '+nf(r.lines)+' รายการ &middot; '+nf(r.qty)+' หน่วย &middot; '+nf(r.val)+' บาท</span>'
-            +'</div><div class="vd-refs">'
+            +'</div>'
+            +(r.bk?bkLineHtml(r.bk):'')
+            +'<div class="vd-refs">'
             +r.pos.map(function(p){
               return '<button class="ref-btn'+(tdOpen[p.ref]?' on':'')+'" onclick="tdToggleRef(event,\''+esc(p.ref)+'\')">'
                 +esc(p.ref)+'<span class="ref-caret">'+(tdOpen[p.ref]?'&#9652;':'&#9662;')+'</span></button>';
@@ -1333,7 +1476,7 @@ function renderToday(){
             +'</div>'
             +r.pos.filter(function(p){return tdOpen[p.ref];}).map(poItemsHtml).join('')
             +'</div>';
-        }).join(''):'<div class="empty">'+g.e+'</div>')
+        }).join(''):(loose.length?'':'<div class="empty">'+g.e+'</div>'))
       +(late&&all.length>rows.length
         ?'<button class="btn btn-outline btn-block" onclick="tdMore()">แสดงเพิ่มอีก '
          +nf(Math.min(TD_PAGE,all.length-rows.length))+' เจ้า</button>':'')
@@ -1347,8 +1490,14 @@ function tdCheckin(i){
   var g=TD_ROWS[i];if(!g)return;
   var refs=g.pos.filter(function(p){return !poInFlight(p.ref);}).map(function(p){return p.ref;});
   if(!refs.length){showToast('ใบของเจ้านี้ผูกกับรถที่ยังไม่ปิดงานอยู่แล้ว','info');switchTab('board');return;}
-  var t=(TD_GRP.filter(function(x){return x.k===g.bk;})[0]||{}).s||'';
-  openCheckin(refs,refs,g.vendor+(t?' · '+t:''),g.vendor);
+  var t=(TD_GRP.filter(function(x){return x.k===g.grp;})[0]||{}).s||'';
+  if(g.bk)t='จอง '+bkSlot(g.bk);
+  openCheckin(refs,refs,g.vendor+(t?' · '+t:''),g.vendor,g.bk&&g.bk.plate);
+}
+/* แตะการ์ดคิวจองที่ไม่มีใบในมือ → เปิดเช็คอินแบบเลือกใบเองได้ทุกใบ พร้อมเติมทะเบียนที่จองไว้ให้ */
+function tdBkCheckin(i){
+  var b=TD_BK[i];if(!b)return;
+  openCheckin([],null,(b.vendor||'คิวจอง')+' · จอง '+(bkSlot(b)||thDate(b.date)),b.vendor,b.plate);
 }
 
 /* ═══════════ BOARD ═══════════ */
@@ -1471,11 +1620,13 @@ function confirmDone(){
 /* ═══════════ CHECK-IN ═══════════ */
 function toggleChk(id){document.getElementById(id).classList.toggle('on');}
 /* pre = เลข PO ที่ติ๊กไว้ให้ล่วงหน้า · only = จำกัดรายการให้เหลือแค่ชุดนี้ · label/vendor = ข้อความบอกที่มา */
-function openCheckin(pre,only,label,vendor){
+function openCheckin(pre,only,label,vendor,plate){
   pick={};pickN=0;poShow=PO_PAGE;
   (pre||[]).forEach(function(r){if(!pick[r]){pick[r]=1;pickN++;}});
   poOnly=only&&only.length?only.slice():null;poOnlyLabel=label||'';poOnlyVendor=vendor||'';
   ['ciPlate','ciSender','ciDoc'].forEach(function(i){document.getElementById(i).value='';});
+  /* ทะเบียนที่ผู้ขายจองไว้ เติมให้เลย — หน้าลานแค่ตรวจว่าตรงกับรถที่มาจริงไหม */
+  if(plate)document.getElementById('ciPlate').value=plate;
 
   document.getElementById('poSearch').value='';renderPOPick();
   document.getElementById('ciScreen').classList.add('open');document.body.style.overflow='hidden';
@@ -2320,6 +2471,18 @@ pullVisits(function(){renderBoard();renderToday();renderTopNote();});
 startQueueSync();
 /* โหลดแหล่งข้อมูลจริงเงียบ ๆ ตอนเปิดแอพ — ใช้ cache ก่อนถ้ามี */
 loadUsers(false,function(err){if(err)console.warn('users:',err);});
+/* คิวจองลงสินค้าจากแอพผู้ขาย — ไม่เก็บลง localStorage เพราะเปลี่ยนทั้งวัน ต้องเอาของสด
+   อ่านไม่ได้ก็ไม่พัง แท็บงานวันนี้ถอยไปใช้ TRH_SHIP_DATE เหมือนเดิม */
+loadBookings(function(err,n){
+  if(err){console.warn('bookings:',err);renderTopNote();return;}
+  renderToday();renderTopNote();
+  var today=BK.filter(function(b){return bkDays(b)===0;}).length;
+  if(today)showToast('วันนี้มีคิวจองลงสินค้า '+nf(today)+' คิว','info');
+});
+/* ตามคิวจองใหม่ทุก 5 นาที — ผู้ขายจองเพิ่ม/เลื่อนคิวระหว่างวันได้ */
+setInterval(function(){
+  loadBookings(function(err){if(!err){renderToday();renderTopNote();}});
+},300000);
 /* ดึงใบสั่งซื้อจริงเข้ามาแทน mock — ผ่าน Apps Script ถ้าตั้งไว้ ไม่งั้นอ่านชีท POIB ตรง ๆ */
 /* ดึงใบสั่งซื้อใหม่ "ทุกครั้งที่เปิดแอพ" ไม่ใช่เฉพาะตอนยังเป็น mock
    เดิมถ้าเครื่องมี PO ค้างใน localStorage อยู่แล้วจะไม่ดึงซ้ำเลย ทำให้
