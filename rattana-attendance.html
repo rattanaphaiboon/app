@@ -4218,7 +4218,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.63';   // v13.63 (Apps Script 9.110): หนังสือของฉัน — หนังสือแจ้งผลผ่านทดลองงานจาก HR + รับทราบ · กระดิ่งเปิดหน้าหนังสือ — surat 23/10
+const APP_VERSION = '13.64';   // v13.64 (Apps Script 9.114): กันสแกนหาย — สแกนที่เคยขึ้นสำเร็จแต่ชีทไม่มี = ไม่ลบ ส่งซ้ำ · HR ลบแล้ว = เอาออก — surat 24/10
 // v13.62:   // v13.62: เมนู "กลุ่ม" → "แจ้งเตือนสรุปเข้าทำงาน" · สรุปส่งเข้าแอป 08:10 แทนอีเมล (Apps Script 9.109) — surat 23/10
 // v13.61:   // v13.61 (Apps Script 9.107): เมนู "กลุ่ม" แจ้งเตือนในแอปแบบ HumanSoft Notify — สรุปมาทำงานเช้า/วันเกิด + HR/หัวหน้าโพสต์ · ตัวเลขยังไม่อ่าน — surat 23/10
 // v13.60 (Apps Script 9.104): แหล่งเรียนรู้ + กดเรียนจบ · ประเมินลูกทีม (หัวหน้าให้คะแนน) · RATTANA ใช้กะที่ HR ตั้ง (การ์ดวันนี้/สรุปเดือน/หน้าวันนี้) — surat 23/10
@@ -4493,6 +4493,21 @@ async function syncLogsFromSheet(opts = {}) {
     // v2.8 FIX: เคลียร์ local ของวันนี้เฉพาะหลัง sync สำเร็จ
     // v10.9: แต่ "ห้ามทิ้ง" log ที่ยังส่งไม่สำเร็จ (!remote = สแกนออฟไลน์ค้าง) หรือรูปยังค้าง (photoPending)
     // — เดิมโดนกวาดทิ้งด้วย = สแกน/รูปหายถาวร
+    // v13.64 ★ กันสแกนหาย (surat 24/10 "07:30 ขึ้นปกติ 08:00 หาย"): สแกนวันนี้ที่เซิร์ฟเวอร์เคยยืนยันว่าลงชีทแล้ว แต่รอบนี้ชีทไม่มี
+    //   เดิมถูกล้างทิ้งตรงบรรทัดล่าง = เวลาหายจากจอ (และถ้าหายจากชีทจริงก็ไม่มีใครรู้) → เก็บไว้ + ส่งซ้ำแบบ resendLost
+    //   เซิร์ฟเวอร์ 9.114: ยังอยู่ = ซ้ำ (ไม่ลงเบิ้ล) · หายจริง = ลงกลับ · HR ลบแล้ว / มีเวลาใกล้กัน ±15 นาที = ไม่ลง · ส่งซ้ำได้ไม่เกิน 3 ครั้งต่อสแกน
+    let lostN = 0;
+    try {
+      const rts = remoteLogs.map(r => new Date(r.timestamp).getTime() || 0);
+      logs.forEach(l => {
+        if (l.dateKey !== todayKey_ || String(l.empId) !== String(currentUser.empId) || !l.remote || l.photoPending) return;
+        if (!(l.srv === 'ok' || l.srv === 'dup') || (l.lostTries || 0) >= 3) return;
+        const t = new Date(l.ts).getTime(); if (!isFinite(t) || Date.now() - t < 120000) return;
+        if (rts.some(x => Math.abs(x - t) < 90000)) return;
+        l.remote = false; l.lost = true; l.lostAt = Date.now(); l.lostTries = (l.lostTries || 0) + 1; lostN++;
+      });
+      if (lostN) console.warn('[sync] สแกนที่เคยขึ้นแล้วแต่ชีทไม่มี ' + lostN + ' รายการ — ส่งซ้ำ');
+    } catch (_) {}
     logs = logs.filter(l => l.dateKey !== todayKey_ || String(l.empId) !== String(currentUser.empId)
                           || !l.remote || l.photoPending);
     // v11.0: local ที่เก็บไว้ (ยังไม่ส่ง/รูปค้าง) อาจเป็นสแกนเดียวกับแถวจากชีท — กันนับเบิ้ล
@@ -4529,6 +4544,7 @@ async function syncLogsFromSheet(opts = {}) {
       });
     });
     saveLogs();
+    if (lostN) setTimeout(() => { try { resyncPendingLogs(); } catch (_) {} }, 1500);   // v13.64
     console.log(`✓ Sync ${remoteLogs.length} logs (${ddmmyyyy}) empId=${currentUser.empId}`);
     return remoteLogs.length;
   } catch (e) {
@@ -5673,7 +5689,8 @@ async function apiCheckin(logData) {
     //   ส่งเฉพาะสแกนด้วยหน้าตัวเองที่ยังไม่เคยขึ้นระบบ — QR ประจำจุด = ใช้แทนหน้า · ส่งซ่อมรูป = ผ่านมาแล้ว
     //   และส่งเมื่อเซิร์ฟเวอร์บอกว่ารองรับแล้ว (v9.51+: face_checkin) — Apps Script รุ่นเก่าจะบล็อกทันทีโดยไม่มีช่วงจดก่อน
     live: logData.live || '',             // v13.04: ผลด่านคนจริง → ชีทคอลัมน์ R (Apps Script 9.52+)
-    faceDesc: (faceCheckinMode_() && logData.faceDesc && !logData.remote && String(logData.scannedBy || 'self') === 'self') ? logData.faceDesc : undefined,
+    resendLost: logData.lost ? '1' : '',   // v13.64 สแกนที่เคยขึ้นแล้วแต่ชีทไม่มี — เซิร์ฟเวอร์ 9.114 ตรวจ HR ลบ/เวลาใกล้กันก่อนลงกลับ
+    faceDesc: (faceCheckinMode_() && logData.faceDesc && !logData.remote && !logData.lost && String(logData.scannedBy || 'self') === 'self') ? logData.faceDesc : undefined,
   });
 }
 
@@ -5698,7 +5715,9 @@ async function resyncPendingLogsOnce_() {
   for (const l of pending) {
     try {
       const r = await apiCheckin(l);
+      if (r && r.deleted) { logs = logs.filter(x => x !== l); ok++; continue; }   // v13.64 HR ลบสแกนนี้แล้ว = เอาออกจากเครื่อง (ไม่วนส่ง)
       l.remote = true; l.srv = (r && r.guard) ? 'guard' : (r && r.dup) ? 'dup' : 'ok'; l.srvAt = Date.now(); delete l.err; ok++;   // v13.40
+      if (l.lost) { l.lostFixed = l.srv; delete l.lost; }   // v13.64
       if (l.photoPending) {
         if (r && r.photoSaved) { l.photoPending = false; delete l.photoTries; }        // รูปขึ้นแล้ว ✓
         else if (!l.photo) { l.photoPending = false; }                                 // ไม่มีรูปให้ส่งแล้ว — เลิกวน
