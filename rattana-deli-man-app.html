@@ -1219,7 +1219,7 @@ body.ui2 .toast{border-radius:14px}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.434';
+const APP_VERSION='3.435';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -1345,9 +1345,77 @@ function coPickerShow_(){
   d.innerHTML='<div style="width:100%;max-width:460px">'
     +'<div class="home-choose-title" style="margin:0 0 12px">เลือกบริษัทที่จะบันทึกงาน</div>'
     +'<div style="display:flex;flex-direction:column;gap:12px">'+coList_().map(card).join('')+'</div>'
+    +'<div id="coMyJobs" style="margin-top:18px"></div>'
     +'<div class="txt-xs txt-muted txt-center" style="margin-top:12px;line-height:1.6">เปิดครั้งหน้าเข้าฝั่งที่เลือกไว้เลย · สลับได้ที่หัวแอปตลอดเวลา</div>'
     +'</div>';
   document.body.appendChild(d);
+  try{ coMyJobsLoad_(); }catch(e){}   // ★ v3.435
+}
+/* ★★ v3.435 (user 27 ต.ค. 2026): คนขับที่ส่งทั้ง 2 บริษัท — จอเลือกบริษัทดึง "ใบคุมของฉัน" จากทุกบริษัทที่เข้าได้มารวมไว้
+   อ่านชีท "บันทึกเที่ยวส่ง" ของแต่ละบริษัท (ชีทเล็ก) · ของฉัน = ชื่ออยู่ในคนขับหรือผู้ช่วย (isMyTeamJob_) · โชว์เฉพาะที่ยังไม่อนุมัติ 7 วันล่าสุด
+   แตะ = จำบริษัท + โหลดหน้าใหม่ด้วย ?co=…&job=… แล้วเปิดใบนั้นให้เอง (ข้อมูลในเครื่องยังแยกบริษัทเหมือนเดิม ไม่ปนกัน) */
+function coMyJobsStatus_(r){
+  const appr=!!(cleanCell(r['ผู้อนุมัติปิดงาน'])||cleanCell(r['วันเวลาอนุมัติ']));
+  const sub=cleanCell(r['วันเวลาปิดงาน']);
+  const rej=sheetTs_(r['ตีกลับเมื่อ']);
+  if(appr) return 'approved';
+  if(rej&&(!sub||rej>=sheetTs_(sub))) return 'rejected';
+  if(sub) return 'pending_approval';
+  return 'in_progress';
+}
+async function coMyJobsLoad_(){
+  const box=document.getElementById('coMyJobs'); if(!box) return;
+  if(!(state.user&&(state.user.displayName||state.user.nickname||state.user.name))) return;
+  const cos=coList_(); if(cos.length<2) return;
+  box.innerHTML='<div class="txt-sm txt-muted txt-center" style="padding:10px">⏳ กำลังดึงงานของคุณจากทุกบริษัท…</div>';
+  const cut=Date.now()-7*86400000;
+  const res=await Promise.all(cos.map(c=>fetchSheet(c.jobsSheetId,'บันทึกเที่ยวส่ง',{fresh:true,timeoutMs:12000})
+    .then(rows=>({c,rows:rows||[],ok:true})).catch(()=>({c,rows:[],ok:false}))));
+  const items=[];
+  res.forEach(({c,rows})=>rows.forEach(r=>{
+    const id=cleanCell(r['รหัสใบคุม']||r['🔒 Row ID']); if(!id) return;
+    const helpers=Object.keys(r).filter(k=>k.indexOf('ผู้ช่วย')===0||k==='พนง.ใหม่').map(k=>cleanCell(r[k])).filter(Boolean);
+    const team={driver:cleanCell(r['ชื่อคนขับ']),helperList:helpers};
+    if(!isMyTeamJob_({team})) return;
+    const st=coMyJobsStatus_(r); if(st==='approved') return;
+    const t=sheetTs_(r['วันเวลาที่รับงาน']); if(t&&t<cut) return;
+    items.push({co:c,id,st,t,shops:String(r['ร้านค้า']||'').split(',').map(x=>x.trim()).filter(Boolean).length,plate:cleanCell(r['ทะเบียนรถ']),own:isMyOwnJob({team})});
+  }));
+  items.sort((a,b)=>(b.t||0)-(a.t||0));
+  const failed=res.filter(x=>!x.ok).map(x=>x.c.name);
+  const stLbl={in_progress:['กำลังส่ง','#1F6FD6','#EAF2FE'],rejected:['ถูกตีกลับ','#B4231A','#FFF1F0'],pending_approval:['รออนุมัติ','#8A5A00','#FFF6E5']};
+  const row=x=>{ const s=stLbl[x.st]||stLbl.in_progress, cg=x.co.theme==='cg';
+    return `<div onclick="coOpenJob_('${x.co.key}','${esc(x.id).replace(/'/g,"\'")}')" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;background:var(--card,#fff);border:1px solid var(--border);border-left:5px solid ${cg?'#C4102F':'#0A1B3E'};cursor:pointer">
+      <div style="font-size:22px">${x.co.icon}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:14px">${esc(x.id)} <span style="font-size:11px;font-weight:600;color:${cg?'#C4102F':'#0A1B3E'}">· ${esc(x.co.name)}</span></div>
+        <div class="txt-xs txt-muted">${x.t?formatThaiDateTime(x.t):''}${x.shops?' · '+x.shops+' ร้าน':''}${x.plate?' · '+esc(x.plate):''}${x.own?'':' · ผู้ช่วย'}</div>
+      </div>
+      <span style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;color:${s[1]};background:${s[2]};white-space:nowrap">${s[0]}</span>
+    </div>`; };
+  box.innerHTML='<div class="home-choose-title" style="margin:0 0 10px">📋 งานของฉัน (ทุกบริษัท)</div>'
+    +(items.length?`<div style="display:flex;flex-direction:column;gap:8px">${items.map(row).join('')}</div>`
+      :'<div class="txt-sm txt-muted txt-center" style="padding:12px;border:1px dashed var(--border);border-radius:12px">ไม่มีงานค้างของคุณใน 7 วันนี้ — รับงานใหม่ได้จากบริษัทด้านบน</div>')
+    +(failed.length?`<div class="txt-xs" style="margin-top:8px;color:var(--danger)">⚠️ ดึงงานของ ${esc(failed.join(', '))} ไม่สำเร็จ — เข้าบริษัทนั้นเพื่อดูงาน</div>`:'')
+    +'<div class="txt-xs txt-muted txt-center" style="margin-top:8px">แตะใบคุมเพื่อเข้าบริษัทนั้นและเปิดใบนั้นทันที</div>';
+}
+function coOpenJob_(k,id){
+  if(!COMPANIES[k]) return;
+  coRemember_(k);
+  try{ location.replace(location.origin+location.pathname+'?co='+encodeURIComponent(k)+'&job='+encodeURIComponent(id)); }
+  catch(e){ location.reload(); }
+}
+/* เปิดใบคุมที่ส่งมากับลิงก์ (?job=) ครั้งเดียว — เรียกหลังวาดหน้าแรก และหลังซิงก์เสร็จ (เครื่องที่ยังไม่มีงานนี้ในเครื่อง) */
+let _coUrlJobDone=false;
+function coTryOpenUrlJob_(){
+  if(_coUrlJobDone) return;
+  let id=''; try{ id=new URLSearchParams(location.search||'').get('job')||''; }catch(e){}
+  if(!id){ _coUrlJobDone=true; return; }
+  const j=(state.jobs||[]).find(x=>normJobId(x.id)===normJobId(id)); if(!j) return;
+  _coUrlJobDone=true;
+  try{ history.replaceState(null,'',location.pathname+'?co='+encodeURIComponent(CO.key)); }catch(e){}
+  state.homeGroup='driver'; state.activeJobId=j.id; state.driverJobView='detail';
+  switchTab('sec-driver-job');
 }
 function coChoose_(k){
   if(!COMPANIES[k]) return;
@@ -17048,6 +17116,7 @@ async function bootApp(){
     if(cachedSS && cachedSS.length) state.salesStaff=cachedSS;   // v3.120: ชื่อเซลล์ (SLMN) hydrate ทันที
     // render ทันทีด้วยข้อมูลที่มีอยู่ในเครื่อง
     if(dataDepTabs.includes(state.currentTab)) renderCurrent();
+    try{ coTryOpenUrlJob_(); }catch(e){}   // ★ v3.435: มาจาก "งานของฉัน (ทุกบริษัท)"
     updateOutboxBadge();                        // v3.28: โชว์จำนวนที่ค้างจาก session ก่อน (ถ้ามี)
 
     // ===== v2.53 STAGE 2: fetch fresh ในพื้นหลัง (ไม่บล็อก UI, silent update) =====
@@ -17070,6 +17139,7 @@ async function bootApp(){
     Promise.all([_sideP,_jobsP])
       .then(()=>{
         state._bgLoading=false;
+        try{ coTryOpenUrlJob_(); }catch(e){}   // ★ v3.435
         pruneLocalJobs_();   // ★ v3.206: หลังซิงค์เสร็จ ล้างงานเก่าอีกรอบ (ชีทเติมงานเก่ากลับมาได้)
         if(dataDepTabs.includes(state.currentTab)) renderCurrent();
         startAutoRefresh();
