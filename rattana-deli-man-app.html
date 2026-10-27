@@ -1219,7 +1219,7 @@ body.ui2 .toast{border-radius:14px}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.435';
+const APP_VERSION='3.436';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -9091,6 +9091,7 @@ async function fetchSaleCN_(code){
       if(String(r['หมายเหตุการคืน']||'').indexOf('ขนส่งเก็บ')<0) return;
       if(!cncApproved_(r['อนุมัติคืน'])) return;
       if(cleanCell(r['สถานะอนุมัติเก็บ']).indexOf('ปฏิเสธ')>=0) return;
+      if(String(r['หมายเหตุขนส่ง']||'').indexOf(SALE_OWED_MARK)>=0) return;   // ★ v3.436: คลังยืนยันเก็บแล้ว (ขนส่งไม่ได้กด) = ซ่อนจากหน้าบิล ไม่หักในแอป
       const key=String(r['cnId']||'').trim()||('L'+line);
       // เก็บแล้ว = ใช้จำนวนเก็บจริงเสมอ (แม้เป็น 0 — เก็บไม่ได้เลยต้องหัก 0) · ยังไม่เก็บ = โชว์ยอดตามที่เซลล์สั่งไว้ก่อน
       const _fq=cleanCell(r['จำนวนเก็บจริง']);
@@ -10747,8 +10748,92 @@ async function renderSupHome(){
   $('pendingList').innerHTML=_bar+(pending.length?pending.map(j=>renderSupJobRow(j)).join(''):
     `<div class="txt-center txt-muted p-16">ไม่มีงานรออนุมัติ${whLocked_()?' ของคลัง '+esc(state.user.warehouse||''):(state.whFilter?' คลัง '+esc(state.whFilter):'')}</div>`);
   renderCNPending();   // v2.9: CN ของคลังที่รออนุมัติ โผล่ในหน้านี้ด้วย (เฉพาะฝ่ายคลัง)
+  renderSaleOwed_();   // ★ v3.436: ของคืนเซลล์สั่ง ค้างเก็บ (คลังยืนยันเก็บแล้ว)
   // ★ v3.231: ตัด renderCNCollectPending ออก — ย้ายไปรวมในกล่อง 📦 CN รออนุมัติ (paintCNPending + loadCNSalePending_)
   renderPalletPending();   // v3.68: ค่าพาเลทรออนุมัติ (เฉพาะฝ่ายบัญชี)
+}
+/* ★★ v3.436 (user 27 ต.ค. 2026): ของคืนที่เซลล์สั่งเก็บ — ขนส่งเก็บของมาแล้วแต่ไม่ได้กดในแอป → ใบค้างโผล่ที่หน้าบิลร้านนั้นทุกรอบ คนส่งแทนงง
+   คลังกด "✅ ยืนยันเก็บแล้ว" ที่หน้ารออนุมัติ = save_cn_collect (เก็บครบตามสั่ง · หมายเหตุขนส่งมี SALE_OWED_MARK) แล้ว approve_cn_collect ต่อทันที (อนุมัติในตัว)
+   ใบที่คลังยืนยันแล้ว ซ่อนจากหน้าบิลคนขับทั้งหมด ไม่ให้ติ๊กหักยอด (ต้องหักเงินร้าน = ออฟฟิศจัดการเอง) — ดู fetchSaleCN_
+   หลังบ้านไม่ต้องแก้ (ใช้ action เดิม 2 ตัว) · อนุมัติไม่ผ่าน = ใบไปค้างในกล่อง CN รออนุมัติ ให้กดต่อตามปกติ */
+const SALE_OWED_MARK='คลังยืนยันเก็บแล้ว';
+let _saleOwed=[];
+async function renderSaleOwed_(){
+  const u=state.user||{};
+  if(!saleCnOn_()||!(u.canApproveCN||(isHQ_()&&u.canApprove))){ _saleOwed=[]; return; }
+  let rows; try{ rows=await fetchCNSaleRows_(); }catch(e){ return; }
+  const by={},ord=[];
+  (rows||[]).forEach(r=>{
+    const line=String(r['cnLineId']||'').trim(); if(!line) return;
+    if(cleanCell(r['ที่มา']).indexOf('ขนส่ง')>=0) return;                      // ขนส่งเก็บเอง = ไม่ใช่ใบเซลล์สั่ง
+    if(String(r['หมายเหตุการคืน']||'').indexOf('ขนส่งเก็บ')<0) return;
+    if(String(r['สถานะเก็บ']||'').trim()) return;                               // เก็บแล้ว
+    if(!cncApproved_(r['อนุมัติคืน'])) return;
+    if(cleanCell(r['สถานะอนุมัติเก็บ']).indexOf('ปฏิเสธ')>=0) return;
+    if(!whPass_(r['คลัง'])) return;
+    const key=String(r['cnId']||'').trim()||('L'+line);
+    if(!by[key]){ by[key]={key,shopCode:String(r['รหัสร้าน']||'').trim(),shopName:String(r['ชื่อร้าน']||'').trim(),wh:String(r['คลัง']||'').trim(),
+      seller:String(r['ชื่อเซลล์']||'').trim(),reason:String(r['สาเหตุรับคืน']||'').trim(),date:String(r['วัน เวลา']||r['วันที่คืน']||'').trim(),amount:0,lines:[]}; ord.push(key); }
+    const qty=parseFloat(r['จำนวน'])||0, tot=parseFloat(String(r['รวม']||'').replace(/,/g,''));
+    const amt=isFinite(tot)?tot:qty*(parseFloat(r['ราคา'])||0);
+    by[key].amount+=amt;
+    by[key].lines.push({cnLineId:line,name:String(r['ชื่อสินค้า']||'').trim(),qty,unit:String(r['หน่วย']||'').trim()});
+  });
+  _saleOwed=ord.map(k=>by[k]).map(g=>({...g,days:cnDaysAgo_(g.date)})).sort((a,b)=>(b.days||0)-(a.days||0));
+  if(state.currentTab==='sec-sup-home'&&$('cnPendingList')) paintCNPending();
+}
+/* วาดในชิป "📦 รอเก็บ" ของกล่อง CN รออนุมัติ (paintCNPending สร้าง #saleOwedList ให้) */
+function paintSaleOwed_(){
+  const box=$('saleOwedList'); if(!box) return;
+  const recent=_saleOwed.filter(g=>g.days===null||g.days<=SALE_CN_MAX_DAYS), old=_saleOwed.length-recent.length;
+  let fk=state._saleOwedF||'recent'; if(fk==='old'&&!old) fk='recent';
+  const chip=(k,lb,n)=>`<button type="button" class="pill${fk===k?' active':''}" onclick="state._saleOwedF='${k}';state._saleOwedLim=0;paintSaleOwed_()" style="flex:none">${lb} <b style="margin-left:4px">${n}</b></button>`;
+  box.innerHTML=`<div class="txt-xs txt-muted" style="margin-bottom:8px">ใบที่เซลล์สั่งให้ขนส่งเก็บ แต่ยังไม่มีใครกดเก็บในแอป — ถ้าของเข้าคลังแล้ว กด <b>✅ ยืนยันเก็บแล้ว</b> ใบจะหายจากหน้าบิลของคนขับ (ไม่หักยอดในแอป)</div>`
+    +`<div class="pills" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${chip('recent','🚚 คนขับยังเห็น (≤'+SALE_CN_MAX_DAYS+' วัน)',recent.length)}${old?chip('old','เกิน '+SALE_CN_MAX_DAYS+' วัน',old):''}</div>`
+    +`<input class="input" id="saleOwedQ" placeholder="🔍 ค้นหา ร้าน / รหัสร้าน / เลข CN / เซลล์" autocomplete="off" value="${esc(state._saleOwedQ||'')}" oninput="state._saleOwedQ=this.value;state._saleOwedLim=0;paintSaleOwedRows_()" style="margin-bottom:8px">`
+    +'<div id="saleOwedRows"></div>';
+  paintSaleOwedRows_();
+}
+function paintSaleOwedRows_(){
+  const el=$('saleOwedRows'); if(!el) return;
+  const fk=state._saleOwedF||'recent';
+  const q=String(state._saleOwedQ||'').trim().toLowerCase();
+  let list=_saleOwed.filter(g=>fk==='old'?(g.days!==null&&g.days>SALE_CN_MAX_DAYS):(g.days===null||g.days<=SALE_CN_MAX_DAYS));
+  if(q) list=list.filter(g=>[g.key,g.shopCode,g.shopName,g.seller,g.wh].join(' ').toLowerCase().indexOf(q)>=0);
+  const lim=state._saleOwedLim||30;
+  if(!list.length){ el.innerHTML='<div class="txt-center txt-muted p-16">ไม่มีรายการ</div>'; return; }
+  el.innerHTML=list.slice(0,lim).map(g=>{
+    const hot=g.days!==null&&g.days>=7;
+    const items=g.lines.map(l=>esc(l.name||'-')+' '+fmtQty_(l.qty)+' '+esc(l.unit)).join(' · ');
+    return `<div class="bill-row" style="align-items:center;gap:10px;cursor:default">
+      <span style="flex:1;min-width:0">
+        <div class="txt-sm"><b>${esc(g.key)}</b> · <span class="txt-gold txt-bold">${fmt(g.amount)} ฿</span>${g.days!==null?` <span class="badge ${hot?'badge-danger':'badge-warn'}" style="font-size:11px">ค้าง ${g.days} วัน</span>`:''}</div>
+        <div class="txt-xs" style="margin-top:2px">🏪 ${esc(g.shopName||'-')} <span class="txt-muted">(${esc(g.shopCode)})</span> · ${esc(g.wh)}</div>
+        <div class="txt-xs txt-muted">${cnDateShort_(g.date)}${g.reason?' · '+esc(g.reason):''}${g.seller?' · เซลล์ '+esc(g.seller):''}</div>
+        <div class="txt-xs txt-muted" style="word-break:break-word">${items}</div>
+      </span>
+      <button class="btn btn-gold btn-sm" style="flex:none" onclick="saleOwedConfirm_('${esc(g.key)}')">✅ ยืนยัน<br>เก็บแล้ว</button>
+    </div>`; }).join('')
+    +(list.length>lim?`<button class="btn btn-outline btn-sm" style="width:100%;margin-top:8px" onclick="state._saleOwedLim=${lim+30};paintSaleOwedRows_()">แสดงเพิ่ม (อีก ${list.length-lim} ใบ)</button>`:'');
+}
+async function saleOwedConfirm_(key){
+  const g=_saleOwed.find(x=>x.key===key); if(!g) return;
+  const who=await showPromptModal(`${g.key} · ${g.shopName||g.shopCode} · ${fmt(g.amount)} ฿\n\nยืนยันว่าของเข้าคลังแล้ว (ขนส่งเก็บมาแต่ไม่ได้กดในแอป)\nใบนี้จะหายจากหน้าบิลของคนขับ และไม่หักยอดในแอป\n\nชื่อคนที่ไปเก็บ (ถ้ารู้ · ไม่ใส่ก็ได้)`,'',
+    {title:'✅ ยืนยันเก็บแล้ว',okLabel:'ยืนยันเก็บแล้ว',placeholder:'ชื่อคนขับ/ผู้ช่วย'});
+  if(who===null) return;
+  const me=currentUserName_();
+  const lines=g.lines.map(l=>({cnLineId:l.cnLineId,qtyCollect:l.qty}));
+  showSpinner('กำลังบันทึก…');
+  const r1=await postSyncGAS_({action:'save_cn_collect',shopCode:g.shopCode,shopName:g.shopName,warehouse:g.wh,driver:String(who).trim()||me,
+    note:SALE_OWED_MARK+' (ขนส่งไม่ได้กด) โดย '+me,photo:'',lines},30000);
+  if(!(r1&&r1.ok&&r1.updated>0)){ hideSpinner(); showToast('บันทึกไม่สำเร็จ: '+((r1&&r1.error)||'ไม่พบรายการในชีท'),'error'); return; }
+  const r2=await postSyncGAS_({action:'approve_cn_collect',decision:'approve',approver:me,reason:'',cnDoc:'',photo:'',lines:lines.map(l=>({cnLineId:l.cnLineId}))},30000);
+  hideSpinner();
+  try{ cnMemoBust_(); }catch(e){}
+  _saleOwed=_saleOwed.filter(x=>x.key!==key);
+  if(state.currentTab==='sec-sup-home') paintCNPending(); else paintSaleOwed_();
+  if(r2&&r2.ok&&r2.updated>0) showToast('ยืนยันเก็บแล้ว ✓ — ใบนี้ไม่ขึ้นที่หน้าบิลคนขับอีก','success');
+  else { showToast('บันทึกเก็บแล้ว แต่อนุมัติไม่สำเร็จ — กดอนุมัติต่อในกล่อง CN รออนุมัติ','warning'); try{ renderCNPending(); }catch(e){} }
 }
 /* ===== CN รออนุมัติ ในหน้ารออนุมัติ (เฉพาะฝ่ายคลัง) v2.9 ===== */
 function renderCNPending(){
@@ -10778,12 +10863,14 @@ function paintCNPending(){
      state._cnView ต้องเป็นรายการที่ "โชว์อยู่จริง" (ปุ่มในการ์ดอ้างตาม index) */
   const _isSale=c=>String(c&&c.returnType||'')==='เซลล์เก็บเอง';
   const nSale=all.filter(_isSale).length, nDrv=all.length-nSale;
-  let fk=state._cnPendFilter||'all'; if((fk==='sale'&&!nSale)||(fk==='driver'&&!nDrv)) fk='all';
-  const list=fk==='sale'?all.filter(_isSale):fk==='driver'?all.filter(c=>!_isSale(c)):all;
+  const nOwed=(_saleOwed||[]).filter(g=>g.days===null||g.days<=SALE_CN_MAX_DAYS).length, hasOwed=(_saleOwed||[]).length>0;   // ★ v3.436: ชิป รอเก็บ
+  let fk=state._cnPendFilter||'all'; if((fk==='sale'&&!nSale)||(fk==='driver'&&!nDrv)||(fk==='owed'&&!hasOwed)) fk='all';
+  const list=fk==='owed'?[]:fk==='sale'?all.filter(_isSale):fk==='driver'?all.filter(c=>!_isSale(c)):all;
   state._cnView=list;
   const cc=$('cnPendingCount'); if(cc) cc.textContent=all.length;
   const chip=(k,lb,n)=>`<button type="button" class="pill${fk===k?' active':''}" onclick="state._cnPendFilter='${k}';paintCNPending()" style="flex:none">${lb} <b style="margin-left:4px">${n}</b></button>`;
-  const chips=all.length?`<div class="pills" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">${chip('all','ทั้งหมด',all.length)}${chip('driver','🚚 ขนส่งเก็บ',nDrv)}${chip('sale','🧑‍💼 เซลล์เก็บ',nSale)}</div>`:'';
+  const chips=(all.length||hasOwed)?`<div class="pills" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">${chip('all','ทั้งหมด',all.length)}${chip('driver','🚚 ขนส่งเก็บ',nDrv)}${chip('sale','🧑‍💼 เซลล์เก็บ',nSale)}${hasOwed?chip('owed','📦 รอเก็บ',nOwed):''}</div>`:'';
+  if(fk==='owed'){ box.innerHTML=chips+'<div id="saleOwedList"></div>'; paintSaleOwed_(); return; }   // ★ v3.436
   box.innerHTML=chips+(list.length?list.map((c,i)=>cnCardHTML(c,i)).join('')
     :'<div class="txt-center txt-muted p-16">ไม่มี CN รออนุมัติ</div>');
 }
