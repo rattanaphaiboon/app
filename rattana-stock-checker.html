@@ -1285,7 +1285,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v5.2';
+const APP_VERSION = 'v5.3';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // GAS Web App URL เดียว — route ไปยัง Sheet ของแต่ละคลังที่ฝั่ง GAS (ใช้ตอน "บันทึกจริง" ลงชีท)
@@ -2491,6 +2491,16 @@ function expiryBadgeHtml(v) {
   return `<span class="badge" style="background:var(--row-alt);color:var(--muted);border:1px solid var(--border)">EXP ${dateStr} · อีก ${days} วัน</span>`;
 }
 
+// ── v5.3: จำวันหมดอายุที่คนนับเพิ่งใส่ (3 วันล่าสุด ทุกสินค้า) → เอาไปทำปุ่มลัด ──
+//   บังคับใส่วันหมดอายุทุก Lot แล้ว ถ้าไม่มีทางลัด ต้องกดดรอปดาวน์ 3 รอบทุกกล่อง
+const EXP_RECENT_KEY = 'stock_exp_recent_v1';
+let expRecent = (() => { try { return JSON.parse(localStorage.getItem(EXP_RECENT_KEY)) || []; } catch { return []; } })();
+function expRecentPush(d) {
+  if (!d) return;
+  expRecent = [d, ...expRecent.filter(x => x !== d)].slice(0, 3);
+  try { localStorage.setItem(EXP_RECENT_KEY, JSON.stringify(expRecent)); } catch {}
+}
+
 function setStatusDot(state) { // 'ok' | 'syncing' | 'error'
   const el = document.getElementById('statusDot');
   if (!el) return;
@@ -3432,7 +3442,8 @@ function renderPending() {
       <div style="margin-top:12px;padding:10px 11px;background:var(--row-alt);border:1px dashed var(--navy-light);border-radius:12px">
       ${(() => {
         const ib = ibInfo(p, countSession && countSession.warehouse);
-        const required = ib && ib.expired;
+        // v5.3: user สั่ง "ใส่วันที่ทุก Lot ที่เช็ค" — บังคับทุกตัว ไม่ดูอายุ IB แล้ว
+        const required = true;
         // ที่ตั้ง (location): โชว์ช่องไว้ทุกคลัง แต่ไม่บังคับ — ใส่จำนวนแล้วกดยืนยันข้ามไปได้เลย
         // Quick-pick buttons from existing lots of this product
         const existing = countSession.items[productKey(p)]
@@ -3442,8 +3453,12 @@ function renderPending() {
         const scanMonths = Array.from({length:12},(_,i)=>i+1);
         const scanYearNow = new Date().getFullYear();
         const scanYears = Array.from({length:8},(_,i)=>scanYearNow+i);
-        const quickPick = existing.length
-          ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${existing.map(d=>`<button type="button" onclick="scanExpSet('${d}')" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--navy);font-weight:600">${formatThaiDate(d)}</button>`).join('')}</div>`
+        // v5.3: ปุ่มลัด = วันของสินค้าตัวนี้ในเซสชัน + 3 วันล่าสุดที่คนนับใส่ (ทุกสินค้า)
+        //   ของพาเลทเดียวกันหมดอายุวันเดียวกัน → แตะทีเดียวแทนกดดรอปดาวน์ 3 รอบ
+        const quick = [...new Set([...existing, ...expRecent])].slice(0, 4);
+        const quickPick = quick.length
+          ? `<div style="font-size:10.5px;font-weight:700;color:var(--navy-mid);margin-top:7px">⏱ วันที่เพิ่งใส่ไป — แตะทีเดียวจบ</div>
+             <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px">${quick.map((d,i)=>`<button type="button" onclick="scanExpSet('${d}')" style="background:${i?'var(--card-bg)':'var(--navy-mid)'};border:1.5px solid ${i?'var(--border)':'var(--navy-mid)'};border-radius:10px;padding:8px 13px;font-size:13.5px;cursor:pointer;color:${i?'var(--navy-mid)':'#fff'};font-weight:${i?600:700};font-family:inherit">${formatThaiDate(d)}</button>`).join('')}</div>`
           : '';
         return `
       <div class="field">
@@ -3573,11 +3588,11 @@ function confirmCount() {
   const qty = parseInt(document.getElementById('qtyInput').value) || 0;
   if (qty <= 0) { cancelPending(); return; }
   const p = pendingScan.product, u = pendingScan.unit;
-  // Enforce expiry-date entry when this product is older than the IB expiry threshold
-  const ib  = ibInfo(p, countSession && countSession.warehouse);
+  // v5.3: บังคับใส่วันหมดอายุ "ทุก Lot ที่เช็ค" (user สั่ง 2026-10-27)
+  //   ของเดิมบังคับเฉพาะของที่ค้าง IB เกิน 90 วัน — ตอนนี้ของใหม่ก็ต้องมี เพราะต้องรู้อายุทุกตัว
   const expVal = getScanExpiry();
-  if (ib && ib.expired && !expVal) {
-    showToast('สินค้าเกิน 90 วัน — กรุณาใส่วันหมดอายุก่อนบันทึก', 'warning');
+  if (!expVal) {
+    showToast('ต้องใส่วันหมดอายุก่อนบันทึก', 'warning');
     document.getElementById('scan_exp_d_pick')?.classList.add('req-err');
     document.getElementById('scan_exp_m_pick')?.classList.add('req-err');
     document.getElementById('scan_exp_y_pick')?.classList.add('req-err');
@@ -3587,6 +3602,7 @@ function confirmCount() {
     expPickOpen('scan_exp_d');
     return;
   }
+  expRecentPush(expVal);   // v5.3: จำไว้ทำปุ่มลัดครั้งหน้า
   const key = productKey(p);
   if (!countSession.items[key]) {
     countSession.items[key] = {
@@ -3874,6 +3890,9 @@ function renderCountList() {
         <span class="lrow-ro-v${v===0?' zero':''}">${v}</span>
       </div>`;
     }).join('');
+    // v5.3: แถวที่นับไว้ก่อนกฎใหม่ (หรือดึง draft เก่ามา) ยังไม่มีวันหมดอายุ — เตือนให้เห็นในลิสต์เลย
+    const noExpN = itemLots(it).filter(l => !l.expiryDate
+      && ['CS','BP','PA','EA'].some(u => (l.counts[u]||0) > 0)).length;
     const extras = `
       ${ibBadgeHtml(prod, countSession && countSession.warehouse)}
       ${(() => {
@@ -3889,7 +3908,7 @@ function renderCountList() {
       <div class="lrow-main" onclick="toggleLiveRow('${key}')">
         <div class="lrow-info">
           <div class="lrow-name">${it.name}${codeSuffix(itemCodeOf(it))}${skuSuffix(itemSkuOf(it))}</div>
-          <div class="lrow-sub">${breakdownText(it)} = <b>${d.counted.toLocaleString()}</b> ชิ้น · ระบบ ${d.system.toLocaleString()}${d.putawayPallets ? ` <span style="color:var(--navy-mid);font-weight:600">· 📍 ${d.putawayPallets} พาเลท</span>` : ''}</div>
+          <div class="lrow-sub">${breakdownText(it)} = <b>${d.counted.toLocaleString()}</b> ชิ้น · ระบบ ${d.system.toLocaleString()}${d.putawayPallets ? ` <span style="color:var(--navy-mid);font-weight:600">· 📍 ${d.putawayPallets} พาเลท</span>` : ''}${noExpN ? ` · <span style="color:var(--danger);font-weight:700">⚠ ไม่มีวันหมดอายุ${noExpN > 1 ? ' '+noExpN+' Lot' : ''}</span>` : ''}</div>
         </div>
         ${pill}
         <span class="lrow-chev">›</span>
@@ -4084,7 +4103,7 @@ function expPickHtml(id, placeholder, opts, curVal, isErr) {
   </div>`;
 }
 function lotRowHtml(lot, li, ib) {
-  const required = ib && ib.expired && !lot.expiryDate;
+  const required = !lot.expiryDate;   // v5.3: ทุก Lot ต้องมีวันหมดอายุ
   const it = window._editItem;
   const prod = it && productByKey[it.key];
   const usedUnits = ['CS','BP','PA','EA'].filter(u => prod && String(prod[`CODE ${u}`]||'').length > 3);
@@ -4223,7 +4242,6 @@ function openEditItem(encKey) {
 function saveEditItem() {
   const it = window._editItem || countSession.items[editKey];
   if (!it) return closeEditItem();
-  const ib = ibInfo(productByKey[it.key], countSession && countSession.warehouse);
   const lots = itemLots(it);
   // Read back values from DOM into lots array
   const newLots = lots.map((l, li) => {
@@ -4241,11 +4259,11 @@ function saveEditItem() {
     const location = document.getElementById(`lot_${li}_loc`)?.value?.trim() || '';
     return { counts, expiryDate, location };
   });
-  // Validate: each lot with qty > 0 must have expiry if product expired
+  // v5.3: ทุก Lot ที่มีจำนวน ต้องมีวันหมดอายุ (ไม่ดูอายุ IB แล้ว)
   for (let i = 0; i < newLots.length; i++) {
     const hasQty = ['CS','BP','PA','EA'].some(u => newLots[i].counts[u] > 0);
-    if (hasQty && ib && ib.expired && !newLots[i].expiryDate) {
-      showToast(`Lot ${i+1}: สินค้าเกิน 90 วัน — กรุณาใส่วันหมดอายุ`, 'warning');
+    if (hasQty && !newLots[i].expiryDate) {
+      showToast(`Lot ${i+1}: ต้องใส่วันหมดอายุ`, 'warning');
       expPickOpen(`lot_${i}_d`);
       return;
     }
@@ -4253,6 +4271,7 @@ function saveEditItem() {
   // Remove empty lots (all counts = 0)
   const validLots = newLots.filter(l => ['CS','BP','PA','EA'].some(u => l.counts[u] > 0));
   if (!validLots.length) { delete countSession.items[editKey]; closeEditItem(); saveCountSession(); renderCountList(); return; }
+  validLots.forEach(l => expRecentPush(l.expiryDate));   // v5.3: จำไว้ทำปุ่มลัด
   it.lots = validLots;
   it.counts = lotsToTotalCounts(validLots);
   it.expiryDate = validLots[0].expiryDate || '';
@@ -5061,6 +5080,7 @@ function confirmScrap() {
     if (ex) { try { ex.focus(); ex.showPicker && ex.showPicker(); } catch {} }
     return;
   }
+  expRecentPush(exp);   // v5.3: นับเศษก็สะสมวันลัดให้หน้านับสต็อกด้วย
   if (sp.editId) {
     // แก้ไขรายการเดิม (คงคลัง/id เดิม) — อัปเดตจำนวน/หน่วย/ชื่อ/บาร์/วันหมดอายุ
     const it = scrapItems.find(x => x.id === sp.editId);
