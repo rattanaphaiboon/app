@@ -3442,8 +3442,8 @@ function renderPending() {
       <div style="margin-top:12px;padding:10px 11px;background:var(--row-alt);border:1px dashed var(--navy-light);border-radius:12px">
       ${(() => {
         const ib = ibInfo(p, countSession && countSession.warehouse);
-        // v5.3: user สั่ง "ใส่วันที่ทุก Lot ที่เช็ค" — บังคับทุกตัว ไม่ดูอายุ IB แล้ว
-        const required = true;
+        // บังคับวันหมดอายุเฉพาะของที่ "รับเข้า (IB) เกิน 90 วัน" — ของเข้าใหม่ไม่ต้องใส่ก็ได้
+        const required = ib && ib.expired;
         // ที่ตั้ง (location): โชว์ช่องไว้ทุกคลัง แต่ไม่บังคับ — ใส่จำนวนแล้วกดยืนยันข้ามไปได้เลย
         // Quick-pick buttons from existing lots of this product
         const existing = countSession.items[productKey(p)]
@@ -3588,11 +3588,11 @@ function confirmCount() {
   const qty = parseInt(document.getElementById('qtyInput').value) || 0;
   if (qty <= 0) { cancelPending(); return; }
   const p = pendingScan.product, u = pendingScan.unit;
-  // v5.3: บังคับใส่วันหมดอายุ "ทุก Lot ที่เช็ค" (user สั่ง 2026-10-27)
-  //   ของเดิมบังคับเฉพาะของที่ค้าง IB เกิน 90 วัน — ตอนนี้ของใหม่ก็ต้องมี เพราะต้องรู้อายุทุกตัว
+  // บังคับใส่วันหมดอายุเฉพาะของที่ "รับเข้า (IB) เกิน 90 วัน" — ทุก Lot ของตัวนั้นต้องมีวัน
+  const ib  = ibInfo(p, countSession && countSession.warehouse);
   const expVal = getScanExpiry();
-  if (!expVal) {
-    showToast('ต้องใส่วันหมดอายุก่อนบันทึก', 'warning');
+  if (ib && ib.expired && !expVal) {
+    showToast('ของค้างเกิน 90 วัน — ต้องใส่วันหมดอายุก่อนบันทึก', 'warning');
     document.getElementById('scan_exp_d_pick')?.classList.add('req-err');
     document.getElementById('scan_exp_m_pick')?.classList.add('req-err');
     document.getElementById('scan_exp_y_pick')?.classList.add('req-err');
@@ -3890,9 +3890,13 @@ function renderCountList() {
         <span class="lrow-ro-v${v===0?' zero':''}">${v}</span>
       </div>`;
     }).join('');
-    // v5.3: แถวที่นับไว้ก่อนกฎใหม่ (หรือดึง draft เก่ามา) ยังไม่มีวันหมดอายุ — เตือนให้เห็นในลิสต์เลย
-    const noExpN = itemLots(it).filter(l => !l.expiryDate
-      && ['CS','BP','PA','EA'].some(u => (l.counts[u]||0) > 0)).length;
+    // v5.3: ของค้างเกิน 90 วันที่ "ต้องใส่วันหมดอายุ" แต่ยัง Lot ไหนไม่มีวัน — เตือนในลิสต์เลย
+    //   (เจอได้จาก draft ที่นับค้างไว้ หรือรายการที่ sync มาจากเครื่องอื่น)
+    const ibRow = ibInfo(prod, countSession && countSession.warehouse);
+    const noExpN = (ibRow && ibRow.expired)
+      ? itemLots(it).filter(l => !l.expiryDate
+          && ['CS','BP','PA','EA'].some(u => (l.counts[u]||0) > 0)).length
+      : 0;
     const extras = `
       ${ibBadgeHtml(prod, countSession && countSession.warehouse)}
       ${(() => {
@@ -4103,7 +4107,7 @@ function expPickHtml(id, placeholder, opts, curVal, isErr) {
   </div>`;
 }
 function lotRowHtml(lot, li, ib) {
-  const required = !lot.expiryDate;   // v5.3: ทุก Lot ต้องมีวันหมดอายุ
+  const required = ib && ib.expired && !lot.expiryDate;   // ของค้างเกิน 90 วัน → ทุก Lot ต้องมีวัน
   const it = window._editItem;
   const prod = it && productByKey[it.key];
   const usedUnits = ['CS','BP','PA','EA'].filter(u => prod && String(prod[`CODE ${u}`]||'').length > 3);
@@ -4242,6 +4246,7 @@ function openEditItem(encKey) {
 function saveEditItem() {
   const it = window._editItem || countSession.items[editKey];
   if (!it) return closeEditItem();
+  const ib = ibInfo(productByKey[it.key], countSession && countSession.warehouse);
   const lots = itemLots(it);
   // Read back values from DOM into lots array
   const newLots = lots.map((l, li) => {
@@ -4259,11 +4264,11 @@ function saveEditItem() {
     const location = document.getElementById(`lot_${li}_loc`)?.value?.trim() || '';
     return { counts, expiryDate, location };
   });
-  // v5.3: ทุก Lot ที่มีจำนวน ต้องมีวันหมดอายุ (ไม่ดูอายุ IB แล้ว)
+  // ของค้างเกิน 90 วัน → ทุก Lot ที่มีจำนวน ต้องมีวันหมดอายุ
   for (let i = 0; i < newLots.length; i++) {
     const hasQty = ['CS','BP','PA','EA'].some(u => newLots[i].counts[u] > 0);
-    if (hasQty && !newLots[i].expiryDate) {
-      showToast(`Lot ${i+1}: ต้องใส่วันหมดอายุ`, 'warning');
+    if (hasQty && ib && ib.expired && !newLots[i].expiryDate) {
+      showToast(`Lot ${i+1}: ของค้างเกิน 90 วัน — ต้องใส่วันหมดอายุ`, 'warning');
       expPickOpen(`lot_${i}_d`);
       return;
     }
