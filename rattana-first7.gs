@@ -1,4 +1,4 @@
-// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v3.0
+// Rattana 7 วันแรก — หลังบ้าน (Google Apps Script) v3.1
 // พนักงานใหม่ลงทะเบียนด้วยเบอร์โทร (+รูปหน้า) → 7 วันแรก ทำวันละ 2 ครั้ง ต้องอยู่ในพิกัดที่ทำงานเท่านั้น
 //   เช้า  = เช็คอินเข้างานอย่างเดียว                              → แท็บ "เข้า-ออกงาน" (ประเภท = เข้างาน)
 //   เย็น  = ชื่อพี่เลี้ยง/คนที่ไปด้วย + ตอบคำถาม + เช็คเอาท์        → แท็บ "เข้า-ออกงาน" (ประเภท = เลิกงาน) + แท็บ "คำตอบ"
@@ -10,7 +10,8 @@
 //  2. เลือกฟังก์ชัน setupSheet ▸ Run (ถ้าขอสิทธิ์เพิ่ม — กดอนุญาต) → Execution log ต้องขึ้น "พร้อมใช้งาน" + จำนวนจุดพิกัด
 //  3. Deploy ▸ Manage deployments ▸ ✏️ ▸ Version: New version ▸ Deploy   (URL เดิม ไม่ต้องส่งใหม่)
 //     ครั้งแรก: Deploy ▸ New deployment ▸ Web app ▸ Execute as: Me / Who has access: Anyone (ทุกคน)
-//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"3.0"
+//  เช็คว่าติดแล้ว: เปิด URL ต่อท้าย ?action=ping → ต้องเห็น "version":"3.1"
+//  v3.1 ครั้งแรกหลังอัปเดต ระบบเติม 0 หน้าเบอร์โทรที่หายไปในชีตให้เอง (แท็บ ลงทะเบียน / เข้า-ออกงาน / คำตอบ) + ตั้งคอลัมน์เบอร์เป็นข้อความ
 //  v3.0 ไม่บังคับพิกัดแล้ว — บันทึกได้ทุกที่ ช่อง "ผล" ลงว่า อยู่ในพิกัด / นอกพิกัด / ไม่มีพิกัด (เปิด GPS ไม่ได้)
 //  v2.9 แก้ชีตตัด 0 หน้าเบอร์โทร (0891234567 → 891234567) ทำให้ล็อกอินด้วยเบอร์ไม่เจอ → อ่านเบอร์เติม 0 คืน + บันทึกเบอร์/วันที่/เวลาเป็นข้อความ
 //  v2.6 วันที่ 1 = วันที่ลงทะเบียน (ไม่ให้เลือกวันเริ่มงาน) · ประเมิน 7 วันทำงาน ข้ามวันอาทิตย์
@@ -21,7 +22,7 @@
 //    ALERT_EMAILS = hr@rattanaphaiboon.com, …  ← อีเมลเตือนทันทีเมื่อน้องใหม่ "เสี่ยงสูง" + สรุปรายวัน (ถ้าเปิด)
 //  สรุปรายวัน (ไม่บังคับ): Run setupDailyTrigger ครั้งเดียว → 10.00 น. คนที่ยังไม่เช็คอินเข้างาน · 19.00 น. คนที่ยังไม่เช็คเอาท์
 
-var VERSION = '3.0';
+var VERSION = '3.1';
 var AREA = { in: 'อยู่ในพิกัด', out: 'นอกพิกัด', none: 'ไม่มีพิกัด' };
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';    // ทะเบียนพนักงาน — ใช้ตรวจสิทธิ์ล็อกอินของ HR เท่านั้น
 var STRUCT_SHEET_ID = '1tkJoaZj72MG9HIOkd-uM_Tvng-l2uqH61jUwqqiRTMI'; // ชีต "โครงสร้าง" — พิกัด/รัศมีที่ทำงาน + ตำแหน่งงาน
@@ -294,6 +295,7 @@ function register_(p) {
     try { url = savePhoto_(photo, start + ' ' + name + ' ' + ph + '.jpg'); } catch (e) { url = 'บันทึกรูปไม่สำเร็จ: ' + e.message; }
     regSheet_().appendRow([id, new Date(), name, txt_(ph), pos, w + ' ' + PROV[w], txt_(start), txt_(key), 'ทำงานอยู่', '', clean_(p.ua).slice(0, 120), '', thumb, url]);
     SpreadsheetApp.flush();
+    styleOnce_();
     return { ok: true, me: me_(findReg_('id', id)), key: key, created: true };
   } finally { lock.releaseLock(); }
 }
@@ -602,8 +604,26 @@ function styleOnce_() {
   try {
     var pr = PropertiesService.getScriptProperties();
     if (pr.getProperty('STYLE_VER') === VERSION) return;
-    styleAttTab_(); pr.setProperty('STYLE_VER', VERSION);
+    pr.setProperty('STYLE_VER', VERSION);
+    fixPhones_(); styleAttTab_();
   } catch (e) {}
+}
+// เติม 0 หน้าเบอร์โทรที่ชีตตัดทิ้ง (890832386 → 0890832386) + ตั้งทั้งคอลัมน์เป็นข้อความ กันหายอีก
+function fixPhones_() {
+  var n = 0;
+  [[regSheet_(), R_PHONE], [attSheet_(), K_PHONE], [respSheet_(), C_NICK]].forEach(function (x) {
+    var sh = x[0], col = x[1], last = sh.getLastRow();
+    sh.getRange(2, col, Math.max(sh.getMaxRows() - 1, 1), 1).setNumberFormat('@');
+    if (last < 2) return;
+    var rg = sh.getRange(2, col, last - 1, 1), v = rg.getValues(), changed = false;
+    v = v.map(function (r) {
+      var ph = phone_(r[0]);
+      if (ph && String(r[0]) !== ph) { changed = true; n++; return [ph]; }
+      return [r[0] === '' || r[0] == null ? '' : String(r[0])];
+    });
+    if (changed) rg.setValues(v);
+  });
+  return n;
 }
 // แต่งสีคอลัมน์ "ประเภท" ให้แยกง่าย: เข้างาน = เขียว · เลิกงาน = ฟ้า · พิกัด: อยู่ในพิกัด = เขียว · นอกพิกัด = แดง · ไม่มีพิกัด = เหลือง
 function styleAttTab_() {
@@ -629,6 +649,7 @@ function setupSheet() {
   var moved = migrateOldTabs_();
   if (moved) Logger.log('ย้ายข้อมูลจากแท็บ เข้างาน/เลิกงาน เดิม ' + moved + ' แถว → "' + ATT_TAB + '" (แท็บเดิมซ่อนไว้เป็นสำรอง)');
   styleAttTab_();
+  Logger.log('เติม 0 หน้าเบอร์โทร ' + fixPhones_() + ' ช่อง');
   DriveApp.getRootFolder();   // ขอสิทธิ์ Drive ไว้ก่อน (ใช้เก็บรูปหน้า)
   CacheService.getScriptCache().removeAll(['f7_sites_v2', 'reg_f7_v2']);
   var s = sites_();
