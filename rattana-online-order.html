@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Online Order v5.12</title>
+<title>Rattana Online Order v5.13</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -1106,7 +1106,7 @@ body.dark .pdpa-body h4,body.dark .pdpa-body b{color:var(--gold-light,#e2c882)}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.12</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v5.13</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -2080,8 +2080,8 @@ function specialPriceRuleFor(c,prod){ const ph=digits(c&&c.phone); if(!ph||!prod
   return best; }
 function specialPriceAddFor(c,prod){ if(!isSpecial(c)) return 0; const r=specialPriceRuleFor(c,prod); return r?numOr0(r.add):0; }   // บวกราคา(บาท) ของกฎที่เข้า
 function specialPricePrefixFor(c,prod){ if(!isSpecial(c)) return 'PRICE S03 ';
-  const r=specialPriceRuleFor(c,prod); if(r){ const m=String(r.step||'').toUpperCase().match(/S0[0-3]/); if(m) return 'PRICE '+m[0]+' '; }   // เข้ากฎรายสินค้า (มี Step)
-  const m2=String(c.step||'').toUpperCase().match(/S0[0-3]/); return 'PRICE '+(m2?m2[0]:'S00')+' '; }                                          // ค่ากลางของร้าน
+  const r=specialPriceRuleFor(c,prod); if(r){ const m=String(r.step||'').toUpperCase().match(/S0[0-3]/); if(m) return fshortS00Fix('PRICE '+m[0]+' ',prod); }   // เข้ากฎรายสินค้า (มี Step)
+  const m2=String(c.step||'').toUpperCase().match(/S0[0-3]/); return fshortS00Fix('PRICE '+(m2?m2[0]:'S00')+' ',prod); }                                          // ค่ากลางของร้าน
 let promoIndex={};                 // field -> Map(valueLower -> [promoObj])
 let EA_SET=new Set();              // CAT SIZE (lowercase) ที่ขายแบบชิ้น (EA) ได้
 let BARCODE_INDEX=new Map();       // barcode -> product (จาก CODE EA/PA/BP/CS)
@@ -3529,7 +3529,8 @@ function buildDealIndex(){
       const pr=x.pr, field=PROMO_FIELD[clean(pr['วิธีวัด'])]; if(!field) continue;
       if(clean(p[field]).toLowerCase()!==clean(pr['ชื่อ']).toLowerCase()) continue;
       const unit=(clean(pr['รูปแบบขาย']).toUpperCase()==='PA')?'PA':'CS';
-      const step=clean(pr['ลดราคา']).toUpperCase();
+      let step=clean(pr['ลดราคา']).toUpperCase();
+      if(step==='S00' && fshortS00(p)) step='S01';                                              /* 🏭 v5.13: ของขาดจากโรงงาน ห้ามขาย S00 */
       const dealP=numOr0(p['PRICE '+step+' '+unit]), fullP=numOr0(p['PRICE S03 '+unit]);
       if(!(dealP>0 && fullP>0 && dealP<fullP)) continue;                                       // ต้องลดจริง
       const name=clean(p['PRODUCT NAME']), off=Math.round((fullP-dealP)/fullP*100), e=parseFlashDate(pr['จบโปร']||pr['Period']);
@@ -6348,7 +6349,8 @@ async function fshortBoot(force){
     const rows=await qGviz(QCFG.quotaSheet,{sheet:'ขาดจากโรงงาน'}).then(skucRows);
     FSHORT.rows=rows; FSHORT.ts=Date.now(); FSHORT.ver++;
     fshortIndexProducts();
-    try{ renderProducts(); renderStrips(); }catch(e){}
+    try{ buildDealIndex(); _visCache=null; }catch(e){}                       /* 🏭 v5.13: ราคาดีล S00→S01 ต้องคิดใหม่ */
+    try{ renderProducts(); renderStrips(); renderCart(); }catch(e){}
     if(FSHORT.hit&&FSHORT.hit.size) console.log('[fshort] ขาดจากโรงงาน '+FSHORT.hit.size+' ตัว (จากชีท '+rows.length+' แถว)');
   }catch(e){
     /* โหลดครั้งแรกไม่ได้ = ไม่เปลี่ยนป้ายอะไร · รีเฟรชไม่ได้ = ใช้ของเดิมไปก่อน */
@@ -6362,7 +6364,7 @@ async function fshortBoot(force){
    ⚠️ MeasureBy ที่ไม่ใช่ PRODUCT NAME (CAT SIZE/CAT BRAND/VENDOR NAME) = ครอบทั้งกลุ่ม
       ต้องตรงเป๊ะเท่านั้น ห้าม fuzzy (บทเรียนเดียวกับ skuแทน) */
 function fshortIndexProducts(){
-  const m=new Map();
+  const m=new Map(), s00=new Set();
   try{
     const rows=FSHORT.rows||[];
     if(rows.length && (PRODUCTS||[]).length){
@@ -6397,13 +6399,20 @@ function fshortIndexProducts(){
          ถ้ารอบล่าสุดได้ของแล้ว/ไม่ใช่เรื่องโรงงาน = จบ ไม่ต้องไปดูรอบเก่าอีก */
       latest.forEach((v,nm)=>{
         if(clean(v.r['ได้สินค้า'])) return;                                  /* ของมาแล้ว */
+        s00.add(nm);                                                          /* 🏭 v5.13: ทุกหมายเหตุ (ไม่ใช่แค่ "โรงงาน") = ห้ามขาย S00 */
         if(clean(v.r['หมายเหตุขาด']).indexOf('โรงงาน')<0) return;        /* ทาง ข. — ไม่ใช่เรื่องโรงงาน = ป้ายปกติ */
         m.set(nm,{start:v.st,note:clean(v.r['หมายเหตุขาด'])});
       });
     }
   }catch(e){ try{ console.warn('[fshort] index:',e&&e.message); }catch(_){} }
-  FSHORT.hit=m;
+  FSHORT.hit=m; FSHORT.s00=s00;
 }
+/* 🏭 v5.13 (Surat 28/10: "สินค้าที่มีใน ขาดจากโรงงาน ถ้ามีขายราคา S00 ให้ตีกลับไป S01 ทุกตัว")
+   ใช้ทุกแถวในแท็บที่ยังขาดอยู่ (เริ่มขาด ≤ วันนี้ · ได้สินค้า ว่าง · แถวล่าสุดของสินค้านั้น) ไม่ดูหมายเหตุ
+   จุดที่เคยขายราคา S00: ร้านส่ง (Step ว่าง/S00 · กฎราคารายสินค้า Step S00) + ดีล/แฟลชเซลที่ ลดราคา = S00
+   ⚠️ โหลดตารางไม่ได้ = ราคาเดิม (S00) · แต่ตอนกดยืนยันจะรอโหลดตารางก่อน (สูงสุด 8 วิ) */
+function fshortS00(p){ try{ return !!(p && FSHORT.s00 && FSHORT.s00.has(clean(p['PRODUCT NAME']))); }catch(e){ return false; } }
+function fshortS00Fix(prefix,p){ return (prefix==='PRICE S00 ' && fshortS00(p)) ? 'PRICE S01 ' : prefix; }
 /* ป้าย "ขาดจากโรงงาน" (คืน '' = ใช้ป้ายเดิม) · Surat 12/09: ไม่เอาวันที่บนป้าย */
 function fshortBand(p,s){
   if(s!=='out' && s!=='low') return '';                        /* ของยังปกติ = ไม่ต้องบอกอะไร */
@@ -7536,6 +7545,7 @@ async function submitOrder(force, skipReco){
   }catch(e){ console.warn('[quota] ด่านสุดท้ายข้าม (fail-open)',e); }
   /* ⛔ v4.30 ด่านสุดท้ายปิดสินค้า - ตรวจซ้ำทั้งใบเสมอ (ตะกร้าค้างข้ามวันได้ จัดซื้ออาจสั่งปิดหลังลูกค้าใส่ตะกร้า)
      ยังไม่เคยโหลด/ข้อมูลเก่าเกิน ttl → รอโหลดก่อนตัดสิน · โหลดไม่ได้จริง ๆ = fail-open ตามกฎ (ไม่บล็อก) */
+  try{ if(!FSHORT.ts) await qRace(fshortBoot(true), 8000, 'ตรวจของขาดจากโรงงาน'); }catch(e){}   /* 🏭 v5.13: ราคา S00→S01 ต้องรู้ก่อนส่งบิล */
   try{ if(!SKUC.ts || Date.now()-SKUC.ts>SKUC.ttl) await qRace(skucBoot(true), 10000, 'ตรวจสินค้าปิดขาย'); }
   catch(e){ console.warn('[skuc] ข้ามด่าน ปล่อยผ่าน (fail-open):', (e&&e.message)||e); }   /* ⏱ v4.78 */
   const _cb=skucFinalCheck();
