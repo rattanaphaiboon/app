@@ -1219,7 +1219,7 @@ body.ui2 .toast{border-radius:14px}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.444';
+const APP_VERSION='3.445';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -7156,6 +7156,43 @@ function staleOwnJobs_(){
     return listMyJobs(true).filter(j=>(j.status==='in_progress'||j.status==='rejected')&&j.startedAt&&j.startedAt<mid.getTime());   // ★ v3.402: นับเฉพาะใบที่ตัวเองขับ
   }catch(e){ return []; }
 }
+/* ★★ v3.445 (user 28 ต.ค. 2026 "ขนส่งจะรู้ได้ยังไงว่าใบของตัวเองอนุมัติปิดงานแล้วหรือยัง")
+   เดิมต้องเปิดแท็บงานของฉันดูเอง ไม่มีอะไรบอกตอนคลังกดอนุมัติ/ตีกลับ
+   → จำสถานะใบของตัวเองที่เห็นล่าสุด (แยกตามอีเมล · คีย์แยกจาก store หลักที่ก้อนใหญ่) · ทุกครั้งที่ดึงชีทใบคุม (syncJobsFromSheet)
+     ใบที่ "รออนุมัติ" กลายเป็น ถูกตีกลับ = แจ้งเด้ง + สั่น + ป้าย 🆕 บนการ์ด + แถบบนสุด จนกว่าจะเปิดใบนั้น
+     ★ อนุมัติแล้ว = ไม่แจ้ง (user: "อนุมัติแล้วไม่ต้องขึ้น เพราะเขาไม่ต้องตามอะไร") — ใบย้ายไปกล่อง ✅ อนุมัติแล้ว เฉยๆ
+   · ครั้งแรกในเครื่อง = จำเฉยๆ ไม่แจ้ง (กันเด้งใบเก่าทั้งหมด) · กดปิดงานเอง/อนุมัติอัตโนมัติ = จำทันที ไม่แจ้งตัวเอง
+   · ไม่ส่งอะไรออกนอกแอป ไม่แตะ GAS */
+function jobSeenLsKey_(){ const e=String((state.user&&state.user.email)||'').toLowerCase(); return e?(CFG.storageKey+':jobSeen:'+e):''; }
+function jobSeenGet_(){ try{ const k=jobSeenLsKey_(); const v=k?JSON.parse(localStorage.getItem(k)||'null'):null; return {seen:(v&&v.seen)||null,news:(v&&v.news)||{}}; }catch(e){ return {seen:null,news:{}}; } }
+function jobSeenPut_(seen,news){ try{ const k=jobSeenLsKey_(); if(!k) return; const t=JSON.stringify({seen,news}); if(localStorage.getItem(k)!==t) localStorage.setItem(k,t); }catch(e){} }
+function jobSeenMark_(j){ try{ const g=jobSeenGet_(); const seen=g.seen||{}; seen[j.id]=j.status; delete g.news[j.id]; jobSeenPut_(seen,g.news); }catch(e){} }
+function jobNewOf_(id){ return jobSeenGet_().news[id]||''; }
+function jobNewCount_(){ return Object.keys(jobSeenGet_().news).length; }
+function jobNewClear_(id){ const g=jobSeenGet_(); if(!g.news[id]) return; delete g.news[id]; jobSeenPut_(g.seen||{},g.news); try{ updateTabBadges(); }catch(e){} }
+function jobStatusNotify_(){
+  if(!jobSeenLsKey_()) return;
+  const mine=listMyJobs(); const g=jobSeenGet_(); const first=!g.seen; const seen=g.seen||{}; const news=g.news;
+  const rj=[];
+  mine.forEach(j=>{
+    const prev=seen[j.id];
+    if(!first&&prev==='pending_approval'&&j.status==='rejected'){ news[j.id]='rejected'; rj.push(j); }
+    if(news[j.id]&&news[j.id]!==j.status) delete news[j.id];   // ยกเลิกอนุมัติ / ส่งใหม่แล้ว = ป้ายหมดความหมาย
+    seen[j.id]=j.status;
+  });
+  const ids=new Set(mine.map(j=>j.id));
+  Object.keys(seen).forEach(k=>{ if(!ids.has(k)) delete seen[k]; });
+  Object.keys(news).forEach(k=>{ if(!ids.has(k)) delete news[k]; });
+  jobSeenPut_(seen,news);
+  if(!rj.length) return;
+  const parts=[];
+  if(rj.length===1) parts.push('↩️ ใบคุม '+rj[0].id+' ถูกตีกลับ'+(rj[0].rejectReason?': '+rj[0].rejectReason:'')+' — เข้าไปแก้แล้วส่งใหม่');
+  else if(rj.length) parts.push('↩️ ถูกตีกลับ '+rj.length+' ใบ: '+rj.map(j=>j.id).join(', ')+' — เข้าไปแก้แล้วส่งใหม่');
+  const t=document.createElement('div'); t.className='toast toast-warning'; t.style.whiteSpace='pre-line';
+  t.textContent=parts.join('\n'); document.body.appendChild(t); setTimeout(()=>t.remove(),8000);   // ค้างนานกว่า toast ปกติ (3.5 วิ)
+  try{ if(navigator.vibrate) navigator.vibrate([80,60,80,60,80]); }catch(e){}
+  try{ updateTabBadges(); if(state.currentTab==='sec-driver-job'&&state.driverJobView==='list') renderMyJobsList(); }catch(e){}
+}
 function renderMyJobsList(){
   const mine=listMyJobs();
   const inProg=mine.filter(j=>j.status==='in_progress'||j.status==='rejected');
@@ -7170,7 +7207,9 @@ function renderMyJobsList(){
     // v1.48: timestamp ตามสถานะ
     const ts=j.status==='approved'?j.approvedAt:j.status==='rejected'?j.rejectedAt:j.status==='pending_approval'?j.submittedAt:j.startedAt;
     const tsLbl=j.status==='approved'?'อนุมัติ':j.status==='rejected'?'ตีกลับ':j.status==='pending_approval'?'ส่ง':'เริ่ม';
-    return `<div class="job-card" onclick="openMyJob('${esc(j.id)}')" style="cursor:pointer">
+    const _nw=jobNewOf_(j.id);   // ★ v3.445: เพิ่งเปลี่ยนสถานะ ยังไม่ได้เปิดดู
+    return `<div class="job-card" onclick="openMyJob('${esc(j.id)}')" style="cursor:pointer${_nw?';border:2px solid var(--danger);box-shadow:0 0 0 3px rgba(239,68,68,.15)':''}">
+      ${_nw?`<div style="display:inline-block;margin-bottom:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700;color:#fff;background:var(--danger)">🆕 เพิ่งถูกตีกลับ${j.rejectReason?' · '+esc(j.rejectReason):''}</div>`:''}
       <div class="job-head">
         <div>
           <div class="job-id">${esc(j.id)}</div>
@@ -7203,7 +7242,13 @@ function renderMyJobsList(){
       </div>
       <div class="card-body" id="coRecList"></div>
     </div>`:'';
+  const _nR=jobNewCount_();   // ★ v3.445: ใบที่เพิ่งถูกตีกลับ ยังไม่เปิดดู
+  const _nwBar=_nR?`<div class="card" style="padding:12px 14px;margin-bottom:12px;border:2px solid var(--danger);background:rgba(239,68,68,.07)">
+      <div class="txt-bold txt-danger" style="font-size:15px">↩️ ใบคุมถูกตีกลับ ${_nR} ใบ — ต้องแก้แล้วส่งใหม่</div>
+      <div class="txt-xs txt-muted" style="margin-top:2px">แตะการ์ดที่มีป้าย 🆕 เพื่อดูเหตุผล</div>
+    </div>`:'';
   $('activeJobContent').innerHTML=`
+    ${_nwBar}
     ${groupCard('card card-gold','🚚 กำลังทำอยู่',inProg)}
     ${groupCard('card mt-12','⏳ รออนุมัติ',pending)}
     ${groupCard('card mt-12','✅ อนุมัติแล้ว',approved)}
@@ -7361,6 +7406,7 @@ function paintCoRecList_(){
   }).join('')+(list.length>CAP?`<div class="txt-center txt-muted p-8 txt-xs">แสดง ${CAP} จาก ${list.length} — พิมพ์ค้นหาเพื่อลดจำนวน</div>`:'');
 }
 function openMyJob(id){
+  try{ jobNewClear_(id); }catch(e){}   // ★ v3.445
   state.activeJobId=id;
   state.driverJobView='detail';
   /* ★ v3.311: เปิดจากหน้าอื่น (การ์ดเตือน "งานค้างข้ามวัน" อยู่ในหน้ารับงาน sec-driver-home)
@@ -10762,6 +10808,7 @@ async function submitForApproval(){
   j.rejectedAt=null; j.rejectedBy=''; j.rejectReason='';   // ★ v3.336: ส่งใหม่หลังถูกตีกลับ = ไม่พกข้อมูลตีกลับเก่าไปกับคำขอ
   j._notifiedSubmit=0;        // v3.41: reset ให้ยิงแจ้งเตือนรอบนี้ได้ (การส่งใหม่)
   persistJobs();
+  try{ jobSeenMark_(j); }catch(e){}   // ★ v3.445: ปิดงานเอง/อนุมัติอัตโนมัติ — ไม่ต้องแจ้งตัวเอง
   showToast(_auto?'ปิดงานแล้ว ✓ อนุมัติอัตโนมัติ (ไม่มี CN)':'ส่งหัวหน้าอนุมัติแล้ว ✓','success');
   // ★ v3.281: สำเนา "การปิดงาน" ขึ้นกล่องสำรองด้วย (เดิม syncToSheets เป็น no-cors อ่านผลไม่ได้ ถ้าหายกลางทางไม่มีใครรู้)
   sbInboxPut_('submit',j.id,'',{action:'save_job',jobId:j.id,status:j.status,submittedAt:j.submittedAt,ret:j.ret||null,
@@ -13255,6 +13302,7 @@ async function syncJobsFromSheet(opts){
   enrichBills();
   persistJobs();
   loadRedeliveryJobs().catch(()=>{});   // v3.55: หลัง merge เสร็จ (คิวส่งซ้ำ derive จากบิลใน state.jobs)
+  try{ jobStatusNotify_(); }catch(e){ console.warn('jobStatusNotify_:',e); }   // ★ v3.445
   return sheetJobs.length;
 }
 
