@@ -4218,7 +4218,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.66';   // v13.66: เปิดหมวดลางานให้คลัง W2 + W3 — surat 28/10
+const APP_VERSION = '13.67';   // v13.67: เข้าด้วย Google = จำ 7 วัน (กุญแจ G2 จาก Apps Script) — surat 28/10
 // v13.62:   // v13.62: เมนู "กลุ่ม" → "แจ้งเตือนสรุปเข้าทำงาน" · สรุปส่งเข้าแอป 08:10 แทนอีเมล (Apps Script 9.109) — surat 23/10
 // v13.61:   // v13.61 (Apps Script 9.107): เมนู "กลุ่ม" แจ้งเตือนในแอปแบบ HumanSoft Notify — สรุปมาทำงานเช้า/วันเกิด + HR/หัวหน้าโพสต์ · ตัวเลขยังไม่อ่าน — surat 23/10
 // v13.60 (Apps Script 9.104): แหล่งเรียนรู้ + กดเรียนจบ · ประเมินลูกทีม (หัวหน้าให้คะแนน) · RATTANA ใช้กะที่ HR ตั้ง (การ์ดวันนี้/สรุปเดือน/หน้าวันนี้) — surat 23/10
@@ -4684,9 +4684,10 @@ const SESSION_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 let _sessionWatchTimer = null;
 function sessionSave_(fresh) {
   try {
-    if (!currentUser || !currentUser.sheetLogin) return;
     const token = sessionStorage.getItem('rfc3_idToken');
-    if (!token || !(token.indexOf('S2.') === 0 || token.indexOf('SHEET:') === 0)) return;   // v13.10: + กุญแจ S2
+    const g2 = !!token && token.indexOf('G2.') === 0;   // v13.67: กุญแจ 7 วันของคนที่เข้าด้วย Google
+    if (!currentUser || !(currentUser.sheetLogin || g2)) return;
+    if (!token || !(g2 || token.indexOf('S2.') === 0 || token.indexOf('SHEET:') === 0)) return;   // v13.10: + กุญแจ S2
     const old = LS.get('session', null);
     const keep = !fresh && old && old.exp > Date.now() && old.token === token;   // อัปเดตข้อมูลคน (isPTT ฯลฯ) ไม่ต่ออายุ — ครบ 7 วันนับจากตอนเข้า
     const tExp = sessionTokenExp_(token);   // v13.10: กุญแจ S2 มีวันหมดอายุที่เซิร์ฟเวอร์บังคับอยู่ในตัว — ใช้ค่านั้น
@@ -4695,8 +4696,8 @@ function sessionSave_(fresh) {
   } catch (_) {}
 }
 function sessionClear_() { LS.del('session'); }
-function sessionTokenExp_(tok) { const m = /^S2\.[^.]+\.(\d{12,15})\./.exec(String(tok || '')); return m ? +m[1] : 0; }
-function isSheetToken_(tok) { tok = String(tok || ''); return tok.indexOf('S2.') === 0 || tok.indexOf('SHEET:') === 0; }
+function sessionTokenExp_(tok) { const m = /^[SG]2\.[^.]+\.(\d{12,15})\./.exec(String(tok || '')); return m ? +m[1] : 0; }   // v13.67: + G2
+function isSheetToken_(tok) { tok = String(tok || ''); return tok.indexOf('S2.') === 0 || tok.indexOf('G2.') === 0 || tok.indexOf('SHEET:') === 0; }   // v13.67: + G2
 /* v13.10: เซิร์ฟเวอร์ไม่รับกุญแจเข้าระบบ (ครบ 7 วัน · รหัสผ่านถูกเปลี่ยน · บัญชีถูกปิด · กุญแจแบบเก่าหลัง Apps Script 9.53)
    → ลืมเซสชันในเครื่อง แล้วพาไปหน้าเข้าสู่ระบบ — สแกนที่ค้างในเครื่องไม่หาย (ส่งขึ้นระบบเองหลังเข้าใหม่) · บัญชี Google ใช้ทางเดิม */
 let _authFailShown = false;
@@ -4855,6 +4856,24 @@ async function authorizeUser(email, googleName, picture) {
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('appScreen').style.display = 'block';
   initApp();
+  googleKeep_();   // v13.67
+}
+/* v13.67 (surat 28/10 "Sign in with Google ให้เป็น 7 วันด้วย"): idToken ของ Google หมดอายุใน 1 ชม. และเก็บแค่ใน sessionStorage
+   → ปิดแอปแล้วต้องกด Google ใหม่ทุกครั้ง · แลกเป็นกุญแจ G2 อายุ 7 วันจาก Apps Script แล้วจำแบบเดียวกับใส่รหัส
+   Apps Script รุ่นเก่ายังไม่มี googleSession = ใช้ idToken ของ Google ต่อไปเหมือนเดิม (ไม่จำ) */
+async function googleKeep_() {
+  try {
+    const gTok = getCurrentIdToken();
+    if (!gTok || isSheetToken_(gTok) || !config.appsScriptUrl || !currentUser) return;
+    const json = await apiPost(config.appsScriptUrl, { action: 'googleSession', idToken: gTok });
+    const t = json && json.ok && String(json.sessionToken || '');
+    if (!t || t.indexOf('G2.') !== 0 || getCurrentIdToken() !== gTok) return;
+    if (json.empId && currentUser && String(json.empId) !== String(currentUser.empId)) return;
+    sessionStorage.setItem('rfc3_idToken', t);
+    sessionStorage.removeItem('rfc3_idTokenExp');   // กุญแจ G2 มีวันหมดอายุในตัว — ไม่ใช้เวลา 1 ชม. ของ Google แล้ว
+    sessionSave_(true);
+    try { startSessionWatch_(); } catch (_) {}
+  } catch (e) { console.warn('[googleKeep_]', e && e.message); }
 }
 
 /* ── เข้าสู่ระบบด้วยรหัสพนักงาน/รหัสผ่าน (ชีท User slip) ── */
