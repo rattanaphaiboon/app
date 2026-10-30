@@ -438,6 +438,10 @@
     .asg-row:last-child{border-bottom:none}
     .asg-row .nm{flex:1;min-width:0;font-size:13.5px;font-weight:600;color:var(--text);overflow-wrap:anywhere}
     .asg-row .ct{font-size:10.5px;color:var(--muted);font-weight:400;display:block;margin-top:2px}
+    /* v6.6: ป้ายชื่อผู้ดูแล (เฉพาะตอนดูทั้งคลัง) */
+    .asg-row .own{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:8px;
+      background:var(--mint);color:var(--navy-mid);font-weight:600;font-size:10px;white-space:nowrap}
+    .asg-row .own.none{background:#fdf0e3;color:var(--warning)}
     .asg-row .ok{flex:none;font-size:11px;font-weight:700;color:var(--success)}
     .asg-row .go{flex:none;color:var(--muted);font-size:17px}
     .asg-chip{display:inline-flex;gap:5px;align-items:center;background:var(--row-alt);border:1px solid var(--border);
@@ -1172,8 +1176,6 @@
     <!-- v6.0: รายการที่คนนี้ต้องเช็ค (จากชีทแบ่งงาน) — ไม่มีชื่อในไฟล์ = ซ่อนการ์ด เห็นทุกตัวเหมือนเดิม -->
     <div class="asg-card" id="assignCard" style="display:none"></div>
 
-    <!-- v6.4: ของที่เพิ่งขายออก (วันขายล่าสุดก่อนวันนี้) จากแท็บ DSDC ไฟล์ Check Out -->
-    <div class="asg-card" id="soldCard" style="display:none"></div>
 
     <!-- Cross-device sync status — โชว์ว่าในระบบมีรายการของ "ชื่อนี้" กี่รายการ + ปุ่มดึงให้ตรง -->
     <div id="syncStatus" class="sync-bar mt-8" style="display:none"></div>
@@ -1438,7 +1440,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.5';
+const APP_VERSION = 'v6.6';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -2198,12 +2200,34 @@ async function handleGoogleLogin(r) {
   }
 }
 
+// ══════════ v6.6: กันยิงซ้ำ (single-flight) ══════════
+//   ★ วัดจากของจริง: ตอนเปิดแอป แคตตาล็อกสินค้าถูกยิงพร้อมกัน 3 เส้น
+//     เส้นแรก 2.9 วิ เส้นสาม 6.8 วิ — Google เข้าคิวให้ ยิ่งยิงซ้ำยิ่งช้า
+//   onceFetch: ถ้ามีเส้นเดิมค้างอยู่ (หรือเพิ่งเสร็จภายใน holdMs) ให้ใช้ผลเส้นนั้น
+//   holdMs สั้น ๆ พอกลบช่วง "เปิดแอปแล้วทุกส่วนเรียกพร้อมกัน" ไม่ทำให้ข้อมูลเก่าค้าง
+const _onceP = {};
+function onceFetch(key, fn, holdMs) {
+  if (_onceP[key]) return _onceP[key];
+  const p = (async () => fn())();
+  _onceP[key] = p;
+  const clear = () => {
+    if (holdMs) setTimeout(() => { if (_onceP[key] === p) delete _onceP[key]; }, holdMs);
+    else if (_onceP[key] === p) delete _onceP[key];
+  };
+  p.then(clear, clear);
+  return p;
+}
+// รอให้แคตตาล็อกสินค้า (ก้อนใหญ่สุด) โหลดเสร็จก่อน แล้วค่อยยิงเส้นรอง
+function catalogIdle() { return _onceP['sheet'] ? _onceP['sheet'].catch(() => {}) : Promise.resolve(); }
+
 async function loadUsersSheet() {
-  const url = `https://docs.google.com/spreadsheets/d/${AUTH_CONFIG.usersSheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(AUTH_CONFIG.usersSheetName)}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error('users fetch failed');
-  allUsers = parseCsv(await res.text());
-  return allUsers;
+  return onceFetch('users', async () => {   // v6.6: ล็อกอินกับ ensureUsersLoaded เคยยิงพร้อมกัน
+    const url = `https://docs.google.com/spreadsheets/d/${AUTH_CONFIG.usersSheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(AUTH_CONFIG.usersSheetName)}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('users fetch failed');
+    allUsers = parseCsv(await res.text());
+    return allUsers;
+  }, 10000);
 }
 // Lazy-load users list when restoring session from localStorage (no fresh login)
 async function ensureUsersLoaded() {
@@ -3179,11 +3203,13 @@ function stopDataPoll() { if (dataPollTimer) { clearInterval(dataPollTimer); dat
 // + CP-CT = IB W1, IB W2, IB W3, IB W4, IB C4 (last received date per warehouse)
 const NEEDED_COLS = 'A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,BC,BD,BE,BM,BN,BO,BP,BQ,BR,CP,CQ,CR,CS,CT,CU';
 async function fetchSheet() {
-  const tq  = encodeURIComponent(`select ${NEEDED_COLS}`);
-  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&tq=${tq}`;
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  return parseCsv(await res.text());
+  return onceFetch('sheet', async () => {   // ★ v6.6: จุดที่ช้าที่สุด เคยยิงซ้ำ 3 เส้นตอนเปิดแอป
+    const tq  = encodeURIComponent(`select ${NEEDED_COLS}`);
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&tq=${tq}`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return parseCsv(await res.text());
+  }, 3000);
 }
 
 function buildIndex(data) {
@@ -3201,8 +3227,7 @@ function buildIndex(data) {
     productByKey[productKey(row)] = row;
   });
   remergeSpecialCatalogs();  // v4.21: refresh main (ทุก 60 วิ) reset index — ต้อง merge สินค้าพิเศษกลับ ไม่งั้น pickCode/สแกนหาไม่เจอ
-  assignBuild(); renderAssign();   // v6.0: แคตตาล็อกเปลี่ยน → จับคู่รายการแบ่งงานใหม่
-  soldBuild(); renderSold();       // v6.4
+  assignBuild(); soldBuild(); renderAssign();   // v6.0: แคตตาล็อกเปลี่ยน → จับคู่รายการแบ่งงานใหม่
 }
 // นำสินค้าพิเศษ (Colgate/Chaindrite ที่โหลดแล้ว) กลับเข้า index หลัง buildIndex reset
 function remergeSpecialCatalogs() {
@@ -3811,6 +3836,7 @@ const ASSIGN_GID   = '453477940';
 const ASSIGN_CACHE = 'stock_assign_v1';
 const ASSIGN_TTL   = 6 * 60 * 60 * 1000;   // 6 ชม.
 let assignRows = null, assignIdx = null, assignLoading = false, assignView = 'left';
+let assignOwner = null;   // v6.6: คีย์สินค้า → ชื่อคนที่รับผิดชอบ (ใช้ตอนดูทั้งคลัง)
 const asgNorm = s => String(s || '').replace(/\s+/g, '').toLowerCase();
 
 async function loadAssign(force) {
@@ -3825,6 +3851,7 @@ async function loadAssign(force) {
   if (assignLoading) return;
   assignLoading = true;
   try {
+    await catalogIdle();   // v6.6: อย่าไปแย่งคิวกับแคตตาล็อกสินค้า
     const url = `https://docs.google.com/spreadsheets/d/${ASSIGN_SHEET_ID}/gviz/tq?tqx=out:csv&gid=${ASSIGN_GID}`;
     const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -3856,6 +3883,15 @@ function assignBuild() {
   });
   // v6.5: ทำชุดคีย์ไว้ตัดกับรายการขายออก
   Object.values(assignIdx).forEach(a => { a.keySet = new Set(a.items.map(i => i.key)); });
+  // v6.6: ย้อนกลับ คีย์สินค้า → ชื่อผู้ดูแล (สินค้าตัวเดียวอาจมีมากกว่า 1 คน)
+  assignOwner = {};
+  Object.keys(assignIdx).forEach(who => {
+    assignIdx[who].items.forEach(it => {
+      const cur = assignOwner[it.key];
+      if (!cur) assignOwner[it.key] = who;
+      else if (cur.split(', ').indexOf(who) < 0) assignOwner[it.key] = cur + ', ' + who;
+    });
+  });
 }
 // งานของคนที่เลือกชื่อไว้ตอนนี้ — ไม่มีชื่อในไฟล์คืน null
 // ══════════ v6.4: ของที่เพิ่งขายออก (แท็บ DSDC ไฟล์ Check Out) ══════════
@@ -3895,6 +3931,7 @@ async function loadSold(force) {
   if (soldLoading) return;
   soldLoading = true;
   try {
+    await catalogIdle();   // v6.6: อย่าไปแย่งคิวกับแคตตาล็อกสินค้า
     const today = soldTodayStr();
     const d1 = await soldQuery(`select max(A) where G='${wh}' and A < '${today}'`);
     const day = ((d1[1] && d1[1][0]) || '').trim();
@@ -3928,68 +3965,52 @@ function soldBuild() {
   });
   soldStat = { total: soldRaw.rows.length, miss };
 }
-// v6.5: ตัดรายการขายออกกับไฟล์แบ่งงาน — เห็นเฉพาะของที่ "ขายออก และ เป็นงานของเรา"
-//   ไม่มีชื่อในไฟล์แบ่งงาน = ไม่มีให้ตัด เห็นทั้งคลังเหมือนเดิม
-const SOLD_SCOPE_KEY = 'stock_sold_scope_v1';
-let soldScope = (() => { try { return localStorage.getItem(SOLD_SCOPE_KEY) || 'mine'; } catch { return 'mine'; } })();
-function soldCanSplit() {
+// ══════════ v6.6: กรอบเดียว สลับแหล่งด้วยชิป ══════════
+//   โหมด: asg = งานของฉัน (ไฟล์แบ่งงาน) · soldmine = เพิ่งขายออก∩งานของฉัน · soldall = ขายออกทั้งคลัง
+//   โชว์เฉพาะชิปที่ "มีของให้ดูจริง" · ไม่มีสักโหมด = ซ่อนการ์ดทั้งใบ
+const CHK_MODE_KEY = 'stock_chk_mode_v1';
+let chkMode = (() => { try { return localStorage.getItem(CHK_MODE_KEY) || ''; } catch { return ''; } })();
+function chkHasAsg()  { const m = assignMine(); return !!(m && m.items && m.items.length); }
+function chkHasSold() { return !!(soldItems && soldItems.length); }
+function chkMineSold() {
   const m = assignMine();
-  return !!(m && m.keySet && m.keySet.size && soldItems && soldItems.length);
+  if (!m || !m.keySet || !m.keySet.size || !soldItems) return [];
+  return soldItems.filter(it => m.keySet.has(it.key));
 }
-function soldList() {
-  if (!soldItems) return [];
-  if (soldScope !== 'mine' || !soldCanSplit()) return soldItems;
-  const ks = assignMine().keySet;
-  return soldItems.filter(it => ks.has(it.key));
+function chkModes() {
+  const out = [];
+  if (chkHasAsg()) out.push('asg');
+  if (chkHasSold()) { if (chkHasAsg()) out.push('soldmine'); out.push('soldall'); }
+  return out;
 }
-function soldSetScope(v) {
-  soldScope = (v === 'all') ? 'all' : 'mine';
-  try { localStorage.setItem(SOLD_SCOPE_KEY, soldScope); } catch {}
-  renderSold();
-  if (document.getElementById('assignModal').classList.contains('open') && assignSrc === 'sold') assignList();
+// ของที่เพิ่งขายออกและเป็นงานเรา = สั้นที่สุดและตรงจุดที่สุด → ตั้งเป็นค่าเริ่มต้น
+function chkDefault() { const ms = chkModes(); return ms.includes('soldmine') ? 'soldmine' : (ms[0] || ''); }
+function chkCur() { const ms = chkModes(); return ms.includes(chkMode) ? chkMode : chkDefault(); }
+function chkList(m) {
+  m = m || chkCur();
+  if (m === 'asg') { const a = assignMine(); return a ? a.items : []; }
+  if (m === 'soldmine') return chkMineSold();
+  if (m === 'soldall') return soldItems || [];
+  return [];
+}
+function chkMiss(m) {
+  m = m || chkCur();
+  if (m === 'asg') { const a = assignMine(); return (a && a.miss) || 0; }
+  return (soldStat && soldStat.miss) || 0;
+}
+function chkLabel(m) {
+  return m === 'asg' ? 'งานของฉัน' : m === 'soldmine' ? 'เพิ่งขายออก' : 'ขายออกทั้งคลัง';
+}
+function chkSet(m) {
+  chkMode = m;
+  try { localStorage.setItem(CHK_MODE_KEY, m); } catch {}
+  renderAssign();
+  if (document.getElementById('assignModal')?.classList.contains('open')) assignList();
 }
 
 function soldDone(it) { return !!(countSession && countSession.items[it.key]); }
 
-function renderSold() {
-  const el = document.getElementById('soldCard');
-  if (!el) return;
-  if (!soldItems || !soldItems.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
-  const split = soldCanSplit();
-  // ★ นับ "ของฉัน" จากชุดงานตรง ๆ ไม่ใช่จากรายการที่กำลังแสดง ไม่งั้นพอสลับไปทั้งคลังเลขจะเพี้ยน
-  const mineN = split ? soldItems.filter(it => assignMine().keySet.has(it.key)).length : 0;
-  const list  = soldList();
-  const hit = list.filter(soldDone).length;
-  const tot = list.length;
-  const pct = tot ? Math.round(hit * 100 / tot) : 0;
-  const left = tot - hit;
-  if (!tot && split && soldScope === 'mine') {   // v6.5: ของเราไม่มีตัวไหนออกเลย — ยังให้สลับดูทั้งคลังได้
-    el.style.display = 'block';
-    el.innerHTML = `
-      <div class="asg-head"><span>📤</span><span>ของที่เพิ่งขายออก</span>
-        <span class="who" data-nolang="1">${formatThaiDate(String(soldRaw.day).replace(/\//g,'-'))}</span></div>
-      <div style="font-size:12.5px;color:var(--muted);margin-top:8px">ของที่คุณรับผิดชอบ ไม่มีตัวไหนขายออกวันนั้น</div>
-      <button class="asg-chip" style="margin-top:9px" onclick="soldSetScope('all')" type="button">ดูทั้งคลัง ${dcNum(soldItems.length)}</button>`;
-    return;
-  }
-  el.style.display = 'block';
-  el.innerHTML = `
-    <div class="asg-head"><span>📤</span><span>ของที่เพิ่งขายออก</span>
-      <span class="who" data-nolang="1">${formatThaiDate(String(soldRaw.day).replace(/\//g,'-'))}</span></div>
-    ${split ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:9px">
-      <button class="asg-chip${soldScope === 'mine' ? ' on' : ''}" onclick="soldSetScope('mine')" type="button">ของฉัน ${dcNum(mineN)}</button>
-      <button class="asg-chip${soldScope === 'all' ? ' on' : ''}" onclick="soldSetScope('all')" type="button">ทั้งคลัง ${dcNum(soldItems.length)}</button>
-    </div>` : ''}
-    <div class="asg-bar"><i style="width:${pct}%;background:var(--blue)"></i></div>
-    <div class="asg-nums">
-      <span>เช็คแล้ว <b>${dcNum(hit)}</b>/${dcNum(tot)}</span>
-      <span>เหลือ <b style="color:${left ? 'var(--warning)' : 'var(--success)'}">${dcNum(left)}</b></span>
-      <span>${pct}%</span>
-      ${soldStat.miss ? `<span title="บาร์โค้ดในใบขายไม่มีในแคตตาล็อก">⚠ จับคู่ไม่ได้ ${soldStat.miss}</span>` : ''}
-    </div>
-    <button class="asg-btn${left ? '' : ' done'}" onclick="assignOpen('sold')" type="button">
-      ${left ? 'ดูรายการที่เหลือ' : '✓ เช็คครบแล้ว — ดูรายการ'}</button>`;
-}
+function renderSold() { renderAssign(); }   // v6.6: การ์ดเดียวแล้ว
 
 function assignMine() {
   const who = counterDisplayName();
@@ -4000,36 +4021,40 @@ function assignDone(it) { return !!(countSession && countSession.items[it.key]);
 function renderAssign() {
   const el = document.getElementById('assignCard');
   if (!el) return;
-  const mine = assignMine();
-  if (!mine || !mine.items.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
-  const hit = mine.items.filter(assignDone).length;
-  const tot = mine.items.length;
-  const pct = tot ? Math.round(hit * 100 / tot) : 0;
+  const ms = chkModes();
+  if (!ms.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const cur = chkCur();
+  const list = chkList(cur);
+  const hit  = list.filter(assignIsDone).length;
+  const tot  = list.length;
+  const pct  = tot ? Math.round(hit * 100 / tot) : 0;
   const left = tot - hit;
+  const miss = chkMiss(cur);
+  const isSold = cur !== 'asg';
+  const day = (soldRaw && soldRaw.day) ? formatThaiDate(String(soldRaw.day).replace(/\//g, '-')) : '';
   el.style.display = 'block';
   el.innerHTML = `
-    <div class="asg-head"><span>📋</span><span>รายการที่ต้องเช็ค</span>
-      <span class="who">${counterDisplayName()}</span></div>
-    <div class="asg-bar"><i style="width:${pct}%"></i></div>
+    <div class="asg-head"><span>${isSold ? '📤' : '📋'}</span><span>รายการที่ต้องเช็ค</span>
+      <span class="who">${counterDisplayName() || ''}</span></div>
+    ${ms.length > 1 ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:9px">${ms.map(m =>
+      `<button class="asg-chip${m === cur ? ' on' : ''}" onclick="chkSet('${m}')" type="button">${chkLabel(m)} ${dcNum(chkList(m).length)}</button>`
+    ).join('')}</div>` : ''}
+    ${isSold && day ? `<div style="font-size:11px;color:var(--muted);margin-top:7px">ขายออกวันที่ <b data-nolang="1">${day}</b></div>` : ''}
+    <div class="asg-bar"><i style="width:${pct}%;background:${isSold ? 'var(--blue)' : 'var(--success)'}"></i></div>
     <div class="asg-nums">
-      <span>เช็คแล้ว <b>${hit.toLocaleString()}</b>/${tot.toLocaleString()}</span>
-      <span>เหลือ <b style="color:${left ? 'var(--warning)' : 'var(--success)'}">${left.toLocaleString()}</b></span>
+      <span>เช็คแล้ว <b>${dcNum(hit)}</b>/${dcNum(tot)}</span>
+      <span>เหลือ <b style="color:${left ? 'var(--warning)' : 'var(--success)'}">${dcNum(left)}</b></span>
       <span>${pct}%</span>
-      ${mine.miss ? `<span title="ชื่อในไฟล์แบ่งงานไม่ตรงกับแคตตาล็อก">⚠ จับคู่ไม่ได้ ${mine.miss}</span>` : ''}
+      ${miss ? `<span title="จับคู่กับแคตตาล็อกไม่ได้">⚠ จับคู่ไม่ได้ ${dcNum(miss)}</span>` : ''}
     </div>
-    <button class="asg-btn${left ? '' : ' done'}" onclick="assignOpen()" type="button">
-      ${left ? 'ดูรายการที่เหลือ' : '✓ เช็คครบแล้ว — ดูรายการ'}</button>`;
+    ${tot ? `<button class="asg-btn${left ? '' : ' done'}" onclick="assignOpen()" type="button">
+      ${left ? 'ดูรายการที่เหลือ' : '✓ เช็คครบแล้ว — ดูรายการ'}</button>`
+          : `<div style="font-size:12.5px;color:var(--muted);margin-top:9px">ของที่คุณรับผิดชอบ ไม่มีตัวไหนขายออกวันนั้น</div>`}`;
 }
 
-let assignSrc = 'asg';   // v6.4: กล่องเดียว ใช้ได้ 2 แหล่ง (แบ่งงาน / เพิ่งขายออก)
-function assignCur() {
-  if (assignSrc === 'sold') return soldList();
-  const m = assignMine();
-  return m ? m.items : [];
-}
+function assignCur() { return chkList(); }   // v6.6
 function assignIsDone(it) { return !!(countSession && countSession.items[it.key]); }
-function assignOpen(src) {
-  assignSrc = (src === 'sold') ? 'sold' : 'asg';
+function assignOpen() {
   assignView = 'left';
   document.getElementById('assignSearch').value = '';
   assignTab('left');
@@ -4052,12 +4077,13 @@ function assignList() {
   const host = document.getElementById('assignList');
   if (!host) return;
   const q = asgNorm(document.getElementById('assignSearch')?.value);
+  const showOwn = chkCur() === 'soldall' && assignOwner;   // v6.6: ดูทั้งคลัง → บอกว่าใครดูแล
+  const ownOf = k => (showOwn && assignOwner[k]) || '';
   const rows = assignCur()
     .filter(it => (assignView === 'done') === assignIsDone(it))
-    .filter(it => !q || asgNorm(it.name).includes(q) || asgNorm(it.cat).includes(q));
+    .filter(it => !q || asgNorm(it.name).includes(q) || asgNorm(it.cat).includes(q) || asgNorm(ownOf(it.key)).includes(q));
   const ttl = document.getElementById('assignTitle');
-  if (ttl) ttl.textContent = (assignSrc === 'sold' ? '📤 ของที่เพิ่งขายออก' : '📋 รายการที่ต้องเช็ค')
-    + ` (${rows.length.toLocaleString()})`;
+  if (ttl) ttl.textContent = `${chkCur() === 'asg' ? '📋' : '📤'} ${chkLabel(chkCur())} (${rows.length.toLocaleString()})`;
   if (!rows.length) {
     host.innerHTML = `<div style="text-align:center;padding:26px 10px;color:var(--muted);font-size:13px">
       ${q ? 'ไม่พบรายการที่ค้นหา' : (assignView === 'done' ? 'ยังไม่ได้เช็คสักตัว' : '✓ เช็คครบแล้ว')}</div>`;
@@ -4065,7 +4091,8 @@ function assignList() {
   }
   host.innerHTML = rows.slice(0, 300).map(it => `
     <button class="asg-row" onclick="assignPick('${encodeURIComponent(it.key)}')" type="button">
-      <span class="nm">${it.name}${it.cat ? `<span class="ct">${it.cat}</span>` : ''}</span>
+      <span class="nm">${it.name}${it.cat || ownOf(it.key) ? `<span class="ct">${it.cat || ''}${ownOf(it.key)
+        ? `<span class="own">👤 ${ownOf(it.key)}</span>` : (showOwn ? '<span class="own none">ไม่มีคนดูแล</span>' : '')}</span>` : ''}</span>
       ${assignIsDone(it) ? '<span class="ok">✓ เช็คแล้ว</span>' : '<span class="go">›</span>'}
     </button>`).join('')
     + (rows.length > 300 ? `<div style="text-align:center;padding:10px;color:var(--muted);font-size:11.5px">แสดง 300 จาก ${rows.length.toLocaleString()} รายการ · พิมพ์ค้นหาเพื่อดูตัวที่เหลือ</div>` : '');
@@ -4216,6 +4243,9 @@ async function syncDraftNow() {
 async function fetchRemoteDraft(wh) {
   const key = userKey();
   if (!SUPA_URL || !currentUser || !key) return null;
+  return onceFetch(`draft:${wh}:${key}`, () => fetchRemoteDraft_(wh, key), 1200);   // v6.6
+}
+async function fetchRemoteDraft_(wh, key) {
   try {
     const q = `/stock_draft?wh=eq.${encodeURIComponent(wh)}&counter_key=eq.${encodeURIComponent(key)}&select=*`;
     const res = await supaFetch(q, { cache:'no-store' });
@@ -4863,11 +4893,17 @@ function thumbHtml(name, product, big) {
 // Putaway summary: { "WH__key": { pallets, pieces } } — สินค้าที่วางไว้จุดวางแล้ว หักออกจากสต็อก
 let putawaySummary = {};
 
+// v6.6: loadPutaway กับ loadPutawaySummary ยิง endpoint เดียวกัน (~3.8 วิ) — รวมเป็นเส้นเดียว
+function fetchPutawayJson() {
+  return onceFetch('putaway', async () => {
+    const res = await fetch(COUNT_SAVE_URL + '?action=putaway', { cache: 'no-store' });
+    return res.json();
+  }, 2500);
+}
 async function loadPutawaySummary() {
   if (!COUNT_SAVE_URL) return;
   try {
-    const res = await fetch(COUNT_SAVE_URL + '?action=putaway', { cache: 'no-store' });
-    const json = await res.json();
+    const json = await fetchPutawayJson();   // v6.6
     const sum = {};
     (json.rows || []).forEach(r => {
       const wh = String(r.warehouse || '').toUpperCase();
@@ -6280,7 +6316,6 @@ function renderScrapList() {
   document.getElementById('scrapN').textContent = scrapItems.length;
   updateSumFab();   // v4.79: รายการเปลี่ยน → ปุ่มลอยโชว์/ซ่อน + ตัวเลขอัปเดต
   renderAssign();   // v6.0: นับเพิ่ม/ลบ → ความคืบหน้าของรายการที่ต้องเช็คขยับตาม
-  renderSold();     // v6.4
   if (!scrapItems.length) { card.style.display = 'none'; list.innerHTML = ''; return; }
   card.style.display = 'block';
   list.innerHTML = scrapItems.map(it => `
@@ -7417,8 +7452,7 @@ async function loadPutaway(force) {
   if (!COUNT_SAVE_URL) { body.innerHTML='<div class="txt-center txt-muted" style="padding:24px">ยังไม่ได้ตั้งค่า URL</div>'; return; }
   if (force) body.innerHTML='<div class="txt-center txt-muted" style="padding:24px">⏳ กำลังโหลด...</div>';
   try {
-    const res = await fetch(COUNT_SAVE_URL+'?action=putaway',{cache:'no-store'});
-    const json = await res.json();
+    const json = await fetchPutawayJson();   // v6.6
     putawayCache = json.rows||[];
     renderPutaway();
   } catch(e){ body.innerHTML=`<div class="txt-center" style="padding:24px;color:var(--danger)">โหลดไม่สำเร็จ: ${e.message||e}</div>`; }
