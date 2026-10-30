@@ -1522,7 +1522,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.14';
+const APP_VERSION = 'v6.15';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -7134,6 +7134,30 @@ async function loadCheckProgress(force) {
   renderCheckProgress();
 }
 
+// v6.15: ขาด/เกิน กี่ SKU ของคนนั้นในวันนั้น — อ่านจากประวัติที่แดชบอร์ดโหลดอยู่แล้ว
+//   ★ ส่งหลายรอบในวันเดียว สินค้าตัวเดียวอาจมีหลายแถว → เอาสถานะ "ครั้งล่าสุด" ของแต่ละ SKU
+//   ยังไม่ได้โหลดประวัติ = คืน null แล้วไม่ต้องโชว์ (โชว์ 0 จะเข้าใจผิดว่าไม่มีขาดเกิน)
+function chkDiffCount(day, wh, who) {
+  if (!historyLoaded || !historyCache) return null;
+  const w = String(wh || '').toUpperCase();
+  const n = asgNorm(who);
+  const last = {};
+  historyCache.forEach(r => {
+    if (!r.key || !r.status) return;
+    if (String(r.savedAt || '').slice(0, 10) !== day) return;
+    if (String(r.warehouse || '').toUpperCase() !== w) return;
+    if (asgNorm(r.counterName) !== n) return;
+    const cur = last[r.key];
+    if (!cur || String(r.savedAt) >= cur.t) last[r.key] = { t: String(r.savedAt), s: r.status };
+  });
+  let short = 0, over = 0;
+  Object.keys(last).forEach(k => {
+    if (last[k].s === 'ขาด') short++;
+    else if (last[k].s === 'เกิน') over++;
+  });
+  return { short, over };
+}
+
 // เอาเฉพาะแถวล่าสุดของแต่ละ (วัน + คลัง + ผู้เช็ค) — แถวเก่ากว่าคือรอบส่งก่อนหน้าของวันเดียวกัน
 function chkProgLatest(rows) {
   const best = {};
@@ -7171,7 +7195,12 @@ function renderCheckProgress() {
     </div>`;
     return;
   }
-  const sum = rows.reduce((a, r) => ({ t: a.t + r.total, d: a.d + r.done, m: a.m + r.miss }), { t: 0, d: 0, m: 0 });
+  rows.forEach(r => { r.diff = chkDiffCount(r.day, r.warehouse, r.counterName); });   // v6.15
+  const sum = rows.reduce((a, r) => ({
+    t: a.t + r.total, d: a.d + r.done, m: a.m + r.miss,
+    s: a.s + ((r.diff && r.diff.short) || 0), o: a.o + ((r.diff && r.diff.over) || 0)
+  }), { t: 0, d: 0, m: 0, s: 0, o: 0 });
+  const anyDiff = rows.some(r => r.diff);
   const full = rows.filter(r => r.miss === 0).length;
   host.innerHTML = `<div class="card" style="padding:14px 16px">
     <div class="chkp-head"><span>✅</span><span>เช็คครบไหม</span>
@@ -7181,6 +7210,8 @@ function renderCheckProgress() {
       <span>เช็คแล้ว <b style="color:var(--success)">${dcNum(sum.d)}</b></span>
       <span>ยังไม่เช็ค <b style="color:${sum.m ? 'var(--danger)' : 'var(--success)'}">${dcNum(sum.m)}</b></span>
       <span>${sum.t ? Math.round(sum.d * 100 / sum.t) : 0}%</span>
+      ${anyDiff ? `<span>🔴 ขาด <b style="color:var(--danger)">${dcNum(sum.s)}</b> SKU</span>
+      <span>🟢 เกิน <b style="color:var(--success)">${dcNum(sum.o)}</b> SKU</span>` : ''}
     </div>
     <div class="chkp-list">${rows.slice(0, 60).map((r, i) => `
       <div class="chkp-row">
@@ -7189,7 +7220,9 @@ function renderCheckProgress() {
             <span class="wh" data-nolang="1">${r.warehouse}${r.catalog ? ' ' + r.catalog : ''}</span></div>
           <div class="bar"><i style="width:${r.pct}%;background:${r.miss ? 'var(--warning)' : 'var(--success)'}"></i></div>
           <div class="n">เช็คแล้ว <b>${dcNum(r.done)}</b>/${dcNum(r.total)} · ยังไม่เช็ค
-            <b style="color:${r.miss ? 'var(--danger)' : 'var(--success)'}">${dcNum(r.miss)}</b> · ${r.pct}%</div>
+            <b style="color:${r.miss ? 'var(--danger)' : 'var(--success)'}">${dcNum(r.miss)}</b> · ${r.pct}%${
+            r.diff ? ` · 🔴 ขาด <b style="color:var(--danger)">${dcNum(r.diff.short)}</b> SKU
+                      · 🟢 เกิน <b style="color:var(--success)">${dcNum(r.diff.over)}</b> SKU` : ''}</div>
         </div>
         ${r.miss ? `<button class="asg-chip" onclick="chkProgOpen(${i})" type="button">ดูที่ยังไม่เช็ค</button>`
                  : '<span class="chkp-ok">✓ ครบ</span>'}
