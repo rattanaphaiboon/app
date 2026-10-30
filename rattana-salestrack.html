@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana SalesTrack v1.3</title>
+<title>Rattana SalesTrack v1.4</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -94,7 +94,8 @@ header{background:var(--navy);color:#fff;padding:12px 16px;position:sticky;top:0
 .sales-tbl td{padding:10px 10px;font-size:13px;vertical-align:middle}
 .sales-tbl td.num{text-align:center;font-variant-numeric:tabular-nums;font-weight:600}
 .sales-tbl .sp-info{display:flex;gap:10px;align-items:center}
-.sp-avatar{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--navy),var(--navy-mid));color:var(--gold);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0}
+.sp-avatar{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--navy),var(--navy-mid));color:var(--gold);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0;overflow:hidden;border:1.5px solid var(--border)}
+.sp-avatar img{width:100%;height:100%;object-fit:cover;display:block}
 .sp-name{font-weight:600;font-size:13px}
 .sp-sub{font-size:11px;color:var(--muted)}
 .progress{width:100%;max-width:120px;background:var(--border);height:8px;border-radius:4px;overflow:hidden;margin:4px auto 2px}
@@ -185,7 +186,7 @@ body.dark .demo-note{color:#f1c86a}
 
 <header>
   <div class="logo-text">Rattana <span>SalesTrack</span></div>
-  <span class="badge-ver" id="verBadge">v1.3</span>
+  <span class="badge-ver" id="verBadge">v1.4</span>
   <div class="header-right">
     <input type="date" id="dateFilter" class="input" style="height:38px;background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.2)">
     <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">↻</button>
@@ -430,15 +431,59 @@ body.dark .demo-note{color:#f1c86a}
 /* =============== CONFIG =============== */
 const SHEET_ID = '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI';
 const SHEET_NAME = 'Customer';
+const EMP_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';
+const EMP_SHEET_NAME = 'นำเข้า-ข้อมูลพนักงาน';
 const TTL = 5*60*1000;
 
 /* =============== STATE =============== */
 let allStores = [];      // raw rows from sheet
 let allShops = [];       // normalized with lat/lng + visit sim
 let bySales = new Map(); // sales name -> stores
+let empPhotos = new Map(); // normalizedName -> photoURL
 let selectedSp = null;
 let mapOverview = null, mapRoute = null;
 let overviewMarkers = [], routeMarkers = [], routeLine = null;
+
+/* =============== EMPLOYEE PHOTOS =============== */
+// Strip Thai prefix + normalize whitespace for name matching
+function normalizeName(name){
+  return String(name||'')
+    .replace(/^(คุณ|นาย|นาง|นางสาว|น\.ส\.|นส\.|ด\.ช\.|ดช\.|ด\.ญ\.|ดญ\.)\s+/u, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+// Convert Drive share URL to a displayable thumbnail URL
+function driveThumbUrl(url, sz=120){
+  if(!url) return '';
+  const m = String(url).match(/[?&/]id=([A-Za-z0-9_-]+)|\/d\/([A-Za-z0-9_-]+)/);
+  const id = m ? (m[1]||m[2]) : null;
+  if(!id) return url;
+  return `https://drive.google.com/thumbnail?id=${id}&sz=w${sz}`;
+}
+async function loadEmployeePhotos(){
+  try {
+    const rows = await loadFromSheets(EMP_SHEET_ID, EMP_SHEET_NAME);
+    empPhotos.clear();
+    for(const r of rows){
+      const name = normalizeName(r['ชื่อ - สกุล']||'');
+      const url = (r['รูป']||'').trim();
+      if(name && url) empPhotos.set(name, driveThumbUrl(url));
+    }
+  } catch(e) {
+    console.warn('load emp photos failed', e);
+  }
+}
+// Build an avatar HTML — <img> if photo exists, fallback letter
+function avatarHtml(spName){
+  const url = empPhotos.get(normalizeName(spName));
+  if(url){
+    const letter = (spName.match(/[฀-๿]/)?spName.match(/[฀-๿]/)[0]:spName[0]||'?');
+    return `<div class="sp-avatar"><img src="${url}" alt="" referrerpolicy="no-referrer" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'),{textContent:'${letter}'}))"></div>`;
+  }
+  const letter = (spName.match(/[฀-๿]/)?spName.match(/[฀-๿]/)[0]:spName[0]||'?');
+  return `<div class="sp-avatar">${letter}</div>`;
+}
 
 /* =============== CSV PARSER =============== */
 function parseCsv(text){
@@ -593,9 +638,8 @@ function renderOverview(){
   const tbody = document.getElementById('salesTblBody');
   tbody.innerHTML = spList.map(r=>{
     const pct = (r.total/grandTotal*100);
-    const initial = (r.sp.match(/[฀-๿]/)?r.sp.match(/[฀-๿]/)[0]:r.sp[0]||'?');
     return `<tr onclick="selectSalesperson('${encodeURIComponent(r.sp)}')">
-      <td><div class="sp-info"><div class="sp-avatar">${initial}</div><div><div class="sp-name">${r.sp}</div></div></div></td>
+      <td><div class="sp-info">${avatarHtml(r.sp)}<div><div class="sp-name">${r.sp}</div></div></div></td>
       <td class="num" style="color:var(--navy);font-size:15px"><b>${r.total}</b></td>
       <td class="num">
         ${pct.toFixed(1)}%
@@ -673,9 +717,8 @@ function renderSalesTab(){
   }
   list.sort((a,b)=>b.total-a.total);
   document.getElementById('salesFullBody').innerHTML = list.map(r=>{
-    const initial = (r.sp.match(/[฀-๿]/)?r.sp.match(/[฀-๿]/)[0]:r.sp[0]||'?');
     return `<tr>
-      <td><div class="sp-info"><div class="sp-avatar">${initial}</div><div class="sp-name">${r.sp}</div></div></td>
+      <td><div class="sp-info">${avatarHtml(r.sp)}<div class="sp-name">${r.sp}</div></div></td>
       <td>${r.wh}</td>
       <td class="num">${r.total}</td>
       <td class="num" style="color:var(--navy);font-weight:700;font-size:15px">${r.today}</td>
@@ -855,9 +898,12 @@ async function loadData(force){
       data = await loadFromSheets(SHEET_ID, SHEET_NAME);
       setCache('rst_customer', data);
     }
+    // load employee photos in parallel with first render; re-render on arrival
+    const photosReady = loadEmployeePhotos();
     prepareData(data);
     buildFilters();
     renderOverview();
+    photosReady.then(()=>renderOverview());
   }catch(e){
     console.error(e);
     showToast('โหลดข้อมูลไม่สำเร็จ: '+e.message,'error');
