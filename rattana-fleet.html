@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Fleet v1.6</title>
+<title>Rattana Fleet v1.7</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -100,7 +100,13 @@ body.dark .rc-tabs button.on{background:var(--gold);color:var(--navy)}
 .mk-end{width:26px;height:26px;background:#0d1b3e;color:#c9a84c;border:2px solid #c9a84c}
 .mk-ok{width:14px;height:14px;background:#2ecc71;border:2px solid #fff;border-radius:3px}
 .mk-miss{width:14px;height:14px;background:#e74c3c;border:2px solid #fff;border-radius:3px}
-.leaflet-popup-content{font-family:'Sarabun',sans-serif;font-size:13px;line-height:1.5;margin:10px 12px}
+.leaflet-popup-content{font-family:'Sarabun',sans-serif;font-size:13px;line-height:1.5;margin:10px 12px;color:#0d1b3e}
+.map-toggle{background:#fff;color:#0d1b3e;border:2px solid rgba(0,0,0,.2);border-radius:6px;padding:6px 10px;font:700 12px 'Sarabun',sans-serif;min-height:34px;cursor:pointer}
+.map-toggle.on{background:#0d1b3e;color:#c9a84c;border-color:#0d1b3e}
+.leaflet-tooltip.lb{font:600 11px 'Sarabun',sans-serif;padding:1px 6px;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.25);white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis}
+.leaflet-tooltip.lb-stop{background:#0d1b3e;color:#fff;border-color:#0d1b3e}
+.leaflet-tooltip.lb-ok{background:#e8f7ee;color:#1e8449;border-color:#2ecc71}
+.leaflet-tooltip.lb-miss{background:#fff1ef;color:#c0392b;border-color:#e74c3c}
 .q-link{width:100%;display:flex;justify-content:space-between;align-items:center;background:var(--card-bg);border:1px solid var(--border);border-left:4px solid var(--gold);border-radius:var(--radius-md);padding:12px 14px;margin-bottom:12px;font-size:14px;font-weight:600;color:var(--text);min-height:46px}
 .q-link span{color:var(--muted);font-size:18px}
 .q-tbl{width:100%;border-collapse:collapse;font-size:12px}
@@ -192,7 +198,7 @@ body.dark .dot.end{border-color:#fff}
 <!-- ===== หน้า 1: รายการรถ ===== -->
 <div id="listView" class="view hidden">
   <header>
-    <span class="logo-text">RATTANA <span>FLEET</span></span><span class="ver">v1.6</span>
+    <span class="logo-text">RATTANA <span>FLEET</span></span><span class="ver">v1.7</span>
     <div class="hdr-right">
       <button class="icon-btn" id="btnRefresh" onclick="loadDay(true)" title="ดึงข้อมูลล่าสุด">⟳</button>
       <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
@@ -692,24 +698,55 @@ async function drawMap(d) {
       L.polyline(line, { color: '#3d3d3d', weight: 4, opacity: .85 }).addTo(fleetMap);
       bounds.push(...line);
     }
+    const labeled = [];   // หมุดที่มีชื่อร้าน ไว้เปิด/ปิดป้ายชื่อทั้งหมดทีเดียว
     // ร้านในรูท (ปักก่อน ให้อยู่ใต้หมุดจุดจอด)
     (d.route ? d.route.stores : []).forEach(s => {
       const p = llOf(s.store); if (!p) return;
-      L.marker(p, { icon: icon(s.visited ? 'mk-ok' : 'mk-miss', '', 14), zIndexOffset: -100 }).addTo(fleetMap)
-        .bindPopup(`<b>${esc(s.name || s.code)}</b><br>${esc(s.code)}<br>${s.visited ? `✓ ถึง ${t(s.arrive)}${s.leave ? ' ออก ' + t(s.leave) : ''}` : '✕ ไม่ได้ไป'}`);
+      const m = L.marker(p, { icon: icon(s.visited ? 'mk-ok' : 'mk-miss', '', 14), zIndexOffset: -100 }).addTo(fleetMap)
+        .bindPopup(`<b>${esc(s.name || s.code)}</b><br>รหัส ${esc(s.code)} · ลำดับ ${s.seq}<br>${s.visited ? `✓ ถึง ${t(s.arrive)}${s.leave ? ' ออก ' + t(s.leave) : ''}` : '✕ ไม่ได้ไป'}`);
+      labeled.push([m, s.name || s.code, s.visited ? 'lb-ok' : 'lb-miss']);
       bounds.push(p);
     });
+    // ร้านที่ส่ง/เช็คอินที่จุดจอดแต่ละจุด: ร้านในรูทที่ถึงตอนจุดนั้น + เช็คอินในช่วงเวลาที่จอด
+    const namesAt = s => {
+      const a = toMin(s.arrive) - 5, l = (s.leave ? toMin(s.leave) : 24 * 60) + 5, out = [];
+      (d.route ? d.route.stores : []).forEach(x => { if (x.visited && x.arrive === s.arrive) out.push(x.name || x.code); });
+      (d.route && d.route.checkins || []).forEach(c => { const m = toMin(c.tin); if (m >= a && m <= l && c.status !== 'remote') out.push(c.name || c.code); });
+      return [...new Set(out)];
+    };
     const start = llOf(d.startCoords);
     if (start) { L.marker(start, { icon: icon('mk-start', 'S', 26), zIndexOffset: 500 }).addTo(fleetMap).bindPopup(`<b>ออกรถ ${t(d.start)}</b><br>${esc(cleanPlace(d.startPlace))}`); bounds.push(start); }
     const stopsList = DEMO ? (stopsByReg[d.reg] || []).map(s => ({ arrive: s.arrive, leave: s.leave, minutes: toMinutes(s.duration), place: s.place, coords: s.coords })) : track.stops;
     stopsList.forEach((s, i) => {
       const p = llOf(s.coords); if (!p) return;
-      const last = !s.leave;
+      const last = !s.leave, names = namesAt(s), place = cleanPlace(s.place);
       const cls = last ? 'mk-end' : 'mk-stop' + (s.minutes >= 60 ? ' mk-long' : '');
-      L.marker(p, { icon: icon(cls, last ? 'E' : i + 1, last ? 26 : 24), zIndexOffset: 400 + i }).addTo(fleetMap)
-        .bindPopup(`<b>${last ? 'จบวัน' : 'จุดที่ ' + (i + 1)} · ${t(s.arrive)}${s.leave ? '–' + t(s.leave) : ''}</b>${s.minutes != null ? `<br>จอด ${minTh(s.minutes)}` : ''}<br>${esc(cleanPlace(s.place))}<br><a href="${mapUrl(s.coords)}" target="_blank" rel="noopener">เปิดใน Google Maps</a>`);
+      const m = L.marker(p, { icon: icon(cls, last ? 'E' : i + 1, last ? 26 : 24), zIndexOffset: 400 + i }).addTo(fleetMap)
+        .bindPopup(`<b>${last ? 'จบวัน' : 'จุดที่ ' + (i + 1)} · ${t(s.arrive)}${s.leave ? '–' + t(s.leave) : ''}</b>${s.minutes != null ? ` · จอด ${minTh(s.minutes)}` : ''}`
+          + (names.length ? `<br>🏪 <b>${names.map(esc).join('<br>🏪 ')}</b>` : '')
+          + `<br><span style="color:#6b7896">${esc(place)}</span><br><a href="${mapUrl(s.coords)}" target="_blank" rel="noopener">เปิดใน Google Maps</a>`);
+      // ป้ายชื่อของจุดจอด: ชื่อร้าน ถ้าไม่มีใช้ชื่อสถานที่จาก Cartrack (เช่น บริษัทรัตน W1)
+      const lb = names.length ? names[0] + (names.length > 1 ? ` +${names.length - 1}` : '') : (/^บริษัทรัตน|^\d+#/.test(s.place || '') ? place : '');
+      if (lb) labeled.push([m, lb, 'lb-stop']);
       bounds.push(p);
     });
+    // ปุ่มเปิด/ปิดป้ายชื่อร้านบนแผนที่
+    const Toggle = L.Control.extend({
+      onAdd() {
+        const b = L.DomUtil.create('button', 'map-toggle');
+        b.textContent = '🏷 ชื่อร้าน';
+        L.DomEvent.disableClickPropagation(b);
+        b.onclick = () => {
+          const on = b.classList.toggle('on');
+          labeled.forEach(([mk, txt, cls]) => {
+            if (on) mk.bindTooltip(esc(txt), { permanent: true, direction: 'top', offset: [0, -10], className: 'lb ' + cls }).openTooltip();
+            else mk.unbindTooltip();
+          });
+        };
+        return b;
+      },
+    });
+    if (labeled.length) new Toggle({ position: 'topright' }).addTo(fleetMap);
     if (bounds.length) fleetMap.fitBounds(bounds, { padding: [24, 24], maxZoom: 16 }); else fleetMap.setView([13.5, 100], 9);
     setTimeout(() => fleetMap && fleetMap.invalidateSize(), 50);
     info.textContent = DEMO ? 'โหมดตัวอย่าง: ไม่มีเส้นทาง GPS' : `${stopsList.length} จุดจอด · ${track.points.length.toLocaleString('th-TH')} จุด GPS`;
