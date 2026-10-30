@@ -4241,7 +4241,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.70';   // v13.70: ขออุปกรณ์ ทดแทน/เพิ่มใหม่ = หัวหน้าอนุมัติก่อน แล้วส่งต่อ HR + แจ้งเตือน (Apps Script 9.131) — surat 29/10
+const APP_VERSION = '13.71';   // v13.71: กดอนุมัติหลายใบ ส่งเป็นชุดละ 8 ใบ (approveMany · Apps Script 9.132) — surat 30/10 "โหลดนานมาก"
 // v13.62:   // v13.62: เมนู "กลุ่ม" → "แจ้งเตือนสรุปเข้าทำงาน" · สรุปส่งเข้าแอป 08:10 แทนอีเมล (Apps Script 9.109) — surat 23/10
 // v13.61:   // v13.61 (Apps Script 9.107): เมนู "กลุ่ม" แจ้งเตือนในแอปแบบ HumanSoft Notify — สรุปมาทำงานเช้า/วันเกิด + HR/หัวหน้าโพสต์ · ตัวเลขยังไม่อ่าน — surat 23/10
 // v13.60 (Apps Script 9.104): แหล่งเรียนรู้ + กดเรียนจบ · ประเมินลูกทีม (หัวหน้าให้คะแนน) · RATTANA ใช้กะที่ HR ตั้ง (การ์ดวันนี้/สรุปเดือน/หน้าวันนี้) — surat 23/10
@@ -15466,6 +15466,7 @@ function closeApprovalDetail() {
    · ยังรอของสดก่อนส่งเหมือนเดิม (กันเลขแถวขยับ — กติกา v12.31) แต่รอในคิว ไม่ขวางมือผู้อนุมัติ
    ตัวแปรใช้ var (ไม่มีช่วง TDZ) — ฟังก์ชันพวกนี้ถูกเรียกจาก updateApproveAlert ตั้งแต่ตอนบูต */
 var _apQ = null, _apLocal = null, _apQBusy = false, _apQStalled = false;
+var _apNoMany = false, AP_MANY_MAX = 8;   // v13.71 เซิร์ฟเวอร์ยังไม่มี approveMany = ส่งทีละใบแบบเดิม
 var _apDone = [];   // v13.44 ใบที่เซิร์ฟเวอร์ยืนยันว่าลงชีทแล้วในรอบส่งนี้ → สรุป ✓ ตอนจบรอบ
 function apLocal_() { return _apLocal || (_apLocal = new Map()); }   // k → { status, approver, state: q|ok|err, at, err }
 function apKey_(it) { return [it.sheet, it.row, String(it.empId == null ? '' : it.empId).trim(), String(it.info || '')].join('|'); }
@@ -15561,6 +15562,32 @@ async function apQRun_() {
   if (!_apLastAt && !_approvalsLoadPromise) { try { apFetch_({ withDone: true }).catch(() => {}); } catch (_) {} }
   try {
     while (q.length) {
+      // v13.71 ★ (surat 30/10 "โหลดนานมาก" — กด 14 ใบ ค้าง ⏳ หลายนาที): เดิมยิงทีละใบ ใบละ ~2 วิแค่ต่อเชื่อม+ตรวจกุญแจ
+      //   ตอนนี้ส่งชุดละ 8 ใบในคำขอเดียว (เซิร์ฟเวอร์วน approveAny ตัวเดิม ด่านเหมือนเดิมทุกอย่าง) · ผลแยกรายใบ · skipped = ส่งรอบหน้า
+      if (!_apNoMany && q.length >= 2) {
+        if (_approvalsLoadPromise) { try { await _approvalsLoadPromise; } catch (_) {} }
+        const send = [];
+        q.slice(0, AP_MANY_MAX).forEach(j => { const cur = apFindFresh_(j); if (cur === null) apQFinish_(j, false, 'ใบนี้เปลี่ยนไปแล้ว (อาจถูกแก้/ลบในชีท) — ดูรายการล่าสุดอีกครั้ง'); else send.push([j, cur]); });
+        if (!send.length) continue;
+        let res;
+        try {
+          res = await callAppsScript('approveMany', { jobs: send.map(([j, cur]) => Object.assign({ sheet: j.sheet, row: cur ? cur.row : j.row, decision: j.decision, note: j.note || '',
+            approverName: j.by || currentUser.name, empId: j.empId, info: j.info }, j.amount !== undefined ? { approvedAmount: j.amount } : {})) });
+        } catch (e) {
+          const msg = String((e && e.message) || e || 'บันทึกไม่สำเร็จ');
+          if (/Unknown action/i.test(msg)) { _apNoMany = true; continue; }   // Apps Script รุ่นเก่า
+          if ((e && /^session_/.test(e.code || '')) || /^Unauthorized|idToken/.test(msg)) { _apQStalled = true; break; }
+          const j0 = send[0][0]; j0.tries = (j0.tries || 0) + 1; apQSave_();
+          if (j0.tries >= 3) { j0.tries = 0; apQSave_(); _apQStalled = true; break; }
+          await new Promise(r => setTimeout(r, 2000 * j0.tries));
+          continue;
+        }
+        const rs = (res && Array.isArray(res.results)) ? res.results : null;
+        if (!rs) { _apNoMany = true; continue; }
+        send.forEach(([j], i) => { const r = rs[i]; if (!r || r.skipped) return; if (r.ok) apQFinish_(j, true, ''); else apQFinish_(j, false, String(r.error || 'บันทึกไม่สำเร็จ')); });
+        try { if (typeof qtMarkDirty_ === 'function') qtMarkDirty_(); } catch (_) {}
+        continue;
+      }
       const job = q[0];
       // ① ใบที่กดจากแคช + ของสดกำลังมา → รอของสดก่อน (เลขแถวในชีทอาจขยับ — กติกา v12.31)
       if (_approvalsLoadPromise) { try { await _approvalsLoadPromise; } catch (_) {} }
@@ -16127,7 +16154,7 @@ const QT_TYPES = [
 const QT_TTL = 10 * 60 * 1000;
 let _qtPack = null, _qtTabNow = 'me', _qtBusy = false;
 /* v12.93: คำขอที่ทำให้ยอด "ใช้ไป" เปลี่ยน (ใบที่รออนุมัติยังไม่หักโควต้า จึงไม่ต้องนับการยื่น/ยกเลิก) */
-var QT_DIRTY_ACTIONS = { approveAny: 1, approveRequest: 1, revokeApproval: 1 };
+var QT_DIRTY_ACTIONS = { approveAny: 1, approveMany: 1, approveRequest: 1, revokeApproval: 1 };   // v13.71 + approveMany
 var _qtDirty = false;
 function qtMarkDirty_() {
   _qtDirty = true;
