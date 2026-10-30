@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Fleet v2.5</title>
+<title>Rattana Fleet v2.6</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -309,7 +309,7 @@ body.dark .dot.end{border-color:#fff}
 <!-- ===== หน้า 1: รายการรถ ===== -->
 <div id="listView" class="view hidden">
   <header>
-    <span class="logo-text">RATTANA <span>FLEET</span></span><span class="ver">v2.5</span>
+    <span class="logo-text">RATTANA <span>FLEET</span></span><span class="ver">v2.6</span>
     <div class="hdr-right">
       <button class="icon-btn" id="btnRefresh" onclick="loadDay(true)" title="ดึงข้อมูลล่าสุด">⟳</button>
       <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
@@ -463,25 +463,47 @@ function renderDateBar() {
 }
 
 // ---------- โหลดข้อมูล ----------
+// จำข้อมูลรายวันล่าสุดไว้ในเครื่อง (ต่อผู้ใช้ เก็บ 3 วันล่าสุด) เปิดแอปครั้งถัดไปเห็นทันที แล้วค่อยอัปเดตตามหลัง
+const DAY_CACHE_KEY = 'rattana_fleet_days_v1';
+function myEmail() { try { return decodeJwtPayload(getIdToken()).email || ''; } catch (e) { return ''; } }
+function readDayCache(date) {
+  try { const c = JSON.parse(localStorage.getItem(DAY_CACHE_KEY)); return c && c.email === myEmail() && c.days[date] || null; } catch (e) { return null; }
+}
+function writeDayCache(date, data) {
+  try {
+    let c = JSON.parse(localStorage.getItem(DAY_CACHE_KEY) || 'null');
+    if (!c || c.email !== myEmail()) c = { email: myEmail(), days: {} };
+    c.days[date] = data;
+    Object.keys(c.days).sort().reverse().slice(3).forEach(k => delete c.days[k]);
+    localStorage.setItem(DAY_CACHE_KEY, JSON.stringify(c));
+  } catch (e) { try { localStorage.removeItem(DAY_CACHE_KEY); } catch (_) {} }
+}
 async function loadDay(refresh) {
   renderDateBar();
   const list = document.getElementById('list');
-  list.innerHTML = '<div class="load-note">กำลังดึงข้อมูลจาก Cartrack…</div>' + '<div class="skel"></div>'.repeat(6);
-  ['sCars', 'sKm', 'sStops'].forEach(id => document.getElementById(id).textContent = '-');
-  document.getElementById('updated').textContent = '';
-  document.getElementById('warn').innerHTML = '';
+  const want = curDate, old = !refresh && !DEMO ? readDayCache(want) : null;
+  if (old) { setData(old); document.getElementById('updated').textContent = '⟳ กำลังอัปเดตข้อมูลล่าสุด…'; }
+  else {
+    list.innerHTML = '<div class="load-note">กำลังดึงข้อมูลจาก Cartrack…</div>' + '<div class="skel"></div>'.repeat(6);
+    ['sCars', 'sKm', 'sStops'].forEach(id => document.getElementById(id).textContent = '-');
+    document.getElementById('updated').textContent = '';
+    document.getElementById('warn').innerHTML = '';
+  }
+  if (refresh) TRACKS = {};
   const btn = document.getElementById('btnRefresh'); btn.disabled = true;
-  const want = curDate;
   try {
     const data = await api('day', { date: want, refresh });
     if (want !== curDate) return;   // ผู้ใช้เปลี่ยนวันระหว่างรอ
-    setData(data);
+    if (!DEMO) writeDayCache(want, data);
+    setData(data, !!old);
   } catch (e) {
     if (want !== curDate) return;
-    if (e.code !== 'AUTH' && e.code !== 'NO_USER') list.innerHTML = `<div class="empty">ดึงข้อมูลไม่สำเร็จ<br><small>${esc(e.message)}</small><br><br><button class="sort on" onclick="loadDay(true)">ลองใหม่</button></div>`;
+    if (old) { if (e.code !== 'AUTH' && e.code !== 'NO_USER') document.getElementById('updated').textContent = 'อัปเดตไม่สำเร็จ แสดงข้อมูลรอบก่อน · กด ⟳ เพื่อลองใหม่'; }
+    else if (e.code !== 'AUTH' && e.code !== 'NO_USER') list.innerHTML = `<div class="empty">ดึงข้อมูลไม่สำเร็จ<br><small>${esc(e.message)}</small><br><br><button class="sort on" onclick="loadDay(true)">ลองใหม่</button></div>`;
   } finally { btn.disabled = false; }
 }
-function setData(data) {
+/** quiet = ข้อมูลใหม่มาแทนข้อมูลรอบก่อน: อัปเดตรายการ แต่ไม่เปิดหน้ารถซ้ำถ้าผู้ใช้กำลังดูอยู่ */
+function setData(data, quiet) {
   DATA = data;
   stopsByReg = {};
   DATA.stops.forEach(s => (stopsByReg[s.reg] ||= []).push(s));
@@ -493,6 +515,7 @@ function setData(data) {
   renderSummary();
   renderList();
   const reg = decodeURIComponent(location.hash.slice(1));
+  if (quiet && curScreen === 'detail') return;
   if (reg && DATA.days.some(d => d.reg === reg)) showDetail(reg, true);
 }
 
@@ -602,6 +625,8 @@ function onCredential(r) {
 }
 function logout() {
   if (DEMO) { showToast('โหมดตัวอย่าง ไม่ต้องออกจากระบบ'); return; }
+  try { localStorage.removeItem(DAY_CACHE_KEY); } catch (e) {}
+  TRACKS = {};
   sessionStorage.removeItem(TOKEN_KEY);
   if (window.google && google.accounts) google.accounts.id.disableAutoSelect();
   showLogin();
@@ -861,7 +886,14 @@ function showDetail(reg, noPush) {
 }
 
 // ---------- แผนที่ (Leaflet + OpenStreetMap) ----------
-let fleetMap = null, mapSeq = 0;
+let fleetMap = null, mapSeq = 0, TRACKS = {};
+async function getTrack(date, reg) {
+  const k = date + '|' + reg, hit = TRACKS[k];
+  if (hit && (!hit.data.live || Date.now() - hit.at < 120000)) return hit.data;
+  const data = await api('track', { date, reg });
+  TRACKS[k] = { data, at: Date.now() };
+  return data;
+}
 function loadLeaflet() {
   if (window.L) return Promise.resolve();
   return new Promise((res, rej) => {
@@ -878,7 +910,7 @@ async function drawMap(d) {
     await loadLeaflet();
     L.Popup.prototype.options.autoPan = false;   // เลื่อนให้ป้ายอยู่ในกรอบเอง (ดู popupopen ด้านล่าง)
     let track = { points: [], stops: [] };
-    if (!DEMO) track = await api('track', { date: DATA.date || curDate, reg: d.reg });
+    if (!DEMO) track = await getTrack(DATA.date || curDate, d.reg);
     if (seq !== mapSeq || !document.getElementById('fleetMap')) return;   // เปลี่ยนรถไประหว่างรอ
     if (fleetMap) { fleetMap.remove(); fleetMap = null; }
     fleetMap = L.map('fleetMap', { zoomControl: true, attributionControl: true });
