@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Fleet v2.3</title>
+<title>Rattana Fleet v2.4</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -107,6 +107,7 @@ body.dark .rc-tabs button.on{background:var(--gold);color:var(--navy)}
 .leaflet-popup-content{font-family:'Sarabun',sans-serif;font-size:13px;line-height:1.5;margin:10px 12px;color:#0d1b3e}
 .map-toggle{background:#fff;color:#0d1b3e;border:2px solid rgba(0,0,0,.2);border-radius:6px;padding:6px 10px;font:700 12px 'Sarabun',sans-serif;min-height:34px;cursor:pointer}
 .map-toggle.on{background:#0d1b3e;color:#c9a84c;border-color:#0d1b3e}
+.map-clear{background:#0d1b3e;color:#fff;border:2px solid #c9a84c;border-radius:20px;padding:7px 14px;font:700 13px 'Sarabun',sans-serif;min-height:38px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);animation:popIn .2s ease}
 .map-tools{display:flex;flex-direction:column;align-items:flex-end;gap:4px}
 .map-hint{background:rgba(13,27,62,.85);color:#fff;font:600 11px 'Sarabun',sans-serif;padding:3px 8px;border-radius:10px;animation:popIn .25s ease}
 
@@ -291,7 +292,7 @@ body.dark .dot.end{border-color:#fff}
 <!-- ===== หน้า 1: รายการรถ ===== -->
 <div id="listView" class="view hidden">
   <header>
-    <span class="logo-text">RATTANA <span>FLEET</span></span><span class="ver">v2.3</span>
+    <span class="logo-text">RATTANA <span>FLEET</span></span><span class="ver">v2.4</span>
     <div class="hdr-right">
       <button class="icon-btn" id="btnRefresh" onclick="loadDay(true)" title="ดึงข้อมูลล่าสุด">⟳</button>
       <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
@@ -850,6 +851,7 @@ async function drawMap(d) {
   const seq = ++mapSeq, info = document.getElementById('mapInfo');
   try {
     await loadLeaflet();
+    L.Popup.prototype.options.autoPan = false;   // เลื่อนให้ป้ายอยู่ในกรอบเอง (ดู popupopen ด้านล่าง)
     let track = { points: [], stops: [] };
     if (!DEMO) track = await api('track', { date: DATA.date || curDate, reg: d.reg });
     if (seq !== mapSeq || !document.getElementById('fleetMap')) return;   // เปลี่ยนรถไประหว่างรอ
@@ -863,7 +865,29 @@ async function drawMap(d) {
       bounds.push(...line);
     }
     const labeled = [];   // หมุดที่มีชื่อร้าน ไว้เปิด/ปิดป้ายชื่อทั้งหมดทีเดียว
-    MAP = { d, track, storeMk: {}, offMk: {}, tmp: [] };
+    MAP = { d, track, storeMk: {}, offMk: {}, tmp: [], bounds, focusTok: 0 };
+    // ปุ่มออกจากจุดที่เลือก (โผล่เฉพาะตอนกดรายการให้ไปที่แผนที่) · กดที่ว่างบนแผนที่ก็ออกได้
+    const Clear = L.Control.extend({
+      onAdd() {
+        const b = L.DomUtil.create('button', 'map-clear');
+        b.textContent = '✕ ดูทั้งเส้นทาง';
+        b.style.display = 'none';
+        L.DomEvent.disableClickPropagation(b);
+        b.onclick = () => clearFocus(true);
+        MAP.clearBtn = b;
+        return b;
+      },
+    });
+    new Clear({ position: 'bottomleft' }).addTo(fleetMap);
+    fleetMap.on('click', () => { if (MAP.tmp.length) clearFocus(false); });
+    // ป้ายล้นขอบแผนที่ (autoPan ของ Leaflet พลาดบ่อยตอนกำลังซูม) → เลื่อนแผนที่ให้ป้ายอยู่ในกรอบ
+    fleetMap.on('popupopen', e => setTimeout(() => {
+      const el = e.popup.getElement(); if (!el || !fleetMap) return;
+      const p = el.getBoundingClientRect(), m = fleetMap.getContainer().getBoundingClientRect(), g = 10;
+      const dx = p.left < m.left + g ? p.left - m.left - g : p.right > m.right - g ? Math.min(p.right - m.right + g, p.left - m.left - g) : 0;
+      const dy = p.top < m.top + g ? p.top - m.top - g : 0;
+      if (dx || dy) fleetMap.panBy([dx, dy], { animate: false });
+    }, 30));
     // ระยะ: ร้านที่ไม่ได้ไป ↔ เส้นทางวิ่ง · จุดจอดนอกรูท ↔ ร้านในรูทที่ใกล้สุด
     if (d.route) {
       d.route.stores.forEach(s => { if (!s.visited && s.store && track.points.length) { const n = nearestOnTrack(llOf(s.store), track.points); s.trackDist = n.m; s.trackNear = n.p; } });
@@ -991,9 +1015,21 @@ function nearestOnTrack(p, pts) {
 }
 
 /** กดรายการในการ์ดเทียบรูท → เลื่อนไปที่แผนที่ ซูมไปจุดนั้น เปิดป๊อปอัป และลากเส้นประบอกระยะ */
+/** ออกจากจุดที่เลือก: ลบเส้นประ/วงแดง ปิดป้าย · refit = ซูมกลับให้เห็นทั้งวัน */
+function clearFocus(refit) {
+  if (!fleetMap || !MAP) return;
+  MAP.focusTok++;
+  MAP.tmp.forEach(l => fleetMap.removeLayer(l)); MAP.tmp = [];
+  fleetMap.closePopup();
+  if (MAP.clearBtn) MAP.clearBtn.style.display = 'none';
+  if (refit && MAP.bounds.length) fleetMap.fitBounds(MAP.bounds, { padding: [24, 24], maxZoom: 16 });
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && MAP && MAP.tmp && MAP.tmp.length) clearFocus(true); });
+
 function focusMap(kind, i) {
   if (!fleetMap || !MAP) return;
   MAP.tmp.forEach(l => fleetMap.removeLayer(l)); MAP.tmp = [];
+  const tok = ++MAP.focusTok;
   const r = MAP.d.route, add = l => { l.addTo(fleetMap); MAP.tmp.push(l); return l; };
   const dash = (a, b, label) => {
     add(L.polyline([a, b], { color: '#e74c3c', weight: 3, dashArray: '6 6' }));
@@ -1022,11 +1058,21 @@ function focusMap(kind, i) {
   }
   if (!popupMk) popupMk = add(L.marker(target, { icon: icon('mk-focus', '', 30), zIndexOffset: 2000 }));
   else add(L.marker(target, { icon: icon('mk-focus', '', 30), zIndexOffset: 2000, interactive: false }));
+  if (MAP.clearBtn) MAP.clearBtn.style.display = '';
   document.getElementById('fleetMap').scrollIntoView({ behavior: 'smooth', block: 'center' });
   setTimeout(() => {
+    // เปิดป้ายหลังแผนที่เลื่อนเสร็จ ป้ายจะได้ไม่ล้นขอบ · ปิดป้าย (✕) = ออกจากจุดที่เลือกด้วย
+    let opened = false;
+    const open = () => {
+      if (opened || MAP.focusTok !== tok) return;
+      opened = true;
+      popupMk.openPopup();
+      popupMk.once('popupclose', () => { if (MAP.focusTok === tok) clearFocus(false); });
+    };
+    fleetMap.once('moveend', () => setTimeout(open, 60));
     if (fit && distM(fit[0], fit[1]) > 150) fleetMap.fitBounds(fit, { padding: [50, 50], maxZoom: 17 });
     else fleetMap.setView(target, 17);
-    setTimeout(() => popupMk.openPopup(), 350);
+    setTimeout(open, 900);
   }, 300);
 }
 
