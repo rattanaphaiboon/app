@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana SalesTrack v1.15</title>
+<title>Rattana SalesTrack v2.0</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -202,9 +202,10 @@ body.dark .leaflet-tooltip.shop-label{background:rgba(17,28,53,.95);border-color
 
 <header>
   <div class="logo-text">Rattana <span>SalesTrack</span></div>
-  <span class="badge-ver" id="verBadge">v1.15</span>
+  <span class="badge-ver" id="verBadge">v2.0</span>
   <div class="header-right">
     <input type="date" id="dateFilter" class="input" style="height:38px;background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.2)">
+    <button class="icon-btn" id="btnFleet" onclick="toggleFleet()" title="เชื่อม Fleet GPS รถขนส่ง">🚚 <span id="fleetLabel">Fleet</span></button>
     <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">↻</button>
     <button class="icon-btn" onclick="toggleDark()" title="โหมดมืด">🌓</button>
   </div>
@@ -382,9 +383,10 @@ body.dark .leaflet-tooltip.shop-label{background:rgba(17,28,53,.95);border-color
         <div class="card-head">
           <h3>เส้นทางบนแผนที่</h3>
           <div class="map-legend">
-            <span><span class="dot dot-ok"></span>เยี่ยม (ร้าน)</span>
+            <span><span class="dot dot-ok"></span>เยี่ยม</span>
             <span><span class="dot dot-no"></span>ยังไม่เยี่ยม</span>
-            <span><span class="dot" style="background:#3498db"></span>จุดเช็คอินจริง</span>
+            <span><span class="dot" style="background:#3498db"></span>เช็คอินจริง</span>
+            <span id="fleetLegend" style="display:none">🚚 <span style="color:#3d3d3d">—</span> เส้นทางรถ</span>
           </div>
         </div>
         <div class="card-body pad-0">
@@ -442,12 +444,22 @@ const EMP_SHEET_NAME = 'นำเข้า-ข้อมูลพนักงา�
 const VISIT_SHEET_NAME = 'Visits'; // sheet with check-in GPS
 const TTL = 5*60*1000;
 
+/* === Fleet backend (optional overlay) === */
+const FLEET_GAS = 'https://script.google.com/macros/s/AKfycbxKMKKXBe6uYp-4Mbbc5w7V8CK7qU59JmmyDtWfhA9jZZxSIsfPdmrSFqi_LLL7pVq3/exec';
+const GOOGLE_CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
+const FLEET_TOKEN_KEY = 'rattana_salestrack_fleet_token';
+
 /* =============== STATE =============== */
 let allStores = [];      // raw rows from sheet
 let allShops = [];       // normalized with lat/lng + visit sim
 let bySales = new Map(); // sales name -> stores
 let empPhotos = new Map(); // normalizedName -> photoURL
 let todayVisits = new Map(); // shopCode -> {time, sales}
+let fleetDays = [];           // Fleet 'day' response
+let fleetTracks = new Map();  // reg -> {points, stops, live}
+let salesToReg = new Map();   // normalized sales name -> [reg1, reg2, ...]
+let regToDay = new Map();     // reg -> fleet day object
+let fleetEnabled = false;
 let selectedSp = null;
 
 /* =============== VISIT (CHECK-IN) =============== */
@@ -492,6 +504,13 @@ function formatDistance(m){
   if(!m) return '';
   if(m < 1000) return m+' ม.';
   return (m/1000).toFixed(1)+' กม.';
+}
+function decodeJwtPayload(token){
+  let b64 = String(token||'').split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+  b64 += '='.repeat((4 - b64.length % 4) % 4);
+  const bin = atob(b64), bytes = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+  return JSON.parse(new TextDecoder('utf-8').decode(bytes));
 }
 let mapOverview = null, mapRoute = null;
 let overviewMarkers = [], routeMarkers = [], routeLine = null;
@@ -858,6 +877,8 @@ function renderRouteTab(){
     heading = `ทุกร้าน (ไม่มีรูทวันนี้)`;
   }
   shops = shops.slice(0, 60);
+  // Fleet overlay for this sales
+  const fdays = fleetEnabled ? fleetDaysForSales(sp) : [];
   // sort: visited first by check-in time ASC, then non-visited at the end (by name)
   shops.sort((a,b)=>{
     const va = isVisited(a), vb = isVisited(b);
@@ -878,18 +899,29 @@ function renderRouteTab(){
         : `<span style="color:var(--danger)">● พิกัดไม่ตรง (${dist||'-'})</span>`;
       distInfo = `<div style="font-size:11px;margin-top:2px">${badge}</div>`;
     }
+    let fleetInfo = '';
+    if(fleetEnabled){
+      const fv = fleetVerdict(s.code, fdays);
+      if(fv) fleetInfo = `<div style="font-size:11px;margin-top:2px"><span style="color:${fv.color}">${fv.text}</span></div>`;
+    }
     return `<li class="store-item ${v?'visited':''}">
       <div class="idx">${i+1}</div>
       <div class="meta">
         <div class="sname">${s.name}</div>
         <div class="saddr">${s.shortAddr||'-'} · รูท: ${s.route||'-'}</div>
-        ${distInfo}
+        ${distInfo}${fleetInfo}
       </div>
       <div class="stime">${v?('✅ '+visitTimeOf(s).replace(':','.')+' น.'):'-'}</div>
     </li>`;
   }).join('') || '<div class="empty">ไม่มีร้านของเซลล์คนนี้</div>';
   const vn = shops.filter(isVisited).length;
-  document.getElementById('routeCount').textContent = `${heading} · ${vn}/${shops.length} ร้าน`;
+  let headExtra = '';
+  if(fleetEnabled && fdays.length){
+    const regs = fdays.map(d=>d.reg).join(', ');
+    const totalKm = fdays.reduce((a,d)=>a+(+d.km||0),0).toFixed(1);
+    headExtra = ` · 🚚 ${regs} (${totalKm} กม.)`;
+  }
+  document.getElementById('routeCount').textContent = `${heading} · ${vn}/${shops.length} ร้าน${headExtra}`;
 
   const map = ensureMap('mapRoute');
   routeMarkers.forEach(m=>map.removeLayer(m));
@@ -942,6 +974,39 @@ function renderRouteTab(){
   const linePts = shops.filter(s=>s.lat).map(s=>[s.lat,s.lng]);
   if(linePts.length>1){
     routeLine = L.polyline(linePts, {color:'#1a6fb8', weight:3, opacity:.75, dashArray:'6,8'}).addTo(map);
+  }
+  // Fleet overlay — vehicle track + stops
+  if(fleetEnabled && fdays.length){
+    (async ()=>{
+      for(const d of fdays){
+        const track = await getFleetTrack(d.reg);
+        if(!track) continue;
+        // vehicle polyline (dark grey)
+        if(track.points && track.points.length>1){
+          const line = L.polyline(track.points.map(p=>[p[0],p[1]]), {color:'#3d3d3d', weight:3, opacity:.6}).addTo(map);
+          routeMarkers.push(line);
+        }
+        // start marker (green S)
+        if(d.startCoords){
+          const sm = L.marker([d.startCoords.latitude, d.startCoords.longitude], {icon: L.divIcon({html:`<div style="background:#2ecc71;color:#fff;width:22px;height:22px;border-radius:50%;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;box-shadow:0 1px 4px rgba(0,0,0,.4)">S</div>`, className:'', iconSize:[22,22], iconAnchor:[11,11]})}).addTo(map);
+          sm.bindPopup(`<b>🚚 ${d.reg} ออกรถ</b> ${(d.start||'').replace(':','.')} น.<br>${d.startPlace||''}`);
+          routeMarkers.push(sm);
+          pts.push([d.startCoords.latitude, d.startCoords.longitude]);
+        }
+        // long stops (grey circle with number)
+        (track.stops||[]).forEach((st,idx)=>{
+          if(!st.coords) return;
+          const p = [st.coords.latitude||st.coords.lat, st.coords.longitude||st.coords.lng];
+          const isLong = (st.minutes||0) >= 60;
+          const color = isLong ? '#e74c3c' : '#95a5a6';
+          const mk = L.marker(p, {icon: L.divIcon({html:`<div style="background:#fff;color:${color};width:20px;height:20px;border-radius:50%;border:2px solid ${color};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:10px">${idx+1}</div>`, className:'', iconSize:[20,20], iconAnchor:[10,10]})}).addTo(map);
+          mk.bindPopup(`<b>🚚 ${d.reg} จอด</b> ${(st.arrive||'').replace(':','.')}${st.leave?'–'+st.leave.replace(':','.'):''}<br>${st.minutes||0} นาที<br>${st.place||''}`);
+          routeMarkers.push(mk);
+          pts.push(p);
+        });
+      }
+      if(pts.length) map.fitBounds(L.latLngBounds(pts), {padding:[30,30], maxZoom:14});
+    })().catch(e=>console.warn('fleet overlay fail', e));
   }
   if(pts.length) map.fitBounds(L.latLngBounds(pts), {padding:[30,30], maxZoom:13});
   setTimeout(()=>map.invalidateSize(), 100);
@@ -1050,6 +1115,189 @@ async function loadData(force){
   }finally{
     hideSpinner();
   }
+}
+
+/* =============== FLEET INTEGRATION =============== */
+function getFleetToken(){
+  try { const o = JSON.parse(sessionStorage.getItem(FLEET_TOKEN_KEY)); if(o && o.exp-60000 > Date.now()) return o.t; } catch(e){}
+  return null;
+}
+function setFleetToken(cred){
+  try{
+    const p = decodeJwtPayload(cred);
+    sessionStorage.setItem(FLEET_TOKEN_KEY, JSON.stringify({t:cred, exp:p.exp*1000}));
+  }catch(e){}
+}
+function loadGsi(){
+  return new Promise((res,rej)=>{
+    if(window.google && google.accounts) return res();
+    const s = document.createElement('script'); s.src='https://accounts.google.com/gsi/client'; s.async=true;
+    s.onload = res; s.onerror=()=>rej(new Error('โหลด Google Sign-In ไม่สำเร็จ'));
+    document.head.appendChild(s);
+  });
+}
+async function fleetLogin(){
+  await loadGsi();
+  return new Promise((res,rej)=>{
+    google.accounts.id.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      callback: r => { setFleetToken(r.credential); res(r.credential); },
+      cancel_on_tap_outside: false,
+    });
+    // render button in a floating modal
+    const modal = document.createElement('div');
+    modal.id = 'fleetLoginModal';
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(13,27,62,.7);z-index:100001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+    modal.innerHTML = `<div style="background:var(--card-bg);border-radius:16px;border-top:4px solid var(--gold);padding:28px 24px;max-width:360px;width:92vw;text-align:center">
+      <h3 style="margin-bottom:12px">🚚 เชื่อม Fleet GPS</h3>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:18px">ล็อกอินด้วย Google เพื่อดึงข้อมูล GPS รถขนส่งจาก Cartrack</p>
+      <div id="fleetGsiBtn" style="display:flex;justify-content:center"></div>
+      <button style="margin-top:14px;background:transparent;color:var(--muted);font-size:13px;padding:8px" onclick="document.getElementById('fleetLoginModal').remove();window.__fleetReject&&window.__fleetReject()">ยกเลิก</button>
+    </div>`;
+    document.body.appendChild(modal);
+    google.accounts.id.renderButton(document.getElementById('fleetGsiBtn'), {theme:'outline', size:'large', text:'signin_with', locale:'th'});
+    window.__fleetReject = () => rej(new Error('ยกเลิก'));
+    const origRes = res;
+    res = (v) => { modal.remove(); origRes(v); };
+  });
+}
+async function fleetApi(action, payload={}){
+  const tk = getFleetToken();
+  if(!tk) throw Object.assign(new Error('ต้อง login Google ก่อน'), {code:'AUTH'});
+  const body = JSON.stringify({action, payload, idToken: tk});
+  for(let i=0;i<3;i++){
+    try{
+      const res = await fetch(FLEET_GAS, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body});
+      const raw = await res.text();
+      const j = JSON.parse(raw);
+      if(!j.ok){
+        const e = Object.assign(new Error(j.error||'เกิดข้อผิดพลาด'), {code:j.code});
+        if(e.code==='AUTH'||e.code==='NO_USER') sessionStorage.removeItem(FLEET_TOKEN_KEY);
+        throw e;
+      }
+      return j.data;
+    }catch(e){
+      if(e.code) throw e;
+      if(i===2) throw e;
+      await new Promise(r=>setTimeout(r,500*(i+1)));
+    }
+  }
+}
+async function loadFleet(force){
+  if(!getFleetToken()){
+    try { await fleetLogin(); } catch(e){ showToast('ยกเลิกการเชื่อม Fleet','info'); return false; }
+  }
+  showSpinner('กำลังโหลดข้อมูล Fleet...');
+  try{
+    const today = formatTodayISO().replace(/\//g,'-'); // Fleet uses YYYY-MM-DD
+    const data = await fleetApi('day', {date: today, refresh:!!force});
+    fleetDays = data.days||[];
+    regToDay.clear();
+    salesToReg.clear();
+    for(const d of fleetDays){
+      regToDay.set(d.reg, d);
+      const reps = d.route?.reps || [];
+      for(const rp of reps){
+        const key = normalizeName(rp);
+        if(!salesToReg.has(key)) salesToReg.set(key, []);
+        salesToReg.get(key).push(d.reg);
+      }
+    }
+    fleetEnabled = true;
+    document.getElementById('fleetLabel').textContent = `Fleet (${fleetDays.length})`;
+    document.getElementById('btnFleet').style.background = 'var(--gold)';
+    document.getElementById('btnFleet').style.color = 'var(--navy)';
+    updateFleetLegend();
+    showToast(`เชื่อม Fleet แล้ว — ${fleetDays.length} คัน`, 'success');
+    renderOverview();
+    const active = document.querySelector('.tab-btn.active')?.dataset.tab;
+    if(active==='route') renderRouteTab();
+    return true;
+  }catch(e){
+    console.error(e);
+    showToast('Fleet error: '+e.message,'error');
+    if(e.code==='AUTH'||e.code==='NO_USER'){
+      sessionStorage.removeItem(FLEET_TOKEN_KEY);
+    }
+    return false;
+  }finally{
+    hideSpinner();
+  }
+}
+function updateFleetLegend(){
+  const el = document.getElementById('fleetLegend');
+  if(el) el.style.display = fleetEnabled ? '' : 'none';
+}
+async function toggleFleet(){
+  if(fleetEnabled){
+    // disconnect
+    fleetEnabled = false;
+    fleetDays = [];
+    fleetTracks.clear();
+    salesToReg.clear();
+    regToDay.clear();
+    document.getElementById('fleetLabel').textContent = 'Fleet';
+    document.getElementById('btnFleet').style.background = '';
+    document.getElementById('btnFleet').style.color = '';
+    updateFleetLegend();
+    renderOverview();
+    const active = document.querySelector('.tab-btn.active')?.dataset.tab;
+    if(active==='route') renderRouteTab();
+    showToast('ตัดการเชื่อม Fleet','info');
+  } else {
+    await loadFleet(false);
+  }
+}
+async function getFleetTrack(reg){
+  if(fleetTracks.has(reg)) return fleetTracks.get(reg);
+  try{
+    const today = formatTodayISO().replace(/\//g,'-');
+    const data = await fleetApi('track', {date: today, reg});
+    fleetTracks.set(reg, data);
+    return data;
+  }catch(e){
+    console.warn('track fail', reg, e);
+    return null;
+  }
+}
+// find Fleet info for a sales person
+function fleetDaysForSales(spName){
+  const key = normalizeName(spName);
+  const regs = salesToReg.get(key) || [];
+  return regs.map(r => regToDay.get(r)).filter(Boolean);
+}
+// For a shop code: find the Fleet route store entry (if any) that matches
+function fleetStoreOf(shopCode, days){
+  for(const d of (days||fleetDays)){
+    if(!d.route?.stores) continue;
+    const s = d.route.stores.find(x => String(x.code)===String(shopCode));
+    if(s) return {store:s, day:d};
+  }
+  return null;
+}
+// For a shop code: find the Fleet checkin entry (if any)
+function fleetCheckinOf(shopCode, days){
+  for(const d of (days||fleetDays)){
+    if(!d.route?.checkins) continue;
+    const c = d.route.checkins.find(x => String(x.code)===String(shopCode));
+    if(c) return {checkin:c, day:d};
+  }
+  return null;
+}
+// Translate Fleet's judgement to a short Thai label
+function fleetVerdict(shopCode, days){
+  const st = fleetStoreOf(shopCode, days);
+  if(st && st.store.visited) return {kind:'ok', text:'🚚 รถไปถึง', color:'#27ae60'};
+  const ci = fleetCheckinOf(shopCode, days);
+  if(ci){
+    const s = ci.checkin.status;
+    if(s==='at') return {kind:'ok', text:'🚚 รถอยู่ที่ร้าน', color:'#27ae60'};
+    if(s==='passing') return {kind:'warn', text:'🚗 รถขับผ่าน', color:'#e67e22'};
+    if(s==='moving') return {kind:'warn', text:'🚗 รถกำลังวิ่ง', color:'#e67e22'};
+    if(s==='away') return {kind:'warn', text:'🚗 รถอยู่ที่อื่น', color:'#e74c3c'};
+    if(s==='remote') return {kind:'info', text:'☎ จดระยะไกล', color:'#7f8c8d'};
+  }
+  return null;
 }
 
 /* =============== BOOT =============== */
