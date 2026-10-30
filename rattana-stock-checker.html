@@ -483,6 +483,8 @@ try{
     .chkp-row .n{font-size:11px;color:var(--muted)}
     .chkp-row .asg-chip{flex:0 0 auto}
     .chkp-ok{flex:0 0 auto;font-size:11.5px;font-weight:700;color:var(--success)}
+    /* v6.17: คนที่ยังไม่กดส่งเลยวันนี้ */
+    .chkp-row .wh.pend{background:#fdf0e3;color:var(--warning)}
     #chkpBody .asg-row .nm{font-weight:500}
     .asg-note{font-size:11px;color:var(--muted);background:var(--row-alt);border:1px solid var(--border);
       border-radius:9px;padding:7px 10px;margin:2px 0 8px;line-height:1.45}
@@ -1522,7 +1524,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.16';
+const APP_VERSION = 'v6.17';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -6763,6 +6765,8 @@ function renderDashTable() {
 }
 
 async function loadDashboard(force) {
+  // v6.17: ยังไม่เคยเข้าแท็บนับสต็อก → เลือกคลังแรกที่เห็นให้เอง การ์ดจะได้มีข้อมูล
+  if (!countSession && visibleWh.length) loadCountSession(visibleWh[0]);
   renderCheckProgress(); renderDayLoad();   // v6.16: วาดกรอบทันที ไม่ต้องรอเน็ต ไม่งั้น user หาไม่เจอ
   loadCheckProgress(force);   // v6.13: ความคืบหน้าการเช็ค (คนละ action โหลดขนานกันไป)
   loadAssign(force); loadSold(force);   // v6.14: การ์ด "วันนี้ต้องเช็คกี่ตัว" ใช้ 2 ก้อนนี้
@@ -7051,7 +7055,7 @@ function renderDayLoad() {
     host.innerHTML = `<div class="card" style="padding:14px 16px">
       <div class="chkp-head"><span>📋</span><span>วันนี้ต้องเช็คกี่ตัว</span></div>
       <div style="font-size:12.5px;color:var(--muted);margin-top:6px">
-        ${wh ? 'กำลังโหลดรายการขายออกของคลัง ' + wh + '…' : 'เลือกคลังในแท็บนับสต็อกก่อน แล้วกลับมาดูที่นี่'}</div>
+        ${wh ? '⏳ กำลังโหลดรายการขายออกของคลัง ' + wh + '…' : 'บัญชีนี้ไม่มีคลัง'}</div>
     </div>`;
     return;
   }
@@ -7173,6 +7177,41 @@ function chkProgLatest(rows) {
   return Object.values(best).sort((a, b) => (a.savedAt < b.savedAt ? 1 : -1));
 }
 
+// v6.17: 🔴 แถวในชีทเกิดตอน "กดส่ง" เท่านั้น — คนที่ไม่ได้เช็คอะไรเลยจึงไม่มีแถว
+//   แล้วหายไปจากกระดานเงียบ ๆ ทั้งที่เป็นเคสที่อยากจับที่สุด
+//   → เติมแถวของ "วันนี้" ให้คนที่มีงานแต่ยังไม่ส่ง เป็น เช็คแล้ว 0 ติดป้าย "ยังไม่ส่ง"
+function chkTodayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function chkAddPending(rows, from, to, whFilter, whoFilter) {
+  const today = chkTodayStr();
+  if (from && from > today) return;
+  if (to   && to   < today) return;
+  const wh = soldWhOf();
+  if (!wh || !visibleWh.includes(String(wh).toUpperCase())) return;
+  if (whFilter !== 'ALL' && String(whFilter).toUpperCase() !== String(wh).toUpperCase()) return;
+  const d = dayLoadRows();
+  if (!d || !d.rows.length) return;
+  const sent = new Set(rows
+    .filter(r => r.day === today && String(r.warehouse||'').toUpperCase() === String(wh).toUpperCase())
+    .map(r => asgNorm(r.counterName)));
+  d.rows.forEach(p => {
+    if (sent.has(asgNorm(p.who))) return;
+    if (whoFilter !== 'ALL' && p.who !== whoFilter) return;
+    rows.push({
+      day: today, savedAt: today + ' 00:00:00', warehouse: wh, counterName: p.who, catalog: '',
+      kind: 'ขายออก+ขนาดเดียวกัน (เฉพาะงานที่แบ่งไว้)',
+      soldDay: (soldRaw && soldRaw.day) || '',
+      total: p.total, done: 0, miss: p.total, pct: 0,
+      missNames: p.items.map(x => x.name).join(' | '),
+      pending: 1
+    });
+  });
+  // วันนี้ขึ้นก่อน · ในวันเดียวกันเอาคนที่เหลือเยอะสุด (ยังไม่ส่ง) ขึ้นก่อน
+  rows.sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : (b.miss - a.miss)));
+}
+
 function renderCheckProgress() {
   const host = document.getElementById('dashCheck');
   if (!host) return;
@@ -7201,6 +7240,7 @@ function renderCheckProgress() {
     </div>`;
     return;
   }
+  chkAddPending(rows, from, to, wh, who);   // v6.17
   rows.forEach(r => { r.diff = chkDiffCount(r.day, r.warehouse, r.counterName); });   // v6.15
   const sum = rows.reduce((a, r) => ({
     t: a.t + r.total, d: a.d + r.done, m: a.m + r.miss,
@@ -7223,7 +7263,8 @@ function renderCheckProgress() {
       <div class="chkp-row">
         <div class="l">
           <div class="d"><b data-nolang="1">${formatThaiDate(r.day)}</b> · ${r.counterName || '—'}
-            <span class="wh" data-nolang="1">${r.warehouse}${r.catalog ? ' ' + r.catalog : ''}</span></div>
+            <span class="wh" data-nolang="1">${r.warehouse}${r.catalog ? ' ' + r.catalog : ''}</span>
+            ${r.pending ? '<span class="wh pend">ยังไม่ส่ง</span>' : ''}</div>
           <div class="bar"><i style="width:${r.pct}%;background:${r.miss ? 'var(--warning)' : 'var(--success)'}"></i></div>
           <div class="n">เช็คแล้ว <b>${dcNum(r.done)}</b>/${dcNum(r.total)} · ยังไม่เช็ค
             <b style="color:${r.miss ? 'var(--danger)' : 'var(--success)'}">${dcNum(r.miss)}</b> · ${r.pct}%${
