@@ -1488,7 +1488,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.11';
+const APP_VERSION = 'v6.12';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -1500,6 +1500,8 @@ const LANG_NAME = { th: 'TH', my: 'MY', en: 'EN' };
 const LANG_I = { my: 0, en: 1 };
 // ช่วงอักษรไทยล้วน → แทนเมื่อ "ตรงทั้งช่วง" เท่านั้น (กันคำสั้นไปแทนกลางคำอื่น)
 const I18N_W = {
+  'ขนาดเดียวกับ':['အရွယ်အစားတူ','Same size as'],
+  'รวมของขนาดเดียวกันอีก':['အရွယ်အစားတူ ထပ်ပေါင်း','plus same-size items'],
   'งานของฉัน':['ကျွန်ုပ်၏အလုပ်','My list'],
   'เพิ่งขายออก':['ခုနကရောင်းထွက်','Just sold'],
   'ขายออกทั้งคลัง':['ဂိုဒေါင်တစ်ခုလုံးရောင်းထွက်','Sold (all)'],
@@ -3326,8 +3328,11 @@ function buildIndex(data) {
   allProducts  = data;
   barcodeIndex = {};
   productByKey = {};
+  sizeIdx      = {};   // v6.12: CAT SIZE → คีย์สินค้าที่ขนาดเดียวกัน
   specialBarcodeMap = {};   // v4.21: reset แล้วสร้างใหม่ (พร้อม remerge ด้านล่าง)
   data.forEach(row => {
+    const _sz = String(row['CAT SIZE'] || '').trim();   // v6.12
+    if (_sz && _sz !== SIZE_SKIP) (sizeIdx[_sz] = sizeIdx[_sz] || []).push(productKey(row));
     UNITS.forEach(u => {
       const code = String(row[`CODE ${u}`]||'').trim();
       if (code && code !== '0' && code !== '-' && code.length > 3) {
@@ -4016,11 +4021,21 @@ function assignBuild() {
 //   ของที่เพิ่งออกจากคลังคือของที่ยอดมีโอกาสเพี้ยนที่สุด → เอามาให้เช็คก่อน
 //   ★ "วันขายล่าสุดก่อนวันที่เช็ค" = ไม่เอาออเดอร์ของวันนี้ (ยังทยอยออกอยู่ ยอดยังไม่นิ่ง)
 //   ★ DI_DATE เป็นคอลัมน์ "ข้อความ" รูปแบบ YYYY/MM/DD → เทียบแบบสตริงได้ตรง ๆ ห้ามใช้ date '...'
+// ══════════ v6.12: สินค้าขนาดเดียวกับของที่ขายออก ══════════
+//   ของที่ขายออกไปแล้ว ตัวที่ "ขนาดเดียวกัน" มักวางชั้นเดียวกันและหยิบสลับกันได้
+//   → เอามาให้เช็คคู่กัน จะเจอยอดสลับตัวได้
+//   ★ วัดจริง W1 29/10: ขายออก 905 ตัว ถ้าขยายทุกค่าจะได้ +3,244 (ใช้ไม่ได้)
+//     เพราะ CAT SIZE มีค่า "ไม่กำหนดขนาด" ที่เป็นถังรวม 2,637 ตัว → ต้องตัดทิ้ง
+//     ตัดแล้วเหลือ +616 (รวม 1,521) รายคน 86–278 ตัว กำลังดี
+const SIZE_SKIP = 'ไม่กำหนดขนาด';   // ค่าถังรวม ไม่ใช่ขนาดจริง
+const SIZE_CAP  = 150;              // กันค่าถังรวมตัวใหม่ที่อาจโผล่มาทีหลัง
+let sizeIdx = {};
+
 const SOLD_SHEET_ID = '1S_HTxQ71AWHym1X_-CBwe-tzfCEPqY4T';
 const SOLD_TAB   = 'DSDC';
 const SOLD_CACHE = 'stock_sold_v1';
 const SOLD_TTL   = 3 * 60 * 60 * 1000;   // 3 ชม.
-let soldRaw = null, soldItems = null, soldStat = { total: 0, miss: 0 }, soldLoading = false;
+let soldRaw = null, soldItems = null, sibItems = null, soldStat = { total: 0, miss: 0 }, soldLoading = false;
 
 function soldTodayStr() {
   const d = new Date();
@@ -4068,7 +4083,7 @@ async function loadSold(force) {
   } finally { soldLoading = false; }
 }
 function soldBuild() {
-  if (!soldRaw || !allProducts || !allProducts.length) { soldItems = null; return; }
+  if (!soldRaw || !allProducts || !allProducts.length) { soldItems = null; sibItems = null; return; }
   const seen = new Set();
   let miss = 0;
   soldItems = [];
@@ -4082,18 +4097,44 @@ function soldBuild() {
     soldItems.push({ key, name: hit.product['PRODUCT NAME'] || r.n, cat: `ขายออก ${dcNum(r.q)}`, qty: r.q });
   });
   soldStat = { total: soldRaw.rows.length, miss };
+  sibBuild();
 }
+// v6.12: ไล่หาสินค้าที่ CAT SIZE ตรงกับของที่ขายออก (ไม่นับตัวที่ขายออกเอง)
+function sibBuild() {
+  sibItems = [];
+  if (!soldItems || !soldItems.length) return;
+  const have = new Set(soldItems.map(i => i.key));
+  const done = new Set();
+  soldItems.forEach(it => {
+    const p = productByKey[it.key];
+    if (!p) return;
+    const sz = String(p['CAT SIZE'] || '').trim();
+    if (!sz || sz === SIZE_SKIP || done.has(sz)) return;
+    done.add(sz);
+    const list = sizeIdx[sz] || [];
+    if (list.length > SIZE_CAP) return;   // ถังรวม — ข้าม ไม่งั้นรายการบวม
+    list.forEach(k => {
+      if (have.has(k)) return;
+      have.add(k);
+      const q = productByKey[k];
+      if (!q) return;
+      sibItems.push({ key: k, name: q['PRODUCT NAME'] || '', cat: `ขนาดเดียวกับ ${it.name}`, sib: 1 });
+    });
+  });
+}
+// ขายออก + พวกขนาดเดียวกัน (ของที่ขายออกมาก่อนเสมอ)
+function soldAll() { return (soldItems || []).concat(sibItems || []); }
 // ══════════ v6.6: กรอบเดียว สลับแหล่งด้วยชิป ══════════
 //   โหมด: asg = งานของฉัน (ไฟล์แบ่งงาน) · soldmine = เพิ่งขายออก∩งานของฉัน · soldall = ขายออกทั้งคลัง
 //   โชว์เฉพาะชิปที่ "มีของให้ดูจริง" · ไม่มีสักโหมด = ซ่อนการ์ดทั้งใบ
 const CHK_MODE_KEY = 'stock_chk_mode_v1';
 let chkMode = (() => { try { return localStorage.getItem(CHK_MODE_KEY) || ''; } catch { return ''; } })();
 function chkHasAsg()  { const m = assignMine(); return !!(m && m.items && m.items.length); }
-function chkHasSold() { return !!(soldItems && soldItems.length); }
+function chkHasSold() { return soldAll().length > 0; }
 function chkMineSold() {
   const m = assignMine();
-  if (!m || !m.keySet || !m.keySet.size || !soldItems) return [];
-  return soldItems.filter(it => m.keySet.has(it.key));
+  if (!m || !m.keySet || !m.keySet.size) return [];
+  return soldAll().filter(it => m.keySet.has(it.key));
 }
 function chkModes() {
   // v6.8: ของที่เพิ่งขายออกมาก่อน (ใช้บ่อยกว่า) · งานของฉันทั้งก้อนไว้ท้ายสุด (user สั่ง)
@@ -4109,7 +4150,7 @@ function chkList(m) {
   m = m || chkCur();
   if (m === 'asg') { const a = assignMine(); return a ? a.items : []; }
   if (m === 'soldmine') return chkMineSold();
-  if (m === 'soldall') return soldItems || [];
+  if (m === 'soldall') return soldAll();
   return [];
 }
 function chkMiss(m) {
@@ -4162,7 +4203,8 @@ function renderAssign() {
     ${ms.length > 1 ? `<div class="asg-chiprow">${ms.map(m =>
       `<button class="asg-chip${m === cur ? ' on' : ''}" onclick="chkSet('${m}')" type="button">${chkLabel(m)} <b>${dcNum(chkList(m).length)}</b></button>`
     ).join('')}</div>` : ''}
-    ${isSold && day ? `<div style="font-size:11px;color:var(--muted);margin-top:7px">ขายออกวันที่ <b data-nolang="1">${day}</b></div>` : ''}
+    ${isSold && day ? `<div style="font-size:11px;color:var(--muted);margin-top:7px">ขายออกวันที่ <b data-nolang="1">${day}</b>${
+      (sibItems && sibItems.length) ? ` · รวมของขนาดเดียวกันอีก <b>${dcNum(sibItems.length)}</b>` : ''}</div>` : ''}
     <div class="asg-bar"><i style="width:${pct}%;background:${isSold ? 'var(--blue)' : 'var(--success)'}"></i></div>
     <div class="asg-nums">
       <span>เช็คแล้ว <b>${dcNum(hit)}</b>/${dcNum(tot)}</span>
@@ -4262,7 +4304,7 @@ function onCountWhChange() {
   pendingScan = null;
   document.getElementById('countPending').innerHTML = '';
   loadCountSession(wh);   // also refreshes stock-source bar + auto-loads ERP
-  soldItems = null; renderSold(); loadSold();   // v6.4: คนละคลัง คนละรายการขายออก
+  soldItems = null; sibItems = null; renderSold(); loadSold();   // v6.4: คนละคลัง คนละรายการขายออก
   renderCountList();
   enterDraftSync(wh);
 }
