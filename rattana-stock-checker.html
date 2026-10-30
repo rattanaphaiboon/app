@@ -1391,6 +1391,7 @@ try{
         </div>
       </div>
     </div>
+    <div id="dashLoad" style="margin-top:10px"></div>    <!-- v6.14: วันนี้ต้องเช็คกี่ตัว -->
     <div id="dashCheck" style="margin-top:10px"></div>   <!-- v6.13: เช็คครบไหม -->
     <div id="dashBody" style="margin-top:10px"></div>
   </div>
@@ -1521,7 +1522,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.13';
+const APP_VERSION = 'v6.14';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -3375,7 +3376,7 @@ function buildIndex(data) {
     productByKey[productKey(row)] = row;
   });
   remergeSpecialCatalogs();  // v4.21: refresh main (ทุก 60 วิ) reset index — ต้อง merge สินค้าพิเศษกลับ ไม่งั้น pickCode/สแกนหาไม่เจอ
-  assignBuild(); soldBuild(); renderAssign();   // v6.0: แคตตาล็อกเปลี่ยน → จับคู่รายการแบ่งงานใหม่
+  assignBuild(); soldBuild(); renderAssign(); renderDayLoad();   // v6.0: แคตตาล็อกเปลี่ยน → จับคู่รายการแบ่งงานใหม่
 }
 // นำสินค้าพิเศษ (Colgate/Chaindrite ที่โหลดแล้ว) กลับเข้า index หลัง buildIndex reset
 function remergeSpecialCatalogs() {
@@ -4207,7 +4208,7 @@ function chkSet(m) {
 
 function soldDone(it) { return !!(countSession && countSession.items[it.key]); }
 
-function renderSold() { renderAssign(); }   // v6.6: การ์ดเดียวแล้ว
+function renderSold() { renderAssign(); renderDayLoad(); }   // v6.6: การ์ดเดียวแล้ว · v6.14
 
 function assignMine() {
   const who = counterDisplayName();
@@ -6763,6 +6764,7 @@ function renderDashTable() {
 
 async function loadDashboard(force) {
   loadCheckProgress(force);   // v6.13: ความคืบหน้าการเช็ค (คนละ action โหลดขนานกันไป)
+  loadAssign(force); loadSold(force);   // v6.14: การ์ด "วันนี้ต้องเช็คกี่ตัว" ใช้ 2 ก้อนนี้
   if (!COUNT_SAVE_URL) {
     document.getElementById('dashBody').innerHTML = '<div class="txt-center txt-muted" style="padding:32px">ยังไม่ได้ตั้งค่า URL</div>';
     return;
@@ -7010,6 +7012,100 @@ function progressSnapshot() {
   };
 }
 
+// ══════════ v6.14: วันนี้แต่ละคนต้องเช็คกี่ตัว ══════════
+//  คิดสดในแอป ไม่ต้องรอใครกดส่ง — ไฟล์แบ่งงานของแต่ละคน ∩ (ขายออก + ขนาดเดียวกัน)
+//  คู่กับการ์ด "เช็คครบไหม" ที่เป็นผลย้อนหลังจากชีท: อันนี้คือ "งานที่ต้องทำ" ดูได้ตั้งแต่เช้า
+function dayLoadRows() {
+  const all = soldAll();
+  if (!all.length) return null;
+  const owned = new Set();
+  const out = [];
+  if (assignIdx) {
+    Object.keys(assignIdx).forEach(who => {
+      const ks = assignIdx[who].keySet;
+      if (!ks || !ks.size) return;
+      let sold = 0, sib = 0;
+      const items = [];
+      all.forEach(it => {
+        if (!ks.has(it.key)) return;
+        owned.add(it.key);
+        items.push(it);
+        if (it.sib) sib++; else sold++;
+      });
+      if (items.length) out.push({ who, total: items.length, sold, sib, items });
+    });
+  }
+  out.sort((a, b) => b.total - a.total);
+  // ตัวที่ขายออกแต่ไม่มีใครรับผิดชอบ — ต้องรู้ ไม่งั้นตกสำรวจเงียบ ๆ
+  const orphan = all.filter(it => !owned.has(it.key));
+  return { rows: out, orphan, all };
+}
+
+function renderDayLoad() {
+  const host = document.getElementById('dashLoad');
+  if (!host) return;
+  const wh = soldWhOf();
+  const data = dayLoadRows();
+  if (!data) {
+    host.innerHTML = `<div class="card" style="padding:14px 16px">
+      <div class="chkp-head"><span>📋</span><span>วันนี้ต้องเช็คกี่ตัว</span></div>
+      <div style="font-size:12.5px;color:var(--muted);margin-top:6px">
+        ${wh ? 'กำลังโหลดรายการขายออกของคลัง ' + wh + '…' : 'เลือกคลังในแท็บนับสต็อกก่อน แล้วกลับมาดูที่นี่'}</div>
+    </div>`;
+    return;
+  }
+  const day = (soldRaw && soldRaw.day) ? formatThaiDate(String(soldRaw.day).replace(/\//g, '-')) : '';
+  const nSold = (soldItems || []).length, nSib = (sibItems || []).length;
+  const max = data.rows.length ? data.rows[0].total : 1;
+  window._dayLoad = data;
+  host.innerHTML = `<div class="card" style="padding:14px 16px">
+    <div class="chkp-head"><span>📋</span><span>วันนี้ต้องเช็คกี่ตัว</span>
+      <span class="who" data-nolang="1">${wh}${day ? ' · ' + day : ''}</span></div>
+    <div class="chkp-sum">
+      <span>ทั้งคลัง <b>${dcNum(data.all.length)}</b></span>
+      <span>ขายออก <b>${dcNum(nSold)}</b></span>
+      <span>ขนาดเดียวกัน <b>${dcNum(nSib)}</b></span>
+      <span>แบ่งแล้ว <b>${dcNum(data.rows.length)}</b> คน</span>
+    </div>
+    ${data.rows.length ? `<div class="chkp-list">${data.rows.map((r, i) => `
+      <div class="chkp-row">
+        <div class="l">
+          <div class="d">${r.who}</div>
+          <div class="bar"><i style="width:${Math.round(r.total * 100 / max)}%;background:var(--navy-mid)"></i></div>
+          <div class="n">ขายออก <b>${dcNum(r.sold)}</b> · ขนาดเดียวกัน <b>${dcNum(r.sib)}</b></div>
+        </div>
+        <button class="asg-chip" onclick="dayLoadOpen(${i})" type="button"><b>${dcNum(r.total)}</b> ตัว</button>
+      </div>`).join('')}</div>`
+      : `<div style="font-size:12.5px;color:var(--muted);margin-top:9px">ยังไม่มีใครในไฟล์แบ่งงานที่ตรงกับของที่ขายออกวันนั้น</div>`}
+    ${data.orphan.length ? `<div class="chkp-row" style="border-top:1px solid var(--border);border-bottom:none">
+      <div class="l"><div class="d" style="color:var(--warning)">⚠ ไม่มีคนดูแล</div>
+        <div class="n">ขายออกแต่ไม่อยู่ในไฟล์แบ่งงานของใครเลย</div></div>
+      <button class="asg-chip" onclick="dayLoadOpen(-1)" type="button"><b>${dcNum(data.orphan.length)}</b> ตัว</button>
+    </div>` : ''}
+  </div>`;
+}
+
+// กดตัวเลข → ดูว่าเป็นสินค้าอะไรบ้าง (ใช้กล่องเดียวกับ "ยังไม่ได้เช็ค")
+function dayLoadOpen(i) {
+  const d = window._dayLoad;
+  if (!d) return;
+  const orphan = (i < 0);
+  const list = orphan ? d.orphan : (d.rows[i] && d.rows[i].items) || [];
+  const who  = orphan ? 'ไม่มีคนดูแล' : (d.rows[i] || {}).who || '';
+  const day  = (soldRaw && soldRaw.day) ? formatThaiDate(String(soldRaw.day).replace(/\//g, '-')) : '';
+  document.getElementById('chkpTitle').textContent = `ต้องเช็ค ${dcNum(list.length)} ตัว — ${who}`;
+  document.getElementById('chkpSub').innerHTML =
+    `<b data-nolang="1">${soldWhOf()}</b>${day ? ' · อ้างอิงยอดขายวันที่ <b data-nolang="1">' + day + '</b>' : ''}
+     · ขายออก ${dcNum(list.filter(x => !x.sib).length)} · ขนาดเดียวกัน ${dcNum(list.filter(x => x.sib).length)}`;
+  document.getElementById('chkpBody').innerHTML = list.length
+    ? list.slice(0, 500).map(it => `<div class="asg-row">
+        <span class="bc5">${csTail(it.key) || '–'}</span>
+        <span class="nm">${it.name}<span class="ct">${it.cat || ''}</span></span>
+      </div>`).join('')
+    : '<div style="text-align:center;padding:20px;color:var(--muted);font-size:13px">ไม่มีรายการ</div>';
+  document.getElementById('chkpModal').classList.add('open');
+}
+
 // ══════════ v6.13: ความคืบหน้าการเช็ค (แดชบอร์ด) ══════════
 const CHKP_CACHE = 'stock_chkprog_v1';
 let chkProgRows = null, chkProgTs = 0;
@@ -7123,6 +7219,7 @@ function chkProgClose() { document.getElementById('chkpModal').classList.remove(
 function renderDashboard(rows) {
   dcalSyncLabel();
   renderCheckProgress();   // v6.13: วาดการ์ด "เช็คครบไหม" ด้วยตัวกรองชุดเดียวกัน
+  renderDayLoad();         // v6.14: งานที่ต้องเช็ควันนี้ รายคน
   const filterFrom    = document.getElementById('dashFrom')?.value    || '';
   const filterTo      = document.getElementById('dashTo')?.value      || '';
   const filterWh      = document.getElementById('dashWh')?.value      || 'ALL';
