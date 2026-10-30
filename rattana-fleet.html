@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Fleet v1.5</title>
+<title>Rattana Fleet v1.6</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -82,6 +82,14 @@ body.dark .sort.on{background:var(--gold);border-color:var(--gold);color:var(--n
 .rs-ico.no{background:var(--danger);color:#fff}
 .rs-ico.off{background:var(--warning);color:var(--navy)}
 .rs-ico.mute{background:var(--border);color:var(--muted)}
+.rc-tabs{display:flex;gap:4px;margin-top:10px;background:var(--row-alt);border:1px solid var(--border);border-radius:var(--radius-sm);padding:3px}
+.rc-tabs button{flex:1;min-height:36px;border-radius:5px;background:transparent;color:var(--muted);font-size:12px;font-weight:700;padding:4px 6px}
+.rc-tabs button.on{background:var(--navy);color:#fff}
+body.dark .rc-tabs button.on{background:var(--gold);color:var(--navy)}
+.pager{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)}
+.pager button{min-height:38px;padding:6px 12px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--card-bg);color:var(--text);font-size:13px;font-weight:600}
+.pager button:disabled{opacity:.35;cursor:not-allowed}
+.pager span{font-size:12px;color:var(--muted);text-align:center}
 .fleet-map{height:360px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--row-alt);z-index:1}
 .map-legend{display:flex;flex-wrap:wrap;gap:10px;padding:10px 14px;font-size:11px;color:var(--muted)}
 .map-legend i{display:inline-block;width:12px;height:12px;border-radius:50%;vertical-align:-2px;margin-right:4px}
@@ -184,7 +192,7 @@ body.dark .dot.end{border-color:#fff}
 <!-- ===== หน้า 1: รายการรถ ===== -->
 <div id="listView" class="view hidden">
   <header>
-    <span class="logo-text">RATTANA <span>FLEET</span></span><span class="ver">v1.5</span>
+    <span class="logo-text">RATTANA <span>FLEET</span></span><span class="ver">v1.6</span>
     <div class="hdr-right">
       <button class="icon-btn" id="btnRefresh" onclick="loadDay(true)" title="ดึงข้อมูลล่าสุด">⟳</button>
       <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
@@ -479,10 +487,54 @@ const CI = {
   remote: ['mute', '–', 'จดแบบไม่ได้เยี่ยม (เซลล์ระบุเอง)'],
   nodata: ['mute', '?', 'ตรวจไม่ได้ (ร้านไม่มีพิกัด)'],
 };
-function checkinList(r) {
-  if (!r.checkins || !r.checkins.length) return '';
-  return `<div class="sec-title">เช็คอินของเซลล์ ${r.checkins.length} ครั้ง${r.checkinAway ? ` · ไม่ตรงกับรถ <span style="color:var(--danger)">${r.checkinAway}</span>` : ''}</div>`
-    + r.checkins.map(c => {
+const minTh = m => m == null ? '' : m >= 60 ? `${Math.floor(m / 60)} ชม. ${m % 60} นาที` : `${m} นาที`;
+
+// การ์ดเทียบรูท: แบ่งเป็นแท็บ (เช็คอิน / ร้านในรูท / จอดนอกรูท) + ตัวกรอง + แบ่งหน้าทีละ 10 รายการ
+const RC_PAGE = 10;
+const CI_FILTERS = [
+  ['all', 'ทั้งหมด', null],
+  ['at', 'จอดที่ร้าน', ['at']],
+  ['away', 'จอดอยู่ที่อื่น', ['away']],
+  ['moving', 'รถกำลังวิ่ง', ['moving']],
+  ['passing', 'ขับผ่าน ไม่ได้จอด', ['passing']],
+  ['remote', 'ไม่ได้เยี่ยม (เซลล์ระบุเอง)', ['remote']],
+  ['nodata', 'ตรวจไม่ได้', ['nodata']],
+];
+const ST_FILTERS = [['all', 'ทั้งหมด'], ['yes', 'ถึง'], ['no', 'ไม่ได้ไป']];
+let RC = { d: null, tab: 'ci', filter: 'all', page: 0 };
+function routeCard(d) {
+  if (!d.route) return `<div class="card"><div class="card-head">เทียบกับรูท</div><div class="card-body tl-sub">${DATA.routeError ? esc(DATA.routeError) : 'ยังไม่ได้กำหนดรูทของรถคันนี้สำหรับวันนี้ (ชีท Rattana Fleet รูทวิ่งรถ)'}</div></div>`;
+  RC = { d, tab: d.route.checkins && d.route.checkins.length ? 'ci' : 'stores', filter: 'all', page: 0 };
+  return `<div class="card" id="rcCard">${rcBody()}</div>`;
+}
+function rcSet(k, v) {
+  RC[k] = v;
+  if (k !== 'page') RC.page = 0;
+  if (k === 'tab') RC.filter = 'all';
+  const el = document.getElementById('rcCard');
+  if (!el) return;
+  el.innerHTML = rcBody();
+  if (k === 'page') el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+function chip(key, label, n, on) {
+  return `<button class="sort${on ? ' on' : ''}" onclick="rcSet('filter','${key}')"${n === 0 && key !== 'all' ? ' style="opacity:.45"' : ''}>${label} ${n}</button>`;
+}
+function rcBody() {
+  const d = RC.d, r = d.route, ci = r.checkins || [];
+  const head = r.kind === 'sales' ? `${esc(r.routes[0].code)} · เซลล์ ${esc(r.reps.join(', '))}` : r.routes.map(x => esc(x.code + (x.name ? ' ' + x.name : ''))).join(' · ');
+  const tabs = [];
+  if (ci.length) tabs.push(['ci', `เช็คอิน ${ci.length}`]);
+  tabs.push(['stores', `ร้านในรูท ${r.visited}/${r.planned}`]);
+  tabs.push(['off', `จอดนอกรูท ${r.off.length}`]);
+
+  let filters = '', items = [];
+  if (RC.tab === 'ci') {
+    filters = CI_FILTERS.map(([k, label, sts]) => {
+      const n = sts ? ci.filter(c => sts.includes(c.status)).length : ci.length;
+      return n || k === 'all' || k === RC.filter ? chip(k, label, n, RC.filter === k) : '';
+    }).join('');
+    const sts = (CI_FILTERS.find(f => f[0] === RC.filter) || CI_FILTERS[0])[2];
+    items = (sts ? ci.filter(c => sts.includes(c.status)) : ci).map(c => {
       const [cls, ico, label] = CI[c.status] || CI.nodata;
       const dist = c.meters != null && c.status !== 'at' ? ` ห่างร้าน ${kmOrM(c.meters)}` : c.status === 'at' && c.meters != null ? ` (${c.meters} ม.)` : '';
       return `<div class="rs">
@@ -493,39 +545,48 @@ function checkinList(r) {
         </div>
         ${c.coords && c.status !== 'at' ? `<a class="map-btn" href="${mapUrl(c.coords)}" target="_blank" rel="noopener" title="ตำแหน่งรถตอนเช็คอิน">🚚</a>` : ''}
       </div>`;
+    });
+  } else if (RC.tab === 'stores') {
+    filters = ST_FILTERS.map(([k, label]) => {
+      const n = k === 'all' ? r.stores.length : r.stores.filter(s => s.visited === (k === 'yes')).length;
+      return chip(k, label, n, RC.filter === k);
     }).join('');
-}
-const minTh = m => m == null ? '' : m >= 60 ? `${Math.floor(m / 60)} ชม. ${m % 60} นาที` : `${m} นาที`;
-function routeCard(d) {
-  if (!d.route) return `<div class="card"><div class="card-head">เทียบกับรูท</div><div class="card-body tl-sub">${DATA.routeError ? esc(DATA.routeError) : 'ยังไม่ได้กำหนดรูทของรถคันนี้สำหรับวันนี้ (ชีท Rattana Fleet รูทวิ่งรถ)'}</div></div>`;
-  const r = d.route;
-  const head = r.kind === 'sales' ? `${esc(r.routes[0].code)} · เซลล์ ${esc(r.reps.join(', '))}` : r.routes.map(x => esc(x.code + (x.name ? ' ' + x.name : ''))).join(' · ');
-  return `<div class="card">
+    items = r.stores.filter(s => RC.filter === 'all' || s.visited === (RC.filter === 'yes')).map(s => `
+      <div class="rs">
+        <div class="rs-ico ${s.visited ? 'ok' : 'no'}">${s.visited ? '✓' : '✕'}</div>
+        <div class="rs-body">
+          <div class="rs-name">${s.seq}. ${esc(s.name || '(ไม่มีชื่อในแท็บร้านค้า)')}</div>
+          <div class="rs-sub">${esc(s.code)} · ${s.visited ? `ถึง ${t(s.arrive)}${s.leave ? ` ออก ${t(s.leave)} · จอด ${minTh(s.minutes)}` : ' · จุดสุดท้ายของวัน'}` : s.noCoord ? 'ไม่ได้ไป (ร้านนี้ไม่มีพิกัด ตรวจไม่ได้)' : 'ไม่ได้ไป'}</div>
+        </div>
+        ${s.visited ? `<a class="map-btn" href="${mapUrl(s.coords)}" target="_blank" rel="noopener">📍</a>` : ''}
+      </div>`);
+  } else {
+    items = r.off.map(o => `
+      <div class="rs">
+        <div class="rs-ico off">!</div>
+        <div class="rs-body">
+          <div class="rs-name">${esc(cleanPlace(o.place))}</div>
+          <div class="rs-sub">${o.code ? 'ร้านลูกค้าที่ไม่อยู่ในรูท' : 'ไม่ใช่ร้านลูกค้า'} · ${t(o.arrive)}–${t(o.leave)} · จอด ${minTh(o.minutes)}</div>
+        </div>
+        <a class="map-btn" href="${mapUrl(o.coords)}" target="_blank" rel="noopener">📍</a>
+      </div>`);
+  }
+
+  const pages = Math.max(1, Math.ceil(items.length / RC_PAGE)), pg = Math.min(RC.page, pages - 1);
+  const empty = { ci: 'ไม่มีเช็คอินในกลุ่มนี้', stores: 'ไม่มีร้านในกลุ่มนี้', off: 'ไม่มีจอดนอกรูทเกิน 10 นาที' }[RC.tab];
+  return `
     <div class="card-head">เทียบกับรูท <span class="badge ${r.planned - r.visited ? 'badge-warn' : 'badge-ok'}">ถึง ${r.visited}/${r.planned} ร้าน</span></div>
-    <div class="card-body" style="padding-top:6px">
-      <div class="tl-sub">${head}</div>
-      ${checkinList(r)}
-      ${r.stores.length ? `<div class="sec-title">ร้านในรูทวันนี้ (ดูจากจุดจอดรถ)</div>` : ''}
-      ${r.stores.map(s => `
-        <div class="rs">
-          <div class="rs-ico ${s.visited ? 'ok' : 'no'}">${s.visited ? '✓' : '✕'}</div>
-          <div class="rs-body">
-            <div class="rs-name">${s.seq}. ${esc(s.name || '(ไม่มีชื่อในแท็บร้านค้า)')}</div>
-            <div class="rs-sub">${esc(s.code)} · ${s.visited ? `ถึง ${t(s.arrive)}${s.leave ? ` ออก ${t(s.leave)} · จอด ${minTh(s.minutes)}` : ' · จุดสุดท้ายของวัน'}` : s.noCoord ? 'ไม่ได้ไป (ร้านนี้ไม่มีพิกัดใน Cartrack ตรวจไม่ได้)' : 'ไม่ได้ไป'}</div>
-          </div>
-          ${s.visited ? `<a class="map-btn" href="${mapUrl(s.coords)}" target="_blank" rel="noopener">📍</a>` : ''}
-        </div>`).join('')}
-      ${r.off.length ? `<div class="sec-title">จอดนอกรูท (ตั้งแต่ 10 นาที)</div>` + r.off.map(o => `
-        <div class="rs">
-          <div class="rs-ico off">!</div>
-          <div class="rs-body">
-            <div class="rs-name">${esc(cleanPlace(o.place))}</div>
-            <div class="rs-sub">${o.code ? 'ร้านลูกค้าที่ไม่อยู่ในรูท' : 'ไม่ใช่ร้านลูกค้า'} · ${t(o.arrive)}–${t(o.leave)} · จอด ${minTh(o.minutes)}</div>
-          </div>
-          <a class="map-btn" href="${mapUrl(o.coords)}" target="_blank" rel="noopener">📍</a>
-        </div>`).join('') : `<div class="sec-title" style="color:var(--ok-text)">ไม่มีจอดนอกรูทเกิน 10 นาที</div>`}
-    </div>
-  </div>`;
+    <div class="card-body" style="padding-top:8px">
+      <div class="tl-sub">${head}${r.checkinAway ? ` · เช็คอินไม่ตรงกับรถ <b style="color:var(--danger)">${r.checkinAway}</b>` : ''}</div>
+      <div class="rc-tabs">${tabs.map(([k, label]) => `<button class="${RC.tab === k ? 'on' : ''}" onclick="rcSet('tab','${k}')">${label}</button>`).join('')}</div>
+      ${filters ? `<div class="sort-row" style="margin:8px 0 2px">${filters}</div>` : ''}
+      ${items.slice(pg * RC_PAGE, pg * RC_PAGE + RC_PAGE).join('') || `<div class="q-note" style="padding:14px 0">${empty}</div>`}
+      ${pages > 1 ? `<div class="pager">
+        <button onclick="rcSet('page',${pg - 1})"${pg === 0 ? ' disabled' : ''}>‹ ก่อนหน้า</button>
+        <span>หน้า ${pg + 1}/${pages} · ${items.length} รายการ</span>
+        <button onclick="rcSet('page',${pg + 1})"${pg >= pages - 1 ? ' disabled' : ''}>ถัดไป ›</button>
+      </div>` : ''}
+    </div>`;
 }
 
 // ---------- หน้า 2 ----------
