@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana SalesTrack v1.10</title>
+<title>Rattana SalesTrack v1.11</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -197,7 +197,7 @@ body.dark .demo-note{color:#f1c86a}
 
 <header>
   <div class="logo-text">Rattana <span>SalesTrack</span></div>
-  <span class="badge-ver" id="verBadge">v1.10</span>
+  <span class="badge-ver" id="verBadge">v1.11</span>
   <div class="header-right">
     <input type="date" id="dateFilter" class="input" style="height:38px;background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.2)">
     <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรช">↻</button>
@@ -377,8 +377,9 @@ body.dark .demo-note{color:#f1c86a}
         <div class="card-head">
           <h3>เส้นทางบนแผนที่</h3>
           <div class="map-legend">
-            <span><span class="dot dot-ok"></span>เยี่ยมแล้ว</span>
+            <span><span class="dot dot-ok"></span>เยี่ยม (ร้าน)</span>
             <span><span class="dot dot-no"></span>ยังไม่เยี่ยม</span>
+            <span><span class="dot" style="background:#3498db"></span>จุดเช็คอินจริง</span>
           </div>
         </div>
         <div class="card-body pad-0">
@@ -433,7 +434,7 @@ const SHEET_ID = '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI';
 const SHEET_NAME = 'Customer';
 const EMP_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ';
 const EMP_SHEET_NAME = 'นำเข้า-ข้อมูลพนักงาน';
-const VISIT_SHEET_NAME = 'Visit';
+const VISIT_SHEET_NAME = 'Visits'; // sheet with check-in GPS
 const TTL = 5*60*1000;
 
 /* =============== STATE =============== */
@@ -449,6 +450,10 @@ function formatTodayISO(){
   const d = new Date();
   return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}`;
 }
+function padTime(t){
+  const m = String(t||'').match(/^(\d{1,2})[:.](\d{1,2})/);
+  return m ? String(m[1]).padStart(2,'0')+':'+String(m[2]).padStart(2,'0') : (t||'');
+}
 async function loadVisits(){
   try {
     const rows = await loadFromSheets(SHEET_ID, VISIT_SHEET_NAME);
@@ -459,16 +464,29 @@ async function loadVisits(){
       if(day !== todayStr) continue;
       const code = String(r['รหัสร้าน']||'').trim();
       if(!code) continue;
-      const time = (r['เวลา']||'').trim();
+      const time = padTime(r['เวลาเช็คอิน']||'');
       const existing = todayVisits.get(code);
       if(!existing || (time && time < existing.time)){
-        todayVisits.set(code, { time, sales: r['ชื่อ-สกุล']||'' });
+        todayVisits.set(code, {
+          time,
+          sales: r['ชื่อ-สกุล']||'',
+          gps: (r['พิกัดเช็คอิน']||'').trim(),
+          distM: parseInt(r['ระยะห่าง(m)']||'')||0,
+          inRange: (r['ในพิกัด']||'').trim() === 'ใช่',
+          outReason: (r['นอกพิกัด-เหตุผล']||'').trim(),
+        });
       }
     }
   } catch(e){ console.warn('load visits failed', e); }
 }
 const isVisited = s => todayVisits.has(s.code);
-const visitTimeOf = s => todayVisits.get(s.code)?.time || '';
+const visitOf = s => todayVisits.get(s.code);
+const visitTimeOf = s => visitOf(s)?.time || '';
+function formatDistance(m){
+  if(!m) return '';
+  if(m < 1000) return m+' ม.';
+  return (m/1000).toFixed(1)+' กม.';
+}
 let mapOverview = null, mapRoute = null;
 let overviewMarkers = [], routeMarkers = [], routeLine = null;
 
@@ -786,7 +804,14 @@ function renderStoresTab(){
   document.getElementById('storeCountLabel').textContent = `(แสดง ${rows.length} จาก ${allShops.length})`;
   document.getElementById('storeBody').innerHTML = rows.map((s,i)=>{
     const v = isVisited(s);
-    const badge = v ? `<span class="badge badge-ok">✅ ${visitTimeOf(s)} น.</span>` : `<span class="badge badge-info">${s.route||'-'}</span>`;
+    const vi = visitOf(s);
+    let badge;
+    if(v){
+      const outIcon = vi.inRange ? '' : ` <span title="นอกพิกัด ${formatDistance(vi.distM)}" style="color:var(--danger)">⚠️</span>`;
+      badge = `<span class="badge badge-ok">✅ ${visitTimeOf(s).replace(':','.')} น.</span>${outIcon}`;
+    } else {
+      badge = `<span class="badge badge-info">${s.route||'-'}</span>`;
+    }
     return `<tr>
       <td class="num">${i+1}</td>
       <td><b>${s.name}</b><div class="sp-sub">${s.code}</div></td>
@@ -827,13 +852,23 @@ function renderRouteTab(){
   const list = document.getElementById('routeList');
   list.innerHTML = shops.map((s,i)=>{
     const v = isVisited(s);
+    const vi = visitOf(s);
+    let distInfo = '';
+    if(vi){
+      const dist = formatDistance(vi.distM);
+      const badge = vi.inRange
+        ? `<span style="color:var(--success)">● ในพิกัด</span>`
+        : `<span style="color:var(--danger)">● นอกพิกัด${dist?' '+dist:''}</span>`;
+      distInfo = `<div style="font-size:11px;margin-top:2px">${badge}</div>`;
+    }
     return `<li class="store-item ${v?'visited':''}">
       <div class="idx">${i+1}</div>
       <div class="meta">
         <div class="sname">${s.name}</div>
         <div class="saddr">${s.shortAddr||'-'} · รูท: ${s.route||'-'}</div>
+        ${distInfo}
       </div>
-      <div class="stime">${v?('✅ '+visitTimeOf(s)+' น.'):'-'}</div>
+      <div class="stime">${v?('✅ '+visitTimeOf(s).replace(':','.')+' น.'):'-'}</div>
     </li>`;
   }).join('') || '<div class="empty">ไม่มีร้านของเซลล์คนนี้</div>';
   const vn = shops.filter(isVisited).length;
@@ -846,15 +881,44 @@ function renderRouteTab(){
   const pts = [];
   shops.forEach((s,i)=>{
     const v = isVisited(s);
+    const vi = visitOf(s);
     const color = v ? '#2ecc71' : '#e74c3c';
     const icon = L.divIcon({
       html:`<div style="background:${color};color:#fff;width:26px;height:26px;border-radius:50%;border:2px solid #fff;font-weight:700;display:flex;align-items:center;justify-content:center;font-size:11px;box-shadow:0 2px 6px rgba(0,0,0,.4)">${i+1}</div>`,
       className:'', iconSize:[26,26], iconAnchor:[13,13]
     });
     const m = L.marker([s.lat, s.lng], {icon}).addTo(map);
-    m.bindPopup(`<b>${i+1}. ${s.name}</b><br>${s.shortAddr}<br>รูท: ${s.route||'-'}<br>${v?('✅ เยี่ยม '+visitTimeOf(s)+' น.'):'⚠️ ยังไม่เยี่ยม'}`);
+    let visitInfo = '⚠️ ยังไม่เยี่ยม';
+    if(v){
+      const dist = formatDistance(vi.distM);
+      const rangeBadge = vi.inRange
+        ? '<span style="color:#2ecc71">● ในพิกัด</span>'
+        : `<span style="color:#e74c3c">● นอกพิกัด ${dist}</span>`;
+      visitInfo = `✅ เยี่ยม ${visitTimeOf(s).replace(':','.')} น.<br>${rangeBadge}${vi.outReason?' · '+vi.outReason:''}`;
+    }
+    m.bindPopup(`<b>${i+1}. ${s.name}</b><br>${s.shortAddr}<br>รูท: ${s.route||'-'}<br>${visitInfo}`);
     routeMarkers.push(m);
     pts.push([s.lat, s.lng]);
+
+    // if visited and we have check-in GPS, add a small blue pin + dashed line to shop
+    if(v && vi.gps){
+      const parts = vi.gps.split(',').map(Number);
+      if(parts.length===2 && !isNaN(parts[0])){
+        const [clat, clng] = parts;
+        const ciIcon = L.divIcon({
+          html:`<div style="background:#3498db;width:12px;height:12px;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.5)"></div>`,
+          className:'', iconSize:[12,12], iconAnchor:[6,6]
+        });
+        const cm = L.marker([clat, clng], {icon:ciIcon}).addTo(map);
+        cm.bindPopup(`📍 จุดเช็คอินของ ${vi.sales}<br>${vi.gps}<br>ห่างร้าน ${formatDistance(vi.distM)||'-'}`);
+        routeMarkers.push(cm);
+        // link check-in to shop
+        const linkColor = vi.inRange ? '#2ecc71' : '#e74c3c';
+        const link = L.polyline([[clat,clng],[s.lat,s.lng]], {color:linkColor, weight:2, opacity:.65, dashArray:'3,4'}).addTo(map);
+        routeMarkers.push(link);
+        pts.push([clat, clng]);
+      }
+    }
   });
   // dashed line connecting visited shops in time order
   const visitedShops = shops.filter(isVisited).sort((a,b)=> visitTimeOf(a).localeCompare(visitTimeOf(b)));
