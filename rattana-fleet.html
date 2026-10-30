@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Fleet v1.4</title>
+<title>Rattana Fleet v1.5</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -82,6 +82,17 @@ body.dark .sort.on{background:var(--gold);border-color:var(--gold);color:var(--n
 .rs-ico.no{background:var(--danger);color:#fff}
 .rs-ico.off{background:var(--warning);color:var(--navy)}
 .rs-ico.mute{background:var(--border);color:var(--muted)}
+.fleet-map{height:360px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--row-alt);z-index:1}
+.map-legend{display:flex;flex-wrap:wrap;gap:10px;padding:10px 14px;font-size:11px;color:var(--muted)}
+.map-legend i{display:inline-block;width:12px;height:12px;border-radius:50%;vertical-align:-2px;margin-right:4px}
+.mk{display:flex;align-items:center;justify-content:center;border-radius:50%;font:700 12px 'Sarabun',sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.35)}
+.mk-stop{width:24px;height:24px;background:#fff;color:#0d1b3e;border:2px solid #0d1b3e}
+.mk-long{border-color:#e74c3c;color:#e74c3c}
+.mk-start{width:26px;height:26px;background:#2ecc71;color:#fff;border:2px solid #fff}
+.mk-end{width:26px;height:26px;background:#0d1b3e;color:#c9a84c;border:2px solid #c9a84c}
+.mk-ok{width:14px;height:14px;background:#2ecc71;border:2px solid #fff;border-radius:3px}
+.mk-miss{width:14px;height:14px;background:#e74c3c;border:2px solid #fff;border-radius:3px}
+.leaflet-popup-content{font-family:'Sarabun',sans-serif;font-size:13px;line-height:1.5;margin:10px 12px}
 .q-link{width:100%;display:flex;justify-content:space-between;align-items:center;background:var(--card-bg);border:1px solid var(--border);border-left:4px solid var(--gold);border-radius:var(--radius-md);padding:12px 14px;margin-bottom:12px;font-size:14px;font-weight:600;color:var(--text);min-height:46px}
 .q-link span{color:var(--muted);font-size:18px}
 .q-tbl{width:100%;border-collapse:collapse;font-size:12px}
@@ -173,7 +184,7 @@ body.dark .dot.end{border-color:#fff}
 <!-- ===== หน้า 1: รายการรถ ===== -->
 <div id="listView" class="view hidden">
   <header>
-    <span class="logo-text">RATTANA <span>FLEET</span></span><span class="ver">v1.4</span>
+    <span class="logo-text">RATTANA <span>FLEET</span></span><span class="ver">v1.5</span>
     <div class="hdr-right">
       <button class="icon-btn" id="btnRefresh" onclick="loadDay(true)" title="ดึงข้อมูลล่าสุด">⟳</button>
       <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="สลับธีม">🌙</button>
@@ -547,6 +558,12 @@ function showDetail(reg, noPush) {
       <div class="stat-card ${stops.length ? 'danger' : ''}"><div class="s-label">จอดเกิน 1 ชม.</div><div class="s-value">${stops.length}</div><div class="s-sub">จุด</div></div>
     </div>
 
+    <div class="card">
+      <div class="card-head">แผนที่การวิ่ง <span class="tl-sub" style="font-weight:500" id="mapInfo">กำลังโหลด…</span></div>
+      <div id="fleetMap" class="fleet-map"></div>
+      <div class="map-legend"><span><i style="background:#2ecc71"></i>ออกรถ</span><span><i style="background:#fff;border:2px solid #0d1b3e"></i>จุดจอด (เลขลำดับ)</span><span><i style="background:#fff;border:2px solid #e74c3c"></i>จอดเกิน 1 ชม.</span><span><i style="background:#0d1b3e"></i>จบวัน</span>${d.route ? '<span><i style="background:#2ecc71;border-radius:3px"></i>ร้านในรูท ถึง</span><span><i style="background:#e74c3c;border-radius:3px"></i>ไม่ได้ไป</span>' : ''}</div>
+    </div>
+
     ${routeCard(d)}
 
     <div class="card">
@@ -583,7 +600,63 @@ function showDetail(reg, noPush) {
   showScreen('detail');
   window.scrollTo(0, 0);
   if (!noPush) history.pushState({ reg }, '', location.search + '#' + encodeURIComponent(reg));
+  drawMap(d);
 }
+
+// ---------- แผนที่ (Leaflet + OpenStreetMap) ----------
+let fleetMap = null, mapSeq = 0;
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  return new Promise((res, rej) => {
+    const css = document.createElement('link'); css.rel = 'stylesheet'; css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'; document.head.appendChild(css);
+    const s = document.createElement('script'); s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    s.onload = res; s.onerror = () => rej(new Error('โหลดแผนที่ไม่สำเร็จ')); document.head.appendChild(s);
+  });
+}
+const icon = (cls, txt, size) => L.divIcon({ className: '', html: `<div class="mk ${cls}">${txt}</div>`, iconSize: [size, size], iconAnchor: [size / 2, size / 2], popupAnchor: [0, -size / 2] });
+const llOf = c => c && (c.latitude ?? c.lat) != null ? [c.latitude ?? c.lat, c.longitude ?? c.lng] : null;
+async function drawMap(d) {
+  const seq = ++mapSeq, info = document.getElementById('mapInfo');
+  try {
+    await loadLeaflet();
+    let track = { points: [], stops: [] };
+    if (!DEMO) track = await api('track', { date: DATA.date || curDate, reg: d.reg });
+    if (seq !== mapSeq || !document.getElementById('fleetMap')) return;   // เปลี่ยนรถไประหว่างรอ
+    if (fleetMap) { fleetMap.remove(); fleetMap = null; }
+    fleetMap = L.map('fleetMap', { zoomControl: true, attributionControl: true });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(fleetMap);
+    const bounds = [];
+    if (track.points.length > 1) {
+      const line = track.points.map(p => [p[0], p[1]]);
+      L.polyline(line, { color: '#3d3d3d', weight: 4, opacity: .85 }).addTo(fleetMap);
+      bounds.push(...line);
+    }
+    // ร้านในรูท (ปักก่อน ให้อยู่ใต้หมุดจุดจอด)
+    (d.route ? d.route.stores : []).forEach(s => {
+      const p = llOf(s.store); if (!p) return;
+      L.marker(p, { icon: icon(s.visited ? 'mk-ok' : 'mk-miss', '', 14), zIndexOffset: -100 }).addTo(fleetMap)
+        .bindPopup(`<b>${esc(s.name || s.code)}</b><br>${esc(s.code)}<br>${s.visited ? `✓ ถึง ${t(s.arrive)}${s.leave ? ' ออก ' + t(s.leave) : ''}` : '✕ ไม่ได้ไป'}`);
+      bounds.push(p);
+    });
+    const start = llOf(d.startCoords);
+    if (start) { L.marker(start, { icon: icon('mk-start', 'S', 26), zIndexOffset: 500 }).addTo(fleetMap).bindPopup(`<b>ออกรถ ${t(d.start)}</b><br>${esc(cleanPlace(d.startPlace))}`); bounds.push(start); }
+    const stopsList = DEMO ? (stopsByReg[d.reg] || []).map(s => ({ arrive: s.arrive, leave: s.leave, minutes: toMinutes(s.duration), place: s.place, coords: s.coords })) : track.stops;
+    stopsList.forEach((s, i) => {
+      const p = llOf(s.coords); if (!p) return;
+      const last = !s.leave;
+      const cls = last ? 'mk-end' : 'mk-stop' + (s.minutes >= 60 ? ' mk-long' : '');
+      L.marker(p, { icon: icon(cls, last ? 'E' : i + 1, last ? 26 : 24), zIndexOffset: 400 + i }).addTo(fleetMap)
+        .bindPopup(`<b>${last ? 'จบวัน' : 'จุดที่ ' + (i + 1)} · ${t(s.arrive)}${s.leave ? '–' + t(s.leave) : ''}</b>${s.minutes != null ? `<br>จอด ${minTh(s.minutes)}` : ''}<br>${esc(cleanPlace(s.place))}<br><a href="${mapUrl(s.coords)}" target="_blank" rel="noopener">เปิดใน Google Maps</a>`);
+      bounds.push(p);
+    });
+    if (bounds.length) fleetMap.fitBounds(bounds, { padding: [24, 24], maxZoom: 16 }); else fleetMap.setView([13.5, 100], 9);
+    setTimeout(() => fleetMap && fleetMap.invalidateSize(), 50);
+    info.textContent = DEMO ? 'โหมดตัวอย่าง: ไม่มีเส้นทาง GPS' : `${stopsList.length} จุดจอด · ${track.points.length.toLocaleString('th-TH')} จุด GPS`;
+  } catch (e) {
+    if (seq === mapSeq && info) info.textContent = 'โหลดแผนที่ไม่สำเร็จ: ' + e.message;
+  }
+}
+const toMinutes = s => { const [h, m] = String(s || '0:0').split(':'); return +h * 60 + +m; };
 
 function showList() {
   showScreen('list');
