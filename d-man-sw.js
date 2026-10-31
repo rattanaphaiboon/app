@@ -44,3 +44,39 @@ self.addEventListener('fetch', function(e){
     }
   })());
 });
+
+/* ★★ v3.454 แจ้งเตือนเด้งบนมือถือ (Web Push แบบ Rattana One Chat)
+   หลังบ้าน = Supabase Edge Function "dman-push" · payload {title, body, url, tag}
+   tag เดียวกัน = ทับอันเดิม (ไม่ท่วมจอ) · renotify = สั่นซ้ำเมื่อมีอันใหม่จริง
+   กดแจ้งเตือน → หน้าต่าง D-MAN ที่เปิดอยู่ไปที่ url นั้น (ไม่มี = เปิดใหม่) */
+self.addEventListener('push', function(e){
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch(err) { d = { body: e.data ? e.data.text() : '' }; }
+  const title = d.title || 'D-MAN';
+  e.waitUntil(self.registration.showNotification(title, {
+    body: d.body || '',
+    icon: 'd-man-icon.png',
+    badge: 'd-man-icon.png',
+    tag: d.tag || 'dman',
+    renotify: true,
+    data: { url: d.url || PAGE }
+  }));
+});
+
+self.addEventListener('notificationclick', function(e){
+  e.notification.close();
+  const target = new URL((e.notification.data && e.notification.data.url) || PAGE, self.location.href).href;
+  e.waitUntil((async function(){
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const w of wins) {
+      try {
+        if (isMyPage(new URL(w.url))) {
+          await w.focus();
+          try { await w.navigate(target); } catch(err) {}
+          return;
+        }
+      } catch(err) {}
+    }
+    await self.clients.openWindow(target);
+  })());
+});
