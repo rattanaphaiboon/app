@@ -1539,7 +1539,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.22';
+const APP_VERSION = 'v6.23';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -4022,7 +4022,6 @@ const ASSIGN_CACHE = 'stock_assign_v2';    // v6.22: โครงเปลี่
 //   ต่อท้ายด้วยชื่อแท็บ — แยกช่องต่อคลัง ไม่งั้นสลับคลังไปมาแล้วเขี่ยแคชกันทิ้งทุกรอบ
 const ASSIGN_TTL   = 6 * 60 * 60 * 1000;   // 6 ชม.
 let assignRows = null, assignIdx = null, assignView = 'left';
-let assignLoading = '';   // v6.22: เก็บ "ชื่อแท็บที่กำลังโหลด" ไม่ใช่ true/false — คนละคลังต้องไม่บล็อกกัน
 let assignKind = '';      // v6.22: 'name' = แบ่งรายสินค้า · 'vendor' = แบ่งรายผู้ขาย
 let assignWh   = '';      // v6.22: คลังของข้อมูลที่ถืออยู่ (กันเอาของคลังอื่นมาใช้)
 let assignOwner = null;   // v6.6: คีย์สินค้า → ชื่อคนที่รับผิดชอบ (ใช้ตอนดูทั้งคลัง)
@@ -4046,50 +4045,55 @@ async function asgFinger(tab) {
   return `${(r[0] && r[0][0]) || ''}|${(r[1] && r[1][0]) || ''}`;
 }
 
-async function loadAssign(force) {
-  const tab = assignTabOf();
-  if (!tab) return;
-  if (!force) {
+// v6.23: ดึงไฟล์แบ่งงานของแท็บใดก็ได้ — คืนค่าเฉย ๆ ไม่แตะตัวแปรกลาง
+const _asgFlight = {};
+function asgStore(tab, rows, kind) {
+  try { localStorage.setItem(asgCacheKey(tab), JSON.stringify({ ts: Date.now(), wh: tab, kind, data: rows })); } catch {}
+  return { rows, kind };
+}
+function assignFetch(tab) {
+  if (_asgFlight[tab]) return _asgFlight[tab];
+  const p = (async () => {
     try {
       const c = JSON.parse(localStorage.getItem(asgCacheKey(tab)) || 'null');
-      if (c && c.wh === tab && Array.isArray(c.data) && Date.now() - c.ts < ASSIGN_TTL) {
-        assignRows = c.data; assignKind = c.kind || 'name'; assignWh = tab;
-        assignBuild(); renderAssign(); return;
-      }
+      if (c && c.wh === tab && Array.isArray(c.data) && Date.now() - c.ts < ASSIGN_TTL)
+        return { rows: c.data, kind: c.kind || 'name' };
     } catch {}
-  }
-  if (assignLoading === tab) return;
-  assignLoading = tab;
-  try {
     await catalogIdle();   // v6.6: อย่าไปแย่งคิวกับแคตตาล็อกสินค้า
     if (tab !== ASSIGN_HOME_TAB) {
       const [mine, base] = await Promise.all([asgFinger(tab), asgFinger(ASSIGN_PROBE_TAB)]);
-      if (mine === base) { asgKeep(tab, [], ''); return; }   // คลังนี้ยังไม่มีแท็บในชีท
+      if (mine === base) return asgStore(tab, [], '');   // คลังนี้ยังไม่มีแท็บในชีท
     }
     const res = await fetch(asgUrl(tab), { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     // หัวตารางเป็นเซลล์หลายบรรทัด → อ่านตามตำแหน่งคอลัมน์ ปลอดภัยกว่าอ่านตามชื่อหัว
     const raw  = parseCsvRaw(await res.text());
     const rows = raw.slice(1);
-    if (asgNorm((raw[0] || [])[0]).indexOf('vendor') >= 0) {
-      asgKeep(tab, rows.map(r => ({ v: (r[0] || '').trim(), w: (r[2] || '').trim() }))
-                       .filter(r => r.v && r.w), 'vendor');
-    } else {
-      asgKeep(tab, rows.map(r => ({ n: (r[0] || '').trim(), c: (r[1] || '').trim(), w: (r[2] || '').trim() }))
-                       .filter(r => r.n && r.w), 'name');
-    }
-  } catch (e) {
-    console.warn('โหลดไฟล์แบ่งงานไม่ได้', e);
-  } finally { if (assignLoading === tab) assignLoading = ''; }
+    return asgNorm((raw[0] || [])[0]).indexOf('vendor') >= 0
+      ? asgStore(tab, rows.map(r => ({ v: (r[0] || '').trim(), w: (r[2] || '').trim() }))
+                          .filter(r => r.v && r.w), 'vendor')
+      : asgStore(tab, rows.map(r => ({ n: (r[0] || '').trim(), c: (r[1] || '').trim(), w: (r[2] || '').trim() }))
+                          .filter(r => r.n && r.w), 'name');
+  })();
+  _asgFlight[tab] = p;
+  p.then(() => { delete _asgFlight[tab]; }, () => { delete _asgFlight[tab]; });
+  return p;
 }
 
-function asgKeep(tab, rows, kind) {
-  // สลับคลังไปแล้วระหว่างที่เส้นนี้ยังโหลดอยู่ — เก็บลงแคชได้ แต่ห้ามเขียนทับของคลังที่กำลังดู
-  try { localStorage.setItem(asgCacheKey(tab), JSON.stringify({ ts: Date.now(), wh: tab, kind, data: rows })); } catch {}
-  if (tab !== assignTabOf()) return;
-  assignRows = rows; assignKind = kind; assignWh = tab;
-  assignBuild(); renderAssign();
+async function loadAssign(force) {
+  const tab = assignTabOf();
+  if (!tab) return;
+  if (force) { try { localStorage.removeItem(asgCacheKey(tab)); } catch {} }
+  try {
+    const r = await assignFetch(tab);
+    if (tab !== assignTabOf()) return;   // สลับคลังไประหว่างโหลด — อย่าเขียนทับของคลังใหม่
+    assignRows = r.rows; assignKind = r.kind; assignWh = tab;
+    assignBuild(); renderAssign();
+  } catch (e) {
+    console.warn('โหลดไฟล์แบ่งงานไม่ได้', e);
+  }
 }
+
 
 function asgBucket(who) {
   return assignIdx[who] || (assignIdx[who] = { total: 0, miss: 0, items: [], seen: new Set() });
@@ -4168,9 +4172,10 @@ let sizeIdx = {};
 
 const SOLD_SHEET_ID = '1S_HTxQ71AWHym1X_-CBwe-tzfCEPqY4T';
 const SOLD_TAB   = 'DSDC';
-const SOLD_CACHE = 'stock_sold_v1';
+const SOLD_CACHE = 'stock_sold_v1';      // + ':' + คลัง — แยกช่องต่อคลัง (v6.23)
 const SOLD_TTL   = 3 * 60 * 60 * 1000;   // 3 ชม.
-let soldRaw = null, soldItems = null, sibItems = null, soldStat = { total: 0, miss: 0 }, soldLoading = false;
+let soldRaw = null, soldItems = null, sibItems = null, soldStat = { total: 0, miss: 0 };
+const _soldFlight = {};                  // คลัง → เส้นที่กำลังโหลด (กันยิงซ้ำ แต่คนละคลังไม่บล็อกกัน)
 
 function soldTodayStr() {
   const d = new Date();
@@ -4181,42 +4186,54 @@ function soldWhOf() {
   const w = (countSession && countSession.warehouse) || '';
   return (SPECIAL_WH[w] && SPECIAL_WH[w].parent) || w;
 }
+function soldCacheKey(wh) { return SOLD_CACHE + ':' + wh; }
 async function soldQuery(tq) {
   const url = `https://docs.google.com/spreadsheets/d/${SOLD_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${SOLD_TAB}&headers=1&tq=${encodeURIComponent(tq)}`;
   const r = await fetch(url, { cache: 'no-store' });
   if (!r.ok) throw new Error('HTTP ' + r.status);
   return parseCsvRaw(await r.text());
 }
-async function loadSold(force) {
-  const wh = soldWhOf();
-  if (!wh) return;
-  if (!force) {
+// v6.23: ดึงใบขายของคลังใดก็ได้ — คืนค่าเฉย ๆ ไม่แตะตัวแปรกลาง (แดชบอร์ดเรียกคลังอื่นได้)
+function soldFetch(wh) {
+  if (_soldFlight[wh]) return _soldFlight[wh];
+  const p = (async () => {
     try {
-      const c = JSON.parse(localStorage.getItem(SOLD_CACHE) || 'null');
-      if (c && c.wh === wh && Date.now() - c.ts < SOLD_TTL) { soldRaw = c.data; soldBuild(); renderSold(); return; }
+      const c = JSON.parse(localStorage.getItem(soldCacheKey(wh)) || 'null');
+      if (c && c.data && Date.now() - c.ts < SOLD_TTL) return c.data;
     } catch {}
-  }
-  if (soldLoading) return;
-  soldLoading = true;
-  try {
     await catalogIdle();   // v6.6: อย่าไปแย่งคิวกับแคตตาล็อกสินค้า
     const today = soldTodayStr();
-    const d1 = await soldQuery(`select max(A) where G='${wh}' and A < '${today}'`);
+    const d1  = await soldQuery(`select max(A) where G='${wh}' and A < '${today}'`);
     const day = ((d1[1] && d1[1][0]) || '').trim();
-    if (!day) { soldRaw = { day: '', rows: [] }; }
+    let data;
+    if (!day) data = { day: '', rows: [] };
     else {
       const rows = (await soldQuery(`select H,I,sum(K) where G='${wh}' and A = '${day}' group by H,I order by sum(K) desc`))
         .slice(1)
         .map(r => ({ b: String(r[0] || '').replace(/\D/g, ''), n: String(r[1] || '').trim(), q: Math.round(+(r[2] || 0)) }))
         .filter(r => r.b || r.n);
-      soldRaw = { day, rows };
+      data = { day, rows };
     }
-    try { localStorage.setItem(SOLD_CACHE, JSON.stringify({ ts: Date.now(), wh, data: soldRaw })); } catch {}
-    soldBuild(); renderSold();
+    try { localStorage.setItem(soldCacheKey(wh), JSON.stringify({ ts: Date.now(), data })); } catch {}
+    return data;
+  })();
+  _soldFlight[wh] = p;
+  p.then(() => { delete _soldFlight[wh]; }, () => { delete _soldFlight[wh]; });
+  return p;
+}
+async function loadSold(force) {
+  const wh = soldWhOf();
+  if (!wh) return;
+  if (force) { try { localStorage.removeItem(soldCacheKey(wh)); } catch {} }
+  try {
+    const data = await soldFetch(wh);
+    if (wh !== soldWhOf()) return;   // สลับคลังไประหว่างโหลด — อย่าเขียนทับของคลังใหม่
+    soldRaw = data; soldBuild(); renderSold();
   } catch (e) {
     console.warn('โหลดใบขายไม่ได้', e);
-  } finally { soldLoading = false; }
+  }
 }
+
 function soldBuild() {
   if (!soldRaw || !allProducts || !allProducts.length) { soldItems = null; sibItems = null; return; }
   const seen = new Set();
@@ -7130,14 +7147,16 @@ function progressSnapshot() {
 // ══════════ v6.14: วันนี้แต่ละคนต้องเช็คกี่ตัว ══════════
 //  คิดสดในแอป ไม่ต้องรอใครกดส่ง — ไฟล์แบ่งงานของแต่ละคน ∩ (ขายออก + ขนาดเดียวกัน)
 //  คู่กับการ์ด "เช็คครบไหม" ที่เป็นผลย้อนหลังจากชีท: อันนี้คือ "งานที่ต้องทำ" ดูได้ตั้งแต่เช้า
-function dayLoadRows() {
-  const all = soldAll();
-  if (!all.length) return null;
+// v6.23: ctx = ชุดข้อมูลของคลังอื่น (แดชบอร์ด) · ไม่ส่ง = ใช้ของแท็บนับสต็อกเหมือนเดิม
+function dayLoadRows(ctx) {
+  const all = ctx ? ctx.all : soldAll();
+  const idx = ctx ? ctx.assignIdx : assignIdx;
+  if (!all || !all.length) return null;
   const owned = new Set();
   const out = [];
-  if (assignIdx) {
-    Object.keys(assignIdx).forEach(who => {
-      const ks = assignIdx[who].keySet;
+  if (idx) {
+    Object.keys(idx).forEach(who => {
+      const ks = idx[who].keySet;
       if (!ks || !ks.size) return;
       let sold = 0, sib = 0;
       const items = [];
@@ -7167,10 +7186,10 @@ function dayLoadOpen(i) {
   const orphan = (i < 0);
   const list = orphan ? d.orphan : (d.rows[i] && d.rows[i].items) || [];
   const who  = orphan ? 'ไม่มีคนดูแล' : (d.rows[i] || {}).who || '';
-  const day  = (soldRaw && soldRaw.day) ? formatThaiDate(String(soldRaw.day).replace(/\//g, '-')) : '';
+  const day  = d.day ? formatThaiDate(String(d.day).replace(/\//g, '-')) : '';
   document.getElementById('chkpTitle').textContent = `ต้องเช็ค ${dcNum(list.length)} ตัว — ${who}`;
   document.getElementById('chkpSub').innerHTML =
-    `<b data-nolang="1">${soldWhOf()}</b>${day ? ' · อ้างอิงยอดขายวันที่ <b data-nolang="1">' + day + '</b>' : ''}
+    `<b data-nolang="1">${d.wh || soldWhOf()}</b>${day ? ' · อ้างอิงยอดขายวันที่ <b data-nolang="1">' + day + '</b>' : ''}
      · ขายออก ${dcNum(list.filter(x => !x.sib).length)} · ขนาดเดียวกัน ${dcNum(list.filter(x => x.sib).length)}`;
   document.getElementById('chkpBody').innerHTML = list.length
     ? list.slice(0, 500).map(it => `<div class="asg-row">
@@ -7181,6 +7200,42 @@ function dayLoadOpen(i) {
   document.getElementById('chkpModal').classList.add('open');
 }
 
+// ══════════ v6.23: แดชบอร์ดใช้ยอดของ "คลังที่เลือกบนแดชบอร์ด" ══════════
+//   เดิมแถบยอดบนการ์ด "เช็คครบไหม" ยึด soldWhOf() = คลังที่ค้างอยู่ในแท็บนับสต็อก
+//   เลือก W4 บนแดชบอร์ดแต่เลขยังเป็นของ W1 โดยไม่มีอะไรบอก → อ่านผิดแบบเงียบ ๆ
+const _dashCtx = {};        // คลัง → { wh, day, soldItems, sibItems, assignIdx, all }
+let _dashCtxWant = '';
+
+function dashWhPick() {
+  const v = document.getElementById('dashWh')?.value || 'ALL';
+  return v !== 'ALL' ? v : soldWhOf();   // "ทั้งหมด" = ใช้คลังของแท็บนับเหมือนเดิม
+}
+function dashCtxOf(wh) {
+  if (!wh) return null;
+  if (wh === soldWhOf()) {   // คลังเดียวกับแท็บนับ = ใช้ของกลางที่โหลดไว้แล้ว ไม่ต้องยิงซ้ำ
+    return soldAll().length
+      ? { wh, day: (soldRaw && soldRaw.day) || '', soldItems, sibItems, assignIdx, all: soldAll() }
+      : null;
+  }
+  return _dashCtx[wh] || null;
+}
+async function dashCtxLoad(wh) {
+  if (!wh || wh === soldWhOf() || _dashCtx[wh] || _dashCtxWant === wh) return;
+  _dashCtxWant = wh;
+  try {
+    const [raw, asg] = await Promise.all([soldFetch(wh), assignFetch(wh)]);
+    // ★ ตัวสร้างดัชนีเขียนลงตัวแปรกลาง → สลับเข้า-ออกชั่วคราว
+    //   ปลอดภัยเพราะ soldBuild/assignBuild ทำงาน sync ล้วน ไม่มี await คั่นกลาง
+    const bk = { soldRaw, soldItems, sibItems, soldStat, assignRows, assignKind, assignWh, assignIdx, assignOwner };
+    soldRaw = raw; soldBuild();
+    assignRows = asg.rows; assignKind = asg.kind; assignWh = wh; assignBuild();
+    _dashCtx[wh] = { wh, day: raw.day || '', soldItems, sibItems, assignIdx, all: soldAll() };
+    ({ soldRaw, soldItems, sibItems, soldStat, assignRows, assignKind, assignWh, assignIdx, assignOwner } = bk);
+    renderCheckProgress();
+  } catch (e) {
+    console.warn('โหลดยอดของคลัง ' + wh + ' ไม่ได้', e);
+  } finally { if (_dashCtxWant === wh) _dashCtxWant = ''; }
+}
 // ══════════ v6.13: ความคืบหน้าการเช็ค (แดชบอร์ด) ══════════
 const CHKP_CACHE = 'stock_chkprog_v1';
 let chkProgRows = null, chkProgTs = 0;
@@ -7258,13 +7313,13 @@ function chkTodayInRange(from, to) {
   const today = chkTodayStr();
   return !(from && from > today) && !(to && to < today);
 }
-function chkAddPending(rows, from, to, whFilter, whoFilter) {
+function chkAddPending(rows, from, to, whFilter, whoFilter, ctx) {
   const today = chkTodayStr();
   if (!chkTodayInRange(from, to)) return;
-  const wh = soldWhOf();
+  const wh = ctx ? ctx.wh : soldWhOf();   // v6.23: คลังของแดชบอร์ด ไม่ใช่ของแท็บนับ
   if (!wh || !visibleWh.includes(String(wh).toUpperCase())) return;
   if (whFilter !== 'ALL' && String(whFilter).toUpperCase() !== String(wh).toUpperCase()) return;
-  const d = dayLoadRows();
+  const d = dayLoadRows(ctx);
   if (!d || !d.rows.length) return;
   const sent = new Set(rows
     .filter(r => r.day === today && String(r.warehouse||'').toUpperCase() === String(wh).toUpperCase())
@@ -7283,7 +7338,7 @@ function chkAddPending(rows, from, to, whFilter, whoFilter) {
     rows.push({
       day: today, savedAt: today + ' 00:00:00', warehouse: wh, counterName: p.who, catalog: '',
       kind: 'ขายออก+ขนาดเดียวกัน (เฉพาะงานที่แบ่งไว้)',
-      soldDay: (soldRaw && soldRaw.day) || '',
+      soldDay: ctx ? ctx.day : ((soldRaw && soldRaw.day) || ''),
       total: p.total, done: 0, miss: p.total, pct: 0,
       sold: p.sold, sib: p.sib,
       missNames: p.items.map(x => x.name).join(' | '),
@@ -7307,6 +7362,10 @@ function renderCheckProgress() {
   const to   = document.getElementById('dashTo')?.value   || '';
   const wh   = document.getElementById('dashWh')?.value   || 'ALL';
   const who  = document.getElementById('dashCounter')?.value || 'ALL';
+  // v6.23: ยอด "วันนี้ต้องเช็คกี่ตัว" ต้องเป็นของคลังที่เลือกบนแดชบอร์ด
+  const dwh  = dashWhPick();
+  const ctx  = dashCtxOf(dwh);
+  if (!ctx) dashCtxLoad(dwh);   // ยังไม่มี → โหลดเบื้องหลังแล้ววาดใหม่เอง
   const rows = chkProgLatest(chkProgRows).filter(r => {
     if (!visibleWh.includes(String(r.warehouse || '').toUpperCase())) return false;
     if (from && r.day < from) return false;
@@ -7315,13 +7374,13 @@ function renderCheckProgress() {
     if (who !== 'ALL' && r.counterName !== who) return false;
     return true;
   });
-  chkAddPending(rows, from, to, wh, who);   // v6.18: ★ ต้องเติมก่อนเช็คว่าว่างไหม
+  chkAddPending(rows, from, to, wh, who, ctx);   // v6.18: ★ ต้องเติมก่อนเช็คว่าว่างไหม
   if (!rows.length) {
     host.innerHTML = `<div class="card" style="padding:14px 16px">
       <div class="chkp-head"><span>✅</span><span>เช็คครบไหม</span></div>
       <div style="font-size:12.5px;color:var(--muted);margin-top:6px">${
-        soldAll().length ? 'ยังไม่มีข้อมูลในช่วงที่เลือก — ข้อมูลจะถูกบันทึกตอนกดส่งผลนับลงชีท'
-                         : '⏳ กำลังโหลดรายการขายออกของคลัง ' + (soldWhOf() || '') + '…'}</div>
+        (ctx && ctx.all.length) ? 'ยังไม่มีข้อมูลในช่วงที่เลือก — ข้อมูลจะถูกบันทึกตอนกดส่งผลนับลงชีท'
+                                : '⏳ กำลังโหลดรายการขายออกของคลัง ' + (dwh || '') + '…'}</div>
     </div>`;
     return;
   }
@@ -7336,16 +7395,16 @@ function renderCheckProgress() {
   const oneDay = rows.every(r => r.day === rows[0].day);
   const oneWh  = rows.every(r => String(r.warehouse) === String(rows[0].warehouse));
   // v6.19: ยอดของทั้งคลังวันนี้ (เดิมอยู่บนการ์ด "วันนี้ต้องเช็คกี่ตัว")
-  const dl   = chkTodayInRange(from, to) ? dayLoadRows() : null;
-  const dwh  = soldWhOf();
-  const dday = (dl && soldRaw && soldRaw.day) ? formatThaiDate(String(soldRaw.day).replace(/\//g, '-')) : '';
+  const dl   = (ctx && chkTodayInRange(from, to)) ? dayLoadRows(ctx) : null;
+  if (dl) { dl.wh = ctx.wh; dl.day = ctx.day; }   // v6.23: กล่องรายการต้องรู้ว่าเป็นของคลังไหน
+  const dday = (dl && ctx.day) ? formatThaiDate(String(ctx.day).replace(/\//g, '-')) : '';
   host.innerHTML = `<div class="card" style="padding:14px 16px">
     <div class="chkp-head"><span>✅</span><span>เช็คครบไหม</span>
       <span class="who" data-nolang="1">${dl ? dwh + (dday ? ' · ' + dday : '') : rows.length + ' รอบ · ครบ ' + full}</span></div>
     ${dl ? `<div class="chkp-sum" style="border-bottom:none;padding-bottom:2px">
       <span>ทั้งคลัง <b>${dcNum(dl.all.length)}</b></span>
-      <span>ขายออก <b>${dcNum((soldItems || []).length)}</b></span>
-      <span>ขนาดเดียวกัน <b>${dcNum((sibItems || []).length)}</b></span>
+      <span>ขายออก <b>${dcNum((ctx.soldItems || []).length)}</b></span>
+      <span>ขนาดเดียวกัน <b>${dcNum((ctx.sibItems || []).length)}</b></span>
       <span>แบ่งแล้ว <b>${dcNum(dl.rows.length)}</b> คน</span>
     </div>` : ''}
     <div class="chkp-sum">
@@ -7419,7 +7478,8 @@ function renderDashboard(rows) {
   if (whSel) {
     const cur = whSel.value;
     whSel.innerHTML = '<option value="ALL">ทั้งหมด</option>';
-    const whs = [...new Set(allVisible.map(r=>String(r.warehouse||'').toUpperCase()))].filter(w=>visibleWh.includes(w)).sort();
+    // v6.23: ลิสต์ทุกคลังที่สิทธิ์เห็น — เดิมเอาเฉพาะคลังที่มีประวัติ คลังที่ยังไม่เคยส่งเลยเลือกไม่ได้
+    const whs = [...visibleWh].sort();
     whs.forEach(w => whSel.add(new Option(`${w} · ${WH_NAMES[w]||''}`, w)));
     whSel.value = cur;
   }
