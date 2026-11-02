@@ -1557,7 +1557,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.26';
+const APP_VERSION = 'v6.27';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -6861,7 +6861,8 @@ function renderDashTable() {
   if (q) {
     rows = rows.filter(r => [r.name, r.key, r.warehouse, r.counterName,
       formatThaiDate(r.savedAt), r._resolvedStatus,
-      pcsCSEA(r.systemPieces, r.key), pcsCSEA(r.countedPieces, r.key)
+      pcsCSEA(r.systemPieces, r.key), pcsCSEA(r.countedPieces, r.key),
+      r._prev ? pcsCSEA(r._prev.c, r.key) + ' ' + formatThaiDate(r._prev.day) : ''
     ].join(' ').toLowerCase().includes(q));
   }
   // Apply column sort (copy so default order is preserved)
@@ -6893,20 +6894,30 @@ function renderDashTable() {
       : st === 'short'
         ? `<span class="diff-short">↓ ขาด ${pcsCSEA(Math.abs(diff), r.key)}</span>`
         : `<span class="diff-over">↑ เกิน ${pcsCSEA(Math.abs(diff), r.key)}</span>`;
+    // v6.27: รอบก่อนหน้า — ยอด + สถานะ + วันที่ ยัดช่องเดียว ตารางจะได้ไม่กว้างเกิน
+    const pv = r._prev;
+    const prevHtml = !pv ? '<span style="color:var(--muted)">—</span>' : (() => {
+      const w = pv.diff === 0 ? '<span class="diff-ok">ตรง</span>'
+        : pv.diff < 0 ? `<span class="diff-short">ขาด ${pcsCSEA(Math.abs(pv.diff), r.key)}</span>`
+                      : `<span class="diff-over">เกิน ${pcsCSEA(Math.abs(pv.diff), r.key)}</span>`;
+      return `<b>${pcsCSEA(pv.c, r.key)}</b> ${w}`
+           + `<div style="font-weight:400;color:var(--muted)" data-nolang="1">${formatThaiDate(pv.day)}</div>`;
+    })();
     const whBadge = _dashFilterWh === 'ALL'
       ? `<span class="badge badge-info" style="font-size:9px;vertical-align:middle;margin-left:4px">${r.warehouse||''}</span>`
       : '';
     return `<tr class="row-${st}">
       <td style="font-size:12px">${r.name||r.key||'—'}${whBadge}
-        <div class="row-sub-m">ระบบ ${pcsCSEA(r.systemPieces, r.key)} · นับ ${pcsCSEA(r.countedPieces, r.key)}<br>${formatThaiDate(r.savedAt)} · ${r.counterName||'—'}</div>
+        <div class="row-sub-m">ระบบ ${pcsCSEA(r.systemPieces, r.key)} · นับ ${pcsCSEA(r.countedPieces, r.key)}<br>${formatThaiDate(r.savedAt)} · ${r.counterName||'—'}${r._prev ? `<br>ครั้งที่แล้ว ${pcsCSEA(r._prev.c, r.key)} · ${formatThaiDate(r._prev.day)}` : ''}</div>
       </td>
       <td class="num col-hide-m">${pcsCSEA(r.systemPieces, r.key)}</td>
       <td class="num col-hide-m">${pcsCSEA(r.countedPieces, r.key)}</td>
       <td class="num">${statusHtml}</td>
       <td class="col-hide-m" style="font-size:11px;white-space:nowrap">${formatThaiDate(r.savedAt)}</td>
+      <td class="num col-hide-m" style="font-size:11px;white-space:nowrap">${prevHtml}</td>
       <td class="col-hide-m" style="font-size:11px">${r.counterName||'—'}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="6" class="txt-center txt-muted" style="padding:24px">${q?'ไม่พบรายการที่ค้นหา':'ไม่มีข้อมูลตามตัวกรองที่เลือก'}</td></tr>`;
+  }).join('') || `<tr><td colspan="7" class="txt-center txt-muted" style="padding:24px">${q?'ไม่พบรายการที่ค้นหา':'ไม่มีข้อมูลตามตัวกรองที่เลือก'}</td></tr>`;
   const cnt = document.getElementById('dashCount');
   if (cnt) cnt.textContent = `${total.toLocaleString()} รายการ`;
   const pager = document.getElementById('dashPager');
@@ -7611,6 +7622,26 @@ function renderDashboard(rows) {
   });
   const latestRows = Object.values(latestByKey);
 
+  // v6.27: "นับครั้งที่แล้ว" — รอบก่อนหน้าของสินค้าตัวนั้น (เอาตามสรุปเก่าในชีทที่ user ใช้อยู่)
+  //   ★ ไล่จาก allVisible ไม่ใช่ filtered — ถ้ากรองเหลือวันเดียวจะไม่มีรอบก่อนให้เทียบเลย
+  const prevAgg = {};
+  allVisible.forEach(r => {
+    if (!r.key) return;
+    const d = dayOf(r.savedAt); if (!d) return;
+    const m = prevAgg[r.key] || (prevAgg[r.key] = {});
+    const a = m[d] || (m[d] = { c: 0, s: 0, who: '' });
+    a.c += Number(r.countedPieces) || 0;
+    a.s += Number(r.systemPieces)  || 0;
+    if (!a.who) a.who = r.counterName || '';
+  });
+  latestRows.forEach(r => {
+    const m = prevAgg[r.key]; if (!m) return;
+    const before = Object.keys(m).filter(d => d < latestDayByKey[r.key]).sort();
+    if (!before.length) return;
+    const d = before[before.length - 1];
+    r._prev = { day: d, c: m[d].c, s: m[d].s, who: m[d].who, diff: m[d].c - m[d].s };
+  });
+
   // Stats — "ทั้งหมด" = all products; specific warehouse = products with stock > 0 there
   const nChecked = latestRows.length;
   let totalProds;
@@ -7749,6 +7780,7 @@ function renderDashboard(rows) {
             <th class="num col-hide-m" onclick="dashSortBy('counted')" style="cursor:pointer">นับจริง <span id="dsArr-counted" class="ds-arr"></span></th>
             <th class="num" onclick="dashSortBy('diff')" style="cursor:pointer">สถานะ <span id="dsArr-diff" class="ds-arr"></span></th>
             <th class="col-hide-m" onclick="dashSortBy('date')" style="cursor:pointer">วันที่ <span id="dsArr-date" class="ds-arr"></span></th>
+            <th class="num col-hide-m" title="รอบก่อนหน้าของสินค้าตัวนี้ — ไม่สนช่วงวันที่ที่กรองอยู่">นับครั้งที่แล้ว</th>
             <th class="col-hide-m" onclick="dashSortBy('counter')" style="cursor:pointer">ผู้เช็ค <span id="dsArr-counter" class="ds-arr"></span></th>
           </tr></thead>
           <tbody id="dashTbody"></tbody>
