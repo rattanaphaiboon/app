@@ -92,6 +92,9 @@ APPS=(
   pc-icon-180.png
   rattana-manpower.html
   rattana-manpower.gs
+  rattana-manpower-data.json
+  rattana-manpower-team.html
+  rattana-line-register.html
 )
 
 DRY=0
