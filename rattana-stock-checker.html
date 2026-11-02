@@ -524,6 +524,10 @@ try{
       overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .ad-b .bo.me{color:var(--success);font-weight:600}
     .ad-b .bo.none{opacity:.55}
+    /* v6.32 — บรรทัด "ตรงกับสินค้าชื่อนี้" ตอนค้นเจอจากชื่อสินค้า ไม่ใช่ชื่อแบรนด์ */
+    .ad-b .bq{display:block;font-size:10.5px;color:var(--navy-mid);margin-top:1px;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    body.dark .ad-b .bq{color:var(--gold-light)}
     .ad-b .bc{font-size:11.5px;color:var(--muted);flex:0 0 auto;font-variant-numeric:tabular-nums}
     .chkp-row.c{padding:7px 0;cursor:pointer;-webkit-tap-highlight-color:transparent}
     .chkp-row.c:active{background:var(--row-alt)}
@@ -1494,7 +1498,7 @@ try{
       <div class="modal-body asg-body">
         <div class="asg-fixed">
           <div class="ad-sum" id="adPickSum"></div>
-          <input id="adPickSearch" class="input" style="margin-top:8px" placeholder="🔍 ค้นหาแบรนด์" oninput="adPickList()" autocomplete="off">
+          <input id="adPickSearch" class="input" style="margin-top:8px" placeholder="🔍 ค้นหา — แบรนด์ / ชื่อสินค้า / ผู้ดูแล" oninput="adPickList()" autocomplete="off">
           <div class="asg-note" style="margin-top:7px">ติ๊กแบรนด์ที่ต้องการ — ตัวเลขข้างบนจะบอกว่ารวมแล้วกี่ตัว</div>
         </div>
         <div id="adPickBody"></div>
@@ -1632,7 +1636,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.31';
+const APP_VERSION = 'v6.32';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -4347,6 +4351,39 @@ function adRender() {
     </div>`;
 }
 
+// ══════════ v6.32: ค้นในกล่องเลือกแบรนด์ — ชื่อแบรนด์ / ชื่อสินค้า / ผู้ดูแล ══════════
+//   ★ ดัชนีชื่อสินค้าต้องแคช ไม่งั้นพิมพ์ทีละตัวอักษร = ไล่แคตตาล็อกหมื่นกว่าตัวใหม่ทุกจังหวะ
+//     คีย์แคชผูกกับ (คลัง + จำนวนสินค้า) เพราะแคตตาล็อกรีเฟรชเองทุก 60 วิ (v3.39)
+//   ★ สร้างเฉพาะตอนมีคำค้นจริง ๆ — เปิดกล่องเฉย ๆ ไม่ต้องเสียเวลาไล่
+let _adPnIdx = null, _adPnIdxKey = '';
+function adPnIdx(wh) {
+  const key = wh + '|' + (allProducts || []).length;
+  if (_adPnIdx && _adPnIdxKey === key) return _adPnIdx;
+  const m = {};
+  Object.keys(brandIdx || {}).forEach(b => {
+    const names = [];
+    (brandIdx[b] || []).forEach(k => {
+      const p = productByKey[k];
+      // ★ ต้องกรองสต็อกคลังนี้ให้ตรงกับ adBrandsOf ไม่งั้นค้นเจอสินค้าที่คลังนี้ไม่มีของ
+      if (p && parseStock(p['STOCK ' + wh]).total > 0) names.push(String(p['PRODUCT NAME'] || k));
+    });
+    if (names.length) m[b] = names;
+  });
+  _adPnIdxKey = key; _adPnIdx = m;
+  return m;
+}
+
+// ตรงคำค้นไหม · null = ไม่ตรง · rank น้อย = ตรงตรงกว่า (ดันขึ้นบน)
+//   hit = ชื่อสินค้าที่ตรง — ต้องเอาไปโชว์ ไม่งั้นคนไม่รู้ว่าทำไมแบรนด์นี้โผล่มา
+//   ★ ผู้ดูแลค้นได้ต่อเมื่อ own โหลดเสร็จแล้ว (null = ยังอ่านไม่เสร็จ)
+//     พอโหลดเสร็จ adOwnEnsure จะสั่งวาดใหม่ให้เอง คำค้นเดิมจึงเจอทีหลังได้
+function adPickMatch(b, q, own, pn) {
+  if (asgNorm(b).includes(q)) return { rank: 0, hit: null };
+  if (((own && own[b]) || []).some(o => asgNorm(o.who).includes(q))) return { rank: 1, hit: null };
+  const hits = ((pn && pn[b]) || []).filter(n => asgNorm(n).includes(q));
+  return hits.length ? { rank: 2, hit: hits } : null;
+}
+
 function adPickOpen(name, empId) {
   const wh = document.getElementById('adWh')?.value || '';
   if (!wh) return;
@@ -4366,18 +4403,32 @@ function adPickClose() { document.getElementById('adPickModal').classList.remove
 
 function adPickList() {
   const wh = document.getElementById('adWh')?.value || '';
-  const q = (document.getElementById('adPickSearch')?.value || '').trim().toLowerCase();
+  // asgNorm ตัดช่องว่างทิ้งหมด — พิมพ์ "มาม่าคัพ" หรือ "มาม่า คัพ" ต้องเจอเหมือนกัน
+  const q = asgNorm(document.getElementById('adPickSearch')?.value || '');
   const all = adBrandsOf(wh);
-  const show = q ? all.filter(x => x.b.toLowerCase().includes(q)) : all;
-  // ที่ติ๊กไว้แล้วลอยขึ้นบนเสมอ ไม่งั้นเลือกแล้วหาไม่เจอ
-  show.sort((x, y) => (adPickSet.has(y.b) - adPickSet.has(x.b)) || (y.n - x.n));
   const picked = adKeysOf(wh, [...adPickSet]).length;
   const own = adOwnOf(wh);   // v6.31: null = ยังอ่านไม่เสร็จ · {} = คลังนี้ไม่มีไฟล์แบ่งงาน
+  // v6.32: ค้นได้ 3 ทาง — ชื่อแบรนด์ / ชื่อสินค้าในแบรนด์ / ชื่อผู้ดูแล
+  const hitOf = {};
+  let show = all;
+  if (q) {
+    const pn = adPnIdx(wh);
+    show = all.filter(x => {
+      const m = adPickMatch(x.b, q, own, pn);
+      if (m) hitOf[x.b] = m;
+      return !!m;
+    });
+  }
+  // ที่ติ๊กไว้แล้วลอยขึ้นบนเสมอ ไม่งั้นเลือกแล้วหาไม่เจอ · ตรงชื่อแบรนด์มาก่อนตรงชื่อสินค้า
+  show.sort((x, y) => (adPickSet.has(y.b) - adPickSet.has(x.b))
+    || ((hitOf[x.b] || { rank: 0 }).rank - (hitOf[y.b] || { rank: 0 }).rank)
+    || (y.n - x.n));
   const noOwn = own ? all.filter(x => !(own[x.b] || []).length).length : 0;
   const sum = document.getElementById('adPickSum');
   if (sum) sum.innerHTML = `<span>เลือกแล้ว <b>${adPickSet.size}</b> แบรนด์</span>`
     + `<span>รวม <b style="color:${picked ? 'var(--success)' : 'var(--muted)'}">${dcNum(picked)}</b> ตัว</span>`
-    + `<span>ทั้งคลังมี <b>${dcNum(all.length)}</b> แบรนด์</span>`
+    + (q ? `<span>ตรงคำค้น <b>${dcNum(show.length)}</b> จาก ${dcNum(all.length)} แบรนด์</span>`
+         : `<span>ทั้งคลังมี <b>${dcNum(all.length)}</b> แบรนด์</span>`)
     + (!own ? '<span>⏳ กำลังอ่านผู้ดูแล…</span>'
        : !Object.keys(own).length ? `<span>คลัง ${wh} ยังไม่มีแท็บในไฟล์แบ่งงาน</span>`
        : noOwn ? `<span>ไม่มีใครดูแล <b>${dcNum(noOwn)}</b> แบรนด์</span>` : '');
@@ -4390,13 +4441,17 @@ function adPickList() {
           : ow.length ? `<span class="bo${ow.some(o => adOwnIsMe(o.who)) ? ' me' : ''}">👤 ${
               ow.map(o => `${o.who} ${dcNum(o.n)}`).join(' · ')}</span>`
           : '<span class="bo none">ยังไม่มีใครดูแล</span>';
+        // v6.32: เจอเพราะชื่อสินค้า → ต้องบอกว่าตรงตัวไหน ไม่งั้นงงว่าแบรนด์นี้โผล่มาทำไม
+        const hw = hitOf[x.b] && hitOf[x.b].hit;
+        const hl = hw ? `<span class="bq">🔎 ${hw.slice(0, 2).join(' · ')}${
+          hw.length > 2 ? ` +อีก ${dcNum(hw.length - 2)}` : ''}</span>` : '';
         return `<div class="ad-b${adPickSet.has(x.b) ? ' on' : ''}" onclick="adPickToggle('${String(x.b).replace(/'/g,"\\'")}')">
           <span class="tick">${adPickSet.has(x.b) ? '✓' : ''}</span>
-          <span class="bw"><span class="bn">${x.b}</span>${ol}</span>
+          <span class="bw"><span class="bn">${x.b}</span>${ol}${hl}</span>
           <span class="bc">${dcNum(x.n)} ตัว</span></div>`;
       }).join('')
       + (show.length > 400 ? `<div style="text-align:center;padding:8px;color:var(--muted);font-size:11.5px">แสดง 400 จาก ${dcNum(show.length)} แบรนด์ — พิมพ์ค้นหาเพื่อแคบลง</div>` : '')
-    : '<div style="text-align:center;padding:20px;color:var(--muted);font-size:13px">ไม่พบแบรนด์ที่ค้นหา</div>';
+    : '<div style="text-align:center;padding:20px;color:var(--muted);font-size:13px">ไม่พบทั้งชื่อแบรนด์ ชื่อสินค้า และชื่อผู้ดูแลที่ค้นหา</div>';
 }
 function adPickToggle(b) {
   if (adPickSet.has(b)) adPickSet.delete(b); else adPickSet.add(b);
