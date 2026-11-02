@@ -2262,7 +2262,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.539</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.540</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -4294,9 +4294,55 @@ function _xlBar(){
   const b=_ocBarEl(); b.className='oc-bar new';
   b.innerHTML='📄 ใช้ข้อมูลจากไฟล์ Excel: <b>'+_xlFrom+'</b><button type="button" onclick="xlPick()">เลือกไฟล์ใหม่</button><button type="button" class="x" onclick="_ocBarHide()" title="ปิด">✕</button>';
 }
+// ══ v9.540: อ่านไฟล์ "Check Out.xlsx" ก่อน (เร็วกว่า) · ช้าเกิน 8 วิ/พลาด/ว่าง = ใช้ชีท Order แทนทันที ══
+//   user: "ถ้าอยากให้อ่านข้อมูลจาก Excel Checkout จะดึงข้อมูลเร็วขึ้นไหม" → "ทำเลย"
+//   วัด 2 พ.ย. (W1 4 วัน): Check Out ใบจอง 3.0 วิ / ใบขาย 3.0–3.5 วิ · ชีท Order 4.5–9.1 / 4.1–4.4 วิ · แต่ Check Out ยิงครั้งแรกบางทีช้า 24–30 วิ (กูเกิลแปลง .xlsx)
+//   คอลัมน์ A–P ตรงกับชีท Order เป๊ะ (แท็บ BVBK = BK_BV · DSDC = DS_DC) · ไฟล์รีเฟรชจาก SQL ชั่วโมงละครั้งเฉพาะตอนเครื่องคอมเปิด
+//   → ได้จาก Check Out แล้ว ยิงชีท Order ตามหลัง: มีใบที่ Check Out ยังไม่มี = รวมเก็บลงแคช + แถบ "🆕 อัปเดตเลย" (ไม่กระชากของที่กำลังจัด)
+const CO_FILE_ID='1S_HTxQ71AWHym1X_-CBwe-tzfCEPqY4T', CO_TAB={BK_BV:'BVBK',DS_DC:'DSDC'}, CO_FAST_MS=8000;
+const _coBgAt={};   // คีย์ → เวลาที่เช็คชีท Order ตามหลังล่าสุด (กันยิงซ้ำถี่)
+let _coSrc={};      // คีย์ → 'co' | 'order' (ไว้ดูใน console)
+async function _ordDual(key,orderTab,coTq,fromOrder,post){
+  if(!ORDER_WL||!CO_TAB[orderTab])return fromOrder();
+  let co=null; const t0=Date.now();
+  try{ co=await fetchSheet(CO_TAB[orderTab],CO_FILE_ID,{timeoutMs:CO_FAST_MS,retries:0,tq:coTq}); }
+  catch(e){ console.warn(`[Check Out] ${CO_TAB[orderTab]} ช้า/พลาด (${Math.round((Date.now()-t0)/100)/10} วิ) — ใช้ชีท Order แทน: ${(e&&e.message)||e}`); }
+  if(co&&co.length&&co[0]&&('DI_REF' in co[0])){
+    if(post)co=post(co);
+    // ใบที่เคยเจอเฉพาะในชีท Order (Check Out ยังตามไม่ทัน) = รวมให้ทุกรอบ ไม่งั้นรอบเช็คเบื้องหลังเขียนแคชทับแล้วใบหาย
+    const _have=new Set(co.map(_coRef)), _ex=(_coExtra[key]||[]).filter(r=>!_have.has(_coRef(r)));
+    const pure=co; if(_ex.length)co=co.concat(_ex);
+    _coSrc[key]='co'; console.log(`⚡ Check Out/${CO_TAB[orderTab]}: ${co.length} แถว (${ORDER_WL}) ${Math.round((Date.now()-t0)/100)/10} วิ — เช็คชีท Order ตามหลัง`);
+    _ordBgCheck(key,pure,fromOrder); return co;
+  }
+  _coSrc[key]='order'; return fromOrder();
+}
+function _ordBgCheck(key,co,fromOrder){
+  if(Date.now()-(_coBgAt[key]||0)<5*60e3)return; _coBgAt[key]=Date.now();
+  setTimeout(async()=>{ try{
+    const od=await fromOrder(); if(!od||!od.length)return;
+    const R=_coRef, prev=new Set((_coExtra[key]||[]).map(R));
+    const have=new Set(co.map(R)), add=od.filter(r=>!have.has(R(r)));
+    _coExtra[key]=add;
+    const nNew=new Set(add.map(R).filter(x=>!prev.has(x))).size;
+    if(!nNew){ console.log(`✅ ${key}: ชีท Order ไม่มีใบใหม่เกินจาก Check Out`+(add.length?` (ใบที่รวมไว้แล้ว ${new Set(add.map(R)).size} ใบ)`:'')); return; }
+    const merged=co.concat(add), k=key+'|'+ORDER_WL;
+    await _ocPut(k,{at:Date.now(),wl:ORDER_WL,sig:_ocSig(merged),rows:merged});
+    console.log(`🆕 ${key}: ชีท Order มีอีก ${nNew} ใบที่ Check Out ยังไม่มี — รวมเก็บแล้ว`);
+    _ocChanged=true; _coNewN+=nNew; _coBar();
+  }catch(e){ console.warn('[Check Out] เช็คชีท Order ตามหลังไม่สำเร็จ:',(e&&e.message)||e); } },1500);
+}
+let _coNewN=0, _coExtra={};   // _coExtra: คีย์ → แถวจากชีท Order ที่ Check Out ยังไม่มี
+const _coRef=r=>String((r&&r.DI_REF)||'').replace(/\s+/g,'').toUpperCase();
+function _coBar(){ const b=_ocBarEl(); b.className='oc-bar new';
+  b.innerHTML=`🆕 ชีท Order มีใบใหม่ ${fmtN(_coNewN)} ใบที่ไฟล์ Check Out ยังไม่มี <button type="button" onclick="_coNewN=0;_ocApply()">อัปเดตเลย</button><button type="button" class="x" onclick="_ocBarHide()" title="ปิด">✕</button>`; }
 // ครอบตัวดึงบิลทั้ง 3 ชุด (BK_BV · DS_DC ที่ส่งแล้ว · DS_DC วันนี้) ด้วยแคชเดียวกัน
-function fetchOrderBills(){ return _ocWrap('bk',_netOrderBills); }
-function fetchDsDcTodayBills(){ return _ocWrap('dstoday',_netDsDcTodayBills); }
+function fetchOrderBills(){ return _ocWrap('bk',()=>_ordDual('bk','BK_BV',`SELECT * WHERE G='${ORDER_WL}' AND A >= '${orderCutoffStr().text}'`,_netOrderBills)); }   // v9.540
+function fetchDsDcTodayBills(){ return _ocWrap('dstoday',()=>_ordDual('dstoday','DS_DC',`SELECT * WHERE G='${ORDER_WL}' AND A = '${_coToday()}'`,_netDsDcTodayBills,_coDropDsc)); }   // v9.540
+function _coToday(){ const n=new Date(); return n.getFullYear()+'/'+String(n.getMonth()+1).padStart(2,'0')+'/'+String(n.getDate()).padStart(2,'0'); }
+function _coDropDsc(rows){   // ใบจาก Check Out ยังไม่ผ่านตัวกรองของ _netDsDcTodayBills → ทำเหมือนกัน (ตัด DSC + ติด _dsdc)
+  return (rows||[]).filter(r=>!/^DSC/.test(String(r['DI_REF']||'').replace(/\s+/g,'').toUpperCase())).map(r=>{ r._dsdc=true; return r; });
+}
 async function _netOrderBills(){
   const c=orderCutoffStr();
   const tries=[
@@ -4386,7 +4432,7 @@ async function fetchDsDcRefs(){
     }
     return [];
   };
-  const loadDsdc=()=>_ocWrap('dsref',_netDsdc);   // v9.233: แคชในเครื่อง
+  const loadDsdc=()=>_ocWrap('dsref',()=>_ordDual('dsref','DS_DC',`SELECT A, B, O WHERE G='${ORDER_WL}' AND A >= '${c.text}'`,_netDsdc));   // v9.233: แคชในเครื่อง · v9.540 Check Out ก่อน
   // v8.88: โหลดแบบเรียงลำดับ (ไม่ Promise.all) — กัน rate-limit ตอนโหลดพร้อมชีตอื่น (peak = 8 เท่าเดิม)
   const pay=await fetchPaidDocs();
   const dsRows=await loadDsdc();
