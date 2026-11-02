@@ -515,8 +515,15 @@ try{
     .ad-b .tick{width:20px;height:20px;border-radius:6px;border:1.5px solid var(--border);flex:0 0 auto;
       display:grid;place-items:center;font-size:12px;color:#fff;background:var(--card-bg)}
     .ad-b.on .tick{background:var(--navy-mid);border-color:var(--navy-mid)}
-    .ad-b .bn{font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    /* v6.31 — ชื่อแบรนด์ + บรรทัดผู้ดูแล · flex:1 ย้ายมาอยู่กล่องนอก (.bw)
+       ★ flex:1 ต้องคู่ min-width:0 เสมอ ไม่งั้นชื่อยาวดันแถวเลยขอบจอ */
+    .ad-b .bw{flex:1;min-width:0}
+    .ad-b .bn{display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .ad-b.on .bn{font-weight:700}
+    .ad-b .bo{display:block;font-size:10.5px;color:var(--muted);margin-top:1px;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ad-b .bo.me{color:var(--success);font-weight:600}
+    .ad-b .bo.none{opacity:.55}
     .ad-b .bc{font-size:11.5px;color:var(--muted);flex:0 0 auto;font-variant-numeric:tabular-nums}
     .chkp-row.c{padding:7px 0;cursor:pointer;-webkit-tap-highlight-color:transparent}
     .chkp-row.c:active{background:var(--row-alt)}
@@ -1625,7 +1632,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.30';
+const APP_VERSION = 'v6.31';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -4154,6 +4161,98 @@ function adKeysOf(wh, brands) {
   return out;
 }
 
+// ══════════ v6.31: แบรนด์นี้ "ปกติใครดูแล" (ม้วนจากไฟล์แบ่งงาน) ══════════
+//   ★ ห้ามเรียก assignBuild() — มันเขียน assignIdx/assignOwner ที่หน้านับกำลังใช้อยู่
+//     (บทเรียนเดียวกับ dashCtxLoad v6.23 ที่ต้องสำรองตัวแปรกลางไว้ก่อนยืม)
+//   ★ ค่าใน _adOwn มี 3 สถานะ: undefined = ยังไม่โหลด · {} = คลังนี้ไม่มีใครดูแล · {…} = มีข้อมูล
+//     ต้องแยก undefined กับ {} ไม่งั้นตอนกำลังโหลดจะขึ้น "ไม่มีใครดูแล" ทั้งจอ
+//   ★ W2/W3/C4 ยังไม่มีแท็บในไฟล์แบ่งงาน → assignFetch คืน rows ว่าง (ด่าน count(A) จับได้)
+//     ต้องบอกผู้ใช้ตรง ๆ ไม่ใช่ปล่อยช่องว่าง ไม่งั้นคนจะคิดว่าแอปพัง
+const _adOwn = {}, _adOwnFlight = {};
+
+// คืน { ชื่อแบรนด์: [{who,n}] } เรียงคนที่ถือมากสุดก่อน — n = จำนวนตัวที่คนนั้นถือในแบรนด์นั้น
+function adOwnRoll(wh, rows, kind) {
+  const col = 'STOCK ' + wh, acc = {};
+  const bump = (p, who) => {
+    if (!p || !parseStock(p[col]).total) return;   // ★ นับเฉพาะตัวที่มีของจริงในคลังนี้
+    const b = String(p['CAT BRAND'] || '').trim();
+    if (!b) return;
+    const m = acc[b] || (acc[b] = {});
+    m[who] = (m[who] || 0) + 1;
+  };
+  const seen = {};   // ★ ชีทใส่ชื่อซ้ำได้ (เจอจริงในแท็บ W4) ไม่กัน = นับ 2 รอบ
+  if (kind === 'vendor') {
+    const byV = {};
+    (allProducts || []).forEach(p => {
+      const v = asgNorm(p['VENDOR NAME']);
+      if (v) (byV[v] || (byV[v] = [])).push(p);
+    });
+    rows.forEach(r => {
+      const k = asgNorm(r.v), sk = r.w + '|' + k;
+      if (!k || seen[sk]) return;
+      seen[sk] = 1;
+      (byV[k] || []).forEach(p => bump(p, r.w));
+    });
+  } else {
+    const byN = {};
+    (allProducts || []).forEach(p => {
+      const n = asgNorm(p['PRODUCT NAME']);
+      if (n && !byN[n]) byN[n] = p;
+    });
+    rows.forEach(r => {
+      const k = asgNorm(r.n), sk = r.w + '|' + k;
+      if (!k || seen[sk]) return;
+      seen[sk] = 1;
+      bump(byN[k], r.w);
+    });
+  }
+  const out = {};
+  Object.keys(acc).forEach(b => {
+    out[b] = Object.keys(acc[b]).map(w => ({ who: w, n: acc[b][w] }))
+                   .sort((x, y) => y.n - x.n || x.who.localeCompare(y.who, 'th'));
+  });
+  return out;
+}
+
+function adOwnKey(wh) { return adWhOf(String(wh || '').trim().toUpperCase()); }
+// {} นับเป็น "โหลดแล้ว" (object ว่างยัง truthy) · undefined → null = ยังไม่โหลด
+function adOwnOf(wh)  { const k = adOwnKey(wh); return (k && _adOwn[k]) || null; }
+
+function adOwnLoad(wh) {
+  const k = adOwnKey(wh);
+  if (!k) return Promise.resolve(null);
+  if (_adOwn[k]) return Promise.resolve(_adOwn[k]);
+  if (_adOwnFlight[k]) return _adOwnFlight[k];
+  const p = (async () => {
+    const r = await assignFetch(k);   // แคช 6 ชม. + กันยิงซ้ำให้อยู่แล้ว
+    _adOwn[k] = (r && r.rows && r.rows.length && allProducts && allProducts.length)
+              ? adOwnRoll(k, r.rows, r.kind) : {};
+    return _adOwn[k];
+  })();
+  _adOwnFlight[k] = p;
+  p.then(() => { delete _adOwnFlight[k]; }, () => { delete _adOwnFlight[k]; });
+  return p;
+}
+
+// โหลดเบื้องหลัง · ข้อมูลมาถึงตอนกล่องเปิดอยู่ ให้วาดใหม่ให้เอง (ไม่ต้องปิด-เปิด)
+function adOwnEnsure(wh) {
+  const k = adOwnKey(wh);
+  if (!k || _adOwn[k]) return;
+  adOwnLoad(k).then(() => {
+    if (document.getElementById('adPickModal')?.classList.contains('open')) adPickList();
+    else if (document.getElementById('modeAssignDay')?.style.display !== 'none') adRender();
+  }).catch(e => console.warn('ม้วนผู้ดูแลแบรนด์ไม่ได้', e));
+}
+
+// คนที่กำลังมอบงานให้ = คนเดียวกับผู้ดูแลเดิมไหม
+//   ★ แท็บ W1 เขียนชื่อเต็ม แต่แท็บ W4 เขียนชื่อเล่น → ต้องเทียบทั้งสองอย่าง
+function adOwnIsMe(who) {
+  if (!adPickWho) return false;
+  const w = asgNorm(who);
+  return w === asgNorm(adPickWho.name)
+      || (!!adPickWho.nickname && w === asgNorm(adPickWho.nickname));
+}
+
 function adInit() {
   const sel = document.getElementById('adWh');
   if (sel && !sel.options.length) {
@@ -4209,6 +4308,7 @@ function adRender() {
   if (!host) return;
   const wh = document.getElementById('adWh')?.value || visibleWh[0] || '';
   const date = document.getElementById('adDate')?.value || adTodayStr();
+  adOwnEnsure(wh);   // v6.31: อ่านผู้ดูแลเดิมของคลังนี้ไว้ล่วงหน้า กดเข้ากล่องแล้วเห็นทันที
   const mine = (adRows || []).filter(r => String(r.warehouse).toUpperCase() === String(wh).toUpperCase());
   const totSku = mine.reduce((a, r) => a + (adKeysOf(wh, r.brands).length), 0);
   const q = (document.getElementById('adSearch')?.value || '').trim().toLowerCase();
@@ -4252,7 +4352,10 @@ function adPickOpen(name, empId) {
   if (!wh) return;
   if (!Object.keys(brandIdx || {}).length) { showToast('แคตตาล็อกยังโหลดไม่เสร็จ รอสักครู่', 'warning'); return; }
   const r = adMineRow(wh, name);
-  adPickWho = { name, empId };
+  // v6.31: เก็บชื่อเล่นมาด้วย — แท็บ W4 ในไฟล์แบ่งงานเขียนชื่อเล่น ไม่ใช่ชื่อเต็ม
+  const _st = (adStaff || []).find(p => p.name === name && p.empId === empId);
+  adPickWho = { name, empId, nickname: (_st && _st.nickname) || '' };
+  adOwnEnsure(wh);
   adPickSet = new Set(r ? r.brands : []);
   document.getElementById('adPickTitle').textContent = 'เลือกแบรนด์ให้ ' + name;
   const se = document.getElementById('adPickSearch'); if (se) se.value = '';
@@ -4269,15 +4372,29 @@ function adPickList() {
   // ที่ติ๊กไว้แล้วลอยขึ้นบนเสมอ ไม่งั้นเลือกแล้วหาไม่เจอ
   show.sort((x, y) => (adPickSet.has(y.b) - adPickSet.has(x.b)) || (y.n - x.n));
   const picked = adKeysOf(wh, [...adPickSet]).length;
+  const own = adOwnOf(wh);   // v6.31: null = ยังอ่านไม่เสร็จ · {} = คลังนี้ไม่มีไฟล์แบ่งงาน
+  const noOwn = own ? all.filter(x => !(own[x.b] || []).length).length : 0;
   const sum = document.getElementById('adPickSum');
   if (sum) sum.innerHTML = `<span>เลือกแล้ว <b>${adPickSet.size}</b> แบรนด์</span>`
     + `<span>รวม <b style="color:${picked ? 'var(--success)' : 'var(--muted)'}">${dcNum(picked)}</b> ตัว</span>`
-    + `<span>ทั้งคลังมี <b>${dcNum(all.length)}</b> แบรนด์</span>`;
+    + `<span>ทั้งคลังมี <b>${dcNum(all.length)}</b> แบรนด์</span>`
+    + (!own ? '<span>⏳ กำลังอ่านผู้ดูแล…</span>'
+       : !Object.keys(own).length ? `<span>คลัง ${wh} ยังไม่มีแท็บในไฟล์แบ่งงาน</span>`
+       : noOwn ? `<span>ไม่มีใครดูแล <b>${dcNum(noOwn)}</b> แบรนด์</span>` : '');
   const body = document.getElementById('adPickBody');
   if (body) body.innerHTML = show.length
-    ? show.slice(0, 400).map(x => `<div class="ad-b${adPickSet.has(x.b) ? ' on' : ''}" onclick="adPickToggle('${String(x.b).replace(/'/g,"\\'")}')">
-        <span class="tick">${adPickSet.has(x.b) ? '✓' : ''}</span>
-        <span class="bn">${x.b}</span><span class="bc">${dcNum(x.n)} ตัว</span></div>`).join('')
+    ? show.slice(0, 400).map(x => {
+        const ow = own ? (own[x.b] || []) : null;
+        // ยังโหลดไม่เสร็จ = ไม่ต้องขึ้นบรรทัดนี้เลย · รู้แล้วว่าไม่มีคน = บอกไปตรง ๆ
+        const ol = !ow ? ''
+          : ow.length ? `<span class="bo${ow.some(o => adOwnIsMe(o.who)) ? ' me' : ''}">👤 ${
+              ow.map(o => `${o.who} ${dcNum(o.n)}`).join(' · ')}</span>`
+          : '<span class="bo none">ยังไม่มีใครดูแล</span>';
+        return `<div class="ad-b${adPickSet.has(x.b) ? ' on' : ''}" onclick="adPickToggle('${String(x.b).replace(/'/g,"\\'")}')">
+          <span class="tick">${adPickSet.has(x.b) ? '✓' : ''}</span>
+          <span class="bw"><span class="bn">${x.b}</span>${ol}</span>
+          <span class="bc">${dcNum(x.n)} ตัว</span></div>`;
+      }).join('')
       + (show.length > 400 ? `<div style="text-align:center;padding:8px;color:var(--muted);font-size:11.5px">แสดง 400 จาก ${dcNum(show.length)} แบรนด์ — พิมพ์ค้นหาเพื่อแคบลง</div>` : '')
     : '<div style="text-align:center;padding:20px;color:var(--muted);font-size:13px">ไม่พบแบรนด์ที่ค้นหา</div>';
 }
