@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.0 — Apps Script backend
+ * Rattana ClearStock v1.2 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -74,7 +74,7 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.0' });
+    if (action === 'ping') return json_({ ok: true, version: '1.2' });
     const user = requireUser_(p.email);
     let out;
     switch (action) {
@@ -143,7 +143,17 @@ function requireUser_(email) {
 
 // ───────────────────────── PDDT products ─────────────────────────
 const PDDT_COLS = ['PRODUCT NAME', 'CODE EA', 'CODE PA', 'CODE BP', 'CODE CS', 'UNIT EA', 'UNIT PA', 'UNIT BP', 'UNIT CS',
-  'QTY EA', 'QTY PA', 'QTY BP', 'QTY CS', 'SHORT NAME', 'STOCK W4', 'STOCK C4'];
+  'QTY EA', 'QTY PA', 'QTY BP', 'QTY CS', 'SHORT NAME', 'STOCK W4', 'STOCK C4', 'SKU_USAGE'];
+const PDDT_OPTIONAL = ['SKU_USAGE'];   // รูปสินค้า (ลิงก์ Google Drive) — ไม่มีคอลัมน์ก็ไม่ error
+
+/** ลิงก์ Drive / lh3 / id เปล่า → file id ; อื่น ๆ → '' */
+function driveId_(u) {
+  u = String(u || '').trim().replace(/^["']+|["']+$/g, '');
+  if (!u || u.charAt(0) === '#') return '';
+  if (/^[\w-]{25,60}$/.test(u)) return u;
+  const m = u.match(/\/d\/([\w-]{25,60})/) || u.match(/[?&]id=([\w-]{25,60})/);
+  return m ? m[1] : '';
+}
 
 function getProducts_(fresh) {
   const cache = CacheService.getScriptCache();
@@ -162,11 +172,11 @@ function readPddt_() {
   const head = sh.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(s => String(s).trim());
   const idx = PDDT_COLS.map(h => {
     const i = head.indexOf(h);
-    if (i < 0) throw new Error('PDDT ไม่พบคอลัมน์ ' + h);
+    if (i < 0 && PDDT_OPTIONAL.indexOf(h) < 0) throw new Error('PDDT ไม่พบคอลัมน์ ' + h);
     return i;
   });
   // อ่านเป็นช่วงคอลัมน์ติดกัน ลดจำนวนครั้งที่เรียก API
-  const sorted = idx.slice().sort((a, b) => a - b);
+  const sorted = idx.filter(c => c >= 0).sort((a, b) => a - b);
   const runs = [];
   sorted.forEach(c => {
     const r = runs[runs.length - 1];
@@ -177,10 +187,13 @@ function readPddt_() {
     const vals = sh.getRange(2, r.start + 1, n, r.end - r.start + 1).getDisplayValues();
     for (let c = r.start; c <= r.end; c++) col[c] = vals.map(row => row[c - r.start]);
   });
+  const iImg = PDDT_COLS.indexOf('SKU_USAGE');
   const rows = [];
   for (let i = 0; i < n; i++) {
     if (!String(col[idx[0]][i]).trim()) continue;
-    rows.push(idx.map(c => String(col[c][i]).trim()));
+    const row = idx.map(c => (c < 0 ? '' : String(col[c][i]).trim()));
+    row[iImg] = driveId_(row[iImg]);   // ส่งแค่ file id ให้ข้อมูลเล็กลง
+    rows.push(row);
   }
   return { cols: PDDT_COLS, rows: rows, syncAt: getSyncAt_(), loadedAt: new Date().toISOString() };
 }
