@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.7 — Apps Script backend
+ * Rattana ClearStock v1.9 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -76,7 +76,9 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.7' });
+    if (action === 'ping') return json_({ ok: true, version: '1.9' });
+    if (action === 'users') return json_({ ok: true, users: listUsers_() });
+    if (action === 'login') return json_({ ok: true, user: loginByUid_(p.uid) });
     const user = requireUser_(p.email);
     let out;
     switch (action) {
@@ -104,13 +106,13 @@ const normEmail_ = s => String(s || '').replace(/[​‌‍﻿]/g, '').replace(/
 
 function getUsers_() {
   const cache = CacheService.getScriptCache();
-  const hit = cacheGet_(cache, 'users');
+  const hit = cacheGet_(cache, 'users18');
   if (hit) return hit;
   const v = SpreadsheetApp.openById(CFG.USERS_ID).getSheetByName(CFG.USERS_SHEET).getDataRange().getDisplayValues();
   const h = v[0].map(s => String(s).trim());
   const c = n => h.indexOf(n);
   const iE = c('E-mail'), iN = c('ชื่อ - สกุล'), iW = c('W'), iR = c('User Role'), iS = c('Approval Stage'),
-        iD = c('แผนก'), iSt = c('Status'), iEmp = c('รหัสพนักงาน');
+        iD = c('แผนก'), iSt = c('Status'), iEmp = c('รหัสพนักงาน'), iNk = c('ชื่อเล่น');
   const map = {};
   v.slice(1).forEach(r => {
     const em = normEmail_(r[iE]);
@@ -119,13 +121,36 @@ function getUsers_() {
       email: em, name: String(r[iN] || '').trim(), w: String(r[iW] || '').trim().toUpperCase(),
       role: parseInt(r[iR], 10) || 1, stage: String(r[iS] || '').trim(), dept: String(r[iD] || '').trim(),
       status: String(r[iSt] || '').trim(), empId: String(r[iEmp] || '').trim(),
+      nick: iNk >= 0 ? String(r[iNk] || '').trim() : '', uid: uid_(em),
     };
     const prev = map[em];
     const active = x => x && x.status.toLowerCase() === 'active';
     if (!prev || (!active(prev) && active(u))) map[em] = u;
   });
-  cachePut_(cache, 'users', map, CFG.CACHE_SEC);
+  cachePut_(cache, 'users18', map, CFG.CACHE_SEC);
   return map;
+}
+
+/** รหัสแทนอีเมลในหน้าเลือกชื่อ — รายชื่อเปิดให้ดูก่อนล็อกอิน จึงไม่ส่งอีเมลออกไป */
+function uid_(email) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, 'clearstock:' + email)
+    .slice(0, 6).map(b => ('0' + (b & 255).toString(16)).slice(-2)).join('');
+}
+
+/** หน้าเลือกชื่อ: เฉพาะคน Active ที่มีอีเมล เรียงตามชื่อ */
+function listUsers_() {
+  const map = getUsers_();
+  return Object.keys(map).map(k => map[k])
+    .filter(u => u.status.toLowerCase() === 'active' && u.name)
+    .map(u => ({ uid: u.uid, name: u.name, nick: u.nick, dept: u.dept, w: u.w, emp: u.empId }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'th'));
+}
+
+function loginByUid_(uid) {
+  const map = getUsers_();
+  const em = Object.keys(map).filter(k => map[k].uid === String(uid || ''))[0];
+  if (!em) throw new Error('ไม่พบชื่อนี้ในระบบ — กดโหลดรายชื่อใหม่');
+  return requireUser_(em);
 }
 
 function perms_(u) {
