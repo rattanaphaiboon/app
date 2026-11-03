@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.12 — Apps Script backend
+ * Rattana ClearStock v1.13 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -76,7 +76,7 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.12' });
+    if (action === 'ping') return json_({ ok: true, version: '1.13' });
     if (action === 'users') return json_({ ok: true, users: listUsers_() });
     if (action === 'login') return json_({ ok: true, user: loginByUid_(p.uid) });
     const user = requireUser_(p.email);
@@ -207,24 +207,16 @@ function getProducts_(fresh) {
   return data;
 }
 
-/** ราคาต่อหน่วย (PRICE CC00 ของหน่วยที่บาร์โค้ดนั้นเป็น) สำหรับไฟล์นำเข้า Bplus → { barcode: ราคา } */
+/** ราคาต่อหน่วย (PRICE CC00 ของหน่วยที่บาร์โค้ดนั้นเป็น) สำหรับไฟล์นำเข้า Bplus → { barcode: ราคา }
+ *  readPddt_ เก็บตารางราคาไว้ใน cache ทุกครั้งที่อ่าน PDDT (ใช้ได้จนกว่า Stocksync จะลงรอบใหม่)
+ *  — อ่านชีทใหม่ทุกครั้งใช้เวลาเป็นนาที */
+let LAST_PRICES_ = null;
 function getPrices_(codes) {
-  const want = {};
-  (codes || []).forEach(c => { c = String(c || '').trim(); if (c) want[c] = 1; });
-  if (!Object.keys(want).length) return {};
-  const sh = SpreadsheetApp.openById(CFG.PDDT_ID).getSheetByName(CFG.PDDT_SHEET);
-  const n = sh.getLastRow() - 1;
-  const head = sh.getRange(1, 1, 1, sh.getLastColumn()).getDisplayValues()[0].map(s => String(s).trim());
-  const read = h => { const i = head.indexOf(h); return i < 0 ? null : sh.getRange(2, i + 1, n, 1).getDisplayValues().map(r => r[0]); };
+  const cache = CacheService.getScriptCache();
+  let hit = cacheGet_(cache, 'prices');
+  if (!hit || hit.syncAt !== getSyncAt_()) { getProducts_(true); hit = cacheGet_(cache, 'prices') || LAST_PRICES_ || { map: {} }; }
   const out = {};
-  ['EA', 'PA', 'BP', 'CS'].forEach(u => {
-    const code = read('CODE ' + u), price = read('PRICE CC00 ' + u);
-    if (!code || !price) return;
-    for (let i = 0; i < n; i++) {
-      const c = String(code[i]).trim();
-      if (want[c] && !(c in out)) out[c] = Number(String(price[i]).replace(/,/g, '')) || 0;
-    }
-  });
+  (codes || []).forEach(c => { c = String(c || '').trim(); if (c && c in hit.map) out[c] = hit.map[c]; });
   return out;
 }
 
@@ -237,8 +229,9 @@ function readPddt_() {
     if (i < 0 && PDDT_OPTIONAL.indexOf(h) < 0) throw new Error('PDDT ไม่พบคอลัมน์ ' + h);
     return i;
   });
+  const pIdx = ['EA', 'PA', 'BP', 'CS'].map(u => [head.indexOf('CODE ' + u), head.indexOf('PRICE CC00 ' + u)]);
   // อ่านเป็นช่วงคอลัมน์ติดกัน ลดจำนวนครั้งที่เรียก API
-  const sorted = idx.filter(c => c >= 0).sort((a, b) => a - b);
+  const sorted = idx.concat(pIdx.map(x => x[1])).filter((c, i, a) => c >= 0 && a.indexOf(c) === i).sort((a, b) => a - b);
   const runs = [];
   sorted.forEach(c => {
     const r = runs[runs.length - 1];
@@ -258,6 +251,16 @@ function readPddt_() {
     rows.push(row);
   }
   const sync = getSyncInfo_();
+  const prices = {};
+  pIdx.forEach(([ci, pi]) => {
+    if (ci < 0 || pi < 0) return;
+    for (let i = 0; i < n; i++) {
+      const c = String(col[ci][i]).trim();
+      if (c && !(c in prices)) prices[c] = Number(String(col[pi][i]).replace(/,/g, '')) || 0;
+    }
+  });
+  LAST_PRICES_ = { syncAt: sync.syncAt, map: prices };
+  cachePut_(CacheService.getScriptCache(), 'prices', LAST_PRICES_, 21600);
   return { cols: PDDT_COLS, rows: rows, syncAt: sync.syncAt, sync: sync, loadedAt: new Date().toISOString() };
 }
 
