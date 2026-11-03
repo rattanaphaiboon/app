@@ -106,28 +106,36 @@ const normEmail_ = s => String(s || '').replace(/[​‌‍﻿]/g, '').replace(/
 
 function getUsers_() {
   const cache = CacheService.getScriptCache();
-  const hit = cacheGet_(cache, 'users18');
+  const hit = cacheGet_(cache, 'users19');
   if (hit) return hit;
   const v = SpreadsheetApp.openById(CFG.USERS_ID).getSheetByName(CFG.USERS_SHEET).getDataRange().getDisplayValues();
   const h = v[0].map(s => String(s).trim());
   const c = n => h.indexOf(n);
   const iE = c('E-mail'), iN = c('ชื่อ - สกุล'), iW = c('W'), iR = c('User Role'), iS = c('Approval Stage'),
         iD = c('แผนก'), iSt = c('Status'), iEmp = c('รหัสพนักงาน'), iNk = c('ชื่อเล่น');
-  const map = {};
-  v.slice(1).forEach(r => {
-    const em = normEmail_(r[iE]);
-    if (!em) return;
-    const u = {
-      email: em, name: String(r[iN] || '').trim(), w: String(r[iW] || '').trim().toUpperCase(),
+  const rows = v.slice(1).map(r => {
+    const mail = normEmail_(r[iE]);
+    return {
+      mail: mail.indexOf('@') > 0 ? mail : '', name: String(r[iN] || '').trim(), w: String(r[iW] || '').trim().toUpperCase(),
       role: parseInt(r[iR], 10) || 1, stage: String(r[iS] || '').trim(), dept: String(r[iD] || '').trim(),
       status: String(r[iSt] || '').trim(), empId: String(r[iEmp] || '').trim(),
-      nick: iNk >= 0 ? String(r[iNk] || '').trim() : '', uid: uid_(em),
+      nick: iNk >= 0 ? String(r[iNk] || '').trim() : '',
     };
-    const prev = map[em];
-    const active = x => x && x.status.toLowerCase() === 'active';
-    if (!prev || (!active(prev) && active(u))) map[em] = u;
+  }).filter(u => u.mail || u.name);
+  // ตัวระบุผู้ใช้ (เก็บใน field email ให้โค้ดส่วนอื่นใช้ต่อได้) = อีเมล ถ้ามีและไม่ได้ใช้ร่วมกับคนชื่ออื่น
+  // ไม่มีอีเมล / อีเมลกลางที่หลายคนใช้ → emp:รหัสพนักงาน หรือ name:ชื่อ
+  const namesByMail = {};
+  rows.forEach(u => { if (u.mail) (namesByMail[u.mail] = namesByMail[u.mail] || {})[u.name] = 1; });
+  const map = {};
+  const active = x => x && x.status.toLowerCase() === 'active';
+  rows.forEach(u => {
+    const shared = u.mail && Object.keys(namesByMail[u.mail]).length > 1;
+    const key = u.mail && !shared ? u.mail : normEmail_(u.empId ? 'emp:' + u.empId : 'name:' + u.name);
+    u.email = key; u.uid = uid_(key);
+    const prev = map[key];
+    if (!prev || (!active(prev) && active(u))) map[key] = u;
   });
-  cachePut_(cache, 'users18', map, CFG.CACHE_SEC);
+  cachePut_(cache, 'users19', map, CFG.CACHE_SEC);
   return map;
 }
 
@@ -137,7 +145,7 @@ function uid_(email) {
     .slice(0, 6).map(b => ('0' + (b & 255).toString(16)).slice(-2)).join('');
 }
 
-/** หน้าเลือกชื่อ: เฉพาะคน Active ที่มีอีเมล เรียงตามชื่อ */
+/** หน้าเลือกชื่อ: ทุกคนที่ Active เรียงตามชื่อ (ไม่ส่งอีเมลออกไป) */
 function listUsers_() {
   const map = getUsers_();
   return Object.keys(map).map(k => map[k])
@@ -157,7 +165,7 @@ function perms_(u) {
   const stage = String(u.stage || '').toLowerCase();
   const isWh = CFG.WH_STAFF.indexOf(u.w) >= 0;
   const isApprover = stage === 'mgt' || stage === 'all' || u.role >= 5;
-  const isAdj = CFG.ADJ_EMAILS.map(normEmail_).indexOf(u.email) >= 0;
+  const isAdj = CFG.ADJ_EMAILS.map(normEmail_).indexOf(u.mail) >= 0;
   return { create: true, ack: isWh || u.role >= 8, approve: isApprover, post: isAdj };
 }
 
@@ -165,7 +173,7 @@ function requireUser_(email) {
   const em = normEmail_(email);
   if (!em) throw new Error('กรุณาเข้าสู่ระบบ');
   const u = getUsers_()[em];
-  if (!u) throw new Error('ไม่พบอีเมลนี้ในระบบผู้ใช้ (' + em + ')');
+  if (!u) throw new Error('ไม่พบชื่อนี้ในระบบผู้ใช้ — กรุณาเลือกชื่อใหม่');
   if (u.status.toLowerCase() !== 'active') throw new Error('บัญชีถูกระงับ — ติดต่อ Admin');
   return Object.assign({}, u, { perms: perms_(u) });
 }
