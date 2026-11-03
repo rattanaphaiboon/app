@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.5 — Apps Script backend
+ * Rattana ClearStock v1.7 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -76,13 +76,14 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.5' });
+    if (action === 'ping') return json_({ ok: true, version: '1.7' });
     const user = requireUser_(p.email);
     let out;
     switch (action) {
       case 'me':       out = { user: user }; break;
       case 'products': out = getProducts_(p.fresh === true || p.fresh === '1'); break;
       case 'docs':     out = { docs: listDocs_() }; break;
+      case 'sync':     out = { sync: getSyncInfo_() }; break;
       case 'create':   out = createDocs_(user, p.docs || []); break;
       case 'ack': case 'approve': case 'reject': case 'post': case 'cancel':
         out = transition_(user, action, p); break;
@@ -162,7 +163,8 @@ function getProducts_(fresh) {
   const cache = CacheService.getScriptCache();
   if (!fresh) {
     const hit = cacheGet_(cache, 'pddt');
-    if (hit) return hit;
+    // Stocksync ลงรอบใหม่แล้ว → ทิ้ง cache เก่าทันที ไม่ต้องรอหมดอายุ
+    if (hit && hit.syncAt === getSyncAt_()) { hit.sync = getSyncInfo_(); return hit; }
   }
   const data = readPddt_();
   cachePut_(cache, 'pddt', data, CFG.CACHE_SEC);
@@ -198,18 +200,34 @@ function readPddt_() {
     row[iImg] = driveId_(row[iImg]);   // ส่งแค่ file id ให้ข้อมูลเล็กลง
     rows.push(row);
   }
-  return { cols: PDDT_COLS, rows: rows, syncAt: getSyncAt_(), loadedAt: new Date().toISOString() };
+  const sync = getSyncInfo_();
+  return { cols: PDDT_COLS, rows: rows, syncAt: sync.syncAt, sync: sync, loadedAt: new Date().toISOString() };
 }
 
-function getSyncAt_() {
+/** อ่าน log ของ Stocksync (_SyncStatus) — แถวบนสุด = ล่าสุด
+ *  syncAt  = เวลาที่ลงชีท PDDT เสร็จ
+ *  stockAt = เวลาที่ Bplus ส่งไฟล์สต็อก ("file modified") = สต็อก ณ เวลานั้นจริง
+ *  checkedAt = รอบที่ระบบเข้ามาเช็คล่าสุด (แม้ไม่มีไฟล์ใหม่) */
+function getSyncInfo_() {
+  const out = { syncAt: '', stockAt: '', rows: 0, checkedAt: '', history: [] };
   try {
-    const v = SpreadsheetApp.openById(CFG.PDDT_ID).getSheetByName(CFG.SYNC_SHEET).getRange(1, 1, 30, 3).getDisplayValues();
+    const v = SpreadsheetApp.openById(CFG.PDDT_ID).getSheetByName(CFG.SYNC_SHEET).getRange(1, 1, 60, 3).getDisplayValues();
     for (let i = 1; i < v.length; i++) {
-      if (String(v[i][1]).toLowerCase() === 'ok' && /Sync \d+ rows/.test(v[i][2])) return v[i][0];
+      const ts = String(v[i][0]).trim(), ok = String(v[i][1]).toLowerCase() === 'ok', msg = String(v[i][2]);
+      if (!ts) continue;
+      if (!out.checkedAt && ok && !/Cleanup/.test(msg)) out.checkedAt = ts;
+      const m = ok && msg.match(/Sync (\d+) rows/);
+      if (!m) continue;
+      const f = msg.match(/file modified ([\d\/]+ [\d:]+)/);
+      const h = { syncAt: ts, stockAt: f ? f[1] : ts, rows: Number(m[1]) };
+      if (!out.syncAt) Object.assign(out, h);
+      if (out.history.length < 8) out.history.push(h);
     }
   } catch (_) {}
-  return '';
+  return out;
 }
+
+function getSyncAt_() { return getSyncInfo_().syncAt; }
 
 /** "3.14" (CS.EA ของ Bplus) → จำนวนชิ้นรวม ; ว่าง → null */
 function csEaToEa_(s, qcs) {
