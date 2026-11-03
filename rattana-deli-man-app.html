@@ -1253,7 +1253,7 @@ body.ui2 .toast{border-radius:14px}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.461';
+const APP_VERSION='3.463';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -9491,6 +9491,7 @@ async function prefetchIssuedCNForJob_(j){
   try{
     if(!j||!Array.isArray(j.bills)||!j.bills.length) return;
     if(!DSDC_SRC_ID) return;                     // บริษัทที่ยังไม่มีไฟล์ Order (Colgate)
+    fetchArCN_().catch(()=>{});                  // ★ v3.462: โหลดชีทลูกหนี้ไว้ก่อน กล่องหักยอดไม่กระพริบ
     if(!state.issuedCN) state.issuedCN={};
     /* เรียงให้ตรงกับที่หน้าจอเรียง (ยังไม่กรอกขึ้นก่อน → ตามลำดับใบคุม) ชุดแรกที่ยิงจะได้เป็นบิลที่คนขับเปิดก่อน */
     const _seqOf=function(b){ return (b&&b.seq!==undefined&&b.seq!==null&&b.seq!=='')?Number(b.seq):99999; };
@@ -9651,10 +9652,93 @@ function cnDaysAgo_(v){
   const now=new Date(); now.setHours(0,0,0,0);
   return Math.round((now-d)/86400000);
 }
+/* ★★ v3.462 (user 3 พ.ย. 2026 "CN ค้างเก่าที่ในแอปยังขึ้น ให้เช็คว่าในชีทลูกหนี้มีไหม ถ้าไม่มีให้ตัดออก · ในกรณี CN ค้างเกิน 15 วัน")
+   ใบเกิน 15 วัน ตัดสินด้วย "ชีทลูกหนี้" (SQL Data = ลูกหนี้คงค้างสดจาก Bplus · CN ที่ยังไม่ถูกตัด = แถวยอดติดลบ)
+   · ยังอยู่ในลูกหนี้ = ร้านยังมีสิทธิ์หัก → โชว์ (ใบ IS เก่ากว่า 15 วันก็โชว์ ถ้ายังค้าง)
+   · ไม่อยู่ในลูกหนี้ = ตัดหนี้ไปแล้ว → ซ่อน (กันหักซ้ำ)
+   · ≤15 วัน = เหมือนเดิม (ชีทลูกหนี้อาจยังไม่ทันมีใบใหม่) · ใบที่บิลนี้ติ๊กไว้แล้วไม่หาย (กรองที่ applyIssuedCN_)
+   · ชีทลูกหนี้โหลดไม่ได้ / ใบเซลล์สั่งเก็บที่ยังไม่มีเลขเอกสาร CN (ยังไม่เก็บ) = ใช้กติกาเดิม 15/30 วัน
+   · Colgate ไม่มีชีทนี้ = กติกาเดิม */
+const AR_SHEET_ID='1LqTqZg1z3e6FtPBbhZsKZd60DL6tZmCi78QQT1MoPq4', AR_SHEET_TAB='SQL Data';
+const CN_AR_CHECK_DAYS=15;
+let _arCN=null, _arCNAt=0, _arCNWait=null;
+function cnArKey_(v){ return String(v||'').toUpperCase().replace(/\s+/g,''); }
+function fetchArCN_(){
+  if(!CO||CO.key!=='rtn') return Promise.resolve(null);
+  if(_arCN&&Date.now()-_arCNAt<600000) return Promise.resolve(_arCN);   // แคช 10 นาที
+  if(_arCNWait) return _arCNWait;
+  _arCNWait=(async()=>{
+    try{
+      const tq='select G,H where H < 0';   // G=เลขที่เอกสาร H=ยอดหนี้ — เอาเฉพาะใบติดลบ (CN ค้าง) ~300 แถว
+      const url='https://docs.google.com/spreadsheets/d/'+AR_SHEET_ID+'/gviz/tq?tqx=out:csv&headers=1&sheet='+encodeURIComponent(AR_SHEET_TAB)+'&tq='+encodeURIComponent(tq);
+      const ctrl=('AbortController' in window)?new AbortController():null;
+      const to=setTimeout(()=>{ if(ctrl) ctrl.abort(); },12000);
+      const res=await fetch(url,{cache:'no-store',signal:ctrl?ctrl.signal:undefined});
+      clearTimeout(to);
+      if(!res.ok) throw new Error('AR HTTP '+res.status);
+      const rows=parseCsv(await res.text());
+      const m={};
+      rows.forEach(r=>{ const k=cnArKey_(r['เลขที่เอกสาร']); if(k) m[k]=parseFloat(String(r['ยอดหนี้']||'').replace(/,/g,''))||0; });
+      if(!Object.keys(m).length) throw new Error('AR ว่าง');   // ว่างทั้งชีท = น่าจะโหลดพลาด → ห้ามใช้ตัดใบ
+      _arCN=m; _arCNAt=Date.now();
+    }catch(e){ console.warn('[AR CN]',(e&&e.message)||e); }
+    finally{ _arCNWait=null; }
+    return _arCN;
+  })();
+  return _arCNWait;
+}
+/* ★★ v3.463 (user 3 พ.ย. 2026 "CN ที่ไม่ใช่ IS ที่กดมาและมีการหักเงินมาแล้ว ให้ไปดูเลขที่คอลัมน์ เลขที่เอกสาร CN
+   ถ้าขึ้นมาในแอป ให้ล็อกว่าหักไปแล้ว ป้องกันหักซ้ำซ้อน")
+   CN ในแอป / ใบเซลล์สั่งเก็บ พออนุมัติจะได้ "เลขที่เอกสาร CN" (ISS…/ISK…) — เลขเดียวกันนี้โผล่ในชีท IS อีกรอบ
+   → กล่องหักยอดขึ้นใบ IS ให้ติ๊กซ้ำได้ (เจอจริง 6 ใบ: ISS6909/666 ISK6910/004 ISS6910/550 หักซ้ำคนละบิล · ISS6910/248 /250 /563 หักซ้ำในบิลเดียว)
+   แหล่ง "หักไปแล้ว": (1) CN ในแอป ชีท CN ของ D-MAN ที่มีเลขเอกสาร และไม่ใช่ไม่อนุมัติ/ยกเลิก = หักกับบิลของมันเองอัตโนมัติ (cnAmtForBill_)
+                      (2) ใบเซลล์สั่งเก็บ (CN-Sale-dman) ที่ cnId ถูกติ๊กหักในบิลแล้ว ([CN:] ในชีทบิล หรือในเครื่องนี้)
+   คืน {k: {via,bill}} · คีย์ = เลขเอกสาร CN ตัวใหญ่ ไม่มีช่องว่าง */
+function cnDedMap_(){
+  const m={};
+  (state.cnHistory||[]).forEach(c=>{
+    const k=cnArKey_(c.cnDocNo); if(!k||m[k]) return;
+    if(/ไม่อนุมัติ|ยกเลิก/.test(cnStatusOf(c))) return;
+    m[k]={via:'app',bill:String(c.docNo||'').trim()};
+  });
+  const rows=(typeof _cnSaleMemo!=='undefined'&&_cnSaleMemo.rows)||[];
+  rows.forEach(r=>{
+    const k=cnArKey_(r['เลขที่เอกสาร CN']); if(!k||m[k]) return;
+    const id=String(r['cnId']||'').trim(); if(!id) return;
+    const u=(state.usedCN||{})[id.toUpperCase()];
+    if(u) m[k]={via:'sale',bill:String(u.doc||'').trim()};
+    else if(cnUsedElsewhere_(id,'')) m[k]={via:'sale',bill:''};
+  });
+  return m;
+}
+/* ใบในกล่องนี้ถูกหักไปแล้วทางอื่นไหม → ข้อความล็อก (null = ไม่ล็อก) */
+function cnDedLock_(c,b,dm,picked){
+  if(!c) return null;
+  if(!c._sale){
+    const d=dm[cnArKey_(c.cnDoc)]; if(!d) return null;
+    const same=d.bill&&String(d.bill).toUpperCase()===String(b.doc||'').trim().toUpperCase();
+    return 'หักไปแล้ว ผ่าน'+(d.via==='app'?' CN ในแอป':'ใบเซลล์สั่งเก็บ')+(same?' ของบิลนี้':(d.bill?' บิล '+d.bill:''));
+  }
+  /* ใบเซลล์สั่งเก็บที่ใบ IS เลขเดียวกันถูกติ๊กหักแล้ว (บิลนี้หรือบิลอื่น) */
+  const a=cnArKey_(c.arDoc); if(!a) return null;
+  if(picked&&Object.keys(picked).some(x=>cnArKey_(x)===a)&&!picked[c.cnDoc]) return 'หักไปแล้ว ผ่านใบ IS '+c.arDoc+' ในบิลนี้';
+  if(cnUsedElsewhere_(a,b.doc)) return 'หักไปแล้ว ผ่านใบ IS '+c.arDoc+' บิลอื่น';
+  return null;
+}
+/* ใบนี้ "เกิน 15 วันแต่ยังค้างในลูกหนี้" ไหม (ใช้ติดป้าย) */
+function cnArStill_(c){
+  if(!c||!_arCN) return false;
+  const d=cnDaysAgo_(c.date); if(d===null||d<=CN_AR_CHECK_DAYS) return false;
+  const doc=c._sale?c.arDoc:c.cnDoc;
+  return !!(doc&&_arCN[cnArKey_(doc)]);
+}
 function cnInWindow_(c){
   if(!c) return true;
   const d=cnDaysAgo_(c.date);
   if(d===null) return true;                                 // ไม่มีวันที่/อ่านไม่ออก = โชว์ (ปลอดภัยกว่าซ่อน)
+  if(d<=CN_AR_CHECK_DAYS) return true;                      // ★ v3.462: ≤15 วัน โชว์ตามเดิม
+  const doc=c._sale?c.arDoc:c.cnDoc;
+  if(_arCN&&doc) return !!_arCN[cnArKey_(doc)];             // ★ v3.462: เกิน 15 วัน = เชื่อชีทลูกหนี้
   return d<=(c._sale?SALE_CN_MAX_DAYS:ISSUED_CN_MAX_DAYS);
 }
 function cnDateShort_(v){
@@ -9693,8 +9777,9 @@ async function fetchSaleCN_(code){
       let amt;
       if(isFinite(_rowTotal)){ amt=(qty===ordQty)?_rowTotal:(ordQty>0?_rowTotal*qty/ordQty:0); }
       else { amt=qty*price; }   // ชีทไม่มีคอลัมน์รวม/ค่าว่าง = คำนวณแบบเดิม
-      if(!by[key]){ by[key]={cnDoc:key,_sale:true,date:String(r['วันที่คืน']||r['วัน เวลา']||'').trim(),wh:String(r['คลัง']||'').trim(),seller:String(r['ชื่อเซลล์']||'').trim(),collected:'',reason:String(r['สาเหตุรับคืน']||'').trim(),amount:0,_amtColl:0,_nPend:0,items:[]}; ord.push(key); }
+      if(!by[key]){ by[key]={cnDoc:key,arDoc:'',_sale:true,date:String(r['วันที่คืน']||r['วัน เวลา']||'').trim(),wh:String(r['คลัง']||'').trim(),seller:String(r['ชื่อเซลล์']||'').trim(),collected:'',reason:String(r['สาเหตุรับคืน']||'').trim(),amount:0,_amtColl:0,_nPend:0,items:[]}; ord.push(key); }
       by[key].amount+=amt;
+      if(!by[key].arDoc) by[key].arDoc=cleanCell(r['เลขที่เอกสาร CN']||'');   // ★ v3.462: เทียบชีทลูกหนี้
       if(_coll) by[key]._amtColl+=amt; else by[key]._nPend++;   // ★ v3.370
       if(_coll){ by[key].collected='เก็บแล้ว';
         /* ★ v3.319: เก็บแล้ว = นับอายุจาก "เวลาเก็บ" (ความเคลื่อนไหวล่าสุด)
@@ -9834,6 +9919,7 @@ function applyIssuedCN_(idx){
       b.payment._cnPicked=pk;
     }
     const picked=b.payment._cnPicked||{};
+    const _dm=cnDedMap_();   // ★ v3.463: เลขเอกสาร CN ที่หักไปแล้วผ่าน CN ในแอป/ใบเซลล์สั่งเก็บ
     // v3.157: ซ่อนใบที่ "ใช้ไปแล้ว" ในบิลอื่น (กันเลือกซ้ำ) — แต่คงใบที่บิลนี้เลือกไว้เองเสมอ
     const vis=list.filter(c=>picked[c.cnDoc]||(!cnUsedElsewhere_(c.cnDoc,b.doc)&&cnInWindow_(c)));   // ★ v3.318: +ตัดใบเกิน 15 วัน (ใบที่ติ๊กไว้แล้วไม่หาย)
     if(!vis.length){ el.innerHTML=_isWarn; return; }   /* ★ v3.363: ไม่มีใบให้โชว์แต่ IS โหลดพลาด = บอก ไม่ใช่ว่างเปล่า */
@@ -9855,11 +9941,12 @@ function applyIssuedCN_(idx){
     const pendSale=vis.filter(c=>c._sale&&!c.collected);   // ★ v3.264: ใบเซลล์สั่งเก็บที่ยังไม่เก็บ → ปุ่มเดียว "เก็บ+หักยอด"
     el.innerHTML=_isWarn+`<div style="padding:10px 12px;border-radius:10px;border:1px solid var(--gold);background:var(--gold-soft)">
       <div class="txt-sm txt-bold mb-8">📄 ใบรับคืนของร้านนี้ (ออกแล้ว + เซลล์สั่งเก็บ)${ro?'':' — แตะเลือกใบ = ระบบบวกยอดเข้าช่องหักยอดให้เอง'}</div>
-      ${vis.map(c=>{const lock=c._sale&&!c.collected&&!ro; return `<label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--border);cursor:${(ro||lock)?'default':'pointer'}${lock?';opacity:.72':''}">
+      ${vis.map(c=>{const dl=cnDedLock_(c,b,_dm,picked); const lock=(c._sale&&!c.collected&&!ro)||(!!dl&&!picked[c.cnDoc]); return `<label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--border);cursor:${(ro||lock)?'default':'pointer'}${lock?';opacity:.72':''}">
         ${lock?`<span style="width:20px;flex:none;text-align:center;margin-top:2px">🔒</span>`:`<input type="checkbox" ${picked[c.cnDoc]?'checked':''} ${ro?'disabled':''} onchange="toggleIssuedCN_(${idx},'${esc(c.cnDoc).replace(/'/g,"\\'")}',this.checked)" style="width:20px;height:20px;margin-top:2px;flex:none">`}
         <div style="flex:1;min-width:0">
           <div class="txt-sm"><b>${esc(c.cnDoc)}</b> · <span class="txt-gold txt-bold">${fmt(c.amount)} ฿</span>${c._sale?` <span class="badge badge-gold" style="font-size:11px">🛒 เซลล์สั่งเก็บ${c.collected?' · '+esc(c.collected):''}</span>`:''}</div>
-          <div class="txt-xs txt-muted" style="white-space:normal">${c.date?esc(cnDateShort_(c.date))+' · ':''}${esc(c.reason||'-')}${c._sale&&c.seller?' · เซลล์ '+esc(c.seller):''} · ${c.items.length} รายการ</div>
+          <div class="txt-xs txt-muted" style="white-space:normal">${cnArStill_(c)?'<span style="color:var(--warning);font-weight:700">📒 เกิน '+CN_AR_CHECK_DAYS+' วัน · ยังค้างในลูกหนี้</span> · ':''}${c.date?esc(cnDateShort_(c.date))+' · ':''}${esc(c.reason||'-')}${c._sale&&c.seller?' · เซลล์ '+esc(c.seller):''} · ${c.items.length} รายการ</div>
+          ${dl?`<div class="txt-xs" style="margin-top:2px;color:var(--danger);font-weight:700;white-space:normal">${picked[c.cnDoc]?'⚠️ ':'🔒 '}${esc(dl)}${picked[c.cnDoc]?' — ติ๊กออก กันหักซ้ำ':' — เลือกซ้ำไม่ได้'}</div>`:''}
         </div></label>`;}).join('')}
       ${(pendSale.length&&!ro)?`<div style="border-top:1px solid var(--border);padding-top:9px;margin-top:2px">
         <button type="button" class="btn btn-gold" style="width:100%" onclick="cncQuickOpen_(${idx})">📦 เก็บของคืน + หักยอด (${pendSale.length} ใบ · ${fmt(pendSale.reduce((s,c)=>s+c.amount,0))} ฿)</button>
@@ -9869,6 +9956,7 @@ function applyIssuedCN_(idx){
     </div>`;
   };
   render();
+  if(!_arCN) fetchArCN_().then(render).catch(()=>{});   // ★ v3.462: ชีทลูกหนี้ (ตัดใบเกิน 15 วันที่ตัดหนี้แล้ว)
   if(!((state.issuedCN||{})[b.code])) fetchIssuedCN_(b.code).then(render).catch(render);
   if(!((state.saleCN||{})[b.code])) fetchSaleCN_(b.code).then(render).catch(render);   // ★ v3.264: เซลล์สั่งเก็บ โหลดขนานกัน มาถึงก่อน-หลังก็เติมเอง
 }
@@ -9879,6 +9967,8 @@ function toggleIssuedCN_(idx,cnDoc,checked){
   const list=_cnPickList_(b.code);   // v3.157: key = รหัสร้าน · v3.264: รวมใบเซลล์สั่งเก็บ
   // ★ v3.264: ใบเซลล์สั่งเก็บที่ยังไม่กดเก็บของ = ห้ามติ๊กหัก (ต้องกดเก็บก่อน ยอดถึงจะตรงจำนวนเก็บจริง) — กันหลุดจาก UI ค้าง
   { const _ent=list.find(c=>c.cnDoc===cnDoc);
+    if(checked&&_ent){ const _dl=cnDedLock_(_ent,b,cnDedMap_(),b.payment._cnPicked||{});   /* ★ v3.463 */
+      if(_dl){ showToast('ใบนี้'+_dl+' — เลือกซ้ำไม่ได้ (กันหักซ้ำ)','warning'); applyIssuedCN_(idx); return; } }
     if(_ent&&_ent._sale&&!_ent.collected){ showToast('ใบนี้ยังไม่ได้กดเก็บของคืน — ไปกดเก็บก่อนถึงจะเลือกหักได้','warning'); applyIssuedCN_(idx); return; } }
   if(!b.payment._cnPicked) b.payment._cnPicked={};
   // v3.92: รวมยอด 2 แบบ — คงส่วน "ไม่มีเอกสาร" (พิมพ์เอง) ไว้ แล้วบวก/ลบเฉพาะส่วน "มีเอกสาร" (IS) ที่ติ๊ก
