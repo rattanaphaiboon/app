@@ -1679,7 +1679,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.38';
+const APP_VERSION = 'v6.39';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -2275,11 +2275,28 @@ const COUNT_SAVE_URL = 'https://script.google.com/macros/s/AKfycbyMAQLR0MCCBq8-f
 // กดส่งจริง → ลงชีท (GAS) แล้วลบ draft แถวนี้ทิ้ง
 const SUPA_URL = 'https://uytzsuwapwkqkougorvb.supabase.co';
 const SUPA_KEY = 'sb_publishable_2iDqojkyM2pqJxQJfvnxyg_Y6WMQ6Q8';
+/* ═══ v6.33: คำขอที่ "แค่อ่าน" ไม่ต้องให้เบราว์เซอร์ถามนำ (CORS preflight) ═══
+   เดิมใส่ apikey / Authorization / Content-Type เป็น header ทุกคำขอ — สามตัวนี้
+   ไม่ใช่ header มาตรฐาน เบราว์เซอร์จึงต้องยิง OPTIONS ไปถามก่อนทุกครั้ง
+   = ยิง 1 ครั้ง เกิด log 2 บรรทัด
+   วัดจริง 2 พ.ย. 2026: OPTIONS 8,117 ครั้ง/วัน = 28% ของ log ทั้งฐาน (โควต้า 1 GB/เดือน)
+   ★ GET ที่ไม่มี body และไม่มี header พิเศษ → ย้าย apikey ไปไว้ใน URL แล้วไม่ส่ง header เลย
+     กลายเป็นคำขอธรรมดา เบราว์เซอร์ยิงตรงได้ ไม่ต้องถามนำ
+   ★ กุญแจที่ใช้คือ publishable key ซึ่งฝังอยู่ในไฟล์หน้าเว็บนี้อยู่แล้ว ไม่ใช่ความลับ
+     🔴 ห้ามทำท่านี้กับ service_role เด็ดขาด
+   ★ คำขอที่เขียนข้อมูล และ GET ที่มี header พิเศษ (Prefer/Range) ยังใช้ท่าเดิมทุกอย่าง */
+const SUPA_SIMPLE_HDR = { accept:1, 'accept-language':1, 'content-language':1 };
 function supaFetch(path, opts) {
   opts = opts || {};
-  const url = SUPA_URL.replace(/\/$/,'') + '/rest/v1' + path;
+  const base = SUPA_URL.replace(/\/$/,'') + '/rest/v1';
+  const method = String(opts.method || 'GET').toUpperCase();
+  const extra = Object.keys(opts.headers || {});
+  if (method === 'GET' && !opts.body && extra.every(k => SUPA_SIMPLE_HDR[k.toLowerCase()])) {
+    const u = base + path + (path.indexOf('?') >= 0 ? '&' : '?') + 'apikey=' + encodeURIComponent(SUPA_KEY);
+    return fetch(u, opts);
+  }
   const headers = Object.assign({ 'apikey':SUPA_KEY, 'Authorization':'Bearer '+SUPA_KEY, 'Content-Type':'application/json' }, opts.headers || {});
-  return fetch(url, Object.assign({}, opts, { headers }));
+  return fetch(base + path, Object.assign({}, opts, { headers }));
 }
 // device id คงที่ต่อเครื่อง (localStorage) — ใช้แยกว่า draft มาจากเครื่องไหน
 function deviceId() {
@@ -2386,13 +2403,15 @@ document.addEventListener('DOMContentLoaded', () => {
 let draftPollTimer = null;
 function startDraftPoll() {
   stopDraftPoll();
-  draftPollTimer = setInterval(() => {
+  const tick = async () => {
     if (currentMode === 'count' && countSession && !document.hidden && navigator.onLine !== false) {
-      maybeAdoptRemoteDraft(countSession.warehouse);
+      try { await maybeAdoptRemoteDraft(countSession.warehouse); } catch (e) {}
     }
-  }, 5000);   // every 5 seconds — feels real-time without hammering the Sheet
+    draftPollTimer = setTimeout(tick, scPollDelay(Math.max(lastLocalEditMs, lastRemoteChgMs)));   // v6.33
+  };
+  draftPollTimer = setTimeout(tick, 5000);
 }
-function stopDraftPoll() { if (draftPollTimer) { clearInterval(draftPollTimer); draftPollTimer = null; } }
+function stopDraftPoll() { if (draftPollTimer) { clearTimeout(draftPollTimer); draftPollTimer = null; } }
 
 // Re-sync everything that depends on the network the moment focus returns.
 function refreshEverything() {
@@ -5197,6 +5216,21 @@ function loadCountSession(wh) {
   if (SPECIAL_WH[wh] && !adjStockCache[wh]) loadSpecial(wh, true);
 }
 
+/* ═══ v6.33: ดึง draft ถี่เท่าที่จำเป็น ═══
+   เดิมดึงทุก 5 วินาทีตลอดเวลาที่เปิดหน้านับค้างไว้ = 720 ครั้ง/ชม./เครื่อง
+   วัดจริง 2 พ.ย. 2026: stock_draft 9,222 ครั้ง/วัน = 32% ของ log ทั้งฐาน มากที่สุดในระบบ
+   ★ ตอนกำลังนับจริงยังเร็วเท่าเดิม (5 วิ) — คนใช้ไม่รู้สึกว่าช้าลง
+     เงียบแล้วค่อยถ่างออก เพราะหน้าที่เปิดค้างทิ้งไว้ไม่มีอะไรให้ดึง
+   ★ "เงียบ" นับจากทั้งการแก้บนเครื่องนี้ และของใหม่ที่เห็นจากเครื่องอื่น
+     เครื่องที่นั่งดูเฉย ๆ จึงยังเห็นของอีกเครื่องภายใน 5 วิ ถ้าอีกฝั่งกำลังนับอยู่ */
+let lastRemoteChgMs = 0, _lastRemoteSig = null;
+function scPollDelay(lastMs) {
+  const quiet = Date.now() - Math.max(+lastMs || 0, 0);
+  if (quiet < 120000) return 5000;    // 2 นาทีแรกหลังมีอะไรขยับ = เท่าเดิม
+  if (quiet < 300000) return 15000;
+  if (quiet < 600000) return 30000;
+  return 60000;                       // เงียบเกิน 10 นาที
+}
 let lastLocalEditMs = 0;   // เวลา(client) ที่เครื่องนี้แก้รายการนับล่าสุด — ใช้ตัดสิน "กำลังนับ(เก็บของตัวเอง)" vs "ว่าง(มิเรอร์อีกเครื่อง)"
 function saveCountSession() {
   if (countSession) {
@@ -5407,6 +5441,9 @@ async function maybeAdoptRemoteDraft(wh) {
   // เพิ่งบันทึกลงชีท → เว้น 30 วิ กัน draft เก่าย้อนกลับมา (clearDraft แบบ no-cors อาจยังไม่ทันเคลียร์)
   if (recentlySavedAt[wh] && Date.now() - recentlySavedAt[wh] < 30000) return;
   const remote = await fetchRemoteDraft(wh);
+  /* v6.33: ของบนเซิร์ฟเวอร์ขยับ = ยังมีคนทำงานอยู่ → ดึงถี่ต่อ */
+  try { const _sg = (remote && remote.items) ? draftSig(remote.items) : '';
+    if (_sg !== _lastRemoteSig) { _lastRemoteSig = _sg; lastRemoteChgMs = Date.now(); } } catch (e) {}
   updateSyncStatus(wh, remote);   // อัปเดตแถบสถานะทุกครั้งที่ดึง (ทุก 5 วิ) — เห็นได้ว่า 2 เครื่องตรงกันไหม
   const hasRemote = remote && remote.items && Object.keys(remote.items).length;
   if (!hasRemote) {
@@ -7088,8 +7125,10 @@ function rowsToScrap(rows) {
       warehouse: L.warehouse || r.sku || '', counter: L.counter || '', ts: r.counted_at || '' };
   }).sort((a, b) => String(b.ts||'').localeCompare(String(a.ts||'')));
 }
+let lastScrapEditMs = 0;   /* v6.33 */
 function queueScrapSync() {
   if (!SUPA_URL || !currentUser || !userKey()) return;
+  lastScrapEditMs = Date.now();
   clearTimeout(scrapSyncTimer);
   scrapSyncTimer = setTimeout(syncScrapNow, 400);
 }
@@ -7166,11 +7205,15 @@ async function enterScrapSync() {
 }
 function startScrapPoll() {
   stopScrapPoll();
-  scrapPollTimer = setInterval(() => {
-    if (currentMode === 'scrap' && !document.hidden && navigator.onLine !== false) maybeAdoptRemoteScrap();
-  }, 5000);
+  const tick = async () => {
+    if (currentMode === 'scrap' && !document.hidden && navigator.onLine !== false) {
+      try { await maybeAdoptRemoteScrap(); } catch (e) {}
+    }
+    scrapPollTimer = setTimeout(tick, scPollDelay(lastScrapEditMs));   // v6.33
+  };
+  scrapPollTimer = setTimeout(tick, 5000);
 }
-function stopScrapPoll() { if (scrapPollTimer) { clearInterval(scrapPollTimer); scrapPollTimer = null; } }
+function stopScrapPoll() { if (scrapPollTimer) { clearTimeout(scrapPollTimer); scrapPollTimer = null; } }
 async function forcePullScrap() {
   if (!SUPA_URL || !currentUser || !userKey()) { showToast('เลือกชื่อผู้นับก่อน แล้วค่อยดึงรายการ', 'warning'); return; }
   showSpinner('กำลังดึงรายการนับเศษ...');
