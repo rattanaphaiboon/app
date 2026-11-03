@@ -4242,7 +4242,7 @@ body.dark .sdd-row.sdd-total.inc { color:#2ecc71; }
    Rattana Face Check-in v2.0
    ============================================================ */
 
-const APP_VERSION = '13.84';   // v13.84: ดูสลิป = ต้องลงทะเบียน LINE ของบริษัทก่อน (Apps Script 9.151 · ด่านชั่วคราว ปิดได้ที่ SLIP_LINE_GATE) — surat 03/11 · v13.83: GPS นับจุดที่ "อยู่ในรัศมี" ก่อนจุดที่ใกล้สุด (พิกัดส่วนตัว สแกนได้ทุกที่ รัศมีใหญ่ ไกลกว่าคลังใกล้สุด = เคยถูกมองข้าม) — surat 03/11 · v13.82: เตือนสแกนไม่ครบเฉพาะเมื่อชีทยืนยัน
+const APP_VERSION = '13.85';   // v13.85: นอกรัศมี = ดึงจุดสแกนเฉพาะตัวจากระบบใหม่ 1 ครั้งแล้วเช็คอีกรอบ (จุดที่ HR เพิ่งเพิ่มไม่ถึงเครื่อง เพราะโหลดตอนเปิดแอปหมดเวลา) — surat 03/11 · v13.84: ดูสลิป = ต้องลงทะเบียน LINE ของบริษัทก่อน (Apps Script 9.151 · ด่านชั่วคราว ปิดได้ที่ SLIP_LINE_GATE) — surat 03/11 · v13.83: GPS นับจุดที่ "อยู่ในรัศมี" ก่อนจุดที่ใกล้สุด (พิกัดส่วนตัว สแกนได้ทุกที่ รัศมีใหญ่ ไกลกว่าคลังใกล้สุด = เคยถูกมองข้าม) — surat 03/11 · v13.82: เตือนสแกนไม่ครบเฉพาะเมื่อชีทยืนยัน
 // v13.62:   // v13.62: เมนู "กลุ่ม" → "แจ้งเตือนสรุปเข้าทำงาน" · สรุปส่งเข้าแอป 08:10 แทนอีเมล (Apps Script 9.109) — surat 23/10
 // v13.61:   // v13.61 (Apps Script 9.107): เมนู "กลุ่ม" แจ้งเตือนในแอปแบบ HumanSoft Notify — สรุปมาทำงานเช้า/วันเกิด + HR/หัวหน้าโพสต์ · ตัวเลขยังไม่อ่าน — surat 23/10
 // v13.60 (Apps Script 9.104): แหล่งเรียนรู้ + กดเรียนจบ · ประเมินลูกทีม (หัวหน้าให้คะแนน) · RATTANA ใช้กะที่ HR ตั้ง (การ์ดวันนี้/สรุปเดือน/หน้าวันนี้) — surat 23/10
@@ -7644,7 +7644,7 @@ function gpsPrewarm_() {
 function onGpsOk(pos) {
   const { latitude:lat, longitude:lng, accuracy } = pos.coords;
   // รวม locations ทั่วไป + PersonalLocations เฉพาะ user คนนี้
-  const myPersonal = (currentUser?.empId && personalLocations) ? personalLocations.filter(p => p.empId === currentUser.empId) : [];
+  const myPersonal = (currentUser?.empId && personalLocations) ? personalLocations.filter(p => empKey_(p.empId) === empKey_(currentUser.empId)) : [];   // v13.85 ตัดช่องว่าง/ชนิดตัวเลข
   const allCheckPoints = [
     ...locations.map(l => ({...l, isPersonal:false})),
     ...myPersonal.map(p => ({...p, isPersonal:true})),
@@ -7673,6 +7673,25 @@ function onGpsOk(pos) {
     isPersonal: loc.isPersonal,
   };
   renderGpsCard(); updateLocCheck(); evaluateAction();
+  if (!within) plocRefreshMine_(pos);   // v13.85
+}
+/* v13.85 surat 03/11 (วีระพงษ์ รัศมี 9,999,999 ม. ยังขึ้นนอกรัศมีคลังสุพรรณบุรี) — จุดเฉพาะตัวโหลดตอนเปิดแอปเท่านั้น
+   ช่วงเช้าเซิร์ฟเวอร์ช้า โหลดหมดเวลา = เครื่องใช้รายการเก่า (ก่อน HR เพิ่มจุด) · นอกรัศมี = ถามระบบเฉพาะจุดของตัวเองใหม่ (ไม่เกินนาทีละครั้ง) แล้วเช็คอีกรอบ */
+let _plocFetchAt = 0, _plocFetching = false;
+async function plocRefreshMine_(pos) {
+  if (_plocFetching || !currentUser || !currentUser.empId || Date.now() - _plocFetchAt < 60000) return;
+  _plocFetching = true; _plocFetchAt = Date.now();
+  try {
+    const me = empKey_(currentUser.empId);
+    const rows = await apiGetPersonalLocations(me);
+    if (!Array.isArray(rows)) return;
+    const mine = rows.filter(r => empKey_(r.empId) === me && r.lat && r.lng).map(r => ({ empId: me, code: r.locationCode || `P-${me}`, name: r.locName || r.name || 'พิกัดส่วนตัว', lat: +r.lat, lng: +r.lng, radius: +r.radius || settings.radius, note: r.note || '' }));
+    const old = (personalLocations || []).filter(p => empKey_(p.empId) === me);
+    if (JSON.stringify(old) === JSON.stringify(mine)) return;
+    personalLocations = (personalLocations || []).filter(p => empKey_(p.empId) !== me).concat(mine);
+    LS.set('personalLocations', personalLocations);
+    if (pos) onGpsOk(pos);
+  } catch (e) { console.warn('[ploc] ดึงจุดเฉพาะตัวไม่สำเร็จ', e && e.message); } finally { _plocFetching = false; }
 }
 /* ── v12.62: ช่วยเรื่องสิทธิ์ GPS ───────────────────────────────────────────────
    เว็บเปิด "หน้าตั้งค่าของเครื่อง" เองไม่ได้ — ไม่มี API และทั้ง iOS/Android บล็อกไว้
