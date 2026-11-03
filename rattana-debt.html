@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v6.32</title>
+<title>Rattana ยอดหนี้คงค้าง v6.33</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -872,7 +872,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v6.32</span>
+      <span class="app-ver">v6.33</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -1906,6 +1906,8 @@ function enterApp(){
   setTimeout(warmBillItemsSheet, 2500);   // v6.12: อุ่นชีทรายการสินค้าไว้ก่อน — กดบิลครั้งแรกจะไม่ต้องรอ Google โหลดชีท
   biLoadLS();                                          // v6.22: โหลดรายการที่เคยเปิดไว้ (จำ 7 วัน)
   setInterval(keepBillItemsWarm, 3 * 60 * 1000);       // v6.22: อุ่นชีทต่อเนื่องทุก 3 นาที ระหว่างเปิดแอปค้างไว้
+  setTimeout(loadDmanAll, 1500);                       // v6.33: โหลดข้อมูลชำระจาก D-Man ไว้ก่อน — ป๊อปอัพขึ้นทันที
+  setInterval(() => { if (!document.hidden) loadDmanAll(); }, 10 * 60 * 1000);
 
   // Display user info — dept overrides role label
   const normDeptUI = s => String(s||'').replace(/\s+/g,' ').trim();
@@ -6120,13 +6122,33 @@ async function gvizCsv(sheetId, tab, tq, timeoutMs){
     throw e;
   } finally { clearTimeout(t); }
 }
+const DMAN_COLS = `select C,I,J,M,N,O,P,Q,R,S,T,U,V,W,X,AB,AC,AD,AE,AF,AG,AH,AJ,AM,AO,AP,BH,BT`;
+const DMAN_LABELS = ` label C 'doc',I 'total',J 'at',M 'bank',N 'coin',O 't1',P 'b1',Q 'd1',R 't2',S 'b2',T 'd2',U 'img1',V 'img2',W 'chq',X 'chqImg',AB 'chqDate',AC 'chqImg2',`
+    + `AD 'cn',AE 'paid',AF 'diff',AG 'status',AH 'note',AJ 'driver',AM 'combined',AO 'notSent',AP 'notSentWhy',BH 'cnWhy',BT 'cnImg'`;
+/* v6.33: โหลดชีท D-Man ทั้งแท็บครั้งเดียวตอนเปิดแอป (~7 พันแถว ~2 วิ) แล้วจำไว้ → กดป๊อปอัพขึ้นทันที
+   (เดิมถามทีละบิลตอนกด 2-5 วิ) · โหลดใหม่ทุก 10 นาทีให้ข้อมูลสด */
+let dmanAllLoadP = null, dmanAllAt = 0;
+function loadDmanAll(){
+  if (dmanAllLoadP) return dmanAllLoadP;
+  dmanAllLoadP = (async () => {
+    try {
+      const rows = await gvizCsv(DMAN_SHEET_ID, DMAN_PAY_TAB, DMAN_COLS + ` where C is not null order by J desc` + DMAN_LABELS, 90000);
+      const m = new Map();
+      rows.forEach(r => { const k = String(r.doc || '').trim(); if (!k) return; const a = m.get(k); if (a) a.push(r); else m.set(k, [r]); });
+      payInfoCache.clear();
+      m.forEach((v, k) => payInfoCache.set(k, v));
+      dmanAllAt = Date.now();
+    } catch (e){ console.warn('[dman] โหลดทั้งแท็บไม่สำเร็จ', e && e.message); }
+    finally { dmanAllLoadP = null; }
+  })();
+  return dmanAllLoadP;
+}
 async function fetchDmanPay(docNo){
   if (payInfoCache.has(docNo)) return payInfoCache.get(docNo);
-  const q = `select C,I,J,M,N,O,P,Q,R,S,T,U,V,W,X,AB,AC,AD,AE,AF,AG,AH,AJ,AM,AO,AP,BH,BT where C='${docNo.replace(/'/g, "\\'")}' order by J desc `
-    + `label C 'doc',I 'total',J 'at',M 'bank',N 'coin',O 't1',P 'b1',Q 'd1',R 't2',S 'b2',T 'd2',U 'img1',V 'img2',W 'chq',X 'chqImg',AB 'chqDate',AC 'chqImg2',`
-    + `AD 'cn',AE 'paid',AF 'diff',AG 'status',AH 'note',AJ 'driver',AM 'combined',AO 'notSent',AP 'notSentWhy',BH 'cnWhy',BT 'cnImg'`;
-  const rows = await gvizCsv(DMAN_SHEET_ID, DMAN_PAY_TAB, q);
-  payInfoCache.set(docNo, rows);
+  if (dmanAllLoadP){ await dmanAllLoadP; if (payInfoCache.has(docNo)) return payInfoCache.get(docNo); }
+  // ไม่อยู่ในชุดที่โหลดไว้ (เพิ่งบันทึกหลังโหลด หรือโหลดทั้งแท็บไม่สำเร็จ) → ถามทีละบิล
+  const rows = await gvizCsv(DMAN_SHEET_ID, DMAN_PAY_TAB, DMAN_COLS + ` where C='${docNo.replace(/'/g, "\\'")}' order by J desc` + DMAN_LABELS);
+  if (rows.length) payInfoCache.set(docNo, rows);
   return rows;
 }
 // ยอด CN ต่อเลขที่: ดูในชีทหนี้ก่อน (แถวยอดติดลบ) · ไม่เจอ (ตัดไปแล้ว) → รวมยอดจากชีท Order แท็บ IS
@@ -6209,16 +6231,28 @@ async function openPayInfo(docNo){
     if (n('t1')) parts.push(piRow('📱 โอนครั้งที่ 1', fmtBaht(n('t1')) + ' บาท' + (d.d1 ? `<br><span style="font-weight:400;color:var(--muted);font-size:11px">${piDate(d.d1)}${d.b1 ? ' · บช. ' + escapeHtml(d.b1) : ''}</span>` : '')));
     if (n('t2')) parts.push(piRow('📱 โอนครั้งที่ 2', fmtBaht(n('t2')) + ' บาท' + (d.d2 ? `<br><span style="font-weight:400;color:var(--muted);font-size:11px">${piDate(d.d2)}${d.b2 ? ' · บช. ' + escapeHtml(d.b2) : ''}</span>` : '')));
     if (n('chq')) parts.push(piRow('📝 เช็ค', fmtBaht(n('chq')) + ' บาท' + (d.chqDate ? `<br><span style="font-weight:400;color:var(--muted);font-size:11px">วันที่บนเช็ค ${piDate(d.chqDate)}</span>` : '')));
-    let cnHtml = '';
-    if (n('cn')){
-      const cnInfo = cnDocs.length ? await cnAmounts(cnDocs) : { amt: {}, note: {} };
-      if (seq !== payInfoSeq) return;
-      cnHtml = `<div class="pi-cn"><div style="font-weight:700;color:#1e8449;margin-bottom:4px">🔖 หัก CN ${fmtBaht(n('cn'))} บาท</div>${
+    // v6.33: วาดกล่อง CN ทันทีด้วยยอดที่รู้ในเครื่อง แล้วค่อยเติมยอด/หมายเหตุจากชีท Order ทีหลัง (ไม่ให้ทั้งป๊อปอัพรอ)
+    const cnBlock = info => `<div style="font-weight:700;color:#1e8449;margin-bottom:4px">🔖 หัก CN ${fmtBaht(n('cn'))} บาท</div>${
         cnDocs.length
-          ? cnDocs.map(c => piRow('บิล CN ' + escapeHtml(c), cnInfo.amt[c] != null ? fmtBaht(cnInfo.amt[c]) + ' บาท' : '—')
-              + (cnInfo.note[c] ? `<div class="pi-cn-note"><b>📝 หมายเหตุ CN:</b> ${escapeHtml(cnInfo.note[c])}</div>` : '')).join('')
+          ? cnDocs.map(c => piRow('บิล CN ' + escapeHtml(c), info.amt[c] != null ? fmtBaht(info.amt[c]) + ' บาท' : (info.loading ? '⏳' : '—'))
+              + (info.note[c] ? `<div class="pi-cn-note"><b>📝 หมายเหตุ CN:</b> ${escapeHtml(info.note[c])}</div>` : '')).join('')
+            + (info.loading ? '<div class="pi-note">⏳ กำลังดึงหมายเหตุ CN...</div>' : '')
           : '<div class="pi-note">ไม่ได้ระบุเลขที่ CN (คนขับหักยอดเอง)</div>'
-      }${d.cnWhy ? `<div class="pi-note">เหตุผล: ${escapeHtml(d.cnWhy)}</div>` : ''}</div>`;
+      }${d.cnWhy ? `<div class="pi-note">เหตุผล: ${escapeHtml(d.cnWhy)}</div>` : ''}`;
+    let cnHtml = '';
+    const needCnFetch = n('cn') && cnDocs.some(c => /^IS/i.test(c));
+    if (n('cn')){
+      const local = { amt: {}, note: {}, loading: needCnFetch };
+      cnDocs.forEach(c => { const rr = allRows.filter(r => r.docNo === c); if (rr.length) local.amt[c] = Math.abs(rr.reduce((s, r) => s + r.amount, 0)); });
+      cnHtml = `<div class="pi-cn" id="piCnBox">${cnBlock(local)}</div>`;
+    }
+    if (needCnFetch){
+      cnAmounts(cnDocs).then(info => {
+        if (seq !== payInfoSeq) return;
+        const el = document.getElementById('piCnBox'); if (el) el.innerHTML = cnBlock(info);
+      }).catch(() => {
+        const el = document.getElementById('piCnBox'); if (el && seq === payInfoSeq) el.innerHTML = cnBlock({ amt: {}, note: {} });
+      });
     }
     const tail = [];
     tail.push(piRow('รวมเงินที่เก็บได้', fmtBaht(n('paid')) + ' บาท', 'total'));
