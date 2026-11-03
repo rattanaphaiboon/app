@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.2 — Apps Script backend
+ * Rattana ClearStock v1.5 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -16,6 +16,9 @@ const CFG = {
   USERS_SHEET: 'Sheet1',
   LOG_ID: '1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s',   // ไฟล์บันทึก (ใช้เมื่อเป็น standalone script)
   WH_STAFF: ['W4', 'C4'],          // ผู้ใช้คลังที่ "รับทราบ" ได้
+  ADJ_EMAILS: ['natthiya.mai@rattanaphaiboon.com'],   // ผู้ปรับสต็อกใน Bplus + แนบเอกสาร (ขั้นสุดท้าย)
+  FOLDER_NAME: 'ClearStock – เอกสารปรับสต็อก',        // โฟลเดอร์ Drive เก็บไฟล์แนบ
+  MAX_FILE_MB: 10,
   TZ: 'Asia/Bangkok',
   CACHE_SEC: 600,
 };
@@ -30,9 +33,8 @@ const KINDS = {
 const STATUS_TH = {
   PENDING_ACK: 'รอคลังรับทราบ',
   PENDING_APPROVAL: 'รออนุมัติ',
-  APPROVED: 'อนุมัติแล้ว – รอทำในระบบ',
-  POSTED: 'ทำในระบบแล้ว – รอยืนยัน PDDT',
-  CLOSED: 'ยืนยันใน PDDT แล้ว',
+  APPROVED: 'อนุมัติแล้ว – รอปรับสต็อก',
+  POSTED: 'ปรับสต็อกแล้ว',
   REJECTED: 'ไม่อนุมัติ',
   CANCELLED: 'ยกเลิก',
 };
@@ -46,8 +48,8 @@ const DOC_COLS = [
   ['ackAt', 'คลังรับทราบเมื่อ'], ['ackBy', 'คลังรับทราบโดย'], ['ackNote', 'หมายเหตุคลัง'],
   ['approvedAt', 'อนุมัติเมื่อ'], ['approvedBy', 'อนุมัติโดย'], ['approveNote', 'หมายเหตุอนุมัติ'],
   ['rejectedAt', 'ไม่อนุมัติ/ยกเลิกเมื่อ'], ['rejectedBy', 'ไม่อนุมัติ/ยกเลิกโดย'], ['rejectReason', 'เหตุผล'],
-  ['postedAt', 'ทำในระบบเมื่อ'], ['postedBy', 'ทำในระบบโดย'], ['bplusDocNo', 'เลขที่เอกสาร Bplus'],
-  ['closedAt', 'ยืนยัน PDDT เมื่อ'], ['closedBy', 'ยืนยัน PDDT โดย'], ['pddtSyncAt', 'PDDT sync รอบที่ยืนยัน'],
+  ['postedAt', 'ปรับสต็อกเมื่อ'], ['postedBy', 'ปรับสต็อกโดย'], ['bplusDocNo', 'เลขที่เอกสาร Bplus'],
+  ['files', 'ไฟล์เอกสาร (ลิงก์)'], ['postNote', 'หมายเหตุปรับสต็อก'], ['pddtSyncAt', 'PDDT sync ตอนปรับสต็อก'],
   ['updatedAt', 'อัปเดตล่าสุด'],
 ];
 
@@ -74,7 +76,7 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.2' });
+    if (action === 'ping') return json_({ ok: true, version: '1.5' });
     const user = requireUser_(p.email);
     let out;
     switch (action) {
@@ -82,7 +84,7 @@ function handle_(p) {
       case 'products': out = getProducts_(p.fresh === true || p.fresh === '1'); break;
       case 'docs':     out = { docs: listDocs_() }; break;
       case 'create':   out = createDocs_(user, p.docs || []); break;
-      case 'ack': case 'approve': case 'reject': case 'post': case 'close': case 'cancel':
+      case 'ack': case 'approve': case 'reject': case 'post': case 'cancel':
         out = transition_(user, action, p); break;
       default: throw new Error('ไม่รู้จักคำสั่ง: ' + action);
     }
@@ -129,7 +131,8 @@ function perms_(u) {
   const stage = String(u.stage || '').toLowerCase();
   const isWh = CFG.WH_STAFF.indexOf(u.w) >= 0;
   const isApprover = stage === 'mgt' || stage === 'all' || u.role >= 5;
-  return { create: true, ack: isWh || u.role >= 8, approve: isApprover, post: isWh || isApprover, close: isWh || isApprover };
+  const isAdj = CFG.ADJ_EMAILS.map(normEmail_).indexOf(u.email) >= 0;
+  return { create: true, ack: isWh || u.role >= 8, approve: isApprover, post: isAdj };
 }
 
 function requireUser_(email) {
@@ -238,9 +241,9 @@ function ensureSheets_() {
       if (name === SH.DOCS && blank && blank.getLastRow() === 0) { sh = blank; sh.setName(name); }
       else sh = ss.insertSheet(name);
     }
-    if (sh.getLastRow() === 0) {
-      sh.getRange(1, 1, 1, headers.length).setValues([headers])
-        .setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+    const hr = sh.getRange(1, 1, 1, headers.length);
+    if (sh.getLastRow() === 0 || hr.getDisplayValues()[0].join('|') !== headers.join('|')) {
+      hr.setValues([headers]).setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
       sh.setFrozenRows(1);
     }
     return sh;
@@ -257,6 +260,31 @@ function setup() {
   ensureSheets_();
   getUsers_();
   Logger.log('PDDT rows: ' + readPddt_().rows.length);
+  Logger.log('โฟลเดอร์เอกสาร: ' + folder_().getUrl());
+}
+
+/** โฟลเดอร์ Drive สำหรับไฟล์แนบ (สร้างครั้งแรกแล้วจำ id ไว้) */
+function folder_() {
+  const props = PropertiesService.getScriptProperties();
+  const id = props.getProperty('FOLDER_ID');
+  if (id) { try { return DriveApp.getFolderById(id); } catch (_) {} }
+  const f = DriveApp.createFolder(CFG.FOLDER_NAME);
+  props.setProperty('FOLDER_ID', f.getId());
+  return f;
+}
+
+/** files = [{ name, type, data (base64) }] → ลิงก์ไฟล์ใน Drive */
+function saveFiles_(docId, files) {
+  const dir = folder_();
+  return files.map((f, i) => {
+    const bytes = Utilities.base64Decode(String(f.data || ''));
+    if (!bytes.length) throw new Error('ไฟล์ว่าง: ' + f.name);
+    if (bytes.length > CFG.MAX_FILE_MB * 1048576) throw new Error('ไฟล์ใหญ่เกิน ' + CFG.MAX_FILE_MB + ' MB: ' + f.name);
+    const name = docId + '_' + (i + 1) + '_' + String(f.name || 'file').replace(/[\\/:*?"<>|]/g, '_');
+    const file = dir.createFile(Utilities.newBlob(bytes, f.type || 'application/octet-stream', name));
+    try { file.setSharing(DriveApp.Access.DOMAIN_WITH_LINK, DriveApp.Permission.VIEW); } catch (_) {}
+    return file.getUrl();
+  });
 }
 
 const iso_ = v => (v instanceof Date ? v.toISOString() : v);
@@ -404,55 +432,22 @@ function transition_(user, action, p) {
         break;
       case 'post': {
         need(d.status === 'APPROVED', 'เอกสารยังไม่ได้รับอนุมัติ');
-        need(P.post, 'คุณไม่มีสิทธิ์บันทึกการทำรายการในระบบ');
-        const no = String(p.bplusDocNo || '').trim();
-        need(no, 'กรุณาระบุเลขที่เอกสาร Bplus');
-        f = { status: 'POSTED', postedAt: now, postedBy: who, bplusDocNo: no }; label = 'ทำในระบบ Bplus';
+        need(P.post, 'เฉพาะผู้ได้รับมอบหมายเท่านั้นที่ปรับสต็อกได้');
+        const files = Array.isArray(p.files) ? p.files : [];
+        need(files.length, 'กรุณาแนบเอกสารอย่างน้อย 1 ไฟล์');
+        const urls = saveFiles_(id, files);
+        f = { status: 'POSTED', postedAt: now, postedBy: who, bplusDocNo: String(p.bplusDocNo || '').trim(),
+              files: urls.join('\n'), postNote: note, pddtSyncAt: getSyncAt_() };
+        label = 'ปรับสต็อก';
         break;
       }
-      case 'close':
-        need(d.status === 'POSTED', 'ต้องทำในระบบ Bplus ก่อนจึงยืนยัน PDDT ได้');
-        need(P.close || isCreator, 'คุณไม่มีสิทธิ์ยืนยัน PDDT');
-        f = { status: 'CLOSED', closedAt: now, closedBy: who };
-        f.pddtSyncAt = snapshotAfter_(s, id, p.fresh === true);
-        label = 'ยืนยันใน PDDT';
-        break;
     }
     setDocFields_(s, d._row, f);
-    log_(s, id, label, user, note || f.bplusDocNo || '');
+    log_(s, id, label, user, [note, f.bplusDocNo, f.files ? f.files.split('\n').length + ' ไฟล์' : ''].filter(Boolean).join(' · '));
     return { doc: id, status: f.status };
   } finally {
     lock.releaseLock();
   }
-}
-
-/** เก็บสต็อก W4/C4 ปัจจุบันจาก PDDT ลงแต่ละบรรทัด เป็นหลักฐานว่าแก้ไขแล้ว */
-function snapshotAfter_(s, docId, fresh) {
-  const prod = getProducts_(fresh);
-  const map = {};
-  prod.rows.forEach(r => {
-    [r[1], r[2], r[3], r[4]].forEach(code => { if (code && !map[code]) map[code] = r; });
-  });
-  const last = s.lines.getLastRow();
-  if (last < 2) return prod.syncAt;
-  const v = s.lines.getRange(2, 1, last - 1, LINE_COLS.length).getValues();
-  const col = k => LINE_COLS.findIndex(c => c[0] === k);
-  const cBc = col('barcode'), cQ = col('qtyCs'), cW4e = col('w4Expect'), cC4e = col('c4Expect'),
-        cW4a = col('w4After'), cC4a = col('c4After'), cVer = col('verify');
-  v.forEach((r, i) => {
-    if (r[0] !== docId) return;
-    const p = map[String(r[cBc])];
-    if (!p) { s.lines.getRange(i + 2, cVer + 1).setValue('ไม่พบใน PDDT'); return; }
-    const qcs = parseInt(p[12], 10) || Number(r[cQ]) || 1;
-    const w4 = csEaToEa_(p[14], qcs), c4 = csEaToEa_(p[15], qcs);
-    const diff = (now, exp) => (exp === '' || exp === null ? null : (now || 0) - Number(exp));
-    const dw = diff(w4, r[cW4e]), dc = diff(c4, r[cC4e]);
-    const txt = (dw === 0 && dc === 0) ? 'ตรงตามที่ควรเป็น'
-      : 'ต่างจากที่ควรเป็น W4 ' + (dw > 0 ? '+' : '') + (dw == null ? '-' : dw) + ' / C4 ' + (dc > 0 ? '+' : '') + (dc == null ? '-' : dc) + ' ชิ้น (อาจมีขาย/รับเข้าระหว่างทาง)';
-    s.lines.getRange(i + 2, cW4a + 1, 1, 2).setValues([[w4 === null ? '' : w4, c4 === null ? '' : c4]]);
-    s.lines.getRange(i + 2, cVer + 1).setValue(txt);
-  });
-  return prod.syncAt;
 }
 
 // ───────────────────────── chunked gzip cache ─────────────────────────
