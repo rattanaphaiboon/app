@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v6.31</title>
+<title>Rattana ยอดหนี้คงค้าง v6.32</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -378,6 +378,8 @@ body.dark .pi-row.total .v{color:var(--gold)}
 .pi-img .slip-broken{margin-bottom:3px}
 .pi-cn{background:rgba(30,132,73,.08);border:1px solid rgba(30,132,73,.35);border-radius:8px;padding:8px 10px;margin-top:6px}
 .pi-cn .pi-row .v{color:#1e8449}
+.pi-cn-note{margin:4px 0 6px;font-size:13px;font-weight:600;color:#7b1d14;background:#fde2df;border:1px solid #e6a49c;border-radius:6px;padding:6px 9px;line-height:1.5}   /* v6.32 */
+.pi-cn-note b{color:#a01c10;font-weight:800}
 .pi-note{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.5}
 /* v6.16: หัวหน้าต่างล็อกอยู่กับที่ · เฉพาะรายการเลื่อน · หัวคอลัมน์ติดบน · ช่องค้นหา */
 #billItemsModal{z-index:10050}   /* v6.21: ต้องอยู่เหนือหน้าต่างสลิป/QR/แผน ที่อยู่ท้ายกว่าในโค้ด — ไม่งั้นเปิดแล้วโดนบัง */
@@ -870,7 +872,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v6.31</span>
+      <span class="app-ver">v6.32</span>
     </div>
     <div class="title">
       <h1>ยอดหนี้คงค้าง</h1>
@@ -6128,22 +6130,26 @@ async function fetchDmanPay(docNo){
   return rows;
 }
 // ยอด CN ต่อเลขที่: ดูในชีทหนี้ก่อน (แถวยอดติดลบ) · ไม่เจอ (ตัดไปแล้ว) → รวมยอดจากชีท Order แท็บ IS
+// v6.32: คืน { amt: {doc: ยอด}, note: {doc: หมายเหตุใบ CN จากชีท Order แท็บ IS คอลัมน์ O} }
 async function cnAmounts(cnDocs){
-  const out = {};
-  const miss = [];
+  const amt = {}, note = {};
   cnDocs.forEach(d => {
     const rows = allRows.filter(r => r.docNo === d);
-    if (rows.length) out[d] = Math.abs(rows.reduce((s, r) => s + r.amount, 0));
-    else if (/^IS/i.test(d)) miss.push(d);
+    if (rows.length) amt[d] = Math.abs(rows.reduce((s, r) => s + r.amount, 0));
   });
-  if (miss.length){
+  const isDocs = cnDocs.filter(d => /^IS/i.test(d));
+  if (isDocs.length){
     try {
-      const where = miss.map(d => `B='${d.replace(/'/g, "\\'")}'`).join(' or ');
-      const rows = await gvizCsv(CONFIG.itemsSheetId, 'IS', `select B, sum(N) where ${where} group by B label B 'doc', sum(N) 'amt'`);
-      rows.forEach(r => { if (r.doc) out[r.doc] = Math.abs(parseNum(r.amt)); });
-    } catch (e){ /* ไม่รู้ยอดรายใบ ก็โชว์ยอดรวมจาก D-MAN แทน */ }
+      const where = isDocs.map(d => `B='${d.replace(/'/g, "\\'")}'`).join(' or ');
+      const rows = await gvizCsv(CONFIG.itemsSheetId, 'IS', `select B, sum(N), max(O) where ${where} group by B label B 'doc', sum(N) 'amt', max(O) 'note'`);
+      rows.forEach(r => {
+        if (!r.doc) return;
+        if (amt[r.doc] == null) amt[r.doc] = Math.abs(parseNum(r.amt));
+        if (String(r.note || '').trim()) note[r.doc] = String(r.note).trim();
+      });
+    } catch (e){ /* ไม่รู้ยอด/หมายเหตุรายใบ ก็โชว์ยอดรวมจาก D-MAN แทน */ }
   }
-  return out;
+  return { amt, note };
 }
 function piRow(l, v, cls){ return `<div class="pi-row${cls ? ' ' + cls : ''}"><span class="l">${l}</span><span class="v">${v}</span></div>`; }
 function piImg(url, cap){
@@ -6205,11 +6211,12 @@ async function openPayInfo(docNo){
     if (n('chq')) parts.push(piRow('📝 เช็ค', fmtBaht(n('chq')) + ' บาท' + (d.chqDate ? `<br><span style="font-weight:400;color:var(--muted);font-size:11px">วันที่บนเช็ค ${piDate(d.chqDate)}</span>` : '')));
     let cnHtml = '';
     if (n('cn')){
-      const amts = cnDocs.length ? await cnAmounts(cnDocs) : {};
+      const cnInfo = cnDocs.length ? await cnAmounts(cnDocs) : { amt: {}, note: {} };
       if (seq !== payInfoSeq) return;
       cnHtml = `<div class="pi-cn"><div style="font-weight:700;color:#1e8449;margin-bottom:4px">🔖 หัก CN ${fmtBaht(n('cn'))} บาท</div>${
         cnDocs.length
-          ? cnDocs.map(c => piRow('บิล CN ' + escapeHtml(c), amts[c] != null ? fmtBaht(amts[c]) + ' บาท' : '—')).join('')
+          ? cnDocs.map(c => piRow('บิล CN ' + escapeHtml(c), cnInfo.amt[c] != null ? fmtBaht(cnInfo.amt[c]) + ' บาท' : '—')
+              + (cnInfo.note[c] ? `<div class="pi-cn-note"><b>📝 หมายเหตุ CN:</b> ${escapeHtml(cnInfo.note[c])}</div>` : '')).join('')
           : '<div class="pi-note">ไม่ได้ระบุเลขที่ CN (คนขับหักยอดเอง)</div>'
       }${d.cnWhy ? `<div class="pi-note">เหตุผล: ${escapeHtml(d.cnWhy)}</div>` : ''}</div>`;
     }
