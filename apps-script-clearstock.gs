@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.9 — Apps Script backend
+ * Rattana ClearStock v1.12 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -76,7 +76,7 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.9' });
+    if (action === 'ping') return json_({ ok: true, version: '1.12' });
     if (action === 'users') return json_({ ok: true, users: listUsers_() });
     if (action === 'login') return json_({ ok: true, user: loginByUid_(p.uid) });
     const user = requireUser_(p.email);
@@ -86,6 +86,9 @@ function handle_(p) {
       case 'products': out = getProducts_(p.fresh === true || p.fresh === '1'); break;
       case 'docs':     out = { docs: listDocs_() }; break;
       case 'sync':     out = { sync: getSyncInfo_() }; break;
+      case 'prices':
+        if (!user.perms.post) throw new Error('เฉพาะผู้ได้รับมอบหมายเท่านั้นที่ปรับสต็อกได้');
+        out = { prices: getPrices_(p.codes) }; break;
       case 'create':   out = createDocs_(user, p.docs || []); break;
       case 'ack': case 'approve': case 'reject': case 'post': case 'cancel':
         out = transition_(user, action, p); break;
@@ -202,6 +205,27 @@ function getProducts_(fresh) {
   const data = readPddt_();
   cachePut_(cache, 'pddt', data, CFG.CACHE_SEC);
   return data;
+}
+
+/** ราคาต่อหน่วย (PRICE CC00 ของหน่วยที่บาร์โค้ดนั้นเป็น) สำหรับไฟล์นำเข้า Bplus → { barcode: ราคา } */
+function getPrices_(codes) {
+  const want = {};
+  (codes || []).forEach(c => { c = String(c || '').trim(); if (c) want[c] = 1; });
+  if (!Object.keys(want).length) return {};
+  const sh = SpreadsheetApp.openById(CFG.PDDT_ID).getSheetByName(CFG.PDDT_SHEET);
+  const n = sh.getLastRow() - 1;
+  const head = sh.getRange(1, 1, 1, sh.getLastColumn()).getDisplayValues()[0].map(s => String(s).trim());
+  const read = h => { const i = head.indexOf(h); return i < 0 ? null : sh.getRange(2, i + 1, n, 1).getDisplayValues().map(r => r[0]); };
+  const out = {};
+  ['EA', 'PA', 'BP', 'CS'].forEach(u => {
+    const code = read('CODE ' + u), price = read('PRICE CC00 ' + u);
+    if (!code || !price) return;
+    for (let i = 0; i < n; i++) {
+      const c = String(code[i]).trim();
+      if (want[c] && !(c in out)) out[c] = Number(String(price[i]).replace(/,/g, '')) || 0;
+    }
+  });
+  return out;
 }
 
 function readPddt_() {
