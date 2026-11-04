@@ -17,6 +17,7 @@ PAGES_URL="https://rattanaphaiboon.github.io/app"
 # ⬇️ เพิ่มแอปใหม่ตรงนี้
 APPS=(
   rattana-voice.html
+  rattana-newhire.html
   rattana-supply-lite.html
   rattana-supply-lite.webmanifest
   rattana-supply-lite-sw.js
