@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.16 — Apps Script backend
+ * Rattana ClearStock v1.17 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -81,7 +81,12 @@ const CHECK_TH = {
   PENDING: 'รออีกคลังเช็ค', ANSWERED: 'เช็คครบแล้ว · รอสรุป', FIXED: 'ส่งเอกสารแก้ไขแล้ว',
   MATCH: 'ตรงกัน · ปิดเรื่อง', CLOSED: 'ปิดเรื่อง (ไม่แก้ไข)', CANCELLED: 'ยกเลิก',
 };
-const CHECK_EXPIRE_DAYS = 3;
+// คำขอที่ยังไม่มีคนเช็ค หมดอายุเวลา 12.00 น. (เวลาไทย) ของวันถัดจากวันที่ขอ — เลยจากนั้นสต็อกเคลื่อนไหวแล้ว เอามาเทียบไม่ได้
+function checkExpireAt_(reqAt) {
+  const b = new Date(new Date(reqAt).getTime() + 7 * 3600e3);
+  return new Date(Date.UTC(b.getUTCFullYear(), b.getUTCMonth(), b.getUTCDate() + 1, 12 - 7));
+}
+const checkExpired_ = c => c.status === 'PENDING' && Date.now() >= checkExpireAt_(c.reqAt).getTime();
 
 // ───────────────────────── entry points ─────────────────────────
 function doGet(e) { return handle_((e && e.parameter) || {}); }
@@ -94,7 +99,7 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.16' });
+    if (action === 'ping') return json_({ ok: true, version: '1.17' });
     if (action === 'users') return json_({ ok: true, users: listUsers_() });
     if (action === 'login') return json_({ ok: true, user: loginByUid_(p.uid) });
     const user = requireUser_(p.email);
@@ -510,11 +515,12 @@ const myWh_ = u => (CFG.WH_STAFF.indexOf(u.w) >= 0 ? u.w : '');
 /** 30 วันล่าสุด · คำขอที่ยังรอเช็คจะซ่อนตัวเลขที่ผู้ขอนับไว้ (กันอีกฝั่งนับตาม) — ยกเว้นผู้ขอเอง */
 function listChecks_(user) {
   const s = ensureSheets_();
-  const since = Date.now() - 30 * 864e5, expire = Date.now() - CHECK_EXPIRE_DAYS * 864e5;
+  const since = Date.now() - 30 * 864e5;
   return readTable_(s.checks, CHECK_COLS).filter(c => c.id && new Date(c.reqAt).getTime() >= since).map(c => {
     delete c._row;
     c.barcode = String(c.barcode);
-    if (c.status === 'PENDING' && new Date(c.reqAt).getTime() < expire) c.expired = true;
+    c.expireAt = checkExpireAt_(c.reqAt).toISOString();
+    if (checkExpired_(c)) c.expired = true;
     if (c.status === 'PENDING' && normEmail_(c.reqEmail) !== user.email) c.reqCount = '';
     return c;
   }).sort((a, b) => String(b.reqAt).localeCompare(String(a.reqAt)));
@@ -533,7 +539,7 @@ function checkReq_(user, p) {
   try {
     const s = ensureSheets_();
     const ans = otherWh_(wh);
-    const dup = readTable_(s.checks, CHECK_COLS).some(c => c.status === 'PENDING' && String(c.barcode) === barcode && c.ansWh === ans);
+    const dup = readTable_(s.checks, CHECK_COLS).some(c => c.status === 'PENDING' && !checkExpired_(c) && String(c.barcode) === barcode && c.ansWh === ans);
     need(!dup, 'สินค้านี้มีคำขอให้ ' + ans + ' เช็คค้างอยู่แล้ว');
     const id = nextId_(s.checks, 'CK'), now = new Date();
     const c = {
@@ -569,6 +575,7 @@ function checkAns_(user, p) {
     const s = ensureSheets_();
     const c = findCheck_(s, String(p.id || ''));
     need(c.status === 'PENDING', 'คำขอนี้ไม่ได้รอเช็คแล้ว');
+    need(!checkExpired_(c), 'คำขอนี้หมดอายุแล้ว (เกิน 12.00 น. ของวันถัดไป) — สต็อกเคลื่อนไหวแล้ว ให้ผู้ขอนับและขอใหม่');
     need(myWh_(user) === c.ansWh || user.role >= 8, 'เฉพาะพนักงานคลัง ' + c.ansWh + ' เท่านั้นที่เช็คได้');
     need(normEmail_(c.reqEmail) !== user.email, 'ผู้ขอเช็คต้องให้อีกคลังเป็นคนนับ');
     setCheckFields_(s, c._row, {
