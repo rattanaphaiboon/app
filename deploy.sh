@@ -52,6 +52,9 @@ APPS=(
   rattana-quote-brief.html
   rattana-carcheck-brief.html
   rattana-carcheck-brief.mp4
+  rattana-quote-guide.mp4
+  rattana-quote-easy-preview.html
+  rattana-quote-qr-poster.html
   rattana-carcheck-brief-poster.jpg
   rattana-360.html
   rattana-360.gs
@@ -95,6 +98,7 @@ APPS=(
   rattana-manpower-data.json
   rattana-manpower-team.html
   rattana-line-register.html
+  rattana-coffee.html
 )
 
 DRY=0
