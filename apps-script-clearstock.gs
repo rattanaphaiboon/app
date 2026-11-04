@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.14 — Apps Script backend
+ * Rattana ClearStock v1.15 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -93,7 +93,7 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.14' });
+    if (action === 'ping') return json_({ ok: true, version: '1.15' });
     if (action === 'users') return json_({ ok: true, users: listUsers_() });
     if (action === 'login') return json_({ ok: true, user: loginByUid_(p.uid) });
     const user = requireUser_(p.email);
@@ -499,8 +499,9 @@ function listChecks_(user) {
 
 function checkReq_(user, p) {
   const need = (cond, msg) => { if (!cond) throw new Error(msg); };
-  const wh = myWh_(user) || (user.role >= 8 ? String(p.wh || '') : '');
-  need(CFG.WH_STAFF.indexOf(wh) >= 0, 'ขอเช็คสต็อกได้เฉพาะพนักงานคลัง W4 / C4');
+  // พนักงาน W4 / C4 ขอได้เฉพาะคลังตัวเอง · คนอื่น (เช่น HQ ที่ไปนับเอง) ระบุคลังที่นับมาได้
+  const wh = myWh_(user) || String(p.wh || '');
+  need(CFG.WH_STAFF.indexOf(wh) >= 0, 'กรุณาระบุคลังที่นับ (W4 หรือ C4)');
   const barcode = String(p.barcode || '').trim(), count = Number(p.count);
   need(barcode, 'ไม่มีบาร์โค้ดสินค้า');
   need(p.count !== '' && p.count !== null && isFinite(count) && count >= 0, 'กรุณากรอกจำนวนที่นับได้ของ ' + wh);
