@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.13 — Apps Script backend
+ * Rattana ClearStock v1.16 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -15,6 +15,7 @@ const CFG = {
   USERS_ID: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   USERS_SHEET: 'Sheet1',
   LOG_ID: '1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s',   // ไฟล์บันทึก (ใช้เมื่อเป็น standalone script)
+  LOC_ID: '1OmdfoSmPPA3ueKn624AU-WY6BJxS5iSS4e5YlPgl5nk', LOC_SHEET: 'Claude',   // Product Location Rattana Mart (พิกัด C4)
   WH_STAFF: ['W4', 'C4'],          // ผู้ใช้คลังที่ "รับทราบ" ได้
   ADJ_EMAILS: ['natthiya.mai@rattanaphaiboon.com'],   // ผู้ปรับสต็อกใน Bplus + แนบเอกสาร (ขั้นสุดท้าย)
   FOLDER_NAME: 'ClearStock – เอกสารปรับสต็อก',        // โฟลเดอร์ Drive เก็บไฟล์แนบ
@@ -39,7 +40,7 @@ const STATUS_TH = {
   CANCELLED: 'ยกเลิก',
 };
 
-const SH = { DOCS: 'Docs', LINES: 'Lines', LOG: 'Log' };
+const SH = { DOCS: 'Docs', LINES: 'Lines', LOG: 'Log', CHECKS: 'Checks' };
 
 const DOC_COLS = [
   ['id', 'DocID'], ['kind', 'Kind'], ['typeTh', 'ประเภท'], ['wh', 'คลัง'], ['lineCount', 'จำนวนรายการ'],
@@ -65,6 +66,23 @@ const LINE_COLS = [
 
 const LOG_COLS = ['เวลา', 'DocID', 'การกระทำ', 'โดย', 'อีเมล', 'รายละเอียด'];
 
+// คำขอเช็คสต็อก: คลังหนึ่งนับแล้วขอให้อีกคลังนับสินค้าตัวเดียวกัน แล้วเอามาเทียบ (จำนวนเป็นชิ้นทั้งหมด)
+const CHECK_COLS = [
+  ['id', 'CheckID'], ['status', 'Status'], ['statusTh', 'สถานะ'],
+  ['barcode', 'บาร์โค้ด'], ['name', 'ชื่อสินค้า'], ['unitCs', 'หน่วยลัง'], ['qtyCs', 'ชิ้น/ลัง'],
+  ['reqWh', 'คลังที่ขอ'], ['ansWh', 'คลังที่ต้องเช็ค'],
+  ['reqAt', 'ขอเมื่อ'], ['reqBy', 'ขอโดย'], ['reqEmail', 'ผู้ขอ (id)'],
+  ['reqCount', 'คลังที่ขอ นับได้ (ชิ้น)'], ['reqSys', 'คลังที่ขอ ระบบตอนนับ (ชิ้น)'], ['reqStockAt', 'สต็อก ณ (ตอนขอ)'], ['note', 'หมายเหตุ'],
+  ['ansAt', 'เช็คเมื่อ'], ['ansBy', 'เช็คโดย'], ['ansEmail', 'ผู้เช็ค (id)'],
+  ['ansCount', 'คลังที่เช็ค นับได้ (ชิ้น)'], ['ansSys', 'คลังที่เช็ค ระบบตอนนับ (ชิ้น)'], ['ansStockAt', 'สต็อก ณ (ตอนเช็ค)'],
+  ['closedAt', 'ปิดเมื่อ'], ['closedBy', 'ปิดโดย'], ['docIds', 'เอกสารแก้ไข'], ['updatedAt', 'อัปเดตล่าสุด'],
+];
+const CHECK_TH = {
+  PENDING: 'รออีกคลังเช็ค', ANSWERED: 'เช็คครบแล้ว · รอสรุป', FIXED: 'ส่งเอกสารแก้ไขแล้ว',
+  MATCH: 'ตรงกัน · ปิดเรื่อง', CLOSED: 'ปิดเรื่อง (ไม่แก้ไข)', CANCELLED: 'ยกเลิก',
+};
+const CHECK_EXPIRE_DAYS = 3;
+
 // ───────────────────────── entry points ─────────────────────────
 function doGet(e) { return handle_((e && e.parameter) || {}); }
 function doPost(e) {
@@ -76,7 +94,7 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.13' });
+    if (action === 'ping') return json_({ ok: true, version: '1.16' });
     if (action === 'users') return json_({ ok: true, users: listUsers_() });
     if (action === 'login') return json_({ ok: true, user: loginByUid_(p.uid) });
     const user = requireUser_(p.email);
@@ -86,12 +104,17 @@ function handle_(p) {
       case 'products': out = getProducts_(p.fresh === true || p.fresh === '1'); break;
       case 'docs':     out = { docs: listDocs_() }; break;
       case 'sync':     out = { sync: getSyncInfo_() }; break;
+      case 'locs':     out = getLocs_(); break;
       case 'prices':
         if (!user.perms.post) throw new Error('เฉพาะผู้ได้รับมอบหมายเท่านั้นที่ปรับสต็อกได้');
         out = { prices: getPrices_(p.codes) }; break;
       case 'create':   out = createDocs_(user, p.docs || []); break;
       case 'ack': case 'approve': case 'reject': case 'post': case 'cancel':
         out = transition_(user, action, p); break;
+      case 'checks':     out = { checks: listChecks_(user) }; break;
+      case 'checkReq':   out = checkReq_(user, p); break;
+      case 'checkAns':   out = checkAns_(user, p); break;
+      case 'checkClose': out = checkClose_(user, p); break;
       default: throw new Error('ไม่รู้จักคำสั่ง: ' + action);
     }
     return json_(Object.assign({ ok: true }, out));
@@ -205,6 +228,27 @@ function getProducts_(fresh) {
   const data = readPddt_();
   cachePut_(cache, 'pddt', data, CFG.CACHE_SEC);
   return data;
+}
+
+/** พิกัดสินค้า (ชีท Product Location แท็บ Claude) → { map: { บาร์โค้ด: [โลเคชัน, ...] } }
+ *  บาร์โค้ดในชีทเป็นหน่วยไหนก็ได้ — แอปรวมพิกัดจากทุกบาร์โค้ดของสินค้าเอง */
+function getLocs_() {
+  const cache = CacheService.getScriptCache();
+  const hit = cacheGet_(cache, 'locs');
+  if (hit) return hit;
+  const v = SpreadsheetApp.openById(CFG.LOC_ID).getSheetByName(CFG.LOC_SHEET).getDataRange().getDisplayValues();
+  const h = v[0].map(s => String(s).trim()), iL = h.indexOf('โลเคชัน'), iB = h.indexOf('บาร์โค้ด');
+  if (iL < 0 || iB < 0) throw new Error('ชีทพิกัดไม่พบคอลัมน์ โลเคชัน / บาร์โค้ด');
+  const map = {};
+  v.slice(1).forEach(r => {
+    const loc = String(r[iL]).trim(), bc = String(r[iB]).trim();
+    if (!loc || !bc) return;
+    const a = map[bc] = map[bc] || [];
+    if (a.indexOf(loc) < 0) a.push(loc);
+  });
+  const out = { map: map, rows: v.length - 1, loadedAt: new Date().toISOString() };
+  cachePut_(cache, 'locs', out, CFG.CACHE_SEC);
+  return out;
 }
 
 /** ราคาต่อหน่วย (PRICE CC00 ของหน่วยที่บาร์โค้ดนั้นเป็น) สำหรับไฟล์นำเข้า Bplus → { barcode: ราคา }
@@ -330,6 +374,7 @@ function ensureSheets_() {
     docs: make(SH.DOCS, DOC_COLS.map(c => c[1])),
     lines: make(SH.LINES, LINE_COLS.map(c => c[1])),
     log: make(SH.LOG, LOG_COLS),
+    checks: make(SH.CHECKS, CHECK_COLS.map(c => c[1])),
   };
 }
 
@@ -456,6 +501,111 @@ function createDocs_(user, docs) {
   } finally {
     lock.releaseLock();
   }
+}
+
+// ───────────────────────── คำขอเช็คสต็อก ─────────────────────────
+const otherWh_ = w => (w === 'W4' ? 'C4' : 'W4');
+const myWh_ = u => (CFG.WH_STAFF.indexOf(u.w) >= 0 ? u.w : '');
+
+/** 30 วันล่าสุด · คำขอที่ยังรอเช็คจะซ่อนตัวเลขที่ผู้ขอนับไว้ (กันอีกฝั่งนับตาม) — ยกเว้นผู้ขอเอง */
+function listChecks_(user) {
+  const s = ensureSheets_();
+  const since = Date.now() - 30 * 864e5, expire = Date.now() - CHECK_EXPIRE_DAYS * 864e5;
+  return readTable_(s.checks, CHECK_COLS).filter(c => c.id && new Date(c.reqAt).getTime() >= since).map(c => {
+    delete c._row;
+    c.barcode = String(c.barcode);
+    if (c.status === 'PENDING' && new Date(c.reqAt).getTime() < expire) c.expired = true;
+    if (c.status === 'PENDING' && normEmail_(c.reqEmail) !== user.email) c.reqCount = '';
+    return c;
+  }).sort((a, b) => String(b.reqAt).localeCompare(String(a.reqAt)));
+}
+
+function checkReq_(user, p) {
+  const need = (cond, msg) => { if (!cond) throw new Error(msg); };
+  // พนักงาน W4 / C4 ขอได้เฉพาะคลังตัวเอง · คนอื่น (เช่น HQ ที่ไปนับเอง) ระบุคลังที่นับมาได้
+  const wh = myWh_(user) || String(p.wh || '');
+  need(CFG.WH_STAFF.indexOf(wh) >= 0, 'กรุณาระบุคลังที่นับ (W4 หรือ C4)');
+  const barcode = String(p.barcode || '').trim(), count = Number(p.count);
+  need(barcode, 'ไม่มีบาร์โค้ดสินค้า');
+  need(p.count !== '' && p.count !== null && isFinite(count) && count >= 0, 'กรุณากรอกจำนวนที่นับได้ของ ' + wh);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const s = ensureSheets_();
+    const ans = otherWh_(wh);
+    const dup = readTable_(s.checks, CHECK_COLS).some(c => c.status === 'PENDING' && String(c.barcode) === barcode && c.ansWh === ans);
+    need(!dup, 'สินค้านี้มีคำขอให้ ' + ans + ' เช็คค้างอยู่แล้ว');
+    const id = nextId_(s.checks, 'CK'), now = new Date();
+    const c = {
+      id: id, status: 'PENDING', statusTh: CHECK_TH.PENDING, barcode: "'" + barcode, name: String(p.name || ''),
+      unitCs: String(p.unitCs || ''), qtyCs: Number(p.qtyCs) || 1, reqWh: wh, ansWh: ans,
+      reqAt: now, reqBy: user.name || user.email, reqEmail: user.email, reqCount: Math.round(count),
+      reqSys: numOrBlank_(p.sys), reqStockAt: String(p.stockAt || ''), note: String(p.note || ''), updatedAt: now,
+    };
+    s.checks.appendRow(CHECK_COLS.map(k => (c[k[0]] === undefined ? '' : c[k[0]])));
+    log_(s, id, 'ขอเช็คสต็อก', user, wh + ' นับ ' + c.reqCount + ' ชิ้น → ขอให้ ' + ans + ' เช็ค · ' + c.name);
+    return { id: id };
+  } finally { lock.releaseLock(); }
+}
+
+function findCheck_(s, id) {
+  const c = readTable_(s.checks, CHECK_COLS).find(x => x.id === id);
+  if (!c) throw new Error('ไม่พบคำขอเช็ค ' + id);
+  return c;
+}
+function setCheckFields_(s, row, f) {
+  f.updatedAt = new Date();
+  if (f.status) f.statusTh = CHECK_TH[f.status];
+  CHECK_COLS.forEach((k, j) => { if (f[k[0]] !== undefined) s.checks.getRange(row, j + 1).setValue(f[k[0]]); });
+}
+
+function checkAns_(user, p) {
+  const need = (cond, msg) => { if (!cond) throw new Error(msg); };
+  const count = Number(p.count);
+  need(p.count !== '' && p.count !== null && isFinite(count) && count >= 0, 'กรุณากรอกจำนวนที่นับได้');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const s = ensureSheets_();
+    const c = findCheck_(s, String(p.id || ''));
+    need(c.status === 'PENDING', 'คำขอนี้ไม่ได้รอเช็คแล้ว');
+    need(myWh_(user) === c.ansWh || user.role >= 8, 'เฉพาะพนักงานคลัง ' + c.ansWh + ' เท่านั้นที่เช็คได้');
+    need(normEmail_(c.reqEmail) !== user.email, 'ผู้ขอเช็คต้องให้อีกคลังเป็นคนนับ');
+    setCheckFields_(s, c._row, {
+      status: 'ANSWERED', ansAt: new Date(), ansBy: user.name || user.email, ansEmail: user.email,
+      ansCount: Math.round(count), ansSys: numOrBlank_(p.sys), ansStockAt: String(p.stockAt || ''),
+    });
+    log_(s, c.id, 'เช็คสต็อก', user, c.ansWh + ' นับ ' + Math.round(count) + ' ชิ้น · ' + c.name);
+    return { id: c.id };
+  } finally { lock.releaseLock(); }
+}
+
+/** result: FIXED (สร้างเอกสารแก้ไขจาก p.docs) · MATCH · CLOSED · CANCELLED (ผู้ขอยกเลิกก่อนมีคนเช็ค) */
+function checkClose_(user, p) {
+  const need = (cond, msg) => { if (!cond) throw new Error(msg); };
+  const result = String(p.result || '');
+  need(['FIXED', 'MATCH', 'CLOSED', 'CANCELLED'].indexOf(result) >= 0, 'ผลไม่ถูกต้อง');
+  const s0 = ensureSheets_();
+  const c0 = findCheck_(s0, String(p.id || ''));
+  const mine = normEmail_(c0.reqEmail) === user.email || normEmail_(c0.ansEmail) === user.email || user.role >= 8;
+  if (result === 'CANCELLED') need(c0.status === 'PENDING' && (normEmail_(c0.reqEmail) === user.email || user.role >= 8), 'ยกเลิกได้เฉพาะผู้ขอ ก่อนอีกคลังเช็ค');
+  else need(c0.status === 'ANSWERED' && mine, 'ปิดเรื่องได้เฉพาะผู้ขอ / ผู้เช็ค หลังเช็คครบแล้ว');
+  let ids = [];
+  if (result === 'FIXED') {
+    const docs = Array.isArray(p.docs) ? p.docs : [];
+    need(docs.length, 'ไม่มีรายการแก้ไข');
+    ids = createDocs_(user, docs).ids;
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const s = ensureSheets_();
+    const c = findCheck_(s, c0.id);
+    need(c.status === c0.status, 'คำขอนี้ถูกอัปเดตไปแล้ว — โหลดใหม่');
+    setCheckFields_(s, c._row, { status: result, closedAt: new Date(), closedBy: user.name || user.email, docIds: ids.join(', ') });
+    log_(s, c.id, CHECK_TH[result], user, ids.length ? 'สร้าง ' + ids.join(', ') : '');
+    return { id: c.id, ids: ids };
+  } finally { lock.releaseLock(); }
 }
 
 function findDoc_(s, id) {
