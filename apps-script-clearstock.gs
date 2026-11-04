@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.18 — Apps Script backend
+ * Rattana ClearStock v1.19 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -99,7 +99,7 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.18' });
+    if (action === 'ping') return json_({ ok: true, version: '1.19' });
     if (action === 'users') return json_({ ok: true, users: listUsers_() });
     if (action === 'login') return json_({ ok: true, user: loginByUid_(p.uid) });
     const user = requireUser_(p.email);
@@ -361,6 +361,13 @@ function book_() { return SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetAp
 
 function ensureSheets_() {
   const ss = book_();
+  // ตรวจหัวตารางทุกแท็บใช้เวลา — ตรวจแล้วจำไว้ 6 ชม. (เปลี่ยนคอลัมน์เมื่อไรให้เปลี่ยนชื่อ key นี้)
+  const cache = CacheService.getScriptCache(), OK = 'sheets_ok_v118';
+  if (cache.get(OK)) {
+    const g = n => ss.getSheetByName(n);
+    const s = { docs: g(SH.DOCS), lines: g(SH.LINES), log: g(SH.LOG), checks: g(SH.CHECKS) };
+    if (s.docs && s.lines && s.log && s.checks) return s;
+  }
   const make = (name, headers) => {
     let sh = ss.getSheetByName(name);
     if (!sh) {
@@ -375,12 +382,14 @@ function ensureSheets_() {
     }
     return sh;
   };
-  return {
+  const s = {
     docs: make(SH.DOCS, DOC_COLS.map(c => c[1])),
     lines: make(SH.LINES, LINE_COLS.map(c => c[1])),
     log: make(SH.LOG, LOG_COLS),
     checks: make(SH.CHECKS, CHECK_COLS.map(c => c[1])),
   };
+  cache.put(OK, '1', 21600);
+  return s;
 }
 
 /** เรียกครั้งเดียวจากเมนู Run เพื่อสร้างชีทและขอสิทธิ์ */
@@ -538,9 +547,13 @@ function checkReq_(user, p) {
   try {
     const s = ensureSheets_();
     const ans = otherWh_(wh);
-    const dup = readTable_(s.checks, CHECK_COLS).some(c => c.status === 'PENDING' && !checkExpired_(c) && String(c.barcode) === barcode && c.ansWh === ans);
+    const all = readTable_(s.checks, CHECK_COLS);   // อ่านครั้งเดียว ใช้ทั้งเช็คซ้ำและหาเลขถัดไป
+    const dup = all.some(c => c.status === 'PENDING' && !checkExpired_(c) && String(c.barcode) === barcode && c.ansWh === ans);
     need(!dup, 'สินค้านี้มีคำขอให้ ' + ans + ' เช็คค้างอยู่แล้ว');
-    const id = nextId_(s.checks, 'CK'), now = new Date();
+    const now = new Date();
+    const base = 'CK-' + ('0' + (Number(Utilities.formatDate(now, CFG.TZ, 'yyyy')) + 543) % 100).slice(-2) + Utilities.formatDate(now, CFG.TZ, 'MMdd') + '-';
+    const max = all.reduce((m, c) => (String(c.id).indexOf(base) === 0 ? Math.max(m, parseInt(String(c.id).slice(base.length), 10) || 0) : m), 0);
+    const id = base + ('00' + (max + 1)).slice(-3);
     const c = {
       id: id, status: 'PENDING', statusTh: CHECK_TH.PENDING, barcode: "'" + barcode, name: String(p.name || ''),
       unitCs: String(p.unitCs || ''), qtyCs: Number(p.qtyCs) || 1, reqWh: wh, ansWh: ans,
@@ -549,7 +562,7 @@ function checkReq_(user, p) {
     };
     s.checks.appendRow(CHECK_COLS.map(k => (c[k[0]] === undefined ? '' : c[k[0]])));
     log_(s, id, 'ขอเช็คสต็อก', user, wh + ' นับ ' + c.reqCount + ' ชิ้น → ขอให้ ' + ans + ' เช็ค · ' + c.name);
-    return { id: id };
+    return { id: id, check: Object.assign({}, c, { barcode: barcode, reqAt: now.toISOString(), updatedAt: now.toISOString() }) };
   } finally { lock.releaseLock(); }
 }
 
