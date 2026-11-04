@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.15 — Apps Script backend
+ * Rattana ClearStock v1.16 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -15,6 +15,7 @@ const CFG = {
   USERS_ID: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   USERS_SHEET: 'Sheet1',
   LOG_ID: '1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s',   // ไฟล์บันทึก (ใช้เมื่อเป็น standalone script)
+  LOC_ID: '1OmdfoSmPPA3ueKn624AU-WY6BJxS5iSS4e5YlPgl5nk', LOC_SHEET: 'Claude',   // Product Location Rattana Mart (พิกัด C4)
   WH_STAFF: ['W4', 'C4'],          // ผู้ใช้คลังที่ "รับทราบ" ได้
   ADJ_EMAILS: ['natthiya.mai@rattanaphaiboon.com'],   // ผู้ปรับสต็อกใน Bplus + แนบเอกสาร (ขั้นสุดท้าย)
   FOLDER_NAME: 'ClearStock – เอกสารปรับสต็อก',        // โฟลเดอร์ Drive เก็บไฟล์แนบ
@@ -93,7 +94,7 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.15' });
+    if (action === 'ping') return json_({ ok: true, version: '1.16' });
     if (action === 'users') return json_({ ok: true, users: listUsers_() });
     if (action === 'login') return json_({ ok: true, user: loginByUid_(p.uid) });
     const user = requireUser_(p.email);
@@ -103,6 +104,7 @@ function handle_(p) {
       case 'products': out = getProducts_(p.fresh === true || p.fresh === '1'); break;
       case 'docs':     out = { docs: listDocs_() }; break;
       case 'sync':     out = { sync: getSyncInfo_() }; break;
+      case 'locs':     out = getLocs_(); break;
       case 'prices':
         if (!user.perms.post) throw new Error('เฉพาะผู้ได้รับมอบหมายเท่านั้นที่ปรับสต็อกได้');
         out = { prices: getPrices_(p.codes) }; break;
@@ -226,6 +228,27 @@ function getProducts_(fresh) {
   const data = readPddt_();
   cachePut_(cache, 'pddt', data, CFG.CACHE_SEC);
   return data;
+}
+
+/** พิกัดสินค้า (ชีท Product Location แท็บ Claude) → { map: { บาร์โค้ด: [โลเคชัน, ...] } }
+ *  บาร์โค้ดในชีทเป็นหน่วยไหนก็ได้ — แอปรวมพิกัดจากทุกบาร์โค้ดของสินค้าเอง */
+function getLocs_() {
+  const cache = CacheService.getScriptCache();
+  const hit = cacheGet_(cache, 'locs');
+  if (hit) return hit;
+  const v = SpreadsheetApp.openById(CFG.LOC_ID).getSheetByName(CFG.LOC_SHEET).getDataRange().getDisplayValues();
+  const h = v[0].map(s => String(s).trim()), iL = h.indexOf('โลเคชัน'), iB = h.indexOf('บาร์โค้ด');
+  if (iL < 0 || iB < 0) throw new Error('ชีทพิกัดไม่พบคอลัมน์ โลเคชัน / บาร์โค้ด');
+  const map = {};
+  v.slice(1).forEach(r => {
+    const loc = String(r[iL]).trim(), bc = String(r[iB]).trim();
+    if (!loc || !bc) return;
+    const a = map[bc] = map[bc] || [];
+    if (a.indexOf(loc) < 0) a.push(loc);
+  });
+  const out = { map: map, rows: v.length - 1, loadedAt: new Date().toISOString() };
+  cachePut_(cache, 'locs', out, CFG.CACHE_SEC);
+  return out;
 }
 
 /** ราคาต่อหน่วย (PRICE CC00 ของหน่วยที่บาร์โค้ดนั้นเป็น) สำหรับไฟล์นำเข้า Bplus → { barcode: ราคา }
