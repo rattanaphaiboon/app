@@ -405,7 +405,7 @@ body.dark mark{background:rgba(232,200,106,.55);color:#fff}
          data-text="sign_in_with" data-shape="rectangular"></div>
     <div id="loginError" class="login-error"></div>
     <button class="login-install" id="loginInstallBtn" onclick="openInstall()">ติดตั้งแอปลงเครื่อง</button>
-    <div class="login-foot">© Rattanaphaiboon · v2.17</div>
+    <div class="login-foot">© Rattanaphaiboon · v2.18</div>
   </div>
 </div>
 
@@ -485,7 +485,7 @@ body.dark mark{background:rgba(232,200,106,.55);color:#fff}
 </div>
 
   <div class="footer-note">
-    <strong>Rattana Hub v2.17</strong> · ดึง config จาก Google Sheet<br>
+    <strong>Rattana Hub v2.18</strong> · ดึง config จาก Google Sheet<br>
     Login ครั้งเดียวใช้ได้ทุกแอปใน <code>github.io/rattana/</code>
   </div>
 </div>
@@ -1483,7 +1483,8 @@ function hasValidUrl(app) {
 function appCard(app) {
   const starred = isFav(app.url);
   const valid = hasValidUrl(app);
-  const target = ''; // always same window so browser back returns to Hub
+  // เปิดจากแอปที่ติดตั้งแล้ว = แท็บใหม่ (scope ของ Hub มีแค่หน้านี้) · เปิดในเบราว์เซอร์ = หน้าต่างเดิม กดย้อนกลับมา Hub ได้
+  const target = isStandalone() ? ' target="_blank" rel="noopener"' : '';
 
   // No URL → render as <div> (no click action), add "เร็วๆ นี้" badge, dim it
   if (!valid) {
@@ -1697,6 +1698,7 @@ function closeQR(ev) {
    ติดตั้งแอปลงเครื่อง — Android/คอม = ปุ่มติดตั้งของเบราว์เซอร์ · iPhone/iPad/Mac = บอกขั้นตอน
 ═══════════════════════════════════════════════════════════ */
 let deferredInstall = null;
+let hubInstalled = false;
 const INSTALL_DISMISS_KEY = 'rattana_hub_install_dismiss';
 const INSTALL_SNOOZE_MS = 14 * 24 * 3600 * 1000;
 
@@ -1728,7 +1730,27 @@ function refreshInstallUI() {
   document.getElementById('loginInstallBtn')?.classList.toggle('show', can);
   const um = document.getElementById('umInstall');
   if (um) um.style.display = can ? '' : 'none';
-  document.getElementById('installBar')?.classList.toggle('show', can && !installBarSnoozed());
+  document.getElementById('installBar')?.classList.toggle('show', can && !hubInstalled && !installBarSnoozed());
+}
+async function checkHubInstalled() {
+  if (isStandalone() || !navigator.getInstalledRelatedApps) return;
+  try {
+    const apps = await navigator.getInstalledRelatedApps();
+    hubInstalled = Array.isArray(apps) && apps.some(a => a.platform === 'webapp');
+  } catch (e) {}
+  refreshInstallUI();
+}
+function registerHubSW() {
+  if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => {
+      const sc = String(r.scope || '');
+      const sw = r.active || r.waiting || r.installing;
+      if (sc.slice(-5) === '/app/' && sw && /\/rattana-hub-sw\.js/.test(sw.scriptURL)) r.unregister();
+    })).catch(() => {});
+    navigator.serviceWorker.register('rattana-hub-sw.js', { scope: 'rattana-hub.html' })
+      .catch(e => console.warn('[sw] register', (e && e.message) || e));
+  });
 }
 function dismissInstallBar() {
   try { localStorage.setItem(INSTALL_DISMISS_KEY, String(Date.now())); } catch (e) {}
@@ -1796,17 +1818,24 @@ async function openInstall() {
   if (deferredInstall) {
     const p = deferredInstall;
     deferredInstall = null;
+    let shown = true;
     try {
-      p.prompt();
+      await p.prompt();
       const r = await p.userChoice;
       if (r && r.outcome === 'accepted') showToast('กำลังติดตั้ง Rattana Hub', 'success');
-    } catch (e) {}
+      else { deferredInstall = deferredInstall || p; showToast('ยังไม่ได้ติดตั้ง — กดใหม่ได้ตลอด', 'info'); }
+    } catch (e) {
+      shown = false;
+    }
     refreshInstallUI();
-    return;
+    if (shown) return;
   }
   const env = installEnv();
   env.ipad = /iPad/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const info = installSteps(env);
+  const info = (hubInstalled && !env.ios && !env.inApp) ? {
+    title: 'เครื่องนี้ติดตั้ง Hub ไว้แล้ว',
+    steps: ['ไอคอนหาย: ตั้งค่า → แอป', 'ถอนการติดตั้ง "Rattana"', 'เปิดหน้าเว็บนี้ใหม่ รอ 10 วินาที', 'กด "ติดตั้ง" อีกครั้ง']
+  } : installSteps(env);
   document.getElementById('installTitle').textContent = info.title;
   document.getElementById('installSteps').innerHTML = info.steps
     .map((t, i) => `<div class="install-step"><b>${i + 1}</b><span title="${escHtml(t)}">${escHtml(t)}</span></div>`)
@@ -1835,9 +1864,11 @@ window.addEventListener('beforeinstallprompt', e => {
 window.addEventListener('appinstalled', () => {
   deferredInstall = null;
   closeInstall();
+  hubInstalled = true;
   refreshInstallUI();
   showToast('ติดตั้งแล้ว เปิดจากหน้าจอโฮมได้เลย', 'success');
 });
+registerHubSW();
 
 window.handleGoogleLogin = handleGoogleLogin;
 window.toggleTheme = toggleTheme;
@@ -1865,6 +1896,7 @@ window.iconAutoFail = iconAutoFail;
 
 window.addEventListener('DOMContentLoaded', () => {
   refreshInstallUI();
+  checkHubInstalled();
   checkSession();
 });
 </script>
