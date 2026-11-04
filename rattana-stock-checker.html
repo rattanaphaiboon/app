@@ -1711,7 +1711,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.59';
+const APP_VERSION = 'v6.60';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -8086,14 +8086,44 @@ function clearDashFilters() {
 //  ★ ส่งแค่รายการที่ต้องเช็ค ไม่ส่งว่าเช็คอะไรไปแล้ว — ให้ GAS ไปนับเองจาก History ของวันนั้น
 //    (ส่งหลายรอบในวันเดียว แถวล่าสุดจะได้เป็นภาพรวมสะสม ไม่ใช่แค่รอบนั้น)
 //
-//  ═══ v6.59: ไม่ได้รับมอบงาน = ไม่มีตัวหาร (user: "คนที่ไม่ได้รับมอบ ไม่ต้องเอาทั้งคลัง
-//      มาใส่จำนวนที่ต้องเช็คทั้งหมดให้") ═══
+//  ═══ v6.59/v6.60: ไม่ได้รับมอบงาน ═══
+//      user: "คนที่ไม่ได้รับมอบ ไม่ต้องเอาทั้งคลังมาใส่จำนวนที่ต้องเช็คทั้งหมดให้"
+//            "คนที่ไม่ได้รับมอบ จะขึ้น 14/14 100/100 แบบนี้ ยอดตามที่เช็ค"
 //      ของเดิมถ้าหาชื่อในไฟล์แบ่งงานไม่เจอ จะยัด "ขายออกทั้งคลัง" เป็นเป้าของคนนั้น
 //      → ในชีท/แดชบอร์ดคนนั้นขึ้นเป็น 3/900 ทั้งที่ไม่เคยถูกมอบอะไรเลย
-//      และยังไปถ่วงยอดรวม "ยังไม่ได้เช็ค" ของทั้งคลังด้วย
-//      ★ คืน null = ไม่เขียนแถวให้คนนั้น (ของที่เขายิงยังอยู่ใน History ตามปกติ)
+//        และยังไปถ่วงยอดรวม "ยังไม่ได้เช็ค" ของทั้งคลังด้วย
+//      ★ v6.60: เป้าของคนไม่ได้รับมอบ = "ของที่ตัวเองเช็คไปจริง" → ได้ 14/14 ครบ 100%
+//        (v6.59 เคยคืน null ไปเลย แต่แบบนั้นคนนั้นหายจากแดชบอร์ด — user อยากให้เห็นแต่เป็น 100%)
 //      ★ ลำดับที่ยอมรับเป็น "งานที่ได้รับมอบ": คลังมอบให้วันนี้ (v6.29) ก่อน
 //        แล้วค่อยไฟล์แบ่งงาน — ชุดเดียวกับที่การ์ดบนหน้านับใช้เลือกโหมดตั้งต้น (chkDefault)
+
+// v6.60: รายการที่ "ตัวเองเช็คไปแล้ววันนี้" — ใช้เป็นเป้าของคนที่ไม่ได้รับมอบงาน
+//   รอบนี้ (countSession) + รอบก่อน ๆ ของวันเดียวกัน (historyCache ถ้าเคยโหลด)
+//   ★ ต้องรวมรอบก่อนด้วย ไม่งั้นส่งรอบที่ 2 แถวใหม่จะทับของเดิมเหลือแค่ยอดรอบนั้น
+//   ★ GAS เขียน History ก่อนแล้วค่อยนับ (saveCheckProgress_ ถูกเรียกท้ายสุด)
+//     ของรอบนี้จึงถูกนับเป็น "เช็คแล้ว" ครบ → เปอร์เซ็นต์ออกมา 100 เสมอ
+function chkSelfTargets() {
+  const byKey = {};
+  const add = (k, n) => { k = String(k || '').trim(); if (!k || byKey[k]) return;
+    byKey[k] = { key: k, name: String(n || '') || k }; };
+  try { const it = (countSession && countSession.items) || {};
+    Object.keys(it).forEach(k => add(k, (it[k] || {}).name)); } catch (e) {}
+  try {
+    if (historyLoaded && historyCache) {
+      const day = chkTodayStr(), w = String(soldWhOf() || '').toUpperCase(),
+            me = asgNorm(counterDisplayName());
+      historyCache.forEach(r => {
+        if (!r || !r.key) return;
+        if (String(r.savedAt || '').slice(0, 10) !== day) return;
+        if (String(r.warehouse || '').toUpperCase() !== w) return;
+        if (asgNorm(r.counterName) !== me) return;
+        add(r.key, r.name);
+      });
+    }
+  } catch (e) {}
+  return Object.keys(byKey).map(k => byKey[k]);
+}
+
 function progressSnapshot() {
   const all = soldAll();
   if (!all.length) return null;
@@ -8103,8 +8133,11 @@ function progressSnapshot() {
     list = dy.items; kind = 'คลังมอบให้วันนี้';
   } else {
     const m = assignMine();
-    if (!m || !m.keySet || !m.keySet.size) return null;   // ★ ไม่ได้รับมอบ = ไม่ส่งเป้า
-    list = chkMineSold(); kind = 'ขายออก+ขนาดเดียวกัน (เฉพาะงานที่แบ่งไว้)';
+    if (m && m.keySet && m.keySet.size) {
+      list = chkMineSold(); kind = 'ขายออก+ขนาดเดียวกัน (เฉพาะงานที่แบ่งไว้)';
+    } else {
+      list = chkSelfTargets(); kind = 'เช็คเอง (ไม่ได้รับมอบงาน)';   // v6.60
+    }
   }
   if (!list.length) return null;
   return {
