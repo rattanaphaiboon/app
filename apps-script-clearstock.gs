@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.17 — Apps Script backend
+ * Rattana ClearStock v1.18 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -99,7 +99,7 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.17' });
+    if (action === 'ping') return json_({ ok: true, version: '1.18' });
     if (action === 'users') return json_({ ok: true, users: listUsers_() });
     if (action === 'login') return json_({ ok: true, user: loginByUid_(p.uid) });
     const user = requireUser_(p.email);
@@ -512,7 +512,7 @@ function createDocs_(user, docs) {
 const otherWh_ = w => (w === 'W4' ? 'C4' : 'W4');
 const myWh_ = u => (CFG.WH_STAFF.indexOf(u.w) >= 0 ? u.w : '');
 
-/** 30 วันล่าสุด · คำขอที่ยังรอเช็คจะซ่อนตัวเลขที่ผู้ขอนับไว้ (กันอีกฝั่งนับตาม) — ยกเว้นผู้ขอเอง */
+/** 30 วันล่าสุด · ผู้เช็คเห็นยอดที่ผู้ขอนับไว้ (ผู้ใช้ขอให้แสดง ไม่ต้องนับแบบปิดตา) */
 function listChecks_(user) {
   const s = ensureSheets_();
   const since = Date.now() - 30 * 864e5;
@@ -521,7 +521,6 @@ function listChecks_(user) {
     c.barcode = String(c.barcode);
     c.expireAt = checkExpireAt_(c.reqAt).toISOString();
     if (checkExpired_(c)) c.expired = true;
-    if (c.status === 'PENDING' && normEmail_(c.reqEmail) !== user.email) c.reqCount = '';
     return c;
   }).sort((a, b) => String(b.reqAt).localeCompare(String(a.reqAt)));
 }
