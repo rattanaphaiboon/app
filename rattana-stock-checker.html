@@ -574,11 +574,6 @@ try{
     .chkp-row .tagx.pend{background:#fdf0e3;color:var(--warning)}
     .chkp-row .tagx.bad{background:#ffe6e3;color:var(--danger)}
     .chkp-row .tagx.good{background:#e4f6ec;color:var(--success)}
-    /* v6.57 — แยกคนที่ได้รับมอบงาน กับคนที่เลือกนับเอง ให้เห็นตั้งแต่แวบแรก */
-    .chkp-row .tagx.asg{background:#e6edfa;color:var(--navy-mid)}
-    .chkp-row .tagx.own{background:#efe7fb;color:#6b3fc4}
-    body.dark .chkp-row .tagx.asg{background:#1b2a4d;color:#9bb6f0}
-    body.dark .chkp-row .tagx.own{background:#2b2147;color:#c0a6f5}
     .chkp-row .rr{flex:0 0 auto;text-align:right;font-size:11.5px;color:var(--muted);line-height:1.2;
       font-variant-numeric:tabular-nums}
     .chkp-row .rr b{font-size:15px;color:var(--text)}
@@ -1716,7 +1711,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.57';
+const APP_VERSION = 'v6.58';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -2530,6 +2525,13 @@ async function loadUsersSheet() {
     const res = await fetch(url);
     if (!res.ok) throw new Error('users fetch failed');
     allUsers = parseCsv(await res.text());
+    // v6.58: ตัวกรอง "คนที่ออกไปแล้ว" ต้องใช้ชีทนี้ — ถ้าไฟล์แบ่งงานมาถึงก่อน
+    //   ของที่คิดไว้ตอนนั้นยังไม่ได้กรอง ต้องคิดใหม่ทั้งหมด ไม่งั้นต้องรอรีเฟรชหน้า
+    asgActiveReset();
+    Object.keys(_adOwn).forEach(k => { delete _adOwn[k]; });
+    if (assignRows && assignRows.length) {
+      try { assignBuild(); renderAssign(); } catch (e) { console.warn('สร้างไฟล์แบ่งงานใหม่ไม่ได้', e); }
+    }
     return allUsers;
   }, 10000);
 }
@@ -4279,6 +4281,7 @@ const _adOwn = {}, _adOwnFlight = {};
 function adOwnRoll(wh, rows, kind) {
   const col = 'STOCK ' + wh, acc = {};
   const bump = (p, who) => {
+    if (!asgActive(who)) return;                   // v6.58: คนที่ออกไปแล้ว ไม่ขึ้นเป็นผู้ดูแล
     if (!p || !parseStock(p[col]).total) return;   // ★ นับเฉพาะตัวที่มีของจริงในคลังนี้
     const b = String(p['CAT BRAND'] || '').trim();
     if (!b) return;
@@ -4826,6 +4829,41 @@ let assignWh   = '';      // v6.22: คลังของข้อมูลท�
 let assignOwner = null;   // v6.6: คีย์สินค้า → ชื่อคนที่รับผิดชอบ (ใช้ตอนดูทั้งคลัง)
 const asgNorm = s => String(s || '').replace(/\s+/g, '').toLowerCase();
 
+// ══════════ v6.58: คนที่ออกไปแล้ว ห้ามค้างเป็นผู้รับผิดชอบ ══════════
+//   ของที่เคยเป็นงานเขาต้องกลายเป็น "ไม่มีคนดูแล" ไม่ใช่ค้างชื่อคนที่ไม่อยู่แล้ว
+//   (user เจอกับ KYAW THU RA SHWE ที่ถือ 184 แถวในแท็บ W1 แต่ไม่มีชื่อในชีทผู้ใช้แล้ว)
+//   ★ เป็นกฎทั่วไป ไม่ผูกกับชื่อใคร — คนลาออกคนต่อไปหลุดออกเอง ไม่ต้องแก้โค้ด
+//   ★ ยังไม่ได้โหลดชีทผู้ใช้ = ไม่กรองใครเลย
+//     กรองตอนที่ยังไม่รู้ว่าใครเป็นใคร = ล้างไฟล์แบ่งงานทิ้งทั้งก้อน
+//   ★ แท็บ W4 เขียน "ชื่อเล่น" ไม่ใช่ชื่อเต็ม และสะกดไม่ตรงเป๊ะกับชีทผู้ใช้
+//     วัดจริง: ไฟล์เขียน "แทค" ชีทเขียน "แท็ค" (AUNG AUNG · Active · W4) คนเดียวกัน
+//     เทียบตรง ๆ จะลบของคนที่ยังอยู่ทิ้ง 67 แถว → ต้องตัดวรรณยุกต์/ไม้ไต่คู้ก่อนเทียบด้วย
+//     ตัดแล้วชื่อเล่นอาจชนกันบ้าง แต่ชนแล้ว "เก็บไว้" ซึ่งปลอดภัยกว่าลบผิด
+const THAI_MARKS = /[\u0e31\u0e34-\u0e3a\u0e47-\u0e4e]/g;
+const asgBare = s => asgNorm(s).replace(THAI_MARKS, '');
+let _asgAct = null, _asgActN = -1;
+function asgActiveSet() {
+  if (_asgAct && _asgActN === (allUsers || []).length) return _asgAct;
+  const set = new Set();
+  (allUsers || []).forEach(u => {
+    if (String(u['Status'] || '').trim().toLowerCase() !== 'active') return;
+    const full = asgNorm(u['ชื่อ - สกุล']);
+    if (full) { set.add(full); set.add(asgBare(full)); }
+    const nick = asgNorm(u['ชื่อเล่น']);
+    if (nick) { set.add(nick); set.add(asgBare(nick)); }
+  });
+  _asgActN = (allUsers || []).length; _asgAct = set;
+  return set;
+}
+function asgActive(who) {
+  const set = asgActiveSet();
+  if (!set.size) return true;                 // ยังไม่รู้ = ไม่กรอง
+  const k = asgNorm(who);
+  return set.has(k) || set.has(asgBare(k));
+}
+// โหลดชีทผู้ใช้ทีหลังไฟล์แบ่งงานได้ → ต้องล้างของที่คิดไว้ตอนยังไม่มีตัวกรอง
+function asgActiveReset() { _asgAct = null; _asgActN = -1; }
+
 // คลังพิเศษ (Colgate/Chaindrite) ใช้ชื่อแท็บของคลังแม่
 function assignTabOf() {
   const w = (countSession && countSession.warehouse) || '';
@@ -4906,6 +4944,7 @@ function asgBuildName() {
     if (n && !byName[n]) byName[n] = productKey(p);
   });
   assignRows.forEach(r => {
+    if (!asgActive(r.w)) return;   // v6.58: ออกไปแล้ว → ปล่อยเป็นของไม่มีคนดูแล
     const a = asgBucket(r.w);
     a.total++;
     const k = byName[asgNorm(r.n)];
@@ -4925,6 +4964,7 @@ function asgBuildVendor() {
     (byVendor[v] || (byVendor[v] = [])).push(p);
   });
   assignRows.forEach(r => {
+    if (!asgActive(r.w)) return;   // v6.58: ออกไปแล้ว → ปล่อยเป็นของไม่มีคนดูแล
     const a  = asgBucket(r.w);
     const ps = byVendor[asgNorm(r.v)];
     if (!ps) { a.total++; a.miss++; return; }   // ผู้ขายรายนี้หาในแคตตาล็อกไม่เจอ
@@ -8278,18 +8318,6 @@ function chkAddPending(rows, from, to, whFilter, whoFilter, ctx) {
   rows.sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : (b.miss - a.miss)));
 }
 
-// v6.57: แถวนี้มาจาก "งานที่มอบ" หรือ "นับเอง"
-//   ★ อ่านจาก kind ที่แอปเขียนไว้ตอนกดส่ง (เฉพาะงานที่แบ่งไว้ / ทั้งคลัง) ไม่ต้องเดาจากที่อื่น
-//     แถว pending ที่ chkAddPending เติมเข้ามาก็ใช้ kind เดียวกับงานที่แบ่ง จึงเข้ากลุ่มถูกเอง
-//   ★ kind แปลก ๆ (ของเก่า/ของใหม่ที่ยังไม่รู้จัก) คืน '' แล้วไม่ต้องติดป้าย
-//     เดาเป็น "มอบงาน" ไปเลยจะกลายเป็นโกหกคนอ่าน
-function chkWhoKind(r) {
-  const k = String((r && r.kind) || '');
-  if (k.includes('แบ่งไว้')) return 'asg';
-  if (k.includes('ทั้งคลัง')) return 'own';
-  return '';
-}
-
 function renderCheckProgress() {
   const host = document.getElementById('dashCheck');
   if (!host) return;
@@ -8353,9 +8381,6 @@ function renderCheckProgress() {
   //   ★ ยังต้องเก็บเลขลำดับเดิมไว้คู่กับแถว ไม่งั้น chkProgOpen() เปิดผิดคน
   //   คนที่ยังไม่เริ่มขึ้น 0/N แถบ 0% — เหมือนในชีทที่คลังใช้อยู่
   const shownRows = rows.map((r, i) => ({ r, i }));
-  // v6.57: กี่คนที่ "นับเอง" ในช่วงที่เลือก — นับหัวคน ไม่ใช่นับแถว (คนเดียวส่งหลายวันได้)
-  const nOwn = new Set(rows.filter(r => chkWhoKind(r) === 'own')
-                           .map(r => asgNorm(r.counterName))).size;
 
   host.innerHTML = `<div class="card" style="padding:14px 16px">
     <div class="chkp-head"><span>📊</span><span>ภาพรวม</span>
@@ -8374,7 +8399,6 @@ function renderCheckProgress() {
       <span>ขายออก <b>${dcNum((ctx.soldItems || []).length)}</b></span>
       <span>ขนาดเดียวกัน <b>${dcNum((ctx.sibItems || []).length)}</b></span>
       <span>แบ่งแล้ว <b>${dcNum(dl.rows.length)}</b> คน</span>
-      ${nOwn ? `<span>นับเอง <b style="color:#6b3fc4">${dcNum(nOwn)}</b> คน</span>` : ''}
     </div>` : ''}
     ${(oneDay && !dday) ? `<div class="chkp-day" data-nolang="1">${formatThaiDate(rows[0].day)}${oneWh ? ' · ' + rows[0].warehouse : ''}</div>` : ''}
     <div class="chkp-list">${shownRows.slice(0, 60).map(o => {
@@ -8389,8 +8413,6 @@ function renderCheckProgress() {
         <div class="l">
           <div class="d"><span class="nm">${r.counterName || '—'}</span>
             ${r.pending ? '<span class="tagx pend">ยังไม่ส่ง</span>' : ''}
-            ${chkWhoKind(r) === 'asg' ? '<span class="tagx asg">📋 มอบงาน</span>'
-            : chkWhoKind(r) === 'own' ? '<span class="tagx own">✋ นับเอง</span>' : ''}
             ${oneDay ? '' : `<span class="tagx" data-nolang="1">${formatThaiDate(r.day)}</span>`}
             ${oneWh  ? '' : `<span class="tagx" data-nolang="1">${r.warehouse}${r.catalog ? ' ' + r.catalog : ''}</span>`}
             ${(r.diff && r.diff.short) ? `<span class="tagx bad">🔴 ขาด ${dcNum(r.diff.short)} SKU</span>` : ''}
