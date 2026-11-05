@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>บริหารสินค้า v2.36</title>
+<title>บริหารสินค้า v2.37</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Anuphan:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -881,7 +881,7 @@ body[data-sec="dg"] .tabs .wrap{grid-template-columns:repeat(5,minmax(0,1fr))}
 </script>
 
 <script>
-var APP_VER = 'v2.36', APP_DATE = '2026-11-05';
+var APP_VER = 'v2.37', APP_DATE = '2026-11-05';
 var MY_WH_DONE = false;
 var EXEC = 'https://script.google.com/macros/s/AKfycbyD49DDSPZBCXcFeQWBXMhs3F6fdEKTHrcHnLW5BgEtigX3ypCjSqk7r07qLdUkjCSeyg/exec';
 var SESSION_TTL = 30*24*60*60*1000, THEME_KEY = 'spu_theme';
@@ -1171,6 +1171,64 @@ function sortBar(n, cur, opts){
 }
 
 /* ── เรื่องที่แจ้ง (ติดตามสินค้าเดิม) ── */
+/* v2.37 Surat 5/11 "ปิดระบบเรื่องติดตามสต็อก ไปใช้ ClearStock · ดึงหลังบ้านมาโชว์": ชิป ติดตามสต็อก = คำขอเช็คสต็อก + เอกสารปรับ/โอน จาก ClearStock (อ่านอย่างเดียว · แตะ = เปิด ClearStock) */
+var CS_TY = 'ติดตามสต็อก', CS_URL = 'https://rattanaphaiboon.github.io/app/rattana-clearstock.html';
+var CS_EXEC = 'https://script.google.com/macros/s/AKfycbyMxvfsoBlw9uVWRfvn4nFQW7AoqQL7lGdsI0OIUfKPGS7B4Va7H1cvzyv0VI9vX4Hf/exec';
+var CS = { rows: null, busy: null, err: '' };
+var CS_ST = { PENDING: 'open', ANSWERED: 'open', PENDING_ACK: 'open', PENDING_APPROVAL: 'open', APPROVED: 'open', FIXED: 'done', MATCH: 'done', POSTED: 'done', CLOSED: 'done', REJECTED: 'fail', CANCELLED: 'fail' };
+async function csCall(action){
+  var r = await fetch(CS_EXEC, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: action, email: user.email }) });
+  if (!r.ok) throw new Error('ClearStock ตอบ ' + r.status);
+  var j = await r.json(); if (!j.ok) throw new Error(j.error || 'ClearStock โหลดไม่ได้'); return j;
+}
+function csLoad(){
+  if (CS.busy) return CS.busy;
+  CS.busy = Promise.all([csCall('checks'), csCall('docs')]).then(function (a) {
+    var out = [];
+    (a[0].checks || []).forEach(function (c) {
+      var done = c.ansCount !== '' && c.ansCount != null;
+      out.push({ id: c.id, k: 'check', st: CS_ST[c.status] || 'open', stTh: c.statusTh || c.status, name: c.name || '', barcode: c.barcode || '', at: c.reqAt || '', up: c.updatedAt || c.closedAt || c.ansAt || c.reqAt || '',
+        ty: 'ขอเช็คสต็อก', det: (c.reqWh || '') + ' นับ ' + (c.reqCount == null ? '—' : c.reqCount) + ' · ' + (c.ansWh || '') + (done ? ' นับ ' + c.ansCount : ' ยังไม่นับ'), who: c.reqBy || '', wh: [c.reqWh, c.ansWh].filter(Boolean).join('/'), exp: !!c.expired,
+        q: [c.id, c.name, c.barcode, c.statusTh, c.reqBy, c.ansBy, c.reqWh, c.ansWh, c.note, c.docIds].join(' ').toLowerCase() });
+    });
+    (a[1].docs || []).forEach(function (d) {
+      var L = d.lines || [], nm = (L[0] && (L[0].name || L[0].n)) || d.note || d.id;
+      out.push({ id: d.id, k: 'doc', st: CS_ST[d.status] || 'open', stTh: d.statusTh || d.status, name: nm + (L.length > 1 ? ' +' + (L.length - 1) + ' ตัว' : ''), barcode: (L[0] && (L[0].code || L[0].barcode)) || '', at: d.createdAt || '', up: d.updatedAt || d.createdAt || '',
+        ty: d.typeTh || d.kind || 'เอกสาร', det: d.id + (d.bplusDocNo ? ' · bplus ' + d.bplusDocNo : ''), who: d.createdBy || '', wh: d.wh || '', exp: false,
+        q: [d.id, d.typeTh, d.kind, d.statusTh, d.note, d.createdBy, d.approvedBy, d.postedBy, d.wh, d.bplusDocNo].concat(L.map(function (l) { return [l.name, l.n, l.code, l.barcode].join(' '); })).join(' ').toLowerCase() });
+    });
+    CS.rows = out; CS.err = '';
+  }).catch(function (e) { CS.err = e.message || String(e); if (!CS.rows) CS.rows = null; }).then(function () { CS.busy = null; if (SEC === 'pt') { var y = window.scrollY; renderAll(); window.scrollTo(0, y); } });
+  return CS.busy;
+}
+function csCount(t){ return (CS.rows || []).filter(function (x) { return x.st === t; }).length; }
+function csRender(){
+  if (!CS.rows) {
+    if (!CS.busy && !CS.err) csLoad();
+    sortBar(0, P2.sort, [['old', 'ค้างนานสุดก่อน'], ['new', 'ล่าสุดก่อน']]);
+    document.getElementById('list').innerHTML = CS.err ? '<div class="empty"><b>โหลด ClearStock ไม่ได้</b>' + esc(CS.err) + '<br><button class="btn" type="button" data-csretry="1">ลองใหม่</button> <a class="btn" target="_blank" rel="noopener" href="' + CS_URL + '">เปิด ClearStock</a></div>'
+      : '<div class="load"><span class="spin"></span>กำลังโหลดจาก ClearStock…</div>';
+    return;
+  }
+  var w = words(P2.q), rows = CS.rows.filter(function (x) { return x.st === P2.t && w.every(function (t) { return x.q.indexOf(t) >= 0; }); });
+  var key = function (x) { return P2.t === 'open' ? x.at : x.up; };   // ยังค้าง = เวลาแจ้ง · ปิดแล้ว = เวลาที่ปิด (กติกาเรียง ข้อ 4)
+  rows.sort(function (a, b) { var ka = key(a), kb = key(b); return P2.sort === 'old' ? (ka < kb ? -1 : ka > kb ? 1 : 0) : (ka < kb ? 1 : ka > kb ? -1 : 0); });
+  sortBar(rows.length, P2.sort, [['old', 'ค้างนานสุดก่อน'], ['new', 'ล่าสุดก่อน']]);
+  var all = CS.rows.filter(function (x) { return x.st === P2.t; });
+  setHero(P2.t, 'ติดตามสต็อก (ClearStock) · ' + PTS[P2.t][1], all.length, [[all.filter(function (x) { return x.k === 'check'; }).length, 'คำขอเช็ค'], [all.filter(function (x) { return x.k === 'doc'; }).length, 'เอกสารปรับ/โอน']], 'แตะการ์ดเพื่อเปิด ClearStock');
+  document.getElementById('hero').classList.add('mini');
+  var ymd = function (iso) { if (!iso) return ''; var d = new Date(iso); return isNaN(d) ? '' : d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); };
+  document.getElementById('list').innerHTML = '<div class="kvline one" title="ย้ายไปใช้ ClearStock แล้ว · แตะการ์ดเพื่อเปิด" style="margin:0 0 var(--sp-2)">ย้ายไปใช้ ClearStock แล้ว · แตะการ์ดเพื่อเปิด · <a target="_blank" rel="noopener" href="' + CS_URL + '">เปิด ClearStock ↗</a>' + (CS.busy ? ' · กำลังอัปเดต…' : '') + '</div>'
+    + (rows.length ? '<div class="grid">' + rows.map(function (x) {
+      var d0 = ymd(x.at), d1 = ymd(x.up), dd = daysFrom(d0);
+      return '<a class="card" style="color:inherit;text-decoration:none" target="_blank" rel="noopener" href="' + CS_URL + '" data-tweak-card="การ์ดเรื่องแจ้ง">' + photo({ barcode: x.barcode, b: x.ty, v: x.ty }) + '<div class="bd"><span class="nm">' + esc(x.name) + '</span>'
+        + '<span class="sub one" title="' + esc(x.det) + '"><span class="ty">' + esc(x.ty) + '</span>' + esc(x.det) + '</span>'
+        + '<span class="sub one" title="' + esc(x.stTh) + '">' + esc(x.stTh) + (x.exp ? ' · เกิน 3 วัน' : '') + ' · ' + esc(x.wh) + (x.who ? ' · โดย ' + esc(x.who) : '') + '</span></div>'
+        + '<span class="ck"></span><div class="rt"><span class="tag ' + P2.t + '">' + (P2.t === 'open' ? 'ค้าง ' + (dd || 0) + ' วัน' : esc(PTS[P2.t][0])) + '</span>' + (d0 ? '<span class="tl">แจ้ง ' + esc(dm(d0.replace(/-/g, '/'))) + '</span>' : '') + (P2.t !== 'open' && d1 ? '<span class="tl">ปิด ' + esc(dm(d1.replace(/-/g, '/'))) + '</span>' : '') + '</div></a>';
+    }).join('') + '</div>' : '<div class="empty"><b>ไม่มีเรื่องในหมวดนี้</b>ลองกดแท็บด้านบน หรือเปิด ClearStock</div>');
+}
+document.addEventListener('click', function (e) { var b = e.target && e.target.closest && e.target.closest('[data-csretry]'); if (b) { e.stopImmediatePropagation(); CS.err = ''; csLoad(); renderAll(); } }, true);
+
 function ptBase(st){
   return (PTD || []).filter(function(x){ return !st || x.status === PTS[st][0]; });
 }
@@ -1187,20 +1245,24 @@ function renderPt(){
   var base = ptBase(P2.t), w = words(P2.q);
   var rows = base.filter(function(x){
     if (P2.who && (x.buyer || 'ฝน') !== P2.who) return false;
+    if (x.type === CS_TY) return false;   // v2.37 เรื่องติดตามสต็อกเดิม ย้ายไป ClearStock
     if (P2.ty && x.type !== P2.ty) return false;
     if (P2.from && !(x.ts >= P2.from && x.ts < P2.to)) return false;
     var b = [x.id, x.name, x.type, x.buyer, x.sender, x.wh, x.whs, x.barcode, x.note, x.lastNote].join(' ').toLowerCase();
     return w.every(function(t){ return b.indexOf(t) >= 0; });
   }).sort(function(a, b){ var ka = a.ts, kb = b.ts;   /* v2.22 Surat 2/11: ทุกแท็บเรียงตามเวลาที่แจ้ง · ล่าสุดก่อน = เพิ่งแจ้งอยู่บน */ return P2.sort === 'old' ? (ka < kb ? -1 : ka > kb ? 1 : 0) : (ka < kb ? 1 : ka > kb ? -1 : 0); });
   var stale = base.filter(function(x){ return (daysFrom(x.date) || 0) > 3; }).length, types = {}, owners = {};
-  base.forEach(function(x){ types[x.type] = (types[x.type] || 0) + 1; owners[x.buyer] = 1; });
+  base.forEach(function(x){ if (x.type !== CS_TY) types[x.type] = (types[x.type] || 0) + 1; owners[x.buyer] = 1; });
+  if (!CS.rows && !CS.busy && !CS.err) csLoad();
   setHero(P2.t, (isBuyer() ? 'ทุกเรื่องที่แจ้งเข้ามา · ' : 'เรื่องที่คุณแจ้ง · ') + PTS[P2.t][1], base.length,
     [[stale, 'ค้างเกิน 3 วัน'], [Object.keys(owners).length, 'ผู้ดูแล']], isBuyer() ? 'แตะการ์ดเพื่อตอบ/ปิดงาน · ปุ่มชีตเปิดแถวในหลังบ้าน' : 'เห็นเฉพาะเรื่องที่คุณแจ้ง · แตะการ์ดดูรายละเอียด');
   document.getElementById('hero').classList.add('mini');
-  var tyChips = (isBuyer() && P2.t === 'open' ? '<button class="fc' + (PSEL.on ? ' on' : '') + '" data-ptsel>' + (PSEL.on ? 'เลือกอยู่ · แตะการ์ด' : 'เลือกหลายเรื่อง') + '</button>' : '') + (isBuyer() ? '<button class="fc" data-ptfull>เครื่องมือจัดซื้อ</button>' : '') + '<button class="fc' + (!P2.ty ? ' on' : '') + '" data-pty="">ทุกเรื่อง</button>' + Object.keys(types).sort(function(a, b){ return types[b] - types[a]; }).map(function(t){ return '<button class="fc' + (P2.ty === t ? ' on' : '') + '" data-pty="' + esc(t) + '">' + esc(t) + ' ' + types[t] + '</button>'; }).join('');
+  var tyChips = (isBuyer() && P2.t === 'open' ? '<button class="fc' + (PSEL.on ? ' on' : '') + '" data-ptsel>' + (PSEL.on ? 'เลือกอยู่ · แตะการ์ด' : 'เลือกหลายเรื่อง') + '</button>' : '') + (isBuyer() ? '<button class="fc" data-ptfull>เครื่องมือจัดซื้อ</button>' : '') + '<button class="fc' + (!P2.ty ? ' on' : '') + '" data-pty="">ทุกเรื่อง</button>' + Object.keys(types).sort(function(a, b){ return types[b] - types[a]; }).map(function(t){ return '<button class="fc' + (P2.ty === t ? ' on' : '') + '" data-pty="' + esc(t) + '">' + esc(t) + ' ' + types[t] + '</button>'; }).join('')
+    + '<button class="fc' + (P2.ty === CS_TY ? ' on' : '') + '" data-pty="' + CS_TY + '" title="ข้อมูลจาก ClearStock">' + CS_TY + ' ' + (CS.rows ? csCount(P2.t) : '…') + '</button>';
   document.getElementById('frow').innerHTML = whoChips(base, P2.who, function(x){ return x.buyer || 'ฝน'; });
   if (P2.from) tyChips = '<button class="fc on" data-ptrng title="แตะเพื่อดูทุกเรื่อง">' + esc((P2.ty ? P2.ty + ' · ' : '') + 'รอบ ' + P2.from.slice(8, 10) + '/' + P2.from.slice(5, 7) + ' ' + P2.from.slice(11, 16)) + ' ✕</button>' + tyChips;
   document.getElementById('frow2').innerHTML = tyChips; document.getElementById('frow2').hidden = false;
+  if (P2.ty === CS_TY) { PSEL.rows = []; return csRender(); }
   sortBar(rows.length, P2.sort, [['old', 'ค้างนานสุดก่อน'], ['new', 'ล่าสุดก่อน']]);
   var plim = P2.lim || 60;
   PSEL.rows = rows;
