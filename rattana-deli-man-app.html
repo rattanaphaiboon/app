@@ -1286,7 +1286,7 @@ body.ui2 .toast{border-radius:14px}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.471';
+const APP_VERSION='3.472';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -7838,6 +7838,10 @@ function paintCoRecList_(){
 }
 function openMyJob(id){
   try{ jobNewClear_(id); }catch(e){}   // ★ v3.445
+  setTimeout(()=>{   // ★ v3.472: เปิดใบคุม = โหลดโปรถ่ายรูป + รายการสินค้าทุกบิล (ยิงทีเดียว) ไว้ก่อน → เปิดบิลแล้วกล่องรูปโปรขึ้นทันที
+    try{ ppEnsure_(); }catch(e){}
+    try{ if(CO.key==='rtn'){ const _j=(state.jobs||[]).find(x=>x.id===id); if(_j) ensureBillDetailsForDocs_((_j.bills||[]).map(b=>b.doc)); } }catch(e){}
+  },300);
   /* ★ v3.460 (user 3 พ.ย. 2026 "ค้นหางานคนอื่นไว้ พอกดกลับมายังค้างที่ค้นหา ทั้งที่ช่องไม่มีคำค้นหาแล้ว")
      คำค้นอยู่ใน state.coRecQ แต่ช่องถูกวาดใหม่เป็นค่าว่าง → รายการยังกรองอยู่ · เปิดใบแล้วล้างคำค้น (แบบเดียวกับ v3.420 ในใบคุม)
      และช่องค้นหาแสดงค่า state.coRecQ เสมอ — จอกับตัวกรองต้องตรงกัน */
@@ -10108,38 +10112,73 @@ let _ppPromos=null, _ppProd=null, _ppLoading=null;
 function ppNorm_(s){ return String(s==null?'':s).replace(/\s+/g,' ').trim().toLowerCase(); }
 function ppBc_(c){ return String(c==null?'':c).trim().replace(/^0+/,''); }
 function ppDate_(s){ const m=String(s||'').match(/(\d{4})\D(\d{1,2})\D(\d{1,2})/); return m?new Date(+m[1],+m[2]-1,+m[3]):null; }
+const PP_CACHE='pp_cache_v1';
+function ppCacheLoad_(){
+  try{
+    const c=JSON.parse(localStorage.getItem(PP_CACHE)||'null');
+    if(!c||!Array.isArray(c.promos)||!c.prod||(Date.now()-(c.ts||0))>12*3600000) return null;
+    c.promos.forEach(p=>{ p.from=p.from?new Date(p.from):null; p.to=p.to?new Date(p.to):null; });
+    return c;
+  }catch(e){ return null; }
+}
+function ppCacheSave_(){
+  try{ localStorage.setItem(PP_CACHE,JSON.stringify({ts:Date.now(),
+    promos:_ppPromos.map(p=>Object.assign({},p,{from:p.from?p.from.getTime():null,to:p.to?p.to.getTime():null})),prod:_ppProd})); }catch(e){}
+}
 async function ppEnsure_(){
   if(CO.key!=='rtn') return false;
   if(_ppPromos&&_ppProd) return true;
-  if(!_ppLoading) _ppLoading=(async()=>{
+  if(!_ppLoading){
+    const c=ppCacheLoad_();
+    if(c){   // ★ v3.472: มีในเครื่อง = ใช้ทันที · เก่ากว่า 30 นาที ค่อยดึงใหม่เบื้องหลัง
+      _ppPromos=c.promos; _ppProd=c.prod;
+      if(Date.now()-c.ts>30*60000) setTimeout(()=>{ ppLoadNet_().catch(()=>{}); },1500);
+      return true;
+    }
+    _ppLoading=ppLoadNet_();
+  }
+  const _w=_ppLoading;
+  try{ await _w; }catch(e){}
+  if(_ppLoading===_w) _ppLoading=null;
+  return !!(_ppPromos&&_ppProd);
+}
+async function ppLoadNet_(){
+  if(_ppLoading&&_ppLoading._net) return _ppLoading;
+  const pr=(async()=>{
     try{
-      if(!_ppPromos){
-        const rows=await fetchSheet(PROMO_SHEET_ID,PROMO_TAB,{timeoutMs:15000});
-        _ppPromos=(rows||[]).filter(r=>/ถ่ายรูป/.test(cleanCell(r['ถ่ายรูป']||''))).map(r=>({
+      {
+        const _hmP=sheetHeaderLetters_(CFG.productsSheetId,CFG.productsSheetName).catch(()=>null);   // ★ v3.472: พร้อมกับชีทโปร
+        const rows=await fetchSheet(PROMO_SHEET_ID,PROMO_TAB,{timeoutMs:15000,fresh:true});
+        const promos=(rows||[]).filter(r=>/ถ่ายรูป/.test(cleanCell(r['ถ่ายรูป']||''))).map(r=>({
           name:cleanCell(r['ชื่อโปร']||''), how:cleanCell(r['วิธีวัด']||'').toUpperCase(), key:cleanCell(r['ชื่อ']||''),
           need:parseFloat(String(cleanCell(r['จำนวน']||'')).replace(/,/g,''))||1, unit:(cleanCell(r['รูปแบบขาย']||'')||'CS').toUpperCase(),
           freeName:cleanCell(r['แถมสินค้า']||''), freeBc:code0_(r['Barcode สินค้าแถมEA']),
           from:ppDate_(r['เริ่มโปร']), to:ppDate_(r['จบโปร']),
           whs:cleanCell(r['Warehouses']||'').toUpperCase().split(/[,\s]+/).filter(Boolean)
         })).filter(p=>p.key&&p.name);
-      }
-      if(!_ppProd){
-        if(!_ppPromos.length){ _ppProd={}; }
-        else{
-          const rows=await fetchByHeaders_(CFG.productsSheetId,CFG.productsSheetName,
-            [['PRODUCT NAME'],['CODE EA'],['CODE PA'],['CODE BP'],['CODE CS'],['CAT BRAND'],['CAT SIZE']],'select A,B,D,F,H,BD,BE');
-          const m={};
-          (rows||[]).forEach(r=>{
+        let m={};
+        if(promos.length){
+          /* ดึงเฉพาะสินค้าที่ตรงเงื่อนไขโปร (เดิมดึงทั้งแผ่น 13,000 แถว 2.6 MB) · ตัวอักษรคอลัมน์จากหัวตาราง (แคช 6 ชม.) */
+          const hm=(await _hmP)||{};
+          const FB={'PRODUCT NAME':'A','CODE EA':'B','CODE PA':'D','CODE BP':'F','CODE CS':'H','CAT BRAND':'BD','CAT SIZE':'BE'};
+          const L=k=>hm[k]||FB[k];
+          const qv=s=>"'"+String(s).replace(/'/g,'')+"'";
+          const conds=[...new Set(promos.map(p=>(p.how==='CAT BRAND'?L('CAT BRAND'):p.how==='CAT SIZE'?L('CAT SIZE'):L('PRODUCT NAME'))+' = '+qv(p.key)))];
+          const tq='select '+Object.keys(FB).map(L).join(',')+' where '+conds.join(' or ');
+          const rows2=await fetchSheet(CFG.productsSheetId,CFG.productsSheetName,{tq:tq,timeoutMs:15000});
+          (rows2||[]).forEach(r=>{
             const v={name:cleanCell(r['PRODUCT NAME']||''),brand:cleanCell(r['CAT BRAND']||''),size:cleanCell(r['CAT SIZE']||'')};
             ['CODE EA','CODE PA','CODE BP','CODE CS'].forEach(k=>{ const c=ppBc_(code0_(r[k])); if(c) m[c]=v; });
           });
-          if(Object.keys(m).length) _ppProd=m;
+          if(!Object.keys(m).length) m=null;   // ดึงสินค้าไม่ได้ = ยังไม่พร้อม (ไม่ใช่ "ไม่เข้าโปร")
         }
+        if(m){ _ppPromos=promos; _ppProd=m; ppCacheSave_(); }
+        else if(!_ppPromos){ _ppPromos=promos; }
       }
     }catch(e){ console.warn('[promoPhoto] load',e); }
   })();
-  try{ await _ppLoading; }finally{ _ppLoading=null; }
-  return !!(_ppPromos&&_ppProd);
+  pr._net=true;
+  return pr;
 }
 /* คืน [] = ไม่เข้าโปรไหน · null = ข้อมูลยังไม่พร้อม (ห้ามบล็อก) */
 function ppMatchesFor_(j,b){
@@ -10218,8 +10257,7 @@ function ppStamp_(c,b){
 async function ppRefreshBox_(j,b,ro){
   try{
     if(CO.key!=='rtn') return;
-    await ppEnsure_();
-    await ensureBillDetailsForDoc_(b.doc);
+    await Promise.all([ppEnsure_(),ensureBillDetailsForDoc_(b.doc)]);   // ★ v3.472: พร้อมกัน (เดิมทีละอย่าง)
     if(currentOpenBill_()!==b) return;
     const el=$('promoPhotoBox'); if(!el) return;
     const ms=ppMatchesFor_(j,b), sig=(ms||[]).map(m=>m.name).join('|');
