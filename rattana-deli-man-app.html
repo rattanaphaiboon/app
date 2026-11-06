@@ -1286,7 +1286,7 @@ body.ui2 .toast{border-radius:14px}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.479';
+const APP_VERSION='3.480';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -2818,14 +2818,15 @@ function cgEnsureRouteSeq_(j,reorder){
   }catch(e){ console.warn('cgEnsureRouteSeq_',e); }
 }
 let _availCache=null;
-async function loadAvailableJobs(fresh){
+async function loadAvailableJobs(fresh,onlyId){   // ★ v3.480: onlyId = ดึงใบคุมเดียว ไม่กรองวันที่ (ใบเก่าที่ถูกตีกลับ)
   /* ★★ v3.309: fresh=true ต้องข้าม memo 15 วิ ด้วย — เดิมเช็ค memo ก่อน fresh
      ทำให้กด "Sync ใบคุม" ในแอปแล้วอ่านของเก่าซ้ำ (ใบคุมใหม่ไม่โผล่ ต้องไปกดในชีทแทน)
      และ `_cb` อย่างเดียว bust gviz ไม่ได้จริง — ต้องเปลี่ยน "รูปคิวรี่" ถึงได้ผลใหม่ (พิสูจน์แล้ว 3 ก.ย.) */
-  if(!fresh&&_availCache&&(Date.now()-_availCache.ts)<15000) return _availCache.data;
+  if(!onlyId&&!fresh&&_availCache&&(Date.now()-_availCache.ts)<15000) return _availCache.data;
   try{
-    const _opt=fresh?{fresh:true,tq:'select * limit '+(90000+Math.floor(Math.random()*9999))}:undefined;
-    const rows=await fetchSheet(CFG.jobsSheetId,CFG.jobsSheetName,_opt);   // v3.180: manual refresh → cache-bust (กัน gviz cache ~1-2 นาที ค้างใบคุมเก่า)
+    const _opt=onlyId?{fresh:true,tq:"select * where A = '"+String(onlyId).replace(/'/g,'')+"'"}:(fresh?{fresh:true,tq:'select * limit '+(90000+Math.floor(Math.random()*9999))}:undefined);
+    let rows=await fetchSheet(CFG.jobsSheetId,CFG.jobsSheetName,_opt);
+    if(onlyId&&(!rows||!rows.length)) rows=await fetchSheet(CFG.jobsSheetId,CFG.jobsSheetName,{fresh:true,tq:'select * limit '+(90000+Math.floor(Math.random()*9999))});   // gviz where ไม่ได้ผล = อ่านทั้งชีทแล้วกรองเอง   // v3.180: manual refresh → cache-bust (กัน gviz cache ~1-2 นาที ค้างใบคุมเก่า)
     if(!rows||!rows.length) return [];
     // map ลูกค้าสำหรับ enrich
     const custByCode={};
@@ -2841,6 +2842,7 @@ async function loadAvailableJobs(fresh){
     rows.forEach(r=>{
       const tc=cleanCell(r['Trans_Code']); if(!tc) return;
       const deliverDate=parseDeliverDate(cleanCell(r['วันที่ส่งสินค้า']));
+      if(onlyId){ if(normJobId(tc)!==normJobId(onlyId)) return; } else
       if(!_dateOk(deliverDate)) return; // ← FILTER วันนี้ + ย้อนหลัง 2 วันทำการ (Colgate: 21 วันล่าสุด + วันข้างหน้า ★ v3.391)
       if(!byCode[tc]) byCode[tc]={id:tc,bills:[],docDate:cleanCell(r['Doc_Date'])};
       const code=cleanCell(r['Customer_Code']);
@@ -2883,7 +2885,7 @@ async function loadAvailableJobs(fresh){
         docDate:j.docDate, bills:j.bills,
       };
     });
-    _availCache={ts:Date.now(),data:_out};   // v3.242: ตัดการดึงชีทใบคุมซ้ำรอบที่ 2 ตอน boot
+    if(!onlyId) _availCache={ts:Date.now(),data:_out};   // v3.242: ตัดการดึงชีทใบคุมซ้ำรอบที่ 2 ตอน boot
     return _out;
   }catch(e){ console.warn('loadAvailableJobs failed:',e); return []; }
 }
@@ -14271,7 +14273,18 @@ async function ticketRefreshMyJobs_(force){
   try{
     const av=await loadAvailableJobs(true); _tkAmtAt=Date.now();
     let n=0;
-    mine.forEach(j=>{ const t=(av||[]).find(a=>normJobId(a.id)===normJobId(j.id)); if(t&&Array.isArray(t.bills)) n+=ticketSyncAmounts_(j,t.bills).length; });
+    let _added=0;
+    for(const j of mine){
+      let t=(av||[]).find(a=>normJobId(a.id)===normJobId(j.id));
+      if(!t){ try{ const one=await loadAvailableJobs(true,j.id); t=(one||[]).find(a=>normJobId(a.id)===normJobId(j.id)); }catch(e){} }   // ★ v3.480: ใบเก่านอกช่วงวันที่
+      if(!t||!Array.isArray(t.bills)) continue;
+      /* ★★ v3.480: บิลในใบคุมที่ยังไม่มีในงานนี้ (เช่น ไม่เคยถึงชีทบันทึก แล้วถูกตีกลับ) → เติมเป็น "ยังไม่ส่ง" ให้กรอก */
+      const have=new Set((j.bills||[]).map(b=>String(b&&b.doc||'').trim()));
+      const add=t.bills.filter(b=>!have.has(String(b&&b.doc||'').trim()));
+      if(add.length){ add.forEach(b=>j.bills.push({...b,status:'pending',payment:{}})); applyTicketSeq_(j,t.bills); _added+=add.length; n++; }
+      n+=ticketSyncAmounts_(j,t.bills).length;
+    }
+    if(_added){ try{ enrichBills(); }catch(e){} showToast('ใบคุมมีบิลที่ยังไม่ได้กรอก '+_added+' บิล — เพิ่มเข้ารายการให้แล้ว','warning'); }
     if(!n) return;
     persistJobs();
     if(state.currentTab==='sec-bill-form'){
@@ -14309,7 +14322,8 @@ async function ticketSyncNewBills_(j){
   try{
     if(!j||/·ส่งซ้ำ$/.test(String(j.id||''))) return {ok:false,added:[]};
     const av=await loadAvailableJobs(true);
-    const t=(av||[]).find(a=>normJobId(a.id)===normJobId(j.id));
+    let t=(av||[]).find(a=>normJobId(a.id)===normJobId(j.id));
+    if(!t){ const one=await loadAvailableJobs(true,j.id); t=(one||[]).find(a=>normJobId(a.id)===normJobId(j.id)); }   // ★ v3.480: ใบเก่านอกช่วงวันที่
     if(!t||!Array.isArray(t.bills)||!t.bills.length) return {ok:false,added:[]};
     const have=new Set((j.bills||[]).map(b=>String(b&&b.doc||'').trim()));
     const add=t.bills.filter(b=>!have.has(String(b&&b.doc||'').trim()));
