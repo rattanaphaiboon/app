@@ -21,7 +21,7 @@
 <meta name="application-name" content="รัตนมาร์ท">
 <!-- Web App Manifest (inline base64) for Android / Chrome -->
 <link rel="manifest" href='data:application/manifest+json;charset=utf-8,{"name":"รัตนมาร์ท - ระบบค้นหาสินค้า","short_name":"รัตนมาร์ท","start_url":"./","display":"standalone","background_color":"%23f8fafc","theme_color":"%230d2b5e","icons":[{"src":"https://drive.google.com/thumbnail?id=1BVFXkoVvXYHpkk1aNNc79kgUoBWbl2h8&sz=w192","sizes":"192x192","type":"image/png"},{"src":"https://drive.google.com/thumbnail?id=1BVFXkoVvXYHpkk1aNNc79kgUoBWbl2h8&sz=w512","sizes":"512x512","type":"image/png"}]}'>
-<title>รัตนมาร์ท — ระบบค้นหาสินค้า v18.41</title>
+<title>รัตนมาร์ท — ระบบค้นหาสินค้า v18.42</title>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
@@ -34,6 +34,7 @@
   --red:#dc2626;--green:#059669;
   --urgent:#ef4444;--urgent-bg:#fef2f2;--urgent-dark:#b91c1c;
   --amber:#f59e0b;--amber-deep:#d97706;
+  --dl-bg:#fef2f2;--dl-bd:#fca5a5;--dl-ink:#991b1b;
   --emerald:#10b981;--emerald-deep:#059669;
   --violet:#8b5cf6;--violet-deep:#6d28d9;
   /* v18.20: ป้ายผู้สั่ง — 3 สถานะ (contrast วัดแล้วผ่าน AA ทั้งหมด: 6.44 / 6.84 / 6.37 : 1) */
@@ -1694,6 +1695,7 @@ body.demo-mode .topbar{padding-top:calc(max(14px,env(safe-area-inset-top)) + 20p
 .ec-rp-loc .ec-mono{font-size:13px;font-weight:700;color:var(--navy2)}
 .ec-rp-loc .ec-type{font-size:10.5px;padding:1px 6px}
 .ec-rp-loc b{margin-left:auto;flex:none;font-size:13.5px;font-weight:800;color:var(--navy2);font-variant-numeric:tabular-nums}
+.req-delist{margin:8px 0 4px;padding:10px 12px;border-radius:10px;background:var(--dl-bg);border:1px solid var(--dl-bd);color:var(--dl-ink);font-weight:700;font-size:13px;line-height:1.4}
 </style>
 </head>
 <body>
@@ -3093,6 +3095,7 @@ body.demo-mode .topbar{padding-top:calc(max(14px,env(safe-area-inset-top)) + 20p
     <span class="req-handle"></span>
     <div class="req-title" id="req-title">เบิกสินค้า</div>
     <div class="req-product" id="req-product"></div>
+    <div class="req-delist" id="req-delist" role="status" style="display:none"></div>
     <div class="req-type-row">
       <button class="req-type-btn active beik" id="req-type-beik" onclick="setReqType('เบิก')">📦 เบิก<span>ของขาดชั้นวาง</span></button>
       <button class="req-type-btn khad" id="req-type-khad" onclick="setReqType('สินค้าขาด')">🚨 สินค้าขาด<span>แจ้งจัดซื้อด่วน</span></button>
@@ -6698,9 +6701,58 @@ function calcTransfer(){
   }
 }
 
+
+/* v18.42 Surat 6/11 "สินค้าที่กดขอสั่งมา ถ้าใน delist ขึ้นให้หน้าร้านเห็นด้วยตอนเค้าจะกดขอสั่ง"
+   อ่านแท็บ Delist (Purchase Actions · อ่านอย่างเดียว · CSV สาธารณะ) ครั้งเดียว จำ 10 นาที · คลังว่าง = ทุกคลัง · เตือนอย่างเดียว ไม่บล็อก */
+const DELIST_CSV = 'https://docs.google.com/spreadsheets/d/1CqHARklgveAeJ6rTkNeyUSku__puTiNE7-c6ebn93W8/export?format=csv&gid=1528904622';
+let _dlMap = null, _dlAt = 0, _dlBusy = null;
+function _dlNz(v){ return String(v || '').replace(/\D/g, '').replace(/^0+/, ''); }
+function _dlCsv(t){
+  const out = []; let row = [], f = '', q = false;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (q) { if (c === '"') { if (t[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
+    else if (c === '"') q = true; else if (c === ',') { row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && t[i + 1] === '\n') i++; row.push(f); out.push(row); row = []; f = ''; }
+    else f += c;
+  }
+  if (f || row.length) { row.push(f); out.push(row); }
+  return out;
+}
+function delistLoad(){
+  if (_dlMap && Date.now() - _dlAt < 600000) return Promise.resolve(_dlMap);
+  if (_dlBusy) return _dlBusy;
+  _dlBusy = fetch(DELIST_CSV, { cache: 'no-store' }).then(r => r.text()).then(t => {
+    const rows = _dlCsv(t), H = (rows[0] || []).map(x => String(x).trim()), m = {};
+    const iB = H.indexOf('Barcode'), iQ = H.indexOf('จำนวนสั่งมากสุด'), iW = H.indexOf('คลัง'), iR = H.indexOf('เหตุผล');
+    if (iB < 0) throw new Error('no Barcode');
+    rows.slice(1).forEach(r => {
+      const k = _dlNz(String(r[iB] || '').replace(/^[A-Za-z]+(?=\d)/, '')); if (!k) return;
+      const ws = iW >= 0 ? String(r[iW] || '').toUpperCase().split(/[\/,\s]+/).filter(Boolean) : [];
+      (m[k] = m[k] || []).push({ q: iQ >= 0 ? String(r[iQ] || '').trim() : '', ws: ws, why: iR >= 0 ? String(r[iR] || '').trim() : '' });
+    });
+    _dlMap = m; _dlAt = Date.now(); return m;
+  }).catch(() => _dlMap || {}).finally(() => { _dlBusy = null; });
+  return _dlBusy;
+}
+function delistOf(r, wh){
+  if (!r || !_dlMap) return null;
+  const codes = ['CODE EA', 'CODE PA', 'CODE BP', 'CODE CS'].map(k => _dlNz(r[k])).filter(Boolean);
+  for (const c of codes) { const L = _dlMap[c] || []; const hit = L.filter(x => !x.ws.length || x.ws.indexOf(wh) >= 0)[0]; if (hit) return hit; }
+  return null;
+}
+function delistPaint(){
+  const box = document.getElementById('req-delist'); if (!box) return;
+  const d = delistOf(_curProd, 'C4');
+  if (!d) { box.style.display = 'none'; box.textContent = ''; return; }
+  const lim = d.q === '' ? '' : (+d.q === 0 ? 'ห้ามสั่งเข้า' : 'สั่งได้สูงสุด ' + d.q);
+  box.textContent = 'สินค้านี้อยู่ใน Delist ของ C4' + (d.why ? ' · ' + d.why : '') + (lim ? ' · ' + lim : '') + ' — ตรวจกับจัดซื้อก่อนขอสั่ง';
+  box.title = box.textContent; box.style.display = 'block';
+}
 function openReqModal(type){
   _reqType=type;
   const r=_curProd;
+  delistPaint(); delistLoad().then(delistPaint);   /* v18.42 เตือน Delist */
   document.getElementById('req-product').textContent=
     (r?r['PRODUCT NAME']:'')+(r&&r['CODE EA']?' | CODE EA: '+r['CODE EA']:'');
   document.getElementById('req-qty').value='1';
@@ -6851,7 +6903,8 @@ async function submitRequest(){
     fetch(CONFIG.APPS_SCRIPT_URL,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(khadC4Payload)}).catch(()=>{});
     /* 2) สำเนาให้จัดซื้อ → Purchase Actions "ขอสั่งสินค้า" productType='ขาด' */
     if(CONFIG.PRODREQ_APPS_SCRIPT_URL){
-      const note='Stock C4: '+fmtStock(r?r['STOCK C4']:'',qcs);   /* v15.6: note สั้น — แค่สต็อก */
+      const _dl=delistOf(r,'C4');
+      const note='Stock C4: '+fmtStock(r?r['STOCK C4']:'',qcs)+(_dl?' · อยู่ใน Delist C4'+(_dl.why?' ('+_dl.why+')':''):'');   /* v15.6: note สั้น — แค่สต็อก · v18.42 + Delist */
       const prPayload={
         action:'submitProductRequest', productType:'ขาด',
         userName:getEffectiveUserName(), userEmail:currentUser?currentUser.email||'':'',
