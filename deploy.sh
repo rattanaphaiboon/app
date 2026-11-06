@@ -58,6 +58,7 @@ APPS=(
   rattana-quote-qr-poster.html
   rattana-carcheck-brief-poster.jpg
   rattana-360.html
+  rattana-audit711.html
   rattana-360.gs
   rattana-first7.html
   rattana-first7.gs
