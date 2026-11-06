@@ -116,6 +116,7 @@ body.dark .badge-danger{background:#3a1a17;color:#ff8a7e}
 .grow:last-child{border-bottom:none}
 .grow.bad{background:var(--row-alt)}
 .grow-main{flex:1;min-width:0;background:transparent;text-align:left;color:var(--text);padding:0}
+.gbtns{display:flex;flex-direction:column;gap:6px;align-items:stretch;flex-shrink:0}
 .gname{font-size:13px;font-weight:600;line-height:1.35}
 .gvals{font-size:12px;color:var(--muted)}
 .txt-danger{color:var(--danger)!important;font-weight:600}
@@ -729,6 +730,34 @@ function netOf(name) {
 // ขนาดสุทธิทั้งลัง = ขนาดต่อชิ้นในชื่อ × QTY CS (ไม่รู้จำนวนต่อลัง → 0 ไม่ใช้กฎนี้)
 const netCs = p => { const n = netOf(p.name); return n && p.qtyCs ? n * p.qtyCs : 0; };
 
+// เครื่องหมาย "ยืนยันว่าถูกแล้ว" เก็บท้ายช่อง NOTE ในชีตปลายทาง เช่น [✓CAT 47.183/3.2]
+// เก็บค่าที่ยืนยันไว้ด้วย ถ้าค่าเปลี่ยนภายหลังการยืนยันจะหมดผลเอง
+const CAT_OK_RE = /\s*\[✓CAT ([\d.]*)\/([\d.]*)\]/;
+const stripOk = s => String(s || '').replace(CAT_OK_RE, '').trim();
+const okMarker = e => `[✓CAT ${e.volume || ''}/${e.weight || ''}]`;
+function catOkValid(p, e) {
+  const m = String(e.saved?.['NOTE'] || '').match(CAT_OK_RE);
+  if (!m) return false;
+  return same(parseFloat(m[1]) || 0, e.volume || 0) && same(parseFloat(m[2]) || 0, e.weight || 0);
+}
+
+async function confirmCatOk(gi, mi, btn) {
+  if (!getGasUrl()) { showToast('กรุณาตั้งค่า Apps Script URL ก่อน', 'warning'); openSettings(); return; }
+  const m = filtered[gi].members[mi], p = m.p, e = m.e, s = e.saved || {};
+  btn.disabled = true; btn.textContent = 'กำลังบันทึก…';
+  try {
+    await postRecord(p, {
+      measureUnit: s['MEASURE UNIT'] || 'CS', width: s['WIDTH_CM'] || '', length: s['LENGTH_CM'] || '', height: s['HEIGHT_CM'] || '',
+      volume: e.volume || '', weight: e.weight || '', note: s['NOTE'] || '', catOk: true,
+    });
+    showToast('ยืนยันแล้ว: ' + p.name, 'success');
+    applyFilter();
+  } catch (err) {
+    showToast('บันทึกไม่สำเร็จ: ' + err.message, 'error');
+    btn.disabled = false; btn.textContent = 'ยืนยันว่าถูกแล้ว';
+  }
+}
+
 function buildCatGroups() {
   const map = new Map();
   for (const p of products) {
@@ -769,7 +798,9 @@ function buildCatGroups() {
           if (ok) { wtBad = false; wtSize = true; }
         }
       }
-      return { p, e, volBad, wtBad, wtSize, net, bad: volBad || wtBad };
+      // ผู้ใช้กด "ยืนยันว่าถูกแล้ว" ไว้ และค่ายังเท่าเดิม → ไม่นับว่าต้องแก้
+      const okManual = !!(volBad || wtBad) && catOkValid(p, e);
+      return { p, e, volBad, wtBad, wtSize, okManual, net, bad: (volBad || wtBad) && !okManual };
     });
     const badCount = members.filter(m => m.bad).length;
     if (!badCount) continue;
@@ -798,7 +829,9 @@ function groupHtml(g, gi) {
         <div class="pcode">${esc(m.p.codeEa || m.p.codeCs)}</div>
         <div class="gvals"><span class="${m.volBad ? 'txt-danger' : ''}">ปริมาตร ${v}</span> · <span class="${m.wtBad ? 'txt-danger' : ''}">น้ำหนัก ${w}</span>${m.p.sales ? ` · 🔥 ${fmt(m.p.sales, 1)}` : ''}</div>
       </button>
-      ${m.bad ? `<button class="btn btn-gold btn-sm" onclick="openGroupMember(${gi},${mi},true)">ใช้ค่าต้นแบบ</button>`
+      ${m.bad ? `<div class="gbtns"><button class="btn btn-gold btn-sm" onclick="openGroupMember(${gi},${mi},true)">ใช้ค่าต้นแบบ</button>
+          ${(!m.volBad || m.e.volume) && (!m.wtBad || m.e.weight) ? `<button class="btn btn-outline btn-sm" onclick="confirmCatOk(${gi},${mi},this)">ยืนยันว่าถูกแล้ว</button>` : ''}</div>`
+        : m.okManual ? `<span class="badge badge-ok" title="ยืนยันโดย ${esc(m.e.saved?.['UPDATED_BY'] || '-')}">✓ ยืนยันแล้ว</span>`
         : m.wtSize ? '<span class="badge badge-info" title="น้ำหนักต่างจากต้นแบบตามขนาดสินค้าในชื่อ">✓ ตามขนาด</span>'
         : '<span class="badge badge-ok">✓ ตรง</span>'}
     </div>`;
@@ -960,7 +993,7 @@ function openEditor(p, prefill = null) {
   origVolume = e.volume || 0;
   calcVolume();
   $('edWeight').value = e.weight || '';
-  $('edNote').value = s?.['NOTE'] || '';
+  $('edNote').value = stripOk(s?.['NOTE']);
 
   // เติมค่าจากสินค้าต้นแบบใน Cat Size เดียวกัน
   if (prefill) {
@@ -1043,10 +1076,14 @@ function compressImage(file, maxSide = 1280, quality = 0.82) {
 // รูปเดิมของสินค้าจะคงไว้ (ส่ง imageUrl เดิมไปด้วย) เว้นแต่ส่ง imageBase64 ใหม่
 async function postRecord(p, f) {
   const e = eff(p);
+  // คงเครื่องหมาย "ยืนยันว่าถูกแล้ว" เดิมไว้ (หมดผลเองถ้าค่าเปลี่ยน) หรือใส่ใหม่เมื่อ f.catOk
+  const oldMk = (String(e.saved?.['NOTE'] || '').match(CAT_OK_RE) || [''])[0].trim();
+  const mk = f.catOk ? okMarker({ volume: f.volume, weight: f.weight }) : oldMk;
+  const note = [stripOk(f.note), mk].filter(Boolean).join(' ');
   const body = {
     key: p.key, codeEa: p.codeEa, codeCs: p.codeCs, name: p.name,
     measureUnit: f.measureUnit, width: f.width, length: f.length, height: f.height,
-    volume: f.volume, weight: f.weight, note: f.note,
+    volume: f.volume, weight: f.weight, note,
     imageUrl: e.img || '', imageBase64: f.imageBase64 || '',
     user: currentUser?.name || currentUser?.email || '',
   };
