@@ -445,7 +445,7 @@ const SRC = {
   gid: '635140262',
   // A=PRODUCT NAME B=CODE EA C=UNIT EA D=CODE PA F=CODE BP H=CODE CS I=UNIT CS BD=CAT BRAND BE=CAT SIZE CV=SKU_USAGE DS=GOODS_WEIGHT DV=GOODS_VOLUME
   // DW..EA = AVERAGE 90D_W1, W2, W3, W4, C4 (ใช้จัดลำดับยอดขาย)
-  cols: 'A,B,C,D,F,H,I,BD,BE,CV,DS,DV,DW,DX,DY,DZ,EA',
+  cols: 'A,B,C,D,F,H,I,Q,BD,BE,CV,DS,DV,DW,DX,DY,DZ,EA',
 };
 const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbwPZIkiULJRAPriQdFjtU-AGjoayWU0T8Fa5lBBNlWAiMuV75CpX3fG1oFnw1-HJm8B/exec';   // เปลี่ยนได้ผ่านปุ่ม ⚙️ ในแอป
 const GAS_KEY = 'rattana_psize_gas';
@@ -622,6 +622,7 @@ async function loadProducts() {
       codeCs: String(r['CODE CS'] || ''), unitCs: r['RATTANA UNIT CS'] || '',
       brand:  r['CAT BRAND'] || '',
       catSize: r['CAT SIZE'] || '',
+      qtyCs: num(r['QTY CS']),
       sales: ['W1', 'W2', 'W3', 'W4', 'C4'].reduce((t, w) => t + num(r['AVERAGE 90D_' + w]), 0),
       srcImg: isImg(r['SKU_USAGE']) ? r['SKU_USAGE'] : '',
       srcWeight: num(r['GOODS_WEIGHT']),
@@ -717,6 +718,17 @@ function modeOf(vals) {
   return { value, kinds: clusters.length };
 }
 
+// ขนาดสุทธิต่อชิ้นจากชื่อสินค้า (กรัม หรือ มล.) เช่น "40ก." → 40, "1.5ล." → 1500
+function netOf(name) {
+  const m = String(name || '').match(/(\d+(?:\.\d+)?)\s*(กก|กรัม|ก|kg|g|มล|ml|ลิตร|ล|l)(?![a-zA-Zก-๙])/i);
+  if (!m) return 0;
+  const n = parseFloat(m[1]), u = m[2].toLowerCase();
+  return (u === 'กก' || u === 'kg' || u === 'ลิตร' || u === 'ล' || u === 'l') ? n * 1000 : n;
+}
+
+// ขนาดสุทธิทั้งลัง = ขนาดต่อชิ้นในชื่อ × QTY CS (ไม่รู้จำนวนต่อลัง → 0 ไม่ใช้กฎนี้)
+const netCs = p => { const n = netOf(p.name); return n && p.qtyCs ? n * p.qtyCs : 0; };
+
 function buildCatGroups() {
   const map = new Map();
   for (const p of products) {
@@ -739,11 +751,25 @@ function buildCatGroups() {
       const s = (vol.value && same(e.volume, vol.value) ? 1 : 0) + (wt.value && same(e.weight, wt.value) ? 1 : 0) + (e.saved ? .5 : 0);
       if (s > refScore) { ref = p; refScore = s; }
     });
+    const refNet = netCs(ref);
     const members = items.map((p, i) => {
       const e = effs[i];
       const volBad = vol.value && !same(e.volume, vol.value);
-      const wtBad  = wt.value && !same(e.weight, wt.value);
-      return { p, e, volBad, wtBad, bad: volBad || wtBad };
+      let wtBad  = wt.value && !same(e.weight, wt.value);
+      // ขนาดในชื่อต่างจากต้นแบบเล็กน้อย (เช่น 44ก. vs 40ก. จำนวนต่อลังเท่ากัน) → น้ำหนักต่างได้
+      // ยอมรับถ้าหนักขึ้น/เบาลงไปทางเดียวกับขนาด และไม่เกินค่าที่คิดตามสัดส่วน (+5%)
+      let wtSize = false;
+      const net = netCs(p);
+      if (wtBad && e.weight && refNet && net && net !== refNet) {
+        const r = net / refNet;
+        if (r >= 0.75 && r <= 1.33) {
+          const scaled = wt.value * r;
+          const ok = r > 1 ? (e.weight > wt.value && e.weight <= scaled * 1.05 + TOL)
+                           : (e.weight < wt.value && e.weight >= scaled * 0.95 - TOL);
+          if (ok) { wtBad = false; wtSize = true; }
+        }
+      }
+      return { p, e, volBad, wtBad, wtSize, net, bad: volBad || wtBad };
     });
     const badCount = members.filter(m => m.bad).length;
     if (!badCount) continue;
@@ -772,7 +798,9 @@ function groupHtml(g, gi) {
         <div class="pcode">${esc(m.p.codeEa || m.p.codeCs)}</div>
         <div class="gvals"><span class="${m.volBad ? 'txt-danger' : ''}">ปริมาตร ${v}</span> · <span class="${m.wtBad ? 'txt-danger' : ''}">น้ำหนัก ${w}</span>${m.p.sales ? ` · 🔥 ${fmt(m.p.sales, 1)}` : ''}</div>
       </button>
-      ${m.bad ? `<button class="btn btn-gold btn-sm" onclick="openGroupMember(${gi},${mi},true)">ใช้ค่าต้นแบบ</button>` : '<span class="badge badge-ok">✓ ตรง</span>'}
+      ${m.bad ? `<button class="btn btn-gold btn-sm" onclick="openGroupMember(${gi},${mi},true)">ใช้ค่าต้นแบบ</button>`
+        : m.wtSize ? '<span class="badge badge-info" title="น้ำหนักต่างจากต้นแบบตามขนาดสินค้าในชื่อ">✓ ตามขนาด</span>'
+        : '<span class="badge badge-ok">✓ ตรง</span>'}
     </div>`;
   }).join('');
   const open = openGroups.has(g.cat);
