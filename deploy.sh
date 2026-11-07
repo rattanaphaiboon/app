@@ -59,6 +59,11 @@ APPS=(
   rattana-carcheck-brief-poster.jpg
   rattana-360.html
   rattana-audit711.html
+  rattana-audit711.webmanifest
+  audit-icon-32.png
+  audit-icon-180.png
+  audit-icon-192.png
+  audit-icon-512.png
   rattana-360.gs
   rattana-first7.html
   rattana-first7.gs
