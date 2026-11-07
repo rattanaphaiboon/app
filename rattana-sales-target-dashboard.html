@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana ยอดขายเทียบเป้าหมาย v10.8</title>
+<title>Rattana ยอดขายเทียบเป้าหมาย v10.9</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -252,7 +252,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page hidden" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v10.8</small>
+      <small>ยอดขายเทียบเป้าหมาย v10.9</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
 
@@ -892,6 +892,43 @@ function lookupPvSale(pvSaleIndex, normName, parsed) {
   if (unit === 'ตัน') return (entry.lang || 0) / 1000;
   return null;
 }
+// Suggestion: รหัสเซลล์ → Set รหัสร้านที่เปิดบิลแล้ว (4 หัวข้อ · บิลวันเดียวกับออเดอร์หรือช้ากว่า 1 วัน · เดือนปัจจุบัน)
+function buildSugBilledStores() {
+  const CATS = ['เดดสต๊อก', 'แนะนำ-กระจาย', 'แนะนำ-ขายดี', 'สินค้าใหม่'];
+  const pcore = s => { s = normalizeText(String(s||'')).replace(/\s+/g,' '); return s.includes('@') ? s.split('@').slice(1).join('@').trim() : s; };
+  const dayNum = s => {
+    const p = String(s||'').trim().split(/[\/\-\s]/).map(Number);
+    if (p.length < 3 || p.some(isNaN)) return null;
+    const [y, mo, d] = p[0] > 31 ? [p[0], p[1], p[2]] : [p[2], p[1], p[0]];
+    return Math.floor(Date.UTC(y > 2400 ? y - 543 : y, mo - 1, d) / 86400000);
+  };
+  const now = new Date(), curMm = now.getMonth() + 1, curY = now.getFullYear();
+  const billDays = new Map();
+  (state.bpRaw||[]).forEach(r => {
+    const dn = dayNum(r['Doc_Date']);
+    if (dn === null) return;
+    const k = String(r['Customer_Code']||'').trim() + '|' + pcore(r['Product_Name']);
+    if (!billDays.has(k)) billDays.set(k, new Set());
+    billDays.get(k).add(dn);
+  });
+  const out = new Map();
+  (state.sugRaw||[]).forEach(r => {
+    if (!CATS.includes(String(r['อยู่ในคำแนะนำ']||'').trim())) return;
+    if (String(r['ยกเลิก']||'').trim()) return;
+    const od = dayNum(r['วัน']);
+    if (od === null) return;
+    const dt = new Date(od * 86400000);
+    if (dt.getUTCMonth() + 1 !== curMm || dt.getUTCFullYear() !== curY) return;
+    const cust = String(r['รหัสร้าน']||'').trim();
+    const days = billDays.get(cust + '|' + pcore(r['ชื่อสินค้า']));
+    if (!days || !(days.has(od) || days.has(od + 1))) return;
+    const sc = String(r['รหัสเซลล์']||'').trim().toUpperCase();
+    if (!out.has(sc)) out.set(sc, new Set());
+    out.get(sc).add(cust);
+  });
+  return out;
+}
+
 function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw, pvSaleRaw) {
   const bpIndex = buildBpIndex(bpRaw);
   const prevBpIndex = buildBpIndex(pvSaleRaw || []);
@@ -947,6 +984,7 @@ function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw, 
   const newSkuIndex = buildNewSkuIndex(newSkuRaw);
   const budgetIndex = buildBudgetIndex(budgetRaw);
   const budget15Index = buildBudgetIndex(budget15Raw);
+  const sugStores = buildSugBilledStores();
   const rows = [];
   targetRaw.forEach(t => {
     const name = t['ชื่อ สกุล'];
@@ -988,6 +1026,11 @@ function computeAll(targetRaw, bpRaw, cnRaw, budgetRaw, newSkuRaw, budget15Raw, 
       const bucket = bpIndex.get(key) || [];
       actual = bucket.reduce((s, r) => s + r._exvatcn2, 0);
       stores = new Set(bucket.map(r => r['Customer_Code']).filter(Boolean)).size;
+      supported = true;
+    } else if (parsed.dim.toUpperCase() === 'KPI' && normalizeText(parsed.value).toUpperCase() === 'SUGGESTION') {
+      // นับร้านไม่ซ้ำที่เปิดบิลแล้ว จากแท็บ Suggestion
+      actual = (sugStores.get(empCode.toUpperCase()) || new Set()).size;
+      stores = actual;
       supported = true;
     } else if (parsed.dim.toUpperCase() === 'KPI' && normalizeText(parsed.value).toUpperCase() === 'CN') {
       actual = cnIndex.get(normName) ?? null;
