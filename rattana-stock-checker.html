@@ -1718,7 +1718,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.68';
+const APP_VERSION = 'v6.69';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -7909,10 +7909,68 @@ function pcsCSEA(pieces, key) {
   return cs > 0 ? `${sign}${cs} CS ${ea} EA` : `${sign}${ea} EA`;
 }
 function dashSearchInput() { dashPage = 1; renderDashTable(); }
+// v6.69: 📥 Excel — ตารางรายการสินค้าตามที่กรอง/ค้นหาอยู่ (ทุกหน้า) · ช่องเหมือนบนจอ + ตัวเลขชิ้นไว้คิดต่อ + แผ่น "ตัวกรอง"
+function exportDashExcel() {
+  if (typeof XLSX === 'undefined') { showToast('โหลด Excel library ไม่ได้', 'error'); return; }
+  const { q, rows } = _dashViewRows();
+  if (!rows.length) { showToast('ไม่มีรายการให้ส่งออก', 'warning'); return; }
+  const stTx = (st, d, key) => st === 'ok' ? 'ตรง' : (st === 'short' ? 'ขาด ' : 'เกิน ') + pcsCSEA(Math.abs(d), key);
+  const out = rows.map(r => {
+    const diff = Number(r.diffPieces) || (Number(r.countedPieces) - Number(r.systemPieces));
+    const ed = r._expDays, pv = r._prev, lots = r._lots || [];
+    return {
+      'สินค้า': r.name || r.key || '',
+      'รหัส/บาร์โค้ด': String(r.key || ''),
+      'คลัง': r.warehouse || '',
+      'สต็อก': pcsCSEA(r.systemPieces, r.key),
+      'นับจริง': pcsCSEA(r.countedPieces, r.key),
+      'สถานะ': stTx(r._resolvedStatus, diff, r.key),
+      'สต็อก (ชิ้น)': Number(r.systemPieces) || 0,
+      'นับจริง (ชิ้น)': Number(r.countedPieces) || 0,
+      'ต่าง (ชิ้น)': diff,
+      'วันหมดอายุ': isNaN(ed) ? '' : formatThaiDate(parseSheetDT(r.expiryDate)),
+      'เหลือ (วัน)': isNaN(ed) ? '' : ed,
+      'ทุก Lot': lots.length > 1 ? lots.map(l => (isNaN(l.days) ? 'ไม่ระบุวันหมดอายุ' : formatThaiDate(parseSheetDT(l.exp)))
+        + ' นับ ' + pcsCSEA(l.c, r.key)).join(' | ') : '',
+      'วันที่': formatThaiDate(r.savedAt),
+      'นับครั้งที่แล้ว': pv ? pcsCSEA(pv.c, r.key) : '',
+      'สถานะครั้งที่แล้ว': pv ? stTx(pv.diff === 0 ? 'ok' : pv.diff < 0 ? 'short' : 'over', pv.diff, r.key) : '',
+      'วันที่ครั้งที่แล้ว': pv ? formatThaiDate(pv.day) : '',
+      'ผู้เช็ค': r.counterName || ''
+    };
+  });
+  const ws = XLSX.utils.json_to_sheet(out);
+  ws['!cols'] = [44, 16, 10, 14, 14, 18, 11, 12, 10, 12, 10, 30, 12, 15, 18, 15, 22].map(w => ({ wch: w }));
+  // แผ่นที่ 2: เงื่อนไขที่ใช้ตอนกด — เปิดไฟล์ทีหลังจะได้รู้ว่ากรองอะไรไว้
+  const selTx = id => { const e = document.getElementById(id), o = e && e.selectedOptions && e.selectedOptions[0];
+    return o ? o.textContent.trim() : 'ทั้งหมด'; };
+  const dr = dcalGet(), now = new Date();
+  const who = (typeof counterDisplayName === 'function' && counterDisplayName()) || (currentUser && currentUser.name) || '';
+  const info = XLSX.utils.aoa_to_sheet([
+    ['ส่งออกจาก', 'แดชบอร์ด › รายการสินค้า'],
+    ['ช่วงวันที่', (document.getElementById('dcalLab')?.textContent || 'ทุกวัน').trim()],
+    ['คลัง', selTx('dashWh')],
+    ['ผู้เช็ค', selTx('dashCounter')],
+    ['สถานะ', selTx('dashStatus')],
+    ['คำค้น', q || '—'],
+    ['จำนวนรายการ', rows.length],
+    ['ส่งออกเมื่อ', formatThaiDate(now) + ' ' + formatThaiTime(now)],
+    ['โดย', who],
+    ['เวอร์ชันแอป', APP_VERSION]
+  ]);
+  info['!cols'] = [{ wch: 14 }, { wch: 40 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'รายการสินค้า');
+  XLSX.utils.book_append_sheet(wb, info, 'ตัวกรอง');
+  const ymd = iso => String(iso || '').replace(/-/g, '');
+  const wh = (document.getElementById('dashWh')?.value || 'ALL');
+  const span = !dr.from && !dr.to ? 'ทุกวัน' : (dr.from === dr.to || !dr.to) ? ymd(dr.from) : (ymd(dr.from) || 'เริ่ม') + '-' + ymd(dr.to);
+  XLSX.writeFile(wb, `เช็คสต็อก_${wh === 'ALL' ? 'ทุกคลัง' : wh}_${span}.xlsx`);
+  showToast(`ดาวน์โหลด Excel แล้ว · ${rows.length.toLocaleString()} รายการ`, 'success');
+}
 function dashGoPage(n) { dashPage = n; renderDashTable(); }
-function renderDashTable() {
-  const tbody = document.getElementById('dashTbody');
-  if (!tbody) return;
+// v6.69: ชุดแถวที่ตารางโชว์ (กรองแล้ว + คำค้น + เรียงตามหัวคอลัมน์) — ปุ่ม 📥 Excel ใช้ตัวเดียวกัน
+function _dashViewRows() {
   const q = (document.getElementById('dashSearch')?.value || '').trim().toLowerCase();
   let rows = _dashRows;
   if (q) {
@@ -7933,6 +7991,12 @@ function renderDashTable() {
       return cmp * dir;
     });
   }
+  return { q, rows };
+}
+function renderDashTable() {
+  const tbody = document.getElementById('dashTbody');
+  if (!tbody) return;
+  const { q, rows } = _dashViewRows();   // v6.69
   // Update header arrows
   ['name','system','counted','diff','exp','date','counter'].forEach(c => {
     const el = document.getElementById('dsArr-' + c);
@@ -9018,6 +9082,8 @@ function renderDashboard(rows) {
     <div class="card mt-8">
       <div class="card-head" style="gap:8px;flex-wrap:wrap">
         <h3 style="white-space:nowrap">📦 รายการสินค้า</h3>
+        <button type="button" class="btn btn-outline btn-sm" style="margin-left:auto" onclick="exportDashExcel()"
+                title="ดาวน์โหลดเป็นไฟล์ Excel ตามที่กรอง/ค้นหาอยู่ — ทุกหน้า ไม่ใช่แค่หน้าที่เห็น">📥 Excel</button>
         <input id="dashSearch" class="input" style="flex:1 1 100%;width:100%;font-size:15px"
                placeholder="🔍 ค้นหา (ชื่อ/บาร์โค้ด/คลัง/ผู้เช็ค...)" oninput="dashSearchInput()" autocomplete="off">
         <span id="dashCount" style="font-size:12px;color:var(--muted)"></span>
