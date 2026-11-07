@@ -5001,6 +5001,7 @@ function _rpInit(f, inst){
         w.lsGet=function(k){ return (k in RPi.mem)?RPi.mem[k]:og(k); }; }
     }
     if(RPi.wh!=='W4'){ _rpTswWriteHook(w); _rpOrdSeedHook(w); _rpLrFlow(w); }
+    _rpCapHook(w);    // v6.19: สรุปบิล — ความจุตามรถที่จัดจริง
     _rpNameFix(w);    // v6.18: ร้านที่ไม่อยู่ในชีท Customer ของคลังนี้ = ใช้ชื่อจากใบจอง (AR_NAME) แทน "รหัส xxx"
     _rpShotHook(w);   // v6.17: สรุปย่อ = popup เต็มจอ   // v6.09: ใบคุม (หน้าของ Rattana Picker) บันทึก/ลบ → หลังบ้านเรา · ติดตั้งหลังตัวกันเขียน LAB = อยู่นอกสุด
     const t=(d.title||'').match(/v[\d.]+/); RPi.ver=t?t[0]:RPi.ver;   // v6.09: ตอน init หน้าอาจยังเป็นหัวเก่า → ใช้เวลชันจาก _rpVer() ด้วย
@@ -5256,6 +5257,89 @@ function _rpOrdSeedHook(w){
  *   หน้าสรุปของ Rattana Picker เอาชื่อร้านจากชีท Customer · หน้า W4 กรองเฉพาะร้านที่ช่องคลัง (AH) = W4/C4
  *   ร้านนี้ช่องคลังว่าง (ลำดับ/วันส่งก็ว่าง) → ไม่รู้จักชื่อ เลยขึ้น "รหัส 7011090141"
  *   → ห่อ rtBuild: ชื่อที่ขึ้นต้น "รหัส " ใช้ AR_NAME จากใบจองชีต B (CO.jobRows คอลัมน์ 3) แทน · ป้ายนอกรูทคงเดิม */
+/* 🚚 v6.19 (Surat 07/11: "ปริมาตร น้ำหนัก ให้เทียบจัดรถ — จัดเป็นคันไหน เอาความจุของทะเบียนนั้นมาคิด" · "เอาแบบจัดคิว แต่ทำรูปแบบของเราเอง")
+ *   ขั้น 2.2 สรุปบิล เลือกห้อง → แทนการ์ด "ขึ้นรถได้ (คันเล็กสุดที่ขึ้นได้)" ด้วยการ์ดของเรา
+ *   บิลในห้อง → เลขใบจอง (หมายเหตุบิล) → ทะเบียนในแผนจัดรถ (พรีปลีก D/K + Keepdata C/O ย้อน 7 วัน)
+ *   → ความจุจากไฟล์จัดรถ แท็บ Car (นน.บรรทุก · กว้าง×ยาว×สูง ซม.) หักช่องว่างอากาศจากแท็บ Set (คีย์ ช่องว่างอากาศ) = สูตรเดียวกับแอปจัดคิว
+ *   ห้องไปหลายคัน = รวมความจุทุกคัน · ยังไม่จัดรถ = บอกตรง ๆ (ไม่เดา) · อ่านไม่ได้ = บอกให้กดรีเฟรช */
+const RP_CAP={p:null, at:0, book:{}, car:{}, air:0.1, err:''};
+function _rpNum(x){ const n=parseFloat(String(x||'').replace(/,/g,'')); return isFinite(n)?n:0; }
+function _rpCapLoad(force){
+  if(RP_CAP.p && !force && RP_CAP.at && Date.now()-RP_CAP.at<5*60000) return RP_CAP.p;
+  const d0=new Date(Date.now()-7*864e5), ds=d0.getFullYear()+'-'+String(d0.getMonth()+1).padStart(2,'0')+'-'+String(d0.getDate()).padStart(2,'0');
+  const rows=r=>((r&&r.table&&r.table.rows)||[]), labs=r=>((r&&r.table&&r.table.cols)||[]).map(c=>String(c.label||'').replace(/\s+/g,''));
+  const book={}, car={}; let air=null;
+  const pr=_docGvizJsonp(TSW_PLAN_ID,{sheet:'พรีปลีก', tq:"select D,K,L,O,N,Z where A >= date '"+ds+"'"},90000).then(r=>{ if(labs(r)[0]!=='เลขบิล') throw new Error('หัวพรีปลีกไม่ตรง');
+    rows(r).forEach(x=>{ const c=x.c||[], bk=_docCell(c[0]).toUpperCase(), reg=_docCell(c[1]); if(!bk || !reg || /เอาออก/.test(_docCell(c[5]))) return;
+      book[bk]={reg, trip:_docCell(c[2])||'1', type:_docCell(c[3]), driver:_docCell(c[4])}; }); });
+  const kd=_docGvizJsonp(TSW_PLAN_ID,{sheet:'Keepdata', tq:"select C,O,P,S,R,W where A >= date '"+ds+"'"},90000).then(r=>{ if(labs(r)[0]!=='เลขบิล') return {};
+    const m={}; rows(r).forEach(x=>{ const c=x.c||[], bk=_docCell(c[0]).toUpperCase(), reg=_docCell(c[1]); if(!bk || !reg || /เอาออก/.test(_docCell(c[5]))) return;
+      m[bk]={reg, trip:_docCell(c[2])||'1', type:_docCell(c[3]), driver:_docCell(c[4])}; }); return m; }).catch(()=>({}));
+  const cr=_docGvizJsonp(TSW_PLAN_ID,{sheet:'Car', tq:'select *'},90000).then(r=>{ const L=labs(r), f=ws=>L.findIndex(h=>ws.some(x=>h.indexOf(x)>=0));
+    const iR=f(['ทะเบียน']), iT=f(['ประเภทรถ']), iD=f(['ผู้ดูแล','ขับขี่']), iK=f(['บรรทุก']), iW=f(['กว้าง']), iL=f(['ยาว']), iH=f(['สูง']);
+    if(iR<0 || iK<0 || iW<0 || iL<0 || iH<0) throw new Error('หัวแท็บ Car ไม่ตรง');
+    rows(r).forEach(x=>{ const c=x.c||[], reg=_docCell(c[iR]).replace(/\s+/g,''); if(!reg) return;
+      const W=_rpNum(_docCell(c[iW])), Ln=_rpNum(_docCell(c[iL])), H=_rpNum(_docCell(c[iH]));
+      car[reg]={reg, type:iT>=0?_docCell(c[iT]):'', driver:iD>=0?_docCell(c[iD]):'', kg:_rpNum(_docCell(c[iK])), m3:(W&&Ln&&H)?W*Ln*H/1e6:0, dim:(W&&Ln&&H)?(W+'×'+Ln+'×'+H):''}; }); });
+  const st=_docGvizJsonp(TSW_PLAN_ID,{sheet:'Set', tq:'select A,B'},60000).then(r=>{
+    rows(r).forEach(x=>{ const c=x.c||[]; if(_docCell(c[0]).replace(/\s+/g,'')!=='ช่องว่างอากาศ') return;
+      const t=_docCell(c[1]), v=(c[1]&&c[1].v!=null)?Number(c[1].v):NaN;
+      const a=/%/.test(t)?_rpNum(t)/100:(isFinite(v)?(v>1?v/100:v):null); if(a!=null && a>=0 && a<0.9) air=a; }); }).catch(()=>{});
+  RP_CAP.at=0;
+  RP_CAP.p=Promise.all([pr,kd,cr,st]).then(([,k])=>{ Object.keys(k||{}).forEach(b=>{ if(!book[b]) book[b]=k[b]; });
+      RP_CAP.book=book; RP_CAP.car=car; if(air!=null) RP_CAP.air=air; RP_CAP.err=''; RP_CAP.at=Date.now(); return RP_CAP; })
+    .catch(e=>{ RP_CAP.err=String((e&&e.message)||e); RP_CAP.at=0; RP_CAP.p=null; return RP_CAP; });
+  return RP_CAP.p;
+}
+function _rpCapHook(w){
+  if(w.__capHook || typeof w.rtRenderRoom!=='function') return; w.__capHook=true;
+  const orig=w.rtRenderRoom;
+  w.rtRenderRoom=function(){ const r=orig.apply(this, arguments); try{ _rpCapCard(w); }catch(e){ console.warn('[cap]', e); } return r; };
+  const ol=w.rtLoad; if(typeof ol==='function') w.rtLoad=function(){ RP_CAP.at=0; RP_CAP.p=null; RP_CAP.err=''; return ol.apply(this, arguments); };   // ปุ่ม 🔄 รีเฟรช = อ่านแผนรถ/ความจุใหม่ด้วย
+}
+function _rpCapCard(w){
+  const d=w.document, box=d.getElementById('rtBodyD'), V=w.RT&&w.RT.v&&w.RT.v.D; if(!box || !V || !V.room) return;
+  const card=[...box.querySelectorAll('.rt-card')].find(c=>{ const l=c.querySelector('.rt-kv .lab'); return l && l.textContent.trim()==='ปริมาตร'; }); if(!card) return;
+  if(!RP_CAP.at && !RP_CAP.err){ const room=V.room; _rpCapLoad().then(()=>{ try{ if(w.RT.v.D.room===room) _rpCapCard(w); }catch(e){} }); }
+  const R=(w.rtRooms()||{})[V.room]; if(!R) return;
+  const kg=R.kg, m3=R.lt/1000, bills=Object.keys(R.bills);
+  const bookOf={}; ((w.PK&&w.PK.rows)||[]).forEach(x=>{ const c=x._c||[], no=String(c[1]||'').trim(); if(no && R.bills[no] && !bookOf[no]){ const m=String(c[14]||'').match(/[A-Z]{2,3}\d{2,}\/\d+/); if(m) bookOf[no]=m[0].toUpperCase(); } });
+  const e=x=>String(x==null?'':x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const nf=(x,dg)=>Number(x).toLocaleString('th-TH',{minimumFractionDigits:dg||0, maximumFractionDigits:dg||0});
+  if(!d.getElementById('rpCapCss')) d.head.insertAdjacentHTML('beforeend','<style id="rpCapCss">'+
+    '.cap2 .row{display:flex;justify-content:space-between;align-items:baseline;padding:7px 0;border-bottom:1px solid #e5e7eb;font-size:14px}.cap2 .row span{color:#64748b}.cap2 .row b{font-size:17px}'+
+    '.cap2 .tk{background:#0d1b3e;color:#fff;border-radius:12px;padding:9px 12px;margin:10px 0 0}.cap2 .tk .rg{font-weight:800;font-size:16px;color:#e9c46a}.cap2 .tk small{display:block;color:#cbd5e1;font-size:12px;margin-top:2px}'+
+    '.cap2 .g{margin-top:12px}.cap2 .g .t{display:flex;justify-content:space-between;gap:8px;font-size:13px;margin-bottom:4px}.cap2 .bar{height:10px;border-radius:99px;background:#e5e7eb;overflow:hidden}.cap2 .bar i{display:block;height:100%;border-radius:99px}'+
+    '.cap2 .ok{color:#16a34a}.cap2 .wn{color:#d97706}.cap2 .bd{color:#dc2626}.cap2 .al{margin-top:10px;border-radius:10px;padding:7px 10px;font-size:13px;font-weight:700}'+
+    '.cap2 .al.bd{background:#fef2f2;border:1px solid #fecaca}.cap2 .al.wn{background:#fffbeb;border:1px solid #fde68a}.cap2 .nt{font-size:12px;color:#64748b;margin-top:8px;line-height:1.55}</style>');
+  const head='<div class="row"><span>ปริมาตร (m³)</span><b>'+nf(m3,2)+'</b></div><div class="row"><span>น้ำหนัก (กก.)</span><b>'+nf(kg,0)+'</b></div>';
+  let body='';
+  if(RP_CAP.err) body='<div class="nt">⚠️ อ่านแผนจัดรถ/แท็บ Car ไม่ได้ ('+e(RP_CAP.err)+') — กด 🔄 รีเฟรช อีกครั้ง</div>';
+  else if(!RP_CAP.at) body='<div class="nt">⏳ กำลังอ่านแผนจัดรถ + ความจุรถ…</div>';
+  else {
+    const regs={}, noCar=[]; let noBook=0;
+    bills.forEach(no=>{ const bk=bookOf[no], p=bk&&RP_CAP.book[bk]; if(!p){ noBook++; return; } const k=p.reg.replace(/\s+/g,''); (regs[k]=regs[k]||{p, n:0}).n++; });
+    const list=Object.keys(regs);
+    if(!list.length) body='<div class="al wn">🚚 ยังไม่ได้จัดรถ — บิลห้องนี้ยังไม่มีทะเบียนในแผนจัดรถ</div>';
+    else {
+      let cKg=0, cM3=0;
+      body=list.map(k=>{ const c=RP_CAP.car[k], p=regs[k].p; if(!c || !c.kg || !c.m3) noCar.push(p.reg); else { cKg+=c.kg; cM3+=c.m3*(1-RP_CAP.air); }
+        return '<div class="tk"><span class="rg">'+e(p.reg)+'</span> · '+e((c&&c.type)||p.type||'')+' · เที่ยว '+e(p.trip)+'<small>'+e(p.driver||(c&&c.driver)||'')+' · '+regs[k].n+' บิล'+(c&&c.dim?' · '+e(c.dim)+' ซม.':'')+'</small></div>'; }).join('');
+      if(cKg && cM3){
+        const pk=kg/cKg*100, pv=m3/cM3*100, cls=p=>p>100?'bd':p>=85?'wn':'ok', col=p=>p>100?'#dc2626':p>=85?'#d97706':'#16a34a';
+        const g=(lab,use,cap,unit,p,dg)=>'<div class="g"><div class="t"><span>'+lab+' '+nf(use,dg)+' / '+nf(cap,dg)+' '+unit+'</span><b class="'+cls(p)+'">'+nf(p,0)+'%</b></div><div class="bar"><i style="width:'+Math.min(100,p).toFixed(1)+'%;background:'+col(p)+'"></i></div></div>';
+        body+=g('น้ำหนัก',kg,cKg,'กก.',pk,0)+g('ปริมาตร',m3,cM3,'m³',pv,2);
+        const over=[]; if(pk>100) over.push('น้ำหนักเกิน '+nf(kg-cKg,0)+' กก.'); if(pv>100) over.push('ปริมาตรเกิน '+nf(m3-cM3,2)+' m³');
+        if(over.length) body+='<div class="al bd">⚠️ '+over.join(' · ')+'</div>';
+        else if(Math.max(pk,pv)>=85) body+='<div class="al wn">ใกล้เต็มคัน</div>';
+        body+='<div class="nt">ความจุ = แท็บ Car (นน.บรรทุก · กว้าง×ยาว×สูง) หักช่องว่างอากาศ '+nf(RP_CAP.air*100,0)+'% (แท็บ Set)'+(list.length>1?' · รวม '+list.length+' คัน':'')+'</div>';
+      }
+      if(noCar.length) body+='<div class="al wn">ไม่มีขนาด/น้ำหนักบรรทุกของ '+e(noCar.join(', '))+' ในแท็บ Car</div>';
+      if(noBook) body+='<div class="nt">ยังไม่ได้จัดรถ '+noBook+' บิล (ไม่นับในความจุ)</div>';
+    }
+  }
+  card.innerHTML='<div class="cap2">'+head+body+'</div>';
+}
 function _rpNameFix(w){
   if(w.__nameFix || typeof w.rtBuild!=='function') return; w.__nameFix=true;
   const ob=w.rtBuild;
