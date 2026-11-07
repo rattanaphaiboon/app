@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>ทดลองรัตนล็อกดีล v4.32</title>
+<title>ทดลองรัตนล็อกดีล v4.33</title>
 <link rel="icon" type="image/png" href="roo-logo.png">
 <link rel="apple-touch-icon" href="roo-logo.png">
 <meta name="apple-mobile-web-app-title" content="Rattana Order">
@@ -691,7 +691,7 @@ body.head-mode .bn-badge{display:none!important}
 <header>
   <div class="brand">
     <div class="logo-box"><img class="logo-img" id="logoImg" alt=""><span class="logo-ring" id="logoRing"></span></div>
-    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.32</i></div>
+    <div class="logo-text">RATTANA<span>ONLINE ORDER</span><i class="ver">v4.33</i></div>
   </div>
   <div class="h-spacer"></div>
   <button class="icon-btn" id="btnRefresh" title="รีเฟรช" onclick="refreshData()">↻</button>
@@ -3844,9 +3844,26 @@ async function qLoadRules(){
     out.push({ _k:by+'|'+val, by, val, from, to,
       wh:g(r,'Warehouses'), pool:parseFloat(String(g(r,'จำนวน(ลัง)')).replace(/,/g,''))||0,
       perShop:parseFloat(String(g(r,'เพดานต่อร้าน')).replace(/,/g,''))||0,
-      mode:mode, share:g(r,'แบ่งยังไง'), note:g(r,'หมายเหตุ'), row:i+2 });
+      mode:mode, share:g(r,'แบ่งยังไง'), note:g(r,'หมายเหตุ'), row:i+2,
+      noHist:g(r,'ร้านไม่เคยซื้อ') });   /* 🆕 v5.18: คอลัมน์ K */
   });
   return out;
+}
+/* 🆕 v5.18 (Surat 07/11) — คอลัมน์ K "ร้านไม่เคยซื้อ" ของแท็บ Quota · กติกาเดียวกับ Sales App v8.694 (_qtNewShopMode)
+   ใช้กับร้านที่ไม่มีแถวใน QuotaShopCap (ไม่เคยซื้อ 2 เดือนหลัง) + ร้านที่ยังไม่มีรหัสร้าน
+     ว่าง / ให้ 1  = 1 ลังทั้งรอบ (แบบเดิม)
+     ให้ตามเพดาน  = เท่าช่อง เพดานต่อร้าน · ว่าง = ไม่จำกัดรายร้าน เหลือแค่ก้อนรวม
+     ไม่ให้ / 0    = 0 ลัง สั่งไม่ได้เลย
+   ⚠️ ช่วงที่โควต้ายังโหลดไม่เสร็จ ยังให้ QPROV_CS (1 ลัง) เหมือนเดิม — Surat ยืนยันแล้ว */
+function qNewShopCap(rule, prefix){
+  const v=String((rule&&rule.noHist)||'').replace(/\s+/g,'');
+  if(v==='ไม่ให้' || v==='0' || v==='ไม่') return { cap:0, hist:0, none:true, why:prefix+' - สินค้านี้ให้เฉพาะร้านที่เคยซื้อ สั่งไม่ได้ค่ะ' };
+  if(v.indexOf('เพดาน')>=0){
+    const per=rule.perShop||0;
+    if(per>0) return { cap:per, hist:0, why:prefix+' - ซื้อได้สูงสุด '+per+' ลังทั้งรอบ' };
+    return null;                                                     /* ไม่จำกัดรายร้าน เหลือแค่ก้อนรวม */
+  }
+  return { cap:1, hist:0, why:prefix+' - ซื้อได้สูงสุด 1 ลังทั้งรอบ' };
 }
 
 /* ── จับคู่สินค้ากับแถวโควต้า (§5) ── */
@@ -3928,6 +3945,7 @@ async function qGroupBoot(){
       const m={}; let ng=0;
       Object.keys(bag).forEach(r=>{ const g=bag[r].slice().sort(); if(g.length<2) return; ng++; g.forEach(c=>{ m[c]=g; }); });
       QGRP.map=m; QGRP.ts=Date.now();
+      try{ idbSet(QGRP_KEY, { ts:QGRP.ts, map:m }); }catch(e){}   /* ⚡ v5.18 */
       console.log('[quota] กลุ่มลูกค้าหลายรหัส '+ng+' กลุ่ม · '+Object.keys(m).length+' รหัส');
       return m;
     }catch(e){
@@ -3939,9 +3957,28 @@ async function qGroupBoot(){
   QGRP.p=p;
   try{ return await p; } finally{ QGRP.p=null; }
 }
+/* ⚡ v5.18 — กลุ่มลูกค้าหลายรหัสแทบไม่เปลี่ยน แต่ต้องดึงทั้งแท็บ Customer (~1.3 วิ) ทุกครั้งที่เปิดแอป
+   → จำไว้ใน IndexedDB 12 ชม. ใช้ของที่จำไว้ทันที แล้วดึงใหม่เบื้องหลัง (รอบถัดไปได้ของใหม่) · ไม่เคยจำ = รอดึงแบบเดิม */
+const QGRP_KEY='rop_qgrp_v1', QGRP_TTL=12*36e5;
+async function qGroupFast(){
+  if(QGRP.map && QGRP.ts && Date.now()-QGRP.ts<QCFG.ttl) return QGRP.map;
+  if(!QGRP.map){
+    try{ const c=await idbGet(QGRP_KEY);
+      if(c && c.map && Date.now()-(+c.ts||0)<QGRP_TTL){ QGRP.map=c.map; qGroupBoot().catch(()=>{}); return QGRP.map; } }catch(e){}
+  }else{ qGroupBoot().catch(()=>{}); return QGRP.map; }
+  return qGroupBoot();
+}
 /* 🆕 v4.79 — "ตารางเพดานยังไม่ได้สร้างให้กติกานี้" ≠ "ร้านนี้ไม่เคยซื้อ"
    คีย์ที่ไม่มีสักแถวใน QuotaShopCap = จัดซื้อยังไม่ได้ gen → ห้ามตัดทุกร้านเหลือ 1 ลัง (fail-open) */
-const QCAPKEY={};
+const QCAPKEY={};   /* คีย์กติกา → ตารางเพดานมีแถวไหม (ถามครั้งเดียวต่อคีย์) */
+/* ⚡ v5.18: ถามทุกคีย์ในคำขอเดียว (group by) แทนถามทีละคีย์ */
+async function qCapKeysPrefetch(){
+  try{
+    const t=await qGviz(QCFG.quotaSheet,{sheet:'QuotaShopCap'},'select A,count(B) group by A');
+    const have={}; (t.rows||[]).forEach(r=>{ const k=String(r[0]||'').trim(); if(k) have[k]=1; });
+    return have;
+  }catch(e){ return null; }
+}
 async function qCapKeyReady(key){
   if(key in QCAPKEY) return QCAPKEY[key];
   try{
@@ -3951,23 +3988,44 @@ async function qCapKeyReady(key){
   return QCAPKEY[key];
 }
 /* ── เพดานรายร้าน (§7) - สูตรนี้ Surat เคาะเอง ห้ามเปลี่ยน ── */
-async function qShopCap(rule, shopCode){
+async function qShopCap(rule, shopCode, pre){
   if(qtNorm(rule.share)!==qtNorm('ตามที่เคยซื้อ')) return null;      /* ก่อนได้ก่อน = ไม่มีเพดานรายร้าน */
-  if(!shopCode) return null;
   const key=rule.by+'|'+rule.val;
+  /* ⚡ v5.18: มีของที่ดึงรวบไว้แล้ว (ทุกกติกา · ทุกรหัสของร้าน ในคำขอเดียว) = ไม่ต้องยิงใหม่ */
+  if(pre && pre.rows){
+    if(!shopCode){
+      if(!(await qCapKeyReady(key))) return null;
+      return qNewShopCap(rule, 'ร้านนี้ยังไม่มีรหัสร้านในระบบ');
+    }
+    const want=new Set(qGrpOf(shopCode).map(qCode));
+    const rows=pre.rows.filter(r=>String(r[0]||'').trim()===key && want.has(qCode(r[1])));
+    return qCapFromRows_(rule, key, rows);
+  }
+  /* 🐛 v5.02 (Surat 07/10: "โต๋ ค้าส่งอ้อมน้อย สั่งสามแม่ครัวได้ 20 ลัง ทั้งที่ควรได้ลังเดียว")
+     เดิม: ร้านที่ "รหัสร้านว่าง" ในทะเบียน → return null = ข้ามเพดานรายร้านทั้งหมด เหลือแค่ก้อนรวม 1,000 ลัง
+     ร้านไม่มีรหัส = ไม่มีทางอยู่ในตาราง QuotaShopCap อยู่แล้ว → ใช้กติกาเดียวกับ "ร้านที่ไม่มีชื่อในตาราง" = 1 ลัง */
+  if(!shopCode){
+    if(!(await qCapKeyReady(key))) return null;                      /* ตารางเพดานของกติกานี้ยังไม่มี = เหมือน v4.79 */
+    return qNewShopCap(rule, 'ร้านนี้ยังไม่มีรหัสร้านในระบบ');      /* 🆕 v5.18: ตามคอลัมน์ ร้านไม่เคยซื้อ */
+  }
   const grp=qGrpOf(shopCode);   /* 👨‍👩‍👧 v4.82: ทุกรหัสของลูกค้าคนเดียวกัน (ไม่อยู่กลุ่มไหน = [รหัสตัวเอง] = เหมือนเดิมเป๊ะ) */
   const tq='select A,B,C,D where A = "'+key.replace(/"/g,'')+'" and '
     + (grp.length>1 ? qMatchesClause('B',grp) : ('B = "'+String(shopCode).replace(/"/g,'')+'"'));
   const t=await qGviz(QCFG.quotaSheet,{sheet:'QuotaShopCap'},tq);
+  return qCapFromRows_(rule, key, t.rows);
+}
+async function qCapFromRows_(rule, key, rows){
   const per=rule.perShop||0;
+  const t={ rows:rows||[] };
   if(!t.rows.length){
-    if(!(await qCapKeyReady(key))){                                  /* 🆕 v4.79 */
+    if(!(await qCapKeyReady(key))){                                  /* 🆕 v4.79: ตารางเพดานยังไม่ถูกสร้างให้กติกานี้ */
       console.warn('[quota] ยังไม่มีตารางเพดานรายร้านของ "'+key+'" — ข้ามเพดานรายร้าน (เหลือแค่ก้อนรวม)');
       return null;
     }
-    return { cap:1, hist:0, why:'ร้านนี้ไม่เคยซื้อกลุ่มนี้ใน 2 เดือนหลัง - ซื้อได้สูงสุด 1 ลังทั้งรอบ' };
+    return qNewShopCap(rule, 'ร้านนี้ไม่เคยซื้อกลุ่มนี้ใน 2 เดือนหลัง');   /* 🆕 v5.18: ตามคอลัมน์ ร้านไม่เคยซื้อ */
   }
-  /* 👨‍👩‍👧 v4.82: หลายรหัส = บวกเพดานที่หลังบ้านคิดไว้แล้ว ❌ ห้ามคิดสัดส่วนใหม่เอง */
+  /* 👨‍👩‍👧 v4.82: หลายรหัส = **บวกเพดานที่หลังบ้านคิดไว้แล้ว** ของทุกรหัส
+     ❌ ห้ามคิดสัดส่วนใหม่จากก้อนรวมเอง (ก้อนรวมอาจมีหลายแถว Quota และหลังบ้านคิดสัดส่วนไปแล้ว) */
   let hist=0, histCap=0;
   t.rows.forEach(r=>{ hist+=parseFloat(r[2])||0; histCap+=parseFloat(r[3])||1; });
   const _more=(t.rows.length>1) ? (' · รวม '+t.rows.length+' รหัสของลูกค้าเดียวกัน') : '';
@@ -3991,6 +4049,95 @@ function qMatchesClause(col, bcs){
    แก้: ไม่กรองรหัสร้านในคิวรี่แล้ว -> group by รหัสร้าน แล้วเทียบเองแบบ string (กันทั้ง number/text/0 นำหน้า)
    ผลพลอยได้: ได้ทั้ง "ก้อนรวม" และ "ยอดร้านนี้" จากคิวรี่เดียว -> คำขอลดจาก 8 เหลือ 4 ต่อ 1 แถวโควต้า */
 function qCode(v){ return String(v==null?'':v).trim().replace(/\.0+$/,''); }
+/* ⚡ v5.18 (Surat 07/11: "อ่านค่าให้ไวที่สุด ห้ามช้า") — ยอดที่ใช้ไปของ "ทุกกติกา" ในรอบเดียว
+   เดิม: ยิงแยกทีละกติกา × 3 gviz + 2 Supabase (13 กติกา = ~65 คำขอ แย่งกันตอบ)
+   ใหม่: 3 gviz + 2 Supabase **รวมทุกกติกา** (บาร์โค้ดทั้งหมด ~34 ตัว) แล้วแบ่งยอดให้แต่ละกติกาในเครื่อง
+   🐛 พร้อมกันนี้: แถว "รออนุมัติ" ของร้านตัวเอง = ตะกร้า (นับอยู่แล้วใน quotaCartCases) → ไม่นับเป็น "ใช้ไป" ซ้ำ
+      เดิมตัดด้วยเลขบิลร่างอย่างเดียว ถ้าเครื่องยังถือเลขร่างคนละเลขกับตะกร้าบนชีท (เพิ่งเปิดแอป ดึงตะกร้ายังไม่เสร็จ)
+      ของในตะกร้าถูกนับ 2 รอบ — เคสจริง 06/11 ร่ำรวยนิรันดร์ แอล&เอ็มเขียว เพดาน 4 ขึ้น "เหลือ 2" ทั้งที่ยังไม่ได้ซื้อ */
+async function qUsedFetchAll(bcs, minFromISO){
+  const today=qToday(), tISO=today.replace(/\//g,'-');
+  const mOrd=qMatchesClause('J',bcs);
+  const rooJob=gid=>({ src:'roo', sheet:CFG.regSheetId, ref:{gid:gid},
+    tq:'select G,H,J,N,U,sum(M) where ('+mOrd+') and A >= date "'+tISO+'" and (L is null or L = "")'
+       +' and (U = "รออนุมัติ" or U = "อนุมัติ") group by G,H,J,N,U' });
+  const jobs=[
+    { src:'sale', sheet:QCFG.salesSheet, ref:{sheet:'Order'},
+      tq:'select H,J,N,sum(M) where ('+mOrd+') and A = "'+today+'" and (L is null or L = "") group by H,J,N' },
+    rooJob(QCFG.rooOrderGid), rooJob(QCFG.rooSpecialGid)
+  ];
+  const out=await Promise.all([
+    ...jobs.map(async j=>{
+      try{ const t=await qGviz(j.sheet, j.ref, j.tq, QCFG.usedMs); return { src:j.src, rows:t.rows }; }
+      catch(e){ console.warn('[quota] '+j.src+' ล้ม:',e&&e.message); return { src:j.src, err:String(e&&e.message||e) }; }
+    }),
+    (async()=>{
+      if(!minFromISO || minFromISO>=tISO) return { src:'supa', rows:[] };
+      try{
+        const enc=s=>encodeURIComponent('"'+s+'"');
+        const sel='select='+[enc('วัน'),enc('รหัสร้าน'),enc('ชื่อร้าน'),'Barcode',enc('หน่วย'),enc('จำนวน'),enc('ยกเลิก')].join(',');
+        const list=[]; bcs.forEach(b=>qBcKeys(b).forEach(k=>{ if(list.indexOf(k)<0) list.push(k); }));
+        const flt='&Barcode=in.('+list.map(encodeURIComponent).join(',')+')'
+          +'&'+enc('วัน')+'=gte.'+minFromISO+'&'+enc('วัน')+'=lt.'+tISO
+          +'&'+enc('สถานะอนุมัติ')+'=eq.'+encodeURIComponent('อนุมัติ');
+        const one=async table=>{
+          const acc=[];
+          for(let off=0; off<20000; off+=1000){
+            const ctl=(typeof AbortController!=='undefined')?new AbortController():null;
+            const tm=ctl?setTimeout(()=>{ try{ctl.abort();}catch(e){} },15000):null;
+            let rows;
+            try{
+              const r=await fetch(CFG.SUPABASE_URL+'/rest/v1/'+table+'?'+sel+flt+'&limit=1000&offset='+off,
+                { headers:{ apikey:CFG.SUPABASE_ANON_KEY, Authorization:'Bearer '+CFG.SUPABASE_ANON_KEY }, signal:ctl?ctl.signal:undefined });
+              if(!r.ok) throw new Error('supabase '+r.status);
+              rows=await r.json();
+            }finally{ if(tm) clearTimeout(tm); }
+            rows.forEach(x=>acc.push(x)); if(rows.length<1000) break;
+          }
+          return acc;
+        };
+        const rows=[].concat(...await Promise.all(['roo_sales','roo_special_sales'].map(one)));
+        return { src:'supa', rows };
+      }catch(e){ console.warn('[quota] supa ล้ม:',e&&e.message); return { src:'supa', err:String(e&&e.message||e) }; }
+    })()
+  ]);
+  return out;
+}
+/* แบ่งยอดที่ดึงรวบมา ให้กติกาเดียว — คืนรูปเดียวกับ qUsedFor เดิม */
+function qUsedCompute(raw, rule, bcMap, shopCode){
+  const tISO=qToday().replace(/\//g,'-');
+  const fISO=(rule.from||'2000/01/01').replace(/\//g,'-');
+  const want=qCode(shopCode);
+  const wantName=want ? '' : clean((currentCustomer||{}).name||'');
+  const wantSet=new Set(qGrpOf(shopCode));
+  const isMine=(code,name)=> want ? wantSet.has(qCode(code)) : (!!wantName && clean(name)===wantName);
+  const lookup=bc=>bcMap[qBc(bc)] || bcMap[qBc(bc).replace(/^0+/,'')];
+  const res=raw.map(s=>{
+    if(s.err) return { src:s.src, err:s.err };
+    let pool=0, shop=0;
+    if(s.src==='sale'){
+      s.rows.forEach(r=>{ const p=lookup(r[1]); if(!p) return; const cs=qToCases(p, qUnitLabel(r[2]), r[3]); pool+=cs;
+        if(want && wantSet.has(qCode(r[0]))) shop+=cs; });
+    }else if(s.src==='roo'){
+      s.rows.forEach(r=>{ const p=lookup(r[2]); if(!p) return;
+        const mine=isMine(r[1], r[0]);
+        if(mine && String(r[4]).trim()==='รออนุมัติ') return;           /* ตะกร้าของร้านเอง = นับใน quotaCartCases แล้ว */
+        const cs=qToCases(p, qUnitLabel(r[3]), r[5]); pool+=cs; if(mine) shop+=cs; });
+    }else{   /* supa: ทั้งรอบโควต้าถึงเมื่อวาน */
+      if(fISO>=tISO) return { src:'supa', pool:0, shop:0 };
+      s.rows.forEach(x=>{ if(clean(x['ยกเลิก'])) return; const d=String(x['วัน']||'').slice(0,10); if(d<fISO || d>=tISO) return;
+        const p=lookup(x['Barcode']); if(!p) return;
+        const cs=qToCases(p, qUnitLabel(x['หน่วย']), x['จำนวน']); pool+=cs; if(isMine(x['รหัสร้าน'], x['ชื่อร้าน'])) shop+=cs; });
+    }
+    return { src:s.src, pool, shop };
+  });
+  const bad=res.filter(r=>r.err);
+  const sum=(k,f)=>res.filter(r=>!r.err&&(!f||f(r))).reduce((a,b)=>a+(b[k]||0),0);
+  return { ok:!bad.length, err:bad.map(b=>b.src).join(','),
+    srcOk:res.length-bad.length, srcAll:res.length,
+    pool:sum('pool'), shop:sum('shop'),
+    detail:{ bill:sum('shop',r=>r.src==='supa'), today:sum('shop',r=>r.src!=='supa') } };
+}
 async function qUsedFor(rule, bcs, bcMap, shopCode, draftOid){
   const today=qToday(), tISO=today.replace(/\//g,'-');
   const from=rule.from||'2000/01/01', to=rule.to||'2999/12/31';
@@ -4042,21 +4189,37 @@ async function quotaBoot(force){
   QUOTA.p=(async()=>{
   try{
     /* 👨‍👩‍👧 v4.82: โหลดกลุ่มลูกค้าขนานไปกับกติกา · ล้มก็ไปต่อ (ใช้เพดานรายรหัสแบบเดิม) */
-    const [rules]=await Promise.all([ qLoadRules(), qGroupBoot().catch(()=>null) ]);
-    const st={}, draft=(typeof draftOrderId==='function')?draftOrderId():'';
-    /* ทุกแถว + ทุกคำขอ ยิงขนานกันหมด (เดิมวนทีละแถว รอ 30-60 วิกว่าป้ายจะขึ้น) */
-    await Promise.all(rules.map(async rule=>{
+    const _t0=Date.now();
+    /* ⚡ v5.18: ยิงพร้อมกันหมด · ยอดที่ใช้ไปเริ่มทันทีที่รู้กติกา ไม่ต้องรอกลุ่มลูกค้า (ใช้ตอนแบ่งยอดในเครื่องเท่านั้น) */
+    const grpP=qGroupFast().catch(()=>null), keysP=qCapKeysPrefetch();
+    const rules=await qLoadRules();
+    const st={};
+    /* ⚡ v5.18: เตรียมทุกกติกาก่อน แล้วยิง "รวบ" ครั้งเดียว — เพดาน 1 คำขอ + ยอดใช้ไป 3 gviz + 2 Supabase (ไม่ขึ้นกับจำนวนกติกา) */
+    const preps=[];
+    rules.forEach(rule=>{
       const wh=qWhState(rule);
       if(!wh.apply) return;
       const b=qRuleBarcodes(rule);
       if(!b.bcs.length){ console.warn('[quota] แถว '+rule._k+' หาสินค้าไม่เจอสักตัว (MeasureBy อาจไม่ใช่ชื่อคอลัมน์จริง)'); return; }
       if(b.bcs.length>QCFG.maxBc) console.warn('[quota] '+rule._k+' มี '+b.bcs.length+' บาร์โค้ด ตัดเหลือ '+QCFG.maxBc);
-      const bcs=b.bcs.slice(0,QCFG.maxBc);
-      const shopCode=qShopCode(b.prods[0]);
-      const [cap,used]=await Promise.all([
-        qShopCap(rule, shopCode).catch(e=>{ console.warn('[quota] shopCap ล้ม',e&&e.message); return 'ERR'; }),
-        qUsedFor(rule, bcs, b.map, shopCode, draft).catch(e=>{ console.warn('[quota] used ล้ม',e&&e.message); return null; })
-      ]);
+      preps.push({ rule, wh, b, bcs:b.bcs.slice(0,QCFG.maxBc), shopCode:qShopCode(b.prods[0]) });
+    });
+    const allBcs=[...new Set([].concat(...preps.map(x=>x.bcs)))];
+    const minFrom=preps.reduce((m,x)=>{ const f=(x.rule.from||'2000/01/01').replace(/\//g,'-'); return f<m?f:m; }, '9999-12-31');
+    const usedP=allBcs.length ? qUsedFetchAll(allBcs, minFrom).catch(e=>{ console.warn('[quota] used ล้ม',e&&e.message); return null; }) : Promise.resolve([]);
+    const [, capKeys]=await Promise.all([grpP, keysP]);
+    if(capKeys) rules.forEach(r=>{ QCAPKEY[r.by+'|'+r.val]=!!capKeys[r.by+'|'+r.val]; });   /* ⚡ v5.18 */
+    const codes=[...new Set([].concat(...preps.filter(x=>x.shopCode).map(x=>qGrpOf(x.shopCode))))];
+    const [capPre, raw]=await Promise.all([
+      codes.length ? qGviz(QCFG.quotaSheet,{sheet:'QuotaShopCap'},'select A,B,C,D where '+qMatchesClause('B',codes)).then(t=>({rows:t.rows}))
+                     .catch(e=>{ console.warn('[quota] เพดานรวบล้ม - ถามทีละกติกา',e&&e.message); return null; })
+                   : Promise.resolve({rows:[]}),
+      usedP
+    ]);
+    await Promise.all(preps.map(async x=>{
+      const { rule, wh, b, bcs, shopCode }=x;
+      const cap=await qShopCap(rule, shopCode, capPre||undefined).catch(e=>{ console.warn('[quota] shopCap ล้ม',e&&e.message); return 'ERR'; });
+      const used=raw ? qUsedCompute(raw, rule, b.map, shopCode) : null;
       /* 🐛 v4.83 — แหล่งยอดเดียวล้ม (DS_DC 8 หมื่นแถว) ไม่ควรปิดด่านทั้งใบ
          ยอดที่หายทำให้ "ใช้ไป" น้อยกว่าจริงเสมอ = บล็อกน้อยลง ไม่มีทางบล็อกผิด */
       const ready = !!(used && cap!=='ERR' && (used.ok || used.srcOk>0));
@@ -4066,7 +4229,8 @@ async function quotaBoot(force){
     }));
     QUOTA.rules=rules; QUOTA.st=st; QUOTA.loaded=true; QUOTA.ts=Date.now(); QUOTA.err='';
     const on=Object.keys(st).filter(k=>st[k].ready).length;
-    console.log('[quota] พร้อม '+on+'/'+Object.keys(st).length+' แถว',
+    QUOTA.loadMs=Date.now()-_t0;   /* ⚡ v5.18 */
+    console.log('[quota] พร้อม '+on+'/'+Object.keys(st).length+' แถว · '+(QUOTA.loadMs/1000).toFixed(1)+' วิ',
       Object.keys(st).map(k=>k+' เหลือ '+quotaLeft(st[k].rule)));
     try{ renderProducts(); renderCart(); }catch(e){}
   }catch(e){
@@ -4133,6 +4297,8 @@ function quotaGate(p, unitType, qty, mode, cartKey){
 }
 /* ข้อความ 1 บรรทัดที่จอ 375px · ห้ามใส่ emoji (กฎบริษัท) */
 function quotaMsg(g){
+  /* 🆕 v5.18: ช่อง ร้านไม่เคยซื้อ = ไม่ให้ → บอกเหตุผลตรง ๆ แทน "เหลือ 0 ลัง" */
+  if(g && g.st && g.st.cap && g.st.cap.none) return 'สินค้านี้ให้เฉพาะร้านที่เคยซื้อ - ร้านนี้ยังสั่งไม่ได้ค่ะ';
   return 'เกินโควต้า - ร้านนี้เหลือ '+g.left+' ลัง กำลังสั่ง '+g.add+' ลัง';
 }
 /* ── ป้ายบนการ์ด/หน้าสินค้า ── */
@@ -4143,7 +4309,7 @@ function quotaBadgeHtml(p, name){
     const inCart=quotaCartCases(rule);
     const rest=Math.floor(Math.max(0,left-inCart)*10)/10;
     return '<div class="q-badge'+(rest<=0?' zero':'')+'" onclick="event.stopPropagation();quotaInfo(\''+esc(name||clean(p['PRODUCT NAME']))+'\')">'
-      +'โควต้า · ร้านนี้ได้อีก '+rest+' ลัง</div>';
+      +(((quotaState(rule)||{}).cap||{}).none ? 'โควต้า · เฉพาะร้านที่เคยซื้อ' : ('โควต้า · ร้านนี้ได้อีก '+rest+' ลัง'))+'</div>';
   }catch(e){ return ''; }
 }
 /* แตะป้าย -> บอกที่มาให้ครบ: ช่วง · ก้อนทั้งรอบ · เพดานร้าน + เหตุผล · ส่งแล้ว · เหลือ
