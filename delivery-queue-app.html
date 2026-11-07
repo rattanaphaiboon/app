@@ -2379,7 +2379,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.575</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.576</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -4558,6 +4558,8 @@ function _parseBkRef(rmk){
   let key=(rmk||'').toString().trim(); if(!key)return null;
   const h=key.indexOf('#'); if(h>=0)key=key.slice(h+1);      // แบบ 1: เอาข้อความหลัง #
   key=key.split(':')[0].replace(/\s+/g,'').toUpperCase();    // ตัดวันที่หลัง : + normalize
+  // v9.576: เลขใบจองตามด้วยข้อความอื่น (เช่น "BV13691106/100 แถมเพิ่ม คาราบาว…") — เอาเฉพาะเลขใบจอง
+  { const m=/^(B[KV][0-9A-Z]*\/\d+)/.exec(key); if(m)return m[1]; }
   return /^(BK|BV)/.test(key)?key:null;                      // สนใจเฉพาะที่อ้างใบจอง BK/BV
 }
 const _payNorm=s=>(s||'').toString().replace(/\s+/g,'').toUpperCase();
@@ -18842,6 +18844,53 @@ function prPickAdd(rs){
   prPickRender();
   if(typeof showToast==='function')showToast(`ใส่ ${nm}${refs.length>1?' ('+refs.length+' ใบ)':''} → 📄 ${px} · อย่าลืมกด 💾 บันทึก`,'ok');
 }
+// ══ v9.576: ใบจองที่เปิดบิลแล้วแต่ใบส่งไม่อ้างเลขใบจอง → จับคู่ด้วย "รายการสินค้าเหมือนกัน" ══
+//   user: "มีจัดรถไปส่งหนิ" → "ดูด้วยว่ารายการสินค้าเหมือนกันไหม"
+//   เคส 7/11: คุณสุรพล (บ้านปราโมทย์) BV13691105/020 (แอล&เอ็มแดง 2 · แอล&เอ็มเขียว 2 · กรองทิพย์ 1)
+//     = DSC16911/00078 ลง 5/11 รายการ+จำนวนตรงทุกตัว แต่หมายเหตุว่าง → เดิมขึ้นค้างหลอก
+//   เงื่อนไข: ร้านเดียวกัน · ใบส่งลงวันเดียวกับใบจองหรือหลังจากนั้น · ใบส่งไม่อ้างใบจองใบอื่น · สินค้า+จำนวน (ซื้อ+แถม) ตรงกันทุกรายการ
+//   โหลดรายการสินค้า DS_DC เฉพาะร้านที่ยังค้าง (ทีหลัง ไม่ถ่วงตอนเปิดแอป) — ยังโหลดไม่เสร็จ = ถือว่ายังค้างตามเดิม
+let _dsItemC={codes:new Set(),wl:'',docs:null,loading:false,err:''};
+function _dsItemsNeed(codes){
+  const C=[...new Set((codes||[]).filter(Boolean))]; if(!C.length)return;
+  const wl=(typeof ORDER_WL!=='undefined')?ORDER_WL:'';
+  if(_dsItemC.wl===wl&&_dsItemC.docs&&C.every(c=>_dsItemC.codes.has(c)))return;
+  if(_dsItemC.loading)return;
+  _dsItemC.loading=true;
+  const all=[...new Set(C.concat(_dsItemC.wl===wl?[..._dsItemC.codes]:[]))].slice(0,80), c=orderCutoffStr();
+  const cond=all.map(x=>`C='${String(x).replace(/'/g,'')}'`).join(' OR ');
+  const tq1=`SELECT A, B, C, I, K, L, O WHERE G='${wl}' AND A >= '${c.text}' AND (${cond})`;
+  // ไฟล์ Check Out (โครงเดียวกัน · ~1 วิ) ก่อน → ชีท Order (ช้า ~70 วิ) สำรอง
+  const tries=[[CO_TAB.DS_DC,CO_FILE_ID,15000,tq1],[DSDC_SHEET_TAB,ORDER_SHEET_ID,150000,tq1],
+               [DSDC_SHEET_TAB,ORDER_SHEET_ID,150000,`SELECT A, B, C, I, K, L, O WHERE G='${wl}' AND A >= date '${c.iso}' AND (${cond})`]];
+  (async()=>{ let rows=[];
+    for(const [tab,fid,ms,tq] of tries){ try{ rows=await fetchSheet(tab,fid,{timeoutMs:ms,retries:0,tq}); if(rows.length&&('DI_REF' in rows[0]))break; rows=[]; }catch(e){ _dsItemC.err=String(e&&e.message||e); } }
+    const docs=new Map();   // ร้าน → Map(เลขใบส่ง → {ref,date,bk,items})
+    rows.forEach(r=>{ const ar=String(r['AR_CODE']||'').trim(), ref=_payNorm(r['DI_REF']); if(!ar||!ref)return;
+      const m=docs.get(ar)||new Map(); docs.set(ar,m);
+      const d=m.get(ref)||{ref,date:_diToDate(r['DI_DATE']),bk:_parseBkRef(r['DI_REMARK']),items:{}}; m.set(ref,d);
+      if(!d.bk)d.bk=_parseBkRef(r['DI_REMARK']);
+      const sku=String(r['SKU_NAME']||'').trim(); if(!sku)return;
+      d.items[sku]=(d.items[sku]||0)+(parseFloat(r['TRD_QTY']||0)||0)+(parseFloat(r['TRD_Q_FREE']||0)||0); });
+    _dsItemC={codes:new Set(all),wl,docs,loading:false,err:_dsItemC.err};
+    console.log(`🧾 v9.576 รายการสินค้าใบส่ง ${all.length} ร้าน: ${rows.length} แถว`);
+    try{ if(typeof currentTab!=='undefined'&&currentTab==='cars'&&typeof renderCarsView==='function')renderCarsView(); }catch(e){}
+    try{ if(typeof _gbBlIsOpen==='function'&&_gbBlIsOpen())gbBlRender(); else if(typeof currentTab!=='undefined'&&currentTab==='board')renderBoard(); }catch(e){}
+  })().catch(e=>{ _dsItemC.loading=false; _dsItemC.err=String(e&&e.message||e); });
+}
+function _dsItemMatch(ref){   // ใบส่งที่รายการสินค้าตรงกับใบจองนี้ (ไม่เจอ/ยังไม่โหลด = '')
+  const b=billMap[ref]; if(!b||!_dsItemC.docs)return '';
+  const m=_dsItemC.docs.get(String(b.arCode||'').trim()); if(!m)return '';
+  const sk=b.skus||{}, keys=Object.keys(sk).filter(k=>(sk[k].cs||0)>0); if(!keys.length)return '';
+  const bd=_diToDate(b.date), bt=bd?new Date(bd.getFullYear(),bd.getMonth(),bd.getDate()).getTime():0, me=_payNorm(ref);
+  for(const d of m.values()){
+    if(d.bk&&d.bk!==me)continue;                                   // อ้างใบจองใบอื่น
+    if(bt&&d.date&&new Date(d.date.getFullYear(),d.date.getMonth(),d.date.getDate()).getTime()<bt)continue;   // ใบส่งก่อนวันจอง
+    const dk=Object.keys(d.items).filter(k=>d.items[k]>0);
+    if(dk.length!==keys.length)continue;
+    if(keys.every(k=>Math.abs((d.items[k]||0)-(sk[k].cs||0))<0.001))return d.ref; }
+  return '';
+}
 function _carsBacklogList(){   // v9.484: บิลค้างของหน้านี้ (ใช้ทั้งกล่อง 🕗 และหน้าต่าง ➕ เลือกใส่คัน)
   let bl=[]; try{ bl=_lineBacklogData()||[]; }catch(e){ return null; }
   // v9.188: บิลที่เพิ่งกด ✕ เอาออกจากรถ ต้องโชว์ในกล่องนี้ด้วย แม้เอกสารเป็นวันก่อน (ไม่งั้นกดออกแล้วหายไปจากหน้านี้เลย)
@@ -18866,11 +18915,13 @@ function _carsBacklogList(){   // v9.484: บิลค้างของหน�
   //   เปิดบิล = มีใบส่ง DS_DC อ้างใบจองนี้ (_bkDocMap) · ใบส่งวันนี้ที่ไม่มีใบจอง (isDsDc) = ตัวมันเองคือบิล
   //   วัด W1 7/11: ค้าง 71 ใบ · เปิด DSI วันนี้แล้ว 46 ใบ (ยังไม่มีใบไหนติดธงไม่ได้ส่ง) → เหลือ 25
   _cbHidBill=0;
-  { const n0=bl.length;
+  { const n0=bl.length, _need=[];
     bl=bl.filter(x=>{ const r=_payNorm(x.ref), b=billMap[x.ref]||{};
       const docs=b.isDsDc?[r]:[...(((typeof _bkDocMap!=='undefined')&&_bkDocMap[r])||[])];
-      return !docs.length||docs.some(d=>_payNotDeliv.has(_payNorm(d))); });
-    _cbHidBill=n0-bl.length; }
+      if(!docs.length){ const mt=_dsItemMatch(x.ref); if(mt)docs.push(mt); else { _need.push(b.arCode||''); return true; } }   // v9.576: ใบส่งรายการสินค้าตรงกัน
+      return docs.some(d=>_payNotDeliv.has(_payNorm(d))); });
+    _cbHidBill=n0-bl.length;
+    if(_need.length)_dsItemsNeed(_need); }
   // v9.575: ใบที่เพิ่งกด ➕ ใส่คันปลีกในเครื่องนี้ (ยังไม่บันทึก) ไม่ขึ้นค้างซ้ำ
   { const pk=new Set(); Object.keys(_prState||{}).forEach(k=>{ const x=_prState[k]; if(x&&x.pick)x.pick.forEach(r=>pk.add(r)); });
     if(pk.size)bl=bl.filter(x=>!pk.has(x.ref)); }
