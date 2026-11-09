@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana RPB Invoice v1.6</title>
+<title>Rattana RPB Invoice v1.7</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
@@ -507,7 +507,7 @@ body.dark .cfg-warn{background:#3a2e15;color:#e8c86a;border-color:#5a4a20}
 
 <script>
 /* ============ CONFIG ============ */
-const APP_VERSION = '1.6';
+const APP_VERSION = '1.7';
 // Web App URL (/exec) ที่ deploy จาก Code.gs
 const API_URL = 'https://script.google.com/macros/s/AKfycby7DXIrvUP498Z--qkDzhFxii6VrwqbF8JjIHMLpGd2G1NyocxxGKZh0e6UwX8ZUbVooQ/exec';
 const AUTH_CONFIG = {
@@ -553,9 +553,20 @@ async function loadFromSheets(id,name){
   const url=`https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(name)}`;
   const res=await fetch(url);if(!res.ok)throw new Error('fetch failed');return parseCsv(await res.text());
 }
-async function apiGet(action){
-  try{const res=await fetch(`${API_URL}?action=${encodeURIComponent(action)}`);return await res.json();}
-  catch(e){return {ok:false,error:String(e)};}
+// v1.7 — พื้นที่ localStorage ใช้ร่วมกับแอปรัตนทุกตัว (~5MB) เต็มได้ → ห้ามให้การเขียนแคชทำแอปพัง
+const RPB_CACHE_KEYS=['rpb_taxdocs','rpb_bills','rpb_pdfs','rpb_companies'];
+function safeSet(k,v){
+  try{localStorage.setItem(k,v);return true;}catch(e){}
+  try{RPB_CACHE_KEYS.forEach(x=>{if(x!==k)localStorage.removeItem(x);});localStorage.setItem(k,v);return true;}catch(e){}
+  return false;
+}
+try{localStorage.removeItem('rpb_taxdocs');}catch(e){}   // แคชใบกำกับก้อนใหญ่ (v1.5–1.6) — เลิกเก็บแล้ว
+async function apiGet(action,timeoutMs){
+  const ctl=typeof AbortController!=='undefined'?new AbortController():null;
+  const t=ctl?setTimeout(()=>ctl.abort(),timeoutMs||60000):null;
+  try{const res=await fetch(`${API_URL}?action=${encodeURIComponent(action)}`,ctl?{signal:ctl.signal}:{});return await res.json();}
+  catch(e){return {ok:false,error:e&&e.name==='AbortError'?'หมดเวลารอ (เน็ตช้า)':String(e)};}
+  finally{if(t)clearTimeout(t);}
 }
 async function apiPost(payload){
   try{const res=await fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});return await res.json();}
@@ -575,7 +586,7 @@ function showToast(msg,type='info'){const t=document.createElement('div');t.clas
 
 /* ============ THEME ============ */
 function applyTheme(t){document.body.classList.toggle('dark',t==='dark');const b=document.getElementById('themeBtn');if(b)b.textContent=t==='dark'?'☀️':'🌙';}
-function toggleTheme(){const n=document.body.classList.contains('dark')?'light':'dark';localStorage.setItem('rattana_theme',n);applyTheme(n);}
+function toggleTheme(){const n=document.body.classList.contains('dark')?'light':'dark';safeSet('rattana_theme',n);applyTheme(n);}
 applyTheme(localStorage.getItem('rattana_theme')||'light');
 
 /* ============ AUTH (SSO) ============ */
@@ -585,8 +596,8 @@ function checkRattanaSession(){
 }
 function saveSharedSession(d){
   const payload={data:d,exp:Date.now()+30*24*60*60*1000};
-  localStorage.setItem('rattana_session',JSON.stringify(payload));
-  localStorage.setItem('rattanaUser',JSON.stringify(payload));
+  safeSet('rattana_session',JSON.stringify(payload));
+  safeSet('rattanaUser',JSON.stringify(payload));
 }
 function showLoginError(m){document.getElementById('loginError').textContent=m;}
 async function handleGoogleLogin(r){
@@ -635,15 +646,17 @@ function initApp(){
 async function loadCompanies(){
   // cache
   try{const c=JSON.parse(localStorage.getItem('rpb_companies')||'null');if(c&&c.length){companies=c;buildCoDD();}}catch{}
-  try{const r=await apiGet('companies');if(r&&r.ok&&Array.isArray(r.companies)){companies=r.companies;localStorage.setItem('rpb_companies',JSON.stringify(companies));buildCoDD();}}catch(e){}
+  try{const r=await apiGet('companies');if(r&&r.ok&&Array.isArray(r.companies)){companies=r.companies;buildCoDD();safeSet('rpb_companies',JSON.stringify(companies));}}catch(e){}
 }
 async function loadBills(spin){
   if(!cfgReady())return;
   if(spin){try{const c=JSON.parse(localStorage.getItem('rpb_bills')||'null');if(c){bills=c;renderInbox();}}catch{}}
-  try{
-    const r=await apiGet('list');
-    if(r&&r.ok&&Array.isArray(r.bills)){bills=r.bills;localStorage.setItem('rpb_bills',JSON.stringify(bills));renderInbox();}
-  }catch(e){if(spin)showToast('โหลดบิลไม่สำเร็จ','error');}
+  const r=await apiGet('list');
+  if(r&&r.ok&&Array.isArray(r.bills)){
+    bills=r.bills;
+    try{renderInbox();}catch(e){console.error(e);if(spin)showToast('แสดงบิลไม่สำเร็จ: '+e.message,'error');}
+    safeSet('rpb_bills',JSON.stringify(bills));
+  }else if(spin){showToast('โหลดบิลไม่สำเร็จ'+(r&&r.error?': '+r.error:''),'error');}
 }
 
 /* ============ TABS ============ */
@@ -957,7 +970,7 @@ async function loadPdfs(){
   if(!cfgReady())return;
   if(!pdfs.length){try{const c=JSON.parse(localStorage.getItem('rpb_pdfs')||'null');if(c){pdfs=c;renderPdfs();}}catch{}}
   const r=await apiGet('listPdf');
-  if(r&&r.ok&&Array.isArray(r.pdfs)){pdfs=r.pdfs;try{localStorage.setItem('rpb_pdfs',JSON.stringify(pdfs));}catch{}renderPdfs();}
+  if(r&&r.ok&&Array.isArray(r.pdfs)){pdfs=r.pdfs;renderPdfs();safeSet('rpb_pdfs',JSON.stringify(pdfs));}
 }
 function renderPdfs(){
   const list=pdfs.slice().sort(newFirst);
@@ -990,17 +1003,16 @@ function togglePdfForm(force){
 }
 async function loadTaxDocs(){
   if(!cfgReady())return;
-  if(!taxDocsLoaded){
-    try{const c=JSON.parse(localStorage.getItem('rpb_taxdocs')||'null');if(c){taxDocs=c;renderTaxDocs();}}catch{}
-    if(!taxDocs.length)document.getElementById('taxList').innerHTML='<div class="empty"><div>กำลังโหลด...</div></div>';
-  }
-  const r=await apiGet('pendingTax');
+  if(window._taxLoading)return;
+  window._taxLoading=true;
+  if(!taxDocs.length)document.getElementById('taxList').innerHTML='<div class="empty"><div>กำลังโหลดรายการรับสินค้า... (ประมาณ 5–10 วินาที)</div></div>';
+  const r=await apiGet('pendingTax',60000);
+  window._taxLoading=false;
   if(r&&r.ok&&Array.isArray(r.docs)){
     taxDocs=r.docs;taxDocsLoaded=true;
-    try{localStorage.setItem('rpb_taxdocs',JSON.stringify(taxDocs));}catch{}
     renderTaxDocs();
   }else if(!taxDocs.length){
-    document.getElementById('taxList').innerHTML=`<div class="empty"><div>โหลดไม่สำเร็จ${r&&r.error?': '+esc(r.error):''}</div></div>`;
+    document.getElementById('taxList').innerHTML=`<div class="empty"><div>โหลดไม่สำเร็จ${r&&r.error?': '+esc(r.error):''}</div><button class="btn btn-outline" style="margin-top:12px" onclick="loadTaxDocs()">ลองใหม่</button></div>`;
   }
 }
 // pending = รอใบกำกับ · received = กดได้รับแล้ว · noinv = กดไม่มีใบกำกับ · has = ต้นทางมีใบกำกับแล้ว
