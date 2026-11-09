@@ -2577,7 +2577,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-09 · 88';
+const BUILD = '2026-11-09 · 89';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -6545,6 +6545,7 @@ function openWho(show) {
    จัดเที่ยวส่ง — จ่ายทะเบียนรถให้ร้านที่มีบิล BK (ช่องทางส่ง)
    ทะเบียนจากชีต "ข้อมูลการใช้รถ update" คอลัมน์ N (ทะเบียน Final) กรองด้วยคอลัมน์ O (คลัง Final) = คลังที่กำลังเช็ค
    ที่จ่ายไว้ผูกกับ ร้าน + รอบ ของวันทำงานนั้น ส่งขึ้นชีต "จัดรถ" ให้ทุกเครื่องเห็น โชว์ต่อท้ายชื่อร้านในหน้าเช็คตามทีม/ร้านด้วย
+   BUILD 89: ทะเบียนอ่านจาก Keepdata (ไฟล์จัดรถส่งสินค้า ที่ทีมจัดรถใช้) ก่อน — ดู loadKeep · ที่จ่ายในแอปใช้เฉพาะร้าน+รอบที่ Keepdata ไม่มี
    ═══════════════════════════════════════════════════════════════ */
 const VEHICLE_SRC = { id:'1nCkPfEAlULYB9Rf3OMcq4n2r3lV2ZWAHL5UvZbyD73I', gid:'1128184482' };
 /* คอลัมน์ Q "ประเภทรถ Final" — ตัดอุปกรณ์ยกของในคลังออก เอาแต่รถที่ใช้ส่งของจริง (กระบะ/6 ล้อ/เก๋ง ฯลฯ) */
@@ -6568,13 +6569,69 @@ async function loadVehicles() {
 /** ทะเบียนตัวเลขล้วน 6 หลักเขียนแบบป้ายรถบรรทุก 807447 → 80-7447 (เฉพาะที่แสดง ค่าที่เก็บไม่เปลี่ยน) */
 const fmtPlate = p => /^\d{6}$/.test(String(p)) ? String(p).slice(0,2) + '-' + String(p).slice(2) : String(p || '');
 
+/* ── จัดรถจากไฟล์ "จัดรถส่งสินค้า" แท็บ Keepdata (BUILD 89 · ผู้ใช้สั่ง 09/11 "อ่านจัดรถจากที่นี่
+      งานรอบ2 ให้ยึดวันส่งวันถัดไปเที่ยว1 รอบ1คือวันส่งวันนี้เที่ยว2") — ทีมจัดรถบันทึกในไฟล์นั้น แอปอ่านอย่างเดียว
+   คอลัมน์ A วันที่บิล · B วันที่ส่ง · C เลขบิล · D รหัสร้านค้า · E ชื่อร้าน · O ทะเบียนรถ · P เที่ยว · Q ชื่อเล่น(คนขับ)
+           S ประเภทรถ · W สถานะ · X วันที่อัปเดต · Z คลัง · AB ผู้บันทึก
+   แถวคลังนี้: วันที่ส่ง = วันทำงาน + เที่ยว 2 → รอบ 1 · วันที่ส่ง = วันส่งถัดไป (วันแรกหลังวันทำงานที่มีในไฟล์ — เสาร์ → จันทร์) + เที่ยว 1 → รอบ 2
+   ทะเบียนของ ร้าน+รอบ: บิลของรอบนั้นที่เลขบิลมีใน Keepdata ก่อน (ใช้ทะเบียนตามเลขบิลเสมอ) → ไม่มี ใช้แถวรหัสร้านเดียวกันในช่วงส่งของรอบนั้น
+   Keepdata มี = ใช้ Keepdata (แก้ในแอปไม่ได้) · ไม่มี = ที่จ่ายในแอป (ชีต จัดรถ) แบบเดิม */
+const KEEP_SRC = { id:'1OvXga8M0XuUEMYqWPj_AIcBHTEI_vA_WXXNJpqUk0aQ', gid:'1936046765' };
+let KEEP = { key:'', ref:{}, store:{}, next:'', n:0, odd:[], err:'', at:0, ver:0, sig:'' };
+let keepBusy = false, keepCache = null;
+async function loadKeep() {
+  if (keepBusy || SRC !== 'real' || !navigator.onLine) return;
+  keepBusy = true;
+  const key = routeKey(), day = TODAY;
+  try {
+    const sel = 'select A, B, C, D, E, O, P, Q, S, W, X, Z, AB';
+    let res = await gvizJsonp(KEEP_SRC.id, { gid:KEEP_SRC.gid, headers:'1',
+      tq:`${sel} where Z = '${WAREHOUSE}' and B >= date '${day}' and B <= date '${isoAdd(day, 7)}'` });
+    if (res.status === 'error')                    // คอลัมน์วันที่ส่งไม่ใช่ชนิดวันที่ → ดึงทั้งคลังแล้วกรองเอง
+      res = await gvizJsonp(KEEP_SRC.id, { gid:KEEP_SRC.gid, headers:'1', tq:`${sel} where Z = '${WAREHOUSE}'` });
+    if (res.status === 'error') throw new Error((res.errors || [{}])[0].detailed_message || 'อ่าน Keepdata ไม่ได้');
+    if (key !== routeKey()) return;                // เปลี่ยนวัน/คลังระหว่างอ่าน รอบหน้าค่อยเอา
+    const all = [];
+    ((res.table && res.table.rows) || []).forEach(r => {
+      const c = r.c || [], t = i => cellTxt(c[i]);
+      const ship = martDay(c[1]), plate = t(5).replace(/\s+/g, ''), trip = parseInt(t(6), 10) || 0;
+      if (!ship || ship < day || ship > isoAdd(day, 7) || !plate || /ยกเลิก/.test(t(9))) return;
+      all.push({ ref:t(2), code:t(3), name:t(4), ship, trip, plate, driver:t(7), type:t(8), at:t(10),
+                 by:'Keepdata' + (t(12) ? ' · ' + t(12) : ''), keep:true });
+    });
+    const next = all.filter(e => e.ship > day).map(e => e.ship).sort()[0] || '';
+    const ref = {}, store = {}, odd = [];
+    all.forEach(e => {
+      e.rnd = e.ship === day && e.trip === 2 ? 1 : e.ship === next && e.trip === 1 ? 2 : 0;
+      if (e.ref) ref[e.ref] = e;
+      if (e.rnd) store[e.code + '#' + e.rnd] ||= e; else odd.push(e);
+      if (e.type && !(VEH_INFO[e.plate] || {}).type) VEH_INFO[e.plate] = Object.assign(VEH_INFO[e.plate] || {}, { type:e.type });
+    });
+    const sig = JSON.stringify([key, next, all.map(e => [e.ref, e.code, e.ship, e.trip, e.plate])]), changed = sig !== KEEP.sig;
+    KEEP = { key, ref, store, next, n:all.length, odd, err:'', at:Date.now(), ver:KEEP.ver + (changed ? 1 : 0), sig };
+    if (changed) refreshRouteViews(true);
+  } catch(e) { KEEP.err = String(e.message || e).slice(0, 90); console.warn('loadKeep', e); }
+  finally { keepBusy = false; refreshRouteViews(false); }
+}
+/** { "รหัสร้าน#รอบ": แถว Keepdata } ของวันทำงานนี้ — เลขบิลตรงก่อน แล้วค่อยรหัสร้าน+ช่วงส่ง */
+function keepMap() {
+  if (KEEP.key !== routeKey()) return {};
+  if (keepCache && keepCache.bills === ROUTE_BILLS && keepCache.ver === KEEP.ver && keepCache.key === KEEP.key) return keepCache.m;
+  const m = {};
+  ROUTE_BILLS.forEach(b => { const e = KEEP.ref[b.ref]; if (e) m[b.code + '#' + b.round] ||= e; });
+  for (const k in KEEP.store) m[k] ||= KEEP.store[k];
+  keepCache = { bills:ROUTE_BILLS, ver:KEEP.ver, key:KEEP.key, m };
+  return m;
+}
+
 /* ── เที่ยวส่ง (ผู้ใช้กำหนด 29/09) ──
      บิลรอบ 1 ของวันทำงาน = วันนี้ เที่ยว 2 · บิลรอบ 2 ของวันทำงาน = พรุ่งนี้ เที่ยว 1 */
 const TRIP = { 1:{ addDay:0, no:2 }, 2:{ addDay:1, no:1 } };
 const isoAdd = (iso, n) => { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n);
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 const tripOf   = rnd => TRIP[rnd] || TRIP[2];
-const tripDate = rnd => isoAdd(TODAY, tripOf(rnd).addDay);
+const tripDate = rnd => rnd === 2 && KEEP.next && KEEP.key === routeKey() ? KEEP.next   // วันส่งถัดไปจริงจาก Keepdata (เสาร์ → จันทร์)
+                                                                          : isoAdd(TODAY, tripOf(rnd).addDay);
 /** "วันนี้ เที่ยว 2" / "พรุ่งนี้ เที่ยว 1" — ดูวันที่ย้อนหลังจะเป็นวันที่แทนคำว่าวันนี้/พรุ่งนี้ */
 function tripName(rnd) {
   const d = tripDate(rnd), t = todayISO();
@@ -6610,6 +6667,7 @@ const SHEET_ROUTE = 'จัดรถ';
 delete state.routeVehicle;                     // รุ่นก่อนเก็บแค่ในเครื่อง ไม่แยกวัน — เลิกใช้
 const routeKey = () => `${WAREHOUSE}|${TODAY}`;
 function routeEntry(code, rnd) {
+  const kp = keepMap()[code + '#' + rnd]; if (kp) return kp;      // Keepdata ชนะเสมอ (BUILD 89)
   const key = routeKey();
   const mine = (state.routeOut || []).filter(o => o['คีย์'] === key && o['รหัสร้าน'] === code && String(o['รอบ']) === String(rnd));
   if (mine.length) { const o = mine[mine.length-1];
@@ -6706,7 +6764,7 @@ async function pullRoutes() {
   } catch(e) { routePullErr = String(e.message || e).slice(0,90); }
   finally { refreshRouteViews(false); }
 }
-async function syncRoutes(force) { await pushRoutes(force); await pullRoutes(); }
+async function syncRoutes(force) { loadKeep(); await pushRoutes(force); await pullRoutes(); }
 setInterval(() => syncRoutes(), 60000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) syncRoutes(); });
 window.addEventListener('online', () => syncRoutes(true));
@@ -6749,12 +6807,18 @@ function renderRoute() {
     : pend ? `⏳ กำลังส่งขึ้นชีต ${fmtN(pend)} รายการ…`
     : routePullAt ? `<span class="txt-success">✓ ทุกเครื่องเห็นตรงกัน</span> · ดึงล่าสุด ${t2(pa.getHours())}:${t2(pa.getMinutes())} น.`
     : 'กำลังดึงทะเบียนจากชีต…';
+  const ka = new Date(KEEP.at), kOn = KEEP.key === routeKey();
+  const kBills = kOn ? ROUTE_BILLS.filter(b => (routeEntry(b.code, b.round) || {}).keep).length : 0;
+  const keep = SRC !== 'real' ? '' : KEEP.err ? `<br><b class="txt-danger">⚠ อ่าน Keepdata (ไฟล์จัดรถส่งสินค้า) ไม่ได้: ${esc(KEEP.err)}</b>`
+    : !kOn ? '<br>กำลังอ่านจัดรถจาก Keepdata…'
+    : `<br>🚚 จัดรถจาก <b>Keepdata</b> (ไฟล์จัดรถส่งสินค้า) <b>${fmtN(kBills)}</b> บิล · อ่านล่าสุด ${t2(ka.getHours())}:${t2(ka.getMinutes())} น.` +
+      (KEEP.odd.length ? ` · <span style="color:var(--warning)">วันส่ง/เที่ยวไม่ตรงรอบ ${fmtN(KEEP.odd.length)} บิล (ใช้ทะเบียนตามเลขบิล)</span>` : '');
   $('routeNote').innerHTML = `บิล BK (ช่องทางส่ง) วันนี้ <b>${fmtN(ROUTE_BILLS.length)}</b> ใบ · <b>${fmtN(storeN)}</b> ร้าน` +
     (waitN ? ` (ยังไม่จ่ายรถ <b style="color:var(--warning)">${fmtN(waitN)}</b> บิล — ยังไม่เข้าเช็คตามทีม)` : ' (จ่ายรถครบ)') + ' · ' +
     (vehState === 'ok'  ? `ทะเบียนรถคลัง ${WAREHOUSE} <b>${fmtN(VEHICLES.length)}</b> คัน`
      : vehState === 'err' ? `<b class="txt-danger">โหลดทะเบียนรถไม่ได้</b>
          <button class="btn btn-outline btn-sm" onclick="loadVehicles()">ลองใหม่</button>`
-     : 'กำลังโหลดทะเบียนรถ…') + `<br>${sync}`;
+     : 'กำลังโหลดทะเบียนรถ…') + keep + `<br>${sync}`;
 
   const q = $('routeSearch').value.trim().toLowerCase();
   const list = ROUTE_BILLS.filter(b => !q ||
@@ -6768,7 +6832,9 @@ function renderRoute() {
     </div>`;
   const row = b => {
     const e = routeEntry(b.code, b.round), plate = (e || {}).plate || '';
-    const tip = e && e.by ? `จ่ายโดย ${e.by} ${e.at}${e.pending ? ' · ยังไม่ถึงชีต' : ''}` : 'แตะเพื่อจ่ายรถ';
+    const tip = e && e.keep ? `จาก Keepdata · ส่ง ${thaiDate(e.ship)} เที่ยว ${e.trip}${e.rnd && e.rnd !== b.round ? ' (ไม่ตรงรอบของบิล)' : ''}` +
+                              `${e.driver ? ' · คนขับ ' + e.driver : ''}${e.by ? ' · ' + e.by.replace(/^Keepdata · /, 'บันทึกโดย ') : ''}${e.at ? ' ' + e.at : ''}`
+      : e && e.by ? `จ่ายโดย ${e.by} ${e.at}${e.pending ? ' · ยังไม่ถึงชีต' : ''}` : 'แตะเพื่อจ่ายรถ';
     // ปุ่มดรอปดาวน์แบบแอป (BUILD 80 · ผู้ใช้สั่ง 16/10 "ปรับดรอปดาวน์หน้าจัดเที่ยวส่งให้ดูทันสมัยขึ้น") — เดิม <select>
     return `<div class="rt-row">
       <span class="rt-store" title="${esc(b.name)}">${esc(b.name)}</span>
@@ -6793,6 +6859,7 @@ function renderRoute() {
 
 /** จ่ายรถ (BUILD 80) — รายการทะเบียนคลังนี้ + ประเภท/รุ่นรถ + คันนี้มีกี่ร้านแล้วในเที่ยวนี้ · บนสุด "ไม่จ่ายรถ" */
 function vehPick(btn, code, rnd) {
+  if (keepMap()[code + '#' + rnd]) { toast('ทะเบียนนี้มาจาก Keepdata (ไฟล์จัดรถส่งสินค้า) — เปลี่ยนรถที่ไฟล์นั้น', 'warning'); return; }
   const cur = (routeEntry(code, rnd) || {}).plate || '';
   const b0 = ROUTE_BILLS.find(b => b.code === code && b.round === rnd) || {};
   const used = {};
