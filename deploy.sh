@@ -52,8 +52,6 @@ APPS=(
   rattana-quote.html
   rattana-quote-brief.html
   rattana-carcheck-brief.html
-  rattana-carcheck-brief.mp4
-  rattana-quote-guide.mp4
   rattana-quote-easy-preview.html
   rattana-quote-qr-poster.html
   rattana-carcheck-brief-poster.jpg
