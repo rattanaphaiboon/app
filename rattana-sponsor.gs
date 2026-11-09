@@ -1,4 +1,4 @@
-// Rattana ขอสนับสนุน — หลังบ้าน (Google Apps Script) v1.5
+// Rattana ขอสนับสนุน — หลังบ้าน (Google Apps Script) v1.6
 // เก็บแบบตอบกลับการสนับสนุนจากเวนเดอร์ / ซัพพลายเออร์ ลง Google Sheet (เปลี่ยนหัวข้อกิจกรรมได้จากหน้า HR)
 //
 // ══════════════ วิธีติดตั้ง (ทำครั้งเดียว) ══════════════
@@ -15,7 +15,7 @@
 //    HR_PIN        = รหัสเข้าหน้าสรุปของ HR (ไม่ตั้ง = ใช้ค่าเริ่มต้นด้านล่าง)
 //    NOTIFY_EMAILS = อีเมล HR คั่นด้วย , — ได้อีเมลแจ้งทุกครั้งที่มีเวนเดอร์ตอบกลับ (เว้นว่าง = ไม่ส่ง)
 
-var VERSION = '1.5';
+var VERSION = '1.6';
 var SHEET_ID = '16fWBSS1ZxzuRhawl7DWaZDl1RDD6TV6Dl6SMmSrA_9E'; // งบกินเลี้ยงปีใหม่
 var TAB = 'APPของบ';
 var DEFAULT_PIN = '2570';
@@ -68,7 +68,10 @@ function cfg_() {
   var p = props_(), T = topics_(), today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
   var pick = null, status = 'none';
   var open = T.filter(function (t) { return (!t.start || t.start <= today) && (!t.end || today <= t.end); });
-  if (open.length) { pick = open.sort(function (a, b) { return (b.start || '').localeCompare(a.start || ''); })[0]; status = 'open'; }
+  // กิจกรรมที่เปิดรับ เรียง "มีก่อน" ขึ้นก่อน (วันจัดงาน → วันจบฟอร์ม) — ตัวแรก = ตัวเด่นบนหน้าเวนเดอร์
+  var key = function (t) { return t.eventDate || t.end || '9999'; };
+  open.sort(function (a, b) { return key(a).localeCompare(key(b)); });
+  if (open.length) { pick = open[0]; status = 'open'; }
   else {
     var soon = T.filter(function (t) { return t.start > today; }).sort(function (a, b) { return a.start.localeCompare(b.start); });
     var past = T.filter(function (t) { return t.end && t.end < today; }).sort(function (a, b) { return b.end.localeCompare(a.end); });
@@ -79,7 +82,9 @@ function cfg_() {
     intro: pick.intro || DEFAULT_INTRO, status: status, today: today,
     letterName: p.letterName, letterUrl: p.letterUrl, letterType: p.letterType,
     docNo: p.docNo, docSubject: p.docSubject, docDate: p.docDate,
-    topics: T, topicTab: TOPIC_TAB };
+    topics: T, topicTab: TOPIC_TAB,
+    open: open.map(function (t) { return { event: t.event, start: t.start, end: t.end, eventDate: t.eventDate, intro: t.intro }; }),
+    upcoming: T.filter(function (t) { return t.start > today; }).map(function (t) { return { event: t.event, start: t.start, end: t.end, eventDate: t.eventDate }; }) };
 }
 function saveCfg_(c) {
   var p = props_(); p.company = s_((c || {}).company, 200) || DEFAULT_COMPANY; putProps_(p);
@@ -215,7 +220,10 @@ function submit_(d) {
   gifts.forEach(function (g) { gQty += g.qty; gVal += g.qty * g.val; });
   var gTxt = gifts.map(function (g) { return g.name + ' ' + g.qty + ' ' + g.unit; }).join(' / ');
   var deliv = dec === 'yes' ? (DELIV[d.deliv] ? d.deliv : '') : '';
-  var ev = cur.event;
+  // กิจกรรมที่เวนเดอร์เลือก: ต้องเป็นกิจกรรมที่เปิดรับอยู่ หรือ "อื่น ๆ: …" ที่พิมพ์เอง
+  var want = s_(d.topic, 200), ev = cur.event;
+  if (want && cur.open.some(function (t) { return t.event === want; })) ev = want;
+  else if (/^อื่น ๆ: .{2,}/.test(want)) ev = want;
   var files = [];
   (d.files || []).slice(0, 5).forEach(function (f) { if (f && f.data) files.push(saveFile_(f, co + ' - ')); });
 
