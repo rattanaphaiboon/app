@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana RPB Invoice v1.8</title>
+<title>Rattana RPB Invoice v1.9</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
@@ -168,6 +168,8 @@ body.dark .pf-tag{background:rgba(139,92,246,.22);color:#c4b5fd}
 
 /* ใบกำกับ — การ์ดกระชับ (v1.6) */
 .src-note{font-size:11px;color:var(--muted);margin:2px 2px 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.td-date{width:100%;height:42px;padding:0 12px;border-radius:21px;border:1.5px solid var(--border);background:var(--card-bg);color:var(--text);font-size:15px;font-weight:600;margin-bottom:8px;outline:none}
+.td-date:focus{border-color:var(--gold)}
 .td-day{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;font-weight:700;color:var(--muted);margin:14px 2px 6px;padding-bottom:4px;border-bottom:1px solid var(--border)}
 .td-grid{display:grid;grid-template-columns:1fr;gap:8px}
 @media(min-width:760px){.td-grid{grid-template-columns:1fr 1fr}}
@@ -419,6 +421,7 @@ body.dark .cfg-warn{background:#3a2e15;color:#e8c86a;border-color:#5a4a20}
         <button class="btn btn-gold btn-block" id="pdfSubmitBtn" onclick="submitPdf()" style="font-size:15px;min-height:50px">ส่ง PDF</button>
       </div>
       <div class="filterbar">
+        <select class="td-date" id="taxDateSel" onchange="onTaxDate(this.value)"><option value="">วันล่าสุด</option></select>
         <div class="search-wrap">
           <span class="search-ic">🔍</span>
           <input type="text" id="taxSearch" placeholder="ค้นหา ซัพ / เลขเอกสาร / PO / IB" oninput="onTaxSearch(this.value)" autocomplete="off">
@@ -426,7 +429,7 @@ body.dark .cfg-warn{background:#3a2e15;color:#e8c86a;border-color:#5a4a20}
         </div>
         <div class="chips status" id="taxChips"></div>
       </div>
-      <div class="src-note">จาก Receive-IB › รายละเอียดวันล่าสุด · จัดกลุ่มตามวันที่ IB</div>
+      <div class="src-note" id="taxSrcNote">จาก Receive-IB › รายละเอียดวันล่าสุด</div>
       <div id="taxList"></div>
       <details class="td-items" style="margin:6px 0 16px"><summary>PDF ที่ส่งแล้ว <span id="pdfCount"></span></summary>
         <div id="pdfList" style="margin-top:8px"></div>
@@ -507,7 +510,7 @@ body.dark .cfg-warn{background:#3a2e15;color:#e8c86a;border-color:#5a4a20}
 
 <script>
 /* ============ CONFIG ============ */
-const APP_VERSION = '1.8';
+const APP_VERSION = '1.9';
 // Web App URL (/exec) ที่ deploy จาก Code.gs
 const API_URL = 'https://script.google.com/macros/s/AKfycby7DXIrvUP498Z--qkDzhFxii6VrwqbF8JjIHMLpGd2G1NyocxxGKZh0e6UwX8ZUbVooQ/exec';
 const AUTH_CONFIG = {
@@ -561,10 +564,11 @@ function safeSet(k,v){
   return false;
 }
 try{localStorage.removeItem('rpb_taxdocs');}catch(e){}   // แคชใบกำกับก้อนใหญ่ (v1.5–1.6) — เลิกเก็บแล้ว
-async function apiGet(action,timeoutMs){
+async function apiGet(action,timeoutMs,params){
   const ctl=typeof AbortController!=='undefined'?new AbortController():null;
   const t=ctl?setTimeout(()=>ctl.abort(),timeoutMs||60000):null;
-  try{const res=await fetch(`${API_URL}?action=${encodeURIComponent(action)}`,ctl?{signal:ctl.signal}:{});return await res.json();}
+  const q=Object.entries(params||{}).filter(([,v])=>v!==''&&v!=null).map(([k,v])=>`&${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('');
+  try{const res=await fetch(`${API_URL}?action=${encodeURIComponent(action)}${q}`,ctl?{signal:ctl.signal}:{});return await res.json();}
   catch(e){return {ok:false,error:e&&e.name==='AbortError'?'หมดเวลารอ (เน็ตช้า)':String(e)};}
   finally{if(t)clearTimeout(t);}
 }
@@ -639,6 +643,7 @@ function initApp(){
   loadCompanies();
   loadBills(true);
   loadPdfs();
+  setTimeout(()=>loadTaxDocs(false),1500);   // v1.9 โหลดวันล่าสุดรอไว้ กดเข้าแท็บรับสินค้ารัตนแล้วขึ้นทันที
   if(!window._autoRefresh)window._autoRefresh=setInterval(()=>loadBills(false),60000);
 }
 
@@ -994,7 +999,7 @@ function renderPdfs(){
 }
 
 /* ============ ใบกำกับ (v1.6) ============ */
-let taxDocs=[], taxDocsLoaded=false, taxFilter='pending', taxQ='', tdKey='', tdMode='received', tdImages=[], taxShow=200;
+let taxDate='', taxDates=[], taxDayCache={}, taxDocs=[], taxDocsLoaded=false, taxFilter='pending', taxQ='', tdKey='', tdMode='received', tdImages=[], taxShow=200;
 function togglePdfForm(force){
   const card=document.getElementById('pdfFormCard');
   const open=typeof force==='boolean'?force:card.style.display==='none';
@@ -1002,20 +1007,44 @@ function togglePdfForm(force){
   document.getElementById('pdfToggleBtn').textContent=open?'ปิดฟอร์มส่ง PDF':'+ ส่ง PDF';
   if(open)card.scrollIntoView({behavior:'smooth',block:'start'});
 }
+// v1.9 — โหลดทีละวัน (default วันล่าสุด) · จำผลรายวันในหน่วยความจำ 3 นาที · force = ให้หลังบ้านอ่าน Receive-IB ใหม่
 async function loadTaxDocs(force){
   if(!cfgReady())return;
-  if(window._taxLoading)return;
-  if(!force&&taxDocsLoaded&&Date.now()-(window._taxLoadedAt||0)<180000)return;
-  window._taxLoading=true;
-  if(!taxDocs.length)document.getElementById('taxList').innerHTML='<div class="empty"><div>กำลังโหลดรายการรับสินค้า... (ประมาณ 5–10 วินาที)</div></div>';
-  const r=await apiGet('pendingTax',60000);
-  window._taxLoading=false;
+  const want=taxDate;
+  const hit=taxDayCache[want||'__latest'];
+  if(!force&&hit&&Date.now()-hit.at<180000){taxDocs=hit.docs;taxDocsLoaded=true;renderTaxDates();renderTaxDocs();return;}
+  if(window._taxLoading===want+'|'+!!force)return;
+  window._taxLoading=want+'|'+!!force;
+  document.getElementById('taxList').innerHTML=`<div class="empty"><div>กำลังโหลด${want&&want!=='all'?' วันที่ '+esc(want):want==='all'?'ทุกวัน':'วันล่าสุด'}...</div></div>`;
+  const r=await apiGet('pendingTax',60000,{date:want,fresh:force?'1':''});
+  if(window._taxLoading===want+'|'+!!force)window._taxLoading='';
+  if(taxDate!==want)return;                         // ผู้ใช้เปลี่ยนวันไปแล้ว ทิ้งผลเก่า
   if(r&&r.ok&&Array.isArray(r.docs)){
-    taxDocs=r.docs;taxDocsLoaded=true;window._taxLoadedAt=Date.now();
+    if(Array.isArray(r.dates))taxDates=r.dates;
+    const at=Date.now();
+    taxDayCache[r.date||want]={docs:r.docs,at};
+    if(!want)taxDayCache.__latest={docs:r.docs,at,date:r.date};
+    taxDocs=r.docs;taxDocsLoaded=true;
+    if(r.built_at)document.getElementById('taxSrcNote').textContent='จาก Receive-IB › รายละเอียดวันล่าสุด · อ่านล่าสุด '+r.built_at;
+    renderTaxDates(r.date);
     renderTaxDocs();
-  }else if(!taxDocs.length){
+  }else{
     document.getElementById('taxList').innerHTML=`<div class="empty"><div>โหลดไม่สำเร็จ${r&&r.error?': '+esc(r.error):''}</div><button class="btn btn-outline" style="margin-top:12px" onclick="loadTaxDocs(true)">ลองใหม่</button></div>`;
   }
+}
+function renderTaxDates(shown){
+  const sel=document.getElementById('taxDateSel');
+  const opt=(v,l)=>`<option value="${esc(v)}">${esc(l)}</option>`;
+  const latest=(taxDates.find(d=>d.date!=='-')||{}).date||'';
+  sel.innerHTML=taxDates.map(d=>opt(d.date===latest?'':d.date,
+      `${d.date==='-'?'ไม่ระบุวันที่':d.date}${d.date===latest?' (ล่าสุด)':''} · รอ ${d.pending} / ${d.n} ใบ`)).join('')
+    +opt('all','ทุกวัน (โหลดนานกว่า)');
+  sel.value=taxDate===''||taxDate===latest?'':taxDate;
+}
+function onTaxDate(v){taxDate=v;taxShow=200;loadTaxDocs(false);}
+function bumpTaxPending(d,delta){
+  const k=d.ib_date||d.doc_date||'-';const x=taxDates.find(t=>t.date===k);
+  if(x){x.pending=Math.max(0,x.pending+delta);renderTaxDates();}
 }
 // pending = รอใบกำกับ · received = กดได้รับแล้ว · noinv = กดไม่มีใบกำกับ · has = ต้นทางมีใบกำกับแล้ว
 function tdStage(d){
@@ -1126,6 +1155,7 @@ async function confirmTd(){
     if(r&&r.ok){
       d.received='1';d.mark=r.mark||tdMode;d.received_by=r.received_by||currentUser.name;d.received_at=r.received_at||nowStr();
       d.image_url=r.image_url||'';d.note=r.note||'';
+      if(!r.already)bumpTaxPending(d,-1);
       renderTaxDocs();closeTdModal();
       showToast(r.already?'มีคนกดไว้แล้ว ('+(r.received_by||'')+')':'บันทึกแล้ว ✓',r.already?'info':'success');
     }else{showToast('บันทึกไม่สำเร็จ: '+((r&&r.error)||'ลองใหม่'),'error');}
@@ -1139,6 +1169,7 @@ async function undoTd(key){
   d.received='';d.mark='';d.received_by='';d.received_at='';d.image_url='';d.note='';renderTaxDocs();
   const r=await apiPost({action:'unmarkTaxDoc',key:key,by_name:currentUser.name});
   if(!r||!r.ok){Object.assign(d,prev);renderTaxDocs();showToast('ยกเลิกไม่สำเร็จ ลองใหม่','error');return;}
+  if(String(d.has_invoice||'')!=='1')bumpTaxPending(d,+1);
   showToast('ยกเลิกแล้ว','success');
 }
 document.getElementById('tdModal').addEventListener('click',e=>{if(e.target.id==='tdModal')closeTdModal();});
