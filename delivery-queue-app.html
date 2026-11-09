@@ -2386,7 +2386,7 @@ body.dark .dqc-who .o.on{background:#33290F}
   <div class="topnav-inner">
     <div class="logo-box">🚛</div>
     <div class="logo-text">
-      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.581</span></div>
+      <div class="logo-title">จัดคิวรถส่งสินค้า <span class="app-version">v9.582</span></div>
       <div class="logo-sub"></div>
     </div>
     <div class="nav-tabs">
@@ -11778,7 +11778,7 @@ function _lineBacklogAutoSet(){
   const cw=(typeof currentWarehouse!=='undefined')?currentWarehouse:'';
   const carry=_lineBacklogCarry().set;
   (bills||[]).forEach(b=>{
-    if(!(_isDIToday(b.date)||carry.has(b.ref))||assigned.has(b.ref))return;
+    if(!(_isDIToday(b.date)||carry.has(b.ref))||(assigned.has(b.ref)&&!_jrW4Back(b.ref)))return;   // v9.582: +_jrW4Back
     // v9.572: เลิกตัดด้วย Customer.WH (v9.43) — คลังยึด WL_CODE ในข้อมูลใบ (พูลบิลคัดตาม ORDER_WL แล้ว) แบบเดียวกับ Check Out
     //   user: "คลังดูจากข้อมูลในไฟล์ checkout" · "ดึงมาจัดรถใช้คลังตามข้อมูล ไม่ใช่จากใน Customer"
     //   เคส 7/11: BV17691107/001,004,005 WL_CODE=W1 แต่ Customer.WH=W3 → พรีปลีกเอาออกแล้วหายจากบิลค้าง (W1 ทั้งหมด 344/1594 ใบที่ WH ไม่ตรง)
@@ -19318,10 +19318,11 @@ function _jrCarryScanRaw(){
     if(!pastSet.has(b.date))return;
     const ref=norm(b.ref); if(!/^(BK|BV)/.test(ref))return;
     const inQ=!!(typeof queue!=='undefined'&&queue&&queue[b.ref]);   // จัดไว้ในรอบนี้แล้ว = คงไว้เสมอ
-    if(done.has(ref)&&!inQ)return;
+    const _lapsed=_jrW4Lapsed(b.ref);   // v9.582
+    if(done.has(ref)&&!inQ&&!_lapsed)return;
     const docs=[...(_bkDocMap[ref]||[])];
     let why='';
-    if(!docs.length)why='ยังไม่เปิดบิล';
+    if(!docs.length)why=_lapsed?'จัดรถแล้วแต่ยังไม่พบบิล':'ยังไม่เปิดบิล';
     else if(docs.some(d=>_payDocSet.has(d)))return;                      // ส่งแล้ว มีในไฟล์ D-man
     else if(docs.some(d=>_payNotDeliv.has(d)))why='ทำเครื่องหมายไม่ได้ส่ง';
     else if(_jrCarryAge(b.date)>=CARRY_SETTLE_DAYS
@@ -19344,9 +19345,35 @@ function _mgInRound(b){ return (_mgMatchDay(b.days)&&_mgIsToday({diDate:b.date})
 // ══ v9.581: คลัง W4 — ใบที่บันทึกขึ้นรถแล้ว ตัดออกจากลิสต์รอจัด + กล่องบิลค้าง เหลือแค่ใบที่ยังไม่ได้จัด ══
 //   user: "W4 ในวันที่เอกสารเดียวกันถ้ามีจัดรถไปแล้วให้ตัดออก ให้เหลือแค่ใบที่ยังไม่ได้จัด" · เลือกเอง: ทั้งสองที่ · เฉพาะ W4
 //   จัดแล้ว = มีแถวในชีท Keepdata พร้อมทะเบียน (_prSendRefs) · D-MAN ติดธง "ไม่ได้ส่ง" = ต้องจัดใหม่ ไม่ตัด
+// v9.582: จัดรถไปแล้ว แต่เลยวันส่งแล้วยังไม่มีบิล (DS_DC) อ้างถึงใบจองนี้ = กลับมาเป็นค้างจัด
+//   user: "แต่ถ้าวันนี้มีจัดรถไป แล้วพรุ่งนี้ยังตรวจไม่เจอบิล ที่อ้างถึงใบที่จัด ให้เอามาเป็นค้างจัดได้เลย"
+//   ★ _bkDocMap ว่างทั้งก้อน = โหลด DS_DC ไม่สำเร็จ (เคยเจอ timeout) → ตัดสินไม่ได้ ถือว่ายังจัดแล้วอยู่ ไม่งั้นทั้งแผนเด้งกลับ
+let _jrW4PlanC={arr:null,n:-1,map:new Map()};
+function _jrW4Plan(ref){   // แผนล่าสุดของใบนี้ (_prSendRefs เก็บแถวแรก = วันเก่าสุด)
+  const kd=(typeof keepData!=='undefined'&&keepData)||[];
+  if(_jrW4PlanC.arr!==kd||_jrW4PlanC.n!==kd.length){ const m=new Map();
+    kd.forEach(r=>{ const k=String(r.ref||'').trim(); if(!k||!r.plate||r.status==='เอาออก')return; const ms=parseDateTH(r.deliveryDate), o=m.get(k);
+      if(!o||ms>=o.ms)m.set(k,{ms,plate:r.plate,trip:r.trip||1}); });
+    _jrW4PlanC={arr:kd,n:kd.length,map:m}; }
+  return _jrW4PlanC.map.get(String(ref||'').trim())||null;
+}
+function _jrW4Lapsed(ref){
+  if(currentWarehouse!=='W4'||!Object.keys(_bkDocMap||{}).length)return false;
+  const k=String(ref||'').replace(/\s+/g,'').toUpperCase(); if(!/^(BK|BV)/.test(k))return false;
+  const x=_jrW4Plan(ref); if(!x||!x.ms)return false;
+  const t=new Date(); t.setHours(0,0,0,0);
+  if(x.ms>=t.getTime())return false;
+  const docs=_bkDocMap[k]; return !(docs&&docs.size);
+}
+function _jrW4Back(ref){   // กลับกล่องบิลค้างได้ไหม: คิวในเครื่องว่าง หรือเป็นแค่สำเนาแผนเดิมคันเดิม (ลากขึ้นคันอื่นแล้ว = กำลังจัดใหม่)
+  if(!_jrW4Lapsed(ref))return false;
+  const q=queue[ref]; if(!q)return true;
+  const x=_jrW4Plan(ref); return !!x&&String(q)===String(x.plate)&&(tripMap[ref]||1)===x.trip;
+}
 function _jrW4Done(ref){
   if(currentWarehouse!=='W4')return false;
   const r=String(ref||'').trim(); if(!r||!_prSendRefs().has(r))return false;
+  if(_jrW4Lapsed(r))return false;   // v9.582
   const docs=(_bkDocMap||{})[r.replace(/\s+/g,'').toUpperCase()];
   return !(docs&&[...docs].some(d=>_payNotDeliv.has(d)));
 }
@@ -21195,7 +21222,7 @@ function _jrDoneInfo(u){
   for(const r of u.bills){ const docs=[...((_bkDocMap||{})[N(r)]||[])], x=sm.get(String(r).trim());
     if(docs.some(d=>_payNotDeliv.has(d)))fail=fail||{doc:docs.find(d=>_payNotDeliv.has(d)),plate:x&&x.plate||'',dd:x&&x.dd||''};
     else if(docs.some(d=>_payDocSet.has(d)))sent=sent||{doc:docs.find(d=>_payDocSet.has(d)),plate:x&&x.plate||'',dd:x&&x.dd||''};
-    else if(x&&x.plate&&_jrDk(x.dd)!==cur)plan=plan||{plate:x.plate,trip:x.trip||1,dd:x.dd||''};
+    else if(x&&x.plate&&_jrDk(x.dd)!==cur&&!_jrW4Lapsed(r))plan=plan||{plate:x.plate,trip:x.trip||1,dd:x.dd||''};   // v9.582: เลยวันส่งแล้วไม่มีบิล = จัดใหม่ได้
     else { const pp=_prPastRefs().get(String(r).trim()), dc=docs.find(d=>/^DC/.test(d));   // v9.559: user "ดูเลขที่เอกสารด้วย"
       if(pp&&dc)billed=billed||{doc:dc,plate:pp.plate,car:pp.car,book:pp.book,dd:pp.dd}; } }
   if(fail)return Object.assign({kind:'fail'},fail);
