@@ -2577,7 +2577,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-09 · 89';
+const BUILD = '2026-11-09 · 90';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -2622,6 +2622,9 @@ const SM_REFS = new Set();
 const HR_RE = /หน้า\s*ร้าน/;
 const HR_REFS = new Set();
 const HR_RND = 9;
+/* งานส่งยึดตามจัดรถ (BUILD 90 · ผู้ใช้สั่ง 09/11 "งานส่งให้ยึดตามจัดรถ") — เลขบิล → รอบตามช่วงส่งใน Keepdata
+   (ส่งวันนี้ เที่ยว 2 = รอบ 1 · ส่งวันถัดไป เที่ยว 1 = รอบ 2) · ใช้เฉพาะบิลช่องทางส่ง (BK) ใน rndOf · เติมใน loadKeep */
+const KEEP_RND = new Map();
 const smBranch = remark => { const m = String(remark || '').match(/สาขา\s*([^·\n]+?)\s*·/) || String(remark || '').match(/สาขา\s*([^·\n]+?)\s*$/m);
                               return m ? cln(m[1]) : ''; };
 function tagOrders() {
@@ -2681,9 +2684,9 @@ function custOf(line) {
   if (hd === 'MT')    return { key:'m|'+line.storeCode, name:'มาร์ท', kind:'mart', code:line.storeCode, rnd:roundOf(line.time) };   // โอน W4 → C4
   if (SM_REFS.has(line.ref))                                       // SM: สาขา = ร้าน (จ่ายรถรายสาขา)
                       return { key:'s|'+line.storeCode, name:'SM ' + (line.branch || line.ref), kind:'sm',
-                               code:line.storeCode, rnd:roundOf(line.time) };
+                               code:line.storeCode, rnd:rndOf(line) };
   if (hd === 'BK')    return { key:'s|'+line.storeCode, name:line.store || '(ไม่มีชื่อร้าน)', kind:'store',
-                               code:line.storeCode, rnd:roundOf(line.time) };
+                               code:line.storeCode, rnd:rndOf(line) };
   if (PRE_HEAD[hd])   return { key:'h|'+hd,  name:PRE_HEAD[hd], kind:'ch' };
   if (PRE_BOOK[bk])   return { key:'p|'+bk,  name:PRE_BOOK[bk], kind:'code' };
   return { key:'b|'+bk, name:bk, kind:'unknown' };
@@ -2736,8 +2739,10 @@ function custBreak(r) {
   }).join('') + `</div>`;
 }
 const roundOf = time => (ROUNDS.find(r => time >= r.from && time < r.to) || ROUNDS[ROUNDS.length-1]).n;
-/** รอบของบรรทัดใบจอง — หน้าร้านไม่แยกรอบ = รอบเทียม HR_RND (BUILD 87) · ที่เหลือตามเวลาบิล */
-const rndOf    = o => HR_REFS.has(o.ref) ? HR_RND : roundOf(o.time);
+/** รอบของบรรทัดใบจอง — หน้าร้านไม่แยกรอบ = รอบเทียม HR_RND (BUILD 87)
+ *  บิลส่งที่จัดรถใน Keepdata แล้ว = รอบตามช่วงส่ง (BUILD 90) · ที่เหลือตามเวลาบิล */
+const rndOf    = o => HR_REFS.has(o.ref) ? HR_RND
+                    : KEEP_RND.has(o.ref) && chanOf(o.ref).key === 'BK' ? KEEP_RND.get(o.ref) : roundOf(o.time);
 const rndLabel = n => n === HR_RND ? 'หน้าร้าน' : (ROUNDS.find(r => r.n === n) || {}).label || '';
 const rndTxt   = n => n === HR_RND ? 'หน้าร้าน' : `รอบ ${n}`;                // ช่อง "ยืนยันแล้ว" ของชีต กำลังเช็ค
 const rndParse = s => HR_RE.test(String(s || '')) ? HR_RND : parseInt(s, 10) || 0;   // อ่านกลับจาก _log
@@ -2854,7 +2859,7 @@ function buildJobs() {
   const useTeam = GROUP_BY === 'team' && PRODUCTS.some(p => teamKeyOf(p));
   for (const o of ORDERS) {
     if (!chanOn(chanOf(o.ref).key)) continue;        // กรองตามปุ่มช่องทางบนหน้าเลือกงาน
-    if (chanOf(o.ref).key === 'BK' && !hasPlate(o.storeCode, roundOf(o.time))) continue;   // เที่ยวนี้ยังไม่จ่ายรถ ไม่หัก ไม่แบ่ง
+    if (chanOf(o.ref).key === 'BK' && !hasPlate(o.storeCode, rndOf(o))) continue;   // เที่ยวนี้ยังไม่จ่ายรถ ไม่หัก ไม่แบ่ง
     const hit = byCode[String(o.code)];
     if (!hit) continue;
     const { p, u } = hit;
@@ -3662,8 +3667,8 @@ function returnsList() {
   const teamOfP = pid => (jobs.find(j => j.skus[pid]) || {}).team || { code:'?', name:'' };
   const where = l => {
     const c = custOf(l);
-    if (c.kind === 'store') { const v = vehicleOf(l.storeCode, roundOf(l.time));
-      return { at: v ? '🚚 ' + fmtPlate(v) : '🚚 ยังไม่จ่ายรถ', plate:v || '', rnd:roundOf(l.time) }; }
+    if (c.kind === 'store') { const v = vehicleOf(l.storeCode, rndOf(l));
+      return { at: v ? '🚚 ' + fmtPlate(v) : '🚚 ยังไม่จ่ายรถ', plate:v || '', rnd:rndOf(l) }; }
     if (c.kind === 'hr') return { at:'หน้าร้าน', plate:'', rnd:HR_RND };
     return { at:c.name, plate:'', rnd:roundOf(l.time) };                // PMW402 / ออนไลน์ / เลขเล่ม
   };
@@ -6609,7 +6614,17 @@ async function loadKeep() {
     });
     const sig = JSON.stringify([key, next, all.map(e => [e.ref, e.code, e.ship, e.trip, e.plate])]), changed = sig !== KEEP.sig;
     KEEP = { key, ref, store, next, n:all.length, odd, err:'', at:Date.now(), ver:KEEP.ver + (changed ? 1 : 0), sig };
-    if (changed) refreshRouteViews(true);
+    if (changed) {
+      /* งานส่งยึดตามจัดรถ (BUILD 90): รอบของบิลส่งเปลี่ยน → สร้างงาน/ร้าน/รายการบิลจัดรถใหม่ทั้งชุด */
+      const was = JSON.stringify([...KEEP_RND]);
+      KEEP_RND.clear();
+      Object.values(ref).forEach(e => { if (e.rnd) KEEP_RND.set(e.ref, e.rnd); });
+      if (JSON.stringify([...KEEP_RND]) !== was) {
+        tagOrders(); ROUTE_BILLS = buildRouteBills(); keepCache = null;
+        rebuildStores(); CHANS = buildChans(); promoVer++;
+      }
+      refreshRouteViews(true);
+    }
   } catch(e) { KEEP.err = String(e.message || e).slice(0, 90); console.warn('loadKeep', e); }
   finally { keepBusy = false; refreshRouteViews(false); }
 }
@@ -6649,9 +6664,9 @@ function buildRouteBills() {
     const qty = o.isFree ? (o.free || 0) : (o.qty || 0);
     if (qty <= 0) continue;
     // บิลหนึ่งอยู่รอบเดียว (เช็คย้อนหลัง 293 บิลไม่มีบิลคร่อมรอบ) — กันไว้ใช้รอบแรกสุด
-    const b = m[o.ref] ||= { ref:o.ref, code:o.storeCode, name:o.store, slmn:o.slmn, amt:0, round:roundOf(o.time) };
+    const b = m[o.ref] ||= { ref:o.ref, code:o.storeCode, name:o.store, slmn:o.slmn, amt:0, round:rndOf(o) };
     b.amt += o.amt || 0;
-    b.round = Math.min(b.round, roundOf(o.time));
+    b.round = Math.min(b.round, rndOf(o));                // รอบตามจัดรถ Keepdata ก่อน (BUILD 90)
   }
   return Object.values(m).sort((a,b) => a.ref.localeCompare(b.ref, 'th', { numeric:true }));
 }
@@ -6941,7 +6956,7 @@ function shipGroups(rnd) {
   const g = {}, order = {}, refStore = {};
   ROUTE_BILLS.forEach((b, i) => { order[b.ref] = i; });
   ORDERS.forEach((o, li) => {
-    if (roundOf(o.time) !== rnd) return;
+    if (rndOf(o) !== rnd) return;
     const h = byCode[String(o.code)]; if (!h) return;
     const qty = o.isFree ? (o.free || 0) : (o.qty || 0); if (!(qty > 0)) return;
     const ck = chanOf(o.ref).key;
