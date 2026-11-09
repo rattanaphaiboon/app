@@ -1,4 +1,4 @@
-// Rattana ขอสนับสนุน — หลังบ้าน (Google Apps Script) v1.4
+// Rattana ขอสนับสนุน — หลังบ้าน (Google Apps Script) v1.5
 // เก็บแบบตอบกลับการสนับสนุนจากเวนเดอร์ / ซัพพลายเออร์ ลง Google Sheet (เปลี่ยนหัวข้อกิจกรรมได้จากหน้า HR)
 //
 // ══════════════ วิธีติดตั้ง (ทำครั้งเดียว) ══════════════
@@ -15,7 +15,7 @@
 //    HR_PIN        = รหัสเข้าหน้าสรุปของ HR (ไม่ตั้ง = ใช้ค่าเริ่มต้นด้านล่าง)
 //    NOTIFY_EMAILS = อีเมล HR คั่นด้วย , — ได้อีเมลแจ้งทุกครั้งที่มีเวนเดอร์ตอบกลับ (เว้นว่าง = ไม่ส่ง)
 
-var VERSION = '1.4';
+var VERSION = '1.5';
 var SHEET_ID = '16fWBSS1ZxzuRhawl7DWaZDl1RDD6TV6Dl6SMmSrA_9E'; // งบกินเลี้ยงปีใหม่
 var TAB = 'APPของบ';
 var DEFAULT_PIN = '2570';
@@ -38,7 +38,8 @@ var DEFAULT_INTRO = 'ขอขอบพระคุณที่ให้คว�
 // ชื่อบริษัท + หนังสือขอความอนุเคราะห์ เก็บใน Script Properties (SP_CFG) — แก้จากหน้า HR
 function props_() {
   var c = {}; try { c = JSON.parse(prop_('SP_CFG') || '{}'); } catch (e) {}
-  return { company: c.company || DEFAULT_COMPANY, letterName: c.letterName || '', letterUrl: c.letterUrl || '', letterType: c.letterType || '' };
+  return { company: c.company || DEFAULT_COMPANY, letterName: c.letterName || '', letterUrl: c.letterUrl || '', letterType: c.letterType || '',
+    docNo: c.docNo || '', docSubject: c.docSubject || '', docDate: c.docDate || '' };
 }
 function putProps_(p) { PropertiesService.getScriptProperties().setProperty('SP_CFG', JSON.stringify(p)); }
 function ymd_(v) {
@@ -77,6 +78,7 @@ function cfg_() {
   return { company: p.company, event: pick.event, start: pick.start, end: pick.end, eventDate: pick.eventDate,
     intro: pick.intro || DEFAULT_INTRO, status: status, today: today,
     letterName: p.letterName, letterUrl: p.letterUrl, letterType: p.letterType,
+    docNo: p.docNo, docSubject: p.docSubject, docDate: p.docDate,
     topics: T, topicTab: TOPIC_TAB };
 }
 function saveCfg_(c) {
@@ -93,6 +95,40 @@ function setLetter_(file) {
 }
 
 // ───── ไฟล์แนบ → Google Drive โฟลเดอร์ "ไฟล์แนบ ขอสนับสนุน" (อยู่โฟลเดอร์เดียวกับชีต) ─────
+// ───── เชื่อมแอปออกหนังสือ (Rattana Letter): ชีต One Link Rattana แท็บ "APP รันเลขที่" ─────
+var LETTER_SHEET = '16iOUKOG2DY7rCDfxS-UFjEB9Ii2XS_lf3qVOl8Cdjj0';
+var LETTER_TAB = 'APP รันเลขที่';
+function letters_() {
+  var sh = SpreadsheetApp.openById(LETTER_SHEET).getSheetByName(LETTER_TAB);
+  if (!sh || sh.getLastRow() < 2) return [];
+  var v = sh.getRange(1, 1, sh.getLastRow(), sh.getLastColumn()).getDisplayValues();
+  var H = v[0].map(function (h) { return String(h).trim(); });
+  var ix = function (re) { for (var i = 0; i < H.length; i++) if (re.test(H[i])) return i; return -1; };
+  var iNo = ix(/^เลขที่/), iDate = ix(/^วันที่หนังสือ/), iCo = ix(/^บริษัท/), iSub = ix(/^เรื่อง/), iTo = ix(/^เรียน/),
+      iSt = ix(/^สถานะ/), iJs = ix(/ข้อมูลหนังสือ/), iBy = ix(/^ผู้ขอ$/);
+  var out = [];
+  for (var r = v.length - 1; r >= 1 && out.length < 300; r--) {
+    var row = v[r], no = iNo >= 0 ? row[iNo] : ''; if (!no) continue;
+    if (iSt >= 0 && /ยกเลิก/.test(row[iSt])) continue;
+    var data = null; try { data = JSON.parse(iJs >= 0 ? row[iJs] || 'null' : 'null'); } catch (e) {}
+    var to = [];
+    if (data && data.circ && data.toList) to = String(data.toList).split('\n');
+    else if (data && data.to) to = [data.to];
+    else if (iTo >= 0) to = [row[iTo]];
+    to = to.map(function (s) { return String(s).trim(); }).filter(String);
+    out.push({ no: no, date: iDate >= 0 ? row[iDate] : '', company: iCo >= 0 ? row[iCo] : '', subject: iSub >= 0 ? row[iSub] : '',
+      by: iBy >= 0 ? row[iBy] : '', to: to });
+  }
+  return out;
+}
+// ผูกเลขที่หนังสือกับฟอร์ม (เวนเดอร์เห็น "อ้างถึงหนังสือเลขที่ …") · doc=null = เลิกผูก
+function setDoc_(doc) {
+  var p = props_();
+  p.docNo = doc ? s_(doc.no, 60) : ''; p.docSubject = doc ? s_(doc.subject, 300) : ''; p.docDate = doc ? s_(doc.date, 60) : '';
+  putProps_(p);
+  return { ok: true, cfg: cfg_() };
+}
+
 var MAX_FILE = 10 * 1024 * 1024;
 function folder_() {
   var id = prop_('FOLDER_ID');
@@ -149,6 +185,8 @@ function doPost(e) {
     if (p.action === 'list') { checkPin_(p.pin); return json_({ ok: true, rows: list_(), cfg: cfg_() }); }
     if (p.action === 'saveConfig') { checkPin_(p.pin); return json_(saveCfg_(p.cfg)); }
     if (p.action === 'setLetter') { checkPin_(p.pin); return json_(setLetter_(p.file)); }
+    if (p.action === 'letters') { checkPin_(p.pin); return json_({ ok: true, items: letters_() }); }
+    if (p.action === 'setDoc') { checkPin_(p.pin); return json_(setDoc_(p.doc)); }
     if (p.action === 'setReceived') { checkPin_(p.pin); return json_(setReceived_(p.id, !!p.received)); }
     return json_({ ok: false, error: 'unknown action' });
   } catch (err) { return json_({ ok: false, error: String(err.message || err) }); }
@@ -197,7 +235,7 @@ function submit_(d) {
     row[C.DELIV - 1] = deliv ? DELIV[deliv] : ''; row[C.DOTHER - 1] = deliv === 'other' ? s_(d.delivOther, 200) : '';
     row[C.DDATE - 1] = dec === 'yes' && /^\d{4}-\d{2}-\d{2}$/.test(d.delivDate || '') ? d.delivDate : '';
     row[C.SNAME - 1] = sName; row[C.SPOS - 1] = s_(d.sPos, 120);
-    row[C.NOTE - 1] = dec === 'no' ? s_(d.note, 500) : ''; row[C.REF - 1] = s_(d.ref, 200);
+    row[C.NOTE - 1] = dec === 'no' ? s_(d.note, 500) : ''; row[C.REF - 1] = [s_(d.doc, 60) ? 'หนังสือ ' + s_(d.doc, 60) : '', s_(d.ref, 200)].filter(String).join(' · ');
     row[C.RCV - 1] = false; row[C.GJSON - 1] = JSON.stringify(gifts); row[C.EV - 1] = ev; row[C.FILES - 1] = files.map(function (f) { return f.name + ' ' + f.url; }).join('\n');
     sh.getRange(last + 1, 1, 1, N).setValues([row]);
     sh.getRange(last + 1, C.DDATE).setNumberFormat('@');
@@ -231,7 +269,7 @@ function list_() {
       id: r[0], ts: ts, company: r[C.CO - 1], decision: String(r[C.DEC - 1]).indexOf('ยินดี') === 0 ? 'yes' : 'no',
       money: n_(r[C.MONEY - 1]), gifts: g, other: r[C.OTHER - 1], cName: r[C.CNAME - 1], cPos: r[C.CPOS - 1],
       cTel: String(r[C.CTEL - 1]), deliv: inv[r[C.DELIV - 1]] || '', delivOther: r[C.DOTHER - 1], delivDate: String(dd || ''),
-      sName: r[C.SNAME - 1], sPos: r[C.SPOS - 1], note: r[C.NOTE - 1], received: r[C.RCV - 1] === true, event: r[C.EV - 1] || '', files: files_(r[C.FILES - 1])
+      sName: r[C.SNAME - 1], sPos: r[C.SPOS - 1], note: r[C.NOTE - 1], received: r[C.RCV - 1] === true, event: r[C.EV - 1] || '', ref: String(r[C.REF - 1] || ''), files: files_(r[C.FILES - 1])
     };
   });
 }
