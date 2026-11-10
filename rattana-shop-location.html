@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.40</title>
+<title>Rattana Shop Location v1.41</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -348,7 +348,7 @@ body.dark .ms-result .big{color:var(--gold-light)}
 
 <header>
   <button class="icon-btn" id="btnHome" title="แผนที่ทั้งหมด" onclick="goHome()" style="display:none">⌂</button>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.40 · 2026-11-10</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.41 · 2026-11-10</span></div>
   <div class="hdr-right">
     <span class="cur-map" id="curMapName"></span>
     <button class="icon-btn" id="btnShare" title="แชร์แผนที่นี้" onclick="openShare(openIds)" style="display:none">🔗</button>
@@ -1173,11 +1173,12 @@ function resetRouteColors(mapId) {
   touchMap(m.id); save(); renderAll();
 }
 async function newMap() {
+  if (ONLINE && session && srvRev === null) { showToast('กำลังโหลดข้อมูลออนไลน์ — รอสักครู่แล้วกดสร้างใหม่', 'warning'); return; }
   const name = clean(await ask('ชื่อแผนที่ใหม่', { value: `แผนที่ ${maps.length + 1}`, ok: 'สร้าง' }) || '');
   if (!name) return;
   const m = { id: 'm' + Date.now().toString(36), name, visible: true, sheet: newSheetCfg(), fSales: [], fRoutes: [], createdAt: Date.now(), updatedAt: Date.now(), owner: (me && me.email) || '', access: 'all', members: [] };
   maps.push(m); activeMapId = m.id;
-  save(); loadSheetCfg(); renderAll();
+  save(); schedulePush(0); loadSheetCfg(); renderAll();
   showToast(`สร้าง "${name}" แล้ว — เพิ่มร้านหรือดึงชีตเข้าแผนที่นี้ได้เลย`, 'success');
   return m;
 }
@@ -2440,11 +2441,13 @@ async function pushShared() {
       setSync('ok', '☁️ บันทึกแล้ว', 'บันทึกออนไลน์แล้ว — ทุกคนเห็นการเปลี่ยนแปลงนี้');
     } else if (res.conflict) {
       srvRev = res.rev;
-      const changed = applyServer(res.data);
+      const keepOpen = view === 'map' ? openIds.slice() : null;
+      const changed = applyServer(mergeShared(lastPushed ? JSON.parse(lastPushed) : {}, snap, res.data || {}));
+      lastPushed = JSON.stringify(res.data || {});   // what the server holds now: the combined result still has to be sent
       saveLocalOnly(); loadSheetCfg(); renderAll();
+      if (keepOpen && keepOpen.some(id => !mapById(id))) { const left = keepOpen.filter(mapById); if (left.length) openMaps(left); else goHome(); }
+      schedulePush(0);
       for (const id of changed) { const m = mapById(id); if (m && m.sheet.url) await importSheet(true, id); }
-      showToast('มีคนแก้ไขแผนที่พร้อมกัน — โหลดข้อมูลล่าสุดแล้ว กรุณาทำรายการเดิมอีกครั้ง', 'warning');
-      setSync('ok', '☁️ ออนไลน์');
     } else throw new Error(res.error || 'save failed');
   } catch (e) {
     console.warn('push failed', e);
@@ -2455,6 +2458,24 @@ async function pushShared() {
     pushing = false;
     if (pushAgain) { pushAgain = false; schedulePush(0); }
   }
+}
+/* three-way merge: what I changed since my last save goes on top of what the server holds now */
+function mergeShared(base, mine, theirs) {
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const list = (b, m, t) => {
+    const B = new Map((b || []).map(x => [x.id, x])), M = new Map((m || []).map(x => [x.id, x])), T = new Map((t || []).map(x => [x.id, x]));
+    const out = [];
+    (t || []).forEach(x => {
+      if (!M.has(x.id)) { if (!B.has(x.id)) out.push(x); return; }   // added by someone else: keep · gone from mine: I removed it
+      const y = M.get(x.id);
+      out.push(B.has(x.id) && same(y, B.get(x.id)) ? x : y);   // I did not touch it: take theirs
+    });
+    (m || []).forEach(x => { if (!B.has(x.id) && !T.has(x.id)) out.push(x); });   // new on my side
+    return out;
+  };
+  const groupColors = Object.assign({}, theirs.groupColors || {});
+  Object.keys(mine.groupColors || {}).forEach(k => { if ((base.groupColors || {})[k] !== mine.groupColors[k]) groupColors[k] = mine.groupColors[k]; });
+  return { maps: list(base.maps, mine.maps, theirs.maps), manualShops: list(base.manualShops, mine.manualShops, theirs.manualShops), groupColors };
 }
 function queueGeoPush(lat, lng, d) {
   if (!ONLINE) return;
@@ -2703,7 +2724,10 @@ function openMaps(ids) {
 }
 async function homeNewMap() {
   const m = await newMap();
-  if (m) openMap(m.id);
+  if (!m) return;
+  m.fileId = 'm:' + m.id;
+  save();
+  openMap(m.id);
 }
 function setHomeSort(k) {
   homeSort = k;
