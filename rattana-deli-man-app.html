@@ -1304,7 +1304,7 @@ body.ui2 .toast{border-radius:14px}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.490';
+const APP_VERSION='3.491';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -10393,19 +10393,38 @@ async function sheetMissingBills_(j){
     return mine.filter(b=>!have.has(String(b.doc)));
   }catch(e){ console.warn('[close] sheet check',e); return null; }
 }
+/* ★★ v3.491: บิลที่ไฟล์รูปโปรยังขาดรูป แต่เครื่องมีรูปอยู่ → ส่งขึ้นตอนปิดงาน · ส่งได้จริงถึงติ๊ก s.p1/s.p2 */
+async function ppPushPending_(j,b,s){
+  const p=b.payment=b.payment||{};
+  const ok=v=>(v&&v!=='[photo-pending-sync]')?v:'';
+  const ph1=s.p1?'':ok(p.promoPhoto), ph2=s.p2?'':ok(p.promoBillPhoto), phX=PP_EXTRA.map(k=>ok(p[k]));
+  if(!ph1&&!ph2) return;
+  showToast('กำลังส่งรูปโปรที่ค้างอยู่ '+b.doc+'…','info');
+  try{
+    const ms=ppMatchesFor_(j,b)||[];
+    const r=await postSyncGAS_({action:'save_promo_photo',jobId:j.id,doc:b.doc,code:b.code||'',name:b.name||'',warehouse:j.warehouse||'',
+      driver:(j.team&&j.team.driver)||'',promoName:ms.map(m=>m.name).join(' | ')||p.promoName||'',promoPhoto:ph1,promoBillPhoto:ph2,promoPhoto3:phX[0],promoPhoto4:phX[1],promoPhoto5:phX[2]},90000);
+    if(!(r&&r.ok)) return;
+    if(ph1&&r.promoUrl){ s.p1=true; if(p.promoPhoto===ph1) p.promoPhoto=r.promoUrl; }
+    if(ph2&&r.promoBillUrl){ s.p2=true; if(p.promoBillPhoto===ph2) p.promoBillPhoto=r.promoBillUrl; }
+    if(Array.isArray(r.extraUrls)) PP_EXTRA.forEach((k,i)=>{ if(r.extraUrls[i]&&p[k]===phX[i]) p[k]=r.extraUrls[i]; });
+    persistJobs();
+  }catch(e){ console.warn('[promoPhoto] push pending',e); }
+}
 async function ppMissingForClose_(j){
   try{
     if(CO.key!=='rtn') return [];
     await Promise.race([Promise.all([ppEnsure_(),ensureBillDetailsForDocs_((j.bills||[]).map(b=>b.doc))]),new Promise(r=>setTimeout(r,8000))]);
-    const has=v=>!!v&&v!=='[photo-pending-sync]';
     const _from=PP_REQUIRED_FROM.getTime();
     const need=(j.bills||[]).filter(b=>b&&b.status==='done'&&!b.isCN&&(+b.savedAt||0)>=_from)   // ★ v3.474: เฉพาะบิลที่บันทึกตั้งแต่วันเริ่มบังคับ
       .filter(b=>{ const m=ppMatchesFor_(j,b); return m&&m.length; });
-    const lack=need.filter(b=>{ const p=b.payment||{}; return !(has(p.promoPhoto)&&has(p.promoBillPhoto)); });
-    if(!lack.length) return [];
-    const r=await postSyncGAS_({action:'promo_photo_status',docs:lack.map(b=>b.doc)},20000);
+    if(!need.length) return [];
+    const r=await postSyncGAS_({action:'promo_photo_status',docs:need.map(b=>b.doc)},20000);   // ★ v3.491: ตัดสินจากไฟล์รูปโปร ไม่เชื่อรูปในเครื่อง
     if(!(r&&r.ok&&r.docs)) return null;
-    return lack.filter(b=>{ const s=r.docs[b.doc]||{}, p=b.payment||{}; return !((s.p1||has(p.promoPhoto))&&(s.p2||has(p.promoBillPhoto))); });
+    const _st=b=>r.docs[b.doc]=r.docs[b.doc]||{};
+    const lack=need.filter(b=>{ const s=_st(b); return !(s.p1&&s.p2); });
+    for(const b of lack) await ppPushPending_(j,b,_st(b));   // รูปที่ค้างในเครื่อง ส่งให้ก่อน
+    return lack.filter(b=>{ const s=_st(b); return !(s.p1&&s.p2); });
   }catch(e){ console.warn('[promoPhoto] close check',e); return null; }
 }
 async function ppSavePhotos_(){
