@@ -1304,7 +1304,7 @@ body.ui2 .toast{border-radius:14px}
 
 <script>
 /* ========== CONFIG ========== */
-const APP_VERSION='3.489';
+const APP_VERSION='3.490';
 /* ★★ v3.348: หนึ่งแอป สองบริษัท (user 2026-10-01 "D-Man ของ Colgate แยกที่ลงข้อมูล แต่ยังกดในแอปเดียวกัน")
    ทุกอย่างที่ต่างกันรวมอยู่ในโปรไฟล์เดียว: ชีทงาน · ลิงก์หลังบ้าน · ชีทสินค้า · ธีมสี
    ★ ฝั่งรัตนไพบูลย์ต้องเหมือนเดิมทุกตัวอักษร (คนใช้งานจริงอยู่) — คีย์ใน localStorage ต้องเป็นชื่อเดิมทั้งหมด
@@ -2512,6 +2512,21 @@ function bdCoRows_(rows){
   });
   return out;
 }
+/* ★★ v3.490: รายละเอียดบิลล่าสุดจากไฟล์ Check Out — คืน [] ถ้าไม่เจอ/อ่านไม่ได้ (ผู้เรียกไปอ่าน DS_DC ต่อ) · Colgate ไม่ใช้ */
+const CHECKOUT_DSDC_ID='1S_HTxQ71AWHym1X_-CBwe-tzfCEPqY4T', CHECKOUT_DSDC_SHEET='DSDC';
+async function fetchCheckOutRows_(where){
+  if(CO.key!=='rtn') return [];
+  const url='https://docs.google.com/spreadsheets/d/'+CHECKOUT_DSDC_ID+'/gviz/tq?tqx=out:csv&headers=1&sheet='+encodeURIComponent(CHECKOUT_DSDC_SHEET)+'&tq='+encodeURIComponent('select '+DSDC_COLS+' where '+where)+'&_cb='+Date.now();
+  const ctrl=('AbortController' in window)?new AbortController():null;
+  const to=setTimeout(()=>{ if(ctrl) ctrl.abort(); },15000);
+  try{
+    const res=await fetch(url,{cache:'no-store',signal:ctrl?ctrl.signal:undefined});
+    if(!res.ok) return [];
+    const rows=parseCsv(await res.text());
+    return (rows||[]).filter(r=>cleanCell(r['DI_REF']));
+  }catch(e){ console.warn('Check Out details',e); return []; }
+  finally{ clearTimeout(to); }
+}
 async function fetchDsDc_(where){
   if(CO.bdId) return fetchBdCo_(where);   // ★ v3.377
   const tq='select '+DSDC_COLS+' where '+where;
@@ -2554,7 +2569,10 @@ function mergeDsDc_(rows){
 async function ensureBillDetailsForStore_(code){
   code=String(code||'').trim(); if(!code) return;
   const k='C|'+code; if(_dsdcDone[k]) return; _dsdcDone[k]=1;
-  try{ mergeDsDc_(await fetchDsDc_("C = '"+_dsdcEsc(code)+"'")); afterBillDetailsLoaded_(); }
+  const _w="C = '"+_dsdcEsc(code)+"'";
+  const _co=await fetchCheckOutRows_(_w);   // ★ v3.490: บิลล่าสุดขึ้นก่อน · บิลเก่าของร้านตามมาจาก DS_DC (ไม่ทับบิลที่ได้จาก Check Out)
+  if(_co.length){ mergeDsDc_(_co); afterBillDetailsLoaded_(); }
+  try{ const _have=new Set(_co.map(r=>cleanCell(r['DI_REF']))); mergeDsDc_((await fetchDsDc_(_w)).filter(r=>!_have.has(cleanCell(r['DI_REF'])))); afterBillDetailsLoaded_(); }
   catch(e){ delete _dsdcDone[k]; console.warn('DS_DC by store failed:',e); }
 }
 /* ดึงรายละเอียดของ "บิลเดียว" */
@@ -2562,7 +2580,10 @@ async function ensureBillDetailsForDoc_(doc){
   doc=String(doc||'').trim(); if(!doc) return;
   if((state.billDetails[doc]||[]).length) return;
   const k='B|'+doc; if(_dsdcDone[k]) return; _dsdcDone[k]=1;
-  try{ mergeDsDc_(await fetchDsDc_("B = '"+_dsdcEsc(doc)+"'")); afterBillDetailsLoaded_(); }
+  const _w="B = '"+_dsdcEsc(doc)+"'";
+  const _co=await fetchCheckOutRows_(_w);   // ★ v3.490
+  if(_co.length){ mergeDsDc_(_co); afterBillDetailsLoaded_(); return; }
+  try{ mergeDsDc_(await fetchDsDc_(_w)); afterBillDetailsLoaded_(); }
   catch(e){ delete _dsdcDone[k]; console.warn('DS_DC by doc failed:',e); }
 }
 /* v3.59: ล้างรายละเอียดที่ดึงไว้ (ปุ่ม sync ในหน้าตั้งค่า) → ครั้งถัดไปดึงสดจาก DS_DC */
@@ -6449,8 +6470,11 @@ async function ensureBillDetailsForDocs_(docs){
   need.forEach(d=>_dsdcDone['B|'+d]=1);
   const where=need.map(d=>"B = '"+_dsdcEsc(d)+"'").join(' or ');
   try{
-    const n=mergeDsDc_(await fetchDsDc_(where));
-    afterBillDetailsLoaded_();
+    const _co=await fetchCheckOutRows_(where);   // ★ v3.490: Check Out ก่อน เหลือบิลไหนค่อย DS_DC
+    let n=0;
+    if(_co.length){ n=mergeDsDc_(_co); afterBillDetailsLoaded_(); }
+    const _left=need.filter(d=>!(state.billDetails[d]||[]).length);
+    if(_left.length){ n+=mergeDsDc_(await fetchDsDc_(_left.map(d=>"B = '"+_dsdcEsc(d)+"'").join(' or '))); afterBillDetailsLoaded_(); }
     need.forEach(d=>{ if(!(state.billDetails[d]||[]).length){ delete _dsdcDone['B|'+d]; _dsdcMiss['B|'+d]=Date.now(); } });   // ★ v3.301
     return n;
   }
