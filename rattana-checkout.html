@@ -2593,7 +2593,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-10 · 93';
+const BUILD = '2026-11-10 · 94';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -2808,7 +2808,19 @@ function seedRand(s) {
  *    4. สัดส่วนเท่ากันเป๊ะ สุ่มไปร้านใดร้านหนึ่ง ไม่หารกัน
  *  ของที่เหลือแจกไม่ลง = เศษ (ถ้ายังมีคนขาด) หรือ ยิงเกิน (ถ้าครบทุกคนแล้ว) */
 const GIVE_ORDER = { SM:0, BO:1, HR:2, BV:3, BK:4, MT:5 };   // ผู้ใช้สั่ง 01/10: SM → ออนไลน์ → ปลีก → ส่ง · มาร์ทท้ายสุด (09/10) · หน้าร้านหลังออนไลน์ (05/11)
-function allocate(lines, scannedEA, product) {
+/* ═══ แบ่งตามหน่วยที่ยิงมา (BUILD 94 · ผู้ใช้สั่ง 10/11 จากเคส 06/11 สามแม่ครัว ปลาแมกเคอเรล:
+     "ให้แบ่งลงตามหน่วยก่อน ถ้าของมีเต็มลัง ต่อให้ลูกค้าที่สั่งเป็นเศษแต่สัดส่วนมากกว่าคนอื่น ต้องแบ่งให้คนที่สั่งเต็มลังและมีสัดส่วนมากกว่าก่อน
+      ถ้าสินค้ามีครบทั้งหมดหรือมีเช็คมาเป็นหน่วยย่อยค่อยแบ่งให้ และถ้ายังแบ่งไม่ลงให้เป็นเกินไว้ก่อน ยังไม่ต้องตัดจำนวนก่อน และมีการเตือน")
+   comp = กองนี้ยิงมาเป็นหน่วยไหนเท่าไร { lv: ชิ้น } ('*' = ไม่ผูกหน่วย เช่นของทดแทน) — ไม่ส่งมา = แบ่งแบบเดิม (เช็คตามร้าน / ของแถม)
+   ของพอทุกร้าน = ทุกร้านได้ครบ (แกะหน่วยใหญ่ให้ร้านที่สั่งหน่วยย่อยได้)
+   ของไม่พอ: 1. หน่วยตรงกันก่อน (ลังให้ร้านที่สั่งลัง · แพ็คให้ร้านที่สั่งแพ็ค) ตามลำดับช่องทาง → สัดส่วน → สุ่มคงที่
+             2. หน่วยย่อยที่เหลือรวมให้ร้านที่สั่งหน่วยใหญ่กว่า ได้เต็มหน่วยของร้าน (10 แพ็ค = 1 ลัง)
+             3. ไม่แกะหน่วยใหญ่ให้ร้านที่สั่งหน่วยย่อย — เหลือ = "เกิน" ยังไม่ได้แบ่ง (ไม่ลงชีต อยู่ในเครื่อง) + เตือน
+   เดิม (ถึง BUILD 93) แบ่งทีละร้านตามลำดับ ไม่ดูหน่วย: 06/11 ยิง 3 ลัง ร้านที่สั่ง 3 แพ็คอยู่ลำดับต้น ได้ไปก่อน (แกะลัง)
+     → ลงร้านลังได้แค่ 2 ลัง เศษ 7 แพ็คแบ่งไม่ลงและไม่ลงชีต · ยก 3 แพ็คจาก C4 มาก็แบ่งไม่ลงอีก (ร้านแพ็คได้ไปแล้ว) */
+const lvQty = (p, lv) => lv === '*' ? 1 : ((p.units.find(u => u.lv === lv) || {}).qtyEA || 1);
+function allocate(lines, scannedEA, product, comp) {
+  if (comp) return allocateLv(lines, scannedEA, product, comp);
   const n = lines.length;
   const give = new Array(n).fill(0);
   let pool = Math.max(0, scannedEA);
@@ -2839,6 +2851,50 @@ function allocate(lines, scannedEA, product) {
   const given = give.reduce((a, b) => a + b, 0);
   const full = given >= need;
   return { give, stranded: full ? 0 : pool, surplus: full ? pool : 0, full };
+}
+/** แบ่งตามหน่วยที่ยิงมา — ดูคำอธิบายด้านบน · คืน giveLv = แต่ละบรรทัดได้จากหน่วยไหน (จดว่าใช้ไปตอนลงชีต)
+ *  why = ทำไมเหลือ: big = ของเป็นหน่วยใหญ่ ร้านที่ยังขาดสั่งหน่วยเล็กกว่า (ยังไม่แกะ) · small = ไม่ครบหน่วยที่ร้านสั่ง */
+function allocateLv(lines, scannedEA, product, comp) {
+  const n = lines.length, give = new Array(n).fill(0), giveLv = lines.map(() => ({}));
+  const pool = Math.max(0, scannedEA);
+  const order = lines.map((l, i) => {
+    const ck = chanOf(l.ref).key;
+    return { i, rank: GIVE_ORDER[ck] === undefined ? 9 : GIVE_ORDER[ck], ratio: Number(l.ratio) || 0,
+             tie: seedRand(String(product.id) + '|' + String(l.ref) + '|' + String(l.storeCode || '')) };
+  }).sort((a, b) => a.rank - b.rank || b.ratio - a.ratio || a.tie - b.tie);
+  const need = lines.reduce((s, l) => s + l.needEA, 0);
+  const chunkOf = l => { const u = (l.orderedUnit && l.orderedUnit.qtyEA) || product.minEA || 1; return l.needEA >= u ? u : l.needEA; };
+  const tiers = Object.keys(comp).map(lv => ({ lv, q: lvQty(product, lv), ea: Math.max(0, comp[lv] || 0) }))
+                      .filter(t => t.ea > 0).sort((a, b) => b.q - a.q);
+  const remOf = i => lines[i].needEA - give[i];
+  const take = (i, t, ea) => { if (ea <= 0) return; t.ea -= ea; give[i] += ea; giveLv[i][t.lv] = (giveLv[i][t.lv] || 0) + ea; };
+  // 1. หน่วยตรงกัน — หน่วยใหญ่ก่อน ในแต่ละหน่วยตามลำดับร้าน
+  for (const t of tiers) for (const o of order) {
+    const q = chunkOf(lines[o.i]), r = remOf(o.i);
+    if (r <= 0 || q !== t.q || t.ea < q) continue;
+    take(o.i, t, Math.floor(Math.min(t.ea, r) / q) * q);
+  }
+  // 2. หน่วยย่อยที่เหลือ รวมให้ร้านที่สั่งหน่วยใหญ่กว่า เต็มหน่วยของร้าน
+  for (const o of order) {
+    const q = chunkOf(lines[o.i]), r = remOf(o.i); if (r <= 0) continue;
+    const small = tiers.filter(t => t.q < q && t.ea > 0).sort((a, b) => a.q - b.q);
+    let want = Math.floor(Math.min(small.reduce((s, t) => s + t.ea, 0), r) / q) * q;
+    for (const t of small) { if (want <= 0) break; const x = Math.min(t.ea, want); take(o.i, t, x); want -= x; }
+  }
+  // 3. ของพอทุกร้าน — แกะหน่วยใหญ่ให้ร้านที่สั่งหน่วยย่อยได้ (ทุกร้านได้ครบอยู่แล้ว ไม่แย่งกัน)
+  if (pool >= need) for (const o of order) {
+    let r = remOf(o.i);
+    for (const t of tiers.slice().sort((a, b) => a.q - b.q)) { if (r <= 0) break; const x = Math.min(t.ea, r); take(o.i, t, x); r -= x; }
+  }
+  const left = tiers.reduce((s, t) => s + t.ea, 0), given = give.reduce((a, b) => a + b, 0), full = given >= need;
+  let why = null;
+  if (!full && left > 0) {
+    const shortQ = order.filter(o => remOf(o.i) > 0).map(o => chunkOf(lines[o.i]));
+    const big = tiers.filter(t => t.ea > 0 && shortQ.some(q => q < t.q)).sort((a, b) => b.q - a.q)[0];
+    why = big ? { kind:'big', lv:big.lv, q:Math.min(...shortQ.filter(q => q < big.q)) }
+              : { kind:'small', q:Math.min(...shortQ) };
+  }
+  return { give, giveLv, stranded: full ? 0 : left, surplus: full ? left : 0, full, why };
 }
 
 /** โปรที่ใช้กับสินค้านี้ — เลือกแถวที่เกณฑ์ EA น้อยสุดในโปรเดียวกัน
@@ -3228,6 +3284,39 @@ const tGot = (pid, rnd, tag = curTag()) => (state.tscans || {})[tKey(pid, rnd, t
  *  (เจอจริง 30/09 ติ่งฟง น้ำสับปะรด/แอปเปิ้ล ทีมคิง: 1 ลังที่ยิงให้ร้านพี่ศักดิ์รอบ 1 ถูกยืนยันให้คุณไตรสิทธิ์รอบ 2 ซ้ำอีก)
  *  rnd ว่าง = รวมทุกรอบ (ใช้แค่เลือกหน่วย/ข้อความ ไม่ใช้แบ่งของ) */
 const usedKey = (pid, rnd, tag) => pid + '@' + rnd + '#' + tag;
+/* ── กองนี้ยิงมาเป็นหน่วยไหน (BUILD 94 — ใช้แบ่งตามหน่วย allocateLv) ──
+   state.lvs[คีย์กอง] = { lv: ชิ้น } คีย์เดียวกับ scans ('รหัส@รอบ#ป้าย') / tscans ('t|…') — จดตอนยิง/ใส่เลข/กด ± / แก้ยอดรวม
+   state.usedLv[usedKey] = { lv: ชิ้น } ส่วนที่ลงชีตไปแล้ว (markSent ตามผลแบ่ง) · ทั้งคู่อยู่ใน DAY_KEYS
+   ยอดที่ไม่รู้หน่วย (ยิงก่อนรุ่นนี้ / ยอดเครื่องอื่น / ปรับทางอื่น) = ถือเป็นหน่วยใหญ่สุดก่อน (เหมือนนับของเป็นลังเต็มให้มากที่สุด) */
+function lvAdd(key, lv, ea) {
+  if (!ea || !lv) return;
+  const m = ((state.lvs ||= {})[key] ||= {});
+  m[lv] = (m[lv] || 0) + ea;
+  if (m[lv] > 0) return;
+  let neg = -m[lv]; delete m[lv];                     // ลดเกินที่ยิงหน่วยนี้ไว้ → หักหน่วยอื่น (ใหญ่ก่อน)
+  const p = prodById(key.replace(/^t\|/, '').split('@')[0]);
+  Object.keys(m).sort((a, b) => p ? lvQty(p, b) - lvQty(p, a) : 0).forEach(o => {
+    const x = Math.min(m[o], neg); m[o] -= x; neg -= x; if (m[o] <= 0) delete m[o]; });
+}
+/** ให้ผลรวมเท่ายอดกองจริง — เกิน = หักหน่วยใหญ่ก่อน · ขาด (ไม่รู้หน่วย) = เติมเป็นหน่วยใหญ่สุดก่อน */
+function compFit(p, comp, ea) {
+  let s = Object.values(comp).reduce((a, b) => a + b, 0);
+  Object.keys(comp).sort((a, b) => lvQty(p, b) - lvQty(p, a)).forEach(lv => {
+    if (s <= ea) return; const x = Math.min(comp[lv], s - ea); comp[lv] -= x; s -= x; if (comp[lv] <= 0) delete comp[lv]; });
+  if (s < ea) { const t = toUnits(ea - s, p.units);
+    t.parts.forEach(x => { comp[x.u.lv] = (comp[x.u.lv] || 0) + x.n * x.u.qtyEA; });
+    if (t.rest) comp['*'] = (comp['*'] || 0) + t.rest; }
+  return comp;
+}
+/** หน่วยของกอง (ป้ายเดียว) ที่ยังไม่ได้ลงชีต — ea = ยอดกองจาก poolsOf · ของทดแทน = '*' */
+function poolComp(p, rnd, tag, ea) {
+  const out = {}, add = (lv, x) => { if (x > 0) out[lv] = (out[lv] || 0) + x; }, L = state.lvs || {};
+  [scanKey(p.id, rnd, tag), tKey(p.id, rnd, tag)].forEach(k => { for (const lv in L[k] || {}) add(lv, L[k][lv]); });
+  add('*', ((state.subs || {})[subKey(p.id, rnd, tag)] || []).reduce((s, x) => s + (x.ea || 0), 0));
+  const U = (state.usedLv || {})[usedKey(p.id, rnd, tag)] || {};
+  for (const lv in U) if (out[lv]) { out[lv] -= U[lv]; if (out[lv] <= 0) delete out[lv]; }
+  return compFit(p, out, ea);
+}
 function rawPools(pid, rnd) {
   const m = {}, add = (k, ea) => { if (ea > 0) { const t = tagOfKey(k); m[t] = (m[t] || 0) + ea; } };
   const hit = (k, pre) => k.startsWith(pre + pid + '@') && k.slice((pre + pid + '@').length).split('#')[0] === String(rnd);
@@ -3386,6 +3475,8 @@ function markSent(c, onlyConf, acc) {
     for (const t in d.from || {}) {
       const k = usedKey(pid, rnd, t); u[k] = (u[k] || 0) + d.from[t];
       tUseFrom(pid, rnd, t, d.from[t]);                 // ของโอนจาก C4 ถือว่าใช้ไปก่อน (ไม่เอาไปลง "โอนจาก C4" ซ้ำ)
+      const fl = (d.fromLv || {})[t], ul = (state.usedLv ||= {})[k] ||= {};   // ใช้หน่วยไหนไป (BUILD 94)
+      for (const lv in fl || {}) ul[lv] = (ul[lv] || 0) + fl[lv];
     }
     if (d.pre) { const k = sKey(storeKeyOf(d.line), pid); su[k] = (su[k] || 0) + d.pre; }   // เช็คตามร้านส่วนนี้ลงชีตแล้ว (กองร้าน/เซล)
   }));
@@ -3844,13 +3935,14 @@ function computeJob(job, view = viewSet(), onlyPids, remote) {
          บรรทัดที่เช็คตามร้านมาแล้ว → ลงบรรทัดของร้านนั้นก่อน
        ที่เหลือ (ยิงในหน้าทีม + โอน + ทดแทน ที่ยังไม่ได้ยืนยัน) แบ่งทีละกองตามป้ายช่องทาง — กองเฉพาะช่องทางก่อน กองกลางทีหลัง
        กองหนึ่งลงได้เฉพาะบรรทัดของช่องทางในป้ายมัน · แต่ละกองแบ่งตามกติกาเดิม (allocate) */
-    const give = {}, remain = {}, cfOf = {}, from = {};
+    const give = {}, remain = {}, cfOf = {}, from = {}, fromLv = {};
     full.forEach(l => {
       const cf = confOf(l); cfOf[l.lid] = cf;
       // ชีต (ยืนยันจากหน้าไหนก็ได้ / โอนจาก C4 รอปิดงาน) + เช็คตามร้านในเครื่องนี้ที่ยังไม่ยืนยัน (storePreMap ไม่เกินที่เหลือ)
       const g = Math.min(l.needEA, (cf ? cf.given : 0) + (pre[l.lid] || 0));
-      give[l.lid] = g; remain[l.lid] = l.needEA - g; from[l.lid] = {};
+      give[l.lid] = g; remain[l.lid] = l.needEA - g; from[l.lid] = {}; fromLv[l.lid] = {};
     });
+    let why = null;                                   // ทำไมมีของเกินแบ่งไม่ลง (allocateLv)
     const baseGive = lines.map(l => give[l.lid]);
     const baseSum  = baseGive.reduce((a, b) => a + b, 0);
     const preGive  = lines.map(l => Math.min(l.needEA, pre[l.lid] || 0));
@@ -3863,13 +3955,18 @@ function computeJob(job, view = viewSet(), onlyPids, remote) {
     pl.sort((a, b) => a[2] - b[2] || tagRank(a[0]) - tagRank(b[0])).forEach(([tag, ea, isR]) => {
       const chans = tagChans(tag);
       const ls = full.filter(l => !chans || chans.includes(chanOf(l.ref).key));
-      const r = allocate(ls.map(l => Object.assign({}, l, { needEA: remain[l.lid] })), ea, p);
+      // แบ่งตามหน่วยที่ยิงมา (BUILD 94) — ยอดเครื่องอื่นไม่รู้หน่วย ถือเป็นหน่วยใหญ่สุดก่อน
+      const comp = isR ? compFit(p, {}, ea) : poolComp(p, job.round, tag, ea);
+      const r = allocate(ls.map(l => Object.assign({}, l, { needEA: remain[l.lid] })), ea, p, comp);
       ls.forEach((l, i) => {
         give[l.lid] += r.give[i]; remain[l.lid] -= r.give[i];
         if (!r.give[i]) return;
-        if (isR) rem[l.lid] = (rem[l.lid] || 0) + r.give[i];                   // ของเครื่องอื่น — แสดงผลอย่างเดียว
-        else from[l.lid][tag] = (from[l.lid][tag] || 0) + r.give[i];         // ไว้หักกองตอนยืนยัน
+        if (isR) { rem[l.lid] = (rem[l.lid] || 0) + r.give[i]; return; }      // ของเครื่องอื่น — แสดงผลอย่างเดียว
+        from[l.lid][tag] = (from[l.lid][tag] || 0) + r.give[i];              // ไว้หักกองตอนยืนยัน
+        const fl = fromLv[l.lid][tag] ||= {};
+        for (const lv in (r.giveLv || [])[i] || {}) fl[lv] = (fl[lv] || 0) + r.giveLv[i][lv];
       });
+      if (r.stranded && r.why && !why && tagInside(tag, view)) why = r.why;
       /* กองของช่องทางอื่นล้วน ไม่นับในหน้านี้ — แต่ต้องแบ่งก่อนเหมือนกัน กองกลางที่ตามมาจะได้ลงบรรทัดเดียวกันทุกหน้า
          (ไม่งั้นดูหน้า "ปลีก" กับหน้า "ทั้งหมด" ยอดกองกลางตกบิลปลีกไม่เท่ากัน) */
       if (!tagOverlap(tag, view)) return;
@@ -3878,7 +3975,7 @@ function computeJob(job, view = viewSet(), onlyPids, remote) {
       if (tagInside(tag, view)) { stranded += r.stranded; surplus += r.surplus; }
       got += add; if (isR) remoteGot += add;
     });
-    const res = { give: lines.map(l => give[l.lid]), stranded, surplus,
+    const res = { give: lines.map(l => give[l.lid]), stranded, surplus, why: stranded ? why : null,
                   full: lines.every(l => give[l.lid] >= l.needEA) };
     const scanned = got + baseSum;
     const confSum = lines.reduce((s, l) => s + (cfOf[l.lid] ? Math.min(l.needEA, cfOf[l.lid].given) : 0), 0);   // ส่วนที่มาจากชีต
@@ -3907,7 +4004,7 @@ function computeJob(job, view = viewSet(), onlyPids, remote) {
       const cf = cfOf[l.lid];
       /* over = แถมที่ลงชีตไปแล้วเกินสิทธิ์ใหม่ (ตัวหลักมาขาดทีหลัง) — ต้องเอาคืน */
       const over = l.ordEA !== undefined ? Math.max(0, (cf ? cf.given : 0) - l.needEA) : 0;
-      return { line:l, giveEA, free, freeOrdered:0, freeGive:0, from:from[l.lid], over, pre:pre[l.lid] || 0,
+      return { line:l, giveEA, free, freeOrdered:0, freeGive:0, from:from[l.lid], fromLv:fromLv[l.lid], over, pre:pre[l.lid] || 0,
                conf: !!cf && !cf.partial, part: !!cf && !!cf.partial, confGiven: cf ? Math.min(l.needEA, cf.given) : 0,
                remote: rem[l.lid] || 0 };
     });
@@ -4164,7 +4261,7 @@ function renderScan() {
         <div class="stop">
           <div class="sname"${go2}>${r.isFree?'<span class="badge badge-gold">แถม</span> ':''}${esc(p.name)}${alloc ? ' <span class="alloc-go">แบ่ง ›</span>' : ''}</div>
           <span class="badge ${st==='ok'?'badge-ok':st==='none'?'badge-warn':'badge-danger'}"
-            >${st==='check'?'ตรวจซ้ำ':st==='ok'?'ครบ':st==='short'?'ขาด':'รอยิง'}</span>
+            >${st==='check'?'เกิน':st==='ok'?'ครบ':st==='short'?'ขาด':'รอยิง'}</span>
           <button class="btn btn-outline btn-sm sub-btn" onclick="openSub('${p.id}')"
             title="ใช้สินค้าอื่นแทนตัวนี้">⇄</button>
         </div>
@@ -4207,7 +4304,7 @@ function renderScan() {
              onclick="openSub('${p.id}')">แก้</button></div>`).join('')}
         ${usedAsSub(p.id).map(x => `<div class="rounds">⇄ ตัวนี้ถูกยกไปใช้แทน <b>${esc(x.name)}</b>
            ${fmtUnits(x.ea, units, 1)} — ยอดนั้นไปนับเป็น "ได้" ของ ${esc(x.name)} แล้ว</div>`).join('')}
-        ${r.res.stranded ? `<div class="note">⚠ เหลือ ${fmtN(r.res.stranded)} ชิ้น แบ่งไม่ลง — ไม่ครบหน่วยที่ร้านที่เหลือสั่งไว้ (ต้องให้เต็มหน่วย)</div>` : ''}
+        ${r.res.stranded ? `<div class="note">${strandTxt(r, units)}</div>` : ''}
         ${r.res.surplus ? `<div class="note">⚠ ยิงเกินยอดสั่ง ${fmtUnits(r.res.surplus, units)}</div>` : ''}
       </div>
     </div>`;
@@ -4219,6 +4316,20 @@ function renderScan() {
      ควรตรวจสอบ (ยิงเกิน/มีเศษ) → รอยิง → ขาด → ครบ
    ในกลุ่มเดียวกันเรียงยอดสั่งมากอยู่บน · ตัวที่เพิ่งยิงปักบนสุดเสมอ */
 const ROW_RANK = { check:0, none:1, short:2, ok:3 };
+/** ของเกินที่แบ่งไม่ลง (BUILD 94 · ผู้ใช้สั่ง 10/11 "ถ้ายังแบ่งไม่ลงให้เป็นเกินไว้ก่อน ยังไม่ต้องตัดจำนวนก่อน และมีการเตือน")
+ *  ยังนับใน "ได้" · ไม่ลงชีตตอนปิดงาน (ไม่มีร้านรับ) อยู่ในเครื่องที่ยิง · บอกเหตุผล + วิธีแกะแบ่งเอง */
+function strandTxt(r, units) {
+  const x = r.res.stranded; if (!x) return '';
+  const w = r.res.why, amt = fmtUnits(x, units, 1);
+  const uq = q => units.find(u => u.qtyEA === q), ul = lv => units.find(u => u.lv === lv), nm = (u, d) => u ? u.short : d;
+  if (w && w.kind === 'big') {
+    const b = ul(w.lv), s = uq(w.q);
+    return `⚠ เกิน ${amt} ยังไม่ได้แบ่ง — ของเป็น${nm(b, 'หน่วยใหญ่')}เต็ม ร้านที่ยังขาดสั่งเป็น${nm(s, 'หน่วยย่อย')} ยังไม่แกะให้ ` +
+           `(ถ้าจะแกะแบ่ง: กด − 1 ${nm(b, 'หน่วยใหญ่')} แล้วยิงเป็น${nm(s, 'หน่วยย่อย')}แทน) · ส่วนที่เกินยังไม่ลงชีต`;
+  }
+  const s = w && uq(w.q);
+  return `⚠ เกิน ${amt} ยังไม่ได้แบ่ง — ไม่ครบ 1 ${nm(s, 'หน่วย')}${s && s.qtyEA > 1 ? '×' + fmtN(s.qtyEA) : ''} ที่ร้านที่ยังขาดสั่งไว้ · ส่วนที่เกินยังไม่ลงชีต`;
+}
 function rowState(need, got, res) {
   if (res && (res.surplus || res.stranded)) return 'check';
   if (got > need)  return 'check';
@@ -4456,7 +4567,7 @@ function renderStore() {
         <div class="stop">
           <div class="sname">${free?'<span class="badge badge-gold">แถม</span> ':''}${esc(pr.name)}</div>
           <span class="badge ${st==='ok'?'badge-ok':st==='none'?'badge-warn':'badge-danger'}"
-            >${st==='check'?'ตรวจซ้ำ':st==='ok'?'ครบ':st==='short'?'ขาด':'รอยิง'}</span>
+            >${st==='check'?'เกิน':st==='ok'?'ครบ':st==='short'?'ขาด':'รอยิง'}</span>
         </div>
         <div class="smeta">${units.map(u=>u.code).join(' · ')}</div>
         ${s.group ? storeChips(a, units) : ''}
@@ -4738,6 +4849,7 @@ function setQty(pid, val) {
     renderScan(); return;
   }
   state.scans[k] = next;
+  lvAdd(k, u.lv, next - before);
   if (state.scans[k] !== before)
     logMove({ ts:Date.now(), pid, ea:state.scans[k]-before, round:jobRnd(),
               device:DEVICE, by:CHECKER, how:`ใส่เลข ${n} ${u.short}` });
@@ -4755,6 +4867,7 @@ function addEA(pid, ea, unit, how) {
   // กด − ตอนยอดยิงของรอบนี้เป็น 0 แล้ว = ไม่มีอะไรเปลี่ยน ไม่จดลงชีต (เดิมจดเป็น "มือ" ทำให้ดูเหมือนกด + ซ้ำ)
   if (next === before) { toast('ยอดที่ยิงในรอบนี้เป็น 0 แล้ว — ลดอีกไม่ได้', 'warning'); lastHit = pid; renderScan(); return; }
   state.scans[k] = next;
+  lvAdd(k, unit ? unit.lv : '*', next - before);     // ยิงมาเป็นหน่วยไหน (แบ่งตามหน่วย BUILD 94)
   logMove({ ts:Date.now(), pid, ea:next - before, round:jobRnd(), device:DEVICE, by:CHECKER, how });
   lastHit = pid; save(); renderScan();
   const p = byId[pid];
@@ -5271,7 +5384,7 @@ function renderChan() {
         <div class="stop">
           <div class="sname">${free?'<span class="badge badge-gold">แถม</span> ':''}${esc(pr.name)}</div>
           <span class="badge ${st==='ok'?'badge-ok':st==='none'?'badge-warn':'badge-danger'}"
-            >${st==='check'?'ตรวจซ้ำ':st==='ok'?'ครบ':st==='short'?'ขาด':'รอยิง'}</span>
+            >${st==='check'?'เกิน':st==='ok'?'ครบ':st==='short'?'ขาด':'รอยิง'}</span>
         </div>
         <div class="smeta">${units.map(u=>u.code).join(' · ')} · ${fmtN(new Set(k.lines.map(l=>l.storeCode)).size)} ร้าน</div>
         ${chanBreak(k, units)}
@@ -5588,6 +5701,7 @@ function tAddEA(pid, ea, unit, how) {
   if (next === before) { toast(floor ? 'ส่วนที่ยืนยันใบโอนไปแล้วลดจากหน้านี้ไม่ได้' : 'ยอดเป็น 0 แล้ว — ลดอีกไม่ได้', 'warning');
                          lastHit = pid; renderTransfer(); return; }
   (state.tscans ||= {})[k] = next;
+  lvAdd(k, unit ? unit.lv : '*', next - before);     // ยกมาเป็นหน่วยไหน (BUILD 94)
   logMove({ ts:Date.now(), pid, ea:next - before, round:curRnd(), src:FROM_WH, device:DEVICE, by:CHECKER, how });
   lastHit = pid; save(); renderTransfer();
   const p = byId[pid];
@@ -5625,6 +5739,7 @@ function tSetQty(pid, val) {
   const next = before + (n * u.qtyEA + rem - cur);
   if (next < 0) { toast(`ยอดนี้มีส่วนที่ยิงตอนเลือกช่องทางอื่น ${fmtUnits(cur - before, p.units)} — ตั้งต่ำกว่านี้ไม่ได้`, 'warning'); renderTransfer(); return; }
   state.tscans[k] = next;
+  lvAdd(k, u.lv, next - before);
   if (next !== before)
     logMove({ ts:Date.now(), pid, ea:next - before, round:curRnd(), src:FROM_WH, device:DEVICE, by:CHECKER, how:'แก้ยอดโอนรวม' });
   lastHit = pid; save(); renderTransfer();
@@ -5856,7 +5971,7 @@ function renderStale() {
        (รุ่น 29–31 ใช้วันทำงานตัดสิน ใบจองวันใหม่เข้าตอนสาย ๆ แล้วยอดที่ยิงค้างของเมื่อวานถูกลบทิ้ง — แก้ 30/09) */
 /* used = ยอดในกองที่ยืนยันลงชีตไปแล้ว · subsSent = ของทดแทนที่ลงชีตไปแล้ว · tsent = ยอดโอนที่ออกใบไปแล้ว
    sused = ยอดเช็คตามร้านที่ลงชีตแล้ว · tused = ยอดโอนจาก C4 ที่ลงชีต ยืนยันเช็ค แล้ว (BUILD 35) */
-const DAY_KEYS = ['scans','sscans','tscans','cscans','subs','doneStore','doneJob','unknown','used','subsSent','tsent','sused','tused'];
+const DAY_KEYS = ['scans','sscans','tscans','cscans','subs','doneStore','doneJob','unknown','used','subsSent','tsent','sused','tused','lvs','usedLv'];
 const DAY_EMPTY = k => k === 'unknown' ? [] : {};
 const hasDayData = () => ['scans','sscans','tscans','cscans','subs'].some(k =>
   Object.values(state[k] || {}).some(v => Array.isArray(v) ? v.length : v > 0)) || Object.keys(state.doneStore || {}).length;
@@ -7406,7 +7521,7 @@ function cardOf(r) {
         ${hasFree ? '<th style="text-align:right">แถม ได้/สั่ง</th>' : ''}</tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
-    ${r.res.stranded ? `<div class="note">⚠ เหลือ ${fmtN(r.res.stranded)} ชิ้น แบ่งไม่ลง — ไม่ครบหน่วยที่ร้านที่เหลือสั่งไว้</div>` : ''}
+    ${r.res.stranded ? `<div class="note">${strandTxt(r, units)}</div>` : ''}
     ${r.res.surplus ? `<div class="note">⚠ ยิงเกินยอดสั่ง ${fmtUnits(r.res.surplus, units)} — เอากลับเข้าคลังหรือตรวจซ้ำ</div>` : ''}
   </div>`;
 }
@@ -8682,15 +8797,17 @@ let RV_GO = null;
 function shortReview({ title, okLabel, items, go }) {
   if (!items.length) return Promise.resolve(true);
   items.sort((a, b) => b.zero - a.zero);                 // ยังไม่ได้ยิงเลยขึ้นก่อน · ในกลุ่มเรียงแบบหน้าสรุป
-  const nZero = items.filter(x => x.zero).length;
+  const nZero = items.filter(x => x.zero).length, nOver = items.filter(x => x.overEA).length;
   RV_GO = go;
-  const body = `<div class="rv-sum">ขาด <b>${fmtN(items.length)}</b> รายการ${nZero ? ` · <span class="rv-z">ยังไม่ได้ยิงเลย ${fmtN(nZero)}</span>` : ''}</div>
+  const body = `<div class="rv-sum">ขาด <b>${fmtN(items.length)}</b> รายการ${nZero ? ` · <span class="rv-z">ยังไม่ได้ยิงเลย ${fmtN(nZero)}</span>` : ''}${
+      nOver ? ` · <span class="rv-z">มีของเกินยังไม่ได้แบ่ง ${fmtN(nOver)}</span>` : ''}</div>
     <div class="rv-hint"><span>ดูของจริงทีละตัว —</span> <span>ขาดจริงแตะ <b>ขาดจริง</b></span> · <span>รอโอนย้ายแตะ <b>ขาดจริง</b></span> ·
       <span>ยังไม่ได้เช็คแตะ <b>ไปยิง</b></span></div>
     <div class="rv-list">${items.map(x => `<div class="rv-it ${x.zero ? 'zero' : ''}">${thumbHtml(x.p)}
       <div class="rv-t"><b>${esc(x.p.name)}</b>
         <small>ต้องออก ${fmtUnits(x.needEA, x.p.units)} · ได้ ${x.gotEA ? fmtUnits(x.gotEA, x.p.units) : '0'}${x.free ? ' · ของแถม' : ''}</small>
-        <span class="rv-s">${x.zero ? '⚠ ยังไม่ได้ยิงเลย · ' : ''}ขาด ${fmtUnits(x.shortEA, x.p.units)}${x.stores > 1 ? ` · ${fmtN(x.stores)} ร้าน` : ''}</span></div>
+        <span class="rv-s">${x.zero ? '⚠ ยังไม่ได้ยิงเลย · ' : ''}ขาด ${fmtUnits(x.shortEA, x.p.units)}${x.stores > 1 ? ` · ${fmtN(x.stores)} ร้าน` : ''}</span>${
+        x.overEA ? `<span class="rv-s">⚠ เกิน ${fmtUnits(x.overEA, x.p.units)} ยังไม่ได้แบ่ง — ไม่ลงชีต อยู่ในเครื่องนี้</span>` : ''}</div>
       <div class="rv-b"><button type="button" class="rv-go" onclick="rvGo('${x.p.id}')">ไปยิง</button>
         <button type="button" class="rv-ck" onclick="rvTick(this)"><i>✓</i>ขาดจริง</button></div></div>`).join('')}</div>`;
   return askBox({ title, body, ok:okLabel, cancel:'กลับไปตรวจ', wide:true, tick:true });
@@ -8707,6 +8824,7 @@ function rvGo(pid) { if (ASK) ASK.done(false); if (RV_GO) RV_GO(pid); }
 const jobShortItems = c => c.all.filter(rowShort).map(r => {
   const need = r.detail.reduce((s, d) => s + d.line.needEA, 0), got = r.detail.reduce((s, d) => s + Math.min(d.giveEA, d.line.needEA), 0);
   return { p:r.product, needEA:need, gotEA:got, shortEA:need - got, zero:!r.scanned && !got, free:!!r.isFree,
+           overEA:r.res.stranded || 0,                 // ของเกินที่แบ่งไม่ลง (BUILD 94) — เตือนในกล่อง
            stores:new Set(r.detail.filter(d => d.giveEA < d.line.needEA).map(d => d.line.storeCode)).size };
 });
 /** ร้าน/เซล: ตัวที่ได้ไม่ครบ · บรรทัดที่ปิดไปแล้ว (ยืนยันเพิ่ม) ไม่ต้องตรวจซ้ำ */
@@ -8748,6 +8866,9 @@ async function confirmJob() {
     save();
     setMode('team');                         // ปิดงานแล้วกลับหน้าแรกของเช็คตามทีม
     returnsToast();
+    const over = c.all.filter(r => r.res.stranded);   // ของเกินแบ่งไม่ลง — ไม่ลงชีต ยังอยู่ในเครื่องนี้ (BUILD 94)
+    if (over.length) setTimeout(() => toast(`⚠ มีของเกินยังไม่ได้แบ่ง ${fmtN(over.length)} รายการ (${over.slice(0, 2).map(r =>
+      `${r.product.name} ${fmtUnits(r.res.stranded, r.product.units)}`).join(' · ')}${over.length > 2 ? '…' : ''}) — ไม่ได้ลงชีต อยู่ในเครื่องนี้`, 'warning'), 1800);
   }
 }
 
