@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.39</title>
+<title>Rattana Shop Location v1.40</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -348,7 +348,7 @@ body.dark .ms-result .big{color:var(--gold-light)}
 
 <header>
   <button class="icon-btn" id="btnHome" title="แผนที่ทั้งหมด" onclick="goHome()" style="display:none">⌂</button>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.39 · 2026-11-10</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.40 · 2026-11-10</span></div>
   <div class="hdr-right">
     <span class="cur-map" id="curMapName"></span>
     <button class="icon-btn" id="btnShare" title="แชร์แผนที่นี้" onclick="openShare(openIds)" style="display:none">🔗</button>
@@ -1810,29 +1810,31 @@ async function osrmJson(url) {
     try {
       const j = await (await fetch(url)).json();
       if (j.code === 'Ok') return j;
-      throw new Error(j.message || j.code || 'OSRM error');
+      throw Object.assign(new Error(j.message || j.code || 'OSRM error'), { final: !!j.code });   // the server answered: retrying won't help
     } catch (e) {
-      if (i >= 3) throw e;
+      if (e.final || i >= 3) throw e;
       await sleep(2000 * (i + 1));
     }
   }
 }
-/* road distance (meters) from every point to every other point */
+/* driving time (seconds) from every point to every other point, on real roads; snap = meters from each point to the nearest road */
 async function roadMatrix(pts, req) {
   const n = pts.length, coords = pts.map(p => `${p.lng.toFixed(5)},${p.lat.toFixed(5)}`).join(';');
-  const step = Math.min(n, Math.floor(10000 / n)), D = [];
+  const step = Math.min(n, Math.floor(10000 / n)), T = [];
+  let snap = [];
   const parts = Math.ceil(n / step);
   for (let i = 0, part = 1; i < n; i += step, part++) {
-    planMsg(`⏳ กำลังดึงระยะทางตามถนน… ${part}/${parts}`);
+    planMsg(`⏳ กำลังดึงเวลาขับตามถนน… ${part}/${parts}`);
     const src = []; for (let k = i; k < Math.min(n, i + step); k++) src.push(k);
-    const j = await osrmJson(`${OSRM_URL}/table/v1/driving/${coords}?annotations=distance&sources=${src.join(';')}`);
+    const j = await osrmJson(`${OSRM_URL}/table/v1/driving/${coords}?annotations=duration&sources=${src.join(';')}`);
     if (req !== plan.req) return null;
-    j.distances.forEach((row, k) => { D[src[k]] = row; });
+    j.durations.forEach((row, k) => { T[src[k]] = row; });
+    snap = j.destinations.map(d => d.distance || 0);
     if (i + step < n) await sleep(1100);   // be polite to the public server
   }
-  // a pair with no road answer: estimate from the straight line so that one shop cannot break the run
-  D.forEach((row, a) => row.forEach((v, b) => { if (v == null) row[b] = haversineKm(pts[a], pts[b]) * 1400; }));
-  return D;
+  // a pair with no road answer: estimate at 30 km/h so that one shop cannot break the run
+  T.forEach((row, a) => row.forEach((v, b) => { if (v == null) row[b] = haversineKm(pts[a], pts[b]) * 120; }));
+  return { T, snap };
 }
 function improveTour(t, c, end) {
   const m = t.length;
@@ -1867,8 +1869,31 @@ function improveTour(t, c, end) {
     }
   }
 }
-/* order of points 1..n-1 starting at point 0, shortest total road distance */
-function orderStops(D, roundTrip) {
+/* seconds of driving a planner would accept to avoid one crossing / one doubling-back */
+var planPenalty = { cross: 120, back: 30 };
+function tourMess(pts, o, roundTrip) {
+  const w = [pts[0], ...o.map(i => pts[i])];
+  if (roundTrip) w.push(pts[0]);
+  const m = w.length - 1;
+  const side = (a, b, c) => (b.lng - a.lng) * (c.lat - a.lat) - (b.lat - a.lat) * (c.lng - a.lng);
+  let cross = 0, back = 0;
+  for (let i = 0; i < m; i++) {
+    const a = w[i], b = w[i + 1];
+    for (let j = i + 2; j < m; j++) {
+      if (i === 0 && j === m - 1 && roundTrip) continue;   // these two share the warehouse
+      const c = w[j], d = w[j + 1];
+      if (side(a, b, c) * side(a, b, d) < 0 && side(c, d, a) * side(c, d, b) < 0) cross++;
+    }
+    if (i + 2 <= m) {
+      const c = w[i + 2], ux = b.lng - a.lng, uy = b.lat - a.lat, vx = c.lng - b.lng, vy = c.lat - b.lat;
+      const lu = Math.hypot(ux, uy), lv = Math.hypot(vx, vy);
+      if (lu > .003 && lv > .003 && (ux * vx + uy * vy) / (lu * lv) < -.87) back++;   // turned around by more than 150 degrees
+    }
+  }
+  return { cross, back };
+}
+/* order of points 1..n-1 starting at point 0: least driving time, easy to follow */
+function orderStops(D, roundTrip, pts) {
   const n = D.length, END = n;
   const c = (a, b) => a === END ? 0 : b === END ? (roundTrip ? D[a][0] : 0) : D[a][b];
   const left = new Set(); for (let i = 1; i < n; i++) left.add(i);
@@ -1882,12 +1907,14 @@ function orderStops(D, roundTrip) {
   t.push(END);
   const cost = o => { let v = 0; for (let i = 1; i < o.length; i++) v += c(o[i - 1], o[i]); return v; };
   const end = performance.now() + 2500;
+  const mess = o => { if (!pts) return 0; const x = tourMess(pts, o.slice(1, -1), roundTrip); return x.cross * planPenalty.cross + x.back * planPenalty.back; };
+  const score = o => cost(o) + mess(o);
   improveTour(t, c, end);
   if (n <= 10) {   // few shops: try every order, so the answer is exact
-    let bestV = cost(t), bestO = t.slice(1, -1);
+    let bestV = score(t), bestO = t.slice(1, -1);
     const go = (cur, done, v, path) => {
       if (v >= bestV) return;
-      if (path.length === n - 1) { const x = v + c(cur, END); if (x < bestV) { bestV = x; bestO = [...path]; } return; }
+      if (path.length === n - 1) { const x = score([0, ...path, END]); if (x < bestV) { bestV = x; bestO = [...path]; } return; }
       for (let i = 1; i < n; i++) if (!(done >> i & 1)) { path.push(i); go(i, done | 1 << i, v + D[cur][i], path); path.pop(); }
     };
     go(0, 1, 0, []);
@@ -1896,13 +1923,13 @@ function orderStops(D, roundTrip) {
   // shake the best order and improve again (fixed seed: same shops give the same answer)
   let seed = 12345;
   const rnd = k => { seed = (seed * 1103515245 + 12345) % 2147483648; return Math.floor(seed / 2147483648 * k); };
-  let bestCost = cost(t);
+  let bestCost = score(t);
   for (let it = 0; it < 400 && performance.now() < end; it++) {
     const cuts = [1 + rnd(n - 1), 1 + rnd(n - 1), 1 + rnd(n - 1)].sort((a, b) => a - b);
     if (cuts[0] === cuts[1] || cuts[1] === cuts[2]) continue;
     const o = [...t.slice(0, cuts[0]), ...t.slice(cuts[1], cuts[2]), ...t.slice(cuts[0], cuts[1]), ...t.slice(cuts[2])];
     improveTour(o, c, end);
-    const v = cost(o);
+    const v = score(o);
     if (v < bestCost - 1) { bestCost = v; t = o; }
   }
   return t.slice(1, -1);
@@ -1925,18 +1952,20 @@ async function planRun() {
     if (!start) { planMsg('⏳ กำลังหาตำแหน่งปัจจุบัน…'); start = await planGps(); }
     if (req !== plan.req) return;
     const pts = [start, ...list];
-    const D = await roadMatrix(pts, req);
-    if (!D) return;
-    planMsg('⏳ กำลังหาลำดับที่สั้นที่สุด…');
+    const M = await roadMatrix(pts, req);
+    if (!M) return;
+    planMsg('⏳ กำลังหาลำดับที่ใช้เวลาน้อยที่สุด…');
     await sleep(30);   // let the message paint
-    const stops = orderStops(D, roundTrip).map(i => pts[i]);
+    const order = orderStops(M.T, roundTrip, pts);
+    const stops = order.map(i => pts[i]);
+    const far = order.map(i => M.snap[i] > 500 ? Math.round(M.snap[i]) : 0);
     if (req !== plan.req) return;
     planMsg('⏳ กำลังวาดเส้นทาง…');
     const way = roundTrip ? [start, ...stops, start] : [start, ...stops];
-    const j = await osrmJson(`${OSRM_URL}/route/v1/driving/${way.map(p => `${p.lng.toFixed(5)},${p.lat.toFixed(5)}`).join(';')}?overview=full&geometries=geojson`);
+    const j = await osrmJson(`${OSRM_URL}/route/v1/driving/${way.map(p => `${p.lng.toFixed(5)},${p.lat.toFixed(5)}`).join(';')}?overview=full&geometries=geojson&steps=true&continue_straight=false`);
     if (req !== plan.req) return;
     const r = j.routes[0];
-    plan.result = { key: planKey(list), start, stops, way, roundTrip, legs: r.legs.map(l => ({ dist: l.distance, dur: l.duration })), dist: r.distance, dur: r.duration };
+    plan.result = { key: planKey(list), start, stops, way, roundTrip, far, legs: r.legs.map(l => ({ dist: l.distance, dur: l.duration, ferry: l.steps.some(x => x.mode === 'ferry') })), dist: r.distance, dur: r.duration };
     planDraw(r.geometry.coordinates.map(([x, y]) => [y, x]));
     planShow();
   } catch (e) {
@@ -1963,11 +1992,15 @@ function planDraw(latlngs) {
 }
 function planShow() {
   const R = plan.result;
-  $('planResult').innerHTML = `<div class="big">🚚 ${fmtKm(R.dist / 1000)}</div>
-    <div class="sub">${R.stops.length.toLocaleString('th-TH')} ร้าน · ตามเส้นถนน · ขับรถประมาณ ${fmtDur(R.dur)} (ยังไม่รวมเวลาแวะร้าน)</div>`;
+  const nFar = R.far.filter(Boolean).length, nFerry = R.legs.filter(l => l.ferry).length;
+  const leg = l => `+${fmtDur(l.dur)} · ${fmtKm(l.dist / 1000)}`;
+  $('planResult').innerHTML = `<div class="big">🚚 ${fmtDur(R.dur)}</div>
+    <div class="sub">เวลาขับรวมน้อยที่สุด · ${fmtKm(R.dist / 1000)} ตามถนนจริง · ${R.stops.length.toLocaleString('th-TH')} ร้าน (ยังไม่รวมเวลาแวะร้าน)</div>` +
+    (nFerry ? `<div class="sub" style="color:var(--danger)">⛴ มี ${nFerry} ช่วงที่ต้องข้ามเรือ / แพ — ตรวจก่อนออกรถ</div>` : '') +
+    (nFar ? `<div class="sub" style="color:var(--danger)">⚠ ${nFar} ร้านพิกัดอยู่ห่างถนนเกิน 500 ม. — ตรวจพิกัดร้าน</div>` : '');
   $('planList').innerHTML = `<div class="plan-row fixed"><span class="plan-no start">เริ่ม</span><span class="t">${esc(R.start.name)}</span></div>` +
-    R.stops.map((x, i) => `<div class="plan-row" onclick="planFocus(${i})" title="${esc(x.name)}"><span class="plan-no">${i + 1}</span><span class="t">${esc(x.name)}</span><span class="d">+${fmtKm(R.legs[i].dist / 1000)}</span></div>`).join('') +
-    (R.roundTrip ? `<div class="plan-row fixed"><span class="plan-no start">จบ</span><span class="t">กลับ ${esc(R.start.name)}</span><span class="d">+${fmtKm(R.legs[R.stops.length].dist / 1000)}</span></div>` : '');
+    R.stops.map((x, i) => `<div class="plan-row" onclick="planFocus(${i})" title="${esc(x.name)}"><span class="plan-no">${i + 1}</span><span class="t">${R.legs[i].ferry ? '⛴ ' : ''}${R.far[i] ? '⚠ ' : ''}${esc(x.name)}</span><span class="d">${leg(R.legs[i])}</span></div>`).join('') +
+    (R.roundTrip ? `<div class="plan-row fixed"><span class="plan-no start">จบ</span><span class="t">${R.legs[R.stops.length].ferry ? '⛴ ' : ''}กลับ ${esc(R.start.name)}</span><span class="d">${leg(R.legs[R.stops.length])}</span></div>` : '');
   // Google Maps takes a limited number of stops per link, so a long run is split
   const links = [];
   for (let i = 0; i < R.way.length - 1; i += 10) links.push(R.way.slice(i, i + 11));
@@ -1991,17 +2024,17 @@ function planExcel() {
   const R = plan.result; if (!R) return;
   let sum = 0;
   const km = m => Math.round(m / 10) / 100;
-  const rows = [{ 'ลำดับ': 'เริ่ม', 'ชื่อร้าน': R.start.name, 'เซลล์': '', 'รูท': '', 'จังหวัด': '', 'อำเภอ/เขต': '', 'ตำบล/แขวง': '', 'ละติจูด': R.start.lat, 'ลองติจูด': R.start.lng, 'ระยะจากจุดก่อนหน้า (กม.)': 0, 'ระยะสะสม (กม.)': 0, 'Google Maps': gmapsUrl(R.start) }];
+  const rows = [{ 'ลำดับ': 'เริ่ม', 'ชื่อร้าน': R.start.name, 'เซลล์': '', 'รูท': '', 'จังหวัด': '', 'อำเภอ/เขต': '', 'ตำบล/แขวง': '', 'ละติจูด': R.start.lat, 'ลองติจูด': R.start.lng, 'เวลาจากจุดก่อนหน้า (นาที)': 0, 'ระยะจากจุดก่อนหน้า (กม.)': 0, 'ระยะสะสม (กม.)': 0, 'Google Maps': gmapsUrl(R.start) }];
   R.stops.forEach((x, i) => {
     sum += R.legs[i].dist;
-    rows.push({ 'ลำดับ': i + 1, 'ชื่อร้าน': x.name, 'เซลล์': x.sale || '', 'รูท': x.group || '', 'จังหวัด': x.prov || '', 'อำเภอ/เขต': x.amphoe || '', 'ตำบล/แขวง': x.tambon || '', 'ละติจูด': x.lat, 'ลองติจูด': x.lng, 'ระยะจากจุดก่อนหน้า (กม.)': km(R.legs[i].dist), 'ระยะสะสม (กม.)': km(sum), 'Google Maps': gmapsUrl(x) });
+    rows.push({ 'ลำดับ': i + 1, 'ชื่อร้าน': x.name, 'เซลล์': x.sale || '', 'รูท': x.group || '', 'จังหวัด': x.prov || '', 'อำเภอ/เขต': x.amphoe || '', 'ตำบล/แขวง': x.tambon || '', 'ละติจูด': x.lat, 'ลองติจูด': x.lng, 'เวลาจากจุดก่อนหน้า (นาที)': Math.round(R.legs[i].dur / 60), 'ระยะจากจุดก่อนหน้า (กม.)': km(R.legs[i].dist), 'ระยะสะสม (กม.)': km(sum), 'Google Maps': gmapsUrl(x) });
   });
   if (R.roundTrip) {
     const m = R.legs[R.stops.length].dist; sum += m;
-    rows.push({ 'ลำดับ': 'จบ', 'ชื่อร้าน': 'กลับ ' + R.start.name, 'เซลล์': '', 'รูท': '', 'จังหวัด': '', 'อำเภอ/เขต': '', 'ตำบล/แขวง': '', 'ละติจูด': R.start.lat, 'ลองติจูด': R.start.lng, 'ระยะจากจุดก่อนหน้า (กม.)': km(m), 'ระยะสะสม (กม.)': km(sum), 'Google Maps': gmapsUrl(R.start) });
+    rows.push({ 'ลำดับ': 'จบ', 'ชื่อร้าน': 'กลับ ' + R.start.name, 'เซลล์': '', 'รูท': '', 'จังหวัด': '', 'อำเภอ/เขต': '', 'ตำบล/แขวง': '', 'ละติจูด': R.start.lat, 'ลองติจูด': R.start.lng, 'เวลาจากจุดก่อนหน้า (นาที)': Math.round(R.legs[R.stops.length].dur / 60), 'ระยะจากจุดก่อนหน้า (กม.)': km(m), 'ระยะสะสม (กม.)': km(sum), 'Google Maps': gmapsUrl(R.start) });
   }
   const ws = XLSX.utils.json_to_sheet(rows), wb = XLSX.utils.book_new();
-  ws['!cols'] = [{ wch: 6 }, { wch: 32 }, { wch: 12 }, { wch: 11 }, { wch: 16 }, { wch: 18 }, { wch: 18 }, { wch: 11 }, { wch: 11 }, { wch: 12 }, { wch: 12 }, { wch: 48 }];
+  ws['!cols'] = [{ wch: 6 }, { wch: 32 }, { wch: 12 }, { wch: 11 }, { wch: 16 }, { wch: 18 }, { wch: 18 }, { wch: 11 }, { wch: 11 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 48 }];
   XLSX.utils.book_append_sheet(wb, ws, 'ลำดับวิ่งรถ');
   const d = new Date();
   const stamp = `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear() + 543}`;
