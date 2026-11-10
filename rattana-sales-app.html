@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.705</title>
+<title>Rattana Sales — v8.706</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -7170,7 +7170,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.705 · 2026-11-04</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.706 · 2026-11-04</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -7181,7 +7181,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.705</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.706</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -11043,6 +11043,13 @@ function hydrateVisitsFromSheet(rows) {
     const _isMine = (myEmail && rEmail && rEmail === myEmail) || (myCode && code && code === myCode);
     if ((myEmail || myCode) && (rEmail || code) && !_isMine) return;
     if (visits[shopId]) return;   // in-session record takes priority
+    /* 🔴 v8.706 (Surat 10/11 "เซลยืนยันว่ากดเช็คเอาท์แล้ว บางเจ้ามีออเดอร์แล้ว"):
+       เดิมยัด checkInRange:true / checkInDistance:0 ทุกแถว → ร้านนี้โดนตัดอัตโนมัติทีหลัง แถวที่ส่งกลับไปเขียนทับชีท
+       ระยะห่าง 247 ม. "ไม่" กลายเป็น 0 ม. "ใช่" (นอกพิกัดหายจาก KPI) → อ่านค่าจริงจากแถวชีท ว่าง = ไม่รู้ (ไม่ส่งทับ) */
+    const _dRaw = String(r['ระยะห่าง(m)'] == null ? '' : r['ระยะห่าง(m)']).trim();
+    const _inR = String(r['ในพิกัด'] || '').trim();
+    const _ll = String(r['พิกัดเช็คอิน'] || '').match(/(-?\d+\.\d+)[,\s]+(-?\d+\.\d+)/);
+    const _oids = String(r['orderIds'] || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
     visits[shopId] = {
       visitId:          r['visitId'] || '',
       date:             date,
@@ -11050,14 +11057,36 @@ function hydrateVisitsFromSheet(rows) {
       salesmanCode:     code,
       checkInTime:      String(r['เวลาเช็คอิน']  || '').trim() || null,
       checkOutTime:     String(r['เวลาเช็คเอาท์'] || '').trim() || null,
-      checkInRange:     true,
-      checkInDistance:  0,
+      checkInRange:     _inR ? (_inR === 'ใช่') : true,
+      checkInDistance:  (_dRaw !== '' && isFinite(Number(_dRaw))) ? Number(_dRaw) : null,
+      checkInLat:       _ll ? parseFloat(_ll[1]) : null,
+      checkInLng:       _ll ? parseFloat(_ll[2]) : null,
+      outOfRangeReason: String(r['นอกพิกัด-เหตุผล'] || '').trim() || null,
+      orderIds:         _oids.length ? _oids : undefined,
+      notes:            String(r['หมายเหตุ'] || ''),
       duration:         r['ระยะเวลา(นาที)'] || null,
       result:           String(r['ผลลัพธ์'] || '').trim() || null,
       fromSheet:        true,
     };
     count++;
   });
+  /* v8.706: ชีทยังเห็น "เปิดอยู่" แต่เครื่องนี้ปิดร้านไปแล้ว (แถวเช็คเอาท์ยังค้างคิว/gviz ยังไม่ทัน)
+     → เชื่อบันทึกในเครื่อง (rsa_visit_log) ไม่งั้นร้านที่ปิดแล้วกลับมาเปิด แล้วโดนตัดทับเวลาจริง */
+  try {
+    const _vl = {};
+    (_vlogGet() || []).forEach(function (e) { if (e && e.visitId && e.row) _vl[String(e.visitId)] = e.row; });
+    Object.keys(visits).forEach(function (sid) {
+      const v = visits[sid];
+      if (!v || !v.fromSheet || v.checkOutTime) return;
+      const lr = _vl[String(v.visitId || '')];
+      if (!lr || !String(lr['เวลาเช็คเอาท์'] || '').trim()) return;
+      v.checkOutTime = String(lr['เวลาเช็คเอาท์']).trim();
+      v.duration = Number(lr['ระยะเวลา(นาที)']) || 0;
+      v.result = String(lr['ผลลัพธ์'] || '').trim() || v.result;
+      const _lo = String(lr['orderIds'] || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+      if (_lo.length) v.orderIds = _lo;
+    });
+  } catch (e) { console.warn('[hydrate vlog]', e && e.message); }
   console.log('[hydrateVisitsFromSheet] restored', count, 'visits');
   if (count > 0) {
     if (document.getElementById('screenRoute')?.classList.contains('active')) renderShopList();
@@ -34151,6 +34180,21 @@ function _autoCutVisit(shopId, reason) {
   v.checkOutLat  = SALESMAN.currentLat;
   v.checkOutLng  = SALESMAN.currentLng;
   v.duration     = 0;
+  /* 🔴 v8.706 (เคสจริง 10/11 รุ่งฟ้า 5 ร้าน · 33 แถว/วัน): คีย์ออเดอร์แล้วแต่แอปไม่ได้ปิดร้าน (มือถือรีโหลดหน้า visit ในเครื่องหาย)
+     → ร้านถูกตัดตอนเช็คอินร้านถัดไป ได้เช็คเอาท์ = เช็คอิน 0 นาที ไม่มีเลขออเดอร์ ทั้งที่ขายแล้ว
+     ตอนนี้: มีออเดอร์หลังเวลาเช็คอิน = ปิดร้านตามเวลากดยืนยันออเดอร์ล่าสุด (เท่ากับที่การส่งออเดอร์ปกติทำ) + ผูกเลขออเดอร์ */
+  if (_soldCut) {
+    const _os = _visitOrdersSince(shopId, v.checkInTime);
+    if (_os.ids.length) {
+      const _prev = (v.orderIds && v.orderIds.length) ? v.orderIds : (v.orderId ? [String(v.orderId)] : []);
+      v.orderIds = _prev.concat(_os.ids.filter(function (x) { return _prev.indexOf(x) < 0; }));
+    }
+    if (_os.last) {
+      const _m = function (t) { const m = String(t || '').match(/(\d{1,2})[:.](\d{2})/); return m ? (+m[1]) * 60 + (+m[2]) : -1; };
+      const _d = _m(_os.last) - _m(v.checkInTime);
+      if (_m(v.checkInTime) >= 0 && _d > 0) { v.checkOutTime = _os.last; v.duration = _d; }
+    }
+  }
   v.result       = _soldCut ? 'ordered' : 'no-order';
   v.reason       = _soldCut ? '' : (reason || 'ไม่ซื้อ (ออกจากร้าน)');
   v.autoCut      = true;
@@ -34582,6 +34626,29 @@ function _visitSoldToday(shopId) {
   } catch (e) { return 0; }
 }
 window._visitSoldToday = _visitSoldToday;
+
+/* v8.706: ออเดอร์ของฉันวันนี้ที่ร้านนี้ ตั้งแต่เวลาเช็คอินเป็นต้นไป → { ids, last:'HH:MM' }
+   ใช้ตอนตัดร้านอัตโนมัติ: ร้านที่ขายได้ ให้เวลาเช็คเอาท์ = เวลากดยืนยันออเดอร์ (เหมือนปิดร้านจากการส่งออเดอร์ปกติ) + ผูกเลขออเดอร์ */
+function _visitOrdersSince(shopId, checkInTime) {
+  const out = { ids: [], last: '' };
+  try {
+    const shop = (SHOPS || []).find(function (x) { return x.id === shopId; });
+    const code = String((shop && (shop.bplusCode || shop.id)) || shopId || '').trim();
+    const me = (typeof _resolveSalesmanCodeFromUsers === 'function') ? _resolveSalesmanCodeFromUsers() : (SALESMAN.code || '');
+    const mm = function (t) { const m = String(t || '').match(/(\d{1,2})[:.](\d{2})/); return m ? (+m[1]) * 60 + (+m[2]) : -1; };
+    const ci = mm(checkInTime);
+    const seen = {};
+    (_ordersForShopVisit(code, { code: me, email: (currentUser && currentUser.email) || SALESMAN.email || '' }) || []).forEach(function (o) {
+      const id = String(o['orderId'] || '').trim(); if (!id || seen[id]) return;
+      const t = mm(o['เวลา']);
+      if (ci >= 0 && t >= 0 && t < ci) return;   // ออเดอร์ก่อนเช็คอินรอบนี้ = ของรอบอื่น
+      seen[id] = 1; out.ids.push(id);
+      if (t >= 0 && t > mm(out.last)) out.last = String(o['เวลา']).trim();
+    });
+  } catch (e) {}
+  return out;
+}
+window._visitOrdersSince = _visitOrdersSince;
 
 /* ต้องถ่ายรูปไหม — ตัดสินที่เดียว ใช้ร่วมทุกทางที่ปิดร้าน
    ❌ ไม่ต้องถ่าย เมื่อ: ขายได้แล้ว (Surat เคาะ 24/8 "ไม่ต้อง เพราะต้องเช็คอิน แล้วขายได้แล้ว") · อยู่นอกพื้นที่ · กล้องใช้ไม่ได้ */
@@ -47094,13 +47161,24 @@ async function confirmOrder() {
   if (_dataIssue) window._orderIssues[orderId] = _dataIssue;
 
   // AUTO CHECK-OUT only if not already checked out (first order)
+  /* 🔴 v8.706 (Surat 10/11): มือถือรีโหลดหน้าระหว่างคีย์ (สลับไปไลน์/กล้อง) → visits ใน RAM หาย
+     เดิมตรงนี้หาไม่เจอ = ไม่ปิดร้าน ไม่ผูกเลขออเดอร์ → เวลาเช็คเอาท์ว่าง แล้วโดนตัด 0 นาทีตอนเช็คอินร้านถัดไป
+     → กู้จากบันทึกในเครื่องก่อน แล้วค่อยจากชีทที่โหลดมาแล้ว (ไม่รอเน็ต) */
+  if (!visits[currentShopId]) {
+    try { _vlogRestoreOpenVisits(); } catch (e) {}
+    try { if (!visits[currentShopId] && SHEET_DATA && Array.isArray(SHEET_DATA.visits)) hydrateVisitsFromSheet(SHEET_DATA.visits); } catch (e) {}
+  }
   const v = visits[currentShopId];
   let visit = null;
   if (v && !v.checkOutTime) {
     visit = finishVisit(currentShopId, 'ordered', { orderId });
   } else if (v) {
     v.orderIds = v.orderIds || [v.orderId].filter(Boolean);
-    v.orderIds.push(orderId);
+    if (v.orderIds.indexOf(orderId) < 0) v.orderIds.push(orderId);
+    /* v8.706: ร้านปิดไปแล้ว (ตัดอัตโนมัติ/ปิดไม่ซื้อ) แล้วมาขายได้ — เดิมแค่จำในเครื่อง ❌ ไม่เคยส่งขึ้นชีท
+       → แถว visit ไม่มีเลขออเดอร์ และยังเป็น "ไม่ซื้อ" ทั้งที่ขายแล้ว · ส่งซ้ำ (upsert ตาม visitId เขียนเฉพาะช่องที่มีค่า) */
+    if (v.result !== 'ordered') { v.result = 'ordered'; v.reason = ''; }
+    if (v.visitId && _matchToday(v.date || formatDateISO(new Date()))) { try { _pushVisitAndTell(currentShopId, v, 'checkout'); } catch (e) {} }
     visit = v;
   }
 
