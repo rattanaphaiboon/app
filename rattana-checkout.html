@@ -2594,7 +2594,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-10 · 95';
+const BUILD = '2026-11-11 · 96';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -3150,6 +3150,12 @@ async function enrichFromMaster() {
       if (rec.img)  p.img  = rec.img;
       p.mname = rec.name; p.brand = rec.brand; p.size = rec.size;   // ชื่อ/แบรนด์/ไซส์ตามมาสเตอร์ — จับคู่ชีตโปร
       const have = new Set(p.units.map(u => String(u.code)));
+      // ป้ายหน่วยในใบจองที่อ่านจำนวนไม่ออก (parseUnit guess) → ใช้จำนวน/ระดับของบาร์โค้ดเดียวกันในมาสเตอร์
+      p.units.forEach(u => { if (!u.guess) return;
+        const mu = rec.units.find(x => String(x.code) === String(u.code));
+        if (mu && mu.qtyEA > 0) { u.qtyEA = mu.qtyEA; u.lv = mu.lv; UNIT_FIX[u.label] = { qtyEA:mu.qtyEA, lv:mu.lv };
+                                  console.warn('หน่วยในใบจองอ่านไม่ออก ใช้มาสเตอร์แทน', u.label, '→', mu.qtyEA, p.name); }
+        delete u.guess; });
       rec.units.forEach(u => { if (!have.has(String(u.code))) { p.units.push({ ...u }); addedCodes++; } });
     }
     indexProducts(); JOBS = buildJobs(); rebuildStores();
@@ -6049,11 +6055,25 @@ function srcCfg() {
 }
 const setSrcCfg = c => LSset(SRC_KEY, JSON.stringify(c));
 
-/** "ลังx48(CS)" → { short:'ลัง', qtyEA:48, lv:'CS' } */
+/** "ลังx48(CS)" → { short:'ลัง', qtyEA:48, lv:'CS' }
+ *  ระดับในวงเล็บไม่ได้มี 2 ตัวเสมอ — "แพ็คญx60(BPA)" (ยำยำช้างน้อย แพ็คใหญ่ 60 ซอง = CODE BP ในมาสเตอร์)
+ *  รุ่น ≤95 รับแค่ 2 ตัว → อ่านไม่ออกกลายเป็น 1 ชิ้น: สั่ง 2 แพ็คใหญ่ (120 ชิ้น) แอปคิด 2 ชิ้น
+ *  ยก 2 แพ็คx12 มา = "ครบ + เกิน 22" (เจอ 10/11 BV23691110/019 · 09/11 BV24691109/012 ก็โดน)
+ *  ระดับแปลก ๆ เทียบกับ CS/BP/PA/EA ด้วยตัวหน้า (BPA → BP) · ไม่มีวงเล็บแต่มี xN = ใช้จำนวนนั้น
+ *  อ่านจำนวนไม่ออกเลย = 1 ชิ้นแบบเดิม แต่ติด guess → enrichFromMaster เอาจำนวนจากมาสเตอร์ (บาร์โค้ดเดียวกัน) มาแทน */
+const LV_STD = ['CS', 'BP', 'PA', 'EA'];
+const UNIT_FIX = {};          // ป้ายหน่วยที่อ่านจำนวนไม่ออก → ค่าจากมาสเตอร์ { qtyEA, lv }
+function lvStd(s, q) {
+  const u = String(s || '').toUpperCase();
+  return LV_STD.includes(u) ? u : (LV_STD.find(l => u.startsWith(l)) || (u ? u : 'X' + q));
+}
 function parseUnit(sx) {
-  const t = cln(sx), m = t.match(/^(.+?)x([\d.]+)\(([A-Za-z]{2})\)$/);
-  return m ? { short:m[1], qtyEA:Math.max(1, Math.round(+m[2])), lv:m[3].toUpperCase(), label:t }
-           : { short:t || 'ชิ้น', qtyEA:1, lv:'EA', label:t || 'ชิ้นx1(EA)' };
+  const t = cln(sx);
+  if (UNIT_FIX[t]) return Object.assign({ short:t.split(/[x×]/)[0] || t, label:t }, UNIT_FIX[t]);
+  const m = t.match(/^(.+?)\s*[x×]\s*([\d.]+)\s*(?:\(\s*([A-Za-z]{1,6})\s*\))?\s*$/);
+  if (m && +m[2] > 0) { const q = Math.max(1, Math.round(+m[2]));
+    return { short:m[1], qtyEA:q, lv:lvStd(m[3], q), label:t }; }
+  return { short:t || 'ชิ้น', qtyEA:1, lv:'EA', label:t || 'ชิ้นx1(EA)', guess:!!t };
 }
 const numOf = v => { const x = parseFloat(String(v).replace(/[^\d.-]/g,'')); return isFinite(x) ? x : 0; };
 /** gviz คืนวันที่เป็น Date(2026,8,18) ต้องดึงกลับเป็น YYYY-MM-DD */
