@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>SupplyLink — คู่ค้ารัตนไพบูลย์ v1.118.3</title>
+<title>SupplyLink — คู่ค้ารัตนไพบูลย์ v1.119.0</title>
 <meta name="theme-color" content="#B8D5FF">
 <link rel="icon" type="image/png" sizes="64x64" href="icons/rattana-supplylink-64.png">
 <link rel="icon" type="image/png" sizes="256x256" href="icons/rattana-supplylink.png">
@@ -2224,7 +2224,7 @@ body.otgate #tabbar,body.otgate #railnav{display:none!important}
 
 /* ══ ตั้งค่า — แก้ตรงนี้ที่เดียว ══ */
 var CONFIG = {
-  APP_VERSION: 'v1.118.3',
+  APP_VERSION: 'v1.119.0',
   /* LIFF ของแอปนี้: LINE Developers → provider RTNPurchase → channel "RTNPurchase Supplier" (2011693023) → แท็บ LIFF
      ต้องอยู่ channel เดียวกับระบบลงทะเบียนเดิม ถึงจะได้ LINE User ID ตรงกับแท็บ Login Users · ว่าง = ยังไม่เปิดใช้จริง */
   LIFF_ID: '2011693023-xbdsN1K7',
@@ -6956,20 +6956,41 @@ var CLACT = {
 var DFT_TABS = [['plan', 'แผนสั่ง'], ['nr', 'รอซัพ'], ['wait', 'รอยืนยัน'], ['ready', 'ยืนยันแล้ว'], ['cmp', 'ยิง PO']];   /* v1.106 ตาม flow: ใบสั่งสินค้า → ซัพตอบ → ยืนยัน/Excel → เปิด PO → ยิง PO */
 var DFT_ST = { plan:{ 'ยังไม่ส่ง':1 }, nr:{ 'ส่งแล้ว':1 }, wait:{ 'ซัพตอบแล้ว':1 }, ready:{ 'ยืนยันแล้ว':1 }, cmp:{ 'ดึง Excel แล้ว':1, 'ส่ง PO แล้ว':1, 'กำลังส่ง PO':1 } };
 function dftState(){ return S.dft || (S.dft = { items:null, loading:false, tab:'plan', q:'', scope:'', pick:{}, wf:'all', nr:'all', ex:'today', exDay:'', exPick:{}, cmp:'all', old:{}, open:{}, log:[], planErr:'', me:'' }); }
-function dftLoad(force){
-  var d = dftState(); if (d.loading || (d.items && !force)) return;
+/* v1.119 (Surat 2026-11-13) เปิดแอป = ใบสั่งสินค้าแบบเร็ว (3 เดือน · ไม่ตรวจขาดทุน/จับคู่ PO) · แอปเปิดเสร็จ = โหลดเต็มเบื้องหลัง · เปิดหน้าใบสั่งสินค้า = ขอแบบเต็มถ้ายังไม่มี */
+function dftLoad(force, quick){
+  var d = dftState(); if (d.loading || (d.items && !force && (quick || d.full))) return;
   d.loading = true; d.err = '';
-  api('draftList', {}).then(function (r) {
+  api('draftList', quick ? { quick:1 } : {}).then(function (r) {
+    if (r.quick && d.full) return;                              /* ได้แบบเต็มมาก่อนแล้ว ไม่เอาแบบเร็วทับ */
+    d.full = !r.quick;
     d.items = (r.items || []).map(function (x) {
       x.k = x.id || 'k:' + x.key;
       x.hay = [x.id, x.ap, x.name, x.wh, whName(x.wh), x.owner, x.rmk, x.st, x.poNo, x.repBy, x.reply && x.reply.note].concat((x.lines || []).map(function (l) { return l.bc + ' ' + l.n; })).join(' ').toLowerCase();
       return x; });
     d.log = r.log || []; d.planErr = r.planErr || ''; d.me = r.me || ''; d.sellin = r.sellin || [];
-    dftEnrich();
+    if (d.full) dftEnrich();
   }, function (e) { d.err = errText(e); d.items = d.items || []; if (S.route === 'drafts') toast(errText(e)); })
     .then(function () { d.loading = false; if (S.route === 'drafts' || homeish()) softRender(); });
 }
 /** ใบที่หลังบ้านยังไม่ได้ตรวจขาดทุน (x.ex) → ขอทีละ 12 บริษัท ยิงพร้อมกัน 2 ชุด */
+/** v1.119 แอปเปิดเสร็จ (ของหน้าแรกโหลดครบ หรือรอครบ 15 วิ) → โหลดใบสั่งสินค้าเต็ม แล้วค่อยเคลม ทีละตัว ไม่แย่งคิวของหน้าแรก */
+function bgRestLater(){
+  if (S.bgRest) return; S.bgRest = 1; var t0 = Date.now();
+  (function wait(){
+    var busy = ALLV.busy || !ALLV.at || rvState().loading || bState().loading || incState().rvLoading || obsState().loading || dftState().loading || CBM.busy;
+    if (busy && Date.now() - t0 < 15000) return setTimeout(wait, 800);
+    setTimeout(bgRest, 1500);
+  })();
+}
+function bgRest(){
+  var tried = false;
+  (function step(){
+    var d = dftState(), c = clState();
+    if (d.loading || c.loading) return setTimeout(step, 700);
+    if (!d.full && !tried) { tried = true; dftLoad(true, false); return setTimeout(step, 700); }   /* พลาด = ไม่วนซ้ำ ไปต่อที่เคลม */
+    if (!c.items) clLoad(false);
+  })();
+}
 function dftEnrich(){
   var d = dftState(); if (d.exBusy) return;
   var todo = (d.items || []).filter(function (x) { return x.ex && !x.exAsk; }); if (!todo.length) return;
@@ -7625,7 +7646,7 @@ function todoItems(){
 }
 function todoWhoName(nk){ var b = ((S.team && S.team.buyers) || []).filter(function (x) { return x.nick === nk; })[0]; return b ? b.name : nk; }
 function todoBlock(sc){
-  allLoad(false); obLoad(false); dftLoad(false); clLoad(false); cbmLoad(false); teamLoad();
+  allLoad(false); obLoad(false); dftLoad(false, true); cbmLoad(false); teamLoad(); bgRestLater();   /* v1.119 เคลม + ใบสั่งสินค้าเต็ม โหลดหลังแอปเปิดเสร็จ */
   var sum = todoSum(), who = sum.who, buyers = (S.team && S.team.buyers) || [], inTbl = function (x) { return TODO_SIDE[x.t] !== 'old'; };   /* เลยเกิน 30 วัน ไม่อยู่ในลิสต์ปกติ */
   var everyone = sum.every.filter(inTbl), tw = String(S.todoQ || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
   var all = (tw.length ? everyone : sum.list.filter(inTbl)).filter(function (x) { var h = [x.co, x.code, x.txt].join(' ').toLowerCase(); return tw.every(function (w) { return h.indexOf(w) >= 0; }); }), f = S.todoF || 'all';   /* พิมพ์ค้นหา = ค้นทุกคน */
@@ -9245,7 +9266,7 @@ function ownBox(p){
   ownLoad(p);
   var d = S.own && S.own.pid === p.id ? S.own.data : null;
   return '<div class="sect" style="gap:8px" data-tweak="เจ้าต่อคลัง"><div class="sect-h"><b>เจ้าที่ดูแลแต่ละคลัง</b><span class="sp"></span><span class="dim" style="font-size:var(--fs-xs)">จัดซื้อเห็นคนเดียว</span></div>'+
-    (!d ? skeletonHtml() : '<div class="card flat divide" data-tweak-card="แถวเจ้าต่อคลัง">' + d.whs.map(function (x) {
+    (!d ? skeletonHtml() : !(d.whs && d.whs.length) ? '<div class="card flat empty">ยังไม่มีข้อมูลเจ้าต่อคลัง</div>' : '<div class="card flat divide" data-tweak-card="แถวเจ้าต่อคลัง">' + d.whs.map(function (x) {   /* v1.119 กันจอพังเมื่อไม่มีข้อมูล */
       var other = x.c && x.c !== VENDOR.code;
       return '<div class="flexrow" style="gap:8px;min-height:52px;min-width:0"><span class="chip" style="flex-shrink:0;background:' + whInfo(x.wh).c + '22">' + esc(whName(x.wh)) + '</span>'+
         '<span class="grow" style="min-width:0"><b class="one" style="display:block;font-size:13.5px' + (other ? ';color:var(--clay-deep)' : '') + '">' + esc(x.n || '—') + '</b><span class="one dim" style="display:block;font-size:11.5px">' + esc(ownSrcTxt(x)) + '</span></span>'+
@@ -10590,7 +10611,7 @@ function homeTile(d, sum){
 }
 function homeAll(){
   /* v1.113: หน้าแรกเรียกตัวโหลดที่ตัวเองใช้ครบทุกตัว — ไม่ต้องเคยเปิดหน้าอื่นก่อน ตัวเลขถึงจะขึ้น */
-  allLoad(); rvLoad(false); bLoad(false); incRvLoad(false); obLoad(false); dftLoad(false); clLoad(false); cbmLoad(false); teamLoad();
+  allLoad(); rvLoad(false); bLoad(false); incRvLoad(false); obLoad(false); dftLoad(false, true); cbmLoad(false); teamLoad(); bgRestLater();   /* v1.119 เคลม + ใบสั่งสินค้าเต็ม โหลดหลังแอปเปิดเสร็จ */
   var bc = bCountLoad(false), bcs = srcState('bc'), today = todayIso(), sum = todoSum(), who = sum.who;
   var team = S.team || {}, buyers = team.buyers || [], me = team.me || '', amBuyer = !!me && buyers.some(function (b) { return b.nick === me; }), other = who !== 'all' && who !== me;
   var nMe = function (w) { return sum.every.filter(function (x) { return TODO_SIDE[x.t] === 'me' && todoMine(x, w); }).length; };
@@ -11182,7 +11203,7 @@ function memoApi(a, p){
 }
 function memoPrefetch(){                                         /* แอดมินเข้าแอป = ดึงรายการทุกหน้าของจัดซื้อไว้ก่อน ทีละ 3 */
   if (MODE !== 'live' || !ADMIN || !SES.token) return;
-  var q = ['buyCounts', 'onboardList', 'reviewList', 'docList', 'incomeReview', 'allList', 'draftList', 'claimList', 'buyDash', 'stkWeekList', 'defWeekList'].filter(function (a) { var m = MEMO[memoKey(a, {})]; return !m || Date.now() - m.t > 30000; });
+  var q = ['buyCounts', 'onboardList', 'reviewList', 'docList', 'incomeReview', 'allList', 'buyDash', 'stkWeekList', 'defWeekList']   /* v1.119 ใบสั่งสินค้าเต็ม + เคลม ไปอยู่ bgRest (หลังแอปเปิดเสร็จ) */.filter(function (a) { var m = MEMO[memoKey(a, {})]; return !m || Date.now() - m.t > 30000; });
   var next = function () { var a = q.shift(); if (!a || !SES.token) return; memoFetch(a, {}, memoKey(a, {})).catch(function () {}).then(next); };
   next(); next(); next();
 }
