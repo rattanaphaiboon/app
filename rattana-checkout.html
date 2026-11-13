@@ -2594,7 +2594,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-11 · 96';
+const BUILD = '2026-11-13 · 97';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -3302,7 +3302,7 @@ function lvAdd(key, lv, ea) {
   m[lv] = (m[lv] || 0) + ea;
   if (m[lv] > 0) return;
   let neg = -m[lv]; delete m[lv];                     // ลดเกินที่ยิงหน่วยนี้ไว้ → หักหน่วยอื่น (ใหญ่ก่อน)
-  const p = prodById(key.replace(/^t\|/, '').split('@')[0]);
+  const p = prodById(key.startsWith('s|') ? key.split('|').pop() : key.replace(/^t\|/, '').split('@')[0]);   // 's|ร้าน|สินค้า' = กองเช็คตามร้าน
   Object.keys(m).sort((a, b) => p ? lvQty(p, b) - lvQty(p, a) : 0).forEach(o => {
     const x = Math.min(m[o], neg); m[o] -= x; neg -= x; if (m[o] <= 0) delete m[o]; });
 }
@@ -3323,6 +3323,13 @@ function poolComp(p, rnd, tag, ea) {
   add('*', ((state.subs || {})[subKey(p.id, rnd, tag)] || []).reduce((s, x) => s + (x.ea || 0), 0));
   const U = (state.usedLv || {})[usedKey(p.id, rnd, tag)] || {};
   for (const lv in U) if (out[lv]) { out[lv] -= U[lv]; if (out[lv] <= 0) delete out[lv]; }
+  return compFit(p, out, ea);
+}
+/** กองเช็คตามร้าน (คีย์ sKey) ที่ยังไม่ลงชีต แยกหน่วย — state.lvs ของกองร้าน − state.susedLv (ลงชีตไปแล้ว) · ea = ยอดที่ยังไม่ลงชีต
+ *  BUILD 97: การ์ดเซล (หลายร้าน) แบ่งตามหน่วยที่ยิงมาเหมือนหน้าทีม — ยอดรุ่นก่อนที่ไม่รู้หน่วย = หน่วยใหญ่สุดก่อน (compFit) */
+function sComp(p, key, ea) {
+  const out = {}, L = (state.lvs || {})[key] || {}, U = (state.susedLv || {})[key] || {};
+  for (const lv in L) { const x = L[lv] - (U[lv] || 0); if (x > 0) out[lv] = x; }
   return compFit(p, out, ea);
 }
 function rawPools(pid, rnd) {
@@ -3977,7 +3984,8 @@ function storePreMap() {
     b.ls.push(l); b.rem.push(Math.max(0, cap - (cf ? Math.min(cap, cf.given) : 0)));
   }
   for (const k in bags) {
-    const b = bags[k], give = storeSplit(k.startsWith('@'), b.p, b.ls, b.rem, left[k]);
+    const g = k.startsWith('@'), b = bags[k];
+    const give = storeSplit(g, b.p, b.ls, b.rem, left[k], g ? sComp(b.p, 's|' + k, left[k]) : null);
     b.ls.forEach((l, i) => { if (give[i] > 0) m[l.lid] = give[i]; if (k.startsWith('@')) m.seen.add(l.lid); });
   }
   return m;
@@ -4563,24 +4571,31 @@ const skuNeed = k => k.lines.reduce((s, l) => s + lineCap(l), 0);
  *  แล้วเติมด้วยยอดเช็คตามร้านในเครื่องนี้ที่ยังไม่ลงชีต (sGot − sused) ทีละบรรทัดตามลำดับใบจอง
  *  lines[].base = ชีตมีแล้ว · add = ส่วนที่เพิ่ม (ปิดร้าน/ยืนยันเพิ่ม ลงเท่านี้) · excess = ยิงเกินที่ลงไม่ได้ */
 function storeAlloc(s, k) {
-  const pid = k.product.id;
-  let left = Math.max(0, sGot(s.code, pid) - ((state.sused || {})[sKey(s.code, pid)] || 0));
+  const pid = k.product.id, key = sKey(s.code, pid);
+  let left = Math.max(0, sGot(s.code, pid) - ((state.sused || {})[key] || 0));
   const lines = k.lines.map(l => {
     const cap = lineCap(l), cf = confOf(l);
     const base = cf ? Math.min(cap, cf.given) : 0;
-    return { l, cap, cf, base, add:0, closed: !!cf && !cf.partial, part: !!cf && !!cf.partial };
+    return { l, cap, cf, base, add:0, addLv:null, closed: !!cf && !cf.partial, part: !!cf && !!cf.partial };
   });
-  const give = storeSplit(s.group, k.product, lines.map(x => x.l), lines.map(x => Math.max(0, x.cap - x.base)), left);
-  lines.forEach((x, i) => { x.add = give[i]; left -= give[i]; });
+  const give = storeSplit(s.group, k.product, lines.map(x => x.l), lines.map(x => Math.max(0, x.cap - x.base)), left,
+                          s.group ? sComp(k.product, key, left) : null);
+  lines.forEach((x, i) => { x.add = give[i]; x.addLv = give.lv ? give.lv[i] : null; left -= give[i]; });
   const need = lines.reduce((a, x) => a + x.cap, 0), base = lines.reduce((a, x) => a + x.base, 0);
   const add = lines.reduce((a, x) => a + x.add, 0);
-  return { lines, need, base, add, excess:left, got:base + add + left };
+  return { lines, need, base, add, excess:left, got:base + add + left, res:give.res || null };
 }
 /** แบ่งยอดเช็คตามร้านลงบรรทัด — ร้านเดียว: เติมตามลำดับใบจอง (แบบเดิม) ·
- *  รายเซล (หลายร้าน): allocate กติกาเดียวกับหน้าทีม (เต็มหน่วย · สัดส่วนมากได้ก่อน · สุ่มคงที่) — storePreMap ใช้ตัวเดียวกัน ผลตรงกันทุกหน้า */
-function storeSplit(group, product, ls, rem, ea) {
+ *  รายเซล (หลายร้าน): กติกาเดียวกับหน้าทีม (เต็มหน่วย · ช่องทาง · สัดส่วนมากได้ก่อน · สุ่มคงที่) — storePreMap ใช้ตัวเดียวกัน ผลตรงกันทุกหน้า
+ *  BUILD 97: ส่ง comp (กองนี้ยิงมาเป็นหน่วยไหน) → allocateLv แบ่งตามหน่วยที่ยิงมา (ผู้ใช้สั่ง 10/11 BUILD 94 · หน้าร้านเพิ่งตามมา)
+ *  เจอ 13/11 ไวไวปรุงสำเร็จ PMW303: ยิง 1 ลัง → แบบเดิมแกะให้เจน 2 แพ็ค (สัดส่วนสูงสุด) + ถั่วงอกทอง 2 แพ็ค เหลือ 2 แพ็ค
+ *  พี่เก๋ที่สั่ง 1 ลังไม่ได้ · แบบใหม่ = ลังไปพี่เก๋ · ร้านสั่งแพ็คได้เมื่อยิงแพ็คมา / ของพอทุกร้าน
+ *  คืน give (อาร์เรย์) + give.lv = แต่ละบรรทัดได้จากหน่วยไหน · give.res = ผลเต็ม (stranded / why / left) */
+function storeSplit(group, product, ls, rem, ea, comp) {
   if (!group) { let lf = ea; return rem.map(r => { const g = Math.min(r, lf); lf -= g; return g; }); }
-  return allocate(ls.map((l, i) => Object.assign({}, l, { needEA: rem[i] })), ea, product).give;
+  const r = allocate(ls.map((l, i) => Object.assign({}, l, { needEA: rem[i] })), ea, product, comp || null);
+  const give = r.give; give.lv = r.giveLv || null; give.res = r;
+  return give;
 }
 /** รายเซล: ร้านไหนสั่งเท่าไร ได้แล้วเท่าไร (จากผลแบ่ง storeAlloc) — ครบ = ✓ · ได้บางส่วน = ได้/สั่ง · เรียงยอดสั่งมากก่อน */
 function storeChips(a, units) {
@@ -4683,7 +4698,7 @@ function renderStore() {
     const got = a.got, need = a.need;
     const shortEA = Math.max(0, need - got);
     const cls = got === 0 ? 'none' : got >= need ? 'ok' : 'short';
-    const st  = rowState(need, got);
+    const st  = rowState(need, got, a.res);
     const fnotes = k.lines.map(l => freeNote(l, units)).filter(Boolean);
     const partEA = a.lines.reduce((n, x) => n + (x.part ? x.base : 0), 0);
     const closEA = a.lines.reduce((n, x) => n + (x.closed ? x.base : 0), 0);
@@ -4691,7 +4706,8 @@ function renderStore() {
     if (closEA) fnotes.unshift(`✓ ยืนยันลงชีตแล้ว ${fmtUnitsTxt(closEA, units)}` +
                                 (pendEA ? ` · 📝 ได้เพิ่ม ${fmtUnitsTxt(pendEA, units)} ยังไม่ได้ยืนยันเพิ่ม` : ''));
     if (partEA) fnotes.unshift(`🚚 โอนจาก C4 แล้ว ${fmtUnitsTxt(partEA, units)} — นับให้แล้ว ไม่ต้องยิงซ้ำ`);
-    if (a.excess) fnotes.push(`⚠ ยิงเกินยอดสั่ง ${fmtUnitsTxt(a.excess, units)} — เอากลับเข้าคลังหรือตรวจซ้ำ`);
+    const strand = sStrandHtml(a, pr);                 // การ์ดเซล: หน่วยไม่ตรง ยังมีร้านขาด (BUILD 97) — ไม่ใช่ยิงเกินยอดสั่ง
+    if (a.excess && !strand) fnotes.push(`⚠ ยิงเกินยอดสั่ง ${fmtUnitsTxt(a.excess, units)} — เอากลับเข้าคลังหรือตรวจซ้ำ`);
     const tidy = fmtUnits(got, units, 1);
     const rollUp = got > 0 && pu.qtyEA < units[0].qtyEA && got >= units[0].qtyEA;
     const gotTxt = rollUp ? `${fmtN(Math.floor(got/pu.qtyEA))} ${pu.short} <i>=</i> ${tidy}` : tidy;
@@ -4730,6 +4746,7 @@ function renderStore() {
           </div>
         </div>
         ${fnotes.map(t => `<div class="rounds">${esc(t)}</div>`).join('')}
+        ${strand ? `<div class="note">${strand}</div>` : ''}
       </div>
     </div>`;
   }).join('');
@@ -4745,6 +4762,7 @@ function sAddEA(pid, ea, unit, how) {
   if (next === before) { toast(floor ? 'ยอดที่ยังไม่ลงชีตเป็น 0 แล้ว — ส่วนที่ยืนยันไปแล้วลดจากหน้านี้ไม่ได้' : 'ยอดเป็น 0 แล้ว — ลดอีกไม่ได้', 'warning');
                          lastHit = pid; renderStore(); return; }
   state.sscans[k] = next;
+  lvAdd(k, unit ? unit.lv : '*', next - before);     // ยิงมาเป็นหน่วยไหน — การ์ดเซลแบ่งตามหน่วย (BUILD 97)
   logMove({ ts:Date.now(), pid, store:s.code, ea:next - before, device:DEVICE, by:CHECKER, how });
   lastHit = pid; save(); renderStore();
   const p = byId[pid], sk = s.skus.find(x => x.product.id === pid);
@@ -4782,9 +4800,42 @@ function sSetQty(pid, val) {
     toast(`ยืนยันลงชีตแล้ว ${fmtUnitsTxt(a.base, p.units)} — ตั้งต่ำกว่านี้ไม่ได้`, 'warning'); renderStore(); return; }
   const k = sKey(s.code, pid), before = (state.sscans ||= {})[k] || 0;
   state.sscans[k] = Math.max(0, before + (want - cur));
+  lvAdd(k, u.lv, state.sscans[k] - before);
   if (state.sscans[k] !== before)
     logMove({ ts:Date.now(), pid, store:s.code, ea:state.sscans[k] - before, device:DEVICE, by:CHECKER, how:'แก้ยอดรวม' });
   save(); renderStore();
+}
+/** การ์ดเซล: แกะของเกินหน่วยใหญ่ 1 หน่วยเป็นหน่วยย่อย (BUILD 97 · เหมือน xsBreak หน้าทีม แต่กองร้านอยู่ในเครื่องนี้เท่านั้น)
+ *  ยอดชิ้นเท่าเดิม แค่บอกว่าของแกะแล้ว → ร้านที่สั่งหน่วยย่อยได้ */
+function sBreak(pid, bigLv, smallLv) {
+  const s = curStore(), p = prodById(pid); if (!s || !p) return;
+  const b = p.units.find(u => u.lv === bigLv), sm = p.units.find(u => u.lv === smallLv); if (!b || !sm) return;
+  const sk = s.skus.find(x => x.product.id === pid); if (!sk) return;
+  const a = storeAlloc(s, sk);
+  if (!a.res || ((a.res.left || {})[bigLv] || 0) < b.qtyEA) { toast('ไม่มีของเกินเป็นหน่วยนี้แล้ว', 'warning'); return; }
+  const k = sKey(s.code, pid), left = Math.max(0, sGot(s.code, pid) - ((state.sused || {})[k] || 0));
+  const m = Object.assign({}, sComp(p, k, left)), U = (state.susedLv || {})[k] || {};   // ยอดรุ่นก่อนไม่รู้หน่วย → ตั้งตามที่แอปเห็นก่อน
+  for (const lv in U) m[lv] = (m[lv] || 0) + U[lv];
+  (state.lvs ||= {})[k] = m;
+  lvAdd(k, bigLv, -b.qtyEA); lvAdd(k, smallLv, b.qtyEA);
+  logMove({ ts:Date.now(), pid, store:s.code, ea:0, device:DEVICE, by:CHECKER, how:`แกะ 1 ${b.short} → ${fmtN(b.qtyEA / sm.qtyEA)} ${sm.short}` });
+  lastHit = pid; save(); renderStore();
+  toast(`แกะ 1 ${b.short} เป็น ${fmtN(b.qtyEA / sm.qtyEA)} ${sm.short} แล้ว — แบ่งให้ร้านที่สั่ง${sm.short}`, 'success');
+}
+/** การ์ดเซล: ของที่แบ่งไม่ลงเพราะหน่วยไม่ตรง (ยังไม่ครบทุกร้าน) — ข้อความ + ปุ่มแกะ */
+function sStrandHtml(a, p) {
+  const r = a.res, x = r && r.stranded; if (!x) return '';
+  const units = p.units, w = r.why, amt = fmtUnits(x, units, 1);
+  const uq = q => units.find(u => u.qtyEA === q), ul = lv => units.find(u => u.lv === lv), nm = (u, d) => u ? u.short : d;
+  const where = ' · อยู่ในเครื่องนี้ ยังไม่ลงชีต';
+  if (w && w.kind === 'big') {
+    const b = ul(w.lv), s = uq(w.q) || units.filter(u => b && u.qtyEA < b.qtyEA).sort((a2, z) => z.qtyEA - a2.qtyEA)[0];
+    const btn = b && s ? ` <button type="button" class="btn btn-outline btn-sm xs-brk" onclick="sBreak('${p.id}','${b.lv}','${s.lv}')"
+                 >แกะ 1 ${esc(b.short)} → ${fmtN(b.qtyEA / s.qtyEA)} ${esc(s.short)}</button>` : '';
+    return `⚠ เกิน ${amt} ยังไม่ได้แบ่ง — ของเป็น${nm(b, 'หน่วยใหญ่')}เต็ม ร้านที่ยังขาดสั่งเป็น${nm(s, 'หน่วยย่อย')} ยังไม่แกะให้${where}${btn}`;
+  }
+  const s = w && uq(w.q);
+  return `⚠ เกิน ${amt} ยังไม่ได้แบ่ง — ไม่ครบ 1 ${nm(s, 'หน่วย')}${s && s.qtyEA > 1 ? '×' + fmtN(s.qtyEA) : ''} ที่ร้านที่ยังขาดสั่งไว้${where}`;
 }
 
 async function confirmStore() {
@@ -4803,7 +4854,7 @@ async function confirmStore() {
      บรรทัดที่มีแถว "โอนจาก C4" อยู่   → แถวเต็ม แต่ ได้ = ส่วนที่เพิ่มจากที่โอน (ขาด = ยอดจริงที่ยังขาด)
      บรรทัดที่ปิดแล้ว (ร้าน/ทีม)        → แถว "ยืนยันเพิ่ม" เฉพาะที่ได้เพิ่ม · ไม่มีอะไรเพิ่ม = ไม่ลง */
 function confirmStore0(s) {
-  const rows = [], used = {};
+  const rows = [], used = {}, usedLv = {};
   let closed = false;
   const hhmm = (d => `${String(d.getHours()).padStart(2,'0')}.${String(d.getMinutes()).padStart(2,'0')}`)(new Date());
   for (const k of s.skus) {
@@ -4840,7 +4891,11 @@ function confirmStore0(s) {
                   (x.part ? ` · รวมโอน C4 ${+(x.base / q).toFixed(6)}` : ''),
         }));
       }
-      if (x.add) used[sKey(s.code, k.product.id)] = (used[sKey(s.code, k.product.id)] || 0) + x.add;
+      if (x.add) {
+        const sk2 = sKey(s.code, k.product.id);
+        used[sk2] = (used[sk2] || 0) + x.add;
+        if (x.addLv) { const m = usedLv[sk2] ||= {}; for (const lv in x.addLv) m[lv] = (m[lv] || 0) + x.addLv[lv]; }   // ใช้หน่วยไหนไป (BUILD 97)
+      }
     }
   }
   if (!rows.length) { toast(closed ? 'ไม่มียอดที่ได้เพิ่มจากที่ยืนยันไปแล้ว' : 'ยังไม่มีข้อมูล', 'warning'); return; }
@@ -4861,6 +4916,8 @@ function confirmStore0(s) {
   }
   const su = state.sused ||= {};                                       // ส่วนที่ลงชีตแล้ว ไม่นับซ้ำ (ชีตมีแล้ว)
   for (const k in used) su[k] = (su[k] || 0) + used[k];
+  const sl = state.susedLv ||= {};
+  for (const k in usedLv) { const m = sl[k] ||= {}; for (const lv in usedLv[k]) m[lv] = (m[lv] || 0) + usedLv[k][lv]; }
   const d = new Date(), t2 = x => String(x).padStart(2,'0');
   (state.doneStore ||= {})[s.code] = { at:`${t2(d.getHours())}.${t2(d.getMinutes())}`, by:CHECKER, rows:rows.length };
   save(); setMode('store');                  // ปิดร้านแล้วกลับหน้าแรกของเช็คตามร้าน
@@ -6121,7 +6178,7 @@ function renderStale() {
        (รุ่น 29–31 ใช้วันทำงานตัดสิน ใบจองวันใหม่เข้าตอนสาย ๆ แล้วยอดที่ยิงค้างของเมื่อวานถูกลบทิ้ง — แก้ 30/09) */
 /* used = ยอดในกองที่ยืนยันลงชีตไปแล้ว · subsSent = ของทดแทนที่ลงชีตไปแล้ว · tsent = ยอดโอนที่ออกใบไปแล้ว
    sused = ยอดเช็คตามร้านที่ลงชีตแล้ว · tused = ยอดโอนจาก C4 ที่ลงชีต ยืนยันเช็ค แล้ว (BUILD 35) */
-const DAY_KEYS = ['scans','sscans','tscans','cscans','subs','doneStore','doneJob','unknown','used','subsSent','tsent','sused','tused','lvs','usedLv'];
+const DAY_KEYS = ['scans','sscans','tscans','cscans','subs','doneStore','doneJob','unknown','used','subsSent','tsent','sused','tused','lvs','usedLv','susedLv'];
 const DAY_EMPTY = k => k === 'unknown' ? [] : {};
 const hasDayData = () => ['scans','sscans','tscans','cscans','subs'].some(k =>
   Object.values(state[k] || {}).some(v => Array.isArray(v) ? v.length : v > 0)) || Object.keys(state.doneStore || {}).length;
@@ -8962,7 +9019,7 @@ function shortReview({ title, okLabel, items, go }) {
       <div class="rv-t"><b>${esc(x.p.name)}</b>
         <small>ต้องออก ${fmtUnits(x.needEA, x.p.units)} · ได้ ${x.gotEA ? fmtUnits(x.gotEA, x.p.units) : '0'}${x.free ? ' · ของแถม' : ''}</small>
         <span class="rv-s">${x.zero ? '⚠ ยังไม่ได้ยิงเลย · ' : ''}ขาด ${fmtUnits(x.shortEA, x.p.units)}${x.stores > 1 ? ` · ${fmtN(x.stores)} ร้าน` : ''}</span>${
-        x.overEA ? `<span class="rv-s">⚠ เกิน ${fmtUnits(x.overEA, x.p.units)} ยังไม่ได้แบ่ง — ลงชีตเป็นของเกิน เครื่องอื่นเอาไปรวมแบ่งต่อได้</span>` : ''}</div>
+        x.overEA ? `<span class="rv-s">⚠ เกิน ${fmtUnits(x.overEA, x.p.units)} ยังไม่ได้แบ่ง — ${esc(x.overTxt || 'ลงชีตเป็นของเกิน เครื่องอื่นเอาไปรวมแบ่งต่อได้')}</span>` : ''}</div>
       <div class="rv-b"><button type="button" class="rv-go" onclick="rvGo('${x.p.id}')">ไปยิง</button>
         <button type="button" class="rv-ck" onclick="rvTick(this)"><i>✓</i>ขาดจริง</button></div></div>`).join('')}</div>`;
   return askBox({ title, body, ok:okLabel, cancel:'กลับไปตรวจ', wide:true, tick:true });
@@ -8989,6 +9046,7 @@ function storeShortItems(s) {
     const a = storeAlloc(s, k), got = a.base + a.add;
     if (a.lines.some(x => x.closed) || got >= a.need) continue;
     out.push({ p:k.product, needEA:a.need, gotEA:got, shortEA:a.need - got, zero:!a.got, free:k.lines.every(l => l.erpFree),
+               overEA:(a.res && a.res.stranded) || 0, overTxt:'อยู่ในเครื่องนี้ ไม่ลงชีต — แกะแบ่งได้ที่หน้านี้ หรือเอากลับเข้าคลัง',
                stores:new Set(a.lines.filter(x => x.base + x.add < x.cap).map(x => x.l.storeCode)).size });
   }
   return out;
