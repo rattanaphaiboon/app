@@ -363,7 +363,7 @@ textarea:focus{outline:none;border-color:var(--neon-a);box-shadow:var(--glow)}
 <canvas id="confetti"></canvas>
 
 <script>
-const APP_VER = 'v1.5';
+const APP_VER = 'v1.6';
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbyD49DDSPZBCXcFeQWBXMhs3F6fdEKTHrcHnLW5BgEtigX3ypCjSqk7r07qLdUkjCSeyg/exec';
 const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -389,7 +389,7 @@ function checkRattanaSession() {
   try { const p = JSON.parse(localStorage.getItem('rattana_session')); return p && p.data && p.data.email && p.exp && Date.now() < p.exp ? p.data : null; } catch (e) { return null; }
 }
 function saveSharedSession(d) { const s = JSON.stringify({ data: d, exp: Date.now() + 30 * 864e5 }); SESSION_KEYS.forEach(k => localStorage.setItem(k, s)); }
-function logout() { SESSION_KEYS.forEach(k => localStorage.removeItem(k)); location.reload(); }
+function logout() { SESSION_KEYS.forEach(k => localStorage.removeItem(k)); try { localStorage.removeItem(SIG_KEY); } catch (e) {} location.reload(); }
 const dispName = u => !u || !u.name ? '-' : (u.nickname ? `${u.name} (${u.nickname})` : u.name);
 const THEME_KEY = 'rattana_theme';
 function applyTheme(t) { document.body.classList.toggle('light', t === 'light'); }
@@ -412,6 +412,8 @@ async function gas(q, body) {
 function toast(msg) { const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg; document.body.appendChild(t); setTimeout(() => t.remove(), 2600); }
 
 /* ───── state ───── */
+const SIG_KEY = 'rattana_buyer_survey_sig';
+const getSig = () => { try { return localStorage.getItem(SIG_KEY) || ''; } catch (e) { return ''; } };
 let ME = null, D = null, picks = {}, secs = {}, cur = 0, tStart = 0, view = '', ORDER = {}, nonce = '', IMP = { id: '', text: '' }, LOW = [], NOMSEL = [], NOMBAD = [];
 const photo = (id, w) => id ? `https://lh3.googleusercontent.com/d/${id}=w${w || 500}` : '';
 const ini = b => String(b.nick || b.disp || '?').replace(/[()]/g, '').trim().slice(0, 2);
@@ -459,14 +461,19 @@ window.onGoogle = async resp => {
   $('lgErr').textContent = '';
   try {
     const p = decodeJwtPayload(resp.credential);
-    await boot(normalizeEmail(p.email), p.picture || '');
+    go('v-load'); $('loadTxt').textContent = 'กำลังยืนยันตัวตน…';
+    const a = await gas('', { action: 'svLogin', credential: resp.credential });   // v1.6 หลังบ้านตรวจกับ Google เอง
+    if (!a.ok) throw new Error(a.error || 'ยืนยันตัวตนไม่ผ่าน');
+    try { localStorage.setItem(SIG_KEY, a.sig); } catch (e) {}
+    await boot(a.email, p.picture || '');
   } catch (e) { $('lgErr').textContent = e.message || String(e); go('v-login'); }
 };
 document.querySelectorAll('.btnOut').forEach(b => b.onclick = logout);
 
 async function boot(email, picture) {
   go('v-load'); $('loadTxt').textContent = 'กำลังโหลดรายชื่อทีมจัดซื้อ…';
-  const r = await gas('action=svInit&email=' + encodeURIComponent(email));
+  const r = await gas('action=svInit&email=' + encodeURIComponent(email) + '&sig=' + encodeURIComponent(getSig()));
+  if (!r.ok && r.needLogin) { go('v-login'); $('lgErr').textContent = 'ยืนยันตัวตนด้วย Google 1 ครั้ง (ระบบให้เข้าได้เฉพาะอีเมลที่ถูกเลือกเป็นผู้ประเมิน)'; return; }
   if (!r.ok) { SESSION_KEYS.forEach(k => localStorage.removeItem(k)); throw new Error(r.error || 'เข้าไม่ได้'); }
   D = r; ME = r.me;
   const old = checkRattanaSession() || {};
@@ -611,7 +618,7 @@ $('nomX').onclick = () => { $('nomQ').value = ''; renderNom(); $('nomQ').focus()
 async function saveNom() {
   const nx = $('next'); nx.disabled = true; nx.textContent = 'กำลังบันทึก…';
   try {
-    const r = await gas('', { action: 'svNominate', email: ME.email, ids: NOMSEL.slice() });
+    const r = await gas('', { action: 'svNominate', email: ME.email, sig: getSig(), ids: NOMSEL.slice() });
     if (!r.ok) { if (r.clash) { r.clash.forEach(id => { if (!NOMBAD.includes(id)) NOMBAD.push(id); }); NOMSEL = NOMSEL.filter(id => !r.clash.includes(id)); renderNom(); } throw new Error(r.error || 'บันทึกไม่สำเร็จ'); }
     D.nom.mine = r.mine; toast('บันทึกผู้ประเมินแล้ว'); renderStart(); go('v-start');
   } catch (e) { toast(e.message || String(e)); syncAct(); }
@@ -655,7 +662,7 @@ async function submit() {
   const answers = D.topics.map(t => { const a = picks[t.id] || []; return { topic: t.id, ranks: a.slice(), skip: !!a.skip || !a.length, sec: Math.round((secs[t.id] || 0) * 10) / 10 }; });
   try {
     const improve = LOW.length ? { id: IMP.id, text: $('impTxt').value.trim() } : null;
-    const r = await gas('', { action: 'svSubmit', email: ME.email, nonce, answers, comment: D.mine ? D.mine.comment : '', improve });
+    const r = await gas('', { action: 'svSubmit', email: ME.email, sig: getSig(), nonce, answers, comment: D.mine ? D.mine.comment : '', improve });
     if (!r.ok) throw new Error(r.error || 'ส่งไม่สำเร็จ');
     D.mine = { ts: r.ts, answers: answers.map(a => ({ topic: a.topic, ranks: a.ranks, skip: a.skip })), comment: D.mine ? D.mine.comment : '', improve };
     if (view === 'v-imp' || view === 'v-topic') { renderDone(D.mine, Object.values(secs).reduce((s, x) => s + x, 0)); confetti(); }
@@ -679,7 +686,7 @@ $('btnCmt').onclick = async () => {
   const b = $('btnCmt'); b.disabled = true; b.textContent = 'กำลังบันทึก…';
   try {
     const m = D.mine;
-    const r = await gas('', { action: 'svSubmit', email: ME.email, nonce: 'c' + Date.now().toString(36), comment: $('cmt').value.trim(),
+    const r = await gas('', { action: 'svSubmit', email: ME.email, sig: getSig(), nonce: 'c' + Date.now().toString(36), comment: $('cmt').value.trim(),
       answers: m.answers.map(a => ({ topic: a.topic, ranks: a.ranks, skip: a.skip, sec: 99 })), improve: m.improve || null });
     if (!r.ok) throw new Error(r.error || 'บันทึกไม่สำเร็จ');
     m.comment = $('cmt').value.trim(); toast('บันทึกความเห็นแล้ว');
@@ -695,7 +702,7 @@ async function openDash(period) {
   const my = ++DREQ;   // กดซ้ำ/เปลี่ยนรอบเร็วๆ → ใช้ผลของครั้งล่าสุดเท่านั้น
   go('v-dash'); $('dBody').innerHTML = '<div class="spin"></div>';
   try {
-    const res = await gas('action=svDash&email=' + encodeURIComponent(ME.email) + (period ? '&period=' + encodeURIComponent(period) : ''));
+    const res = await gas('action=svDash&email=' + encodeURIComponent(ME.email) + '&sig=' + encodeURIComponent(getSig()) + (period ? '&period=' + encodeURIComponent(period) : ''));
     if (my !== DREQ) return;
     DD = res;
     if (!DD.ok) throw new Error(DD.error);
