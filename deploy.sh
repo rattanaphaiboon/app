@@ -104,6 +104,7 @@ APPS=(
   rattana-manpower-team.html
   rattana-line-register.html
   rattana-coffee.html
+  rattana-truck-advance.html
 )
 
 DRY=0
