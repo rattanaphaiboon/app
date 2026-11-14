@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.56</title>
+<title>Rattana Shop Location v1.57</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -359,7 +359,7 @@ body.dark .ms-result .big{color:var(--gold-light)}
 <header>
   <button class="icon-btn" id="btnHome" title="แผนที่ทั้งหมด" onclick="goHome()" style="display:none">⌂</button>
   <button class="icon-btn" id="btnSide" onclick="toggleSide()" style="display:none">☰</button>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.56 · 2026-11-14</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.57 · 2026-11-14</span></div>
   <div class="hdr-right">
     <span class="cur-map" id="curMapName"></span>
     <button class="icon-btn" id="btnShare" title="แชร์แผนที่นี้" onclick="openShare(openIds)" style="display:none">🔗</button>
@@ -1898,6 +1898,49 @@ function decodePolyline6(str) {
   }
   return out;
 }
+const VH_MAX_PTS = 45;   // its table takes 100 pairs per request
+/* truck driving time (s) between all points on real roads, plus the heading (°) the truck leaves (beg) and arrives (end) with;
+   asked 4 requests at a time so 30 shops take a few seconds */
+async function truckMatrix(pts, req) {
+  const n = pts.length, locs = pts.map(p => ({ lat: +p.lat.toFixed(6), lon: +p.lng.toFixed(6) }));
+  const rows = Math.max(1, Math.floor(100 / n)), T = [], beg = [], end = [], snap = new Array(n).fill(0);
+  const starts = []; for (let i = 0; i < n; i += rows) starts.push(i);
+  let done = 0;
+  const one = async i => {
+    const j = await vhJson('/sources_to_targets', { sources: locs.slice(i, i + rows), targets: locs, costing: 'truck',
+      costing_options: { truck: TRUCK_DIMS[planCarOf()] }, units: 'kilometers' });
+    j.sources_to_targets.forEach((row, k) => {
+      T[i + k] = row.map(c => (c && c.time != null ? c.time : null));
+      beg[i + k] = row.map(c => (c && c.begin_heading != null ? c.begin_heading : null));
+      end[i + k] = row.map(c => (c && c.end_heading != null ? c.end_heading : null));
+      if (i + k === 0) row.forEach((c, t) => { if (c && c.end_lat != null) snap[t] = haversineKm(pts[t], { lat: c.end_lat, lng: c.end_lon }) * 1000; });
+    });
+    planMsg(`⏳ กำลังดึงเวลาขับตามถนนจริง (รถ 4 ล้อจัมโบ้)… ${++done}/${starts.length}`);
+  };
+  planMsg(`⏳ กำลังดึงเวลาขับตามถนนจริง (รถ 4 ล้อจัมโบ้)… 0/${starts.length}`);
+  for (let i = 0; i < starts.length; i += 4) {
+    await Promise.all(starts.slice(i, i + 4).map(one));
+    if (req !== plan.req) return null;
+  }
+  T.forEach((row, a) => row.forEach((v, b) => { if (v == null) row[b] = haversineKm(pts[a], pts[b]) * 120; }));
+  return { T, snap, H: { beg, end } };
+}
+const UTURN_SEC = 180;   // a U-turn at a shop counts as 3 extra minutes, so the order follows the road instead
+/* how many shops the truck must turn around at (it arrives heading one way and must leave the other way) */
+function uTurns(H, tour, roundTrip) {
+  let n = 0;
+  const END = H.beg.length;
+  for (let q = 1; q < tour.length - 1; q++) {
+    const i = tour[q - 1], j = tour[q];
+    let k = tour[q + 1];
+    if (k === END) { if (!roundTrip) continue; k = 0; }
+    const a = H.end[i] && H.end[i][j], b = H.beg[j] && H.beg[j][k];
+    if (a == null || b == null) continue;
+    let d = Math.abs(a - b) % 360; if (d > 180) d = 360 - d;
+    if (d > 140) n++;
+  }
+  return n;
+}
 /* the road line + time / distance of every leg, for points in this order */
 async function routeLegs(way, truck) {
   if (truck) {
@@ -2014,7 +2057,7 @@ function tourMess(pts, o, roundTrip) {
   return { cross, back };
 }
 /* order of points 1..n-1 starting at point 0: least driving time, easy to follow; first = a point that must come first */
-function orderStops(D, roundTrip, pts, first = 0) {
+function orderStops(D, roundTrip, pts, first = 0, extra = null) {
   const n = D.length, END = n;
   const c = (a, b) => a === END ? 0 : b === END ? (roundTrip ? D[a][0] : 0) : D[a][b];
   const left = new Set(); for (let i = 1; i < n; i++) left.add(i);
@@ -2031,7 +2074,7 @@ function orderStops(D, roundTrip, pts, first = 0) {
   const cost = o => { let v = 0; for (let i = 1; i < o.length; i++) v += c(o[i - 1], o[i]); return v; };
   const end = performance.now() + 2500;
   const mess = o => { if (!pts) return 0; const x = tourMess(pts, o.slice(1, -1), roundTrip); return x.cross * planPenalty.cross + x.back * planPenalty.back; };
-  const score = o => cost(o) + mess(o);
+  const score = o => cost(o) + mess(o) + (extra ? extra(o) : 0);
   improveTour(t, c, end, lo);
   if (n <= planExactMax) {   // few shops: try every order, so the answer is exact
     let bestV = score(t), bestO = t.slice(1, -1);
@@ -2056,6 +2099,22 @@ function orderStops(D, roundTrip, pts, first = 0) {
     const v = score(o);
     if (v < bestCost - 1) { bestCost = v; t = o; }
   }
+  if (extra) {   // a U-turn depends on three shops in a row: one more pass that re-checks the whole run for every move
+    const stop = performance.now() + 1500;
+    let cur = score(t), better = true;
+    while (better && performance.now() < stop) {
+      better = false;
+      for (let i = lo; i < t.length - 2 && !better; i++) for (let j = i + 1; j < t.length - 1 && !better; j++) {
+        const o = [...t.slice(0, i), ...t.slice(i, j + 1).reverse(), ...t.slice(j + 1)];
+        const v = score(o); if (v < cur - 1) { t = o; cur = v; better = true; }
+      }
+      for (let i = lo; i < t.length - 1 && !better; i++) for (let k = lo - 1; k < t.length - 1 && !better; k++) {
+        if (k === i || k === i - 1) continue;
+        const o = [...t]; const [x] = o.splice(i, 1); o.splice(k < i ? k + 1 : k, 0, x);
+        const v = score(o); if (v < cur - 1) { t = o; cur = v; better = true; }
+      }
+    }
+  }
   return t.slice(1, -1);
 }
 async function planRun() {
@@ -2078,12 +2137,19 @@ async function planRun() {
     const units = planUnits(list);
     const pts = [start, ...units];
     // order with the fast road table; the road line and times are then fetched for the truck
-    const M = await roadMatrix(pts, req);
+    let M = null, why = '';
+    if (pts.length <= VH_MAX_PTS) {
+      try { M = await truckMatrix(pts, req); } catch (e) { console.warn('truck table failed', e); why = 'ระบบถนนรถบรรทุกไม่ตอบ'; }
+      if (req !== plan.req) return;
+    } else why = `จุดแวะเกิน ${VH_MAX_PTS - 1} จุด`;
+    if (!M) M = await roadMatrix(pts, req);
     if (!M) return;
     planMsg('⏳ กำลังหาลำดับที่ใช้เวลาน้อยที่สุด…');
     await sleep(30);   // let the message paint
     const fi = plan.first ? units.findIndex(u => u.items.some(x => x.id === plan.first)) + 1 : 0;
-    const order = orderStops(M.T, roundTrip, pts, fi > 0 ? fi : 0);
+    const extra = M.H ? (o => uTurns(M.H, o, roundTrip) * UTURN_SEC) : null;
+    const order = orderStops(M.T, roundTrip, pts, fi > 0 ? fi : 0, extra);
+    const turns = M.H ? uTurns(M.H, [0, ...order, pts.length], roundTrip) : null;
     // shops of one stop: the nearest first, going on from where the truck is
     const stops = [], far = [];
     let prev = start;
@@ -2096,7 +2162,7 @@ async function planRun() {
       }
     });
     if (req !== plan.req) return;
-    plan.result = { key: planKey(list), start, stops, roundTrip, far, firstFixed: fi > 0, truck: true, car: planCarOf(), why: '', grouped: list.length - units.length, manual: false };
+    plan.result = { key: planKey(list), start, stops, roundTrip, far, firstFixed: fi > 0, truck: true, car: planCarOf(), why, turns, grouped: list.length - units.length, manual: false };
     await planRoute(req);
   } catch (e) {
     if (req !== plan.req) return;
@@ -2159,7 +2225,7 @@ function planShow() {
   const leg = l => `+${fmtDur(l.dur)} · ${fmtKm(l.dist / 1000)}`;
   $('planResult').innerHTML = `<div class="big">🚚 ${fmtDur(R.dur)}</div>
     <div class="sub">${R.manual ? 'ลำดับที่ปรับเอง' : 'เวลาขับรวมน้อยที่สุด'} · ${fmtKm(R.dist / 1000)} ตามถนนจริง · ${R.stops.length.toLocaleString('th-TH')} ร้าน (ยังไม่รวมเวลาแวะร้าน)</div>
-    <div class="sub">${R.truck ? `🚛 เส้นทางรถบรรทุก (${esc(R.car)})` : '🚗 เส้นทางรถยนต์' + (R.why ? ` — ${esc(R.why)} จึงใช้เส้นทางรถยนต์แทน` : '')}${R.grouped ? ` · ร้านที่อยู่ติดกัน (ไม่เกิน 300 ม.) แวะต่อกัน` : ''}</div>` +
+    <div class="sub">${R.truck ? `🚛 เส้นทางรถบรรทุก (${esc(R.car)})` : '🚗 เส้นทางรถยนต์'}${R.turns != null ? (R.manual ? '' : ` · ลำดับตามถนนจริง เลี่ยงการกลับรถ${R.turns ? ` (ยังต้องกลับรถ ${R.turns} จุด)` : ' (ไม่ต้องกลับรถ)'}`) : (R.why ? ` · ${esc(R.why)} — ลำดับคิดแบบรถยนต์ ยังไม่ได้เลี่ยงการกลับรถ` : '')}${R.grouped ? ` · ร้านที่อยู่ติดกัน (ไม่เกิน 300 ม.) แวะต่อกัน` : ''}</div>` +
     (nFerry ? `<div class="sub" style="color:var(--danger)">⛴ มี ${nFerry} ช่วงที่ต้องข้ามเรือ / แพ — ตรวจก่อนออกรถ</div>` : '') +
     (nFar ? `<div class="sub" style="color:var(--danger)">⚠ ${nFar} ร้านพิกัดอยู่ห่างถนนเกิน 500 ม. — ตรวจพิกัดร้าน</div>` : '');
   $('planList').innerHTML = `<div class="plan-row fixed"><span class="plan-no start">เริ่ม</span><span class="t">${esc(R.start.name)}</span></div>` +
