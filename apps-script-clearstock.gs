@@ -1,5 +1,5 @@
 /**
- * Rattana ClearStock v1.19 — Apps Script backend
+ * Rattana ClearStock v1.20 — Apps Script backend
  * ผูกกับไฟล์บันทึก: "เทียบสต็อก W4-C4 Claude app"
  *   https://docs.google.com/spreadsheets/d/1t3vu5I3y-tWDKDL_-l7M3igmBarG2KKJC9LZcaw0U4s
  *
@@ -99,7 +99,7 @@ function doPost(e) {
 function handle_(p) {
   try {
     const action = String(p.action || '');
-    if (action === 'ping') return json_({ ok: true, version: '1.19' });
+    if (action === 'ping') return json_({ ok: true, version: '1.20' });
     if (action === 'users') return json_({ ok: true, users: listUsers_() });
     if (action === 'login') return json_({ ok: true, user: loginByUid_(p.uid) });
     const user = requireUser_(p.email);
@@ -110,6 +110,7 @@ function handle_(p) {
       case 'docs':     out = { docs: listDocs_() }; break;
       case 'sync':     out = { sync: getSyncInfo_() }; break;
       case 'locs':     out = getLocs_(); break;
+      case 'file':     out = getDocFile_(p.fileId); break;
       case 'prices':
         if (!user.perms.post) throw new Error('เฉพาะผู้ได้รับมอบหมายเท่านั้นที่ปรับสต็อกได้');
         out = { prices: getPrices_(p.codes) }; break;
@@ -422,6 +423,18 @@ function saveFiles_(docId, files) {
     try { file.setSharing(DriveApp.Access.DOMAIN_WITH_LINK, DriveApp.Permission.VIEW); } catch (_) {}
     return file.getUrl();
   });
+}
+
+/** ไฟล์แนบของใบปรับสต็อก → base64 ให้แอปแสดงเอง (พนักงานหลายคนไม่ได้ล็อกอิน Google ของบริษัท เปิดลิงก์ Drive ไม่ได้)
+ *  ส่งได้เฉพาะไฟล์ที่อยู่ในคอลัมน์ไฟล์ของเอกสาร — ไม่ใช่ไฟล์อะไรก็ได้ใน Drive */
+function getDocFile_(fileId) {
+  const id = String(fileId || '');
+  if (!/^[\w-]{20,}$/.test(id)) throw new Error('รหัสไฟล์ไม่ถูกต้อง');
+  const s = ensureSheets_();
+  const ok = readTable_(s.docs, DOC_COLS).some(d => String(d.files || '').indexOf('/d/' + id + '/') >= 0);
+  if (!ok) throw new Error('ไม่พบไฟล์นี้ในเอกสาร');
+  const f = DriveApp.getFileById(id), b = f.getBlob();
+  return { name: f.getName(), mime: b.getContentType(), data: Utilities.base64Encode(b.getBytes()) };
 }
 
 const iso_ = v => (v instanceof Date ? v.toISOString() : v);
