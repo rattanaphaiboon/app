@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.55</title>
+<title>Rattana Shop Location v1.56</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -359,7 +359,7 @@ body.dark .ms-result .big{color:var(--gold-light)}
 <header>
   <button class="icon-btn" id="btnHome" title="แผนที่ทั้งหมด" onclick="goHome()" style="display:none">⌂</button>
   <button class="icon-btn" id="btnSide" onclick="toggleSide()" style="display:none">☰</button>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.55 · 2026-11-14</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.56 · 2026-11-14</span></div>
   <div class="hdr-right">
     <span class="cur-map" id="curMapName"></span>
     <button class="icon-btn" id="btnShare" title="แชร์แผนที่นี้" onclick="openShare(openIds)" style="display:none">🔗</button>
@@ -2120,7 +2120,7 @@ async function planRoute(req) {
     rt = await routeLegs(R.way, false);
   }
   if (req !== plan.req) return;
-  Object.assign(R, { legs: rt.legs, dist: rt.dist, dur: rt.dur });
+  Object.assign(R, { legs: rt.legs, dist: rt.dist, dur: rt.dur, line: rt.line });
   planDraw(rt.line);
   planShow();
 }
@@ -2174,7 +2174,7 @@ function planShow() {
     const url = `https://www.google.com/maps/dir/?api=1&origin=${q(w[0])}&destination=${q(w[w.length - 1])}${mid ? '&waypoints=' + encodeURIComponent(mid) : ''}&travelmode=driving`;
     return `<a class="btn btn-outline btn-sm" href="${url}" target="_blank" rel="noopener">🧭 ${links.length > 1 ? 'นำทางช่วง ' + (i + 1) : 'นำทาง Google Maps'}</a>`;
   }).join('');
-  $('planBtns').innerHTML = `<button class="btn btn-gold btn-sm" onclick="planExcel()">📥 Excel</button>${gm}`;
+  $('planBtns').innerHTML = `<button class="btn btn-gold btn-sm" onclick="planExcel()">📥 Excel</button><button class="btn btn-gold btn-sm" onclick="saveMapImage()">📷 บันทึกรูปลำดับนี้</button>${gm}`;
   planCount();
 }
 function planFocus(i) {
@@ -2217,7 +2217,9 @@ function loadTile(url) {
   });
 }
 async function saveMapImage() {
-  const list = filtered();
+  // a planned truck run on screen: the picture shows its order (numbered pins, the road line, the list of stops)
+  const R = plan && plan.on && plan.result && plan.result.line && plan.result.key === planKey(filtered()) ? plan.result : null;
+  const list = R ? R.stops : filtered();
   if (!list.length) { showToast('ยังไม่มีร้านบนแผนที่', 'warning'); return; }
   const btn = $('tPhoto');
   if (btn.disabled) return;
@@ -2228,6 +2230,7 @@ async function saveMapImage() {
     // zoom: the one on screen (same roads and detail as the map), the screens joined until every shop is in the picture;
     // only when that would be too big (very large picture / too many map tiles) one step further out
     const bnd = L.latLngBounds(list.map(x => [x.lat, x.lng]));
+    if (R) bnd.extend([R.start.lat, R.start.lng]);
     const PAD = 80, MAXSIDE = 7000, MAXTILES = 500;
     const zScreen = Math.max(5, Math.min(18, Math.round(map.getZoom())));
     let z = zScreen;
@@ -2254,7 +2257,11 @@ async function saveMapImage() {
     const cellsOf = r => { const out = []; for (let gx = Math.floor(r.x / CELL); gx <= Math.floor((r.x + r.w) / CELL); gx++) for (let gy = Math.floor(r.y / CELL); gy <= Math.floor((r.y + r.h) / CELL); gy++) out.push(gx + ',' + gy); return out; };
     const hits = r => cellsOf(r).some(k => (grid.get(k) || []).some(o => r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h));
     const add = r => { boxes.push(r); cellsOf(r).forEach(k => { if (!grid.has(k)) grid.set(k, []); grid.get(k).push(r); }); };
-    pins.forEach(p => add({ x: p.x - 8, y: p.y - 8, w: 16, h: 16 }));   // labels never cover a pin
+    const PR = R ? 12 : 8;   // numbered pins are bigger
+    if (R) pins.forEach(p => { p.no = list.indexOf(p.s) + 1; });
+    pins.forEach(p => add({ x: p.x - PR, y: p.y - PR, w: PR * 2, h: PR * 2 }));   // labels never cover a pin
+    const st = R ? xy([R.start.lat, R.start.lng]) : null;
+    if (st) { ctx.font = `700 15px ${FONT}`; add({ x: st.x - 22, y: st.y - 14, w: 50 + ctx.measureText(R.start.name).width, h: 28 }); ctx.font = `600 14px ${FONT}`; }
     let KEY = null;
     if (keyRows.filter(r => r.c).length > 1) {
       ctx.font = `600 15px ${FONT}`;
@@ -2263,19 +2270,22 @@ async function saveMapImage() {
       add(KEY);   // names keep clear of the key
       ctx.font = `600 14px ${FONT}`;
     }
-    const whs = showWh ? WAREHOUSES.map(w => Object.assign({ w }, xy([w.lat, w.lng]))).filter(p => p.x > 0 && p.x < W && p.y > HEAD && p.y < HEAD + H) : [];
+    const whs = showWh ? WAREHOUSES.filter(w => !(R && w.lat === R.start.lat && w.lng === R.start.lng))   // the start warehouse is drawn as "เริ่ม"
+      .map(w => Object.assign({ w }, xy([w.lat, w.lng]))).filter(p => p.x > 0 && p.x < W && p.y > HEAD && p.y < HEAD + H) : [];
     whs.forEach(p => add({ x: p.x - 14, y: p.y - 14, w: 28, h: 28 }));
     const missed = [];
     pins.forEach(p => {
       const w = ctx.measureText(p.s.name).width + 6, h = 19;
-      const tries = [{ x: p.x + 10, y: p.y - h / 2 }, { x: p.x - 10 - w, y: p.y - h / 2 }, { x: p.x - w / 2, y: p.y - 10 - h }, { x: p.x - w / 2, y: p.y + 10 },
-                     { x: p.x + 8, y: p.y - h - 4 }, { x: p.x + 8, y: p.y + 4 }, { x: p.x - 8 - w, y: p.y - h - 4 }, { x: p.x - 8 - w, y: p.y + 4 }];
+      const g1 = PR + 2, g2 = PR;
+      const tries = [{ x: p.x + g1, y: p.y - h / 2 }, { x: p.x - g1 - w, y: p.y - h / 2 }, { x: p.x - w / 2, y: p.y - g1 - h }, { x: p.x - w / 2, y: p.y + g1 },
+                     { x: p.x + g2, y: p.y - h - 4 }, { x: p.x + g2, y: p.y + 4 }, { x: p.x - g2 - w, y: p.y - h - 4 }, { x: p.x - g2 - w, y: p.y + 4 }];
       const spot = tries.map(t => ({ x: t.x, y: t.y, w, h })).find(r => r.x > 2 && r.x + r.w < W - 2 && r.y > HEAD + 2 && r.y + r.h < HEAD + H - 2 && !hits(r));
       if (spot) { add(spot); p.label = spot; } else missed.push(p);
     });
-    missed.forEach((p, i) => { p.no = i + 1; });
+    if (!R) missed.forEach((p, i) => { p.no = i + 1; });
+    const listed = R ? [...pins].sort((a, b) => a.no - b.no) : missed;   // a run: every stop in order under the map
     const COLS = Math.max(1, Math.floor((W - 60) / 340)), ROW = 24;
-    const listH = missed.length ? 70 + Math.ceil(missed.length / COLS) * ROW : 0;
+    const listH = listed.length ? 70 + Math.ceil(listed.length / COLS) * ROW : 0;
     cv.width = W; cv.height = HEAD + H + listH + (listH ? 40 : 0);
 
     // background + tiles
@@ -2297,6 +2307,17 @@ async function saveMapImage() {
     }
     ctx.fillStyle = 'rgba(255,255,255,.18)'; ctx.fillRect(0, HEAD, W, H);   // soften the background so names stand out
 
+    // the road line of the run
+    if (R && R.line.length > 1) {
+      ctx.save(); ctx.beginPath(); ctx.rect(0, HEAD, W, H); ctx.clip();
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      [['rgba(255,255,255,.9)', 9], ['#1a73e8', 5]].forEach(([c, lw]) => {
+        ctx.beginPath();
+        R.line.forEach((ll, i) => { const q = xy(ll); if (i) ctx.lineTo(q.x, q.y); else ctx.moveTo(q.x, q.y); });
+        ctx.strokeStyle = c; ctx.lineWidth = lw; ctx.stroke();
+      });
+      ctx.restore();
+    }
     // warehouses
     whs.forEach(p => {
       ctx.fillStyle = '#0d1b3e'; ctx.strokeStyle = '#c9a84c'; ctx.lineWidth = 3;
@@ -2309,10 +2330,22 @@ async function saveMapImage() {
     });
     // pins
     pins.forEach(p => {
-      ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
-      ctx.fillStyle = shopColor(p.s); ctx.fill();
-      ctx.lineWidth = 2.2; ctx.strokeStyle = '#fff'; ctx.stroke();
+      ctx.beginPath(); ctx.arc(p.x, p.y, R ? 11 : 7, 0, Math.PI * 2);
+      ctx.fillStyle = R ? '#1a73e8' : shopColor(p.s); ctx.fill();
+      ctx.lineWidth = R ? 2.5 : 2.2; ctx.strokeStyle = '#fff'; ctx.stroke();
+      if (R) {
+        ctx.font = `700 ${p.no > 99 ? 10 : 12}px ${FONT}`; ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(p.no, p.x, p.y + 1); ctx.textAlign = 'left';
+      }
     });
+    if (st) {   // where the truck leaves from
+      ctx.fillStyle = '#0d1b3e'; ctx.fillRect(st.x - 21, st.y - 13, 42, 26);
+      ctx.lineWidth = 2.5; ctx.strokeStyle = '#f0d58c'; ctx.strokeRect(st.x - 21, st.y - 13, 42, 26);
+      ctx.font = `700 13px ${FONT}`; ctx.fillStyle = '#f0d58c'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('เริ่ม', st.x, st.y + 1); ctx.textAlign = 'left';
+      ctx.font = `700 15px ${FONT}`; ctx.lineWidth = 4; ctx.strokeStyle = '#fff'; ctx.lineJoin = 'round';
+      ctx.strokeText(R.start.name, st.x + 26, st.y + 1); ctx.fillStyle = '#0d1b3e'; ctx.fillText(R.start.name, st.x + 26, st.y + 1);
+    }
     // names
     ctx.textBaseline = 'middle'; ctx.textAlign = 'left'; ctx.lineJoin = 'round';
     pins.forEach(p => {
@@ -2320,7 +2353,7 @@ async function saveMapImage() {
         ctx.font = `600 14px ${FONT}`;
         ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(255,255,255,.95)'; ctx.strokeText(p.s.name, p.label.x + 3, p.label.y + 10);
         ctx.fillStyle = '#0d1b3e'; ctx.fillText(p.s.name, p.label.x + 3, p.label.y + 10);
-      } else {
+      } else if (!R) {
         ctx.font = `700 12px ${FONT}`;
         ctx.lineWidth = 3.5; ctx.strokeStyle = '#fff'; ctx.strokeText(p.no, p.x + 9, p.y - 8);
         ctx.fillStyle = '#b71c1c'; ctx.fillText(p.no, p.x + 9, p.y - 8);
@@ -2342,7 +2375,8 @@ async function saveMapImage() {
     const filt = maps.filter(m => m.visible !== false).flatMap(m => [...(m.fSales || []).map(x => '👤 ' + x), ...(m.fRoutes || []).map(x => '🚚 ' + x)]);
     ctx.font = `15px ${FONT}`; ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.textAlign = 'right';
     ctx.fillText(`${list.length.toLocaleString('th-TH')} ร้าน · ${fmtDate(Date.now())}`, cv.width - 24, 44);
-    if (filt.length) ctx.fillText(filt.join('  ').slice(0, 120), cv.width - 24, 80);
+    const sub = R ? [`🚚 ลำดับวิ่งรถ · ${fmtDur(R.dur)} · ${fmtKm(R.dist / 1000)}`, ...filt] : filt;
+    if (sub.length) ctx.fillText(sub.join('  ').slice(0, 140), cv.width - 24, 80);
     ctx.textAlign = 'left';
 
     // colour key (bottom-left of the map)
@@ -2361,16 +2395,17 @@ async function saveMapImage() {
     }
 
     // names that did not fit on the map
-    if (missed.length) {
+    if (listed.length) {
       let ly = HEAD + H + 40;
       ctx.font = `700 17px ${FONT}`; ctx.fillStyle = '#0d1b3e';
-      ctx.fillText(`ร้านที่หมุดอยู่ชิดกันจนเขียนชื่อบนแผนที่ไม่พอ (ตัวเลขสีแดงบนแผนที่) · ${missed.length} ร้าน`, 24, ly);
+      ctx.fillText(R ? `ลำดับร้าน — เริ่มจาก ${R.start.name}${R.roundTrip ? ' · ร้านสุดท้ายแล้วกลับคลัง' : ''} · ${listed.length} ร้าน`
+        : `ร้านที่หมุดอยู่ชิดกันจนเขียนชื่อบนแผนที่ไม่พอ (ตัวเลขสีแดงบนแผนที่) · ${missed.length} ร้าน`, 24, ly);
       ly += 30;
       ctx.font = `14px ${FONT}`;
-      missed.forEach((p, i) => {
+      listed.forEach((p, i) => {
         const col = i % COLS, row = Math.floor(i / COLS);
         const x = 24 + col * 340, yy = ly + row * ROW;
-        ctx.fillStyle = '#b71c1c'; ctx.font = `700 14px ${FONT}`; ctx.fillText(p.no + '.', x, yy);
+        ctx.fillStyle = R ? '#1a73e8' : '#b71c1c'; ctx.font = `700 14px ${FONT}`; ctx.fillText(p.no + '.', x, yy);
         ctx.beginPath(); ctx.arc(x + 38, yy - 5, 5, 0, Math.PI * 2); ctx.fillStyle = shopColor(p.s); ctx.fill();
         ctx.fillStyle = '#0d1b3e'; ctx.font = `14px ${FONT}`;
         let t = p.s.name; while (ctx.measureText(t).width > 280 && t.length > 4) t = t.slice(0, -2);
@@ -2384,12 +2419,12 @@ async function saveMapImage() {
     const stamp = `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear() + 543}`;
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `Rattana แผนที่ร้าน ${curMapLabel().replace(/^[^\s]+\s/, '').replace(/[\\/:*?"<>|]/g, ' ').slice(0, 60)} ${stamp}.jpg`;
+    a.download = `Rattana ${R ? 'ลำดับวิ่งรถ' : 'แผนที่ร้าน'} ${curMapLabel().replace(/^[^\s]+\s/, '').replace(/[\\/:*?"<>|]/g, ' ').slice(0, 60)} ${stamp}.jpg`;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
     window._lastMapImage = { w: cv.width, h: cv.height, z, tiles: jobs.length, failed, labeled: pins.length - missed.length, missed: missed.length };
     if (z < zScreen) showToast(`ร้านกระจายกว้างเกินไปสำหรับระดับซูมบนจอ — รูปนี้ซูมออก ${zScreen - z} ระดับ (เลือกทีละรูท/เซลล์ จะได้รูปละเอียดเท่าบนจอ)`, 'warning');
-    showToast(`บันทึกรูปแล้ว — ${list.length.toLocaleString('th-TH')} ร้าน` + (missed.length ? ` (${missed.length} ร้านที่ชิดกันอยู่ในรายชื่อใต้แผนที่)` : '') + (failed ? ` · พื้นหลังโหลดไม่ครบ ${failed} ช่อง` : ''), failed ? 'warning' : 'success');
+    showToast(`บันทึกรูปแล้ว — ${list.length.toLocaleString('th-TH')} ร้าน` + (R ? ' พร้อมลำดับวิ่งรถ' : '') + (!R && missed.length ? ` (${missed.length} ร้านที่ชิดกันอยู่ในรายชื่อใต้แผนที่)` : '') + (failed ? ` · พื้นหลังโหลดไม่ครบ ${failed} ช่อง` : ''), failed ? 'warning' : 'success');
   } catch (e) {
     console.warn('image failed', e);
     showToast('บันทึกรูปไม่สำเร็จ: ' + (e.message || e), 'error');
