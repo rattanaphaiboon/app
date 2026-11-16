@@ -13,6 +13,7 @@
      ► ตัวเลขลงเวลาทั้งหมดอ่านจากแท็บ สรุปวัน / ลงเวลาAuto / การลาApp (สูตรที่ HR ใช้คิดเงินเดือน) — ไม่คำนวณซ้ำ
      ► เฉพาะ HR — ฝั่งเซิร์ฟเวอร์ตรวจสิทธิ์ทุกคำขออีกชั้น (hraDenied_) หน้านี้แค่ซ่อน/บอก
      ► ไม่มีความลับในไฟล์นี้ (URL/ID ชีทชุดเดียวกับที่อยู่ในแอปมือถืออยู่แล้ว)
+     ► v1.74 · 16/11/2026 — หยอดเวลาแล้วคำนวณสรุปวันเฉพาะคนที่แก้ (~10 วิ · เดิมทั้งชีท 60–75 วิ ทำให้หยอด/โหลดคนถัดไปช้า) · รอหยุดแก้ 10 วิ — คู่ Apps Script 9.194 — surat 16/11
      ► v1.73 · 16/11/2026 — HR หยอดเวลาเร็วขึ้น: ไม่สั่งคำนวณสรุปวันทันทีทุกครั้ง (ชนกันทำบันทึกช้า 30–60 วิ) → รอหยุดแก้ 45 วิ แล้วคำนวณรอบเดียว — surat 16/11
      ► v1.72 · 14/11/2026 — หนังสือแจ้งพนักงาน: "เรื่องจากหัวหน้า" ผ่านทดลองงาน/ปรับเงินเดือน/โอนย้าย/ใบเตือน ที่หัวหน้าส่งจากแอป → 📄 ออกหนังสือ (เติมจากข้อมูลหัวหน้า) → ขึ้น ส่งแล้ว/รับทราบ · ＋ ออกหนังสือ เลือกประเภทได้ · ใบเตือนส่งหนังสือ = แจ้งแล้ว — คู่ Apps Script 9.187 — surat 14/11
      ► v1.71 · 14/11/2026 — หนังสือแจ้งพนักงาน: ปุ่ม ＋ ออกหนังสือ เลือกพนักงานเองได้ (ไม่ต้องมีผลประเมินในรอบ) — surat 14/11
@@ -403,7 +404,7 @@ const CFG = {
   api: 'https://script.google.com/macros/s/AKfycbzyZsYY9R3WAhy7LUiaIF_xPTK50vVgggrv6Ua5WYCdKOUHGNd_PjDcSojI39OSiRU/exec',
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ', usersTab: 'Sheet1',
   attendanceSheetId: '1aywVdJ5-zw70__3BHjE3itjZotiubaRUAMjWOzgCAts',
-  ver: '1.73',
+  ver: '1.74',
 };
 const S = { token: '', exp: 0, u: null, users: [], ptt: [], byId: {}, period: null, hr: null, settings: null, holidays: null, locations: null,
             faces: null, docs: null, docsRange: '', view: 'dashboard', sub: '', emp: null, empTab: 'time', empDays: {}, shifts: {}, audit: {}, quotaAll: null, busy: {} };
@@ -2361,19 +2362,21 @@ function fxNow_() {
   if (_fxNowP) { S.fxAgain = 1; return _fxNowP; }
   S.fxRun = Date.now(); fxNowBar_();
   const done = ok => { _fxNowP = null; S.fxRun = 0; fxNowBar_(); if (S.fxAgain) { S.fxAgain = 0; fxNow_(); return; } hrRefresh_(); if (ok) toast('✓ ตารางเวลาอัปเดตแล้ว', 'ok'); };
-  _fxNowP = api('hrFxNow', {}).then(r => r && r.busy ? apiSleep_(25000).then(() => api('hrFxNow', {})) : r)
+  const q = { ids: Object.keys(S.fxIds || {}).join(',') }; S.fxIds = {};   // v1.74 เฉพาะคนที่แก้ (Apps Script 9.194 ~10 วิ · เดิมทั้งชีท 60–75 วิ)
+  _fxNowP = api('hrFxNow', q).then(r => r && r.busy ? apiSleep_(15000).then(() => api('hrFxNow', q)) : r)
     .then(r => done(!(r && r.busy)), e => { if (/Unknown action/i.test(String(e && e.message))) return done(false); return apiSleep_(20000).then(() => done(false)); });
   return _fxNowP;
 }
 /* v1.73 surat 16/11 "ลงเวลาให้พนักงานหลังบ้านรอนานมาก" — perfq.fix: หยอดปกติ 5–6 วิ แต่ชนรอบคำนวณสรุปวัน (สั่งทันทีทุกครั้งที่หยอด · รอบละ 60–85 วิ) = 32–60 วิ
    → หยอด/ลบเวลาแล้วรอให้หยุดแก้ 45 วิ ค่อยสั่งคำนวณรอบเดียว (หยอดใหม่ = นับใหม่ · กำลังบันทึกอยู่ = เลื่อน) */
-const FX_QUIET = 45000; let _fxT = null;
-function fxNowSoon_() {
+const FX_QUIET = 10000; let _fxT = null;   // v1.74 45 → 10 วิ (คำนวณเฉพาะคนที่แก้ เร็วแล้ว)
+function fxNowSoon_(id) {
+  if (id) (S.fxIds = S.fxIds || {})[String(id)] = 1;
   clearTimeout(_fxT); S.fxDue = Date.now() + FX_QUIET; fxNowBar_();
   const go = () => { if (S.fxSaving) { _fxT = setTimeout(go, 10000); return; } _fxT = null; S.fxDue = 0; fxNow_(); };
   _fxT = setTimeout(go, FX_QUIET);
 }
-const fxNowTxt_ = () => S.fxRun ? '<span class="spin"></span> กำลังคำนวณสรุปวันใหม่หลังแก้เวลา (~1 นาที) — ตารางจะอัปเดตเอง' : '⏳ แก้เวลาแล้ว — ระบบจะคำนวณสรุปวันใหม่หลังหยุดแก้ประมาณ 45 วินาที (หยอดคนต่อไปได้เลย ไม่ต้องรอ)';
+const fxNowTxt_ = () => S.fxRun ? '<span class="spin"></span> กำลังคำนวณสรุปวันใหม่หลังแก้เวลา (~10 วินาที) — ตารางจะอัปเดตเอง' : '⏳ แก้เวลาแล้ว — ระบบจะคำนวณสรุปวันใหม่ในอีกไม่กี่วินาที (หยอดคนต่อไปได้เลย ไม่ต้องรอ)';
 function fxNowBar_() { const el = $('#fxNowBar'); if (!el) return; el.hidden = !(S.fxRun || S.fxDue); if (!el.hidden) el.innerHTML = fxNowTxt_(); }
 const fxNowBarHtml_ = () => `<div id="fxNowBar" class="alert" style="margin:6px 0"${S.fxRun || S.fxDue ? '' : ' hidden'}>${fxNowTxt_()}</div>`;
 function hrRefresh_(keepAudit) {
@@ -2408,11 +2411,11 @@ async function delScan_(id, l) {
 }
 async function fxDel_(i) {
   const f = S.fxHave, l = f && f.logs[i]; if (!l) return;
-  if (await delScan_(f.id, l)) { hrRefresh_(); fxLoadHave_(f.id, f.iso); fxNowSoon_(); }
+  if (await delScan_(f.id, l)) { hrRefresh_(); fxLoadHave_(f.id, f.iso); fxNowSoon_(f.id); }
 }
 async function scanDelRow_(id, key, i) {
   const l = (S.audit[key] || [])[i]; if (!l) return;
-  if (await delScan_(id, l)) { S.audit[key].splice(i, 1); hrRefresh_(key); fxNowSoon_(); }
+  if (await delScan_(id, l)) { S.audit[key].splice(i, 1); hrRefresh_(key); fxNowSoon_(id); }
 }
 function fxAdd() { S.fx.push({ type: S.fx.length && S.fx[S.fx.length - 1].type === 'in' ? 'out' : 'in', time: '' }); fxRender(); }
 function fxRender() {
@@ -2459,7 +2462,7 @@ async function fxSave(id) {
     closeModal();
     S.empDays = {}; S.hr = null; S.docs = null; S.audit = {};
     loadPeriod(true).then(() => render()).catch(() => render());
-    fxNowSoon_();   // v1.66 คำนวณสรุปวัน · v1.73 รอหยุดแก้ 45 วิ
+    fxNowSoon_(id);   // v1.66 คำนวณสรุปวัน · v1.73 รอหยุดแก้ 45 วิ
   } catch (err) { toast('❌ ' + err.message, 'bad'); btn.disabled = false; btn.textContent = 'บันทึก'; }
   finally { S.fxSaving = 0; }
 }
