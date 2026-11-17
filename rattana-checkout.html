@@ -2749,7 +2749,8 @@ body[data-theme="carbon"] .hc-check{--hc-grad:var(--acc-grad);--hc-fg:#111}
   </div>
 </div>
 
-<script>
+<!-- สคริปต์หลักของแอป — ไม่รันเองตอนโหลดหน้า ตัวเปิดท้ายไฟล์ (RC_IDB) อ่าน IndexedDB เสร็จแล้วค่อยรัน (BUILD 112) -->
+<script type="text/plain" id="rcMain">
 /* ═══════════════════════════════════════════════════════════════
    ข้อมูลตัวอย่าง — ดึงจากไฟล์จริงทั้งหมด
    แทนที่ทั้ง 4 ก้อนนี้ด้วย Apps Script ตอนต่อของจริง
@@ -2947,11 +2948,52 @@ const ROUNDS = [
 /* ═══ เลือกชุดข้อมูล ═══
    checkout-data.js = ข้อมูลจริง W4 17/09/2569 (ใบจอง 586 บรรทัด · สินค้า 279 ตัว)
    ตัวอย่าง        = ชุดเล็กที่มีโปร/ของแถม/รูป ครบไว้ทดสอบตรรกะ */
-const LSget = k => { try { return localStorage.getItem(k); } catch(e) { return null; } };
-const LSset = (k,v) => { try { localStorage.setItem(k,v); return true; } catch(e) {
-  const fr = lsFreeCaches();                         // เต็ม → ล้างแคชแอปอื่นที่โหลดใหม่ได้ แล้วลองอีกครั้ง (BUILD 111)
-  if (fr.length) { try { localStorage.setItem(k,v); lsFreedNote(fr); return true; } catch(e2) {} }
-  lsFull(e); return false; } };
+/* ── ที่เก็บในเครื่อง = localStorage + IndexedDB (BUILD 112 · ดูตัวเปิดแอป RC_IDB ท้ายไฟล์) ──
+   LSset เขียนทั้งสองที่ เวลาประทับ t เดียวกัน · เวลาของค่าใน localStorage จดที่ rattana_lst หลังเขียนสำเร็จ
+   localStorage เต็ม = ค่าและเวลาเขียนไม่ลงทั้งคู่ → เปิดแอปครั้งหน้า IndexedDB ใหม่กว่า ใช้ของ IndexedDB
+   เวลาเท่ากัน = ใช้ localStorage (แอปอื่นแก้คีย์ที่ใช้ร่วม เช่น rattana_theme / ลบคีย์ตอนทดสอบ ก็ยังเห็น)
+   ค่าที่เขียนรอบนี้จำใน LS_MEM — อ่านกลับได้ตรงแม้ localStorage เขียนไม่ลง */
+const RC = window.RC_IDB || (window.RC_IDB = { db: null, kv: {}, ok: false, err: 'ไม่ได้เปิดผ่านตัวเปิดแอป' });
+const LS_MEM = {}, LS_STALE = {};
+let LS_IDB_ONLY = false;                             // รอบนี้มีค่าที่ลงได้แค่ IndexedDB (localStorage เต็ม) — ไว้บอกในกล่องตั้งค่า
+let LS_T = {};
+try { LS_T = JSON.parse(localStorage.getItem('rattana_lst') || '{}') || {}; } catch(e) {}
+let LS_TMAX = [...Object.values(LS_T), ...Object.values(RC.kv).map(r => r && r.t)].reduce((m, t) => Math.max(m, +t || 0), 0);
+const LSget = k => {
+  if (k in LS_MEM) return LS_MEM[k];
+  let v = null; try { v = localStorage.getItem(k); } catch(e) {}
+  const r = RC.kv[k];
+  return (r && typeof r.v === 'string' && (+r.t || 0) > (+LS_T[k] || 0)) ? r.v : v;
+};
+function idbPut(k, v, t) {
+  const db = RC.db; if (!db) return false;
+  try {
+    const tx = db.transaction('kv', 'readwrite');
+    tx.objectStore('kv').put({ v, t }, k);
+    tx.onerror = tx.onabort = () => idbFail(k, tx.error);
+    return true;
+  } catch(e) { idbFail(k, e); return false; }
+}
+function idbFail(k, e) {
+  console.warn('IndexedDB เขียนไม่ได้', k, e);
+  if (RC.ok) { RC.ok = false; RC.err = 'เขียนไม่ได้ ' + ((e && e.name) || ''); }
+  if (LS_STALE[k]) lsFull(e);                       // ทั้งสองที่เขียนไม่ลง = เสี่ยงหายจริง
+}
+const LSset = (k, v) => {
+  v = String(v); LS_MEM[k] = v;
+  const t = LS_TMAX = Math.max(Date.now(), LS_TMAX + 1);
+  const idb = idbPut(k, v, t);
+  let ok = false, err = null;
+  try { localStorage.setItem(k, v); ok = true; } catch(e) {
+    err = e;
+    const fr = lsFreeCaches();                       // เต็ม → ล้างแคชแอปอื่นที่โหลดใหม่ได้ แล้วลองอีกครั้ง (BUILD 111)
+    if (fr.length) { try { localStorage.setItem(k, v); ok = true; lsFreedNote(fr); } catch(e2) {} }
+  }
+  if (ok) { delete LS_STALE[k]; LS_T[k] = t; try { localStorage.setItem('rattana_lst', JSON.stringify(LS_T)); } catch(e) {} }
+  else { LS_STALE[k] = 1; LS_IDB_ONLY = true; if (!idb) lsFull(err); }
+  return ok || idb;
+};
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch(e) {}   // ขอไม่ให้เบราว์เซอร์ลบข้อมูลเว็บนี้เองตอนเครื่องที่ใกล้เต็ม
 /* แคชของแอปอื่นในเว็บเดียวกัน (rattanaphaiboon.github.io) ที่ลบได้ปลอดภัย — แอปนั้นโหลดใหม่เองตอนเปิด (BUILD 111 · 17/11 เครื่องผู้ใช้เต็ม 10 MB)
    ตรวจโค้ดแล้ว: rsc_pddt_v1 = Rattana Stock Check แคชมาสเตอร์สินค้า {ts,text} อายุ 30 นาทีแต่ไม่เคยลบ (~4.6 MB)
                  debtData / debtData_colgate = Rattana ยอดหนี้คงค้าง แคชยอดหนี้ {ts,data} (~3.3 MB)
@@ -3018,7 +3060,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-17 · 111';
+const BUILD = '2026-11-17 · 112';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -9903,13 +9945,22 @@ function renderLsInfo() {
   let ok = true;
   try { localStorage.setItem('__rc_probe', 'x'.repeat(1024)); localStorage.removeItem('__rc_probe'); } catch(e) { ok = false; LS_FULL = true; }
   const u = lsUsage(), mb = c => (c * 2 / 1048576).toFixed(c * 2 >= 1048576 ? 1 : 2) + ' MB';
-  const el = $('lsInfo');
-  el.className = 'txt-sm ' + (ok ? 'txt-muted' : 'txt-danger');
+  const el = $('lsInfo'), idb = RC.ok && RC.db;      // BUILD 112: งานเช็คสำรองใน IndexedDB ด้วย
+  const top = () => ' · ที่ใช้มากสุด: ' + u.top.map(([k, c]) => `<code>${esc(k)}</code> ${mb(c)}`).join(' · ');
+  el.className = 'txt-sm ' + (ok ? 'txt-muted' : idb ? '' : 'txt-danger');
   el.innerHTML = ok
     ? `พื้นที่เก็บข้อมูลในเครื่อง: ใช้ ${mb(u.total)} (${fmtN(u.n)} รายการ ทุกแอปของ ${esc(location.host)}) · ปกติ`
+    : idb
+    ? `<b style="color:var(--warning)">พื้นที่ localStorage เต็ม</b> (ใช้ ${mb(u.total)} · ${fmtN(u.n)} รายการ ทุกแอปของ ${esc(location.host)}) — ` +
+      `<b class="txt-success">งานเช็คบันทึกใน IndexedDB แทน ไม่หาย</b>` + top()
     : `<b>⚠ พื้นที่เก็บข้อมูลในเครื่องเต็ม</b> (ใช้ ${mb(u.total)} · ${fmtN(u.n)} รายการ ทุกแอปของ ${esc(location.host)}) — ` +
-      `ยอดที่ยิง/คิวที่ยังไม่ส่ง จำไม่ได้ถ้าปิดแอป · ที่ใช้มากสุด: ` +
-      u.top.map(([k, c]) => `<code>${esc(k)}</code> ${mb(c)}`).join(' · ');
+      `ยอดที่ยิง/คิวที่ยังไม่ส่ง จำไม่ได้ถ้าปิดแอป` + top();
+  el.innerHTML += '<br>' + (idb
+    ? `<span class="txt-success">✓ งานเช็คเก็บสำรองใน IndexedDB ด้วย — แอปหลุด/ปิดแอป ยอดที่ยิงไม่หาย</span>${LS_IDB_ONLY ? ' <span class="txt-muted">(รอบนี้บางค่าลงได้แค่ IndexedDB)</span>' : ''} <span id="lsEst" class="txt-muted"></span>`
+    : `<span class="txt-danger">⚠ IndexedDB ใช้ไม่ได้ (${esc(RC.err || '-')}) — เก็บใน localStorage อย่างเดียว</span>`);
+  try { if (idb && navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then(e => {
+    const s = $('lsEst'); if (s && e && e.quota) s.textContent = `· เว็บนี้ใช้ ${(e.usage / 1048576).toFixed(1)} MB จากที่ใช้ได้ ${fmtN(Math.round(e.quota / 1048576))} MB`;
+  }).catch(() => {}); } catch(e) {}
   // แคชของแอปอื่นที่ลบได้ (BUILD 111) — มีเมื่อไหร่โชว์ปุ่มล้าง
   const fr = LS_FREEABLE.map(([k, app]) => { try { const v = localStorage.getItem(k); return v == null ? null : [app, k.length + v.length]; } catch(e) { return null; } }).filter(Boolean);
   if (fr.length) el.innerHTML += `<br><span class="txt-muted">แคชแอปอื่นที่ลบได้ (แอปนั้นโหลดใหม่เอง): ${fr.map(([a, c]) => `${esc(a)} ${mb(c)}`).join(' · ')}</span>
@@ -11226,6 +11277,50 @@ flushQueue();
    ยอดที่ยิงไว้ไม่หาย เก็บแยกตามวันทำงาน (switchDay) */
 if (SRC === 'real' && !w1Only()) reloadOrders(0);
 else enrichFromMaster();     // ชุดตัวอย่าง / คนคลัง W1 (BUILD 107 — ไม่โหลดใบจอง W4 ใช้แค่มาสเตอร์สินค้า)     // ชุดตัวอย่าง: ดึง CAT GROUP + รูป + บาร์โค้ดครบทุกระดับ จากมาสเตอร์สด
+</script>
+<script>
+/* ═══ ตัวเปิดแอป: งานเช็คเก็บสำรองใน IndexedDB (BUILD 112) ═══
+   ผู้ใช้ 17/11 ส่งรูปเครื่องกิ๊ง (v111 ยังขึ้นพื้นที่เต็ม) "เวลาแอปเด้งหลุดออกไป เขาต้องเริ่มเช็คใหม่"
+   localStorage แชร์ทั้ง rattanaphaiboon.github.io (~5–10 MB) แอปอื่นกินจนเต็ม → ยอดที่ยิง/คิว เขียนไม่ลง → แอปหลุด = กลับไปยอดเก่า
+   IndexedDB ได้หลายร้อย MB และไม่นับรวมกับ localStorage → LSset เขียนทั้งสองที่พร้อมเวลาประทับ · LSget เอาค่าที่ใหม่กว่า
+   ต้องอ่าน IndexedDB ให้เสร็จก่อนสคริปต์หลักเริ่ม (มันอ่าน state ตอนโหลด) → สคริปต์หลักเป็น type=text/plain #rcMain แล้วรันจากที่นี่
+   IndexedDB เปิด/อ่านไม่ได้ หรือช้าเกิน 2.5 วิ = รันด้วย localStorage อย่างเดียวแบบเดิม และไม่เขียน IndexedDB ทั้งรอบ (กันของเก่าทับของใหม่) */
+window.RC_IDB = { db: null, kv: {}, ok: false, err: '' };
+(function () {
+  let ran = false;
+  const run = why => {
+    if (ran) return; ran = true;
+    if (why) { RC_IDB.err = why; console.warn('IndexedDB:', why); }
+    const s = document.createElement('script');
+    s.textContent = document.getElementById('rcMain').textContent;
+    document.body.appendChild(s);
+  };
+  const timer = setTimeout(() => run('ช้าเกิน 2.5 วิ'), 2500);
+  const fail = why => { clearTimeout(timer); run(why); };
+  try {
+    const rq = indexedDB.open('rattana_checkout', 1);
+    rq.onupgradeneeded = () => { try { rq.result.createObjectStore('kv'); } catch (e) {} };
+    rq.onerror = () => fail('เปิดไม่ได้ ' + ((rq.error && rq.error.name) || ''));
+    rq.onblocked = () => fail('ถูกบล็อก');
+    rq.onsuccess = () => {
+      const db = rq.result, kv = {};
+      if (ran) { try { db.close(); } catch (e) {} return; }
+      try {
+        const tx = db.transaction('kv', 'readonly'), cur = tx.objectStore('kv').openCursor();
+        cur.onsuccess = () => { const c = cur.result; if (c) { kv[c.key] = c.value; c.continue(); } };
+        tx.oncomplete = () => {
+          clearTimeout(timer);
+          if (ran) { try { db.close(); } catch (e) {} return; }
+          db.onversionchange = () => { try { db.close(); } catch (e) {} RC_IDB.db = null; };
+          db.onclose = () => { RC_IDB.db = null; };
+          RC_IDB.db = db; RC_IDB.kv = kv; RC_IDB.ok = true;
+          run();
+        };
+        tx.onerror = tx.onabort = () => fail('อ่านไม่ได้ ' + ((tx.error && tx.error.name) || ''));
+      } catch (e) { fail('อ่านไม่ได้ ' + e.name); }
+    };
+  } catch (e) { fail('ไม่รองรับ ' + e.name); }
+})();
 </script>
 </body>
 </html>
