@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana Shop Location v1.64</title>
+<title>Rattana Shop Location v1.65</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -336,6 +336,10 @@ body.dark .ms-result .big{color:var(--gold-light)}
 .split-rt input{accent-color:#c9a84c}
 .split-rt small{color:var(--muted);font-weight:400}
 .split-day{font-size:12px;font-weight:700;color:var(--muted);margin:8px 0 4px}
+.split-run{border:1px solid var(--border);border-radius:10px;padding:6px 10px;margin-top:6px}
+.split-run summary{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;flex-wrap:wrap}
+.split-run summary span:last-child{color:var(--muted);font-size:12.5px}
+.split-run .plan-list{margin-top:6px}
 .split-name{display:flex;align-items:center;gap:8px;margin-bottom:6px}
 .split-name .input{flex:1;min-width:0;height:36px}
 .split-n{font-size:12.5px;font-weight:700;color:var(--muted);white-space:nowrap;min-width:52px;text-align:right}
@@ -377,7 +381,7 @@ body.dark .ms-result .big{color:var(--gold-light)}
 <header>
   <button class="icon-btn" id="btnHome" title="แผนที่ทั้งหมด" onclick="goHome()" style="display:none">⌂</button>
   <button class="icon-btn" id="btnSide" onclick="toggleSide()" style="display:none">☰</button>
-  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.64 · 2026-11-17</span></div>
+  <div class="logo-text">Rattana <span class="nm">Shop Location</span> <span class="ver-badge">v1.65 · 2026-11-17</span></div>
   <div class="hdr-right">
     <span class="cur-map" id="curMapName"></span>
     <button class="icon-btn" id="btnShare" title="แชร์แผนที่นี้" onclick="openShare(openIds)" style="display:none">🔗</button>
@@ -471,6 +475,16 @@ body.dark .ms-result .big{color:var(--gold-light)}
       <div class="ms-btns" style="margin-top:8px">
         <button class="btn btn-gold btn-sm" id="splitSave" onclick="splitSave()" disabled>💾 บันทึกลงชีต</button>
         <button class="btn btn-outline btn-sm" onclick="splitClear()">↺ ล้างการแบ่ง</button>
+      </div>
+      <div id="splitRunBox" style="display:none">
+        <div class="split-day" style="margin-top:12px">🚚 ลำดับวิ่งของแต่ละรอบ (รถ 4 ล้อจัมโบ้)</div>
+        <select class="input" id="splitStart"></select>
+        <select class="input" id="splitEnd" style="margin-top:6px">
+          <option value="back">กลับมาคลัง</option>
+          <option value="open">จบที่ร้านสุดท้าย</option>
+        </select>
+        <button class="btn btn-gold btn-block" id="splitGo" onclick="splitOrderAll()" style="margin-top:6px">▶ จัดลำดับทุกรอบ</button>
+        <div id="splitRuns"></div>
       </div>
     </div>
 
@@ -1954,7 +1968,9 @@ const VALHALLA_URL = 'https://valhalla1.openstreetmap.de';
 const PLAN_CAR = '4 ล้อจัมโบ้';
 const TRUCK_DIMS = { '4 ล้อจัมโบ้': { height: 3.2, width: 2.1, length: 6.0, weight: 6.0, axle_load: 5.0 } };   // metres / tonnes
 const planCarOf = () => PLAN_CAR;
+let vhDownUntil = 0;
 async function vhJson(path, body) {
+  if (Date.now() < vhDownUntil) throw Object.assign(new Error('truck server skipped'), { final: true });
   for (let i = 0; ; i++) {
     try {
       const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 8000);   // a slow answer: give up, car roads instead
@@ -1963,6 +1979,7 @@ async function vhJson(path, body) {
       if (r.ok) return j;
       throw Object.assign(new Error(j.error || 'HTTP ' + r.status), { final: r.status === 400 });
     } catch (e) {
+      if (e.name === 'AbortError' || (!e.final && i >= 1)) vhDownUntil = Date.now() + 5 * 60 * 1000;   // not answering: car roads for the next 5 minutes
       if (e.final || e.name === 'AbortError' || i >= 1) throw e;
       await sleep(1000);
     }
@@ -2155,7 +2172,7 @@ function orderStops(D, roundTrip, pts, first = 0, extra = null) {
   }
   t.push(END);
   const cost = o => { let v = 0; for (let i = 1; i < o.length; i++) v += c(o[i - 1], o[i]); return v; };
-  const end = performance.now() + 2500;
+  const end = performance.now() + Math.min(2500, 300 + n * 40);   // small runs need far less time
   const mess = o => { if (!pts) return 0; const x = tourMess(pts, o.slice(1, -1), roundTrip); return x.cross * planPenalty.cross + x.back * planPenalty.back; };
   const score = o => cost(o) + mess(o) + (extra ? extra(o) : 0);
   improveTour(t, c, end, lo);
@@ -2183,7 +2200,7 @@ function orderStops(D, roundTrip, pts, first = 0, extra = null) {
     if (v < bestCost - 1) { bestCost = v; t = o; }
   }
   if (extra) {   // a U-turn depends on three shops in a row: one more pass that re-checks the whole run for every move
-    const stop = performance.now() + 1500;
+    const stop = performance.now() + Math.min(1500, 200 + n * 30);
     let cur = score(t), better = true;
     while (better && performance.now() < stop) {
       better = false;
@@ -2711,6 +2728,8 @@ function splitNames() {
 }
 function splitClear() {
   split.rounds = null;
+  if (split.runLayer) splitRunsClear();
+  if ($('splitRunBox')) $('splitRunBox').style.display = 'none';
   split.layer.clearLayers(); map.removeLayer(split.layer);
   $('splitSave').disabled = true; $('splitMsg').textContent = '';
   document.querySelectorAll('#splitNameBox .split-n').forEach(c => { c.textContent = ''; });
@@ -2778,6 +2797,9 @@ function splitShow() {
   });
   $('splitSave').disabled = false;
   $('splitMsg').textContent = '';
+  splitRunsClear();   // a changed split needs a new order
+  $('splitRunBox').style.display = '';
+  splitFillStart();
   renderAll();
 }
 /* tap a pin while splitting: move the shop to the next round of the same day */
@@ -2803,6 +2825,99 @@ async function splitSave() {
   if (msgs.length) { $('splitMsg').textContent = '⚠ ' + (done ? `บันทึกแล้ว ${done} ร้าน\n` : '') + msgs.join('\n'); $('splitSave').disabled = false; return; }
   showToast(`แบ่งรอบและบันทึกลงชีตแล้ว ${done} ร้าน ✓`, 'success');
   splitClear(); splitFill();
+}
+
+/* ----- 🚚 the driving order of every round (each round its own run from the warehouse) ----- */
+split.runLayer = L.layerGroup();
+split.runs = null;
+/* one run: order + road line for these shops, from start (same steps as the 🚚 planner) */
+async function runFor(list, start, roundTrip, req) {
+  const units = planUnits(list);
+  const pts = [start, ...units];
+  let M = null;
+  if (pts.length <= VH_MAX_PTS) { try { M = await truckMatrix(pts, req); } catch (e) { console.warn('truck table failed', e); } }
+  if (req !== plan.req) return null;
+  if (!M) M = await roadMatrix(pts, req);
+  if (!M) return null;
+  await sleep(20);
+  const extra = M.H ? (o => uTurns(M.H, o, roundTrip) * UTURN_SEC) : null;
+  const order = orderStops(M.T, roundTrip, pts, 0, extra);
+  const stops = [];
+  let prev = start;
+  order.forEach(ui => {
+    const left = [...pts[ui].items];
+    while (left.length) {
+      let bi = 0; left.forEach((x, i) => { if (haversineKm(prev, x) < haversineKm(prev, left[bi])) bi = i; });
+      prev = left.splice(bi, 1)[0]; stops.push(prev);
+    }
+  });
+  const way = roundTrip ? [start, ...stops, start] : [start, ...stops];
+  let rt, truck = !!M.H;
+  try { rt = await routeLegs(way, true); } catch (e) { rt = await routeLegs(way, false); truck = false; }
+  return { stops, legs: rt.legs, line: rt.line, dist: rt.dist, dur: rt.dur, truck };
+}
+function splitRunsClear() {
+  split.runs = null;
+  split.runLayer.clearLayers(); map.removeLayer(split.runLayer);
+  if ($('splitRuns')) $('splitRuns').innerHTML = '';
+}
+function splitFillStart() {
+  const ids = [...(split.rounds ? split.rounds.keys() : [])];
+  const list = shops.filter(x => ids.includes(x.id));
+  const c = list.length ? { lat: list.reduce((a, x) => a + x.lat, 0) / list.length, lng: list.reduce((a, x) => a + x.lng, 0) / list.length } : WAREHOUSES[0];
+  const near = [...WAREHOUSES].sort((a, b) => haversineKm(c, a) - haversineKm(c, b))[0].id;
+  const cur = $('splitStart').value;
+  $('splitStart').innerHTML = WAREHOUSES.map(w => `<option value="${w.id}">🏭 ${esc(w.name)}</option>`).join('');
+  $('splitStart').value = cur || near;
+}
+async function splitOrderAll() {
+  if (!split.rounds || split.busy) return;
+  const start = WAREHOUSES.find(w => w.id === $('splitStart').value);
+  const roundTrip = $('splitEnd').value === 'back';
+  const req = ++plan.req;
+  split.busy = true; $('splitGo').disabled = true;
+  splitRunsClear();
+  const runs = [];
+  try {
+    let done = 0;
+    $('splitMsg').textContent = `⏳ กำลังจัดลำดับทุกรอบ… 0/${split.groups.length}`;
+    const one = async n => {
+      const list = shops.filter(x => split.rounds.get(x.id) === n);
+      runs[n] = list.length ? await runFor(list, start, roundTrip, req) : null;
+      if (req === plan.req) $('splitMsg').textContent = `⏳ กำลังจัดลำดับทุกรอบ… ${++done}/${split.groups.length}`;
+    };
+    for (let n = 0; n < split.groups.length; n += 2) await Promise.all([one(n), n + 1 < split.groups.length ? one(n + 1) : null]);   // two rounds at a time
+    if (req !== plan.req || runs.some((r, n) => !r && shops.some(x => split.rounds.get(x.id) === n))) return;
+    split.runs = runs;
+    $('splitMsg').textContent = '';
+    splitRunsShow(start);
+  } catch (e) {
+    console.warn('split order failed', e);
+    $('splitMsg').textContent = '⚠ คำนวณเส้นทางไม่สำเร็จ — ลองกดใหม่อีกครั้ง';
+  } finally { split.busy = false; $('splitGo').disabled = false; }
+}
+function splitRunsShow(start) {
+  split.runLayer.clearLayers();
+  const pin = (html, color) => L.divIcon({ className: '', iconSize: [30, 26], iconAnchor: [15, 13], html: `<div style="text-align:center"><span class="plan-pin" style="background:${color}">${html}</span></div>` });
+  split.runs.forEach((r, n) => {
+    if (!r) return;
+    const col = SPLIT_COLORS[n];
+    L.polyline(r.line, { color: '#fff', weight: 8, opacity: .85, interactive: false }).addTo(split.runLayer);
+    L.polyline(r.line, { color: col, weight: 4, opacity: .95, interactive: false }).addTo(split.runLayer);
+    r.stops.forEach((x, i) => L.marker([x.lat, x.lng], { icon: pin(i + 1, col), zIndexOffset: 1000 })
+      .bindPopup(`<div class="p-row" style="font-weight:700;color:${col}">🚚 ${esc(clean($('splitN' + n).value))} · ลำดับที่ ${i + 1} จาก ${r.stops.length}</div>` + popupHtml(x)).addTo(split.runLayer));
+  });
+  L.marker([start.lat, start.lng], { icon: pin('เริ่ม', '#0d1b3e'), zIndexOffset: 1100 }).bindPopup(`<div class="pop"><h4>🏁 ${esc(start.name)}</h4></div>`).addTo(split.runLayer);
+  split.runLayer.addTo(map);
+  $('splitRuns').innerHTML = split.runs.map((r, n) => !r ? '' : `
+    <details class="split-run"><summary><span class="dot" style="background:${SPLIT_COLORS[n]}"></span><b>${esc(clean($('splitN' + n).value))}</b>
+      <span>${r.stops.length} ร้าน · ${fmtDur(r.dur)} · ${fmtKm(r.dist / 1000)}</span></summary>
+      <div class="plan-list">${r.stops.map((x, i) => `<div class="plan-row" onclick="splitFocusRun(${n},${i})"><span class="plan-no" style="background:${SPLIT_COLORS[n]}">${i + 1}</span><span class="t">${esc(x.name)}</span><span class="d">+${fmtDur(r.legs[i].dur)}</span></div>`).join('')}</div>
+    </details>`).join('') + `<div class="plan-tip">${split.runs.some(r => r && !r.truck) ? '⚠ ระบบเส้นทางรถบรรทุกไม่ตอบตอนนี้ — บางรอบใช้เส้นทางรถยนต์แทน · ' : '🚛 เส้นทางรถ 4 ล้อจัมโบ้ · '}เวลาขับรวมยังไม่รวมเวลาแวะร้าน · กดชื่อรอบเพื่อดูลำดับร้าน</div>`;
+}
+function splitFocusRun(n, i) {
+  const x = split.runs[n].stops[i];
+  map.flyTo([x.lat, x.lng], Math.max(map.getZoom(), 16), { duration: .5 });
 }
 
 /* ----- pick many shops: tap pins, or drag a box on the map ----- */
