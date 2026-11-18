@@ -1,4 +1,4 @@
-# RATTANA UI v1.0.0
+# Rattana CI v1.0.0
 
 UI กลางของบริษัท — Crystal Luxury (โหมดสว่าง) + Luxury Dark (โหมดมืด)
 

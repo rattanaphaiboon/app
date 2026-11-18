@@ -1,4 +1,4 @@
-/* RATTANA UI — behaviour helpers (no dependencies). window.RattanaUI */
+/* Rattana CI — behaviour helpers (no dependencies). window.RattanaUI */
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement;
