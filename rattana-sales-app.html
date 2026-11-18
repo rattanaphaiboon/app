@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.730</title>
+<title>Rattana Sales — v8.731</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -7244,7 +7244,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.730 · 2026-11-04</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.731 · 2026-11-04</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -7255,7 +7255,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.730</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.731</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -35566,6 +35566,8 @@ async function _pushVisitAndTell(shopId, v, kind) {
   let row = null;
   try { row = _visitRowFor(shopId, v); } catch (e) { console.warn('[visit row]', e && e.message); }
   if (row) _vlogPut(row, false);
+  const _ifId = row ? String(row.visitId || '') : '';
+  if (_ifId) (window._visitInflight = window._visitInflight || {})[_ifId] = 1;   // v8.731: กำลังส่ง = ไม่ใช่ของค้าง
   try {
     const r = await submitVisitRow(row || _visitRowFor(shopId, v));
     if (r && r.ok === false) throw new Error(String(r.error || 'หลังบ้านปฏิเสธ'));
@@ -35587,6 +35589,8 @@ async function _pushVisitAndTell(shopId, v, kind) {
     }
     try { _renderStuckQueue(); } catch (e2) {}
     return false;
+  } finally {
+    if (_ifId && window._visitInflight) delete window._visitInflight[_ifId];
   }
 }
 window._pushVisitAndTell = _pushVisitAndTell;
@@ -35595,10 +35599,11 @@ window._pushVisitAndTell = _pushVisitAndTell;
    ใช้ queueProbe ตัวเดิม (อ่านอย่างเดียว ไม่กินล็อก) · ตรวจไม่ได้ = ไม่สรุป ปล่อยไว้รอบหน้า */
 /* v8.730: แถวเยี่ยมร้าน "วันนี้" ที่ยังไม่ยืนยันว่าขึ้นชีท — จาก rsa_visit_log (ok=false) + คิวส่ง (appendVisit) · ไม่รอเวลาผ่อนผัน 3 นาที */
 function _visitPendingRows() {
-  const today = formatDateISO(new Date()), out = {};
+  if (Date.now() - (window._visitResendFailAt || 0) < 180000) return [];   // v8.731: เพิ่งส่งไม่ผ่าน = พัก 3 นาที (ไม่ให้ทุกการเช็คอินต้องรอ)
+  const today = formatDateISO(new Date()), out = {}, inf = window._visitInflight || {};
   try { _vlogGet().forEach(function (e) { if (e && !e.ok && e.row && String(e.row['วัน'] || '').slice(0, 10) === today) out[e.visitId] = e.row; }); } catch (e) {}
   try { writeQueue.get().forEach(function (it) { const p = it && it.payload; if (p && p.action === 'appendVisit' && p.row && p.row.visitId && String(p.row['วัน'] || '').slice(0, 10) === today) out[String(p.row.visitId)] = p.row; }); } catch (e) {}
-  return Object.keys(out).map(function (k) { return out[k]; });
+  return Object.keys(out).filter(function (k) { return !inf[k]; }).map(function (k) { return out[k]; });
 }
 /* ยิงตรง (ไม่ผ่าน postToAppsScript → ไม่เพิ่มรายการซ้ำเข้าคิว) · ทีละแถว ไม่เกิน 5 แถว · แถวละ ≤12 วิ · สำเร็จ = มาร์ค ok ใน rsa_visit_log
    (รายการในคิวไม่ต้องลบเอง — รอบ flush ถามชีทก่อนยิง เจอเวลาเช็คเอาท์ครบแล้วจะทิ้งเอง) */
@@ -35608,22 +35613,23 @@ async function _visitResendBeforeCheckin() {
   window._visitResendBusy = true;
   let fail = 0;
   try {
-    if (!navigator.onLine) { fail = rows.length; return { n: rows.length, fail: fail }; }
+    if (!navigator.onLine) { fail = rows.length; window._visitResendFailAt = Date.now(); return { n: rows.length, fail: fail }; }
     showToast('กำลังส่งข้อมูลร้านก่อนหน้าที่ยังไม่ขึ้นชีท ' + rows.length + ' ร้าน...', 'info');
-    for (const row of rows.slice(0, 5)) {
-      try {
-        const ctrl = new AbortController();
-        const to = setTimeout(function () { ctrl.abort(); }, 12000);
-        let d = null;
-        try {
-          const res = await fetch(CONFIG.appsScriptUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({ psV: 1, action: 'appendVisit', row: row }), signal: ctrl.signal });
-          d = res.ok ? await res.json().catch(function () { return null; }) : null;
-        } finally { clearTimeout(to); }
-        if (d && d.ok !== false) _vlogMark(row.visitId, true, 'landed'); else fail++;
-      } catch (e) { fail++; }
-    }
+    // v8.731: ยิงพร้อมกัน งบรวม 6 วิ — เกินเวลา = ปล่อยให้เช็คอินต่อ (คำขอที่ยิงไปแล้วยังวิ่งต่อได้ ส่งซ้ำได้ปลอดภัยเพราะ upsert ด้วย visitId)
+    const ctrl = new AbortController();
+    const to = setTimeout(function () { ctrl.abort(); }, 6000);
+    try {
+      const res = await Promise.all(rows.slice(0, 5).map(function (row) {
+        return fetch(CONFIG.appsScriptUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({ psV: 1, action: 'appendVisit', row: row }), signal: ctrl.signal })
+          .then(function (r) { return r.ok ? r.json().catch(function () { return null; }) : null; })
+          .then(function (d) { if (d && d.ok !== false) { _vlogMark(row.visitId, true, 'landed'); return true; } return false; })
+          .catch(function () { return false; });
+      }));
+      fail = res.filter(function (x) { return !x; }).length;
+    } finally { clearTimeout(to); }
     fail += Math.max(0, rows.length - 5);
+    if (fail) window._visitResendFailAt = Date.now();
     return { n: rows.length, fail: fail };
   } finally {
     window._visitResendBusy = false;
