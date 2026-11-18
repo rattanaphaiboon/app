@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.729</title>
+<title>Rattana Sales — v8.730</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -7244,7 +7244,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.729 · 2026-11-04</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.730 · 2026-11-04</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -7255,7 +7255,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.729</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.730</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -14622,7 +14622,9 @@ async function _queueProbe(item) {
       res = await fetch(CONFIG.appsScriptUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action: 'queueProbe', kind: payload.action, keys: keys }),
+        // v8.730: แถว visit ที่มีเวลาเช็คเอาท์ = ต้องเห็นเวลาเช็คเอาท์ในชีทด้วย (เดิมเจอแค่แถวเช็คอินก็ทิ้งรอบเช็คเอาท์จากคิวเงียบ)
+        body: JSON.stringify({ action: 'queueProbe', kind: payload.action, keys: keys,
+          needOut: (payload.action === 'appendVisit' && String(((payload.row || {})['เวลาเช็คเอาท์']) || '').trim()) ? keys : [] }),
         signal: _ctrl.signal,
       });
     } finally { clearTimeout(_to); }
@@ -34546,9 +34548,16 @@ window._usersReady = _usersReady;
 window._waitUsersReady = _waitUsersReady;
 
 // Check in — always get fresh GPS first (v6.5.23: never use stale position for check-in)
-function doCheckIn(shopId, _waited) {
+function doCheckIn(shopId, _waited, _resent) {
   const s = SHOPS.find(x => x.id === shopId);
   if (!s) return;
+  /* v8.730 (Surat 18/11 "เช็คแล้วแต่ไม่ลงชีท ให้ส่งใหม่ ก่อนที่จะเช็คร้านใหม่"): แถวเยี่ยมร้านวันนี้ที่ยังไม่ยืนยันว่าขึ้นชีท → ยิงซ้ำก่อน
+     ไม่มีของค้าง = ไปต่อทันที · ส่งไม่ผ่าน = แจ้งแล้วไปต่อ (ของยังอยู่ในเครื่อง ส่งเองรอบหน้า) ❌ ไม่ขวางการเช็คอิน */
+  if (!_resent && _visitPendingRows().length) {
+    if (window._visitResendBusy) { showToast('⏳ กำลังส่งข้อมูลร้านก่อนหน้า — อีกครู่เดียว', 'info'); return; }
+    _visitResendBeforeCheckin().finally(function () { doCheckIn(shopId, _waited, true); });
+    return;
+  }
   // v8.436: Users ยังไม่มา = รหัสเซลจะผิด → รอก่อน (รอบเดียว · ไม่บล็อก)
   if (!_usersReady() && !_waited) {
     showToast('⏳ กำลังเตรียมข้อมูล — อีกครู่เดียว', 'info');
@@ -34693,7 +34702,7 @@ window._checkInNoGps = function(shopId) {
 // v8.250: ตัด visit ที่ค้าง (เซลออกจากร้านโดยไม่เช็คเอาท์) เป็น "ไม่ซื้อ" + เวลา 0
 //   เช็คเอาท์ = เช็คอิน → ระยะเวลา 0 → _tmComputeTimeStats ได้ co−ci=0 (ไม่นับเวลาในร้าน)
 //   result='no-order' → นับเป็นร้านไม่ซื้อ (อยู่ใน TM_NO_BUY_VALUES)
-function _autoCutVisit(shopId, reason) {
+function _autoCutVisit(shopId, reason, noCheckout) {
   const v = visits[shopId];
   if (!v || v.checkOutTime) return null;
   /* v8.579 (เคสจริง 27/8 ป้าตุ้ม ORD7176574): ร้านที่ "ขายได้แล้ววันนี้" โดน auto-cut ต้องปิดเป็น ordered
@@ -34718,8 +34727,10 @@ function _autoCutVisit(shopId, reason) {
       if (_m(v.checkInTime) >= 0 && _d > 0) { v.checkOutTime = _os.last; v.duration = _d; }
     }
   }
-  v.result       = _soldCut ? 'ordered' : 'no-order';
-  v.reason       = _soldCut ? '' : (reason || 'ไม่ซื้อ (ออกจากร้าน)');
+  // v8.730 (Surat 18/11): ไปเช็คร้านใหม่โดยไม่เช็คเอาท์ร้านเดิม (ยังไม่ขาย) = 'no-checkout' · หลังบ้านไม่นับคะแนนเยี่ยมร้าน
+  v.result       = _soldCut ? 'ordered' : (noCheckout ? 'no-checkout' : 'no-order');
+  v.reason       = _soldCut ? '' : (noCheckout ? 'ไม่ได้เช็คเอาท์' : (reason || 'ไม่ซื้อ (ออกจากร้าน)'));
+  if (noCheckout && !_soldCut) v.notes = (v.notes ? v.notes + ' · ' : '') + 'ไม่ได้เช็คเอาท์ — เซลไปเช็คอินร้านใหม่ (ไม่นับคะแนน)';
   v.autoCut      = true;
   /* v8.577: ตัดอัตโนมัติ = ไม่ได้ถ่ายรูป → ต้องบอกในชีทว่าทำไม (Surat สั่ง 24/8)
      ร้านที่ขายไปแล้ววันนี้ ไม่ต้องมีเหตุผล — หลักฐานเป็น "ขายได้" อยู่แล้ว */
@@ -34734,24 +34745,15 @@ function _autoCutVisit(shopId, reason) {
 // v8.250: มีร้านค้าง (ยังไม่เช็คเอาท์) แล้วจะเช็คอินร้านใหม่ → จับ GPS วัดระยะจากร้านเดิม
 //   ห่าง >50ม. = เซลออกจากร้านไปแล้ว → ตัดร้านเดิมเป็นไม่ซื้อ 0 นาที แล้วเช็คอินร้านใหม่ต่อ
 //   ยังอยู่ใกล้ (≤50ม.) / ไม่มี GPS / ร้านเดิมไม่มีพิกัด → ถามเหมือนเดิม (modal เลือกเอง)
+/* v8.730 (Surat 18/11 "ไปเช็คร้านใหม่แล้วร้านเดิมไม่ได้กดเช็คเอาท์ ให้ขึ้นเตือนเซล และให้กดมา แต่หลังบ้านบันทึกว่าไม่ได้เช็คออก ไม่นับคะแนน")
+   เดิม: ห่าง >50ม. = ตัดเงียบเป็น "ไม่ซื้อ" · ใกล้ = ถาม → ตอนนี้: ขายแล้ว = ปิดตามเวลาออเดอร์ (เหมือนเดิม) · ยังไม่ขาย = เตือนทุกครั้ง */
 function _handleActiveCheckin(activeId, nextId) {
-  const activeShop = SHOPS.find(s => s.id === activeId);
-  window._checkinBusy = true;
-  showToast('📍 กำลังตรวจตำแหน่ง...', 'info');
-  refreshGPS(true).then(loc => {
-    const dist = (loc && activeShop && activeShop.lat && activeShop.lng) ? distanceToShop(activeShop) : null;
-    window._checkinBusy = false;
-    if (dist != null && dist > 50) {
-      _autoCutVisit(activeId, 'ออกจากร้าน >50ม. (เช็คอินร้านใหม่)');
-      showToast('✂️ ห่างร้านเดิม ' + Math.round(dist) + 'ม. — ตัดเป็น "ไม่ซื้อ" ไม่นับเวลา', 'info');
-      setTimeout(() => doCheckIn(nextId), 250);
-    } else {
-      _showActiveCheckinModal(activeId, nextId);
-    }
-  }).catch(() => {
-    window._checkinBusy = false;
-    _showActiveCheckinModal(activeId, nextId);
-  });
+  if (_visitSoldToday(activeId) > 0) {
+    _autoCutVisit(activeId, 'ออกจากร้าน (เช็คอินร้านใหม่)');
+    setTimeout(() => doCheckIn(nextId), 250);
+    return;
+  }
+  _showActiveCheckinModal(activeId, nextId);
 }
 
 function _showActiveCheckinModal(activeId, nextId) {
@@ -34762,13 +34764,13 @@ function _showActiveCheckinModal(activeId, nextId) {
     <div class="modal-handle"></div>
     <div style="padding:18px 16px 22px">
       <div style="font-size:17px;font-weight:900;margin-bottom:6px">⛔ ยังไม่เช็คเอาท์ร้านเดิม</div>
-      <div style="font-size:13px;color:var(--muted);margin-bottom:14px">
-        คุณกำลังเช็คอินอยู่ที่ <b>${escapeHtml(active?.name || '?')}</b><br>
-        ต้องเช็คเอาท์ร้านนี้ก่อน ถึงจะเช็คอินที่ <b>${escapeHtml(next?.name || '?')}</b> ได้
+      <div style="font-size:13px;color:var(--muted);margin-bottom:14px;line-height:1.6">
+        ร้าน <b>${escapeHtml(active?.name || '?')}</b> ยังไม่ได้กดเช็คเอาท์<br>
+        ถ้าไปเช็คอิน <b>${escapeHtml(next?.name || '?')}</b> เลย ร้านเดิมจะถูกบันทึกว่า <b style="color:var(--danger)">ไม่ได้เช็คเอาท์ · ไม่นับคะแนนเยี่ยมร้าน</b>
       </div>
       <div style="display:flex;flex-direction:column;gap:8px">
-        <button class="btn btn-primary" onclick="closeModal();openShopForAction('${escapeAttr(activeId)}','order')">📍 กลับไปที่ร้านเดิม</button>
-        <button class="btn btn-outline" onclick="_closeAsNoSaleAndCheckin('${escapeAttr(activeId)}','${escapeAttr(nextId)}')">✕ ปิดร้านเดิม "ไม่ซื้อ" แล้วเช็คอินร้านใหม่</button>
+        <button class="btn btn-primary" onclick="closeModal();openShopForAction('${escapeAttr(activeId)}','order')">กลับไปเช็คเอาท์ร้านเดิม</button>
+        <button class="btn btn-outline" style="color:var(--danger)" onclick="_noCheckoutAndCheckin('${escapeAttr(activeId)}','${escapeAttr(nextId)}')">ไปต่อ — บันทึกว่าไม่ได้เช็คเอาท์</button>
         <button class="btn btn-outline" onclick="closeModal()">ยกเลิก</button>
       </div>
     </div>
@@ -34777,6 +34779,12 @@ function _showActiveCheckinModal(activeId, nextId) {
   document.getElementById('productModal').classList.add('active');
 }
 
+window._noCheckoutAndCheckin = function(activeId, nextId) {   // v8.730
+  closeModal();
+  if (!_autoCutVisit(activeId, 'ไม่ได้เช็คเอาท์', true)) return;
+  showToast('บันทึกร้านเดิมว่า "ไม่ได้เช็คเอาท์" แล้ว', 'warning');
+  setTimeout(() => doCheckIn(nextId), 250);
+};
 window._closeAsNoSaleAndCheckin = function(activeId, nextId) {
   closeModal();
   // Force-close previous visit as ไม่ซื้อ (no-order)
@@ -35585,6 +35593,47 @@ window._pushVisitAndTell = _pushVisitAndTell;
 
 /* ตรวจรอบละ 30 วิ (เกาะ _startWriteQueueAutoFlush) — ถามชีทว่าแถวขึ้นจริงไหม แล้วยิงซ้ำถ้ายังไม่ขึ้น
    ใช้ queueProbe ตัวเดิม (อ่านอย่างเดียว ไม่กินล็อก) · ตรวจไม่ได้ = ไม่สรุป ปล่อยไว้รอบหน้า */
+/* v8.730: แถวเยี่ยมร้าน "วันนี้" ที่ยังไม่ยืนยันว่าขึ้นชีท — จาก rsa_visit_log (ok=false) + คิวส่ง (appendVisit) · ไม่รอเวลาผ่อนผัน 3 นาที */
+function _visitPendingRows() {
+  const today = formatDateISO(new Date()), out = {};
+  try { _vlogGet().forEach(function (e) { if (e && !e.ok && e.row && String(e.row['วัน'] || '').slice(0, 10) === today) out[e.visitId] = e.row; }); } catch (e) {}
+  try { writeQueue.get().forEach(function (it) { const p = it && it.payload; if (p && p.action === 'appendVisit' && p.row && p.row.visitId && String(p.row['วัน'] || '').slice(0, 10) === today) out[String(p.row.visitId)] = p.row; }); } catch (e) {}
+  return Object.keys(out).map(function (k) { return out[k]; });
+}
+/* ยิงตรง (ไม่ผ่าน postToAppsScript → ไม่เพิ่มรายการซ้ำเข้าคิว) · ทีละแถว ไม่เกิน 5 แถว · แถวละ ≤12 วิ · สำเร็จ = มาร์ค ok ใน rsa_visit_log
+   (รายการในคิวไม่ต้องลบเอง — รอบ flush ถามชีทก่อนยิง เจอเวลาเช็คเอาท์ครบแล้วจะทิ้งเอง) */
+async function _visitResendBeforeCheckin() {
+  const rows = _visitPendingRows();
+  if (!rows.length || !CONFIG.appsScriptUrl) return { n: 0, fail: 0 };
+  window._visitResendBusy = true;
+  let fail = 0;
+  try {
+    if (!navigator.onLine) { fail = rows.length; return { n: rows.length, fail: fail }; }
+    showToast('กำลังส่งข้อมูลร้านก่อนหน้าที่ยังไม่ขึ้นชีท ' + rows.length + ' ร้าน...', 'info');
+    for (const row of rows.slice(0, 5)) {
+      try {
+        const ctrl = new AbortController();
+        const to = setTimeout(function () { ctrl.abort(); }, 12000);
+        let d = null;
+        try {
+          const res = await fetch(CONFIG.appsScriptUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({ psV: 1, action: 'appendVisit', row: row }), signal: ctrl.signal });
+          d = res.ok ? await res.json().catch(function () { return null; }) : null;
+        } finally { clearTimeout(to); }
+        if (d && d.ok !== false) _vlogMark(row.visitId, true, 'landed'); else fail++;
+      } catch (e) { fail++; }
+    }
+    fail += Math.max(0, rows.length - 5);
+    return { n: rows.length, fail: fail };
+  } finally {
+    window._visitResendBusy = false;
+    if (fail) showToast('ข้อมูลร้านก่อนหน้า ' + fail + ' ร้านยังส่งไม่ขึ้น — เก็บไว้ในเครื่องแล้ว จะส่งเองอีกครั้ง', 'warning');
+    else if (rows.length) showToast('✓ ส่งข้อมูลร้านก่อนหน้าขึ้นชีทแล้ว', 'success');
+    try { _renderStuckQueue(); } catch (e) {}
+  }
+}
+window._visitResendBeforeCheckin = _visitResendBeforeCheckin;
+
 let _vlogSweepInFlight = false;
 async function _vlogSweep() {
   if (_vlogSweepInFlight || !navigator.onLine || !CONFIG.appsScriptUrl) return;
