@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Rattana ยอดขายเทียบเป้าหมาย v12.7</title>
+<title>Rattana ยอดขายเทียบเป้าหมาย v12.8</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -252,7 +252,7 @@ body.dark .ptbl-td{border-color:var(--border)}
 <div class="page hidden" id="appScreen">
   <header>
     <div class="logo-text">RATTANA<span>·</span>SALES
-      <small>ยอดขายเทียบเป้าหมาย v12.7</small>
+      <small>ยอดขายเทียบเป้าหมาย v12.8</small>
     </div>
     <div class="flex gap-8" style="margin-left:auto">
 
@@ -906,40 +906,42 @@ function lookupPvSale(pvSaleIndex, normName, parsed) {
   if (unit === 'ตัน') return (entry.lang || 0) / 1000;
   return null;
 }
-// Suggestion: รหัสเซลล์ → Set รหัสร้านที่เปิดบิลแล้ว (4 หัวข้อ · บิลวันเดียวกับออเดอร์หรือช้ากว่า 1 วัน · เดือนปัจจุบัน)
-function buildSugBilledStores() {
-  const CATS = ['เดดสต๊อก', 'แนะนำ-กระจาย', 'แนะนำ-ขายดี', 'สินค้าใหม่'];
-  const pcore = s => { s = normalizeText(String(s||'')).replace(/\s+/g,' '); return s.includes('@') ? s.split('@').slice(1).join('@').trim() : s; };
-  const dayNum = s => {
-    const p = String(s||'').trim().split(/[\/\-\s]/).map(Number);
-    if (p.length < 3 || p.some(isNaN)) return null;
-    const [y, mo, d] = p[0] > 31 ? [p[0], p[1], p[2]] : [p[2], p[1], p[0]];
-    return Math.floor(Date.UTC(y > 2400 ? y - 543 : y, mo - 1, d) / 86400000);
-  };
-  const now = new Date(), curMm = now.getMonth() + 1, curY = now.getFullYear();
-  const billDays = new Map();
-  (state.bpRaw||[]).forEach(r => {
-    const dn = dayNum(r['Doc_Date']);
-    if (dn === null) return;
-    const k = String(r['Customer_Code']||'').trim() + '|' + pcore(r['Product_Name']);
-    if (!billDays.has(k)) billDays.set(k, new Set());
-    billDays.get(k).add(dn);
+// ===== SuggestionSales (ขายจากคำแนะนำ) =====
+const SS_CATS = [
+  { key: 'ขายดีพื้นที่', label: 'ขายดีในพื้นที่', color: '#c9a84c' },
+  { key: 'กระจายพื้นที่', label: 'กระจายในพื้นที่', color: '#3498db' },
+  { key: 'เดดสต๊อก', label: 'ค้างสต็อก', color: '#8e44ad' },
+  { key: 'สินค้าใหม่', label: 'สินค้าใหม่', color: '#27ae60' },
+];
+// แตก "<หัวข้อ>-รายการ" → [{prod, store, baht}] · รูปแบบ "ชื่อสินค้า จำนวน หน่วย @ชื่อร้าน ฿1,180" คั่นด้วย " | "
+function ssItems(r, key) {
+  return String(r[key + '-รายการ']||'').split(' | ').map(t => t.trim()).filter(Boolean).map(t => {
+    const m = t.match(/^(.*) @(.+) ฿([\d,.\-]+)$/);
+    return m ? { prod: m[1].trim(), store: normalizeText(m[2]), baht: parseNum(m[3]) } : { prod: t, store: '', baht: 0 };
   });
-  const out = new Map();
-  (state.sugRaw||[]).forEach(r => {
-    if (!CATS.includes(String(r['อยู่ในคำแนะนำ']||'').trim())) return;
-    if (String(r['ยกเลิก']||'').trim()) return;
-    const od = dayNum(r['วัน']);
-    if (od === null) return;
-    const dt = new Date(od * 86400000);
-    if (dt.getUTCMonth() + 1 !== curMm || dt.getUTCFullYear() !== curY) return;
-    const cust = String(r['รหัสร้าน']||'').trim();
-    const days = billDays.get(cust + '|' + pcore(r['ชื่อสินค้า']));
-    if (!days || !(days.has(od) || days.has(od + 1))) return;
+}
+// รวมต่อเซลล์: บาท/SKU ต่อหัวข้อ + ร้านไม่ซ้ำ (จากชื่อร้านใน -รายการ) · ชื่อ/คลังเอาจากแถวล่าสุด
+function ssAggregate(cats) {
+  const by = new Map();
+  (state.ssRaw||[]).forEach(r => {
     const sc = String(r['รหัสเซลล์']||'').trim().toUpperCase();
-    if (!out.has(sc)) out.set(sc, new Set());
-    out.get(sc).add(cust);
+    if (!by.has(sc)) by.set(sc, { sc, name: '', wh: '', day: '', cat: {}, stores: new Set(), baht: 0, items: [] });
+    const g = by.get(sc);
+    const d = String(r['วัน']||'');
+    if (d >= g.day) { g.day = d; g.name = String(r['ชื่อ-สกุล']||'').trim(); g.wh = String(r['คลัง']||'').trim().toUpperCase(); }
+    cats.forEach(c => {
+      const o = g.cat[c.key] || (g.cat[c.key] = { baht: 0, sku: 0, stores: new Set() });
+      const b = parseNum(r[c.key + '-บาท']);
+      o.baht += b; o.sku += parseNum(r[c.key + '-SKU']); g.baht += b;
+      ssItems(r, c.key).forEach(it => { if (it.store) { o.stores.add(it.store); g.stores.add(it.store); } g.items.push({ day: d, cat: c, ...it }); });
+    });
   });
+  return by;
+}
+// KPI Suggestion: รหัสเซลล์ → Set ร้านที่ขายได้ (4 หัวข้อแนะนำ)
+function buildSugBilledStores() {
+  const out = new Map();
+  ssAggregate(SS_CATS).forEach((g, sc) => out.set(sc, g.stores));
   return out;
 }
 
@@ -1345,48 +1347,13 @@ async function loadData(showSpin) {
     const deedoRaw   = await loadFromSheets(DEEDO_SHEET_ID, DEEDO_SHEET_NAME).catch(()=>[]);
     state.deedoRaw   = deedoRaw;
     state.plantbRaw  = await loadFromSheets(PLANTB_SHEET_ID, PLANTB_SHEET_NAME).catch(()=>[]);
-    const _rm = getLatestBpMonth(bpRaw) || { mm: new Date().getMonth()+1, yyyy: new Date().getFullYear() };
-    state.recSheet = String(_rm.mm).padStart(2,'0') + '/' + _rm.yyyy;
     {
-      const [recA, recB] = await Promise.all([
-        loadFromSheets(REC_SHEET_ID, state.recSheet).catch(()=>[]),
-        loadFromSheets(CUSTOMER_SHEET_ID, 'Order').catch(()=>[])
-      ]);
-      const ymPrefix = _rm.yyyy + '/' + String(_rm.mm).padStart(2,'0');
-      const seenLine = new Set();
-      state.recRaw = [...recA, ...recB].filter(r => {
-        if (!String(r['วัน']||'').startsWith(ymPrefix)) return false;
-        const lid = String(r['lineId']||'').trim();
-        if (lid) { if (seenLine.has(lid)) return false; seenLine.add(lid); }
-        return true;
-      });
-    }
-    {
-      // Suggestion: ชีต Order ไฟล์แยก · เฉพาะเดือนปัจจุบัน
-      const _sn = new Date(), _sp = _sn.getFullYear() + '/' + String(_sn.getMonth()+1).padStart(2,'0');
-      const [sugAll, sugOld] = await Promise.all([
-        loadFromSheets(SUG_SHEET_ID, 'Order').catch(()=>[]),
-        loadFromSheets(CUSTOMER_SHEET_ID, 'Order').catch(()=>[])
-      ]);
-      const dayOf = r => String(r['วัน']||'').trim().slice(0,10);
-      const inMon = r => String(r['วัน']||'').startsWith(_sp);
-      const newRows = sugAll.filter(inMon);
-      // วันที่ไฟล์ใหม่มีแล้ว ไม่เอาจากไฟล์เก่า
-      const newDays = new Set(newRows.map(dayOf));
-      const oldRows = sugOld.filter(r => inMon(r) && !newDays.has(dayOf(r)));
-      const seenSug = new Set();
-      const seenSugItem = new Set();
-      const _sugTxt = (r, k) => normalizeText(String(r[k]||''));
-      state.sugRaw = [...newRows, ...oldRows].filter(r => {
-        const lid = String(r['lineId']||'').trim();
-        if (lid) { if (seenSug.has(lid)) return false; seenSug.add(lid); }
-        // รายการซ้ำ (วัน เซลล์ ร้าน สินค้า จำนวน หน่วย ราคา ตรงกัน) นับครั้งเดียว · แถวที่ยกเลิกไม่ไปกันแถวจริง
-        if (_sugTxt(r, 'ยกเลิก')) return true;
-        const itemKey = [dayOf(r), 'รหัสเซลล์', 'รหัสร้าน', 'ชื่อสินค้า', 'จำนวน', 'หน่วย', 'ราคา'].map((k, i) => i ? _sugTxt(r, k) : k).join('|');
-        if (seenSugItem.has(itemKey)) return false;
-        seenSugItem.add(itemKey);
-        return true;
-      });
+      // ขายจากคำแนะนำ: แท็บ SuggestionSales (แอปขายสรุปให้ · 1 แถว = 1 เซลล์ × 1 วัน) · เฉพาะเดือนปัจจุบัน
+      const _sn = new Date(), _sp = _sn.getFullYear() + '-' + String(_sn.getMonth()+1).padStart(2,'0');
+      const ss = await loadFromSheets(CUSTOMER_SHEET_ID, 'SuggestionSales').catch(()=>[]);
+      state.ssRaw = ss.filter(r => String(r['วัน']||'').startsWith(_sp) && String(r['รหัสเซลล์']||'').trim());
+      state.ssMonth = { mm: _sn.getMonth()+1, yyyy: _sn.getFullYear() };
+      state.ssUpdated = ss.reduce((m, r) => { const u = String(r['อัปเดตล่าสุด']||''); return u > m ? u : m; }, '');
     }
     state.cgSkuRaw   = cgSkuRaw;
     state.latestBpMonth = getLatestBpMonth(bpRaw);
@@ -3867,225 +3834,120 @@ function renderPlanTB() {
   el.innerHTML = html;
 }
 
+// แถวเซลล์: เรียงตามคลัง แล้วรหัส
+function ssSalesList(by, wh) {
+  return [...by.values()].filter(g => wh === 'ALL' || g.wh === wh).sort((a, b) => a.wh.localeCompare(b.wh) || a.sc.localeCompare(b.sc));
+}
+function ssMonthLabel() {
+  const m = state.ssMonth || { mm: new Date().getMonth()+1, yyyy: new Date().getFullYear() };
+  return ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'][m.mm-1] + ' ' + (m.yyyy+543);
+}
+const SS_TH = `background:#1a3a55;color:#fff;padding:8px 10px;border:1px solid #000;text-align:center;white-space:nowrap`;
+const SS_TD = `padding:7px 10px;border:1px solid #000;color:#000;text-align:right;white-space:nowrap`;
+function ssWhButtons(fn, wh) {
+  return ['ALL','W1','W3','W4'].map(w => `<button class="btn btn-sm ${w===wh?'btn-gold':'btn-outline'}" onclick="${fn}('${w}')">${w==='ALL'?'ทั้งหมด':w}</button>`).join(' ');
+}
+function ssItemTable(items, title) {
+  const f0 = v => Math.round(v).toLocaleString();
+  const list = items.slice().sort((a, b) => a.sc.localeCompare(b.sc) || a.day.localeCompare(b.day) || b.baht - a.baht);
+  return `<div class="card card-gold" style="margin-top:12px;display:block;max-width:100%">
+    <div class="card-head"><b>${title} (${list.length} รายการ)</b></div>
+    <div class="card-body" style="padding:0;overflow-x:auto">
+    ${list.length ? `<table style="border-collapse:collapse;font-size:13px">
+    <thead><tr><th style="${SS_TH}">#</th><th style="${SS_TH}">วันที่</th><th style="${SS_TH}">หัวข้อ</th><th style="${SS_TH}">รหัส</th><th style="${SS_TH}">ชื่อพนักงานขาย</th><th style="${SS_TH}">ร้าน</th><th style="${SS_TH}">สินค้า · จำนวน</th><th style="${SS_TH}">ยอด (บาท)</th></tr></thead>
+    <tbody>${list.map((b,i) => `<tr style="background:${i%2?'#fafbfd':'#fff'}">
+      <td style="${SS_TD};text-align:center">${i+1}</td>
+      <td style="${SS_TD};text-align:center">${b.day}</td>
+      <td style="${SS_TD};text-align:center;font-weight:700;color:${b.cat.color}">${b.cat.label}</td>
+      <td style="${SS_TD};text-align:center">${b.sc}</td>
+      <td style="${SS_TD};text-align:left">${b.name}</td>
+      <td style="${SS_TD};text-align:left">${b.store}</td>
+      <td style="${SS_TD};text-align:left">${b.prod}</td>
+      <td style="${SS_TD}">${f0(b.baht)}</td></tr>`).join('')}</tbody></table>` : '<p style="padding:16px;color:var(--muted)">ยังไม่มีรายการเดือนนี้</p>'}
+    </div></div>`;
+}
+
 function renderBestSell(whSel) {
   const el = document.getElementById('bestsellContent');
   if (!el) return;
   if (whSel !== undefined) state.bestWh = whSel;
   const wh = state.bestWh || 'ALL';
-  const _bn = new Date(); const m = { mm: _bn.getMonth()+1, yyyy: _bn.getFullYear() };
-  if (!m) { el.innerHTML = '<p style="padding:16px;color:#b00">ไม่มีข้อมูล BP</p>'; return; }
-  const SALES = [
-    ['W1','คุณ นพดล พุทธรักษา','HSW104'],['W1','คุณ วิรชัย หัตถกรรม','HSW105'],
-    ['W4','คุณ วิภา ยิ่งคุ้ม','HSW403'],['W4','คุณ รุ่งฟ้า ธรรมรักษ์ษา','HSW404'],['W4','คุณ สมคิด คุ้มวงค์','HSW405'],
-    ['W1','คุณ ชัยสิทธิ์ มีศิริ','PMW101'],['W1','คุณ จารุพัฒน์ หอมวิเชียร','PMW102'],['W1','คุณ ดวงหทัย แสงแก้ว','PMW103'],
-    ['W1','คุณ จิรายุ วันจันทร์','PMW104'],['W1','คุณ สุกรี สรสิทธิ์','PMW105'],
-    ['W3','คุณ วรพันธ์ เพ็งจันทร์','PMW301'],['W3','คุณ ปวริศ ทองก้อน','PMW304'],['W3','คุณ อภิชญา พัวนิรันดร์','PMW303'],
-    ['W4','คุณ ชลรดาณัชช์ เอมอิ่ม','PMW402'],['W4','คุณ ธนปกร เทพทอง','PMW404']];
-  const LIST = SALES.filter(x => wh === 'ALL' || x[0] === wh);
-  const CATS = ['แนะนำ-ขายดี', 'แนะนำ-กระจาย'];
-  const pcore = s => { s = normalizeText(String(s||'')).replace(/\s+/g,' '); return s.includes('@') ? s.split('@').slice(1).join('@').trim() : s; };
-  const bpAct = new Map();
-  (state.bpRaw||[]).forEach(r => {
-    const my = bpMonthYear(r['Doc_Date']);
-    if (!my || my.mm !== m.mm || my.yyyy !== m.yyyy) return;
-    const k = String(r['Customer_Code']||'').trim() + '|' + pcore(r['Product_Name']);
-    const a = bpAct.get(k) || { cs: 0, baht: 0 };
-    a.cs += parseNum(r['Sales_CS']); a.baht += parseNum(r['EXVat+CN*2']);
-    bpAct.set(k, a);
-  });
-  const mk = () => Object.assign(Object.fromEntries(CATS.map(c => [c, { order: 0, billed: 0, cs: 0, baht: 0 }])), { _stores: new Set() });
-  const idx = new Map(LIST.map(x => [x[2], mk()]));
-  const tot = mk();
-  const billedList = [];
-  (state.sugRaw||[]).forEach(r => {
-    const cat = String(r['อยู่ในคำแนะนำ']||'').trim();
-    if (!CATS.includes(cat)) return;
-    if (String(r['ยกเลิก']||'').trim()) return;
-    const sc = String(r['รหัสเซลล์']||'').trim().toUpperCase();
-    const g = idx.get(sc);
-    if (!g) return;
-    const k = String(r['รหัสร้าน']||'').trim() + '|' + pcore(r['ชื่อสินค้า']);
-    const a = bpAct.get(k);
-    const storeName = normalizeText(String(r['ชื่อร้าน']||''));
-    [g, tot].forEach(o => { o[cat].order++; if (a) { o[cat].billed++; o[cat].cs += a.cs; o[cat].baht += a.baht; if (storeName) o._stores.add(storeName); } });
-    if (a) billedList.push({ cat, sc, sale: (LIST.find(x => x[2] === sc)||[])[1] || sc, cust: String(r['รหัสร้าน']||'').trim(), custName: String(r['ชื่อร้าน']||'').trim(), prod: String(r['ชื่อสินค้า']||'').trim(), cs: a.cs, baht: a.baht });
-  });
-  const BD = '#000';
-  const th = `background:#1a3a55;color:#fff;padding:10px 12px;border:1px solid ${BD};text-align:center;white-space:nowrap`;
-  const td = `padding:8px 12px;border:1px solid ${BD};color:#000;text-align:right;white-space:nowrap`;
+  const CATS = SS_CATS.slice(0, 2);
+  const by = ssAggregate(CATS);
+  const LIST = ssSalesList(by, wh);
   const f0 = v => Math.round(v).toLocaleString();
-  const f1 = v => v.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1});
   const TARGET = 40000;
   const tu = getWorkingDaysInfo(getWdMonth()).pct;
-  const dash = `<td style="${td};color:#999">-</td>`;
-  const cells = (g, tgt) => {
-    const sum = CATS.reduce((s,c) => s + g[c].baht, 0);
+  const dash = `<td style="${SS_TD};color:#999">-</td>`;
+  const totStores = new Set();
+  const tot = { cat: Object.fromEntries(CATS.map(c => [c.key, 0])), baht: 0 };
+  LIST.forEach(g => { g.stores.forEach(x => totStores.add(g.sc + '|' + x)); CATS.forEach(c => tot.cat[c.key] += g.cat[c.key].baht); tot.baht += g.baht; });
+  const cells = (catB, sum, stores, tgt) => {
     const pct = tgt ? sum / tgt * 100 : 0;
-    return `<td style="${td}">${f0(tgt)}</td>` + CATS.map(c => { const o = g[c]; return o.billed ? `<td style="${td}">${f0(o.baht)}</td>` : dash; }).join('')
-      + `<td style="${td};font-weight:700">${sum ? f0(sum) : '-'}</td>`
-      + `<td style="${td}">${g._stores.size ? g._stores.size.toLocaleString() : '-'}</td>`
-      + `<td style="${td};font-weight:700;background:${pct >= tu ? '#d4edda' : '#f8d7da'};color:${pct >= tu ? '#155724' : '#721c24'}">${pct.toFixed(2)}%</td>`;
+    return `<td style="${SS_TD}">${f0(tgt)}</td>` + CATS.map(c => catB[c.key] ? `<td style="${SS_TD}">${f0(catB[c.key])}</td>` : dash).join('')
+      + `<td style="${SS_TD};font-weight:700">${sum ? f0(sum) : '-'}</td>`
+      + `<td style="${SS_TD}">${stores ? stores.toLocaleString() : '-'}</td>`
+      + `<td style="${SS_TD};font-weight:700;background:${pct >= tu ? '#d4edda' : '#f8d7da'};color:${pct >= tu ? '#155724' : '#721c24'}">${pct.toFixed(2)}%</td>`;
   };
-  const mn = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'][m.mm-1] + ' ' + (m.yyyy+543);
+  const items = [];
+  LIST.forEach(g => g.items.forEach(it => items.push({ ...it, sc: g.sc, name: g.name })));
   el.innerHTML = `<div class="card card-gold" style="margin-top:12px;display:inline-block;max-width:100%">
-    <div class="card-head" style="gap:12px;flex-wrap:wrap"><b>ขายดี-กระจายดี</b><span>${['ALL','W1','W3','W4'].map(w => `<button class="btn btn-sm ${w===wh?'btn-gold':'btn-outline'}" onclick="renderBestSell('${w}')">${w==='ALL'?'ทั้งหมด':w}</button>`).join(' ')}</span><span class="txt-sm txt-muted">ข้อมูลเดียวกับแท็บ Suggestion (ชีต Order เดือนนี้ · คอลัมน์ "อยู่ในคำแนะนำ") เทียบยอดจริงจากชีต BP · จับคู่ รหัสร้าน + สินค้า</span></div>
+    <div class="card-head" style="gap:12px;flex-wrap:wrap"><b>ขายดี-กระจายดี · ${ssMonthLabel()}</b><span>${ssWhButtons('renderBestSell', wh)}</span><span class="txt-sm txt-muted">แท็บ SuggestionSales (แอปขาย) · อัปเดตล่าสุด ${state.ssUpdated||'-'}</span></div>
     <div class="card-body" style="padding:0;overflow-x:auto">
     <table style="border-collapse:collapse;font-size:15px">
-    <thead><tr><th style="${th}">WH</th><th style="${th}">ชื่อพนักงานขาย</th><th style="${th}">รหัส</th><th style="${th}">Target<br>(บาท)</th>
-      <th style="${th};background:#c9a84c;color:#0d1b3e">แนะนำ-ขายดี<br>(บาท)</th><th style="${th};background:#3498db">แนะนำ-กระจาย<br>(บาท)</th>
-      <th style="${th}">ยอดจริงรวม<br>(บาท)</th><th style="${th}">ร้านที่<br>ขายได้</th><th style="${th}">%</th></tr></thead>
-    <tbody>${LIST.map((x,i) => `<tr style="background:${i%2?'#fafbfd':'#fff'}">
-      <td style="${td};text-align:center;font-weight:700">${x[0]}</td>
-      <td style="${td};text-align:left">${x[1]}</td>
-      <td style="${td};text-align:center;font-weight:700">${x[2]}</td>
-      ${cells(idx.get(x[2]), TARGET)}</tr>`).join('')}
-    <tr style="background:#e6eff5;font-weight:700"><td colspan="3" style="${td};text-align:center">${wh === 'ALL' ? 'รวมทุกช่องทาง' : 'รวม ' + wh}</td>${cells(tot, TARGET * LIST.length)}</tr>
+    <thead><tr><th style="${SS_TH}">WH</th><th style="${SS_TH}">ชื่อพนักงานขาย</th><th style="${SS_TH}">รหัส</th><th style="${SS_TH}">Target<br>(บาท)</th>
+      ${CATS.map(c => `<th style="${SS_TH};background:${c.color}">${c.label}<br>(บาท)</th>`).join('')}
+      <th style="${SS_TH}">ยอดรวม<br>(บาท)</th><th style="${SS_TH}">ร้านที่<br>ขายได้</th><th style="${SS_TH}">%</th></tr></thead>
+    <tbody>${LIST.map((g,i) => `<tr style="background:${i%2?'#fafbfd':'#fff'}">
+      <td style="${SS_TD};text-align:center;font-weight:700">${g.wh}</td>
+      <td style="${SS_TD};text-align:left">${g.name}</td>
+      <td style="${SS_TD};text-align:center;font-weight:700">${g.sc}</td>
+      ${cells(Object.fromEntries(CATS.map(c => [c.key, g.cat[c.key].baht])), g.baht, g.stores.size, TARGET)}</tr>`).join('')}
+    <tr style="background:#e6eff5;font-weight:700"><td colspan="3" style="${SS_TD};text-align:center">${wh === 'ALL' ? 'รวมทุกช่องทาง' : 'รวม ' + wh}</td>${cells(tot.cat, tot.baht, totStores.size, TARGET * LIST.length)}</tr>
     </tbody></table></div></div>
-    <div class="card card-gold" style="margin-top:12px;display:block;max-width:100%">
-    <div class="card-head"><b>รายการที่เปิดบิลจริง (${billedList.length} รายการ)</b></div>
-    <div class="card-body" style="padding:0;overflow-x:auto">
-    ${billedList.length ? `<table style="border-collapse:collapse;font-size:14px">
-    <thead><tr><th style="${th}">#</th><th style="${th}">กลุ่ม</th><th style="${th}">รหัส</th><th style="${th}">ชื่อพนักงานขาย</th><th style="${th}">รหัสร้าน</th><th style="${th}">ชื่อร้าน</th><th style="${th}">สินค้า</th><th style="${th}">ลัง</th><th style="${th}">ยอดจริง (บาท)</th></tr></thead>
-    <tbody>${billedList.sort((a,b) => a.sc.localeCompare(b.sc) || a.cat.localeCompare(b.cat)).map((b,i) => `<tr style="background:${i%2?'#fafbfd':'#fff'}">
-      <td style="${td};text-align:center">${i+1}</td>
-      <td style="${td};text-align:center;font-weight:700;color:${b.cat==='แนะนำ-ขายดี'?'#a87800':'#1a6fb8'}">${b.cat}</td>
-      <td style="${td};text-align:center">${b.sc}</td>
-      <td style="${td};text-align:left">${b.sale}</td>
-      <td style="${td};text-align:center;font-family:monospace">${b.cust}</td>
-      <td style="${td};text-align:left">${b.custName}</td>
-      <td style="${td};text-align:left">${b.prod}</td>
-      <td style="${td}">${f1(b.cs)}</td>
-      <td style="${td}">${f0(b.baht)}</td></tr>`).join('')}</tbody></table>` : '<p style="padding:16px;color:var(--muted)">ยังไม่มีรายการที่เปิดบิลจริง</p>'}
-    </div></div>`;
+    ${ssItemTable(items, 'รายการที่ขายได้')}`;
 }
 
-const SUG_SHEET_ID = '19zV3O2Y01cxfnLgUPcthi9VGFP6DKYKEJddmlJ9I9YU';
 function renderSuggestion(whSel) {
   const el = document.getElementById('suggestionContent');
   if (!el) return;
   if (whSel !== undefined) state.sugWh = whSel;
   const wh = state.sugWh || 'ALL';
-  const SALES = [
-    ['W1','คุณ นพดล พุทธรักษา','HSW104'],['W1','คุณ วิรชัย หัตถกรรม','HSW105'],
-    ['W4','คุณ วิภา ยิ่งคุ้ม','HSW403'],['W4','คุณ รุ่งฟ้า ธรรมรักษ์ษา','HSW404'],['W4','คุณ สมคิด คุ้มวงค์','HSW405'],
-    ['W1','คุณ ชัยสิทธิ์ มีศิริ','PMW101'],['W1','คุณ จารุพัฒน์ หอมวิเชียร','PMW102'],['W1','คุณ ดวงหทัย แสงแก้ว','PMW103'],
-    ['W1','คุณ จิรายุ วันจันทร์','PMW104'],['W1','คุณ สุกรี สรสิทธิ์','PMW105'],
-    ['W3','คุณ วรพันธ์ เพ็งจันทร์','PMW301'],['W3','คุณ ปวริศ ทองก้อน','PMW304'],['W3','คุณ อภิชญา พัวนิรันดร์','PMW303'],
-    ['W4','คุณ ชลรดาณัชช์ เอมอิ่ม','PMW402'],['W4','คุณ ธนปกร เทพทอง','PMW404']];
-  const LIST = SALES.filter(x => wh === 'ALL' || x[0] === wh);
-  const CATS = ['เดดสต๊อก', 'แนะนำ-กระจาย', 'แนะนำ-ขายดี', 'สินค้าใหม่'];
-  const CCOL = { 'เดดสต๊อก': '#8e44ad', 'แนะนำ-กระจาย': '#3498db', 'แนะนำ-ขายดี': '#c9a84c', 'สินค้าใหม่': '#27ae60' };
-  const pcore = s => { s = normalizeText(String(s||'')).replace(/\s+/g,' '); return s.includes('@') ? s.split('@').slice(1).join('@').trim() : s; };
-  // วันที่ → เลขวัน (รองรับ yyyy/mm/dd และ dd/mm/yyyy)
-  const dayNum = s => {
-    const p = String(s||'').trim().split(/[\/\-\s]/).map(Number);
-    if (p.length < 3 || p.some(isNaN)) return null;
-    const [y, mo, d] = p[0] > 31 ? [p[0], p[1], p[2]] : [p[2], p[1], p[0]];
-    return Math.floor(Date.UTC(y > 2400 ? y - 543 : y, mo - 1, d) / 86400000);
-  };
-  const now = new Date(), curMm = now.getMonth() + 1, curY = now.getFullYear();
-  // BP: รหัสร้าน|สินค้า → รายการบิล {day, cs, baht}
-  const bpBills = new Map();
-  (state.bpRaw||[]).forEach(r => {
-    const dn = dayNum(r['Doc_Date']);
-    if (dn === null) return;
-    const k = String(r['Customer_Code']||'').trim() + '|' + pcore(r['Product_Name']);
-    if (!bpBills.has(k)) bpBills.set(k, []);
-    bpBills.get(k).push({ dn, cs: parseNum(r['Sales_CS']), baht: parseNum(r['EXVat+CN*2']) });
-  });
-  const mk = () => Object.fromEntries(CATS.map(c => [c, { ord: new Set(), bill: new Set(), baht: 0 }]).concat([['_ord', new Set()], ['_bill', new Set()], ['_baht', 0]]));
-  const idx = new Map(LIST.map(x => [x[2], mk()]));
-  const tot = mk();
-  const list = [];
-  const usedBill = new Set();
-  const storeMap = new Map();
-  (state.sugRaw||[]).forEach(r => {
-    const cat = String(r['อยู่ในคำแนะนำ']||'').trim();
-    if (!CATS.includes(cat)) return;
-    if (String(r['ยกเลิก']||'').trim()) return;
-    const od = dayNum(r['วัน']);
-    if (od === null) return;
-    const odDate = new Date(od * 86400000);
-    if (odDate.getUTCMonth() + 1 !== curMm || odDate.getUTCFullYear() !== curY) return;
-    const sc = String(r['รหัสเซลล์']||'').trim().toUpperCase();
-    const g = idx.get(sc);
-    if (!g) return;
-    const cust = String(r['รหัสร้าน']||'').trim();
-    const k = cust + '|' + pcore(r['ชื่อสินค้า']);
-    // บิลจริง: วันเดียวกับออเดอร์ หรือช้ากว่า 1 วัน
-    const bills = (bpBills.get(k) || []).filter(b => b.dn === od || b.dn === od + 1);
-    const billed = bills.length > 0;
-    const cs = bills.reduce((s,b) => s + b.cs, 0), baht = bills.reduce((s,b) => s + b.baht, 0);
-    const bk = k + '|' + od;
-    const addBaht = billed && !usedBill.has(bk) ? baht : 0;
-    if (billed) usedBill.add(bk);
-    if (billed) {
-      const sk = sc + '|' + cust;
-      if (!storeMap.has(sk)) storeMap.set(sk, { sc, sale: (LIST.find(x => x[2] === sc)||[])[1] || sc, cust, custName: String(r['ชื่อร้าน']||'').trim(), cats: new Set(), baht: 0 });
-      const st = storeMap.get(sk); st.cats.add(cat); st.baht += addBaht;
-    }
-    [g, tot].forEach(o => {
-      o[cat].ord.add(cust); o._ord.add(cust);
-      if (billed) { o[cat].bill.add(cust); o._bill.add(cust); o[cat].baht += addBaht; o._baht += addBaht; }
-    });
-    list.push({ cat, sc, sale: (LIST.find(x => x[2] === sc)||[])[1] || sc, date: String(r['วัน']||'').trim(), cust, custName: String(r['ชื่อร้าน']||'').trim(), prod: String(r['ชื่อสินค้า']||'').trim(), qty: String(r['จำนวน']||'').trim() + ' ' + String(r['หน่วย']||'').trim(), billed, cs, baht });
-  });
-  const BD = '#000';
-  const th = `background:#1a3a55;color:#fff;padding:8px 10px;border:1px solid ${BD};text-align:center;white-space:nowrap`;
-  const td = `padding:7px 10px;border:1px solid ${BD};color:#000;text-align:right;white-space:nowrap`;
+  const by = ssAggregate(SS_CATS);
+  const LIST = ssSalesList(by, wh);
   const f0 = v => Math.round(v).toLocaleString();
-  const f1 = v => v.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1});
   const n = s => s.size ? s.size.toLocaleString() : '-';
-  const pctCell = (b, o) => { const p = o ? b / o * 100 : 0; return `<td style="${td};font-weight:700;background:${o ? (p >= 100 ? '#d4edda' : '#f8d7da') : '#fff'};color:${p >= 100 ? '#155724' : '#721c24'}">${o ? p.toFixed(1) + '%' : '-'}</td>`; };
-  const cells = g => CATS.map(c => `<td style="${td}">${n(g[c].ord)}</td><td style="${td};font-weight:700">${n(g[c].bill)}</td>`).join('')
-    + `<td style="${td}">${n(g._ord)}</td><td style="${td};font-weight:700">${n(g._bill)}</td>${pctCell(g._bill.size, g._ord.size)}<td style="${td};font-weight:700">${g._baht ? f0(g._baht) : '-'}</td>`;
-  const mn = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'][curMm-1] + ' ' + (curY+543);
-  const sumPct = tot._ord.size ? tot._bill.size / tot._ord.size * 100 : 0;
+  const totStores = new Set(), tot = { cat: Object.fromEntries(SS_CATS.map(c => [c.key, { baht: 0, stores: new Set() }])), baht: 0 };
+  LIST.forEach(g => {
+    g.stores.forEach(x => totStores.add(g.sc + '|' + x));
+    SS_CATS.forEach(c => { tot.cat[c.key].baht += g.cat[c.key].baht; g.cat[c.key].stores.forEach(x => tot.cat[c.key].stores.add(g.sc + '|' + x)); });
+    tot.baht += g.baht;
+  });
   const box = (label, val, sub, color) => `<div style="background:#fff;border:1px solid #dde3f0;border-top:4px solid ${color};border-radius:10px;padding:12px 18px;min-width:170px">
     <div style="font-size:12px;color:#6b7896;font-weight:600">${label}</div><div style="font-size:28px;font-weight:700;color:${color}">${val}</div><div style="font-size:11px;color:#6b7896">${sub}</div></div>`;
+  const row = (catOf, sum, stores) => SS_CATS.map(c => { const o = catOf(c); return `<td style="${SS_TD}">${o.baht ? f0(o.baht) : '-'}</td>`; }).join('')
+    + `<td style="${SS_TD};font-weight:700">${sum ? f0(sum) : '-'}</td><td style="${SS_TD};text-align:center;font-weight:700">${n(stores)}</td>`;
+  const items = [];
+  LIST.forEach(g => g.items.forEach(it => items.push({ ...it, sc: g.sc, name: g.name })));
   el.innerHTML = `<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
-    ${box('ร้านที่กดแนะนำ (ไม่ซ้ำ)', tot._ord.size.toLocaleString(), 'รวม 4 หัวข้อ · 1 ร้าน นับ 1', '#1a3a55')}
-    ${box('ร้านที่เปิดบิลแล้ว (ไม่ซ้ำ)', tot._bill.size.toLocaleString(), 'รวม 4 หัวข้อ · 1 ร้าน นับ 1', '#27ae60')}
-    ${box('% ร้านเปิดบิล', sumPct.toFixed(1) + '%', 'ร้านเปิดบิล ÷ ร้านที่กด', '#c9a84c')}
-    ${box('ยอดบิลรวม (บาท)', f0(tot._baht), wh === 'ALL' ? 'ทุกคลัง' : 'คลัง ' + wh, '#8e44ad')}
+    ${box('ร้านที่ขายได้ (ไม่ซ้ำ)', totStores.size.toLocaleString(), 'รวม 4 หัวข้อ · 1 ร้าน นับ 1', '#27ae60')}
+    ${box('ยอดขายจากคำแนะนำ (บาท)', f0(tot.baht), wh === 'ALL' ? 'ทุกคลัง · 4 หัวข้อ' : 'คลัง ' + wh + ' · 4 หัวข้อ', '#8e44ad')}
   </div>
-    <div class="card card-gold" style="margin-top:12px;display:inline-block;max-width:100%">
-    <div class="card-head" style="gap:12px;flex-wrap:wrap"><b>สรุปยอดเปิดบิล (บาท) และร้านที่กระจายได้ · ${mn}</b><span>${['ALL','W1','W3','W4'].map(w => `<button class="btn btn-sm ${w===wh?'btn-gold':'btn-outline'}" onclick="renderSuggestion('${w}')">${w==='ALL'?'ทั้งหมด':w}</button>`).join(' ')}</span><span class="txt-sm txt-muted">ชีต Order (ไฟล์ Suggestion · คอลัมน์ "อยู่ในคำแนะนำ") เดือนนี้ เทียบบิลจริงชีต BP · จับคู่ รหัสร้าน + สินค้า · บิลวันเดียวกันหรือช้ากว่า 1 วัน · นับร้านไม่ซ้ำ</span></div>
+  <div class="card card-gold" style="margin-top:12px;display:inline-block;max-width:100%">
+    <div class="card-head" style="gap:12px;flex-wrap:wrap"><b>ขายจากคำแนะนำ · ${ssMonthLabel()}</b><span>${ssWhButtons('renderSuggestion', wh)}</span><span class="txt-sm txt-muted">แท็บ SuggestionSales (แอปขาย) · อัปเดตล่าสุด ${state.ssUpdated||'-'} · ร้านนับจากชื่อร้านไม่ซ้ำ</span></div>
     <div class="card-body" style="padding:0;overflow-x:auto">
     <table style="border-collapse:collapse;font-size:15px">
-    <thead><tr><th style="${th}">WH</th><th style="${th}">ชื่อพนักงานขาย</th><th style="${th}">รหัส</th>
-      ${CATS.map(c => `<th style="${th};background:${CCOL[c]}">${c}<br>(บาท)</th>`).join('')}<th style="${th}">รวม 4 หัวข้อ<br>(บาท)</th><th style="${th}">ร้านที่กระจายได้<br>(เปิดบิล · ไม่ซ้ำ)</th></tr></thead>
-    <tbody>${LIST.map((x,i) => { const g = idx.get(x[2]); return `<tr style="background:${i%2?'#fafbfd':'#fff'}">
-      <td style="${td};text-align:center;font-weight:700">${x[0]}</td>
-      <td style="${td};text-align:left">${x[1]}</td>
-      <td style="${td};text-align:center;font-weight:700">${x[2]}</td>
-      ${CATS.map(c => `<td style="${td}">${g[c].baht ? f0(g[c].baht) : '-'}</td>`).join('')}
-      <td style="${td};font-weight:700">${g._baht ? f0(g._baht) : '-'}</td>
-      <td style="${td};text-align:center;font-weight:700">${n(g._bill)}</td></tr>`; }).join('')}
-    <tr style="background:#e6eff5;font-weight:700"><td colspan="3" style="${td};text-align:center">${wh === 'ALL' ? 'รวมทั้งหมด' : 'รวม ' + wh}</td>
-      ${CATS.map(c => `<td style="${td}">${tot[c].baht ? f0(tot[c].baht) : '-'}</td>`).join('')}
-      <td style="${td}">${tot._baht ? f0(tot._baht) : '-'}</td>
-      <td style="${td};text-align:center">${n(tot._bill)}</td></tr>
+    <thead><tr><th style="${SS_TH}">WH</th><th style="${SS_TH}">ชื่อพนักงานขาย</th><th style="${SS_TH}">รหัส</th>
+      ${SS_CATS.map(c => `<th style="${SS_TH};background:${c.color}">${c.label}<br>(บาท)</th>`).join('')}
+      <th style="${SS_TH}">รวม 4 หัวข้อ<br>(บาท)</th><th style="${SS_TH}">ร้านที่ขายได้<br>(ไม่ซ้ำ)</th></tr></thead>
+    <tbody>${LIST.map((g,i) => `<tr style="background:${i%2?'#fafbfd':'#fff'}">
+      <td style="${SS_TD};text-align:center;font-weight:700">${g.wh}</td>
+      <td style="${SS_TD};text-align:left">${g.name}</td>
+      <td style="${SS_TD};text-align:center;font-weight:700">${g.sc}</td>
+      ${row(c => g.cat[c.key], g.baht, g.stores)}</tr>`).join('')}
+    <tr style="background:#e6eff5;font-weight:700"><td colspan="3" style="${SS_TD};text-align:center">${wh === 'ALL' ? 'รวมทั้งหมด' : 'รวม ' + wh}</td>${row(c => tot.cat[c.key], tot.baht, totStores)}</tr>
     </tbody></table></div></div>
-    <div class="card card-gold" style="margin-top:12px;display:block;max-width:100%">
-    <div class="card-head"><b>รายการที่กดแนะนำเดือนนี้ (${list.length} รายการ · เปิดบิล ${list.filter(b => b.billed).length})</b></div>
-    <div class="card-body" style="padding:0;overflow-x:auto">
-    ${list.length ? `<table style="border-collapse:collapse;font-size:13px">
-    <thead><tr><th style="${th}">#</th><th style="${th}">วันที่สั่ง</th><th style="${th}">กลุ่ม</th><th style="${th}">รหัส</th><th style="${th}">ชื่อพนักงานขาย</th><th style="${th}">รหัสร้าน</th><th style="${th}">ชื่อร้าน</th><th style="${th}">สินค้า</th><th style="${th}">จำนวนสั่ง</th><th style="${th}">สถานะ</th><th style="${th}">ลัง (บิล)</th><th style="${th}">ยอดบิล (บาท)</th></tr></thead>
-    <tbody>${list.sort((a,b) => a.sc.localeCompare(b.sc) || a.date.localeCompare(b.date) || a.cat.localeCompare(b.cat)).map((b,i) => `<tr style="background:${i%2?'#fafbfd':'#fff'}">
-      <td style="${td};text-align:center">${i+1}</td>
-      <td style="${td};text-align:center">${b.date}</td>
-      <td style="${td};text-align:center;font-weight:700;color:${CCOL[b.cat]}">${b.cat}</td>
-      <td style="${td};text-align:center">${b.sc}</td>
-      <td style="${td};text-align:left">${b.sale}</td>
-      <td style="${td};text-align:center;font-family:monospace">${b.cust}</td>
-      <td style="${td};text-align:left">${b.custName}</td>
-      <td style="${td};text-align:left">${b.prod}</td>
-      <td style="${td}">${b.qty}</td>
-      <td style="${td};text-align:center;font-weight:700;color:${b.billed?'#155724':'#c0392b'}">${b.billed?'เปิดบิลแล้ว':'ยังไม่เปิดบิล'}</td>
-      <td style="${td}">${b.billed ? f1(b.cs) : '-'}</td>
-      <td style="${td}">${b.billed ? f0(b.baht) : '-'}</td></tr>`).join('')}</tbody></table>` : '<p style="padding:16px;color:var(--muted)">ยังไม่มีรายการเดือนนี้</p>'}
-    </div></div>`;
+    ${ssItemTable(items, 'รายการขายจากคำแนะนำเดือนนี้')}`;
 }
 
 function renderDebtorTab(whSel) {
