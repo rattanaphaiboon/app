@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v6.52</title>
+<title>Rattana ยอดหนี้คงค้าง v6.53</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png">
@@ -936,7 +936,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v6.52</span>
+      <span class="app-ver">v6.53</span>
       <button type="button" class="co-btn" id="btnCompany" onclick="switchCompany()" title="เปลี่ยนบริษัท">Bplus ⇄</button>
     </div>
     <div class="title">
@@ -1586,15 +1586,57 @@ function showLoginError(msg){
 /* ========================
    CACHE (stale-while-revalidate)
    ======================== */
-function getCached(key){
+/* v6.53: เก็บข้อมูลยอดหนี้ใน IndexedDB (ที่เก็บใหญ่ของเบราว์เซอร์) แทน localStorage
+   localStorage จุแค่ ~5MB และใช้ร่วมกับทุกแอปบน rattanaphaiboon.github.io → เต็มแล้วเซฟไม่ลงแบบเงียบๆ
+   = เปิดแอปทุกครั้งต้องรอโหลดใหม่ · IndexedDB จุได้หลายร้อย MB → เปิดมามีข้อมูลรอบก่อนขึ้นทันที แล้วอัปเดตเบื้องหลัง */
+const memCache = {};
+function idbOpen(){
+  return new Promise((ok, bad) => {
+    try {
+      const rq = indexedDB.open('rattanaDebt', 1);
+      rq.onupgradeneeded = () => rq.result.createObjectStore('kv');
+      rq.onsuccess = () => ok(rq.result);
+      rq.onerror = () => bad(rq.error);
+    } catch (e){ bad(e); }
+  });
+}
+async function idbGet(key){
+  const db = await idbOpen();
+  return new Promise((ok, bad) => {
+    const rq = db.transaction('kv').objectStore('kv').get(key);
+    rq.onsuccess = () => ok(rq.result || null);
+    rq.onerror = () => bad(rq.error);
+  });
+}
+async function idbSet(key, val){
+  const db = await idbOpen();
+  return new Promise((ok, bad) => {
+    const tx = db.transaction('kv', 'readwrite');
+    tx.objectStore('kv').put(val, key);
+    tx.oncomplete = () => ok();
+    tx.onerror = () => bad(tx.error);
+  });
+}
+function wrapCache(item){
+  return item && item.data ? { data: item.data, ts: item.ts, fresh: (Date.now() - item.ts) < CONFIG.cacheTTL } : null;
+}
+function getCached(key){   // แบบทันที (ใช้แสดงเวลาอัปเดตล่าสุด)
+  if (memCache[key]) return wrapCache(memCache[key]);
+  try { return wrapCache(JSON.parse(localStorage.getItem(key))); } catch { return null; }
+}
+async function getCachedAsync(key){   // ตอนเปิดแอป: IndexedDB ก่อน ไม่มีค่อยดู localStorage แบบเดิม
   try {
-    const item = JSON.parse(localStorage.getItem(key));
-    if (!item) return null;
-    return { data: item.data, ts: item.ts, fresh: (Date.now() - item.ts) < CONFIG.cacheTTL };
-  } catch { return null; }
+    const item = await Promise.race([idbGet(key), new Promise(r => setTimeout(() => r(null), 3000))]);
+    if (item && item.data){ memCache[key] = item; return wrapCache(item); }
+  } catch (e){ /* IndexedDB ใช้ไม่ได้ → ถอยไปแบบเดิม */ }
+  return getCached(key);
 }
 function setCache(key, data){
-  try { localStorage.setItem(key, JSON.stringify({ts:Date.now(), data})); } catch {}
+  const item = { ts: Date.now(), data };
+  memCache[key] = item;
+  idbSet(key, item)
+    .then(() => { try { localStorage.removeItem(key); } catch {} })   // ย้ายไป IndexedDB แล้ว → คืนที่ให้ localStorage
+    .catch(() => { try { localStorage.setItem(key, JSON.stringify(item)); } catch {} });
 }
 
 /* ========================
@@ -2214,7 +2256,7 @@ async function loadPlanReasons(){
 
 async function initApp(){
   // Load main data first, then payment log (both affect table render)
-  const cached = getCached(debtCacheKey());
+  const cached = await getCachedAsync(debtCacheKey());   // v6.53: IndexedDB
   if (cached){
     processData(cached.data);
     hideSpinner();
