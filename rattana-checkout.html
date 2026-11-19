@@ -3194,7 +3194,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-19 · 129';
+const BUILD = '2026-11-19 · 130';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -11155,6 +11155,9 @@ let W1_SRC = 'scan';
 const W1_SRC_TXT = { scan:'ยิงบาร์โค้ด', name:'ค้นชื่อ', list:'เลือกจากรายการ', adj:'แก้ยอดรวม' };   // adj = แก้ยอดรวมจากหน้าสรุป (BUILD 128)
 let W1_LIVE = [], W1_LIVE_T = null;
 const W1_DOC_RE = /^[A-Z]{2,4}\d{4,}\/\d{2,}$/, W1_BATCH_RE = /^(W\d)-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})$/;
+/* ใบจัดปลีกรวมตามหน่วยรถ (BUILD 130) — รหัส W1-01-191126 (คลัง-หน่วยรถ-วันที่ · บุหรี่ = 00) · ใบจัดรายคนจัด W1-01-02-191126 ยังยิงได้ (ปลีก = เปิดงานหน่วยรถ) */
+const W1_UNIT_RE = /^(W\d)-(\d{2})-(\d{2})(\d{2})(\d{2})$/;
+const w1IsBatch = c => W1_BATCH_RE.test(c) || W1_UNIT_RE.test(c);
 const W1S = () => (state.w1 ||= { jobs:{}, done:{}, unit:{} });
 const w1n = v => { const n = parseFloat(String(v ?? '').replace(/,/g, '')); return isNaN(n) ? 0 : n; };
 const w1bk = s => String(s ?? '').replace(/\D/g, '').replace(/^0+(?=\d)/, '');      // บาร์โค้ดไว้เทียบ (0 นำหน้า)
@@ -11390,6 +11393,7 @@ function w1BatchToJob(d, day) {
            store, storeCode:'', slmn:'', remark:'', bills:Object.keys(d.bills), lines, at:Date.now() };
 }
 async function w1BatchJob(code) {
+  if (W1_UNIT_RE.test(code)) return w1UnitJob(code);
   const m = code.match(W1_BATCH_RE); if (!m) return null;
   const day = `20${m[6]}/${m[5]}/${m[4]}`;
   await Promise.all([w1BatchData(false, day), w1MasterReady()]);
@@ -11397,7 +11401,47 @@ async function w1BatchJob(code) {
   if (!hits.length) return null;
   const d = hits.length === 1 ? hits[0] : await new Promise(res => ddOpen(w1Anchor(), 'เลือกใบจัด — หน่วยรถ+คนจัดเดียวกันแต่คนละช่องทาง',
     hits.map((h, i) => ({ v:i, title:`${h.chan} · ${h.unit}`, sub:`${fmtN(h.nLines)} รายการ · ${fmtN(h.nBills)} บิล` })), i => res(hits[i])));
+  if (d.chan === 'ปลีก') return w1UnitJob(w1UnitKey(d, day));       // ปลีก = งานหน่วยรถ (BUILD 130)
   return w1BatchToJob(d, day);
+}
+/* ── ใบจัดปลีกรวมตามหน่วยรถ (BUILD 130 · ผู้ใช้สั่ง 19/11 "w1 ใบจัดปลีก ให้รวมตามรหัสหน่วยรถเลย ไม่ต้องแยกคนจัด")
+   ใบจัดช่องทางปลีกของวันเดียวกัน หน่วยรถเดียวกัน (ทุกคนจัด) = งานเดียว รหัส W1-01-191126 · บุหรี่ทุกหน่วยรวมเป็น W1-00-191126
+   งานแบบใบจัดเดิม (แถวละสินค้า ยอดรวมทุกบิล ไม่แบ่งลงบิล · กลุ่ม "ใบจัด W1-01-191126") · คนจัดบอกในหัวงาน
+   ยิง/ค้นรหัสใบจัดรายคนจัด (W1-01-02-191126 ที่พิมพ์จากแอป picking) ของปลีก = เปิดงานหน่วยรถนั้น · ช่องทางส่งยังเป็นใบจัดรายคนจัดเหมือนเดิม */
+function w1UnitKey(d, day) {
+  const dd = day.split('/'), wh = String(d.bc || 'W1').split('-')[0] || 'W1';
+  return `${wh}-${d.cig ? '00' : ('00' + String(d.unit || '').replace(/\D/g, '')).slice(-2)}-${dd[2]}${dd[1]}${dd[0].slice(-2)}`;
+}
+function w1UnitBatches(day) {
+  const g = {};
+  w1Batches(day).filter(d => d.chan === 'ปลีก').forEach(d => {
+    const key = w1UnitKey(d, day);
+    const G = g[key] ||= { bc:key, unit:d.unit, cig:d.cig, chan:'ปลีก', items:{}, bills:{}, pickers:[], batches:[] };
+    G.batches.push(d.bc); if (d.who && !G.pickers.includes(d.who)) G.pickers.push(d.who);
+    Object.assign(G.bills, d.bills);
+    Object.entries(d.items).forEach(([ik, L]) => { (G.items[ik] ||= { name:L.name, rows:[] }).rows.push(...L.rows); });
+  });
+  return Object.values(g).map(G => Object.assign(G, { who:G.pickers.join(', '), nBills:Object.keys(G.bills).length, nLines:Object.keys(G.items).length }))
+    .sort((A, B) => ((A.cig ? 1 : 0) - (B.cig ? 1 : 0)) || String(A.unit).localeCompare(String(B.unit), 'th', { numeric:true }));
+}
+async function w1UnitJob(key) {
+  const m = key.match(W1_UNIT_RE); if (!m) return null;
+  const day = `20${m[5]}/${m[4]}/${m[3]}`;
+  await Promise.all([w1BatchData(false, day), w1MasterReady()]);
+  const G = w1UnitBatches(day).find(x => x.bc === key); if (!G) return null;
+  const job = w1BatchToJob(G, day);
+  job.sub = `${fmtN(G.nBills)} บิล · รวม ${fmtN(G.batches.length)} ใบจัด · ${thaiDate(day.replace(/\//g, '-'))}`;
+  job.batches = G.batches.slice(); job.pickers = G.pickers.slice();
+  if (G.pickers.length > 1) job.title = `${job.store} · คนจัด ${fmtN(G.pickers.length)} คน`;   // ชื่อเต็มอยู่ในบรรทัดคนจัด (w1Info)
+  return job;
+}
+/** รหัสใบจัดรายคนจัดของปลีก → รหัสงานหน่วยรถ ('' = ไม่ใช่ปลีก / หาไม่เจอ / มีทั้งปลีกและส่ง ให้เลือกตอนเปิด) */
+async function w1UnitKeyOf(code) {
+  const m = code.match(W1_BATCH_RE); if (!m) return '';
+  const day = `20${m[6]}/${m[5]}/${m[4]}`;
+  await w1BatchData(false, day);
+  const hits = w1Batches(day).filter(d => d.bc === code);
+  return hits.length && hits.every(h => h.chan === 'ปลีก') ? w1UnitKey(hits[0], day) : '';
 }
 
 /* ── บิล / ใบจอง (port ของ loadDocJob) ── */
@@ -11469,7 +11513,7 @@ async function w1OpenCode(raw, fromTruck) {
   if (tj) { toast(`${code} อยู่ในงาน ${tj[0]} ที่กำลังเช็ค — เปิดงานนั้นให้`, 'info'); w1Open(tj[0]); return; }
   if (!fromTruck) state.w1from = '';                           // เปิดจากหน้ารถ → เช็คเสร็จกลับหน้ารถ (BUILD 107)
   const S = W1S();
-  if (!W1_DOC_RE.test(code) && !W1_BATCH_RE.test(code)) {      // ทะเบียนรถ (BUILD 107)
+  if (!W1_DOC_RE.test(code) && !w1IsBatch(code)) {      // ทะเบียนรถ (BUILD 107)
     const pk = w1PlateKey(raw), reg = Object.keys(w1Trucks()).find(r => w1PlateKey(r) === pk);
     if (reg) { w1OpenTruck(reg); return; }
   }
@@ -11486,17 +11530,25 @@ async function w1OpenCode(raw, fromTruck) {
     const tj2 = w1TruckOfDoc(code);                                   // ใบจอง → บิลที่อยู่ในงานรถ
     if (tj2) { toast(`${code} อยู่ในงาน ${tj2[0]} ที่กำลังเช็ค — เปิดงานนั้นให้`, 'info'); w1Open(tj2[0]); return; }
     if (S.jobs[code]) { w1Open(code); return; }                       // งานค้างในเครื่องนี้ — เปิดต่อ
+    if (W1_BATCH_RE.test(code)) {                                     // ใบจัดปลีกรายคนจัด → งานหน่วยรถ (BUILD 130)
+      w1Busy(`กำลังหาใบจัด ${code}…`);
+      const uk = await w1UnitKeyOf(code);
+      w1Busy('');
+      if (uk) { toast(`ใบจัดปลีกรวมตามหน่วยรถแล้ว — ${code} อยู่ในงาน ${uk}`, 'info'); code = uk;
+                if (S.jobs[code]) { w1Open(code); return; } }
+    }
     const dn = w1DoneOf(code);
     if (dn && !await askBox({ title:'เช็คเสร็จแล้ว', ok:'เช็คซ้ำ', cancel:'ไม่',
           body:`<b>${esc(code)}</b><br>เช็คเสร็จแล้วโดย ${esc(dn.by || '-')} เวลา ${esc(dn.at || '-')}${dn.short ? ` · ขาด ${fmtN(dn.short)} บรรทัด` : ''}<br><br>
                 เช็คซ้ำทั้งใบไหม? — กดยืนยันอีกครั้ง แถวจะลงชีตซ้ำ` })) return;
-    const isBatch = W1_BATCH_RE.test(code), isDoc = W1_DOC_RE.test(code);
+    const isBatch = w1IsBatch(code), isDoc = W1_DOC_RE.test(code);
     if (!isBatch && !isDoc) { vibrate([200, 80, 200]); toast(`ไม่รู้จักรหัส "${raw}" — ต้องเป็นเลขที่บิล / ใบจอง / รหัสใบจัด (W1-01-02-161126) หรือทะเบียนรถของงานวันนี้`, 'error'); return; }
     w1Busy(isBatch ? `กำลังสร้างใบจัด ${code}…` : `กำลังค้นหา ${code}…`);
     const job = isBatch ? await w1BatchJob(code) : await w1DocJob(code);
     if (!job) { vibrate([200, 80, 200]);
       toast(isBatch ? `ไม่พบใบจัด ${code} — บิลอาจยังไม่ขึ้นชีต D หรือคนละวัน` : `ไม่พบเอกสาร ${code} ใน Doc W1`, 'error'); return; }
     if (!job.lines.length) { toast('เอกสารนี้ไม่มีรายการที่ต้องเช็ค', 'warning'); return; }
+    if (S.jobs[job.key]) { w1Open(job.key); return; }                 // ได้งานคีย์อื่น (ใบจัดปลีก → หน่วยรถ) ที่ค้างอยู่แล้ว — ไม่ทับยอด
     S.jobs[job.key] = { job, got:{}, lvs:{}, entries:[], seq:0, extra:{}, at:Date.now(), by:CHECKER };
     w1Open(job.key);
   } catch (e) { console.error(e); toast('โหลดไม่สำเร็จ — ' + String(e.message || e).slice(0, 90), 'error'); }
@@ -11535,7 +11587,9 @@ function w1Index() {
   Object.values(w1Trucks()).forEach(t => { const n = t.trips.reduce((s, g) => s + g.stores.length, 0);
     out.push({ type:'truck', code:t.reg, reg:t.reg, day:today, title:`🚚 ${t.reg}${t.driver ? ' · ' + t.driver : ''}${t.vtype ? ' · ' + t.vtype : ''}`,
       sub:`รถ · ${fmtN(n)} ร้าน · ${t.trips.map(g => w1TripName(g.sday, g.trip)).join(' + ')}` }); });
-  try { w1Batches(w1Slash(today)).forEach(d => out.push({ type:'batch', code:d.bc, day:today,
+  try { w1UnitBatches(w1Slash(today)).forEach(d => out.push({ type:'batch', code:d.bc, day:today, book:d.batches.join(' '),   // ใบจัดปลีก = หน่วยรถ (BUILD 130)
+      title:`ใบจัดปลีก · ${d.cig ? '🚬 บุหรี่' : 'หน่วยรถ ' + d.unit}`, sub:`ใบจัด ${d.bc} · ${fmtN(d.nBills)} บิล · ${fmtN(d.nLines)} รายการ${d.pickers.length ? ' · คนจัด ' + fmtN(d.pickers.length) + ' คน' : ''}` }));
+        w1Batches(w1Slash(today)).filter(d => d.chan !== 'ปลีก').forEach(d => out.push({ type:'batch', code:d.bc, day:today,
       title:`${d.cig ? '🚬 บุหรี่' : 'หน่วยรถ ' + d.unit} · ${d.chan}${d.who ? ' · ' + d.who : ''}`,
       sub:`ใบจัด ${d.bc} · ${fmtN(d.nBills)} บิล · ${fmtN(d.nLines)} รายการ` })); } catch (e) { console.warn('W1 ใบจัด', e); }
   out.forEach(x => { x.codeN = w1Norm(x.code); x.hay = w1Norm(`${x.code} ${x.title} ${x.reg || ''} ${x.book || ''}`); x.hayNs = x.hay.replace(/\s/g, ''); });
@@ -11599,7 +11653,7 @@ function w1PickSugg(i) { const x = W1_SG.list[i]; if (!x) return; w1ClearQ(); if
 function w1Ok() {
   clearTimeout(W1_SG.t);
   const v = w1Code($('w1Q').value); if (!v) { $('w1Q').focus(); return; }
-  if (W1_BATCH_RE.test(v) || W1_DOC_RE.test(v)) { w1ClearQ(); w1OpenCode(v); return; }
+  if (w1IsBatch(v) || W1_DOC_RE.test(v)) { w1ClearQ(); w1OpenCode(v); return; }
   const reg = Object.keys(w1Trucks()).find(r => w1PlateKey(r) === w1PlateKey(v));      // ทะเบียนตรงตัว = เปิดหน้ารถเลย
   if (reg) { w1ClearQ(); w1OpenTruck(reg); return; }
   $('w1Q').focus(); w1RenderSugg();
@@ -11889,10 +11943,11 @@ function w1LRows(t) {
         sub:[r.bill, bk && 'จอง ' + bk, k && k.reg && '🚚 ' + k.reg, nl[r.bill] && `${fmtN(nl[r.bill])} รายการ`].filter(Boolean).join(' · ') });
     });
   } else if (t === 'batch') {
-    w1Batches(w1Slash(today)).filter(d => d.chan === 'ปลีก').forEach((d, i) => {
+    w1UnitBatches(w1Slash(today)).forEach((d, i) => {             // รวมตามหน่วยรถ ทุกคนจัด (BUILD 130)
       const dn = w1DoneOf(d.bc);
-      out.push({ code:d.bc, title:`${d.cig ? '🚬 บุหรี่' : 'หน่วยรถ ' + d.unit}${d.who ? ' · ' + d.who : ''}`, grp:'b', grpName:`ใบจัดปลีก วันที่ ${thaiDate(today).slice(0, 5)}`,
-        ord:String(i).padStart(4, '0'), chan:'ปลีก', done:!!dn, dn, busy:S.jobs[d.bc] ? d.bc : '', sub:`ใบจัด ${d.bc} · ${fmtN(d.nBills)} บิล · ${fmtN(d.nLines)} รายการ` });
+      out.push({ code:d.bc, book:d.batches.join(' '), title:d.cig ? '🚬 บุหรี่ (ทุกหน่วยรถ)' : 'หน่วยรถ ' + d.unit, grp:'b', grpName:`ใบจัดปลีก วันที่ ${thaiDate(today).slice(0, 5)}`,
+        ord:String(i).padStart(4, '0'), chan:'ปลีก', done:!!dn, dn, busy:S.jobs[d.bc] ? d.bc : '',
+        sub:`ใบจัด ${d.bc} · ${fmtN(d.nBills)} บิล · ${fmtN(d.nLines)} รายการ${d.pickers.length ? ' · คนจัด ' + fmtN(d.pickers.length) + ' คน' : ''}` });
     });
   } else if (t === 'truck') {
     Object.values(w1Trucks()).forEach((tr, i) => {
@@ -11911,7 +11966,7 @@ function w1HomeCards() {
     const R = cnt(t), pend = R.filter(x => !x.done);
     if (t === 'book') return [`รอเช็ค ${fmtN(pend.length)} ใบ`, 'เลือกหลายใบรวมกันได้'];
     if (t === 'bill') { const s = pend.filter(x => x.chan === 'ส่ง').length; return [`ส่ง ${fmtN(s)} · ปลีก ${fmtN(pend.length - s)}`, 'เลือกหลายใบรวมกันได้']; }
-    if (t === 'batch') return [`วันนี้ ${fmtN(R.length)} ใบ`, `เช็คแล้ว ${fmtN(R.length - pend.length)}`];
+    if (t === 'batch') return [`วันนี้ ${fmtN(R.length)} หน่วยรถ`, `เช็คแล้ว ${fmtN(R.length - pend.length)}`];
     return [`งานวันนี้ ${fmtN(R.length)} คัน`, 'ร้านในรถ → เช็คทั้งเที่ยว'];
   };
   $('w1Grid').innerHTML = Object.entries(W1_TYPES).map(([t, T]) => `<button class="home-card ${T.cls}" onclick="w1OpenType('${t}')">
@@ -11989,7 +12044,7 @@ function w1LClear() { w1Sel(state.w1type).length = 0; save(); renderW1ListBody()
 function w1LScan(raw) {
   const t = state.w1type, v = String(raw || '').trim(), c = w1Code(v); if (!v) return;
   const clear = () => { W1L.q = ''; const q = $('w1lQ'); q.value = ''; toggleClr(q); };
-  if (t === 'batch' && (W1_BATCH_RE.test(c) || W1_DOC_RE.test(c))) { clear(); w1OpenCode(c); return; }
+  if (t === 'batch' && (w1IsBatch(c) || W1_DOC_RE.test(c))) { clear(); w1OpenCode(c); return; }
   if (t === 'truck') { const reg = Object.keys(w1Trucks()).find(r => w1PlateKey(r) === w1PlateKey(v)); if (reg) { clear(); w1OpenTruck(reg); return; } }
   if ((t === 'book' || t === 'bill') && W1_DOC_RE.test(c)) {
     const all = w1LRows(t), hit = all.filter(x => x.code === c || x.book === c || (x.bills || []).includes(c));
@@ -12028,7 +12083,7 @@ async function w1LStart() {
     toggleClr(q); clearTimeout(rt); clearTimeout(timer);
     const now = performance.now(); run = now - t0 < 60 ? run + 1 : 0; t0 = now;
     const v = w1Code(q.value);
-    if (run >= 4 && (W1_DOC_RE.test(v) || W1_BATCH_RE.test(v))) { timer = setTimeout(() => w1LScan(q.value), 160); return; }   // สแกนเนอร์ที่ไม่ส่ง Enter
+    if (run >= 4 && (W1_DOC_RE.test(v) || w1IsBatch(v))) { timer = setTimeout(() => w1LScan(q.value), 160); return; }   // สแกนเนอร์ที่ไม่ส่ง Enter
     rt = setTimeout(() => { W1L.q = q.value; renderW1ListBody(); }, 140);
   });
   q.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); clearTimeout(rt); w1LScan(q.value); } });
@@ -12200,7 +12255,7 @@ function w1Sent(item) {
     toggleClr(q); clearTimeout(W1_SG.t); W1_SG.t = setTimeout(w1RenderSugg, 120);
     const now = performance.now(); run = now - t < 60 ? run + 1 : 0; t = now; clearTimeout(timer);
     const v = w1Code(q.value);
-    if (run >= 4 && (W1_DOC_RE.test(v) || W1_BATCH_RE.test(v))) timer = setTimeout(w1Ok, 160);   // สแกนเนอร์ที่ไม่ส่ง Enter
+    if (run >= 4 && (W1_DOC_RE.test(v) || w1IsBatch(v))) timer = setTimeout(w1Ok, 160);   // สแกนเนอร์ที่ไม่ส่ง Enter
   });
   q.addEventListener('keydown', e => {
     const open = !!$('w1Sugg').querySelector('.w1-sg');
@@ -12215,7 +12270,7 @@ function w1Sent(item) {
   const commit = () => {
     clearTimeout(timer2); const v = j.value.trim(); if (!v) return;
     const c = w1Code(v);
-    if (!/^\d+$/.test(v) && !W1_DOC_RE.test(c) && !W1_BATCH_RE.test(c)) { W1_Q = v; renderW1Job(); return; }   // ตัวหนังสือ = กรองรายการ
+    if (!/^\d+$/.test(v) && !W1_DOC_RE.test(c) && !w1IsBatch(c)) { W1_Q = v; renderW1Job(); return; }   // ตัวหนังสือ = กรองรายการ
     j.value = ''; toggleClr(j); W1_Q = ''; w1Scan(v);
   };
   j.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commit(); } });
@@ -12299,6 +12354,7 @@ function renderW1Job() {
   $('w1Info').innerHTML = `<b>${esc(job.title)}</b><br>${job.docs ? '' : esc(job.typeLabel) + ' '}<b class="st-ref-in">${esc(job.key)}</b>${job.sub ? ' · ' + esc(job.sub) : ''} · ${fmtN(items.length)} รายการ`
     + (job.kind === 'batch' ? `<br><span class="txt-muted">ยอดรวมของใบจัด ${fmtN((job.bills || []).length)} บิล — ไม่แบ่งลงบิล ลงชีตเป็นยอดรวมของใบจัด</span>` : '')
     + (job.docs ? w1TruckInfo(job) : '')
+    + ((job.pickers || []).length > 1 ? `<br><span class="txt-muted">คนจัด: ${esc(job.pickers.join(' · '))}</span>` : '')
     + (job.remark ? `<br><span class="txt-muted">หมายเหตุ: ${esc(job.remark)}</span>` : '')
     + (dn ? `<br><b class="txt-success">✓ เช็คเสร็จแล้ว ${esc(String(dn.at || '').split(' ').pop())} · ${esc(nickOf(dn.by || '-'))}${dn.pending ? ' (รอส่งขึ้นชีต)' : ''} — ยืนยันอีกครั้งแถวจะลงชีตซ้ำ</b>` : '');
   $('w1Card').innerHTML = W1_HIT ? w1CardHtml(J) : '';
@@ -12489,7 +12545,7 @@ function w1Scan(raw) {
   const v = String(raw || '').trim(); if (!v) return;
   const J = w1Cur(); if (!J) return;
   const c = w1Code(v);
-  if (W1_DOC_RE.test(c) || W1_BATCH_RE.test(c)) {
+  if (W1_DOC_RE.test(c) || w1IsBatch(c)) {
     if (c === J.job.key || (J.job.book && c === J.job.book) || (J.job.docs || []).some(d => d.doc === c || d.book === c)) {
       toast(`${c} อยู่ในงานนี้แล้ว — ยิงสินค้าต่อได้เลย`, 'info'); return; }
     if (W1_DOC_RE.test(c) && ['bill', 'book', 'multi'].includes(J.job.kind)) { w1AskAdd(c); return; }   // BUILD 126 ถามเพิ่มเข้างานนี้ / เปิดแยก
