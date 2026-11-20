@@ -1082,6 +1082,7 @@ body.dark .fav-glass .grid::before{background:radial-gradient(120% 70% at 0% 0%,
 @media (hover:hover){.app-card:hover{background:var(--surface-2);transform:none}}
 .app-card:active{transform:scale(.92);transition-duration:var(--dur-1)}
 .card-icon-img img,.card-icon-fallback{width:56px;height:56px;border-radius:15px;box-shadow:0 4px 10px -4px rgba(13,27,62,.35)}
+.card-icon-img img.icon-pending{background:var(--surface-2);box-shadow:none}
 .card-title{color:var(--text);font-size:var(--fs-sm);font-weight:600;line-height:1.25;text-align:center;padding:0;white-space:normal;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .card-desc{display:none}
@@ -1129,7 +1130,7 @@ body.dark .tag.active{background:#fff;color:#0d1b3e;border-color:#fff}
          data-text="sign_in_with" data-shape="rectangular"></div>
     <div id="loginError" class="login-error"></div>
     <button class="login-install" id="loginInstallBtn" onclick="openInstall()">ติดตั้งแอปลงเครื่อง</button>
-    <div class="login-foot">© Rattanaphaiboon · v3.2</div>
+    <div class="login-foot">© Rattanaphaiboon · v3.3</div>
   </div>
 </div>
 
@@ -1209,7 +1210,7 @@ body.dark .tag.active{background:#fff;color:#0d1b3e;border-color:#fff}
 </div>
 
   <div class="footer-note">
-    <strong>Rattana Hub v3.2</strong> · ดึง config จาก Google Sheet<br>
+    <strong>Rattana Hub v3.3</strong> · ดึง config จาก Google Sheet<br>
     Login ครั้งเดียวใช้ได้ทุกแอปใน <code>github.io/rattana/</code>
   </div>
 </div>
@@ -2128,11 +2129,16 @@ function renderCardIcon(app) {
   // 2. Auto-detect: try multiple naming conventions in order:
   //    icons/<base>.svg → icons/<base>.png → <base>-icon.svg → <base>-icon.png
   //    (last 2 match favicon/PWA icons that Surat saves at repo root)
+  // v3.3: ลองทุกชื่อพร้อมกัน (ไม่รอ 404 ทีละตัว) + จำว่าไอคอนอยู่ไฟล์ไหน เปิดครั้งถัดไปโหลดตรงทันที
   const baseName = deriveAutoIconBaseName(app.url);
   if (baseName) {
     const emoji = raw || '📱';
-    const firstUrl = autoIconCandidate(baseName, 0);
-    return `<div class="card-icon card-icon-img"><img src="${escHtmlInner(firstUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-base="${escHtmlInner(baseName)}" data-emoji="${escHtmlInner(emoji)}" data-step="0" onerror="iconAutoFail(this)"></div>`;
+    const hit = iconMapGet(baseName);
+    if (hit === '') return `<div class="card-icon">${escHtmlInner(emoji)}</div>`;
+    const attrs = `alt="" referrerpolicy="no-referrer" data-base="${escHtmlInner(baseName)}" data-emoji="${escHtmlInner(emoji)}" onerror="iconAutoFail(this)"`;
+    if (hit) return `<div class="card-icon card-icon-img"><img src="${escHtmlInner(hit)}" ${attrs}></div>`;
+    scheduleIconResolve();
+    return `<div class="card-icon card-icon-img"><img class="icon-pending" ${attrs}></div>`;
   }
 
   // 3. No URL — use emoji as-is
@@ -2160,20 +2166,101 @@ function iconFail(imgEl) {
   parent.textContent = fb;
 }
 
-function iconAutoFail(img) {
-  if (!img || !img.parentElement) return;
-  const step = parseInt(img.dataset.step || '0', 10) + 1;
-  const next = autoIconCandidate(img.dataset.base, step);
-  if (next) {
-    img.dataset.step = step;
-    img.src = next;
-    return;
-  }
-  // All paths failed → revert to emoji
+/* ── ที่อยู่ไอคอนที่หาเจอแล้ว (ต่อเครื่อง) · เจอ = จำ 7 วัน · ไม่มีไอคอน = จำ 1 วัน ── */
+const ICON_MAP_KEY = 'rattana_hub_icon_map_v1';
+let _iconMap = null;
+function iconMapLoad() {
+  if (_iconMap) return _iconMap;
+  try { _iconMap = JSON.parse(localStorage.getItem(ICON_MAP_KEY) || '{}') || {}; } catch (e) { _iconMap = {}; }
+  return _iconMap;
+}
+function iconMapGet(base) {  // url · '' (ไม่มีไอคอน) · null (ยังไม่รู้)
+  const e = iconMapLoad()[base];
+  if (!e) return null;
+  const ttl = e.u ? 7 * 864e5 : 864e5;
+  return (Date.now() - (e.t || 0) < ttl) ? e.u : null;
+}
+function iconMapSet(base, url) {
+  iconMapLoad()[base] = { u: url, t: Date.now() };
+  try { localStorage.setItem(ICON_MAP_KEY, JSON.stringify(_iconMap)); } catch (e) {}
+}
+function iconMapDrop(base) {
+  delete iconMapLoad()[base];
+  try { localStorage.setItem(ICON_MAP_KEY, JSON.stringify(_iconMap)); } catch (e) {}
+}
+
+// ลองทีละคู่พร้อมกัน: icons/<base>.svg + .png ก่อน (เกือบทุกแอปอยู่ตรงนี้) · ไม่เจอค่อยลอง <base>-icon.svg + .png
+// ในคู่เดียวกันใช้ตัวลำดับต้นก่อน (ลำดับเดิม: svg → png)
+// สารบัญไฟล์ไอคอนใน repo (icons/hub-index.json · สร้างด้วย tools\build-hub-icon-index.py) → รู้ทันทีไม่ต้องเดา
+// แอปที่ไม่อยู่ในสารบัญ (เพิ่งเพิ่มไอคอน) ค่อยลองหาไฟล์แบบเดิม
+let _iconIndex = null;
+function loadIconIndex() {
+  if (!_iconIndex) _iconIndex = fetch('icons/hub-index.json', { cache: 'no-cache' })
+    .then(r => r.ok ? r.json() : null)
+    .then(j => (j && Array.isArray(j.files)) ? { has: new Set(j.files), small: j.small || {} } : null).catch(() => null);
+  return _iconIndex;
+}
+const _iconProbe = {};
+function probeIcon(base) {
+  if (_iconProbe[base]) return _iconProbe[base];
+  const urls = AUTO_ICON_PATHS.map(fn => fn(base));
+  _iconProbe[base] = loadIconIndex().then(idx => {
+    const known = idx && urls.find(u => idx.has.has(u));
+    if (known) return idx.small[known] || known;   // ไฟล์ใหญ่ใช้ตัวย่อ 192px
+    return probeSet(urls.slice(0, 2)).then(u => u || probeSet(urls.slice(2)));
+  });
+  return _iconProbe[base];
+}
+function probeSet(urls) {
+  return new Promise(resolve => {
+    const res = new Array(urls.length).fill(undefined);
+    const settle = () => {
+      for (let i = 0; i < res.length; i++) {
+        if (res[i] === undefined) return;   // ตัวก่อนหน้ายังไม่ตอบ รอก่อน
+        if (res[i]) return resolve(urls[i]);
+      }
+      resolve('');
+    };
+    urls.forEach((u, i) => {
+      const im = new Image();
+      im.referrerPolicy = 'no-referrer';
+      im.onload = () => { res[i] = true; settle(); };
+      im.onerror = () => { res[i] = false; settle(); };
+      im.src = u;
+    });
+  });
+}
+
+function applyIcon(img, url) {
+  if (!img.isConnected) return;
+  if (url) { img.classList.remove('icon-pending'); img.src = url; return; }
   const parent = img.parentElement;
-  const emoji = img.dataset.emoji || '📱';
+  if (!parent) return;
   parent.classList.remove('card-icon-img');
-  parent.textContent = emoji;
+  parent.textContent = img.dataset.emoji || '📱';
+}
+
+let _iconTimer = 0;
+function scheduleIconResolve() {
+  if (_iconTimer) return;
+  _iconTimer = setTimeout(() => {
+    _iconTimer = 0;
+    document.querySelectorAll('img.icon-pending[data-base]').forEach(img => {
+      const base = img.dataset.base;
+      probeIcon(base).then(url => { iconMapSet(base, url); applyIcon(img, url); });
+    });
+  }, 0);
+}
+
+// ไฟล์ที่จำไว้หายไป (ย้าย/เปลี่ยนชื่อ) → ลืมแล้วหาใหม่
+function iconAutoFail(img) {
+  if (!img) return;
+  if (!img.parentElement || img.dataset.retried) return applyIcon(img, '');
+  img.dataset.retried = '1';
+  const base = img.dataset.base;
+  iconMapDrop(base);
+  delete _iconProbe[base];
+  probeIcon(base).then(url => { iconMapSet(base, url); applyIcon(img, url); });
 }
 
 /* ═══════════════════════════════════════════════════════════
