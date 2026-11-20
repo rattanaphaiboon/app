@@ -1726,7 +1726,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v6.76';
+const APP_VERSION = 'v6.77';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -1797,6 +1797,7 @@ const I18N_W = {
   'ใช้สต็อกปัจจุบัน':['လက်ရှိလက်ကျန်ကို သုံး','using current stock'],
   'ยังไม่มีสต็อกที่จำไว้ในช่วงนี้':['ဤကာလအတွက် မှတ်ထားသောလက်ကျန် မရှိသေး','no saved stock in this range yet'],
   'กำลังโหลดสต็อกที่จำไว้':['မှတ်ထားသောလက်ကျန် ဖွင့်နေသည်','loading saved stock'],
+  'กำลังโหลดสต็อกวางเอง':['ကိုယ်တိုင်ထားလက်ကျန် ဖွင့်နေသည်','loading manual stock'],
   'จำสต็อกไว้':['လက်ကျန်မှတ်ထား','saved stock'],
   'คลังที่เหลือใช้สต็อกปัจจุบัน':['ကျန်ဂိုဒေါင်များ လက်ရှိလက်ကျန်သုံး','other warehouses use current stock'],
   'คงเหลือ':['လက်ကျန်','Balance'],
@@ -2561,6 +2562,79 @@ let productByKey = {};   // productKey → product row
 let adjStockCache = {};  // wh → { index:{barcode→totalEA}, reportDate } from ERP sheet
 let specialBarcodeMap = {}; // barcode → [{product,unit}] สำหรับสินค้าพิเศษ (บาร์โค้ดเดียวมีได้หลายรหัส)
 let adjLoading   = new Set(); // warehouses with an in-flight adj-stock load
+// ══ v6.77: สต็อกของคลัง "แหล่งเดียว" ══
+//   user: "ให้เลือกดึงข้อมูลใช้จากอย่างใดอย่างหนึ่ง" · "ใช้ Stocksync ตอนที่ข้อมูลวางสต็อกว่าง เท่านั้น"
+//   • ไฟล์วางสต็อก (ADJ_STOCK_SHEETS · วางbplus 3.1) มีข้อมูล → ใช้ไฟล์วางอย่างเดียว · ตัวที่ไม่อยู่ในไฟล์ = 0
+//     (รายงาน Bplus ที่วางแสดงเฉพาะตัวที่คงเหลือ > 0 อยู่แล้ว)
+//   • ไฟล์วางว่าง / คลังไม่มีไฟล์วาง → Stocksync (STOCK Wx) อย่างเดียว · คลังพิเศษ = ไฟล์ของมันเท่านั้น (เหมือนเดิม)
+//   เดิมตัวที่ไม่อยู่ในไฟล์วางไปเอา Stocksync มาเติม (19 พ.ย. W3: ไฟล์วาง 41 + Stocksync 52 = ขึ้น 93 · W1 เกิน 14)
+//   ★ ทุกจุดที่ถาม "คลังนี้มีของไหม/กี่ชิ้น" ต้องผ่าน whPcs / whStockMap — หน้านับ (productStock/systemPiecesFor),
+//     ค้นหา (showResult), มอบงานวันนี้ (ad*), แบ่งงานราย Vendor, แดชบอร์ด (ยังไม่เช็ค / ทั้งหมด / รายคลัง)
+//   ★ ไฟล์วางโหลดแยกต่อคลังเมื่อมีคนขอ (adjEnsure) · ระหว่างโหลดยังเป็น Stocksync แล้ววาดใหม่ตอนเสร็จ (adjAfterLoad)
+const adjTried = new Set();   // คลังที่โหลดไฟล์วางจบแล้ว (มีข้อมูลหรือว่าง) — กันยิงซ้ำทุกรอบวาด · ปุ่มรีเฟรชยังโหลดใหม่ได้
+let _lastResult = null;       // ผลค้นหาล่าสุด — ไฟล์วางมาถึงทีหลัง วาดการ์ดสต็อกใหม่
+const _whMapMemo = {};
+function adjPcsOf(a, p) {
+  let v = a.nameIndex ? a.nameIndex[normName(p['PRODUCT NAME'])] : undefined;
+  if (v === undefined) v = a.index[productKey(p)];
+  return v;
+}
+// ชิ้นในคลัง (ก่อนหักจุดวาง)
+function whPcs(p, wh) {
+  if (!p || !wh) return 0;
+  const a = adjStockCache[wh];
+  if (a) return adjPcsOf(a, p) || 0;
+  if (SPECIAL_WH[wh]) return 0;
+  const s = parseStock(p['STOCK ' + wh]);
+  return s.cs * (unitFactor(p, 'CS') || 1) + s.ea;
+}
+// คีย์ → ชิ้น เฉพาะตัวที่มีของ (> 0) ของแคตตาล็อกหลัก · จำไว้จนกว่าไฟล์วาง/แคตตาล็อกจะเปลี่ยน
+function whStockMap(wh) {
+  const a = adjStockCache[wh] || null, n = (allProducts || []).length;
+  const m = _whMapMemo[wh];
+  if (m && m.a === a && m.prods === allProducts && m.n === n) return m.map;
+  const map = new Map();
+  if (wh) (allProducts || []).forEach(p => {
+    if (p._special) return;
+    const k = productKey(p);
+    if (!k || map.has(k)) return;
+    const v = whPcs(p, wh);
+    if (v > 0) map.set(k, v);
+  });
+  _whMapMemo[wh] = { a, prods: allProducts, n, map };
+  return map;
+}
+// ชิ้น → รูป "ลัง.ชิ้น" แบบที่ Stocksync เขียน (ให้ fmtStock อ่านได้เหมือนกัน)
+//   ลังละ 1 ชิ้นที่มีบาร์โค้ดลัง = เขียนเป็นลัง · ไม่มีบาร์โค้ดลัง = เขียนเป็นชิ้น
+function pcsDotOf(p, pcs) {
+  const f = unitFactor(p, 'CS') || 1;
+  if (f <= 1) return String(p['CODE CS'] || '').trim().length > 3 ? `${pcs}.0` : `0.${pcs}`;
+  return csDot(pcs, f);
+}
+// ที่มาสต็อกของคลัง (ข้อความสั้น)
+function whSrcTxt(wh) {
+  const a = adjStockCache[wh];
+  if (a) return 'วางเอง' + (a.reportDate ? ' ' + formatThaiDate(a.reportDate) : '');
+  if (ADJ_STOCK_SHEETS[wh] && (adjLoading.has(wh) || !adjTried.has(wh))) return '⏳ กำลังโหลดสต็อกวางเอง…';
+  return 'Stocksync';
+}
+function adjEnsure(wh) {
+  if (wh && ADJ_STOCK_SHEETS[wh] && !adjStockCache[wh] && !adjLoading.has(wh) && !adjTried.has(wh)) loadAdjStock(wh, true);
+}
+// ไฟล์วางของคลังนี้โหลดจบ → ของที่คิดจากสต็อกไว้แล้วต้องคิดใหม่ + วาดหน้าที่เปิดอยู่ใหม่
+function adjAfterLoad(wh) {
+  try {
+    _adPnIdx = null;
+    delete _adOwn[adOwnKey(wh)];
+    if (wh !== soldWhOf()) delete _dashCtx[wh];   // แบ่งงานราย Vendor ของคลังอื่นบนแดชบอร์ด
+    if (wh === assignWh && assignKind === 'vendor' && assignRows && assignRows.length) { assignBuild(); renderAssign(); }
+    if (currentMode === 'dashboard' && _dashLastRows) renderDashboard(_dashLastRows);
+    if (document.getElementById('adPickModal')?.classList.contains('open')) adPickList();
+    else if (document.getElementById('modeAssignDay') && document.getElementById('modeAssignDay').style.display !== 'none') adRender();
+    const rs = document.getElementById('resultSection');
+    if (_lastResult && rs && rs.className === 'show' && visibleWh.includes(wh)) showResult(_lastResult[0], _lastResult[1], _lastResult[2], true);
+  } catch (e) { console.warn('วาดใหม่หลังโหลดสต็อกวางเองไม่ได้', e); }
+}
 let useAdjStock  = false; // toggle: use ERP adj stock instead of real-time
 let currentMode  = 'lookup';
 let html5QR      = null;
@@ -3475,6 +3549,7 @@ async function loadAdjStock(wh, silent=false) {
   } finally {
     adjLoading.delete(wh);
     renderStockSrcBar();
+    adjTried.add(wh); adjAfterLoad(wh);   // v6.77
   }
 }
 
@@ -4028,7 +4103,9 @@ function fmtStock(val) {
 }
 
 // ── RESULT DISPLAY ───────────────────────────────────────
-function showResult(barcode, product, scannedUnit) {
+function showResult(barcode, product, scannedUnit, noScroll) {
+  _lastResult = [barcode, product, scannedUnit];   // v6.77: ไฟล์วางมาถึงทีหลัง → adjAfterLoad วาดใหม่ (ไม่เลื่อนจอ)
+  visibleWh.forEach(adjEnsure);
   const name  = product['PRODUCT NAME'] || '-';
   const short = product['SHORT NAME'] || '';
   const cat   = [product['CAT GROUP'], product['CAT BRAND'], product['CAT SIZE']].filter(Boolean);
@@ -4041,7 +4118,8 @@ function showResult(barcode, product, scannedUnit) {
   }).filter(x => x.code && x.code !== '0' && x.code !== '-' && x.code.length > 3);
 
   const stockCards = visibleWh.map(w => {
-    const val = product[`STOCK ${w}`] || '0';
+    // v6.77: ไฟล์วางมีข้อมูล = ใช้ไฟล์วางอย่างเดียว (ไม่อยู่ในไฟล์ = 0) · ไฟล์ว่าง = Stocksync
+    const val = adjStockCache[w] ? pcsDotOf(product, whPcs(product, w)) : (product[`STOCK ${w}`] || '0');
     const fmt = fmtStock(val);
     const lines = fmt.line1.split('\n');
     return `
@@ -4096,7 +4174,7 @@ function showResult(barcode, product, scannedUnit) {
   const sec = document.getElementById('resultSection');
   sec.innerHTML = html;
   sec.className = 'show';
-  setTimeout(() => sec.scrollIntoView({ behavior:'smooth', block:'nearest' }), 80);
+  if (!noScroll) setTimeout(() => sec.scrollIntoView({ behavior:'smooth', block:'nearest' }), 80);
 }
 
 function showNotFound(barcode) {
@@ -4463,12 +4541,11 @@ function adWhOf(w) { return (SPECIAL_WH[w] && SPECIAL_WH[w].parent) || w; }
 
 // แบรนด์ที่ "มีของจริง" ในคลังนั้น เรียงจากมากไปน้อย
 function adBrandsOf(wh) {
-  const out = [];
+  const out = [], sm = whStockMap(wh);   // v6.77: สต็อกแหล่งเดียว (ไฟล์วาง ไม่งั้น Stocksync)
   Object.keys(brandIdx || {}).forEach(b => {
     let n = 0;
     brandIdx[b].forEach(k => {
-      const p = productByKey[k];
-      if (p && parseStock(p['STOCK ' + wh]).total > 0) n++;
+      if (productByKey[k] && sm.has(k)) n++;
     });
     if (n) out.push({ b, n });
   });
@@ -4477,12 +4554,12 @@ function adBrandsOf(wh) {
 }
 // แตกแบรนด์เป็นรายสินค้า — เฉพาะตัวที่มีสต็อกในคลังนั้น (user เลือกไว้)
 function adKeysOf(wh, brands) {
-  const seen = new Set(), out = [];
+  const seen = new Set(), out = [], sm = whStockMap(wh);   // v6.77
   (brands || []).forEach(b => {
     (brandIdx[b] || []).forEach(k => {
       if (seen.has(k)) return;
       const p = productByKey[k];
-      if (!p || !parseStock(p['STOCK ' + wh]).total) return;
+      if (!p || !sm.has(k)) return;
       seen.add(k);
       out.push({ key: k, name: p['PRODUCT NAME'] || k, cat: b });
     });
@@ -4501,10 +4578,10 @@ const _adOwn = {}, _adOwnFlight = {};
 
 // คืน { ชื่อแบรนด์: [{who,n}] } เรียงคนที่ถือมากสุดก่อน — n = จำนวนตัวที่คนนั้นถือในแบรนด์นั้น
 function adOwnRoll(wh, rows, kind) {
-  const col = 'STOCK ' + wh, acc = {};
+  const sm = whStockMap(wh), acc = {};   // v6.77: สต็อกแหล่งเดียว
   const bump = (p, who) => {
     if (!asgActive(who)) return;                   // v6.58: คนที่ออกไปแล้ว ไม่ขึ้นเป็นผู้ดูแล
-    if (!p || !parseStock(p[col]).total) return;   // ★ นับเฉพาะตัวที่มีของจริงในคลังนี้
+    if (!p || !sm.has(productKey(p))) return;      // ★ นับเฉพาะตัวที่มีของจริงในคลังนี้
     const b = String(p['CAT BRAND'] || '').trim();
     if (!b) return;
     const m = acc[b] || (acc[b] = {});
@@ -4724,6 +4801,7 @@ function adRender() {
   if (!host) return;
   const wh = document.getElementById('adWh')?.value || visibleWh[0] || '';
   const date = document.getElementById('adDate')?.value || adTodayStr();
+  adjEnsure(wh);     // v6.77: สต็อกของคลังนี้ = ไฟล์วาง (ถ้ามีข้อมูล)
   adOwnEnsure(wh);   // v6.31: อ่านผู้ดูแลเดิมของคลังนี้ไว้ล่วงหน้า กดเข้ากล่องแล้วเห็นทันที
   const mine = (adRows || []).filter(r => String(r.warehouse).toUpperCase() === String(wh).toUpperCase());
   const totSku = mine.reduce((a, r) => a + (adKeysOf(wh, r.brands).length), 0);
@@ -4816,14 +4894,14 @@ const AD_CAT_COLS = ['CAT BU', 'CAT TYPE', 'CAT GROUP'];
 let _adPnIdx = null, _adPnIdxKey = '';
 function adPnIdx(wh) {
   const key = wh + '|' + (allProducts || []).length;
-  if (_adPnIdx && _adPnIdxKey === key) return _adPnIdx;
-  const n = {}, c = {};
+  if (_adPnIdx && _adPnIdxKey === key) return _adPnIdx;   // v6.77: ไฟล์วางโหลดเสร็จ → adjAfterLoad ล้าง _adPnIdx
+  const n = {}, c = {}, sm = whStockMap(wh);
   Object.keys(brandIdx || {}).forEach(b => {
     const names = [], cats = [], seenCat = {};
     (brandIdx[b] || []).forEach(k => {
       const p = productByKey[k];
       // ★ ต้องกรองสต็อกคลังนี้ให้ตรงกับ adBrandsOf ไม่งั้นค้นเจอสินค้าที่คลังนี้ไม่มีของ
-      if (!p || !parseStock(p['STOCK ' + wh]).total) return;
+      if (!p || !sm.has(k)) return;
       names.push(String(p['PRODUCT NAME'] || k));
       AD_CAT_COLS.forEach(col => {
         const v = String(p[col] || '').trim();
@@ -4874,6 +4952,7 @@ function adPickList() {
   const wh = document.getElementById('adWh')?.value || '';
   // asgNorm ตัดช่องว่างทิ้งหมด — พิมพ์ "มาม่าคัพ" หรือ "มาม่า คัพ" ต้องเจอเหมือนกัน
   const q = asgNorm(document.getElementById('adPickSearch')?.value || '');
+  adjEnsure(wh);   // v6.77
   const all = adBrandsOf(wh);
   const picked = adKeysOf(wh, [...adPickSet]).length;
   const own = adOwnOf(wh);   // v6.31: null = ยังอ่านไม่เสร็จ · {} = คลังนี้ไม่มีไฟล์แบ่งงาน
@@ -5181,9 +5260,9 @@ function asgBuildName() {
 // v6.22 แบบราย Vendor (W4) — แตกเป็นรายสินค้า เฉพาะตัวที่มีสต็อกในคลังนั้น
 //   ★ ไม่กรองสต็อก = คิง 4,928 ตัว · นุ้ย 4,535 (เกือบทั้งแคตตาล็อก) → กรองแล้วเหลือ 1,980 / 879
 function asgBuildVendor() {
-  const byVendor = {};
+  const byVendor = {}, sm = whStockMap(assignWh);   // v6.77: สต็อกแหล่งเดียว (ไฟล์วางโหลดทีหลัง → adjAfterLoad สร้างใหม่)
   allProducts.forEach(p => {
-    if (!parseStock(p['STOCK ' + assignWh]).total) return;
+    if (!sm.has(productKey(p))) return;
     const v = asgNorm(p['VENDOR NAME']);
     if (!v) return;
     (byVendor[v] || (byVendor[v] = [])).push(p);
@@ -5348,6 +5427,8 @@ function soldAll() { return (soldItems || []).concat(sibItems || []); }
 //   คลังแบรนด์ (Colgate/Chaindrite) ใช้สินค้าของแคตตาล็อกแบรนด์ · คลังอื่นใช้แคตตาล็อกหลัก (allProducts มีทั้ง 2 ชุดปนกัน)
 //   ★ จำผลไว้ — renderAssign ถูกเรียกทุกครั้งที่ยิง ไม่ต้องไล่ทั้งแคตตาล็อกใหม่ทุกรอบ
 //     allProducts ถูก push เพิ่มที่เดิม (remergeSpecialCatalogs) → คีย์ต้องมีจำนวนด้วย ไม่ใช่แค่ตัวอ้างอิง
+// v6.77: คลังที่มีไฟล์วางสต็อก → ขึ้นเฉพาะตัวที่อยู่ในไฟล์วางล่าสุด — user: "ตัวที่มีสต็อกให้ขึ้นเท่าที่ข้อมูลวางสต็อกล่าสุด"
+//   productStock ให้ 0 กับตัวที่ไม่อยู่ในไฟล์วางเองแล้ว (ดู whPcs ด้านบน) · ไฟล์ว่าง (ตอนนี้ W2/W4/C4) = Stocksync
 let _stockMemo = null;
 function stockAll() {
   const wh = countSession && countSession.warehouse;
@@ -6432,7 +6513,7 @@ function systemPiecesFor(item) {
   const p  = productByKey[item.key];
   const put = putawayFor(wh, item.key);
   let base, raw, cs, ea, isAdj = false;
-  // สต็อกวางเอง (ERP) — ใช้ถ้ามีข้อมูลสำหรับ product นี้; fallback Stocksync
+  // สต็อกวางเอง (ERP) — v6.77: ไฟล์วางมีข้อมูล = ใช้ไฟล์วางอย่างเดียว (ไม่อยู่ในไฟล์ = 0) · ไฟล์ว่าง = Stocksync
   if (wh && adjStockCache[wh]) {
     const adj = adjStockCache[wh];
     let totalEA = adj.nameIndex ? adj.nameIndex[normName((p && p['PRODUCT NAME']) || item.name)] : undefined;
@@ -6443,8 +6524,9 @@ function systemPiecesFor(item) {
       base = totalEA; raw = `${cs}.${ea}`; isAdj = true;
     }
   }
-  if (base === undefined && SPECIAL_WH[wh]) {
+  if (base === undefined && (SPECIAL_WH[wh] || adjStockCache[wh])) {
     // คลังพิเศษ (Colgate/Chaindrite): ใช้เฉพาะสต็อกจากชีตวางฯ — ไม่ fallback Stocksync เด็ดขาด
+    // v6.77: คลังปกติที่ไฟล์วางมีข้อมูล ก็เหมือนกัน — ไม่อยู่ในไฟล์วาง = 0 (user: "ใช้ Stocksync ตอนที่ข้อมูลวางสต็อกว่าง เท่านั้น")
     cs = 0; ea = 0; base = 0; raw = '0'; isAdj = true;
   }
   if (base === undefined) {
@@ -6697,7 +6779,7 @@ function srcBadge(isAdj) {
 }
 
 // Resolve system stock for a raw product (used in scan card, before item is built).
-// Same fallback logic as systemPiecesFor: ERP dated stock if found, else Stocksync.
+// Same logic as systemPiecesFor — v6.77: ไฟล์วางมีข้อมูล = ไฟล์วางอย่างเดียว (ไม่อยู่ในไฟล์ = 0) · ไฟล์ว่าง = Stocksync
 function productStock(p) {
   const wh = countSession && countSession.warehouse;
   const factorCS = unitFactor(p, 'CS') || 1;
@@ -6712,8 +6794,9 @@ function productStock(p) {
       base = totalEA; isAdj = true;
     }
   }
-  if (base === undefined && SPECIAL_WH[wh]) {
+  if (base === undefined && (SPECIAL_WH[wh] || adjStockCache[wh])) {
     // คลังพิเศษ (Colgate/Chaindrite): ใช้เฉพาะสต็อกจากชีตวางฯ — ไม่ fallback Stocksync
+    // v6.77: คลังปกติที่ไฟล์วางมีข้อมูลก็เหมือนกัน — ไม่อยู่ในไฟล์วาง = 0
     cs = 0; ea = 0; base = 0; isAdj = true;
   }
   if (base === undefined) {
@@ -8671,6 +8754,7 @@ function dashCtxOf(wh) {
 async function dashCtxLoad(wh) {
   if (!wh || wh === soldWhOf() || _dashCtx[wh] || _dashCtxWant === wh) return;
   if (SPECIAL_WH[wh]) return;   // v6.65: คลังย่อยไม่มีแท็บแบ่งงาน/ใบขาย (gviz จะคืนแท็บแรกมาผิด ๆ)
+  adjEnsure(wh);   // v6.77: แบ่งงานราย Vendor กรองด้วยสต็อกของคลังนี้
   _dashCtxWant = wh;
   try {
     const [raw, asg] = await Promise.all([soldFetch(wh), assignFetch(wh)]);
@@ -9104,7 +9188,8 @@ function snapNote(scopeWhs, snapOf) {
   const one = scopeWhs.length === 1;
   const has = scopeWhs.filter(w => snapOf[w]);
   if (scopeWhs.some(w => snapOf[w] === undefined)) return '⏳ กำลังโหลดสต็อกที่จำไว้…';
-  if (!has.length) return 'ใช้สต็อกปัจจุบัน · ยังไม่มีสต็อกที่จำไว้ในช่วงนี้';
+  // v6.77: บอกที่มาของสต็อกปัจจุบันด้วย (ไฟล์วาง + วันที่รายงาน / Stocksync)
+  if (!has.length) return 'ใช้สต็อกปัจจุบัน · ' + scopeWhs.map(w => (one ? '' : w + ' ') + whSrcTxt(w)).join(' · ') + ' · ยังไม่มีสต็อกที่จำไว้ในช่วงนี้';
   if (one) {
     const x = snapOf[scopeWhs[0]], t = parseSheetDT(x.savedAt);
     return `📌 สต็อก ณ <b data-nolang="1">${formatThaiDate(dcalFromIso(x.day))}</b> · จำไว้ตอนส่งล่าสุด <b data-nolang="1">${
@@ -9224,6 +9309,7 @@ function renderDashboard(rows) {
   // v6.74: "ยังไม่เช็ค" ใช้สต็อกที่จำไว้ของวันสุดท้ายในช่วง — user: "อยากให้จำสต็อกเก่าของวันนั้นที่เช็ค"
   //   วางสต็อกใหม่ทีหลัง วันเก่าก็ยังคิดจากสต็อกวันนั้น · ไม่มีชุด (ยังไม่มีใครส่ง / ก่อน v6.74) = สต็อกปัจจุบัน (Stocksync) เหมือนเดิม
   const scopeWhs = filterWh !== 'ALL' ? [filterWh] : visibleWh.slice();
+  scopeWhs.forEach(adjEnsure);   // v6.77: สต็อกปัจจุบัน = ไฟล์วาง (ถ้ามีข้อมูล) — โหลดเสร็จวาดใหม่เอง
   const snapEnd = filterTo || filterFrom || dcalIso(new Date()), snapStart = filterFrom || '';
   const snapOf = {};
   scopeWhs.forEach(wh => { snapOf[wh] = snapGet(wh, snapEnd, snapStart); });
@@ -9237,9 +9323,7 @@ function renderDashboard(rows) {
   } else if (snapOf[filterWh]) {
     totalProds = snapOf[filterWh].list.length;   // v6.74
   } else {
-    totalProds = Object.values(productByKey).filter(p =>
-      parseStock(p[`STOCK ${filterWh}`]).total > 0
-    ).length;
+    totalProds = whStockMap(filterWh).size;   // v6.77: สต็อกแหล่งเดียว
   }
   const nUnchecked = Math.max(0, totalProds - nChecked);
   // Resolve status: use stored value if valid, else compute from diff
@@ -9278,26 +9362,16 @@ function renderDashboard(rows) {
   filtered.forEach(r => { if (r.key) checkedByWh.add(r.key + '__' + String(r.warehouse||'').toUpperCase()); });
   const uncheckedItems = [];
   // v6.74: คลังที่มีสต็อกที่จำไว้ → ไล่จากชุดนั้น (ยอด ณ วันนั้น) · ชื่อ/ชิ้นต่อลังจากแคตตาล็อก
+  // v6.77: ไม่มีชุด = สต็อกปัจจุบัน "แหล่งเดียว" (ไฟล์วางถ้ามีข้อมูล ไม่งั้น Stocksync) — เดิมอ่าน Stocksync ล้วน
   scopeWhs.forEach(wh => {
-    const x = snapOf[wh]; if (!x) return;
-    x.list.forEach(([key, pcs]) => {
+    const x = snapOf[wh];
+    (x ? x.list : [...whStockMap(wh)]).forEach(([key, pcs]) => {
       if (checkedByWh.has(key + '__' + wh)) return;
       const p = productByKey[key], f = p ? (unitFactor(p, 'CS') || 1) : 1;
       // ลังละ 1 ชิ้น (ข้าวถุงใหญ่ ฯลฯ) ที่มีบาร์โค้ดลัง → ขึ้นเป็น CS เหมือนที่ Stocksync เขียน ("23 CS 0 EA" ไม่ใช่ "23 EA")
       const asCS = f <= 1 && p && String(p['CODE CS'] || '').trim().length > 3;
       const cs = f > 1 ? Math.floor(pcs / f) : (asCS ? pcs : 0);
       uncheckedItems.push({ name: (p && p['PRODUCT NAME']) || key, wh, cs, ea: pcs - cs * f, key, pcs });   // v6.76: + key/pcs ให้ Excel
-    });
-  });
-  const liveWhs = scopeWhs.filter(wh => !snapOf[wh]);   // ไม่มีชุด = สต็อกปัจจุบันแบบเดิม
-  if (liveWhs.length) Object.values(productByKey).forEach(p => {
-    const key = productKey(p);
-    liveWhs.forEach(wh => {
-      const st = parseStock(p[`STOCK ${wh}`]);
-      if (st.total > 0 && !checkedByWh.has(key + '__' + wh)) {
-        uncheckedItems.push({ name: p['PRODUCT NAME'] || key, wh, cs: st.cs, ea: st.ea,
-          key, pcs: st.cs * (unitFactor(p, 'CS') || 1) + st.ea });   // v6.76: + key/pcs ให้ Excel
-      }
     });
   });
   uncheckedItems.sort((a,b) => a.wh.localeCompare(b.wh) || String(a.name).localeCompare(String(b.name),'th'));
@@ -9510,7 +9584,7 @@ function dashCockpitHtml(d) {
     whStat[w].diff += dcDiffOf(r);
   });
   const whRows = Object.keys(whStat).sort().map(w => {
-    const tot = Object.values(productByKey).filter(p => parseStock(p['STOCK ' + w]).total > 0).length;
+    const tot = whStockMap(w).size;   // v6.77: สต็อกแหล่งเดียว
     const st = whStat[w];
     return { wh:w, n:st.n, tot, pct: tot ? Math.round(st.n/tot*100) : 0,
              acc: st.n ? Math.round(st.ok/st.n*100) : 0, diff: st.diff };
