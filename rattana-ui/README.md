@@ -67,6 +67,17 @@ icon: `success` `approve` `error` `reject` `warning` `info` `question` `gold`
 
 ปุ่มมีคลื่นแสงตอนกด, ปุ่มทองมีแสงวิ่ง, สลับธีมเป็นวงกลมกระจาย · เครื่องที่ตั้ง "ลดการเคลื่อนไหว" จะนิ่งเอง
 
+### ปุ่มบันทึกแบบสั้น
+- `rt-btn-block` เต็มความกว้างเฉพาะบนมือถือ · คอม/แท็บเล็ตเป็นปุ่มสั้นชิดขวา
+- แถบปุ่ม: ข้อมูลอยู่ซ้าย ปุ่มอยู่ขวา
+```html
+<div class="rt-actions">
+  <div class="rt-actions-info"><span class="rt-cell-main">รวม 12 รายการ · ฿35,400.00</span><span class="rt-cell-sub">บันทึกล่าสุด 11:20 น.</span></div>
+  <button class="rt-btn rt-btn-glass">ยกเลิก</button>
+  <button class="rt-btn rt-btn-gold">บันทึก</button>
+</div>
+```
+
 ### อุปกรณ์
 - `html[data-platform="ios|android|desktop"]`, `data-input="touch|mouse"`, `data-standalone` และ `RattanaUI.platform`
 - เว้นขอบรอยบาก/แถบ home ให้เอง: `.rt-safe-top` `.rt-safe-bottom` `.rt-sticky-top` `.rt-pad-bottom-nav`
