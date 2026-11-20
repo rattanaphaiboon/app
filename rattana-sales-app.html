@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.735</title>
+<title>Rattana Sales — v8.736</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -7244,7 +7244,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.735 · 2026-11-04</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.736 · 2026-11-04</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -7255,7 +7255,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.735</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.736</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -16610,6 +16610,7 @@ function goShop(shopId) {
     console.log('[focus-gate] reset on shop change →', shopId);
   }
   currentShopId = shopId;
+  try { _dsShopPrefetch(shopId); } catch (eDs) {}   // v8.736: โหลดบิลจริงร้านนี้ไว้ก่อน (CN/แนะนำใช้ร่วม)
   renderShopDetail(shopId);
   showScreen('screenShop');
   updateCartBar();
@@ -33974,6 +33975,58 @@ function _drecoDsGet(cc) {
   _drecoDsFetch(cc, since);
   return (e && e.since === since && !e.fail) ? e.rows : undefined;
 }
+/* ═══ v8.736 (Surat 20/11 "DS/DC ก็ต้องโหลดไปโชว์อยู่แล้วว่าร้านนี้เคยซื้ออะไร ทำไมไม่โหลดแล้วใช้กับ CN ได้เลย") ═══
+   บิลจริง DS_DC ต่อร้าน — โหลดครั้งเดียว ใช้ร่วมทุกจุด (การ์ดแนะนำ/ลืมสั่ง = เดือนนี้ · จอ CN = ย้อน 2 เดือนก่อน)
+   เริ่มโหลดตั้งแต่เปิดหน้าร้าน/เช็คอิน → พอเซลกด CN ข้อมูลอยู่ในเครื่องแล้ว ไม่ต้องรอ
+   แคชในเครื่อง 10 นาที (เก่ากว่านั้นใช้ของเดิมไปก่อน + โหลดใหม่เบื้องหลัง) · กำลังโหลดอยู่ = รอตัวเดียวกัน ไม่ยิงซ้ำ
+   since = วันที่ 1 ของ 2 เดือนก่อน (ค่าเดียวกับค่าเริ่มต้นของหลังบ้าน → ใช้แคชหลังบ้านชุดเดียวกับ CN) */
+function _dsShopSince() {
+  const d = new Date(Date.now() + 7 * 3600000);   // Asia/Bangkok
+  let y = d.getUTCFullYear(), m = d.getUTCMonth() - 2;
+  if (m < 0) { m += 12; y -= 1; }
+  return y + '/' + ('0' + (m + 1)).slice(-2) + '/01';
+}
+const DS_SHOP_TTL = 10 * 60000;
+function _dsShopEntry(cc) { return ((window._dsShop || {})[String(cc || '').trim()]) || null; }
+/* คืน Promise<{ rows, stale, staleAt, t }> · ล้ม = reject (ถ้ามีของเก่าในเครื่อง คืนของเก่าพร้อม stale) */
+function _dsShopGet(cc, force) {
+  cc = String(cc || '').trim();
+  if (!cc || cc.indexOf('NEW-') === 0) return Promise.resolve({ rows: [], t: Date.now() });
+  const M = window._dsShop = window._dsShop || {};
+  const since = _dsShopSince();
+  let e = M[cc];
+  if (e && e.since !== since) e = M[cc] = null;
+  if (e && e.p) return e.p;                                                // กำลังโหลดอยู่ — รอตัวเดียวกัน
+  if (e && e.rows && !force && (Date.now() - e.t) < DS_SHOP_TTL) return Promise.resolve(e);
+  const old = e && e.rows ? e : null;
+  const p = postToAppsScript({ action: 'cnDsRows', codes: [cc], since: since }, 1)
+    .then(function (r) {
+      if (!r || r.ok !== true || !Array.isArray(r.rows)) throw new Error((r && r.error) || 'cnDsRows ตอบผิดรูป');
+      const ent = { cc: cc, since: since, t: Date.now(), rows: r.rows.filter(function (x) { return String(x['AR_CODE'] || '').trim() === cc; }),
+                    stale: !!(Array.isArray(r.stale) && r.stale.length), staleAt: String(r.staleAt || '') };
+      M[cc] = ent;
+      window._drecoDsVer = (window._drecoDsVer || 0) + 1;
+      return ent;
+    })
+    .catch(function (err) {
+      if (old) { old.p = null; old.stale = true; old.staleAt = old.staleAt || new Date(old.t).toTimeString().slice(0, 5); M[cc] = old; return old; }
+      M[cc] = { cc: cc, since: since, t: Date.now(), fail: String((err && err.message) || err), rows: null };
+      throw err;
+    });
+  M[cc] = Object.assign({}, old || { cc: cc, since: since }, { p: p });
+  p.then(function () { if (M[cc]) M[cc].p = null; }, function () { if (M[cc]) M[cc].p = null; });
+  return p;
+}
+window._dsShopGet = _dsShopGet;
+function _dsShopPrefetch(shopId) {
+  try {
+    const shop = (SHOPS || []).find(function (x) { return x.id === shopId; });
+    const codes = (typeof _shopAllCodes === 'function' && shop) ? _shopAllCodes(shop) : [shop ? String(shop.bplusCode || '').trim() : ''];
+    codes.filter(Boolean).forEach(function (c) { _dsShopGet(c).catch(function () {}); });
+  } catch (e) {}
+}
+window._dsShopPrefetch = _dsShopPrefetch;
+
 function _drecoDsFetch(cc, since) {
   const F = window._drecoDsInflight = window._drecoDsInflight || {};
   if (F[cc]) return;
@@ -33992,12 +34045,13 @@ function _drecoDsFetch(cc, since) {
     if (shop && String(shop.bplusCode || '').trim() === cc && typeof _renderDistrictReco === 'function') _renderDistrictReco();
     if (shop && String(shop.bplusCode || '').trim() === cc && typeof _renderForgotReminder === 'function') _renderForgotReminder();   // v8.733
   };
-  postToAppsScript({ action: 'cnDsRows', codes: [cc], since: since }, 1)
+  _dsShopGet(cc)   // v8.736: ตัวโหลดกลาง (ชุดเดียวกับจอ CN) → กรองเฉพาะตั้งแต่ since (วันที่ 1 เดือนนี้)
     .then(function (r) {
-      if (!r || r.ok !== true || !Array.isArray(r.rows)) throw new Error((r && r.error) || 'cnDsRows ตอบผิดรูป');
       const out = [];
-      r.rows.forEach(function (x) {
+      (r.rows || []).forEach(function (x) {
         if (String(x['AR_CODE'] || '').trim() !== cc) return;
+        const _dd = String(x['DI_DATE'] || '').replace(/-/g, '/').slice(0, 10);
+        if (_dd && _dd < since) return;
         const h = (typeof _cnDsToHistRow === 'function') ? _cnDsToHistRow(x) : null;
         if (!h || h._gift || !(h.total_baht > 0)) return;   // ขายจริงเท่านั้น (ของแถม/ยอด 0 ไม่นับ)
         out.push({ product_code: h.product_code, product_name: h.product_name, date: h._date });
@@ -34606,7 +34660,7 @@ function doCheckIn(shopId, _waited, _resent) {
       && _showCheckInGateModal(shopId, () => doCheckIn(shopId))) {
     return;
   }
-  try { _sugPrefetchForShop(shopId); } catch (eP) {}   // v8.733: โหลดประวัติ/บิลเดือนนี้ไว้ก่อน → ปิดร้านคิดตัวหารได้แม้ไม่เปิดตะกร้า
+  try { _sugPrefetchForShop(shopId); _dsShopPrefetch(shopId); } catch (eP) {}   // v8.733 · v8.736 บิลจริงทุกรหัสของร้าน: โหลดประวัติ/บิลเดือนนี้ไว้ก่อน → ปิดร้านคิดตัวหารได้แม้ไม่เปิดตะกร้า
   window._checkinBusy = true;   // v8.249: ล็อกตั้งแต่เริ่ม async GPS (กันกดรัวสร้าง visit ซ้ำ)
   showToast('📍 กำลังตรวจสอบตำแหน่ง...', 'info');
   refreshGPS(true)
@@ -56081,13 +56135,12 @@ async function _cnEnsureHist() {
   /* v8.735 (Surat 18/11 แบบ ข): ล้ม = ขึ้นแถบ "ลองใหม่" ทันที ❌ เลิกถอยไปอ่าน gviz ตรง (ไฟล์ใหญ่ ช้า 70+ วิ แล้วก็ล้มอยู่ดี = จอค้างเกือบ 2 นาที)
      หลังบ้านส่งชุดที่จำไว้ (stale) ตอนไฟล์ ERP กำลังซิงค์ → บอกเวลาข้อมูลให้เซลรู้ */
   void _dsGviz;
-  const pDs = postToAppsScript({ action: 'cnDsRows', codes: codes }, 1)
-    .then(function (r) {
-      if (!r || r.ok !== true || !Array.isArray(r.rows)) throw new Error((r && r.error) || 'cnDsRows ตอบผิดรูป');
-      st.dsStaleAt = (Array.isArray(r.stale) && r.stale.length) ? String(r.staleAt || '') || '?' : '';
-      const by = {};
-      r.rows.forEach(function (x) { const c = String(x['AR_CODE'] || '').trim(); (by[c] = by[c] || []).push(x); });
-      return codes.map(function (c) { return _dsTag(by[c] || [], c); });
+  // v8.736: ใช้บิลที่โหลดไว้ตั้งแต่เปิดหน้าร้าน (ตัวโหลดกลาง _dsShopGet) — มีในเครื่องแล้ว = ขึ้นทันที
+  const pDs = Promise.all(codes.map(function (c) { return _dsShopGet(c); }))
+    .then(function (ents) {
+      const st0 = ents.filter(function (e) { return e && e.stale; });
+      st.dsStaleAt = st0.length ? (String(st0[0].staleAt || '') || '?') : '';
+      return ents.map(function (e, i) { return _dsTag((e && e.rows) || [], codes[i]); });
     })
     .catch(function (e) { console.warn('[cn hist] cnDsRows ล้ม:', e && e.message); st.dsFail = String((e && e.message) || 'โหลดไม่ได้'); return []; })
     .then(function (all) { st.ds = [].concat.apply([], all); }).then(merge);
@@ -56106,7 +56159,10 @@ async function _cnEnsureHist() {
 }
 window._cnEnsureHist = _cnEnsureHist;
 // v8.735: ปุ่ม "ลองใหม่" บนแถบบิลเดือนนี้ — ล้างสถานะร้านนี้แล้วโหลดใหม่ทั้งชุด
-window._cnRetryDs = function () { try { _cnHist = { cc: '', rows: null, loading: false }; } catch (e) {} _cnEnsureHist(); };
+window._cnRetryDs = function () {
+  try { const shop = SHOPS.find(s => s.id === currentShopId); (_shopAllCodes(shop) || []).forEach(function (c) { const e = _dsShopEntry(c); if (e && !e.p) { e.t = 0; if (!e.rows) delete window._dsShop[c]; } }); } catch (e) {}
+  try { _cnHist = { cc: '', rows: null, loading: false }; } catch (e) {} _cnEnsureHist();
+};
 
 function _cnRenderHistResults(query) {
   const el = document.getElementById('cnHistResults');
