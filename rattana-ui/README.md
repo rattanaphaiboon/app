@@ -1,14 +1,15 @@
-# Rattana CI v1.0.0
+# Rattana CI v1.1.0
 
 UI กลางของบริษัท — Crystal Luxury (โหมดสว่าง) + Luxury Dark (โหมดมืด)
+ใช้ได้ทั้ง iOS · Android · Laptop พร้อม popup และโมชันแบบพรีเมียม
 
 ## ไฟล์
-- `rattana-ui.css` — สี ฟอนต์ และคอมโพเนนต์ทั้งหมด (class ขึ้นต้นด้วย `rt-`)
-- `rattana-ui.js` — `window.RattanaUI`: สลับธีม, TH/EN, toast, หน้าต่างยืนยัน, ปุ่ม loading, จัดรูปแบบวันที่/เงิน
+- `rattana-ui.css` — สี ฟอนต์ คอมโพเนนต์ popup และโมชันทั้งหมด (class ขึ้นต้นด้วย `rt-`)
+- `rattana-ui.js` — `window.RattanaUI`: ธีม, TH/EN, popup, เมนู, drawer, toast, ยืนยัน, ปุ่ม loading, ตรวจอุปกรณ์, จัดรูปแบบวันที่/เงิน
 - `rattana-logo-navy.png` — โลโก้บนพื้นกรมท่า (มีพื้นที่ว่างรอบโลโก้แล้ว) ใช้บนพื้นสว่าง
 - `rattana-logo-transparent.png` — โลโก้พื้นใส ใช้บนพื้นกรมท่า/โหมดมืดเท่านั้น
 - `index.html` — หน้า demo + คู่มือ (คัดลอกโค้ดได้)
-- `tokens.json` — ค่าสีและขนาดต้นฉบับ (ตรงกับ Design System "RATTANA" บน Claude)
+- `tokens.json` — ค่าสีและขนาดต้นฉบับ (ตรงกับ Design System "Rattana CI" บน Claude)
 
 ## ลิงก์
 - หน้า demo + วิธีใช้ (คัดลอกโค้ดได้): https://rattanaphaiboon.github.io/app/rattana-ui/
@@ -20,6 +21,10 @@ UI กลางของบริษัท — Crystal Luxury (โหมดส�
 ```html
 <html lang="th" data-theme="light">
 <head>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#F4F7FB">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <link rel="stylesheet" href="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.css">
   <script src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.js" defer></script>
 </head>
@@ -29,14 +34,50 @@ UI กลางของบริษัท — Crystal Luxury (โหมดส�
     <img class="rt-logo-light" src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-logo-navy.png" alt="RATTANA">
     <img class="rt-logo-dark" src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-logo-transparent.png" alt="RATTANA">
   </a>
-  ...
+  <main class="rt-container rt-page">...</main>
 </body>
 ```
 Sidebar สีกรมท่า: `<img class="rt-logo-on-navy" src=".../rattana-logo-transparent.png" alt="RATTANA">`
+
+## ใหม่ใน v1.1
+### Popup (คอม = หน้าต่างกลางจอ · มือถือ = bottom sheet ปัดลงปิด หลบคีย์บอร์ดเอง)
+```js
+RattanaUI.popup({ icon: 'question', title: 'บันทึก?', message: '...', content: '<div>...</div>',
+  actions: [{ label: 'ยกเลิก', variant: 'glass', value: false },
+            { label: 'บันทึก', variant: 'gold', value: true, onClick: () => save() }] })   // คืน Promise = ปุ่มหมุนรอ
+  .then(v => ...);
+RattanaUI.confirm({ title, message, variant: 'approve' | 'reject', confirmText })   // → true/false (เหมือน v1.0)
+RattanaUI.alert({ type: 'success' | 'error' | 'warning' | 'info', title, message });
+RattanaUI.menu(button, [{ label: 'แก้ไข', value: 'edit' }, '-', { label: 'ลบ', value: 'del', danger: true }]);
+RattanaUI.drawer({ title: 'ตัวกรอง', content: '...', side: 'right' | 'left' });
+RattanaUI.sheet({ title, content });
+RattanaUI.toast('ลบแล้ว', { type: 'info', duration: 6000, action: { label: 'เลิกทำ', onClick: undo } });  // ปัดทิ้งได้
+```
+icon: `success` `approve` `error` `reject` `warning` `info` `question` `gold`
+
+### โมชัน (ใส่ attribute อย่างเดียว)
+| attribute / class | ผล |
+|---|---|
+| `data-rt-reveal` (`scale` `left` `right` `blur`) | โผล่ตอนเลื่อนถึง |
+| `data-rt-stagger="70"` | ลูกทุกตัวโผล่ทีละชิ้น |
+| `data-rt-tilt="8"` | การ์ด 3D เอียงตามเมาส์ (คอมเท่านั้น) |
+| `data-rt-count="248350" data-prefix="฿"` | ตัวเลขนับขึ้นเมื่อเห็น |
+| `class="rt-page"` | หน้าเปิดแบบค่อย ๆ ปรากฏ + เปลี่ยนหน้ามี transition |
+| `RattanaUI.transition(fn)` | เปลี่ยนเนื้อหาในหน้าแบบลื่น |
+
+ปุ่มมีคลื่นแสงตอนกด, ปุ่มทองมีแสงวิ่ง, สลับธีมเป็นวงกลมกระจาย · เครื่องที่ตั้ง "ลดการเคลื่อนไหว" จะนิ่งเอง
+
+### อุปกรณ์
+- `html[data-platform="ios|android|desktop"]`, `data-input="touch|mouse"`, `data-standalone` และ `RattanaUI.platform`
+- เว้นขอบรอยบาก/แถบ home ให้เอง: `.rt-safe-top` `.rt-safe-bottom` `.rt-sticky-top` `.rt-pad-bottom-nav`
+- ช่องกรอก 16px บนจอสัมผัส (iPhone ไม่ซูมเอง) · ปุ่มกดอย่างน้อย 40–44px · hover เฉพาะเมาส์
+- `RattanaUI.haptic('light' | 'success' | 'error')` สั่นบน Android
+- โครงหน้าแอป `.rt-shell` (แล็ปท็อปเห็นเมนูข้าง · มือถือ/แท็บเล็ตสไลด์ออกด้วย `[data-rt-menu-toggle]`)
+- ซ่อน/แสดง: `.rt-only-mobile` `.rt-only-desktop` `.rt-hide-mobile` `.rt-hide-desktop` `.rt-hide-standalone`
 
 ## กฎโลโก้
 ห้ามวาดใหม่ เปลี่ยนสี ยืด ครอป แยกรถเข็นออกจากตัวหนังสือ หรือใส่เอฟเฟกต์ · ไฟล์พื้นใสห้ามวางบนพื้นสว่าง (ตัวหนังสือสีขาวจะหายไป)
 
 ## อัปเดตเวอร์ชัน
-แก้ไฟล์ใน repo นี้ที่เดียว ทุกแอปที่ลิงก์มาจะได้หน้าตาใหม่ทันที
+แก้ไฟล์ใน repo นี้ที่เดียว ทุกแอปที่ลิงก์มาจะได้หน้าตาใหม่ทันที (v1.1 ใช้ class และคำสั่งเดิมของ v1.0 ได้ทั้งหมด)
 ถ้ากลัวแอปเก่าพัง ให้ทำโฟลเดอร์ตามเวอร์ชัน เช่น `/v1/rattana-ui.css` แล้วให้แอปลิงก์ไปที่เวอร์ชันที่ต้องการ
