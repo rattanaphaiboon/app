@@ -1,4 +1,4 @@
-/* Rattana CI v1.2.0 — behaviour helpers (no dependencies). window.RattanaUI */
+/* Rattana CI v1.3.0 — behaviour helpers (no dependencies). window.RattanaUI */
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement, win = window;
@@ -113,7 +113,7 @@
   }
 
   var UI = {
-    version: '1.2.0',
+    version: '1.3.0',
     icons: ICON,
     platform: platform,
 
@@ -358,6 +358,96 @@
         setTimeout(function () { doc.addEventListener('pointerdown', outside, true); }, 0);
         doc.addEventListener('keydown', key, true); win.addEventListener('resize', dismiss); win.addEventListener('scroll', dismiss, true);
       });
+    },
+
+    /* ---------- Premium dropdown for <select class="rt-select"> (laptops; phones keep the OS picker) ---------- */
+    selectMenu: function (sel) {
+      if (!sel || sel.disabled || sel._rtOpen) return null;
+      var en = UI.getLang() === 'en', opener = sel, closed = false;
+      sel._rtOpen = true; sel.classList.add('is-open'); sel.setAttribute('aria-expanded', 'true');
+      var pop = el('div', 'rt-popover rt-glass rt-select-pop'), list = el('div', 'rt-menu-list'), rows = [], q = null, empty = null;
+      list.setAttribute('role', 'listbox'); if (sel.id) list.setAttribute('aria-labelledby', sel.id);
+      var all = [].slice.call(sel.options).filter(function (o) { return !o.hidden; });
+      if (all.length > 10) {
+        var sb = el('label', 'rt-select-search'); sb.appendChild(svg('M11 3a8 8 0 1 0 0 16a8 8 0 1 0 0-16M21 21l-4.3-4.3', 16));
+        q = el('input'); q.type = 'search'; q.autocomplete = 'off'; q.placeholder = en ? 'Search…' : 'พิมพ์เพื่อค้นหา…'; sb.appendChild(q); pop.appendChild(sb);
+      }
+      var n = 0;
+      function addOpt(o, grp) {
+        if (o.hidden) return;
+        var b = el('button', 'rt-menu-item rt-option'); b.type = 'button'; b.setAttribute('role', 'option');
+        var on = o.selected && (o.value !== '' || sel.selectedIndex === o.index);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+        if (o.disabled || (grp && grp.disabled)) b.disabled = true;
+        b.appendChild(el('span', null, o.label || o.text)); var ck = svg(ICON.check, 18); ck.setAttribute('class', 'rt-option-check'); b.appendChild(ck);
+        b.style.setProperty('--i', Math.min(n++, 14));
+        b.addEventListener('click', function () { choose(o); });
+        b._opt = o; b._grp = grp || null; rows.push(b); list.appendChild(b);
+      }
+      [].forEach.call(sel.children, function (c) {
+        if (c.tagName === 'OPTGROUP') { var lab = el('div', 'rt-menu-label', c.label); lab._isGroup = c; list.appendChild(lab); [].forEach.call(c.children, function (o) { addOpt(o, c); }); }
+        else if (c.tagName === 'OPTION') addOpt(c);
+      });
+      empty = el('div', 'rt-select-empty', en ? 'No matches' : 'ไม่พบรายการ'); empty.hidden = true; list.appendChild(empty);
+      pop.appendChild(list); doc.body.appendChild(pop);
+      /* position under (or above) the select, as wide as it */
+      var r = sel.getBoundingClientRect(), gap = 6, vw = win.innerWidth, vh = win.innerHeight;
+      var w = Math.min(Math.max(r.width, 220), vw - 24); pop.style.width = w + 'px'; pop.style.maxWidth = 'calc(100vw - 24px)';
+      var below = vh - r.bottom - gap - 12, above = r.top - gap - 12, up = below < 240 && above > below;
+      pop.style.maxHeight = Math.max(160, Math.min(380, up ? above : below)) + 'px';
+      var left = Math.min(Math.max(12, r.left), vw - 12 - w);
+      pop.style.left = Math.round(left) + 'px';
+      if (up) { pop.style.top = 'auto'; pop.style.bottom = Math.round(vh - r.top + gap) + 'px'; } else pop.style.top = Math.round(r.bottom + gap) + 'px';
+      pop.style.setProperty('--rt-origin', (up ? 'bottom' : 'top') + ' center');
+      function visible() { return rows.filter(function (b) { return !b.hidden && !b.disabled; }); }
+      var cur = rows.filter(function (b) { return b.getAttribute('aria-selected') === 'true'; })[0];
+      if (cur) cur.scrollIntoView({ block: 'center' });
+      setTimeout(function () { try { (q || cur || visible()[0] || pop).focus({ preventScroll: true }); } catch (e) {} }, 0);
+      function choose(o) {
+        if (sel.value !== o.value || sel.selectedIndex !== o.index) {
+          sel.selectedIndex = o.index;
+          sel.dispatchEvent(new Event('input', { bubbles: true })); sel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        UI.haptic('light'); close(true);
+      }
+      function close(picked) {
+        if (closed) return; closed = true; sel._rtOpen = false;
+        sel.classList.remove('is-open'); sel.setAttribute('aria-expanded', 'false');
+        win.removeEventListener('pointerdown', outside, true); win.removeEventListener('keydown', key, true);
+        win.removeEventListener('resize', dismiss); win.removeEventListener('scroll', onScroll, true);
+        pop.classList.add('is-closing'); setTimeout(function () { pop.remove(); }, reducedMotion() ? 0 : 150);
+        try { opener.focus({ preventScroll: true }); } catch (e) {}
+        void picked;
+      }
+      function dismiss() { close(false); }
+      sel._rtClose = dismiss;
+      function onScroll(e) { if (!pop.contains(e.target)) close(false); }
+      function outside(e) { if (!pop.contains(e.target) && e.target !== sel) close(false); }
+      function filter() {
+        var t = q.value.trim().toLowerCase(), any = false;
+        rows.forEach(function (b) { var hit = !t || (b._opt.label || b._opt.text).toLowerCase().indexOf(t) > -1 || String(b._opt.value).toLowerCase().indexOf(t) > -1; b.hidden = !hit; if (hit) any = true; });
+        [].forEach.call(list.querySelectorAll('.rt-menu-label'), function (lab) { lab.hidden = !rows.some(function (b) { return b._grp === lab._isGroup && !b.hidden; }); });
+        empty.hidden = any;
+      }
+      if (q) q.addEventListener('input', filter);
+      function key(e) {
+        var v = visible(), i = v.indexOf(doc.activeElement);
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(false); }
+        else if (e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); close(false); }
+        else if (e.key === 'ArrowDown') { e.preventDefault(); (v[i + 1] || v[0]).focus(); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); if (i <= 0 && q) q.focus(); else (v[i - 1] || v[v.length - 1]).focus(); }
+        else if (e.key === 'Home' && i > -1) { e.preventDefault(); v[0].focus(); }
+        else if (e.key === 'End' && i > -1) { e.preventDefault(); v[v.length - 1].focus(); }
+        else if (e.key === 'Enter' && doc.activeElement === q) { e.preventDefault(); if (v[0]) choose(v[0]._opt); }
+        else if (!q && e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+          var k = e.key.toLowerCase(), start = i + 1;
+          for (var j = 0; j < v.length; j++) { var b = v[(start + j) % v.length]; if (b.textContent.trim().toLowerCase().indexOf(k) === 0) { b.focus(); break; } }
+        }
+      }
+      /* window-level capture so a dropdown inside a popup handles Esc/Tab before the popup does */
+      setTimeout(function () { win.addEventListener('pointerdown', outside, true); }, 0);
+      win.addEventListener('keydown', key, true); win.addEventListener('resize', dismiss); win.addEventListener('scroll', onScroll, true);
+      return { close: dismiss, el: pop };
     },
 
     /* ---------- Toast: spring in, progress bar, pause on hover, swipe away, optional action ---------- */
@@ -652,6 +742,18 @@
   if ('IntersectionObserver' in win) {
     countIO = new IntersectionObserver(function (es) { es.forEach(function (en) { if (en.isIntersecting) { countIO.unobserve(en.target); if (en.target._rtgo) en.target._rtgo(); } }); }, { threshold: 0.4 });
   }
+
+  /* <select class="rt-select">: on laptops open the Rattana dropdown instead of the plain OS list (data-rt-native keeps the OS list) */
+  function rtSelect(n) { return n && n.tagName === 'SELECT' && n.classList.contains('rt-select') && !n.multiple && !(n.size > 1) && !n.hasAttribute('data-rt-native') && !n.closest('[data-rt-native]') && mq('(pointer: fine)'); }
+  doc.addEventListener('mousedown', function (e) {
+    if (e.button !== 0 || !rtSelect(e.target)) return;
+    e.preventDefault(); var s = e.target;
+    if (s._rtOpen) { if (s._rtClose) s._rtClose(); return; } s.focus({ preventScroll: true }); UI.selectMenu(s);
+  }, true);
+  doc.addEventListener('keydown', function (e) {
+    var s = e.target; if (!rtSelect(s) || s._rtOpen) return;
+    if (e.key === ' ' || e.key === 'Enter' || e.key === 'F4' || (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp'))) { e.preventDefault(); UI.selectMenu(s); }
+  }, true);
 
   /* lightbox: what to show for a zoomable <img> — full name from data-rt-caption or the product card, price as the sub line */
   var ZOOM_SEL = 'img[data-rt-zoom], [data-rt-zoom] img, .rt-product-media img';
