@@ -1,4 +1,4 @@
-# Rattana CI v1.3.0
+# Rattana CI v1.4.0
 
 UI กลางของบริษัท — Crystal Luxury (โหมดสว่าง) + Luxury Dark (โหมดมืด)
 ใช้ได้ทั้ง iOS · Android · Laptop พร้อม popup และโมชันแบบพรีเมียม
@@ -40,11 +40,21 @@ UI กลางของบริษัท — Crystal Luxury (โหมดส�
 ```
 Sidebar สีกรมท่า: `<img class="rt-logo-on-navy" src=".../rattana-logo-transparent.png" alt="RATTANA">`
 
+## ทำให้แอปหน้าตาเหมือนต้นฉบับ (เช็กลิสต์ — ส่งให้ AI ที่ช่วยสร้างแอปได้เลย)
+1. ใส่ **ทั้ง 2 บรรทัด** ใน `<head>`: `rattana-ui.css` **และ** `rattana-ui.js` (ไม่มี .js = ไม่มี popup ดรอปดาวน์ใหม่ ซูมรูป และโมชัน)
+2. ลิงก์ไฟล์จาก `https://rattanaphaiboon.github.io/app/rattana-ui/` — อย่าก๊อปไฟล์ไปเก็บเอง ไม่งั้นไม่อัปเดตตาม
+3. `<html data-theme="light">` (หรือ `dark`) และ `<body class="rt-app">`
+4. ใช้ class `rt-` ของ Rattana CI เช่น `rt-btn rt-btn-gold`, `rt-input`, `rt-select`, `rt-search`, `rt-glass` — อย่าเขียนสไตล์ทับเอง
+5. ฟอร์ม/ปุ่ม/รายการ ดูตัวอย่างและกด "คัดลอกโค้ด" จากหน้า demo
+
+## ใหม่ใน v1.4
+- `<select>` ทุกตัวในหน้า `rt-app` ได้ดรอปดาวน์แบบ Rattana อัตโนมัติ แม้ลืมใส่ class `rt-select` (ตัวที่ไม่มี class ได้หน้าตากล่องแบบ Rattana ด้วย)
+
 ## ใหม่ใน v1.3
 ### ดรอปดาวน์แบบใหม่ (`select.rt-select`)
 - บนคอม/แล็ปท็อป: กดแล้วได้รายการแบบกระจกของ Rattana เด้งขึ้นมา มีเครื่องหมายถูกที่ตัวที่เลือก ชื่อยาวขึ้นบรรทัดใหม่ไม่ตัด
 - เกิน 10 รายการมีช่องพิมพ์ค้นหาให้เอง · ใช้คีย์บอร์ดได้ (↑ ↓ Enter Esc)
-- ใช้ `<select>` เดิมได้เลย ไม่ต้องแก้โค้ด — `onchange` / `.value` / ฟอร์ม ทำงานเหมือนเดิม
+- ใช้ `<select>` เดิมได้เลย ไม่ต้องแก้โค้ด (v1.4: ทุก `<select>` ในหน้า `rt-app` ได้เอง) — `onchange` / `.value` / ฟอร์ม ทำงานเหมือนเดิม
 - มือถือใช้ตัวเลือกของเครื่อง (iPhone/Android) ซึ่งจะเป็นสีตามธีมแล้ว ไม่ขาวโพลนในโหมดมืด
 - อยากได้รายการแบบเดิมของเบราว์เซอร์ ใส่ `data-rt-native`
 - เรียกเอง: `RattanaUI.selectMenu(selectElement)`

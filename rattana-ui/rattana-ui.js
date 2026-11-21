@@ -1,4 +1,4 @@
-/* Rattana CI v1.3.0 — behaviour helpers (no dependencies). window.RattanaUI */
+/* Rattana CI v1.4.0 — behaviour helpers (no dependencies). window.RattanaUI */
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement, win = window;
@@ -113,7 +113,7 @@
   }
 
   var UI = {
-    version: '1.3.0',
+    version: '1.4.0',
     icons: ICON,
     platform: platform,
 
@@ -364,7 +364,7 @@
     selectMenu: function (sel) {
       if (!sel || sel.disabled || sel._rtOpen) return null;
       var en = UI.getLang() === 'en', opener = sel, closed = false;
-      sel._rtOpen = true; sel.classList.add('is-open'); sel.setAttribute('aria-expanded', 'true');
+      sel._rtOpen = true; sel.setAttribute('data-rt-open', ''); sel.setAttribute('aria-expanded', 'true');
       var pop = el('div', 'rt-popover rt-glass rt-select-pop'), list = el('div', 'rt-menu-list'), rows = [], q = null, empty = null;
       list.setAttribute('role', 'listbox'); if (sel.id) list.setAttribute('aria-labelledby', sel.id);
       var all = [].slice.call(sel.options).filter(function (o) { return !o.hidden; });
@@ -412,7 +412,7 @@
       }
       function close(picked) {
         if (closed) return; closed = true; sel._rtOpen = false;
-        sel.classList.remove('is-open'); sel.setAttribute('aria-expanded', 'false');
+        sel.removeAttribute('data-rt-open'); sel.setAttribute('aria-expanded', 'false');
         win.removeEventListener('pointerdown', outside, true); win.removeEventListener('keydown', key, true);
         win.removeEventListener('resize', dismiss); win.removeEventListener('scroll', onScroll, true);
         pop.classList.add('is-closing'); setTimeout(function () { pop.remove(); }, reducedMotion() ? 0 : 150);
@@ -744,7 +744,8 @@
   }
 
   /* <select class="rt-select">: on laptops open the Rattana dropdown instead of the plain OS list (data-rt-native keeps the OS list) */
-  function rtSelect(n) { return n && n.tagName === 'SELECT' && n.classList.contains('rt-select') && !n.multiple && !(n.size > 1) && !n.hasAttribute('data-rt-native') && !n.closest('[data-rt-native]') && mq('(pointer: fine)'); }
+  /* any <select> inside .rt-app (or with class rt-select) gets the Rattana dropdown */
+  function rtSelect(n) { return n && n.tagName === 'SELECT' && (n.classList.contains('rt-select') || !!n.closest('.rt-app')) && !n.multiple && !(n.size > 1) && !n.hasAttribute('data-rt-native') && !n.closest('[data-rt-native]') && mq('(pointer: fine)'); }
   doc.addEventListener('mousedown', function (e) {
     if (e.button !== 0 || !rtSelect(e.target)) return;
     e.preventDefault(); var s = e.target;
