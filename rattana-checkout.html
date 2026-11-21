@@ -3323,7 +3323,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-21 · 148';
+const BUILD = '2026-11-21 · 149';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -3925,7 +3925,8 @@ async function enrichFromMaster() {
     indexProducts(); JOBS = buildJobs(); rebuildStores();
     promoVer++;                                    // แบรนด์/ไซส์มาแล้ว จับคู่โปรใหม่
     buildCatalog(all);
-    applyMart();                                   // งานมาร์ท — สินค้าที่ไม่มีในใบจองวันนี้ ต้องใช้มาสเตอร์ (CATALOG)
+    w1IndexMaster(all);                            // W1 ใช้มาสเตอร์ล้วน ไม่ขึ้นกับใบจอง W4 (BUILD 149)
+    applyMart();                                  // งานมาร์ท — สินค้าที่ไม่มีในใบจองวันนี้ ต้องใช้มาสเตอร์ (CATALOG)
     set(`มาสเตอร์ ✓ ${fmtN(hit)}/${fmtN(PRODUCTS.length)} ตัว · +${fmtN(addedCodes)} บาร์โค้ด`, 'ok');
     if (onScreen('scr-w1')) renderW1();            // W1: ใบจัด/ป้ายบุหรี่ต้องใช้มาสเตอร์ — มาแล้ววาดใหม่ (BUILD 107)
     if (onScreen('scr-w1truck')) renderW1Truck();
@@ -11329,6 +11330,53 @@ const W1D = { bills:null, billsAt:0, billsFrom:'', billsP:null, keep:{}, keepAt:
               sunit:{}, sunitD:{}, sunitPfx:{}, dcode:{}, pkr:{}, slmnP:null, pkrP:null, batchCache:{},
               done:{}, doneAt:0, doneP:null, prev:{}, prevDay:'', err:'', busy:'', loading:false, sidx:null, sidxKey:'' };
 const W1P = {};                                   // สินค้าที่มาสเตอร์ไม่มี — สร้างจากบรรทัดเอกสาร
+/* สินค้าของ W1 อิงมาสเตอร์อย่างเดียว (BUILD 149 · ผู้ใช้ส่งรูป 21/11 ใบจัด W1-03-211126 "Doc W1 ถูกแก้หลังเปิดงาน — 22 บรรทัดเปลี่ยน"
+   ทั้งที่ Doc W1 ไม่ได้แก้ — สกอร์บลู 3 แพ็ค · คอมเบ 5 ชิ้น · มาม่า OK 12 แพ็ค … ยอดตอนนี้เท่าเดิมทุกตัว)
+   ต้นเหตุ: รุ่น ≤148 หาสินค้าผ่าน byCode (สินค้าในใบจอง W4 วันนี้ · id = บาร์โค้ดหน่วยใหญ่สุดที่ W4 สั่ง) ก่อน catByCode (มาสเตอร์ที่เหลือ)
+   → id ของสินค้า W1 เปลี่ยนตามใบจอง W4 ที่โหลดอยู่ (เช้าเป็นของเมื่อวาน / ใบจองใหม่เข้า / ช่วงโหลดใหม่ที่มาสเตอร์ยังไม่มา = ไม่มี CAT GROUP
+   บุหรี่ไปอยู่ใบจัดหน่วยรถ) → เทียบ Doc W1 เจอ "ถูกลบ" + "เพิ่มใหม่" ของตัวเดียวกัน · ยิงบาร์หน่วยย่อยอาจขึ้น "ไม่อยู่ในงาน"
+   แก้: W1M = สินค้าทุกแถวในมาสเตอร์ id = บาร์โค้ดหน่วยใหญ่สุด (แบบ CATALOG) ไม่ขึ้นกับใบจอง W4 · งานในเครื่องที่เปิดก่อนนี้แปลง id ให้ (w1Canon) */
+const W1M = { ver:0, n:0, byId:{}, byCode:{}, byBk:{} };
+function w1IndexMaster(recs) {
+  const byId = {}, byCode = {}, byBk = {};
+  for (const rec of recs) {
+    const units = rec.units.map(u => { const short = String(u.label).split('x')[0];
+      return { ...u, code:String(u.code), short, label:/x[\d.]+\(/.test(u.label) ? u.label : `${short}x${u.qtyEA}(${u.lv})` }; })
+      .sort((a, b) => b.qtyEA - a.qtyEA);
+    const id = units[0].code, c = catById[id];
+    const p = c && c.name === rec.name ? c : { id, name:rec.name, cat:rec.cat || '', vend:rec.vend || '', img:rec.img || '',
+                                               units, minEA:units[units.length - 1].qtyEA, master:true };
+    if (byId[id]) continue;
+    byId[id] = p;
+    p.units.forEach(u => { const hit = { p, u }, k = w1bk(u.code);
+      if (!byCode[u.code]) byCode[u.code] = hit; if (k && !byBk[k]) byBk[k] = hit; });
+  }
+  Object.assign(W1M, { byId, byCode, byBk, n:Object.keys(byId).length, ver:W1M.ver + 1 });
+  W1D.batchCache = {};
+  const S = W1S(); let ch = false;
+  for (const k in S.jobs) ch = w1Canon(S.jobs[k]) || ch;
+  if (ch) save();
+}
+/** งานในเครื่องที่ id สินค้ายังเป็นแบบเดิม (อิงใบจอง W4 / w1:บาร์โค้ด) → id ตามมาสเตอร์ · รายการที่ยิง/ยอด/นอกเอกสาร/หน่วยที่จำ ย้ายตาม · คืน true = เปลี่ยน */
+function w1Canon(J) {
+  if (!J || !J.job || !W1M.n || J.cv === W1M.ver) return false;
+  J.cv = W1M.ver;
+  const map = {}, see = (pid, code) => { if (!pid || map[pid]) return; const h = code && w1Find(code); if (h && h.p.id !== pid) map[pid] = h.p.id; };
+  (J.job.lines || []).forEach(l => see(l.pid, l.code));
+  (J.entries || []).forEach(e => see(e.pid, e.code));
+  for (const pid in (J.extra || {})) see(pid, J.extra[pid].code);
+  if (!Object.keys(map).length) return false;
+  const to = pid => map[pid] || pid;
+  J.job.lines.forEach(l => { l.pid = to(l.pid); });
+  (J.entries || []).forEach(e => { if (!map[e.pid]) return; e.pid = to(e.pid); if (!e.inDoc && w1InDoc(J, e.pid)) e.inDoc = true; });
+  if (J.extra) { const x = {}; for (const pid in J.extra) x[to(pid)] = Object.assign({}, J.extra[pid], x[to(pid)]); J.extra = x; }
+  if (J.entries) w1Recalc(J);
+  else if (J.got) { const g = {}; for (const k in J.got) g[to(k)] = (g[to(k)] || 0) + J.got[k]; J.got = g; }
+  const U = W1S().unit; for (const k in map) if (U[k] && !U[map[k]]) U[map[k]] = U[k];
+  if (map[W1_HIT]) W1_HIT = map[W1_HIT];
+  delete W1CHG[J.job.key];                         // เทียบ Doc W1 ใหม่ด้วย id ชุดใหม่
+  return true;
+}
 let W1_Q = '', W1_QT = 0, W1_HIT = '', W1_EDIT = '', W1_SG = { list:[], on:-1, t:0 };
 /* การ์ดสินค้าเปิดมาจากไหน (BUILD 110 · ผู้ใช้สั่ง 17/11 "ค้นหาชื่อสินค้าแล้วเลือกหน่วยนับเองไม่ได้ อยากให้เลือกได้ ·
    เพิ่มคอลัมน์ว่าทำรายการมาจากสแกนบาร์โค้ด (หรือพิมพ์ — แฮนด์เฮลด์อ่านค่าแล้วลงเป็นข้อความ) ค้นหาจากชื่อ หรือกดจากรายการที่แสดงอยู่")
@@ -11376,6 +11424,7 @@ function w1Objs(d) {
 let W1_BCX = null, W1_BCX_N = -1;
 function w1Find(code) {
   const c = String(code || '').trim(); if (!c) return null;
+  if (W1M.n) return W1M.byCode[c] || W1M.byBk[w1bk(c)] || null;   // มาสเตอร์มาแล้ว = มาสเตอร์อย่างเดียว (BUILD 149) ไม่มี = สินค้าเทียมจากเอกสาร
   const h = byCode[c] || catByCode[c]; if (h) return h;
   const n = CATALOG.length + PRODUCTS.length;
   if (!W1_BCX || W1_BCX_N !== n) {
@@ -11394,7 +11443,7 @@ function w1LineBase(bc, name, label) {
            label:String(label || '').trim() || (mu ? mu.label : pu.label), uq };
 }
 function w1Prod(pid, l) {
-  const p = byId[pid] || catById[pid]; if (p) return p;
+  const p = W1M.byId[pid] || byId[pid] || catById[pid]; if (p) return p;
   if (W1P[pid]) return W1P[pid];
   const pu = parseUnit(l.label || '');
   const u = { lv:pu.lv || 'EA', code:l.code || '', label:l.label || pu.label, qtyEA:l.uq || pu.qtyEA || 1 };
@@ -11539,7 +11588,7 @@ const w1IsCig = (bc, unit) => { const h = w1Find(bc), p = h && h.p; if (!p || p.
 /** day = 'yyyy/mm/dd' (วันที่บนรหัสใบจัด = วันที่พิมพ์ใบจัด) */
 function w1Batches(day) {
   if (W1D.batchCache[day]) return W1D.batchCache[day];
-  if (!CATALOG.length || !Object.keys(W1D.sunitD).length || !W1D.bills) return [];   // ยังไม่พร้อม — ไม่จำผล (บุหรี่/หน่วยรถผิด)
+  if (!(W1M.n || CATALOG.length) || !Object.keys(W1D.sunitD).length || !W1D.bills) return [];   // ยังไม่พร้อม — ไม่จำผล (บุหรี่/หน่วยรถผิด)
   const today = day.replace(/\//g, '-');
   const live = r => { const a = w1Iso(r.day); if (!a) return false; if (a >= today) return true;
     const k = W1D.keep[w1BookOf(r.remark)]; return !!(k && k.sday && k.sday > today); };
@@ -11752,7 +11801,7 @@ async function w1OpenCode(raw, fromTruck, again) {           // again = กด�
 }
 function w1Open(key) { const J0 = W1S().jobs[key]; if (J0 && J0.job.kind === 'truck') state.w1from = J0.job.reg;   // งานรถ = กลับหน้ารถ
   state.w1cur = key; W1_Q = ''; W1_HIT = ''; W1_EDIT = ''; W1_SEDIT = ''; const el = $('w1In'); if (el) { el.value = ''; toggleClr(el); } save(); setMode('w1job'); }
-const w1Cur = () => W1S().jobs[state.w1cur] || null;
+const w1Cur = () => { const J = W1S().jobs[state.w1cur] || null; if (J && W1M.n && J.cv !== W1M.ver && w1Canon(J)) save(); return J; };
 async function w1Discard(k) {
   const J = W1S().jobs[k]; if (!J) return;
   const got = w1Items(J).some(it => it.got);
