@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#F4F7FB">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<title>Rattana Call Card v5.2 — RATTANA</title>
+<title>Rattana Call Card v5.4 — RATTANA</title>
 <link rel="stylesheet" href="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.css">
 <script src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.js" defer></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js" defer></script>
@@ -176,7 +176,7 @@ a.cc-rank:hover{background:var(--hover)}
   <nav class="rt-sidebar" aria-label="เมนูหลัก">
     <img class="rt-logo-on-navy" src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-logo-transparent.png" alt="RATTANA">
     <div class="rt-nav" id="sideNav"></div>
-    <div class="cc-side-foot"><b>Rattana Call Card</b><br>v5.2 · 2026-11-21<br>คุณ จิรายุ วันจันทร์</div>
+    <div class="cc-side-foot"><b>Rattana Call Card</b><br>v5.4 · 2026-11-21<br>คุณ จิรายุ วันจันทร์</div>
   </nav>
   <div class="rt-shell-main rt-pad-bottom-nav">
     <header class="rt-glass rt-topbar rt-sticky-top" id="topbar"></header>
@@ -189,7 +189,7 @@ a.cc-rank:hover{background:var(--hover)}
 
 <script>
 /* ════════ Config ════════ */
-const APP_VER = 'v5.2 · 2026-11-21';
+const APP_VER = 'v5.4 · 2026-11-21';
 const CFG = {
   custSheet:'1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI', custTab:'Customer',
   salesSheet:'1NO8sHyDxwHTRqgcLFCxq_g_Rr09lfe4gt_odwkIgiB0', salesTab:'DS_DC',
@@ -367,7 +367,67 @@ async function fetchCustomers(){
 /* DS_DC คอลัมน์ A เก็บเป็นข้อความ YYYY/MM/DD → เทียบช่วงวันที่ได้ตรง ๆ · to ว่าง = ไม่มีปลาย (สัปดาห์ล่าสุด) */
 const dateLit = iso => "'" + iso.replace(/-/g, '/') + "'";
 async function fetchSalesWindow(from, to){
-  const q = "select A,B,C,D,F,I,J,K,L,M,N where F contains '" + CFG.salesKey + "' and A >= " + dateLit(from) + (to ? " and A < " + dateLit(to) : '');
+  return fetchSalesWhere("A >= " + dateLit(from) + (to ? " and A < " + dateLit(to) : ''));
+}
+/* v5.4: ดึงบิลทีละร้าน — ชีต DS_DC ใหญ่เกินจะดึงทั้งหมด
+   เปิดหน้าร้าน = ดึงร้านนั้นทันที (แซงคิว) · เบื้องหลังไล่ดึงร้านในรูทที่เลือกทีละร้าน (พร้อมกันไม่เกิน 2)
+   จำแยกต่อร้านว่าดึงล่าสุดเมื่อไหร่ (DB.shopTs) → รอบเดียวกัน (เช้า / 13.00 / 17.00) ไม่ดึงซ้ำ
+   คอลัมน์ C (AR_CODE) ถ้าชีตเก็บเป็นตัวเลข เทียบแบบข้อความจะ error → ลองแบบตัวเลขให้เอง */
+let CODE_NUMERIC = false;
+const SQ = {list: [], busy: 0, loading: new Set(), err: {}};
+const SHOP_CONC = 2;
+const codeCond = c => CODE_NUMERIC && /^\d+$/.test(c) ? 'C = ' + c : "C = '" + c + "'";
+async function fetchShopRows(code, from){
+  const w = () => fetchSalesWhere("A >= " + dateLit(from) + ' and ' + codeCond(code));
+  try { return await w(); }
+  catch (e) { if (!CODE_NUMERIC && /type|ชนิด|invalid/i.test(e.message || '')) { CODE_NUMERIC = true; return w(); } throw e; }
+}
+const shopFresh = code => !!(DB && DB.shopTs && DB.shopTs[code] >= lastRefreshSlot());
+const shopBusy = code => SQ.loading.has(code) || SQ.list.indexOf(code) >= 0;
+function queueShop(code, front, force){
+  if (!code || !DB || SQ.loading.has(code) || (!force && shopFresh(code))) return;
+  const i = SQ.list.indexOf(code); if (i >= 0) SQ.list.splice(i, 1);
+  if (front) SQ.list.unshift(code); else SQ.list.push(code);
+  pumpShops();
+}
+function queueRoute(force){ routeCodes().codes.forEach(c => queueShop(c, false, force)); }
+function pumpShops(){
+  const open = () => { const r = routeParts(); return (r[0] === 'shop' || r[0] === 'sku') ? r[1] : ''; };
+  // ร้านที่เปิดดูอยู่ได้ช่องพิเศษ ไม่ต้องรอคิวเบื้องหลัง (รวมไม่เกิน 3 ก้อน)
+  while (SQ.list.length && (SQ.busy < SHOP_CONC || (SQ.busy < SHOP_CONC + 1 && SQ.list[0] === open()))) {
+    const code = SQ.list.shift(); SQ.busy++; SQ.loading.add(code); setSync(true);
+    fetchShopBills(code).then(() => { delete SQ.err[code]; }).catch(e => { SQ.err[code] = e.message || String(e); console.warn('[บิลร้าน ' + code + ']', e); })
+      .finally(() => { SQ.busy--; SQ.loading.delete(code); if (!SQ.busy && !SQ.list.length) setSync(false); shopRerender(code); pumpShops(); });
+  }
+}
+async function fetchShopBills(code){
+  const from = addDays(todayISO(), -FULL_DAYS), rows = await fetchShopRows(code, from);
+  if (!DB) return;
+  const all = unpackLines(DB), keepFrom = addDays(todayISO(), -SALES_KEEP_DAYS);
+  // ได้ 0 บรรทัด แต่ในเครื่องมีบิลช่วงเดียวกัน = ชีตอาจกำลังถูก ERP เขียนใหม่ → เก็บของเดิมไว้ ลองใหม่รอบหน้า
+  if (!rows.length && all.some(o => o.code === code && o.d >= from)) throw new Error('ไม่พบบิล (ชีต DS_DC อาจกำลังอัปเดต)');
+  const keep = all.filter(o => o.d >= keepFrom && (o.code !== code || o.d < from)).concat(rows);
+  Object.assign(DB, packLines(keep, DB.names));
+  DB.shopTs = Object.assign({}, DB.shopTs, {[code]: Date.now()});
+  if (!lsSet(LS_DATA, DB)) console.warn('localStorage เต็ม — ไม่ได้เก็บแคช');
+  buildModel();
+}
+let rerenderT = 0;
+function shopRerender(code){
+  const r = routeParts();
+  if (r[0] === 'shop' || r[0] === 'sku') { if (r[1] === code) render(true); return; }
+  if (r[0]) return;
+  clearTimeout(rerenderT);
+  rerenderT = setTimeout(() => { const a = document.activeElement; if (a && /INPUT|TEXTAREA/.test(a.tagName)) { shopRerender(code); return; } render(true); }, 700);
+}
+/* รูทที่ผู้ใช้ดูอยู่ (ยังไม่เลือก = รูทของวันนี้) → รหัสร้านในรูทนั้น */
+function routeCodes(){
+  let r = UI.route;
+  if (!r || r === 'all') { const td = DAYS[new Date().getDay()]; r = SHOPS.some(x => x.route === td) ? td : ''; }
+  return r ? {route: r, codes: SHOPS.filter(x => (x.route || 'อื่นๆ') === r && x.code).map(x => x.code)} : {route: '', codes: []};
+}
+async function fetchSalesWhere(where){
+  const q = "select A,B,C,D,F,I,J,K,L,M,N where F contains '" + CFG.salesKey + "' and " + where;
   let res, err;
   for (let attempt = 0; attempt < 2 && !res; attempt++) { try { res = await gviz(CFG.salesSheet, CFG.salesTab, q, CHUNK_TIMEOUT); } catch (e) { err = e; } }
   if (!res) throw err;
@@ -444,14 +504,14 @@ async function loadData(force, full){
   if (!PROD) { const p = lsGet(LS_PROD); if (p && p.map) PROD = p; }
   if (cached && cached.lines && !DB) { DB = cached; buildModel(); render(); }
   /* v3.8: ไม่มีตัวเตรียมข้อมูล = อ่านชีต DS_DC แค่รอบแรกของวัน + 13:00 + 17:00 (เดิมทุก 30 นาที) */
-  const fresh = cached && cached.lines && cached.lines.length && (CFG.cacheUrl ? Date.now() - cached.ts < 10*60*1000 : cached.ts >= lastRefreshSlot());
-  if (fresh && !force) { loadingNow = false; loadProductsBg(false); loadBqBg(false); return; }
+  const fresh = cached && cached.lines && (cached.lines.length || cached.shopTs) && (CFG.cacheUrl ? Date.now() - cached.ts < 10*60*1000 : cached.ts >= lastRefreshSlot());
+  if (fresh && !force) { loadingNow = false; loadProductsBg(false); loadBqBg(false); queueRoute(false); return; }
   Object.assign(LOAD, {on:true, done:0, total:0, t0:Date.now(), msg:'กำลังเตรียมข้อมูล', error:null});
   setSync(true);
   const tick = setInterval(updateLoadUI, 1000);
   const pCust = fetchCustomers().then(custs => {
-    if (!DB) { DB = {ts: 0, custs, skus: [], units: [], names: {}, lines: []}; LOAD.pending = true; }
-    else { DB.custs = custs; if (!DB.lines.length) LOAD.pending = true; }
+    if (!DB) { DB = {ts: 0, custs, skus: [], units: [], names: {}, lines: []}; LOAD.pending = !!full; }
+    else { DB.custs = custs; if (!DB.lines.length) LOAD.pending = !!full; }
     buildModel(); render(true);
     loadBqBg(false);   // v3.3: ประวัติ 3 เดือนก่อน (BigQuery) โหลดคู่ขนานกับบิล DS_DC — ร้านที่มีในเครื่องแล้วไม่ยิงซ้ำ
   });
@@ -461,12 +521,20 @@ async function loadData(force, full){
   /* ทางเร็ว: ตัวเตรียมข้อมูล (Apps Script) · ไม่ได้ = ดึงจากชีต DS_DC ตรงแบบเดิม */
   const pSales = (async () => {
     if (CFG.cacheUrl) { try { const c = await fetchCache(); if (c) return {cache: c}; } catch (e) { console.warn('[cache] ใช้ไม่ได้ → ดึงชีตตรง', e); } }
+    if (!full) return {perShop: true};   // v5.4: ปกติ = ดึงทีละร้าน · ดึงทั้งหมดเฉพาะกดในตั้งค่า
     return fetchSales(from);
   })();
   pSales.catch(() => {});
   try {
     await pCust;
     const inc = await pSales;
+    if (inc.perShop) {
+      DB.ts = Date.now(); STALE = null;
+      if (!lsSet(LS_DATA, DB)) console.warn('localStorage เต็ม — ไม่ได้เก็บแคช');
+      queueRoute(force);
+      const rp = routeParts(); if (rp[0] === 'shop' || rp[0] === 'sku') queueShop(rp[1], true, force);
+      return;
+    }
     if (inc.cache) {
       const c = inc.cache, age = Date.now() - c.ts;
       DB = {ts: Date.now(), srcTs: c.ts, custs: DB.custs, skus: c.skus, units: c.units, names: c.names || {}, lines: c.lines};
@@ -848,6 +916,12 @@ function statusHTML(){
   if (!STALE) return '';
   return '<section class="rt-glass cc-note"><span class="rt-tile rt-tile-sm rt-tile-amber">' + ic('clock') + '</span><div class="cc-row-body"><span class="rt-cell-main">' + (STALE.at ? 'ใช้ข้อมูล ณ ' + STALE.at : 'ยังไม่มีประวัติการซื้อ') + '</span><span class="rt-cell-sub">' + esc(STALE.why) + '</span></div><button class="rt-btn rt-btn-glass rt-btn-sm" type="button" onclick="loadData(true)">' + ic('sync', 16) + 'ลองใหม่</button></section>';
 }
+function shopLoadHTML(code){
+  const t = DB && DB.shopTs && DB.shopTs[code];
+  if (shopBusy(code)) return '<section class="rt-glass cc-note"><span class="rt-tile rt-tile-sm rt-tile-navy">' + ic('sync') + '</span><div class="cc-row-body"><span class="rt-cell-main">กำลังดึงบิลร้านนี้จาก DS_DC...</span><span class="rt-cell-sub">ดึงเฉพาะร้านนี้ · ' + (t ? 'ตอนนี้แสดงข้อมูล ณ ' + timeTH(t) : 'รอสักครู่') + '</span></div></section>';
+  if (SQ.err[code]) return '<section class="rt-glass cc-note"><span class="rt-tile rt-tile-sm rt-tile-amber">' + ic('clock') + '</span><div class="cc-row-body"><span class="rt-cell-main">ดึงบิลร้านนี้ไม่สำเร็จ' + (t ? ' · ใช้ข้อมูล ณ ' + timeTH(t) : '') + '</span><span class="rt-cell-sub">' + esc(SQ.err[code]) + '</span></div><button class="rt-btn rt-btn-glass rt-btn-sm" type="button" onclick="queueShop(\'' + encA(code) + '\',true,true);render(true)">ลองใหม่</button></section>';
+  return '';
+}
 function setFloat(html){ $('floating').innerHTML = html ? '<div class="cc-float">' + html + '</div>' : ''; $('view').classList.toggle('cc-has-float', !!html); }
 
 function render(keepScroll){
@@ -935,12 +1009,13 @@ function renderShopCards(){
 
 /* ════════ หน้าร้าน ════════ */
 function pageShop(code){
+  if (!shopFresh(code)) queueShop(code, true);   // v5.4: เปิดร้าน = ดึงบิลร้านนี้ก่อน
   const s = SHOP_BY.get(code), M = shopModel(code);
   topbar({title: s.name, sub: 'รหัสร้าน ' + s.code, back: '#/'});
   const ll = /(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)/.exec(s.loc || '');
   const cnt = {all:M.skus.length, reg:0, irr:0, stop:0, nw:0}; M.skus.forEach(k => cnt[k.status]++);
   const f = (label, val) => '<div><span class="rt-caption">' + label + '</span><span class="rt-cell-main">' + val + '</span></div>';
-  let h = pageHead('') + statusHTML() + bqNoteHTML(code) +
+  let h = pageHead('') + statusHTML() + shopLoadHTML(code) + bqNoteHTML(code) +
     '<section class="rt-glass cc-shop" style="gap:16px">' + shopCardHTML(s, true) +
       '<div class="cc-acts">' +
         (s.phone ? '<a class="rt-btn rt-btn-glass rt-btn-sm" href="tel:' + esc(s.phone) + '">' + ic('phone', 16) + esc(s.phone) + '</a>' : '') +
