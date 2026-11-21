@@ -8,11 +8,16 @@
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="icon" href="icons/rattana-prebook-32.png">
 <link rel="apple-touch-icon" href="icons/rattana-prebook-180.png">
-<title>Rattana Pre-Book v1.4</title>
+<title>Rattana Pre-Book v1.5</title>
 <!-- หน้าตา: Rattana CI (เฉพาะแอปนี้ · Surat เคาะ 2026-11-21) -->
 <link rel="stylesheet" href="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.css">
 <script src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.js" defer></script>
-<script src="https://accounts.google.com/gsi/client" async defer></script>
+<link rel="preconnect" href="https://script.google.com">
+<link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://drive.google.com">
+<link rel="preconnect" href="https://lh3.googleusercontent.com">
 <style>
 :root{--pad:16px;--gap:12px;--nav-space:110px;--card-r:22px}
 body{padding-bottom:var(--nav-space)}
@@ -185,8 +190,9 @@ details summary{cursor:pointer;font-size:13px;font-weight:700;color:var(--ink);p
 
 <script>
 'use strict';
-const APP_VER = 'v1.4';
-const SHOPS_KEY = 'rattana_prebook_shops';
+const APP_VER = 'v1.5';
+const ITEMS_KEY = 'rattana_prebook_items';
+const SHOPS_KEY = 'rattana_prebook_shops2';
 const INIT_KEY = 'rattana_prebook_init';
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbwbvjesdQj3HeH7T2zSXHOYnIZNFsy9yBU2FfRof286LU1PmlpDF2GKSyIUG3j5fCoM/exec';
 const CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -231,7 +237,7 @@ function checkRattanaSession() { try { const p = JSON.parse(localStorage.getItem
 function saveSharedSession(u) { try { const payload = JSON.stringify({ data: u, exp: Date.now() + 30 * 864e5 }); SESSION_KEYS.forEach(k => localStorage.setItem(k, payload)); } catch (e) {} }
 function getSig() { try { return localStorage.getItem(SIG_KEY) || ''; } catch (e) { return ''; } }
 function setSig(s) { try { s ? localStorage.setItem(SIG_KEY, s) : localStorage.removeItem(SIG_KEY); } catch (e) {} }
-function logout() { try { localStorage.removeItem(INIT_KEY); localStorage.removeItem(SHOPS_KEY); } catch (e) {} SESSION_KEYS.forEach(k => { try { localStorage.removeItem(k); } catch (e) {} }); setSig(''); location.reload(); }
+function logout() { try { [INIT_KEY, SHOPS_KEY, ITEMS_KEY].forEach(k => localStorage.removeItem(k)); } catch (e) {} SESSION_KEYS.forEach(k => { try { localStorage.removeItem(k); } catch (e) {} }); setSig(''); location.reload(); }
 
 /* ───── เรียกหลังบ้าน ───── */
 async function gas(q, body) {
@@ -324,12 +330,28 @@ function vSaleList() {
   $('#lo').onclick = () => UI().confirm({ title: 'ออกจากระบบ?', message: 'ต้องเข้าสู่ระบบด้วย Google ใหม่ในครั้งถัดไป', confirmText: 'ออกจากระบบ' }).then(ok => ok && logout());
   $('#app').querySelectorAll('.camp').forEach(b => b.onclick = () => openCamp(S.camps.find(c => c.id === b.dataset.c)));
 }
+/* v1.5 สินค้ารายแคมเปญ: จำในเครื่อง (ตามเวลาแก้แคมเปญ) + โหลดล่วงหน้าทันทีที่เปิดแอป */
+const itemsKey = c => c.id + '|' + (c.updatedAt || '');
+const itemsP = {};
+function cachedItems(c) { try { const m = JSON.parse(localStorage.getItem(ITEMS_KEY) || '{}'), e = m[itemsKey(c)]; if (e && Date.now() - e.t < 30 * 6e4) return e.items; } catch (e) {} return null; }
+function fetchItems(c) {
+  if (S.items[c.id]) return Promise.resolve(S.items[c.id]);
+  const hit = cachedItems(c); if (hit) { S.items[c.id] = hit; return Promise.resolve(hit); }
+  if (!itemsP[c.id]) itemsP[c.id] = gas('action=items&id=' + encodeURIComponent(c.id)).then(r => {
+    S.items[c.id] = r.items;
+    try { const m = JSON.parse(localStorage.getItem(ITEMS_KEY) || '{}'); Object.keys(m).forEach(k => { if (k.split('|')[0] === c.id || Date.now() - m[k].t > 864e5) delete m[k]; }); m[itemsKey(c)] = { t: Date.now(), items: r.items }; localStorage.setItem(ITEMS_KEY, JSON.stringify(m)); } catch (e) {}
+    return r.items;
+  }).finally(() => { delete itemsP[c.id]; });
+  return itemsP[c.id];
+}
+function prefetchItems() { S.camps.filter(c => c.live === 'เปิดรับ').slice(0, 3).forEach(c => fetchItems(c).catch(() => {})); }
 async function openCamp(c) {
   S.cur = c; S.brand = 'ทั้งหมด'; S.q = ''; S.show = 60; loadCart();
+  if (!S.items[c.id]) { const hit = cachedItems(c); if (hit) S.items[c.id] = hit; }
   go('present');
   if (!S.items[c.id]) {
     $('#plist') && ($('#plist').innerHTML = '<div class="grid">' + skel(4).replace(/margin-top:12px/g, '') + '</div>');
-    try { const r = await gas('action=items&id=' + encodeURIComponent(c.id)); S.items[c.id] = r.items; }
+    try { await fetchItems(c); }
     catch (e) { if ($('#plist')) $('#plist').innerHTML = errBox(e.message, 'openCamp(S.cur)'); return; }
     if (S.page === 'present') { vPresent(); updCart(); }
   }
@@ -425,7 +447,7 @@ let shopsP = null;
 function loadShops() {
   if (S.shops) return Promise.resolve(S.shops);
   try { const c = JSON.parse(localStorage.getItem(SHOPS_KEY) || 'null'); if (c && c.sig === getSig() && Date.now() - c.t < 6 * 36e5) { S.shops = c.shops; return Promise.resolve(S.shops); } } catch (e) {}
-  if (!shopsP) shopsP = gas('action=shops').then(r => { S.shops = r.shops; try { localStorage.setItem(SHOPS_KEY, JSON.stringify({ sig: getSig(), t: Date.now(), shops: r.shops })); } catch (e) {} return S.shops; }).finally(() => { shopsP = null; });
+  if (!shopsP) shopsP = gas('action=shops').then(r => { S.shops = r.f === 2 ? r.shops.map(x => ({ c: x[0], n: x[1], a: x[2], mine: !!x[3], img: x[4] ? 'https://drive.google.com/thumbnail?id=' + x[4] + '&sz=w160' : '' })) : r.shops; try { localStorage.setItem(SHOPS_KEY, JSON.stringify({ sig: getSig(), t: Date.now(), shops: S.shops })); } catch (e) {} return S.shops; }).finally(() => { shopsP = null; });
   return shopsP;
 }
 async function pickShop(after) {
@@ -639,7 +661,7 @@ function save(mode) {
       const r = await gas('', { action: 'saveCampaign', camp: Object.assign({}, c, { status }) });
       const i = S.camps.findIndex(x => x.id === r.camp.id); if (i >= 0) S.camps[i] = r.camp; else S.camps.unshift(r.camp);
       S.counts[r.camp.id] = (S.preview || []).filter(p => r.camp.exclude.indexOf(p.c) < 0).length || S.counts[r.camp.id] || 0;
-      delete S.items[r.camp.id];
+      delete S.items[r.camp.id]; try { const m = JSON.parse(localStorage.getItem(ITEMS_KEY) || '{}'); Object.keys(m).forEach(k => { if (k.split('|')[0] === r.camp.id) delete m[k]; }); localStorage.setItem(ITEMS_KEY, JSON.stringify(m)); } catch (e) {}
       UI().toast(status === 'เปิดรับ' ? 'เปิดให้เซลล์จองแล้ว' : status === 'ยกเลิก' ? 'ปิดรับแล้ว' : 'บันทึกร่างแล้ว', { type: 'success' });
       S.edit = null; go('blist');
     } catch (e) { UI().alert({ type: 'error', title: 'บันทึกไม่สำเร็จ', message: e.message }); }
@@ -692,8 +714,9 @@ function showLogin(msg) {
     '<form class="telrow" id="telForm"><input class="rt-input" id="tel" type="tel" inputmode="tel" autocomplete="tel" maxlength="15" placeholder="เบอร์โทรร้าน" aria-label="เบอร์โทร"><button class="rt-btn rt-btn-gold" id="telBtn">' + ic('phone') + 'เข้าใช้งาน</button></form>' +
     '<div class="choose" id="choose"></div><div class="err" id="lgErr">' + esc(msg || '') + '</div></div>';
   $('#telForm').onsubmit = e => { e.preventDefault(); phoneLogin(); };
+  if (!document.getElementById('gsi')) { const g = document.createElement('script'); g.id = 'gsi'; g.src = 'https://accounts.google.com/gsi/client'; g.async = true; document.head.appendChild(g); }   /* v1.5 โหลดปุ่ม Google เฉพาะตอนต้องล็อกอิน */
   const render = () => {
-    if (!(window.google && google.accounts && google.accounts.id)) return setTimeout(render, 200);
+    if (!(window.google && google.accounts && google.accounts.id)) return setTimeout(render, 150);
     google.accounts.id.initialize({ client_id: CLIENT_ID, callback: onGoogle, auto_select: false });
     google.accounts.id.renderButton($('#gbtn'), { type: 'standard', size: 'large', theme: 'filled_blue', text: 'signin_with', shape: 'pill' });
   };
@@ -736,7 +759,8 @@ async function boot(force) {
     const r = await gas('action=init');
     try { localStorage.setItem(INIT_KEY, JSON.stringify({ sig: getSig(), r })); } catch (e) {}
     S.me = r.me; S.camps = r.campaigns; S.counts = r.counts;
-    if (!S.me.isCustomer) setTimeout(() => loadShops().catch(() => {}), 800);
+    setTimeout(prefetchItems, 300);
+    if (!S.me.isCustomer) setTimeout(() => loadShops().catch(() => {}), 1200);
     if (shown && !force) { if (S.page === 'list' || S.page === 'blist') go(S.page, true); return; }   /* v1.3 เปิดจากข้อมูลที่จำไว้ทันที แล้วค่อยอัปเดต */
     if (force) { S.items = {}; S.shops = null; S.catalog = null; UI().toast('โหลดข้อมูลใหม่แล้ว', { type: 'success', duration: 1500 }); }
     go(force && (S.page === 'list' || S.page === 'blist') ? S.page : 'list');
