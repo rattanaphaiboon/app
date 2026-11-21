@@ -1,4 +1,4 @@
-# Rattana CI v1.4.0
+# Rattana CI v1.4.1
 
 UI กลางของบริษัท — Crystal Luxury (โหมดสว่าง) + Luxury Dark (โหมดมืด)
 ใช้ได้ทั้ง iOS · Android · Laptop พร้อม popup และโมชันแบบพรีเมียม
@@ -46,6 +46,9 @@ Sidebar สีกรมท่า: `<img class="rt-logo-on-navy" src=".../rattana
 3. `<html data-theme="light">` (หรือ `dark`) และ `<body class="rt-app">`
 4. ใช้ class `rt-` ของ Rattana CI เช่น `rt-btn rt-btn-gold`, `rt-input`, `rt-select`, `rt-search`, `rt-glass` — อย่าเขียนสไตล์ทับเอง
 5. ฟอร์ม/ปุ่ม/รายการ ดูตัวอย่างและกด "คัดลอกโค้ด" จากหน้า demo
+
+## ใหม่ใน v1.4.1
+- กดช่องค้นหา / ช่องกรอก / ดรอปดาวน์ ไม่มีขอบดำแล้ว เหลือขอบทอง + วงทองอ่อน (Surat 2026-11-21: ใช้ทุกแอป)
 
 ## ใหม่ใน v1.4
 - `<select>` ทุกตัวในหน้า `rt-app` ได้ดรอปดาวน์แบบ Rattana อัตโนมัติ แม้ลืมใส่ class `rt-select` (ตัวที่ไม่มี class ได้หน้าตากล่องแบบ Rattana ด้วย)

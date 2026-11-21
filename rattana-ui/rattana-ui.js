@@ -1,4 +1,4 @@
-/* Rattana CI v1.4.0 — behaviour helpers (no dependencies). window.RattanaUI */
+/* Rattana CI v1.4.1 — behaviour helpers (no dependencies). window.RattanaUI */
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement, win = window;
@@ -113,7 +113,7 @@
   }
 
   var UI = {
-    version: '1.4.0',
+    version: '1.4.1',
     icons: ICON,
     platform: platform,
 
