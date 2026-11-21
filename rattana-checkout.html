@@ -3323,7 +3323,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-21 · 150';
+const BUILD = '2026-11-21 · 151';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -3378,6 +3378,7 @@ const KEEP_RND = new Map();
    เริ่มวันทำงาน 21/11 — วันที่ 20/11 ทีมยิงปลีกรอบ 1 ค้างอยู่ (ยอดยิงผูกกับรอบ ย้ายรอบกลางวันยอดจะไม่ตามไป) */
 const RETAIL_RND  = new Map();
 const RETAIL_FROM = '2026-11-21';
+const RETAIL_R1   = 1;                               // ปลีก = รอบ 1 เสมอ (BUILD 151 — 142–150 รอบตามช่วงส่ง = รอบ 2 ทุกใบ)
 const retailGate  = () => SRC === 'real' && WAREHOUSE === 'W4' && TODAY >= RETAIL_FROM;
 const smBranch = remark => { const m = String(remark || '').match(/สาขา\s*([^·\n]+?)\s*·/) || String(remark || '').match(/สาขา\s*([^·\n]+?)\s*$/m);
                               return m ? cln(m[1]) : ''; };
@@ -3508,8 +3509,58 @@ const roundOf = time => (ROUNDS.find(r => time >= r.from && time < r.to) || ROUN
 const SM_RND   = 1;                                  // SM (สยามมิตร) = รอบ 1 เสมอ ไม่ดูเวลาบิล (BUILD 118 · ผู้ใช้ 18/11 "w4 งาน sm ย้ายมารอบ1")
 const rndOf    = o => HR_REFS.has(o.ref) ? HR_RND : SM_REFS.has(o.ref) ? SM_RND
                     : KEEP_RND.has(o.ref) && chanOf(o.ref).key === 'BK' ? KEEP_RND.get(o.ref)
-                    : RETAIL_RND.has(o.ref) && retailGate() && chanOf(o.ref).key === 'BV' ? RETAIL_RND.get(o.ref)   // ปลีกตามพรีปลีก (BUILD 142)
+                    : retailGate() && chanOf(o.ref).key === 'BV' ? RETAIL_R1      // ปลีก = รอบ 1 เสมอ (BUILD 151)
                     : roundOf(o.time);
+/* ปลีก = รอบ 1 เสมอ (BUILD 151 · ผู้ใช้ 21/11 "งานปลีกจะมีแค่เที่ยวเดียวอยู่แล้ว เราแค่ต้องการข้อมูลพวกใบจองอะไรบ้างที่ต้องเช็คโดยให้ยึดจากจัดรถ
+   แต่ไม่ได้นึกถึงรอบส่งเลยว่าเป็นส่งพรุ่งนี้ ช่วยปรับให้งานปลีกไปอยู่รอบ1ให้หน่อย") — 142–150 รอบตามช่วงส่งในพรีปลีก = ส่งวันถัดไปเที่ยว 1 = รอบ 2 ทุกใบ
+   ยังต้องอยู่ในพรีปลีกก่อนถึงเข้าเช็คตามทีม (retailWait) เหมือน 142 · ไม่ดูเวลาบิล (เหมือน SM) · RETAIL_R1 ประกาศไว้ข้าง RETAIL_FROM */
+/** ยอดปลีกที่ยิงไว้ในรอบ 2 ตอนรุ่น 142–150 → ย้ายไปรอบ 1 (ยอดยิงผูกกับรอบ — ไม่ย้าย = ยิงใหม่)
+ *  เฉพาะกองที่ป้ายเป็นปลีกล้วน หรือปลีก+SM (SM รอบ 1 อยู่แล้ว) · กองที่ปนส่ง/ออนไลน์/มาร์ท/ทุกช่องทาง แยกไม่ได้ ไม่แตะ
+ *  ย้าย: ยอดยิง ยอดโอน C4 ทดแทน หน่วยที่ยิง ส่วนที่ลงชีตแล้ว ป้ายปิดงาน · ลงแถวในชีต กำลังเช็ค ให้เครื่องอื่นเห็นว่ายอดค้างย้ายรอบแล้ว
+ *  เรียกทุกครั้งที่โหลดใบจอง (รันซ้ำได้ — ไม่มีอะไรเหลือในรอบ 2 ก็ไม่ทำอะไร) */
+function retailR1Move() {
+  if (!retailGate()) return 0;
+  const ok = t => { const c = tagChans(t); return !!c && c.includes('BV') && c.every(x => x === 'BV' || x === 'SM'); };
+  const add = (a, b) => a == null ? b : Array.isArray(a) ? a.concat(b) : typeof a === 'object'
+    ? (Object.keys(b).forEach(k => { a[k] = (a[k] || 0) + b[k]; }), a) : a + b;
+  const moved = new Set(), re = /^(t\||u\|)?(.+)@2#([A-Z+]+)$/;
+  ['scans', 'tscans', 'subs', 'used', 'tsent', 'tused', 'lvs', 'usedLv'].forEach(n => {
+    const m = state[n]; if (!m) return;
+    Object.keys(m).forEach(k => {
+      const x = k.match(re); if (!x || !ok(x[3])) return;
+      const nk = `${x[1] || ''}${x[2]}@${RETAIL_R1}#${x[3]}`;
+      m[nk] = add(m[nk], m[k]); delete m[k];
+      if (n === 'scans' || n === 'tscans') moved.add(`${x[1] === 't|' ? 't' : 's'}|${x[2]}|${x[3]}`);
+    });
+  });
+  const ss = state.subsSent || {};               // ส่งทดแทนแล้ว (ไม่แยกป้าย) — ย้ายเมื่อไม่มีกองทดแทนรอบ 2 ของสินค้านั้นเหลือ
+  Object.keys(ss).filter(k => /@2$/.test(k)).forEach(k => { const pid = k.slice(0, -2);
+    if (Object.keys(state.subs || {}).some(s => s.startsWith('u|' + pid + '@2'))) return;
+    const nk = pid + '@' + RETAIL_R1; ss[nk] = add(ss[nk], ss[k]); delete ss[k]; });
+  const dj = state.doneJob || {};
+  Object.keys(dj).forEach(k => { const p = k.split('|'); if (p.length === 3 && p[0] === '2' && ok(p[2])) {
+    const nk = `${RETAIL_R1}|${p[1]}|${p[2]}`; if (!dj[nk]) dj[nk] = dj[k]; delete dj[k]; } });
+  if (!moved.size) return 0;
+  save();
+  /* แถวในชีต กำลังเช็ค — แถวล่าสุดของ (เครื่อง × ทีม × ป้าย × สินค้า × รอบ) คือยอดค้าง: รอบ 2 = 0 · รอบ 1 = ยอดหลังย้าย */
+  const AJ = allJobs(), d = new Date(), t2 = x => String(x).padStart(2, '0');
+  const tm = `${t2(d.getHours())}.${t2(d.getMinutes())}.${t2(d.getSeconds())}`;
+  moved.forEach(s => {
+    const [kind, pid, tag] = s.split('|'), p = byId[pid], j = p && AJ.find(x => x.round === RETAIL_R1 && x.skus[pid]);
+    if (!p || !j) return;
+    const u = p.units[p.units.length - 1], tr = kind === 't';
+    const grp = tr ? `โอน ${FROM_WH}→${WAREHOUSE}${tagGroupSfx(tag)}` : `${j.team.code} ${j.team.name}${tagGroupSfx(tag)}`;
+    const left = rnd => tr ? tLeft(pid, rnd, tag) : Math.max(0, (poolsOf(pid, rnd)[tag] || 0) - tLeft(pid, rnd, tag));
+    [2, RETAIL_R1].forEach(rnd => { const ea = left(rnd); liveBuf.push({
+      'วันที่': thaiDate(TODAY), 'คลัง': tr ? FROM_WH : WAREHOUSE, 'บาร์โค้ด': u.code, 'สินค้า': p.name, 'หน่วย': u.label,
+      'ต้องออก': '', 'ยิงแล้ว': ea / u.qtyEA, 'ขาด': '', '-': 'ย้ายปลีกรอบ 2 → รอบ 1', 'ทดแทน': '', 'ชื่อผู้ยิง': CHECKER,
+      'วันที่ยิง': thaiDate(d), 'เวลายิง': tm, 'เครื่อง': DEVICE, 'ยิงแล้ว(EA)': ea, 'ยิงแยกหน่วย': fmtUnitsTxt(ea, p.units),
+      'เลขที่ใบจอง': '', 'ชื่อร้าน': '', 'ยืนยันแล้ว': `${rndTxt(rnd)} · ${LIVE_LEFT} ${ea} ชิ้น`, 'รหัสเซล': '', 'กลุ่มที่เช็ค': grp }); });
+  });
+  if (liveBuf.length) flushLive();
+  toast(`ปลีกย้ายไปรอบ 1 — ยอดที่ยิงไว้ในรอบ 2 ย้ายตามมาแล้ว ${fmtN(moved.size)} รายการ`, 'success');
+  return moved.size;
+}
 const rndLabel = n => n === HR_RND ? 'หน้าร้าน' : (ROUNDS.find(r => r.n === n) || {}).label || '';
 const rndTxt   = n => n === HR_RND ? 'หน้าร้าน' : `รอบ ${n}`;                // ช่อง "ยืนยันแล้ว" ของชีต กำลังเช็ค
 const rndParse = s => HR_RE.test(String(s || '')) ? HR_RND : parseInt(s, 10) || 0;   // อ่านกลับจาก _log
@@ -7570,6 +7621,7 @@ async function reloadOrders(loud, keep) {
     JOBS = buildJobs(); rebuildStores(); CHANS = buildChans(); ROUTE_BILLS = buildRouteBills();
     migrateStoreGroups();                     // ยอดเช็คตามร้านปลีกรายร้านของรุ่นก่อน 51 → ย้ายเข้ากองรายเซล
     migrateStoreBills();                      // ยอดเช็คตามร้านรายร้านของรุ่นก่อน 83 → ย้ายลงรายใบจอง
+    retailR1Move();                           // ยอดปลีกที่ยิงไว้รอบ 2 (รุ่น 142–150) → รอบ 1 (BUILD 151)
     lastHit = null; promoVer++;                // ใบจองใหม่ → จับคู่ของแถมกับโปรใหม่
 
     set(`ออเดอร์ ${fmtN(orders.length)} บรรทัด · ${fmtN(products.length)} ตัว`, 'ok');
@@ -8231,9 +8283,10 @@ async function loadRetail() {
       const o = ref[bill]; if (!o || e.ts >= o.ts) ref[bill] = e;                 // บิลเดียวหลายแถว = อัปเดตล่าสุด
       if (e.type && !(VEH_INFO[plate] || {}).type) VEH_INFO[plate] = Object.assign(VEH_INFO[plate] || {}, { type:e.type });
     });
-    /* รอบตามช่วงส่ง (BUILD 142) — แบบงานส่ง: ส่งวันนี้ เที่ยว 2 = รอบ 1 · วันส่งถัดไป (วันแรกหลังวันทำงานในแท็บนี้ — เสาร์ → จันทร์) เที่ยว 1 = รอบ 2 */
+    /* ปลีกรอบ 1 เสมอ (BUILD 151 — 142–150 รอบตามช่วงส่ง: วันส่งถัดไปเที่ยว 1 = รอบ 2 ทุกใบ) · rndOf ไม่ใช้ e.rnd แล้ว
+       RETAIL_RND ยังเก็บไว้ = รายการบิลที่อยู่ในพรีปลีก เปลี่ยนเมื่อไหร่สร้างงานใหม่ (บิลเพิ่งจัดรถ → เข้าเช็คตามทีม) */
     const next = Object.values(ref).map(e => e.ship).filter(s => s && s > day).sort()[0] || '';
-    Object.values(ref).forEach(e => { e.rnd = e.ship === day && e.trip === 2 ? 1 : e.ship === next && e.trip === 1 ? 2 : 0; });
+    Object.values(ref).forEach(e => { e.rnd = RETAIL_R1; });
     const sig = JSON.stringify([key, next, Object.values(ref).map(e => [e.ref, e.plate, e.ship, e.trip])]), changed = sig !== RETAIL.sig;
     RETAIL = { key, ref, next, err:'', at:Date.now(), sig };
     if (changed) {
