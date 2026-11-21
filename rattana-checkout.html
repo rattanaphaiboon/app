@@ -3323,7 +3323,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-21 · 151';
+const BUILD = '2026-11-21 · 152';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -11440,7 +11440,7 @@ const W1_SRC_TXT = { scan:'ยิงบาร์โค้ด', name:'ค้น�
 let W1_LIVE = [], W1_LIVE_T = null;
 const W1_DOC_RE = /^[A-Z]{2,4}\d{4,}\/\d{2,}$/, W1_BATCH_RE = /^(W\d)-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})$/;
 /* ใบจัดปลีกรวมตามหน่วยรถ (BUILD 130) — รหัส W1-01-191126 (คลัง-หน่วยรถ-วันที่ · บุหรี่ = 00) · ใบจัดรายคนจัด W1-01-02-191126 ยังยิงได้ (ปลีก = เปิดงานหน่วยรถ) */
-const W1_UNIT_RE = /^(W\d)-(\d{2})-(\d{2})(\d{2})(\d{2})$/;
+const W1_UNIT_RE = /^(W\d)-(C?\d{2})-(\d{2})(\d{2})(\d{2})$/;      // + บุหรี่แยกหน่วยรถ W1-C01-221126 (BUILD 152)
 const w1IsBatch = c => W1_BATCH_RE.test(c) || W1_UNIT_RE.test(c);
 const W1S = () => (state.w1 ||= { jobs:{}, done:{}, unit:{} });
 const w1n = v => { const n = parseFloat(String(v ?? '').replace(/,/g, '')); return isNaN(n) ? 0 : n; };
@@ -11675,7 +11675,7 @@ function w1BatchCode(x, day) {
 }
 /** ใบจัด → งานเช็ค: แถวละสินค้า ยอดรวมทุกบิล (ผู้ใช้ตอบ: ไม่ต้องแบ่งลงบิล) · หน่วยลงชีต = หน่วยใหญ่สุดของสินค้า (intRow แปลงเป็นจำนวนเต็มให้) */
 function w1BatchToJob(d, day) {
-  const iso = day.replace(/\//g, '-'), store = `ใบจัด ${d.cig ? 'บุหรี่' : 'หน่วยรถ ' + d.unit} · ${d.chan}`, lines = [];
+  const iso = day.replace(/\//g, '-'), store = `ใบจัด ${w1UnitName(d)} · ${d.chan}`, lines = [];
   Object.values(d.items).forEach(L => {
     let ea = 0, best = null;
     L.rows.forEach(r => { const B = w1LineBase(r.bc, r.name, r.unit); ea += Math.round((r.qty + r.free) * B.uq); if (!best || B.uq > best.uq) best = B; });
@@ -11697,6 +11697,12 @@ async function w1BatchJob(code) {
   if (!hits.length) return null;
   const d = hits.length === 1 ? hits[0] : await new Promise(res => ddOpen(w1Anchor(), 'เลือกใบจัด — หน่วยรถ+คนจัดเดียวกันแต่คนละช่องทาง',
     hits.map((h, i) => ({ v:i, title:`${h.chan} · ${h.unit}`, sub:`${fmtN(h.nLines)} รายการ · ${fmtN(h.nBills)} บิล` })), i => res(hits[i])));
+  if (d.chan === 'ปลีก' && d.cig && w1CigSplit(day)) {             // ใบบุหรี่รายคนจัด ครอบหลายหน่วยรถ → เลือกหน่วยรถ (BUILD 152)
+    const us = w1UnitBatches(day).filter(G => G.cigU && G.batches.includes(d.bc)); if (!us.length) return null;
+    const G = us.length === 1 ? us[0] : await new Promise(res => ddOpen(w1Anchor(), 'บุหรี่แยกตามหน่วยรถแล้ว — เลือกหน่วยรถ',
+      us.map((x, i) => ({ v:i, title:`🚬 บุหรี่ หน่วยรถ ${x.unit}`, sub:`${x.bc} · ${fmtN(x.nLines)} รายการ · ${fmtN(x.nBills)} บิล` })), i => res(us[i])));
+    return G ? w1UnitJob(G.bc) : null;
+  }
   if (d.chan === 'ปลีก') return w1UnitJob(w1UnitKey(d, day));       // ปลีก = งานหน่วยรถ (BUILD 130)
   return w1BatchToJob(d, day);
 }
@@ -11708,12 +11714,29 @@ function w1UnitKey(d, day) {
   const dd = day.split('/'), wh = String(d.bc || 'W1').split('-')[0] || 'W1';
   return `${wh}-${d.cig ? '00' : ('00' + String(d.unit || '').replace(/\D/g, '')).slice(-2)}-${dd[2]}${dd[1]}${dd[0].slice(-2)}`;
 }
+/* บุหรี่ปลีกแยกตามหน่วยรถ (BUILD 152 · ผู้ใช้ส่งรูป 21/11 "บุหรี่ (ทุกหน่วยรถ) W1-00-211126" "w1 แยกรหัสหน่วยรถ ไม่เอารวมแบบนี้"
+   ผู้ใช้ตอบ: ใบบุหรี่แยกต่อหน่วยรถ · เริ่มวันทำงาน 22/11 — 21/11 โอเช็คใบรวมไป 99% แล้ว ให้ยืนยันใบรวมแบบเดิม)
+   รหัส W1-C01-221126 (C = บุหรี่ · หน่วยรถ P01) · รายการบุหรี่ในใบจัดของ picking แยกหน่วยรถอยู่แล้ว (ik = "P01|ชื่อ")
+   ยิงรหัสใบบุหรี่รายคนจัดของ picking (W1-00-03-221126 ครอบหลายหน่วยรถ) = เลือกหน่วยรถ · let = ทดสอบเปลี่ยนวันได้ */
+let W1_CIG_SPLIT = '2026/11/22';
+const w1CigSplit = day => day >= W1_CIG_SPLIT;
+function w1CigKey(d, unit, day) {
+  const dd = day.split('/'), wh = String(d.bc || 'W1').split('-')[0] || 'W1';
+  return `${wh}-C${('00' + String(unit || '').replace(/\D/g, '')).slice(-2)}-${dd[2]}${dd[1]}${dd[0].slice(-2)}`;
+}
+const w1UnitName = d => d.cig ? (d.cigU ? 'บุหรี่ หน่วยรถ ' + d.unit : 'บุหรี่') : 'หน่วยรถ ' + d.unit;
 function w1UnitBatches(day) {
-  const g = {};
+  const g = {}, split = w1CigSplit(day);
+  const grp = (key, d, unit, cigU) => { const G = g[key] ||= { bc:key, unit, cig:d.cig, cigU, chan:'ปลีก', items:{}, bills:{}, pickers:[], batches:[] };
+    if (!G.batches.includes(d.bc)) G.batches.push(d.bc); if (d.who && !G.pickers.includes(d.who)) G.pickers.push(d.who); return G; };
   w1Batches(day).filter(d => d.chan === 'ปลีก').forEach(d => {
-    const key = w1UnitKey(d, day);
-    const G = g[key] ||= { bc:key, unit:d.unit, cig:d.cig, chan:'ปลีก', items:{}, bills:{}, pickers:[], batches:[] };
-    G.batches.push(d.bc); if (d.who && !G.pickers.includes(d.who)) G.pickers.push(d.who);
+    if (d.cig && split) {                          // บุหรี่ → ใบละหน่วยรถ
+      Object.entries(d.items).forEach(([ik, L]) => { const unit = ik.split('|')[0], G = grp(w1CigKey(d, unit, day), d, unit, true);
+        L.rows.forEach(r => { G.bills[r.bill] = r.shop || 1; });
+        (G.items[ik] ||= { name:L.name, rows:[] }).rows.push(...L.rows); });
+      return;
+    }
+    const G = grp(w1UnitKey(d, day), d, d.unit, false);
     Object.assign(G.bills, d.bills);
     Object.entries(d.items).forEach(([ik, L]) => { (G.items[ik] ||= { name:L.name, rows:[] }).rows.push(...L.rows); });
   });
@@ -11737,7 +11760,7 @@ async function w1UnitKeyOf(code) {
   const day = `20${m[6]}/${m[5]}/${m[4]}`;
   await w1BatchData(false, day);
   const hits = w1Batches(day).filter(d => d.bc === code);
-  return hits.length && hits.every(h => h.chan === 'ปลีก') ? w1UnitKey(hits[0], day) : '';
+  return hits.length && hits.every(h => h.chan === 'ปลีก') && !(hits[0].cig && w1CigSplit(day)) ? w1UnitKey(hits[0], day) : '';   // บุหรี่แยกหน่วยรถ = เลือกใน w1BatchJob
 }
 
 /* ── บิล / ใบจอง (port ของ loadDocJob) ── */
@@ -11781,7 +11804,7 @@ async function w1BillsOfBook(book) {
   const rows = w1Rows(await w1Gv(W1.doc, { sheet:'D', tq:`select B,O where O contains '${book}'` }, 60000));
   return [...new Set(rows.filter(r => w1BookOf(r[1]) === book).map(r => String(r[0] || '').trim()).filter(Boolean))].sort();
 }
-const w1Anchor = () => onScreen('scr-w1job') ? $('w1In') : onScreen('scr-w1truck') ? $('w1tHi') : $('w1OkBtn');
+const w1Anchor = () => onScreen('scr-w1job') ? $('w1In') : onScreen('scr-w1truck') ? $('w1tHi') : onScreen('scr-w1list') ? $('w1lQ') : $('w1OkBtn');
 function w1PickBill(book, bills) {
   return new Promise(res => {
     const st = b => { const dn = w1DoneOf(b); return dn ? (dn.pending ? 'รอส่ง' : 'เช็คแล้ว') : W1S().jobs[b] ? 'กำลังเช็ค' : ''; };
@@ -11889,7 +11912,7 @@ function w1Index() {
     out.push({ type:'truck', code:t.reg, reg:t.reg, day:today, title:`🚚 ${t.reg}${t.driver ? ' · ' + t.driver : ''}${t.vtype ? ' · ' + t.vtype : ''}`,
       sub:`รถ · ${fmtN(n)} ร้าน · ${t.trips.map(g => w1TripName(g.sday, g.trip)).join(' + ')}` }); });
   try { w1UnitBatches(w1Slash(today)).forEach(d => out.push({ type:'batch', code:d.bc, day:today, book:d.batches.join(' '),   // ใบจัดปลีก = หน่วยรถ (BUILD 130)
-      title:`ใบจัดปลีก · ${d.cig ? '🚬 บุหรี่' : 'หน่วยรถ ' + d.unit}`, sub:`ใบจัด ${d.bc} · ${fmtN(d.nBills)} บิล · ${fmtN(d.nLines)} รายการ${d.pickers.length ? ' · คนจัด ' + fmtN(d.pickers.length) + ' คน' : ''}` }));
+      title:`ใบจัดปลีก · ${d.cig ? '🚬 ' : ''}${w1UnitName(d)}`, sub:`ใบจัด ${d.bc} · ${fmtN(d.nBills)} บิล · ${fmtN(d.nLines)} รายการ${d.pickers.length ? ' · คนจัด ' + fmtN(d.pickers.length) + ' คน' : ''}` }));
         w1Batches(w1Slash(today)).filter(d => d.chan !== 'ปลีก').forEach(d => out.push({ type:'batch', code:d.bc, day:today,
       title:`${d.cig ? '🚬 บุหรี่' : 'หน่วยรถ ' + d.unit} · ${d.chan}${d.who ? ' · ' + d.who : ''}`,
       sub:`ใบจัด ${d.bc} · ${fmtN(d.nBills)} บิล · ${fmtN(d.nLines)} รายการ` })); } catch (e) { console.warn('W1 ใบจัด', e); }
@@ -12248,7 +12271,7 @@ function w1LRows(t) {
   } else if (t === 'batch') {
     w1UnitBatches(w1Slash(today)).forEach((d, i) => {             // รวมตามหน่วยรถ ทุกคนจัด (BUILD 130)
       const dn = w1DoneOf(d.bc);
-      out.push({ code:d.bc, book:d.batches.join(' '), title:d.cig ? '🚬 บุหรี่ (ทุกหน่วยรถ)' : 'หน่วยรถ ' + d.unit, grp:'b', grpName:`ใบจัดปลีก วันที่ ${thaiDate(today).slice(0, 5)}`,
+      out.push({ code:d.bc, book:d.batches.join(' '), title:d.cig ? (d.cigU ? '🚬 บุหรี่ หน่วยรถ ' + d.unit : '🚬 บุหรี่ (ทุกหน่วยรถ)') : 'หน่วยรถ ' + d.unit, grp:'b', grpName:`ใบจัดปลีก วันที่ ${thaiDate(today).slice(0, 5)}`,
         ord:String(i).padStart(4, '0'), chan:'ปลีก', done:!!dn, dn, busy:S.jobs[d.bc] ? d.bc : '',
         sub:`ใบจัด ${d.bc} · ${fmtN(d.nBills)} บิล · ${fmtN(d.nLines)} รายการ${d.pickers.length ? ' · คนจัด ' + fmtN(d.pickers.length) + ' คน' : ''}` });
     });
