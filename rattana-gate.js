@@ -1,4 +1,4 @@
-/* rattana-gate.js v1.0 — ด่านกลาง: พนักงานต้องลงทะเบียนก่อนใช้แอปภายในของรัตนไพบูลย์ (Surat 2026-11-22)
+/* rattana-gate.js v1.1 — ด่านกลาง: พนักงานต้องลงทะเบียนก่อนใช้แอปภายในของรัตนไพบูลย์ (Surat 2026-11-22)
    ลงทะเบียน = แอดไลน์ OA Rattana-แจ้งข่าว + ยอมรับ PDPA และข้อตกลงรักษาความลับ (เก็บใน Users Sheet คอลัมน์ AH-AJ)
    ใส่ 1 บรรทัดก่อน </body> ของแอปภายใน:
      <script src="https://rattanaphaiboon.github.io/app/rattana-gate.js" defer></script>
@@ -9,9 +9,9 @@
    · ห้ามใส่ในแอปที่คนนอกใช้ (ROO, SupplyLink, Pre-Book, SMR Service Desk) และหน้า Ticket (ที่กรอกฟอร์ม) */
 (function () {
   if (window.RattanaGate) return;
-  var VER = 'v1.0';
+  var VER = 'v1.1';   /* v1.1 ตรวจซ้อนกันไม่หาย (คิวอีเมลล่าสุด) */
   var API = 'https://script.google.com/macros/s/AKfycby84X40inD9qNolqDB2M-iIC4MufFMD5VQAubf_iwZGb77FRWRx-ij04xzIx5DCP32_hQ/exec';
-  var OA = 'https://line.me/R/ti/p/@869ayfup', KEY = 'rattana_gate_ok', busy = false, last = '';
+  var OA = 'https://line.me/R/ti/p/@869ayfup', KEY = 'rattana_gate_ok', busy = false, last = '', queued = null;
   function ls(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function pick(o) {   /* หาอีเมลใน object ที่แอปเก็บคนล็อกอิน: .email · .data.email · .user.email · .me.email */
     if (!o || typeof o !== 'object') return '';
@@ -49,20 +49,22 @@
     try { document.documentElement.style.overflow = 'hidden'; } catch (x) {}
     document.getElementById('rtGateRe').onclick = function () { var m = document.getElementById('rtGateMsg'); if (m) m.textContent = 'กำลังตรวจ…'; check(e, true); };
   }
+  function next() { busy = false; if (queued) { var q = queued; queued = null; check(q.e, q.f); } }
   function check(e, force) {
     e = String(e || '').replace(/\s+/g, '').toLowerCase();
-    if (!e || busy) return;
+    if (!e) return;
+    if (busy) { queued = { e: e, f: force }; return; }
     if (!force && okCached(e)) { unblock(); return; }
     busy = true;
     fetch(API + '?action=regCheck&email=' + encodeURIComponent(e) + '&n=' + Date.now(), { cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (j) {
-        busy = false;
+        next();
         if (!j || !j.ok) return;   /* ตอบผิดปกติ = ไม่บัง */
         if (j.reg) { setOk(e); unblock(); }
         else { block(e); var m = document.getElementById('rtGateMsg'); if (m && force) m.textContent = 'ยังไม่พบการลงทะเบียน ถ้าเพิ่งกรอก รอสัก 1 นาทีแล้วกดอีกครั้ง'; }
       })
-      .catch(function () { busy = false; });
+      .catch(function () { next(); });
   }
   function tick() { var e = emailNow(); if (e && e !== last) { last = e; check(e, false); } }
   window.RattanaGate = { ver: VER, check: function (e) { last = String(e || '').replace(/\s+/g, '').toLowerCase(); check(last, false); } };
