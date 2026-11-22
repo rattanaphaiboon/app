@@ -9,7 +9,7 @@
    · ห้ามใส่ในแอปที่คนนอกใช้ (ROO, SupplyLink, Pre-Book, SMR Service Desk) และหน้า Ticket (ที่กรอกฟอร์ม) */
 (function () {
   if (window.RattanaGate) return;
-  var VER = 'v1.3';   /* v1.3 แอปวาดหน้าใหม่แล้วหน้าบังหาย → ใส่กลับเอง (ตรวจทุก 1 วิ) · v1.2 หน้าบังแบบ Rattana CI (กรมท่า-ทอง · การ์ดกระจก · 3 ขั้น) · v1.1 ตรวจซ้อนกันไม่หาย */
+  var VER = 'v1.4';   /* v1.4 จดแอปที่พามา (ลงทะเบียนเสร็จกดกลับได้) · v1.3 แอปวาดหน้าใหม่แล้วหน้าบังหาย → ใส่กลับเอง (ตรวจทุก 1 วิ) · v1.2 หน้าบังแบบ Rattana CI (กรมท่า-ทอง · การ์ดกระจก · 3 ขั้น) · v1.1 ตรวจซ้อนกันไม่หาย */
   var API = 'https://script.google.com/macros/s/AKfycby84X40inD9qNolqDB2M-iIC4MufFMD5VQAubf_iwZGb77FRWRx-ij04xzIx5DCP32_hQ/exec';
   var OA = 'https://line.me/R/ti/p/@869ayfup', KEY = 'rattana_gate_ok', busy = false, last = '', queued = null, blockedFor = '', gateEl = null, cssEl = null;
   function ls(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
@@ -64,6 +64,7 @@
   function block(e) {
     if (document.getElementById('rtGate')) return;
     blockedFor = e;
+    try { localStorage.setItem('rattana_reg_from', JSON.stringify({ url: location.href, title: document.title, t: Date.now() })); } catch (x) {}   /* v1.4 ลงทะเบียนเสร็จ Ticket มีปุ่มกลับมาแอปนี้ */
     if (!document.getElementById('rtGateFont')) { try { var f = document.createElement('link'); f.id = 'rtGateFont'; f.rel = 'stylesheet'; f.href = 'https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;600;700&display=swap'; document.head.appendChild(f); } catch (x) {} }
     var st = cssEl = document.createElement('style'); st.id = 'rtGateCss'; st.textContent = CSS; (document.head || document.documentElement).appendChild(st);
     var d = gateEl = document.createElement('div'); d.id = 'rtGate'; d.setAttribute('role', 'dialog'); d.setAttribute('aria-modal', 'true'); d.setAttribute('aria-labelledby', 'rtGateT');
