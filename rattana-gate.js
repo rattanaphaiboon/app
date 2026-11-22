@@ -1,4 +1,4 @@
-/* rattana-gate.js v1.2 — ด่านกลาง: พนักงานต้องลงทะเบียนก่อนใช้แอปภายในของรัตนไพบูลย์ (Surat 2026-11-22)
+/* rattana-gate.js v1.3 — ด่านกลาง: พนักงานต้องลงทะเบียนก่อนใช้แอปภายในของรัตนไพบูลย์ (Surat 2026-11-22)
    ลงทะเบียน = แอดไลน์ OA Rattana-แจ้งข่าว + ยอมรับ PDPA และข้อตกลงรักษาความลับ (เก็บใน Users Sheet คอลัมน์ AH-AJ)
    ใส่ 1 บรรทัดก่อน </body> ของแอปภายใน:
      <script src="https://rattanaphaiboon.github.io/app/rattana-gate.js" defer></script>
@@ -9,9 +9,9 @@
    · ห้ามใส่ในแอปที่คนนอกใช้ (ROO, SupplyLink, Pre-Book, SMR Service Desk) และหน้า Ticket (ที่กรอกฟอร์ม) */
 (function () {
   if (window.RattanaGate) return;
-  var VER = 'v1.2';   /* v1.2 หน้าบังแบบ Rattana CI (กรมท่า-ทอง · การ์ดกระจก · 3 ขั้น) · v1.1 ตรวจซ้อนกันไม่หาย */
+  var VER = 'v1.3';   /* v1.3 แอปวาดหน้าใหม่แล้วหน้าบังหาย → ใส่กลับเอง (ตรวจทุก 1 วิ) · v1.2 หน้าบังแบบ Rattana CI (กรมท่า-ทอง · การ์ดกระจก · 3 ขั้น) · v1.1 ตรวจซ้อนกันไม่หาย */
   var API = 'https://script.google.com/macros/s/AKfycby84X40inD9qNolqDB2M-iIC4MufFMD5VQAubf_iwZGb77FRWRx-ij04xzIx5DCP32_hQ/exec';
-  var OA = 'https://line.me/R/ti/p/@869ayfup', KEY = 'rattana_gate_ok', busy = false, last = '', queued = null;
+  var OA = 'https://line.me/R/ti/p/@869ayfup', KEY = 'rattana_gate_ok', busy = false, last = '', queued = null, blockedFor = '', gateEl = null, cssEl = null;
   function ls(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function pick(o) {   /* หาอีเมลใน object ที่แอปเก็บคนล็อกอิน: .email · .data.email · .user.email · .me.email */
     if (!o || typeof o !== 'object') return '';
@@ -34,7 +34,7 @@
   }
   function okCached(e) { try { var c = JSON.parse(ls(KEY) || 'null'); return !!c && c.e === e && c.until > Date.now(); } catch (x) { return false; } }
   function setOk(e) { try { localStorage.setItem(KEY, JSON.stringify({ e: e, until: Date.now() + 864e5 })); } catch (x) {} }
-  function unblock() { var d = document.getElementById('rtGate'); if (d && d.parentNode) d.parentNode.removeChild(d); var c = document.getElementById('rtGateCss'); if (c && c.parentNode) c.parentNode.removeChild(c); try { document.documentElement.style.overflow = ''; } catch (x) {} }
+  function unblock() { blockedFor = ''; var d = document.getElementById('rtGate'); if (d && d.parentNode) d.parentNode.removeChild(d); var c = document.getElementById('rtGateCss'); if (c && c.parentNode) c.parentNode.removeChild(c); try { document.documentElement.style.overflow = ''; } catch (x) {} }
   var CSS = '#rtGate{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:18px;box-sizing:border-box;overflow:auto;' +
     'font-family:"IBM Plex Sans Thai",Inter,"Leelawadee UI",system-ui,sans-serif;color:#011e3e;-webkit-font-smoothing:antialiased;' +
     'background:radial-gradient(60% 45% at 18% 12%,rgba(252,183,15,.22),transparent 70%),radial-gradient(55% 50% at 88% 90%,rgba(56,132,255,.28),transparent 70%),linear-gradient(160deg,#102b49 0%,#011e3e 55%,#06172b 100%)}' +
@@ -63,9 +63,10 @@
     '@media (max-width:380px){#rtGate .g-card{padding:20px 16px 16px}#rtGate h2{font-size:20px}}';
   function block(e) {
     if (document.getElementById('rtGate')) return;
+    blockedFor = e;
     if (!document.getElementById('rtGateFont')) { try { var f = document.createElement('link'); f.id = 'rtGateFont'; f.rel = 'stylesheet'; f.href = 'https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;600;700&display=swap'; document.head.appendChild(f); } catch (x) {} }
-    var st = document.createElement('style'); st.id = 'rtGateCss'; st.textContent = CSS; (document.head || document.documentElement).appendChild(st);
-    var d = document.createElement('div'); d.id = 'rtGate'; d.setAttribute('role', 'dialog'); d.setAttribute('aria-modal', 'true'); d.setAttribute('aria-labelledby', 'rtGateT');
+    var st = cssEl = document.createElement('style'); st.id = 'rtGateCss'; st.textContent = CSS; (document.head || document.documentElement).appendChild(st);
+    var d = gateEl = document.createElement('div'); d.id = 'rtGate'; d.setAttribute('role', 'dialog'); d.setAttribute('aria-modal', 'true'); d.setAttribute('aria-labelledby', 'rtGateT');
     d.innerHTML = '<div class="g-card">' +
       '<img class="g-logo" src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-logo-navy.png" alt="RATTANA" onerror="this.style.display=\'none\'">' +
       '<div class="g-badge"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.6-3 8.3-7 10-4-1.7-7-5.4-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg></div>' +
@@ -100,5 +101,11 @@
   }
   function tick() { var e = emailNow(); if (e && e !== last) { last = e; check(e, false); } }
   window.RattanaGate = { ver: VER, check: function (e) { last = String(e || '').replace(/\s+/g, '').toLowerCase(); check(last, false); } };
-  tick(); setInterval(tick, 3000);   /* ล็อกอินทีหลังก็ตรวจ */
+  /* v1.3 แอปที่วาดหน้าใหม่ทั้งหน้า (เช่น Hub) ลบหน้าบังทิ้ง → ใส่กลับ */
+  function guard() {
+    if (!blockedFor || !gateEl) return;
+    if (!document.getElementById('rtGateCss') && cssEl) (document.head || document.documentElement).appendChild(cssEl);
+    if (!document.getElementById('rtGate')) { (document.body || document.documentElement).appendChild(gateEl); try { document.documentElement.style.overflow = 'hidden'; } catch (x) {} }
+  }
+  tick(); setInterval(tick, 3000); setInterval(guard, 1000);   /* ล็อกอินทีหลังก็ตรวจ */
 })();
