@@ -1,5 +1,9 @@
 name: Deploy to GitHub Pages
 
+# 2026-11-22 (Ticket T-0006): แยกขั้นมัดไฟล์ (build) กับขั้นเอาขึ้นเว็บ (deploy)
+# เดิมบางรอบ deploy ถามหาไฟล์เร็วเกินไป (0.4 วินาทีหลังอัปเสร็จ) GitHub ยังไม่ขึ้นทะเบียน → "No artifacts named github-pages" → fail + อีเมล
+# แก้: รอจนเห็นไฟล์จริงก่อน (สูงสุด 3 นาที) · deploy ล้มครั้งแรก รอ 3 นาทีแล้วลองใหม่ในตัวเอง
+
 on:
   push:
     branches: [main]
@@ -9,22 +13,48 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: read
 
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v5
         with:
           path: '.'
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment2.outputs.page_url }}
+    steps:
+      - name: รอจนเห็นไฟล์ที่มัดไว้ (สูงสุด 3 นาที)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 36); do
+            n=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" --jq '[.artifacts[] | select(.name=="github-pages")] | length' 2>/dev/null || echo 0)
+            if [ "${n:-0}" -gt 0 ]; then echo "เจอไฟล์แล้ว (รอบที่ $i)"; exit 0; fi
+            echo "ยังไม่เห็นไฟล์ รอ 5 วินาที ($i/36)"; sleep 5
+          done
+          echo "รอครบ 3 นาทียังไม่เห็นไฟล์ ลอง deploy ต่อ"
+
       - id: deployment
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+
+      - name: ล้มครั้งแรก รอ 3 นาทีก่อนลองใหม่
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 180
+
+      - id: deployment2
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@v5
