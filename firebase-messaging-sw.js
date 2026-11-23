@@ -91,7 +91,7 @@ self.addEventListener('notificationclick', function (e) {
   const nd = e.notification.data || {};
   const tg = String(e.notification.tag || '');
   const appKey = (nd.app && APPS[nd.app]) ? nd.app : (tg.indexOf('sales') === 0 ? 'sales' : 'rflow');
-  const appCfg = appCfgFor(appKey);
+  let appCfg = appCfgFor(appKey);
   let link = nd.link || '';
   if (!link && appKey === 'rflow' && tg.indexOf('task-') === 0) link = 'r-flow.html?task=' + tg.slice(5);
   if (!link) link = appCfg.defaultLink;
@@ -102,8 +102,17 @@ self.addEventListener('notificationclick', function (e) {
       return n > 0 ? self.navigator.setAppBadge(n) : (self.navigator.clearAppBadge && self.navigator.clearAppBadge());
     }).catch(function () {});
   }
-  e.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (list) {
+  // Sales: เครื่องที่ใช้แอปใหม่ Rattana Sales (rattana-sales.html) ภายใน 30 วัน → กดนอติเปิดแอปใหม่แทนแอปเดิม
+  //   แอปใหม่เขียนป้าย Cache 'rs-pref' ทุกครั้งที่เปิด (SW อ่าน localStorage ไม่ได้) · ไม่มีป้าย = พฤติกรรมเดิมเป๊ะ
+  const prefP = (appKey !== 'sales' || !self.caches) ? Promise.resolve(null) : caches.open('rs-pref')
+    .then(function (c) { return c.match('/app/__rs_pref'); })
+    .then(function (r) { return r ? r.json() : null; })
+    .then(function (p) { return (p && p.app === 'new' && Date.now() - (p.t || 0) < 30 * 864e5) ? p : null; })
+    .catch(function () { return null; });
+  e.waitUntil(prefP.then(function (pref) {
+    if (pref) { link = String(link).replace('rattana-sales-app.html', 'rattana-sales.html'); appCfg = { urlFrag: 'rattana-sales.html', msgType: appCfg.msgType }; }
+    return clients.matchAll({ type: 'window', includeUncontrolled: true });
+  }).then(function (list) {
       // ⚠️ ต้องเทียบ appKey (data.app) ไม่ใช่เดาจาก url string — ถ้ามีแท็บของแอปอื่นเปิดค้างอยู่ (origin เดียวกัน) จะโดน focus ผิดแอปทันที
       for (let i = 0; i < list.length; i++) {
         const c = list[i];
