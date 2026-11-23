@@ -2051,7 +2051,7 @@ const AUTH_CONFIG = {
   usersSheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   usersSheetName: 'Rattana Users for apps',
 };
-const APP_VERSION = 'v7.12';
+const APP_VERSION = 'v7.13';
 const ALL_WAREHOUSE_ROLE = 4; // role >= 4 sees all warehouses
 
 // ══════════ v5.5: ภาษา ไทย / พม่า / อังกฤษ ══════════
@@ -2087,6 +2087,8 @@ const I18N_W = {
   'ไม่มีรายการ':['စာရင်းမရှိ','No items'],
   'รอบ':['ကြိမ်','rounds'],
   'เลือกชื่อผู้เช็ค':['စစ်ဆေးသူအမည် ရွေးပါ','Choose checker'],   // v7.12 หน้าเลือก dropdown ยังไม่เลือกชื่อ
+  'งานที่คลังมอบให้ล่าสุด':['နောက်ဆုံး ပေးအပ်သောအလုပ်','Latest assigned'],   // v7.13 งานที่ยกมาจากวันก่อน (≤ 7 วัน)
+  'มอบเมื่อ':['ပေးအပ်သည့်ရက်','assigned on'],
   'ขนาดเดียวกัน':['အရွယ်အစားတူ','Same size'],
   'แบ่งแล้ว':['ခွဲပေးပြီး','Assigned to'],
   'ยังไม่ส่ง':['မပို့ရသေး','Not sent'],
@@ -5902,9 +5904,17 @@ async function adPickSave() {
 }
 
 // ── ฝั่งหน้านับสต็อก ──────────────────────────────────────────────
+// v7.13: วันนี้ยังไม่ได้มอบ → ใช้งานล่าสุดที่มอบให้คนนั้น ย้อนไม่เกิน 7 วัน · เลย 7 วัน = ว่าง (user สั่ง · เลือก "รายคน")
+//   GAS v3.18 คืน "แถวล่าสุดต่อคน" ในช่วง [วันนี้ − 7, วันนี้] (ยกเลิกล่าสุด = ไม่คืน) · GAS เก่าไม่รู้จัก back = ได้แค่ของวันนี้เหมือนเดิม
+//   ★ หน้ามอบงานของหัวหน้ายังดูทีละวันเหมือนเดิม (user เลือก "ไม่โชว์" งานที่ยกมา)
+const ADAY_BACK = 7;
+function adYmdAdd(ymd, days) {
+  const p = String(ymd).split('-').map(Number), d = new Date(p[0], p[1] - 1, p[2] + days);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
 async function loadAssignDay() {
   try {
-    const r = await fetch(COUNT_SAVE_URL + '?action=assignday&date=' + adTodayStr(), { cache:'no-store' });
+    const r = await fetch(COUNT_SAVE_URL + '?action=assignday&date=' + adTodayStr() + '&back=' + ADAY_BACK, { cache:'no-store' });
     const j = await r.json();
     adDayRows = (j && j.rows) || [];
   } catch (e) { adDayRows = adDayRows || []; }
@@ -5914,11 +5924,16 @@ async function loadAssignDay() {
 function adDayMine() {
   const wh = soldWhOf(), who = counterDisplayName();
   if (!wh || !who || !adDayRows) return null;
+  // กันเหนียวฝั่งแอป: เกิน 7 วัน / วันที่มอบล่วงหน้า = ไม่ใช้ (แถวไม่มีวันที่ = GAS เก่า ส่งมาเฉพาะของวันนี้)
+  const today = adTodayStr(), from = adYmdAdd(today, -ADAY_BACK);
   const r = adDayRows.find(x => String(x.warehouse).toUpperCase() === String(wh).toUpperCase()
-                             && asgNorm(x.counterName) === asgNorm(who));
+                             && asgNorm(x.counterName) === asgNorm(who)
+                             && (!x.date || (x.date >= from && x.date <= today)));
   if (!r || !r.brands.length) return null;
-  return { brands: r.brands, items: adKeysOf(wh, r.brands), by: r.byName };
+  return { brands: r.brands, items: adKeysOf(wh, r.brands), by: r.byName, date: r.date || today };
 }
+// งานที่ยกมาจากวันก่อน (ยังไม่ได้มอบใหม่วันนี้) → คืนวันที่มอบ 'YYYY-MM-DD' · ของวันนี้ = ''
+function adDayFrom(d) { d = d || adDayMine(); return (d && d.date && d.date !== adTodayStr()) ? d.date : ''; }
 
 // ══════════ v6.0: แบ่งงานเช็คสินค้าให้แต่ละคน (ชีท "Log") ══════════
 //   เลือกชื่อใน "ผู้นับ" แล้วขึ้นรายการที่คนนั้นต้องเช็ค · คนที่ไม่มีชื่อในไฟล์ = ไม่มีการ์ด เห็นทุกตัวตามปกติ
@@ -6323,7 +6338,7 @@ function chkMiss(m) {
 }
 // ชื่อเต็มสำหรับหัวกล่องรายการ — ชิปใช้ชื่อสั้นเพราะต้องอยู่แถวเดียว
 function chkTitle(m) {
-  return m === 'day' ? 'งานที่คลังมอบให้วันนี้'
+  return m === 'day' ? (adDayFrom() ? 'งานที่คลังมอบให้ล่าสุด' : 'งานที่คลังมอบให้วันนี้')   // v7.13: ยกมาจากวันก่อน
        : m === 'asg' ? 'รายการที่ต้องเช็ค' : m === 'soldmine' ? 'ของที่เพิ่งขายออก'
        : m === 'stock' ? 'มีสต็อกทั้งคลัง' : 'ขายออกทั้งคลัง';
 }
@@ -6368,13 +6383,15 @@ function renderAssign() {
   // v6.35: โหมด "คลังมอบให้" ต้องหน้าตาเป็นของตัวเอง ไม่ใช่ยืมของ "ขายออก" มาใช้
   const isDay = cur === 'day';
   const dayBy = isDay ? ((adDayMine() || {}).by || '') : '';
+  const dayFrom = isDay ? adDayFrom() : '';   // v7.13: งานที่ยกมาจากวันก่อน → บอกวันที่มอบ
   const day = (soldRaw && soldRaw.day) ? formatThaiDate(String(soldRaw.day).replace(/\//g, '-')) : '';
   el.style.display = 'block';
   el.innerHTML = `
     <div class="asg-head"><span>${isDay ? '🗂️' : isStock ? '📦' : isSold ? '📤' : '📋'}</span><span>${chkTitle(cur)}</span>
       <span class="who">${counterDisplayName() || ''}</span></div>
     ${isDay ? `<div style="font-size:11px;color:var(--muted);margin-top:7px">คลังมอบงานนี้ให้คุณ${
-      dayBy ? ` · โดย <b>${dayBy}</b>` : ''}</div>` : ''}
+      dayBy ? ` · โดย <b>${dayBy}</b>` : ''}${
+      dayFrom ? ` · มอบเมื่อ <b data-nolang="1">${formatThaiDate(dayFrom)}</b>` : ''}</div>` : ''}
     ${ms.length > 1 ? `<div class="asg-chiprow">${ms.map(m =>
       `<button class="asg-chip${m === cur ? ' on' : ''}" onclick="chkSet('${m}')" type="button">${chkLabel(m)} <b>${dcNum(chkList(m).length)}</b></button>`
     ).join('')}</div>` : ''}
@@ -9474,7 +9491,7 @@ function progressSnapshot() {
   let list = null, kind = '';
   const dy = (typeof adDayMine === 'function') ? adDayMine() : null;   // คลังมอบให้วันนี้
   if (dy && dy.items && dy.items.length) {
-    list = dy.items; kind = 'คลังมอบให้วันนี้';
+    list = dy.items; kind = adDayFrom(dy) ? 'คลังมอบให้ (มอบเมื่อ ' + dy.date + ')' : 'คลังมอบให้วันนี้';   // v7.13: งานที่ยกมา = จดวันที่มอบไว้ในชีทด้วย
   } else {
     const m = assignMine();
     if (m && m.keySet && m.keySet.size) {
