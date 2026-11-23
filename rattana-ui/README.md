@@ -1,4 +1,4 @@
-# Rattana CI v1.6.0
+# Rattana CI v1.6.1
 
 UI กลางของบริษัท — Crystal Luxury (โหมดสว่าง) + Luxury Dark (โหมดมืด)
 ใช้ได้ทั้ง iOS · Android · Laptop พร้อม popup และโมชันแบบพรีเมียม
@@ -76,6 +76,7 @@ RattanaUI.user.config({ defaultRole: 3, fields: ['รหัสขาย Bplus'] 
 - อีเมลซ้ำหลายแถว → ใช้แถวที่ Active และ role สูงสุด
 - หาคอลัมน์จากชื่อหัว ไม่ใช่ตำแหน่ง — ย้าย/เพิ่มคอลัมน์ในชีทได้ไม่พัง
 - รูปจาก Google Drive แสดงได้เลย (ไฟล์ต้องแชร์ "ทุกคนที่มีลิงก์") ไม่มีรูป → ใช้รูปบัญชี Google → ตัวอักษรแรก
+- **โลโก้หน้าเข้าสู่ระบบ:** ใช้ไอคอนแอปของแอปนั้นเองก่อน (หาจาก `<link rel="apple-touch-icon">` หรือไอคอนขนาดใหญ่) ถ้าไม่มีหรือโหลดไม่ได้ → ใช้โลโก้ RATTANA ของ CI · กำหนดเองได้: `<body data-rt-login-logo="icons/my-app-180.png">` หรือ `RattanaUI.user.config({ logo: '...' })`
 - เว็บที่ไม่ได้อยู่บน rattanaphaiboon.github.io ต้องเพิ่มที่อยู่เว็บใน Google Cloud (OAuth client ของบริษัท) ก่อน ปุ่ม Google ถึงจะขึ้น
 
 ### วันหยุดบริษัท (ชีท วันหยุดนขัต)

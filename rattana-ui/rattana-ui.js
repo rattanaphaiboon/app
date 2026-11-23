@@ -1,4 +1,4 @@
-/* Rattana CI v1.6.0 — behaviour helpers (no dependencies). window.RattanaUI */
+/* Rattana CI v1.6.1 — behaviour helpers (no dependencies). window.RattanaUI */
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement, win = window;
@@ -140,7 +140,7 @@
   }
 
   var UI = {
-    version: '1.6.0',
+    version: '1.6.1',
     icons: ICON,
     platform: platform,
 
@@ -1071,7 +1071,8 @@
     minRole: 0,            /* 0 = anyone in the sheet */
     defaultRole: null,     /* role to use when the User Role cell is blank (Sales uses 3) */
     sessionDays: 30,       /* stay signed in this long; the row is re-checked on every visit */
-    fields: []             /* extra sheet columns an app wants (header names) */
+    fields: [],            /* extra sheet columns an app wants (header names) */
+    logo: ''               /* sign-in screen logo; empty = the app's own icon if it has one, else the Rattana CI logo */
   };
   /* sheet header → field name (headers are matched without spaces/new lines) */
   var USER_COLS = {
@@ -1219,8 +1220,10 @@
     var wrap = el('div', 'rt-login'); wrap.setAttribute('role', 'dialog'); wrap.setAttribute('aria-modal', 'true'); wrap.setAttribute('aria-labelledby', 'rt-login-title');
     var bg = el('div', 'rt-bg'); bg.appendChild(el('div', 'rt-bg-arc')); bg.appendChild(el('div', 'rt-bg-arc')); wrap.appendChild(bg);
     var card = el('div', 'rt-glass rt-login-card');
-    var logo = el('div', 'rt-login-logo'), l1 = el('img', 'rt-logo-light'), l2 = el('img', 'rt-logo-dark');
-    l1.src = BASE + 'rattana-logo-navy.png'; l2.src = BASE + 'rattana-logo-transparent.png'; l1.alt = l2.alt = 'RATTANA'; logo.appendChild(l1); logo.appendChild(l2);
+    var logo = el('div', 'rt-login-logo');
+    function ciLogo() { logo.innerHTML = ''; logo.classList.remove('is-app'); var l1 = el('img', 'rt-logo-light'), l2 = el('img', 'rt-logo-dark'); l1.src = BASE + 'rattana-logo-navy.png'; l2.src = BASE + 'rattana-logo-transparent.png'; l1.alt = l2.alt = 'RATTANA'; logo.appendChild(l1); logo.appendChild(l2); }
+    var own = appLogo(cfg);
+    if (own) { var im = el('img', 'rt-login-applogo'); im.alt = cfg.appName || doc.title || ''; im.onerror = ciLogo; im.src = own; logo.classList.add('is-app'); logo.appendChild(im); } else ciLogo();
     var h = el('h1', 'rt-login-title', cfg.appName || (en ? 'Sign in' : 'เข้าสู่ระบบ')); h.id = 'rt-login-title';
     var sub = el('p', 'rt-login-sub', en ? 'Sign in with your company Google account' : 'เข้าสู่ระบบด้วยอีเมลบริษัท (บัญชี Google)');
     var slot = el('div', 'rt-login-gbtn'), msg = el('div', 'rt-login-msg'); msg.setAttribute('role', 'status'); msg.setAttribute('aria-live', 'polite');
@@ -1228,6 +1231,22 @@
     [logo, h, sub, slot, msg, foot].forEach(function (n) { card.appendChild(n); });
     wrap.appendChild(card);
     return { el: wrap, card: card, slot: slot, msg: msg, sub: sub };
+  }
+  /* the app's own logo if it has one, else none (→ Rattana CI logo):
+     config({ logo }) / <body data-rt-login-logo="url"> → [data-rt-app-logo] → apple-touch-icon → a large <link rel="icon"> */
+  function appLogo(cfg) {
+    var b = doc.body, u = cfg.logo || (b && b.getAttribute('data-rt-login-logo')) || '';
+    if (!u) { var n = doc.querySelector('[data-rt-app-logo]'); if (n) u = n.getAttribute('data-rt-app-logo') || n.currentSrc || n.src || ''; }
+    if (!u) {
+      var best = null, bs = -1;
+      [].forEach.call(doc.querySelectorAll('link[rel~="apple-touch-icon"], link[rel~="apple-touch-icon-precomposed"], link[rel~="icon"]'), function (l) {
+        var apple = /apple/.test(l.rel), m = (l.getAttribute('sizes') || '').match(/(\d+)x/), sz = m ? +m[1] : (apple ? 180 : 0);
+        if (!apple && sz < 96) return; if (/\.ico(\?|$)/i.test(l.href)) return;
+        if (sz > bs) { bs = sz; best = l.href; }
+      });
+      u = best || '';
+    }
+    try { return u ? new URL(u, location.href).href : ''; } catch (e) { return ''; }
   }
   function loginMsg(L, kind, title, text, actions) {
     L.msg.innerHTML = ''; L.msg.className = 'rt-login-msg is-' + kind;
