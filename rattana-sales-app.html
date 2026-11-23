@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.751</title>
+<title>Rattana Sales — v8.752</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -7244,7 +7244,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.751 · 2026-11-23</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.752 · 2026-11-23</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -7255,7 +7255,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.751</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.752</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -30091,11 +30091,145 @@ function _dbpOverdue(s) {
 }
 function _dbpShopBlocked(shopId) {
   if (!_pilotOn()) return null;
+  try { if (_dbpPkActive(shopId)) return null; } catch (e) {}   // v8.752: อนุมัติขายหน้าร้านแล้ว (1 ใบวันนี้)
   const s = (SHOPS || []).find(function (x) { return x.id === shopId; });
   const bills = _dbpOverdue(s);
   return bills.length ? { shop: s, bills: bills, total: bills.reduce(function (a, b) { return a + (Number(b.amount) || 0); }, 0) } : null;
 }
 window._dbpShopBlocked = _dbpShopBlocked;
+/* ═══ v8.752 (Surat 23/11 "ทำทั้งหมดเลย" ตาม mockup debt-pickup-flow): ร้านค้างชำระ + ลูกค้ามาเอาหน้าร้าน ═══
+   ขอ (ยอดประมาณ + วันเวลามารับ) → DebtApproval แถวเดิมของร้าน+เซล ประเภท 'ขายหน้าร้าน' สถานะ 'รอ' (Code.gs v8.306)
+   หัวหน้ากดในจอขายเชื่อเดิม → 'รอบัญชี' = คีย์ได้ 1 ใบ วันนี้ · ยอดไม่เกินที่ขอ +10% · ส่งแล้วกลับไปล็อก
+   ใบที่คีย์ผูก billId เข้าแถวเดิม → หัวหน้าไม่ต้องกดขายเชื่อซ้ำ ไปรอบัญชีเลย · ราคาต่ำยังผ่านด่านราคาเดิม
+   เพดาน 2 ครั้ง/ร้าน/เดือน (หลังบ้านนับ · แอปบอกล่วงหน้า) */
+const PK_OVER = 1.10;
+function _dbpPkRow(shopId) {
+  try {
+    const r = (window._debtApprRows || {})[_debtApprKey(shopId, _myApprKeyId())];
+    return (r && String(r['ประเภท'] || '').trim() === 'ขายหน้าร้าน') ? r : null;
+  } catch (e) { return null; }
+}
+function _dbpPkUsedKey(r) { return 'rsa_dbp_pk_used:' + String(r['reqId'] || '') + ':' + String(r['เวลาอนุมัติ'] || ''); }
+/* สถานะคำขอขายหน้าร้านของร้านนี้: null / {k:'wait'|'ok'|'no'|'used', ...} */
+function _dbpPkState(shopId) {
+  const r = _dbpPkRow(shopId); if (!r) return null;
+  const st = String(r['สถานะ'] || '').trim(), today = _todayISO();
+  const o = { r: r, amt: Number(String(r['ยอดประมาณ'] || '').replace(/[^\d.]/g, '')) || 0, at: String(r['มารับ'] || ''), by: String(r['ผู้อนุมัติ'] || ''),
+              why: String(r['เหตุผลปฏิเสธ'] || ''), reqAt: String(r['วันเวลา'] || '') };
+  if (st === 'รอ') return Object.assign(o, { k: 'wait' });
+  if (st === 'ไม่อนุมัติ') return String(r['เวลาอนุมัติ'] || r['วันเวลา'] || '').slice(0, 10) >= today ? Object.assign(o, { k: 'no' }) : null;
+  if (st === 'รอบัญชี' || st === 'อนุมัติ') {
+    if (String(r['เวลาอนุมัติ'] || '').slice(0, 10) !== today) return null;          // อนุมัติวันอื่น = หมดสิทธิ์แล้ว
+    let used = false; try { used = !!localStorage.getItem(_dbpPkUsedKey(r)); } catch (e) {}
+    return Object.assign(o, { k: used ? 'used' : 'ok' });
+  }
+  return null;
+}
+window._dbpPkState = _dbpPkState;
+function _dbpPkActive(shopId) { const p = _dbpPkState(shopId); return !!(p && p.k === 'ok'); }
+window._dbpPkActive = _dbpPkActive;
+function _dbpPkMonthCount(shopId) {
+  const m = _todayISO().slice(0, 7); let n = 0;
+  (SHEET_DATA.debtApprovals || []).forEach(function (r) {
+    if (String(r['รหัสร้าน'] || '').trim() !== String(shopId) || String(r['ประเภท'] || '').trim() !== 'ขายหน้าร้าน') return;
+    if (String(r['สถานะ'] || '').trim() === 'ไม่อนุมัติ') return;
+    if (String(r['เวลาอนุมัติ'] || '').slice(0, 7) === m) n++;
+  });
+  return n;
+}
+function _dbpPkBlockHtml(shopId) {
+  const p = _dbpPkState(shopId), n = _dbpPkMonthCount(shopId);
+  const btn = function (lbl) { return '<button class="btn btn-block" style="background:var(--navy);color:var(--gold-light);border:none;margin-top:6px" onclick="_dbpPkForm(\'' + escapeAttr(shopId) + '\')">' + lbl + '</button>'; };
+  let h = '<div style="border-top:1px dashed var(--border);margin:12px 0 8px"></div>';
+  if (p && p.k === 'wait') {
+    return h + '<div style="background:#FEF3C7;border-radius:10px;padding:10px 12px;font-size:12.5px;line-height:1.6"><b style="color:#B45309">รอหัวหน้าอนุมัติขายหน้าร้าน</b><br>ขอ ฿' + Math.round(p.amt).toLocaleString() + (p.at ? ' · มารับ ' + escapeHtml(p.at) : '')
+      + '<br>หัวหน้ากดที่ กระดิ่ง → รออนุมัติขายเชื่อ · แอปเช็คเองทุก 30 วิ</div>' + btn('แก้ยอด / ขอใหม่');
+  }
+  if (p && p.k === 'no') h += '<div style="background:#FEF2F2;border-radius:10px;padding:10px 12px;font-size:12.5px;line-height:1.6;margin-bottom:6px"><b style="color:#B91C1C">หัวหน้าไม่อนุมัติขายหน้าร้าน</b>' + (p.why ? '<br>' + escapeHtml(p.why) : '') + '</div>';
+  if (p && p.k === 'used') h += '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">ใช้สิทธิ์ขายหน้าร้านของวันนี้ไปแล้ว (1 ใบ)</div>';
+  if (n >= 2) return h + '<div style="font-size:12.5px;color:#B91C1C;font-weight:800;line-height:1.6">ขายหน้าร้านครบ 2 ครั้งเดือนนี้แล้ว — ต้องจ่ายหนี้เก่าก่อน</div>';
+  return h + btn(p && p.k === 'no' ? 'ขอขายหน้าร้านใหม่' : 'ลูกค้ามาเอาหน้าร้าน')
+    + '<div style="font-size:11.5px;color:var(--muted);text-align:center;margin-top:4px">ขอหัวหน้าอนุมัติขาย 1 ใบ · เดือนนี้ใช้ไป ' + n + '/2</div>';
+}
+const _pkF = { shop: '', amt: 5000, txt: '', day: '', time: '15:00', why: '' };
+window._dbpPkForm = function (shopId, preAmt) {
+  _pkF.shop = shopId; _pkF.day = _pkYmd(new Date()); _pkF.why = '';
+  if (preAmt) { _pkF.amt = preAmt; _pkF.txt = String(preAmt); } else { _pkF.amt = 5000; _pkF.txt = ''; }
+  _dbpPkFormRender();
+};
+function _dbpPkFormRender() {
+  const mc = document.getElementById('modalContent'), md = document.getElementById('productModal'); if (!mc || !md) return;
+  const s = (SHOPS || []).find(function (x) { return x.id === _pkF.shop; }) || {};
+  const tY = _pkYmd(new Date()), mY = _pkYmd(new Date(Date.now() + 86400000));
+  const chip = function (on, js, lbl) { return '<button type="button" class="pk-chip' + (on ? ' on' : '') + '" onclick="' + js + '">' + lbl + '</button>'; };
+  mc.innerHTML = '<button type="button" class="modal-close-x" onclick="closeModal()" aria-label="ปิด">✕</button><div class="modal-handle"></div>'
+    + '<div class="modal-body pk-body"><div class="pk-h">ขอขายหน้าร้าน</div>'
+    + '<div class="pk-sub" title="' + escapeAttr(s.name || '') + '">' + escapeHtml(s.name || '') + '</div>'
+    + '<div class="pk-f"><span>ยอดที่จะซื้อประมาณ</span></div>'
+    + '<div class="pk-chips">' + [1000, 5000, 10000].map(function (a) { return chip(_pkF.amt === a && !_pkF.txt, '_pkFSet(\'amt\',' + a + ')', '฿' + a.toLocaleString()); }).join('') + '</div>'
+    + '<input type="text" inputmode="numeric" id="pkFAmt" placeholder="หรือพิมพ์ยอดเอง" value="' + escapeAttr(_pkF.txt) + '" oninput="_pkFType(this.value)" style="width:100%;padding:10px;border-radius:9px;border:1.5px solid var(--border);font-size:14px;font-family:inherit;box-sizing:border-box;background:var(--card-bg);color:var(--text)">'
+    + '<label class="pk-f"><span>มารับวันที่</span><input type="date" min="' + tY + '" value="' + _pkF.day + '" onchange="_pkFSet(\'day\',this.value)"></label>'
+    + '<div class="pk-chips">' + chip(_pkF.day === tY, '_pkFSet(\'day\',\'' + tY + '\')', 'วันนี้') + chip(_pkF.day === mY, '_pkFSet(\'day\',\'' + mY + '\')', 'พรุ่งนี้') + '</div>'
+    + '<div class="pk-chips">' + PK_TIMES.map(function (t) { return chip(_pkF.time === t, '_pkFSet(\'time\',\'' + t + '\')', t); }).join('') + '</div>'
+    + '<div class="pk-f"><span>เหตุผล (ไม่บังคับ)</span></div>'
+    + '<textarea id="pkFWhy" rows="2" placeholder="เช่น ลูกค้าจะโอนหนี้เก่าวันศุกร์" oninput="_pkF.why=this.value" style="width:100%;padding:10px;border-radius:9px;border:1.5px solid var(--border);font-size:13px;font-family:inherit;box-sizing:border-box;background:var(--card-bg);color:var(--text)">' + escapeHtml(_pkF.why) + '</textarea>'
+    + '<div id="pkFMsg" style="font-size:12px;color:var(--danger);margin-top:6px"></div>'
+    + '<div class="pk-btns"><button type="button" class="btn btn-outline" onclick="closeModal()">ยกเลิก</button>'
+    + '<button type="button" class="btn btn-success pk-go" id="pkFGo" onclick="_dbpPkSend()">ส่งให้หัวหน้าอนุมัติ</button></div></div>';
+  md.classList.add('active');
+}
+window._pkFSet = function (k, v) { if (k === 'amt') { _pkF.amt = Number(v) || 0; _pkF.txt = ''; } else _pkF[k] = String(v || ''); const w = document.getElementById('pkFWhy'); if (w) _pkF.why = w.value; _dbpPkFormRender(); };
+window._pkFType = function (v) { _pkF.txt = String(v || '').replace(/[^\d]/g, ''); _pkF.amt = Number(_pkF.txt) || 0; };
+window._dbpPkSend = async function () {
+  const m = document.getElementById('pkFMsg'), b = document.getElementById('pkFGo');
+  if (!(_pkF.amt > 0)) { if (m) m.textContent = 'ใส่ยอดประมาณก่อน'; return; }
+  if (!_pkF.day || !_pkF.time) { if (m) m.textContent = 'เลือกวันเวลามารับก่อน'; return; }
+  if (b) { b.disabled = true; b.textContent = 'กำลังส่ง...'; }
+  const when = _pkF.day + ' ' + _pkF.time;
+  const base = (typeof _debtReqPayload === 'function') ? _debtReqPayload(_pkF.shop, '', 0) : {};
+  const reason = '[ขายหน้าร้าน] ประมาณ ฿' + Math.round(_pkF.amt).toLocaleString() + ' · มารับ ' + when + (String(_pkF.why || '').trim() ? ' · ' + String(_pkF.why).trim() : '');
+  try {
+    const res = await postToAppsScript(Object.assign({}, base, { kind: 'pickup', estAmount: String(Math.round(_pkF.amt)), pickupAt: when, reason: reason, criteria: 'ขายหน้าร้าน ประมาณ ฿' + Math.round(_pkF.amt).toLocaleString(), billId: '' }), 1);
+    if (!res || res.ok === false) throw new Error((res && res.error) || 'ส่งไม่สำเร็จ');
+    try { await _loadDebtApprovals(true); } catch (e) {}
+    showToast('ส่งให้หัวหน้าแล้ว — รออนุมัติ', 'success');
+    const st = _dbpShopBlocked(_pkF.shop) || { shop: (SHOPS || []).find(function (x) { return x.id === _pkF.shop; }) || {}, bills: [], total: 0 };
+    _dbpShowBlock(st);
+  } catch (e) {
+    if (m) m.textContent = String((e && e.message) || e) + (e && e._queued ? '' : ' — กดใหม่อีกครั้ง');
+    if (b) { b.disabled = false; b.textContent = 'ส่งให้หัวหน้าอนุมัติ'; }
+  }
+};
+/* รอหัวหน้า: จอค้างชำระเปิดอยู่ + มีคำขอรอ → โหลด DebtApproval ใหม่ทุก 30 วิ · อนุมัติ = ปิดจอ บอกให้คีย์ */
+setInterval(function () {
+  try {
+    if (document.hidden || !_pilotOn() || !currentShopId || !document.getElementById('dbpMsg')) return;
+    const p = _dbpPkState(currentShopId); if (!p || p.k !== 'wait') return;
+    _loadDebtApprovals(true).then(function () {
+      const q = _dbpPkState(currentShopId);
+      if (q && q.k === 'ok') { try { closeModal(); } catch (e) {} showToast('หัวหน้าอนุมัติขายหน้าร้านแล้ว — คีย์ได้ 1 ใบ ไม่เกิน ฿' + Math.round(q.amt * PK_OVER).toLocaleString(), 'success'); }
+      else if (q && q.k === 'no') { const st = _dbpShopBlocked(currentShopId); if (st) _dbpShowBlock(st); }
+    }).catch(function () {});
+  } catch (e) {}
+}, 30000);
+/* ตอนกดยืนยัน: ยอดเกินที่ขอ +10% = ส่งไม่ได้ + ปุ่มขอยอดใหม่ · คืน true = ผ่าน */
+function _dbpPkCartOk() {
+  try {
+    if (!_pilotOn() || !currentShopId) return true;
+    const p = _dbpPkState(currentShopId); if (!p || p.k !== 'ok') return true;
+    const tot = (cart || []).filter(function (c) { return c && !c.isFree && (!c.shopId || c.shopId === currentShopId); }).reduce(function (a, c) { return a + (Number(c.qty) || 0) * (Number(c.price) || 0); }, 0);
+    const cap = p.amt * PK_OVER;
+    if (tot <= cap + 0.5) return true;
+    const ask = Math.ceil(tot / 1000) * 1000;
+    if (typeof openModal === 'function') openModal({ title: 'เกินยอดที่หัวหน้าอนุมัติ', subtitle: 'ขายหน้าร้าน (ร้านค้างชำระ)', body:
+      '<div style="font-size:13px;line-height:1.7">หัวหน้าอนุมัติประมาณ <b>฿' + Math.round(p.amt).toLocaleString() + '</b> (ได้ถึง ฿' + Math.round(cap).toLocaleString() + ')<br>ในตะกร้าตอนนี้ <b style="color:#B91C1C">฿' + Math.round(tot).toLocaleString() + '</b></div>'
+      + '<div style="font-size:12px;color:var(--muted);margin:6px 0 12px">ลดจำนวนในตะกร้า หรือขอยอดใหม่ (หัวหน้าต้องอนุมัติอีกครั้ง)</div>'
+      + '<div style="display:flex;gap:8px"><button class="btn btn-outline" style="flex:1" onclick="closeModal()">กลับไปลด</button>'
+      + '<button class="btn" style="flex:1;background:var(--navy);color:var(--gold-light);border:none" onclick="_dbpPkForm(\'' + escapeAttr(currentShopId) + '\',' + ask + ')">ขอยอดใหม่ ฿' + ask.toLocaleString() + '</button></div>' });
+    return false;
+  } catch (e) { return true; }
+}
+window._dbpPkCartOk = _dbpPkCartOk;
 function _dbpBillsHtml(bills) {
   return bills.map(function (b) {
     const terms = Number(b.terms) || 0, over = terms > 0 ? ('เลยกำหนด ' + (b.age - terms) + ' วัน') : ('เงินสด เปิดบิล ' + b.age + ' วัน');
@@ -30125,6 +30259,7 @@ function _dbpShowBlock(st) {
     + '<div id="dbpMsg" style="font-size:12px;margin:10px 0 4px;color:var(--muted)"></div>'
     + '<button class="btn btn-block" style="background:#5B21B6;color:#fff;border:none;margin-top:6px" onclick="_dbpOpenDebt()">ไปแจ้งชำระ (Payment Log)</button>'
     + '<button class="btn btn-outline btn-block" style="margin-top:8px" onclick="_dbpRecheck()">ตรวจอีกครั้ง</button>'
+    + (st.shop && st.shop.id ? _dbpPkBlockHtml(st.shop.id) : '')   // v8.752 ลูกค้ามาเอาหน้าร้าน
     + '</div>';
   md.classList.add('active');
   _dbpPollStart();   // v8.741
@@ -39504,6 +39639,7 @@ window._qiRemove = async function (idx, pid) {
 /* ก่อนเปิด popup ยืนยัน: ตรวจโควต้าก่อน (ยอดสด ≤6 วิ) — เกิน = ไม่ให้ไปถึงปุ่มยืนยัน · ตรวจไม่ได้ = ไปต่อ (ด่านใน confirmOrder ยังอยู่) */
 async function _orderPrecheckThenGate() {
   if (window._qiBusy) return;
+  if (typeof _dbpPkCartOk === 'function' && !_dbpPkCartOk()) return;   // v8.752 ขายหน้าร้าน: ยอดเกินที่ขอ
   window._qiBusy = true;
   const btn = document.getElementById('btnConfirmOrder');
   const old = btn ? btn.innerHTML : '';
@@ -48619,7 +48755,7 @@ const PK_TIMES = ['09:00', '12:00', '15:00', '17:00'];
 const PK_UNIT = { piece: 'ชิ้น', pack: 'แพ็ค', bigpack: 'แพ็คใหญ่', case: 'ลัง' };
 const _pkSt = { date: '', time: '' };
 function _pkYmd(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
-function _pkThai(ymd) { const p = String(ymd || '').split('-'); return p.length === 3 ? (+p[2]) + '/' + (+p[1]) + '/' + (+p[0] + 543) : ''; }
+function _pkThai(ymd) { const p = String(ymd || '').split('-'); return p.length === 3 ? p[0] + '-' + String(p[1]).padStart(2, '0') + '-' + String(p[2]).padStart(2, '0') : ''; }   // v8.752: ค.ศ. YYYY-MM-DD (เดิม D/M/พ.ศ.)
 function _pkWhen(d) { try { d = (d instanceof Date) ? d : new Date(); return d.getFullYear() + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); } catch (e) { return ''; } }
 function _pkTag() { return '[ลูกค้ามารับเอง ' + _pkThai(_pkSt.date) + (_pkSt.time ? ' ' + _pkSt.time : '') + ']'; }
 function _pkWh() {
@@ -49100,7 +49236,8 @@ async function confirmOrder() {
     let _qBad = null;
     window._submitBusy = true;
     try { _qBad = await _quotaCartIssues(); } catch (e) { console.warn('[quota] submit gate:', e && e.message); } finally { window._submitBusy = false; }
-    if (_qBad && _qBad.length) { _quotaIssueShow(_qBad); return; }   // v8.746: บอกว่าตัวไหนเกิน + ปุ่มลบ (เดิม toast ไม่บอกสินค้า)
+    if (_qBad && _qBad.length) { _quotaIssueShow(_qBad); return; }
+    if (typeof _dbpPkCartOk === 'function' && !_dbpPkCartOk()) return;   // v8.752   // v8.746: บอกว่าตัวไหนเกิน + ปุ่มลบ (เดิม toast ไม่บอกสินค้า)
   }
 
   // Prices already include VAT — total = sum
@@ -49123,9 +49260,19 @@ async function confirmOrder() {
   // Read optional notes (Surat 2026-05-10 v4.3 — column Q "หมายเหตุ" in Order tab)
   const notesEl = document.getElementById('orderNotes');
   // v8.671: ลูกค้ารับเอง → หมายเหตุขึ้นต้นด้วยวัน/เวลามารับ (ธงใช้ได้ใบเดียว)
-  const _pickup = (typeof _pickupTake === 'function') ? _pickupTake() : null;
+  let _pickup = (typeof _pickupTake === 'function') ? _pickupTake() : null;
   const _noteTyped = notesEl ? notesEl.value.trim() : '';
-  const orderNotes = _pickup ? (_pickup.tag + (_noteTyped ? ' ' + _noteTyped : '')) : _noteTyped;
+  /* v8.752: ขายหน้าร้านที่หัวหน้าอนุมัติ = ใบลูกค้ารับเองเสมอ + ป้ายหนี้ · ใช้สิทธิ์ทันที (ใบเดียว) */
+  let _dbpTag = '';
+  try {
+    const _pk = (typeof _dbpPkState === 'function' && _pilotOn()) ? _dbpPkState(currentShopId) : null;
+    if (_pk && _pk.k === 'ok') {
+      if (!_pickup) { const _w = String(_pk.at || '').split(' '); _pickup = { tag: '[ลูกค้ามารับเอง ' + (_w[0] || '') + (_w[1] ? ' ' + _w[1] : '') + ']', date: _w[0] || '', time: _w[1] || '', wh: _pkWh(), t: Date.now() }; }
+      _dbpTag = '[ร้านค้างชำระ อนุมัติขายหน้าร้าน ประมาณ ฿' + Math.round(_pk.amt).toLocaleString() + (_pk.by ? ' โดย ' + _pk.by : '') + ']';
+      try { localStorage.setItem(_dbpPkUsedKey(_pk.r), String(Date.now())); } catch (e) {}
+    }
+  } catch (e) { console.warn('[dbp pk note]', e && e.message); }
+  const orderNotes = [(_pickup ? _pickup.tag : ''), _dbpTag, _noteTyped].filter(Boolean).join(' ');
   const _pickupItems = _pickup ? cart.slice() : null;
   const _ttAmt = (typeof _ttCartNet === 'function') ? _ttCartNet(cart) : 0;   // v8.672: ยอดใบนี้ที่นับเข้าเป้าคุ้มการส่ง (เก็บก่อนตะกร้าถูกล้าง)
 
