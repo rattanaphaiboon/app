@@ -1,4 +1,4 @@
-/* Rattana CI v1.4.1 — behaviour helpers (no dependencies). window.RattanaUI */
+/* Rattana CI v1.5.0 — behaviour helpers (no dependencies). window.RattanaUI */
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement, win = window;
@@ -6,6 +6,7 @@
   var ICON = {
     check: 'M20 6 9 17l-5-5',
     x: 'M18 6 6 18M6 6l12 12',
+    bell: 'M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0',
     info: 'M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20M12 16v-4M12 8h.01',
     warn: 'm21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3M12 9v4M12 17h.01',
     sun: 'M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41',
@@ -18,6 +19,32 @@
   var EN_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   var EN_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   var uid = 0;
+  var ICON_SCAN = 'M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 8v8M10.5 8v8M14 8v8M17 8v8';
+  /* where rattana-ui.js was loaded from — the scanner engine, service worker and logo sit next to it */
+  var BASE = (function () { try { var c = doc.currentScript && doc.currentScript.src; if (c && /rattana-ui(\.min)?\.js/.test(c)) return c.replace(/[^/]*$/, ''); } catch (e) {} return 'https://rattanaphaiboon.github.io/app/rattana-ui/'; })();
+  var zxP = null;
+  function loadZXing() {
+    if (win.ZXingWASM && win.ZXingWASM.readBarcodes && zxP) return zxP;
+    if (zxP) return zxP;
+    zxP = new Promise(function (resolve, reject) {
+      function ready() {
+        var Z = win.ZXingWASM; if (!Z) return reject(new Error('zxing'));
+        Z.prepareZXingModule({ overrides: { locateFile: function (path, prefix) { return /\.wasm$/.test(path) ? BASE + 'vendor/zxing_reader.wasm' : prefix + path; } }, fireImmediately: true });
+        resolve(Z);
+      }
+      if (win.ZXingWASM) return ready();
+      var sc = doc.createElement('script'); sc.src = BASE + 'vendor/zxing-reader.js'; sc.async = true;
+      sc.onload = ready; sc.onerror = function () { zxP = null; reject(new Error('zxing load')); };
+      doc.head.appendChild(sc);
+    });
+    return zxP;
+  }
+  var AC = null;
+  function beep() {
+    try { AC = AC || new (win.AudioContext || win.webkitAudioContext)(); var o = AC.createOscillator(), g = AC.createGain();
+      o.type = 'sine'; o.frequency.value = 1760; g.gain.setValueAtTime(0.0001, AC.currentTime); g.gain.exponentialRampToValueAtTime(0.18, AC.currentTime + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + 0.14);
+      o.connect(g); g.connect(AC.destination); o.start(); o.stop(AC.currentTime + 0.15); } catch (e) {}
+  }
 
   function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
   function mq(q) { return !!(win.matchMedia && win.matchMedia(q).matches); }
@@ -104,8 +131,8 @@
   }
 
   function popupIcon(kind) {
-    var map = { success: ['rt-tile-green', ICON.check, 1], approve: ['rt-tile-green', ICON.check], error: ['rt-tile-red', ICON.x], reject: ['rt-tile-red', ICON.x], warning: ['rt-tile-amber', ICON.warn], info: ['rt-tile-blue', ICON.info], question: ['rt-tile-gold', ICON.help], gold: ['rt-tile-gold', ICON.check] };
-    var m = map[kind] || map.info;
+    var map = { success: ['rt-tile-green', ICON.check, 1], approve: ['rt-tile-green', ICON.check], error: ['rt-tile-red', ICON.x], reject: ['rt-tile-red', ICON.x], warning: ['rt-tile-amber', ICON.warn], info: ['rt-tile-blue', ICON.info], question: ['rt-tile-gold', ICON.help], gold: ['rt-tile-gold', ICON.check], bell: ['rt-tile-gold', ICON.bell], scan: ['rt-tile-navy', ICON_SCAN] };
+    var m = map[kind] || (typeof kind === 'string' && /[0-9]/.test(kind) ? ['rt-tile-gold', kind] : map.info);
     var w = el('div', 'rt-popup-icon rt-tile ' + m[0]);
     w.appendChild(svg(m[1], 30, true));
     if (m[2]) { var b = el('span', 'rt-burst'); for (var i = 0; i < 12; i++) { var d = el('i'); d.style.setProperty('--a', (i * 30) + 'deg'); b.appendChild(d); } w.appendChild(b); }
@@ -113,7 +140,7 @@
   }
 
   var UI = {
-    version: '1.4.1',
+    version: '1.5.0',
     icons: ICON,
     platform: platform,
 
@@ -450,6 +477,234 @@
       return { close: dismiss, el: pop };
     },
 
+    /* ---------- Notification count: bell badge + app icon badge + tab title ---------- */
+    /* RattanaUI.setBadge(n) — updates every .rt-count inside [data-rt-bell] (or the elements you pass) */
+    setBadge: function (n, targets) {
+      n = Math.max(0, parseInt(n, 10) || 0);
+      var list = targets ? [].concat(typeof targets === 'string' ? [].slice.call(doc.querySelectorAll(targets)) : targets) : [].slice.call(doc.querySelectorAll('[data-rt-bell]'));
+      list.forEach(function (host) {
+        if (!host) return;
+        var c = host.classList && host.classList.contains('rt-count') ? host : host.querySelector('.rt-count');
+        if (!c) { c = el('span', 'rt-count'); c.setAttribute('aria-hidden', 'true'); host.appendChild(c); }
+        var prev = parseInt(c.getAttribute('data-n') || '0', 10);
+        c.setAttribute('data-n', String(n)); c.textContent = n ? (n > 99 ? '99+' : String(n)) : '';
+        if (host !== c) { var lab = host.getAttribute('data-rt-bell-label') || host.getAttribute('aria-label') || ''; lab = lab.replace(/\s*\(\d+\+?\)$/, ''); if (lab) host.setAttribute('aria-label', n ? lab + ' (' + n + ')' : lab); if (!host.getAttribute('data-rt-bell-label') && lab) host.setAttribute('data-rt-bell-label', lab); }
+        if (n > prev) {
+          c.classList.remove('is-bump'); void c.offsetWidth; c.classList.add('is-bump');
+          if (host !== c && !reducedMotion()) { host.classList.remove('is-ringing'); void host.offsetWidth; host.classList.add('is-ringing'); setTimeout(function () { host.classList.remove('is-ringing'); }, 950); }
+        }
+      });
+      try { if (navigator.setAppBadge) { if (n) navigator.setAppBadge(n); else navigator.clearAppBadge(); } } catch (e) {}
+      if (UI._titleBadge !== false) { var t = doc.title.replace(/^\(\d+\+?\)\s+/, ''); doc.title = n ? '(' + (n > 99 ? '99+' : n) + ') ' + t : t; }
+      return n;
+    },
+
+    /* ---------- Notifications outside the app (system notifications) ---------- */
+    notifySupport: function () {
+      var P = UI.platform || {};
+      if (!('Notification' in win)) return P.os === 'ios' && !P.standalone ? 'ios-install' : 'unsupported';
+      if (!win.isSecureContext) return 'insecure';
+      return 'ok';
+    },
+    /* Ask once, with a Rattana prompt first (the browser only asks after a tap). → Promise<'granted'|'denied'|'default'|'unsupported'> */
+    notifyPermission: function (o) {
+      o = o || {};
+      var sup = UI.notifySupport(), en = UI.getLang() === 'en';
+      if (sup === 'ios-install') {
+        return UI.popup({ icon: 'info', title: en ? 'Add to Home Screen first' : 'เพิ่มแอปไว้ที่หน้าจอโฮมก่อน',
+          message: en ? 'On iPhone, notifications work once the app is on your Home Screen.' : 'บน iPhone/iPad ต้องเพิ่มแอปไว้ที่หน้าจอโฮมก่อน ถึงจะแจ้งเตือนได้',
+          content: '<ol class="rt-notify-steps"><li>' + (en ? 'Tap Share in Safari' : 'แตะปุ่ม "แชร์" ใน Safari') + '</li><li>' + (en ? 'Choose “Add to Home Screen”' : 'เลือก "เพิ่มไปยังหน้าจอโฮม"') + '</li><li>' + (en ? 'Open the app from the Home Screen and turn notifications on' : 'เปิดแอปจากหน้าจอโฮม แล้วกดเปิดการแจ้งเตือน') + '</li></ol>',
+          actions: [{ label: en ? 'OK' : 'เข้าใจแล้ว', variant: 'gold', value: 'unsupported' }] }).then(function () { return 'unsupported'; });
+      }
+      if (sup !== 'ok') return Promise.resolve('unsupported');
+      if (Notification.permission !== 'default') return Promise.resolve(Notification.permission);
+      return UI.popup({ icon: 'bell', title: o.title || (en ? 'Turn on notifications?' : 'เปิดการแจ้งเตือนไหม?'),
+        message: o.message || (en ? 'Get alerts even when the app is in the background.' : 'รับแจ้งเตือนงานใหม่ แม้ไม่ได้เปิดหน้าแอปอยู่'),
+        actions: [{ label: en ? 'Not now' : 'ไว้ทีหลัง', variant: 'glass', value: 'default' },
+                  { label: en ? 'Turn on' : 'เปิดแจ้งเตือน', variant: 'gold', value: 'ask', onClick: function () { return Notification.requestPermission().then(function (p) { UI._perm = p; }); } }]
+      }).then(function (v) { if (v === 'ask') { var p = UI._perm || Notification.permission; if (p === 'granted') UI.toast(en ? 'Notifications on' : 'เปิดการแจ้งเตือนแล้ว'); else if (p === 'denied') UI.toast(en ? 'Notifications are blocked in browser settings' : 'เบราว์เซอร์บล็อกการแจ้งเตือนไว้ — เปิดได้ที่การตั้งค่าเว็บไซต์', { type: 'warning', duration: 6000 }); return p; } return 'default'; });
+    },
+    _sw: function () {
+      if (UI._swP) return UI._swP;
+      UI._swP = new Promise(function (resolve) {
+        try {
+          if (!('serviceWorker' in navigator) || !win.isSecureContext) return resolve(null);
+          var swUrl = new URL('rattana-sw.js', BASE);
+          if (swUrl.origin !== location.origin) return resolve(null);
+          navigator.serviceWorker.register(swUrl.href, { scope: new URL('./', swUrl).pathname }).then(function (reg) {
+            if (reg.active) return resolve(reg);
+            var w = reg.installing || reg.waiting; if (!w) return resolve(reg);
+            w.addEventListener('statechange', function () { if (w.state === 'activated') resolve(reg); });
+            setTimeout(function () { resolve(reg); }, 4000);
+          }, function () { resolve(null); });
+        } catch (e) { resolve(null); }
+      });
+      return UI._swP;
+    },
+    /* RattanaUI.notify('มีคำขอใหม่', { body, url, tag, icon, badge: n, force }) — system notification when the app is in the background
+       (or always with force:true); in-app toast while the user is looking at it. → Promise<boolean shown as system notification> */
+    notify: function (title, o) {
+      o = o || {};
+      if (o.badge != null) UI.setBadge(o.badge);
+      var visible = doc.visibilityState === 'visible' && doc.hasFocus && doc.hasFocus();
+      if (visible && !o.force) { UI.toast((title || '') + (o.body ? ' — ' + o.body : ''), { type: o.type || 'info', duration: o.duration || 5000, action: o.url ? { label: UI.getLang() === 'en' ? 'Open' : 'เปิด', onClick: function () { location.href = o.url; } } : undefined }); UI.haptic('light'); return Promise.resolve(false); }
+      if (UI.notifySupport() !== 'ok' || Notification.permission !== 'granted') {
+        if (visible || o.force) UI.toast(title + (o.body ? ' — ' + o.body : ''), { type: o.type || 'info' });
+        return Promise.resolve(false);
+      }
+      var opts = { body: o.body || '', icon: o.icon || BASE + 'rattana-logo-navy.png', tag: o.tag || undefined, renotify: !!o.tag, silent: !!o.silent,
+        requireInteraction: !!o.requireInteraction, data: { url: o.url || location.href }, vibrate: [80, 40, 80], lang: UI.getLang(), timestamp: Date.now() };
+      if (o.badgeIcon) opts.badge = o.badgeIcon;
+      return UI._sw().then(function (reg) {
+        if (reg && reg.showNotification) return reg.showNotification(title, opts).then(function () { return true; });
+        var n = new Notification(title, opts);
+        n.onclick = function () { try { win.focus(); } catch (e) {} if (o.url && o.url !== location.href) location.href = o.url; n.close(); };
+        return true;
+      }).catch(function () { return false; });
+    },
+
+    /* ---------- Barcode / QR scanner ---------- */
+    /* RattanaUI.scan({ title, hint, formats }) → Promise<string | null>
+       Native BarcodeDetector when the device has it; otherwise the bundled ZXing (WebAssembly) engine. */
+    scan: function (o) {
+      o = o || {};
+      var en = UI.getLang() === 'en', done = false, stream = null, track = null, raf = 0, busy = false, last = '', lastAt = 0, hits = 0;
+      var ov = el('div', 'rt-scan'); ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true'); ov.setAttribute('aria-label', o.title || (en ? 'Scan barcode / QR' : 'สแกนบาร์โค้ด / QR'));
+      var video = el('video'); video.setAttribute('playsinline', ''); video.setAttribute('muted', ''); video.muted = true; video.autoplay = true;
+      var mask = el('div', 'rt-scan-mask'), frame = el('div', 'rt-scan-frame'); for (var k = 0; k < 4; k++) frame.appendChild(el('i')); frame.appendChild(el('div', 'rt-scan-laser')); mask.appendChild(frame);
+      var top = el('div', 'rt-scan-top'), ttl = el('div', 'rt-scan-title', o.title || (en ? 'Scan barcode / QR' : 'สแกนบาร์โค้ด / QR'));
+      var x = el('button', 'rt-scan-btn is-icon'); x.type = 'button'; x.setAttribute('aria-label', en ? 'Close' : 'ปิด'); x.appendChild(svg(ICON.x, 22));
+      top.appendChild(ttl); top.appendChild(x);
+      var bottom = el('div', 'rt-scan-bottom'), hint = el('p', 'rt-scan-hint', o.hint || (en ? 'Point the camera at a barcode or QR code' : 'เล็งกล้องให้บาร์โค้ดหรือ QR อยู่ในกรอบ'));
+      var row = el('div', 'rt-scan-row');
+      var torch = el('button', 'rt-scan-btn is-icon'); torch.type = 'button'; torch.hidden = true; torch.setAttribute('aria-pressed', 'false'); torch.setAttribute('aria-label', en ? 'Flashlight' : 'ไฟฉาย'); torch.appendChild(svg('M18 6c0 2-2 2-2 4v10a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2V10c0-2-2-2-2-4V2h12zM6 6h12M12 12v.01', 20));
+      var manual = el('button', 'rt-scan-btn'); manual.type = 'button'; manual.appendChild(svg('M2 6h20v12H2zM6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10', 20)); manual.appendChild(el('span', null, en ? 'Type the code' : 'พิมพ์รหัสเอง'));
+      row.appendChild(torch); row.appendChild(manual); bottom.appendChild(hint); bottom.appendChild(row);
+      ov.appendChild(video); ov.appendChild(mask); ov.appendChild(top); ov.appendChild(bottom);
+      var opener = doc.activeElement; lockScroll(); doc.body.appendChild(ov);
+      setTimeout(function () { try { x.focus({ preventScroll: true }); } catch (e) {} }, 50);
+      var resolveP; var P = new Promise(function (r) { resolveP = r; });
+      function stop() { cancelAnimationFrame(raf); raf = 0; if (stream) stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+      function finish(v) {
+        if (done) return; done = true; stop(); doc.removeEventListener('keydown', key, true);
+        ov.classList.add('is-closing'); setTimeout(function () { ov.remove(); unlockScroll(); try { opener && opener.focus && opener.focus({ preventScroll: true }); } catch (e) {} }, reducedMotion() ? 0 : 200);
+        resolveP(v == null ? null : String(v));
+      }
+      function key(e) { if (ov._paused) return; if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(null); } else if (e.key === 'Tab') trapTab(e, ov); }
+      doc.addEventListener('keydown', key, true);
+      x.addEventListener('click', function () { finish(null); });
+      manual.addEventListener('click', function () {
+        stop(); ov._paused = true; ov.style.visibility = 'hidden';
+        UI.popup({ icon: 'scan', title: en ? 'Type the code' : 'พิมพ์รหัสสินค้า / บาร์โค้ด', content: '<div class="rt-field"><label for="rt-scan-code">' + (en ? 'Code' : 'รหัส') + '</label><input class="rt-input" id="rt-scan-code" inputmode="text" autocomplete="off" enterkeyhint="done"></div>',
+          actions: [{ label: en ? 'Back to camera' : 'กลับไปสแกน', variant: 'glass', value: null }, { label: en ? 'Use code' : 'ใช้รหัสนี้', variant: 'gold', value: 'ok', onClick: function (api) { var i = api.el.querySelector('#rt-scan-code'); if (!i.value.trim()) { i.focus(); return false; } api._code = i.value.trim(); P._code = i.value.trim(); } }],
+          onOpen: function (api) { var i = api.el.querySelector('#rt-scan-code'); if (i) { setTimeout(function () { i.focus(); }, 80); i.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); var b = api.el.querySelector('.rt-btn-gold'); if (b) b.click(); } }); } }
+        }).then(function (v) { ov._paused = false; ov.style.visibility = ''; if (v === 'ok' && P._code) finish(P._code); else if (!done) start(); });
+      });
+      torch.addEventListener('click', function () {
+        if (!track) return; var on = torch.getAttribute('aria-pressed') !== 'true';
+        track.applyConstraints({ advanced: [{ torch: on }] }).then(function () { torch.setAttribute('aria-pressed', on ? 'true' : 'false'); }, function () {});
+      });
+      function fail(title, msg) {
+        stop(); frame.style.display = 'none';
+        var m = el('div', 'rt-scan-msg'); m.appendChild(el('b', null, title)); m.appendChild(el('p', null, msg)); mask.appendChild(m); hint.hidden = true;
+      }
+      function found(v) {
+        if (done) return;
+        ov.classList.add('is-found'); var r = el('div', 'rt-scan-result', v); ov.appendChild(r);
+        UI.haptic('success'); beep(); stop();
+        setTimeout(function () { finish(v); }, 420);
+      }
+      function accept(v, fmt) {
+        if (!v) return;
+        var linear = !/qr|aztec|data.?matrix|pdf|maxi/i.test(fmt || '');
+        var now = Date.now();
+        /* 1D barcodes must read the same twice in a row — stops misreads */
+        if (linear) { if (v === last && now - lastAt < 1500) hits++; else hits = 1; last = v; lastAt = now; if (hits < 2) return; }
+        found(v);
+      }
+      /* crop the frame area of the video into a canvas (smaller = faster + steadier reads) */
+      var cv = doc.createElement('canvas'), cx = cv.getContext('2d', { willReadFrequently: true });
+      function grab() {
+        var vw = video.videoWidth, vh = video.videoHeight; if (!vw || !vh) return null;
+        var fr = frame.getBoundingClientRect(), vr = video.getBoundingClientRect();
+        var sc = Math.max(vr.width / vw, vr.height / vh), ox = (vr.width - vw * sc) / 2, oy = (vr.height - vh * sc) / 2;
+        /* full camera width (long barcodes often stick out of the frame) × the frame's band plus a margin */
+        var padY = fr.height * 0.35, sx = 0, sw = vw;
+        var sy = Math.max(0, ((fr.top - vr.top - padY) - oy) / sc), sh = Math.min(vh - sy, (fr.height + padY * 2) / sc);
+        var tw = Math.min(1280, Math.round(sw)), th = Math.round(sh * tw / sw);
+        if (cv.width !== tw || cv.height !== th) { cv.width = tw; cv.height = th; }
+        cx.drawImage(video, sx, sy, sw, sh, 0, 0, tw, th);
+        return cv;
+      }
+      var engine = null, nextAt = 0;
+      function loop(t) {
+        if (done || !stream) return;
+        raf = requestAnimationFrame(loop);
+        if (busy || t < nextAt || video.readyState < 2) return;
+        nextAt = t + 90; busy = true;
+        var c = grab(); if (!c) { busy = false; return; }
+        engine(c).then(function (r) { busy = false; if (r) accept(r.v, r.f); }, function () { busy = false; });
+      }
+      function pickEngine() {
+        if ('BarcodeDetector' in win) {
+          return BarcodeDetector.getSupportedFormats().then(function (fm) {
+            var want = ['qr_code', 'ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'itf', 'codabar', 'data_matrix', 'code_93', 'pdf417'].filter(function (f) { return fm.indexOf(f) > -1; });
+            if (want.indexOf('qr_code') < 0 || want.indexOf('ean_13') < 0) throw new Error('weak');
+            var det = new BarcodeDetector({ formats: want });
+            return function (c) { return det.detect(c).then(function (a) { return a && a[0] ? { v: a[0].rawValue, f: a[0].format } : null; }); };
+          }).catch(zxing);
+        }
+        return zxing();
+      }
+      function zxing() {
+        return loadZXing().then(function (Z) {
+          /* cycle binarizers frame by frame: sharp codes, uneven light and faded/low-contrast labels each read best with a different one */
+          var bins = ['LocalAverage', 'FixedThreshold', 'GlobalHistogram'], bi = 0;
+          return function (c) {
+            var img = cx.getImageData(0, 0, c.width, c.height), opt = { tryHarder: true, tryRotate: true, tryInvert: true, tryDownscale: true, maxNumberOfSymbols: 1, formats: o.formats || [], binarizer: bins[bi++ % bins.length] };
+            return Z.readBarcodes(img, opt).then(function (a) { var r = a && a.filter(function (b) { return b.isValid; })[0]; return r ? { v: r.text, f: r.format } : null; });
+          };
+        });
+      }
+      function start() {
+        if (done) return;
+        var oldMsg = mask.querySelector('.rt-scan-msg'); if (oldMsg) oldMsg.remove(); frame.style.display = ''; hint.hidden = false;
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return fail(en ? 'Camera not available' : 'ใช้กล้องไม่ได้', win.isSecureContext ? (en ? 'This browser cannot open the camera. Type the code instead.' : 'เบราว์เซอร์นี้เปิดกล้องไม่ได้ กด "พิมพ์รหัสเอง" แทน') : (en ? 'The page must be opened over https.' : 'ต้องเปิดหน้าเว็บผ่าน https ถึงจะใช้กล้องได้'));
+        navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } }).then(function (s) {
+          if (done) { s.getTracks().forEach(function (t) { t.stop(); }); return; }
+          stream = s; track = s.getVideoTracks()[0]; video.srcObject = s;
+          var cap = track.getCapabilities ? track.getCapabilities() : {};
+          if (cap.torch) torch.hidden = false;
+          var adv = []; if (cap.focusMode && cap.focusMode.indexOf('continuous') > -1) adv.push({ focusMode: 'continuous' });
+          if (adv.length) track.applyConstraints({ advanced: adv }).catch(function () {});
+          var pv = video.play(); if (pv && pv.catch) pv.catch(function () {});
+          return (engine ? Promise.resolve(engine) : pickEngine()).then(function (e) { engine = e; if (!done && stream) raf = requestAnimationFrame(loop); });
+        }).catch(function (err) {
+          var nm = err && err.name;
+          if (nm === 'NotAllowedError' || nm === 'SecurityError') fail(en ? 'Camera permission needed' : 'ยังไม่ได้อนุญาตให้ใช้กล้อง', en ? 'Allow camera access in the browser settings, or type the code.' : 'อนุญาตกล้องในการตั้งค่าเบราว์เซอร์ (รูปแม่กุญแจข้างที่อยู่เว็บ) หรือกด "พิมพ์รหัสเอง"');
+          else if (nm === 'NotFoundError' || nm === 'OverconstrainedError') fail(en ? 'No camera found' : 'ไม่พบกล้องในเครื่องนี้', en ? 'Type the code instead.' : 'กด "พิมพ์รหัสเอง" แทน');
+          else if (nm === 'NotReadableError') fail(en ? 'Camera is busy' : 'กล้องถูกใช้งานอยู่', en ? 'Close other apps using the camera and try again.' : 'ปิดแอปอื่นที่ใช้กล้องอยู่ แล้วลองใหม่');
+          else fail(en ? 'Could not start scanning' : 'เริ่มสแกนไม่ได้', en ? 'Type the code instead.' : 'กด "พิมพ์รหัสเอง" แทน');
+        });
+      }
+      start();
+      return P;
+    },
+
+    /* put a scanned code into an input as if the user typed it (fires input + change + rt:scan) */
+    fillScan: function (inp, v) {
+      if (!inp) return; inp.value = v;
+      inp.dispatchEvent(new Event('input', { bubbles: true })); inp.dispatchEvent(new Event('change', { bubbles: true }));
+      inp.dispatchEvent(new CustomEvent('rt:scan', { bubbles: true, detail: { value: v } }));
+      if (inp.form && inp.hasAttribute('data-rt-scan-submit')) { if (inp.form.requestSubmit) inp.form.requestSubmit(); else inp.form.submit(); }
+    },
+
+    /* scroll the page (or the app's main scroller) back to the top */
+    scrollTop: function () {
+      var s = UI._scroller && UI._scroller.isConnected ? UI._scroller : null, b = reducedMotion() ? 'auto' : 'smooth';
+      if (s) s.scrollTo({ top: 0, behavior: b }); else win.scrollTo({ top: 0, behavior: b });
+    },
+
     /* ---------- Toast: spring in, progress bar, pause on hover, swipe away, optional action ---------- */
     toast: function (message, opts) {
       opts = opts || {};
@@ -690,6 +945,15 @@
       q('[data-rt-theme-toggle]').forEach(function (b) { if (b._rt) return; b._rt = 1; b.addEventListener('click', function () { UI.toggleTheme(); }); });
       q('[data-rt-lang]').forEach(function (b) { if (b._rt) return; b._rt = 1; b.addEventListener('click', function () { UI.setLang(b.getAttribute('data-rt-lang')); }); });
       q('.rt-seg').forEach(function (s) { if (s._rt) return; s._rt = 1; UI.segmented(s); });
+      q('.rt-search').forEach(enhanceSearch);
+      q('[data-rt-scan]:not(.rt-search)').forEach(function (b) {
+        if (b._rtScan || b.tagName === 'INPUT') return; b._rtScan = 1;
+        if (b.tagName !== 'BUTTON') return;
+        b.addEventListener('click', function (e) {
+          e.preventDefault(); var sel = b.getAttribute('data-rt-scan'), t = sel ? doc.querySelector(sel) : null;
+          UI.scan().then(function (v) { if (v == null) return; if (t) UI.fillScan(t, v); b.dispatchEvent(new CustomEvent('rt:scan', { bubbles: true, detail: { value: v } })); });
+        });
+      });
       q('.rt-wish').forEach(function (b) { if (b._rt) return; b._rt = 1; b.addEventListener('click', function () { var on = b.getAttribute('aria-pressed') !== 'true'; b.setAttribute('aria-pressed', on ? 'true' : 'false'); if (on) UI.haptic('light'); }); });
       q('.rt-chip[aria-pressed]').forEach(function (b) { if (b._rt) return; b._rt = 1; b.addEventListener('click', function () { var g = b.parentElement; g.querySelectorAll('.rt-chip[aria-pressed]').forEach(function (c) { c.setAttribute('aria-pressed', c === b ? 'true' : 'false'); }); UI.haptic('light'); }); });
       q('[data-rt-menu-toggle]').forEach(function (b) { if (b._rt) return; b._rt = 1; b.setAttribute('aria-expanded', 'false'); b.addEventListener('click', function () { UI.menuOpen(undefined, b.closest('.rt-shell') || undefined); }); });
@@ -784,22 +1048,108 @@
     var r = b.getBoundingClientRect(), d = Math.max(r.width, r.height) * 2.4, s = el('span', 'rt-ripple');
     s.style.width = s.style.height = d + 'px'; s.style.left = (e.clientX - r.left) + 'px'; s.style.top = (e.clientY - r.top) + 'px';
     if (getComputedStyle(b).position === 'static') b.style.position = 'relative';
-    b.appendChild(s); setTimeout(function () { s.remove(); }, 750);
+    var fx = null; for (var k = 0; k < b.children.length; k++) if (b.children[k].classList.contains('rt-fx')) { fx = b.children[k]; break; }
+    if (!fx) { fx = el('span', 'rt-fx'); fx.setAttribute('aria-hidden', 'true'); b.appendChild(fx); }
+    fx.appendChild(s); setTimeout(function () { s.remove(); if (fx.isConnected && !fx.children.length) fx.remove(); }, 750);
   }, { passive: true });
 
   /* Esc closes the shell menu */
   doc.addEventListener('keydown', function (e) { if (e.key === 'Escape') { var s = doc.querySelector('.rt-shell.is-menu-open'); if (s) UI.menuOpen(false, s); } });
+
+  /* search box: X that clears everything (+ optional barcode/QR button) */
+  function enhanceSearch(box) {
+    if (box._rtSearch) return;
+    var inp = box.querySelector('input'); if (!inp) return; box._rtSearch = 1;
+    var en = UI.getLang() === 'en';
+    var clr = el('button', 'rt-search-clear'); clr.type = 'button'; clr.setAttribute('aria-label', en ? 'Clear search' : 'ล้างคำค้นหา'); clr.tabIndex = -1; clr.appendChild(svg(ICON.x, 14));
+    inp.insertAdjacentElement('afterend', clr);
+    function sync() { box.classList.toggle('has-value', !!inp.value); }
+    ['input', 'change', 'search', 'focus', 'blur'].forEach(function (t) { inp.addEventListener(t, sync); });
+    try { /* also notice when the app sets .value from code */
+      var d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+      Object.defineProperty(inp, 'value', { configurable: true, get: function () { return d.get.call(this); }, set: function (v) { d.set.call(this, v); sync(); } });
+    } catch (e) {}
+    clr.addEventListener('mousedown', function (e) { e.preventDefault(); });
+    clr.addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      inp.value = ''; sync();
+      inp.dispatchEvent(new Event('input', { bubbles: true })); inp.dispatchEvent(new Event('change', { bubbles: true })); inp.dispatchEvent(new Event('search', { bubbles: true }));
+      inp.focus(); UI.haptic('light');
+    });
+    if (box.hasAttribute('data-rt-scan') || inp.hasAttribute('data-rt-scan')) {
+      var sb = el('button', 'rt-search-scan'); sb.type = 'button'; sb.setAttribute('aria-label', en ? 'Scan barcode or QR' : 'สแกนบาร์โค้ด / QR'); sb.title = sb.getAttribute('aria-label'); sb.appendChild(svg(ICON_SCAN, 18));
+      clr.insertAdjacentElement('afterend', sb);
+      sb.addEventListener('click', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        UI.scan({ title: box.getAttribute('data-rt-scan-title') || undefined }).then(function (v) { if (v != null) UI.fillScan(inp, v); });
+      });
+    }
+    sync();
+  }
+
+  /* back-to-top floating button on every Rattana page */
+  function setupToTop() {
+    if (!doc.body || doc.body.hasAttribute('data-rt-no-top') || root.hasAttribute('data-rt-no-top') || doc.querySelector('.rt-totop')) return;
+    /* the app already has its own back-to-top button → don't add a second one */
+    var OWN = '[id*="backtotop" i],[id*="back-to-top" i],[id*="totop" i],[id*="to-top" i],[id*="scrolltop" i],[id*="gotop" i],[class*="back-to-top" i],[class*="backtotop" i],[class*="scroll-top" i],[class*="gotop" i],[class*="go-top" i],[class*="to-top" i]';
+    function hasOwn() { var n = doc.querySelectorAll(OWN); for (var i = 0; i < n.length; i++) if (!n[i].classList.contains('rt-totop') && !n[i].closest('.rt-totop')) return true; return false; }
+    if (hasOwn()) return;
+    var en = UI.getLang() === 'en', b = el('button', 'rt-totop'); b.type = 'button'; b.setAttribute('aria-label', en ? 'Back to top' : 'กลับขึ้นบนสุด'); b.title = b.getAttribute('aria-label');
+    var ns = 'http://www.w3.org/2000/svg', ring = doc.createElementNS(ns, 'svg'); ring.setAttribute('class', 'rt-totop-ring'); ring.setAttribute('viewBox', '0 0 54 54'); ring.setAttribute('aria-hidden', 'true');
+    var c1 = doc.createElementNS(ns, 'circle'), c2 = doc.createElementNS(ns, 'circle'), C = 2 * Math.PI * 25;
+    [c1, c2].forEach(function (c) { c.setAttribute('cx', '27'); c.setAttribute('cy', '27'); c.setAttribute('r', '25'); ring.appendChild(c); });
+    c1.setAttribute('class', 'rt-ring-bg'); c2.setAttribute('class', 'rt-ring-fg'); c2.style.strokeDasharray = C; c2.style.strokeDashoffset = C;
+    var ar = svg('M12 19V5M5 12l7-7 7 7', 22); ar.setAttribute('class', 'rt-totop-arrow'); ar.setAttribute('stroke-width', '2.4');
+    b.appendChild(ring); b.appendChild(ar); doc.body.appendChild(b);
+    var ticking = false;
+    function metrics() {
+      var s = UI._scroller && UI._scroller.isConnected ? UI._scroller : null;
+      var top = s ? s.scrollTop : (win.scrollY || root.scrollTop), max = s ? s.scrollHeight - s.clientHeight : Math.max(root.scrollHeight, doc.body.scrollHeight) - win.innerHeight;
+      return { top: top, max: Math.max(1, max) };
+    }
+    function update() {
+      ticking = false; var m = metrics(), show = m.top > Math.max(320, win.innerHeight * 0.6) && !root.classList.contains('rt-locked');
+      b.classList.toggle('is-on', show);
+      c2.style.strokeDashoffset = String(C * (1 - Math.min(1, m.top / m.max)));
+      /* sit above a visible bottom nav */
+      var lift = 0;
+      [].forEach.call(doc.querySelectorAll('.rt-bottom-nav'), function (nav) { var r = nav.getBoundingClientRect(), cs = getComputedStyle(nav); if (cs.position === 'fixed' && cs.display !== 'none' && cs.visibility !== 'hidden' && r.height && r.bottom > win.innerHeight - 60 && r.top < win.innerHeight) lift = Math.max(lift, win.innerHeight - r.top + 4 - 16); });
+      /* never sit on top of the app's own floating buttons (cart, add, chat…) */
+      if (show) {
+        var x = win.innerWidth - 42, guard = 0;
+        while (guard++ < 4) {
+          var y = win.innerHeight - 42 - lift, hit = null, list = doc.elementsFromPoint ? doc.elementsFromPoint(x, y) : [];
+          for (var i = 0; i < list.length; i++) { var n = list[i]; if (n === b || b.contains(n) || n === doc.body || n === root) continue; var f = n; while (f && f !== doc.body) { var p = getComputedStyle(f).position; if (p === 'fixed' || p === 'sticky') break; f = f.parentElement; } if (f && f !== doc.body && !f.classList.contains('rt-toast-stack') && !f.closest('.rt-toast-stack')) { hit = f; break; } }
+          if (!hit) break; var hr = hit.getBoundingClientRect(); if (hr.height > win.innerHeight * 0.5) break; lift = Math.max(lift, win.innerHeight - hr.top + 8 - 16);
+        }
+      }
+      lift = Math.max(0, Math.min(lift, win.innerHeight * 0.45));
+      b.style.setProperty('--rt-totop-lift', lift + 'px');
+      if (show && hasOwn()) { b.remove(); doc.removeEventListener('scroll', onScroll, true); }
+    }
+    function onScroll(e) {
+      var t = e && e.target;
+      if (t && t.nodeType === 1 && t !== doc.documentElement && t !== doc.body && !t.closest('.rt-overlay, .rt-popover, .rt-lightbox, .rt-scan') && t.clientHeight > win.innerHeight * 0.5 && t.scrollHeight > t.clientHeight + 200) UI._scroller = t;
+      else if (t === doc || t === doc.documentElement || t === doc.body) { if ((win.scrollY || root.scrollTop) > 0) UI._scroller = null; }
+      if (!ticking) { ticking = true; requestAnimationFrame(update); }
+    }
+    doc.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    win.addEventListener('resize', function () { if (!ticking) { ticking = true; requestAnimationFrame(update); } });
+    b.addEventListener('click', function () { b.classList.remove('is-flying'); void b.offsetWidth; b.classList.add('is-flying'); UI.haptic('light'); UI.scrollTop(); });
+    update();
+  }
 
   function boot() {
     if (!root.getAttribute('data-theme')) UI.setTheme(store(KEY_THEME) || 'light');
     UI.init();
     var saved = store(KEY_LANG); if (saved && saved !== UI.getLang()) UI.setLang(saved);
     UI.setTheme(UI.getTheme());
+    setupToTop();
     /* pick up anything an app renders later */
     if ('MutationObserver' in win && doc.body) {
       var pending = [], scheduled = false;
       new MutationObserver(function (ms) {
-        ms.forEach(function (m) { m.addedNodes.forEach(function (n) { if (n.nodeType === 1 && !(n.classList && n.classList.contains('rt-ripple'))) pending.push(n); }); });
+        ms.forEach(function (m) { m.addedNodes.forEach(function (n) { if (n.nodeType === 1 && !(n.classList && (n.classList.contains('rt-ripple') || n.classList.contains('rt-fx')))) pending.push(n); }); });
         if (pending.length && !scheduled) { scheduled = true; requestAnimationFrame(function () { scheduled = false; var list = pending; pending = []; list.forEach(function (n) { if (n.isConnected) UI.init(n); }); }); }
       }).observe(doc.body, { childList: true, subtree: true });
     }
