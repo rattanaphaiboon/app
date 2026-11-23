@@ -1,4 +1,4 @@
-/* Rattana CI v1.5.0 — behaviour helpers (no dependencies). window.RattanaUI */
+/* Rattana CI v1.6.0 — behaviour helpers (no dependencies). window.RattanaUI */
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement, win = window;
@@ -140,7 +140,7 @@
   }
 
   var UI = {
-    version: '1.5.0',
+    version: '1.6.0',
     icons: ICON,
     platform: platform,
 
@@ -946,6 +946,7 @@
       q('[data-rt-lang]').forEach(function (b) { if (b._rt) return; b._rt = 1; b.addEventListener('click', function () { UI.setLang(b.getAttribute('data-rt-lang')); }); });
       q('.rt-seg').forEach(function (s) { if (s._rt) return; s._rt = 1; UI.segmented(s); });
       q('.rt-search').forEach(enhanceSearch);
+      q('[data-rt-user]').forEach(function (b) { if (b._rtUserPaint) return; b._rtUserPaint = 1; paintUserChip(b); });
       q('[data-rt-scan]:not(.rt-search)').forEach(function (b) {
         if (b._rtScan || b.tagName === 'INPUT') return; b._rtScan = 1;
         if (b.tagName !== 'BUTTON') return;
@@ -1056,6 +1057,320 @@
   /* Esc closes the shell menu */
   doc.addEventListener('keydown', function (e) { if (e.key === 'Escape') { var s = doc.querySelector('.rt-shell.is-menu-open'); if (s) UI.menuOpen(false, s); } });
 
+  /* ==========================================================================
+     Users for apps (v1.6) — sign in with a company Google account, then look the
+     person up in "Rattana Users for apps" › Sheet1. Only the signed-in person's
+     row (and only the columns an app needs) is downloaded.
+     ========================================================================== */
+  var USER_DEFAULTS = {
+    clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
+    sheetId: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
+    tab: 'Sheet1',
+    holidayTab: 'วันหยุดนขัต',
+    appName: '',
+    minRole: 0,            /* 0 = anyone in the sheet */
+    defaultRole: null,     /* role to use when the User Role cell is blank (Sales uses 3) */
+    sessionDays: 30,       /* stay signed in this long; the row is re-checked on every visit */
+    fields: []             /* extra sheet columns an app wants (header names) */
+  };
+  /* sheet header → field name (headers are matched without spaces/new lines) */
+  var USER_COLS = {
+    email: ['E-mail', 'Email', 'อีเมล'],
+    name: ['ชื่อ - สกุล', 'ชื่อ-สกุล', 'ชื่อสกุล'],
+    title: ['คำนำหน้าชื่อ'],
+    nickname: ['ชื่อเล่น'],
+    displayName: ['ชื่อ - สกุล (ชื่อเล่น)'],
+    empId: ['รหัสพนักงาน'],
+    w: ['W', 'คลัง'],
+    shipW: ['คลังส่ง'],
+    role: ['User Role', 'Role'],
+    lineUserId: ['LINE userId'],
+    photo: ['รูป', 'รูปภาพ'],
+    department: ['แผนก'],
+    company: ['บริษัท'],
+    status: ['Status'],
+    resigned: ['วัน/เดือน/ปี ลาออก', 'วันลาออก', 'ลาออก'],
+    salesCode: ['รหัสเซลล์', 'รหัสเซล']
+  };
+  function normHead(s) { return String(s == null ? '' : s).replace(/\s+/g, '').toLowerCase(); }
+  var userCfg = {}; Object.keys(USER_DEFAULTS).forEach(function (k) { userCfg[k] = USER_DEFAULTS[k]; });
+  var gvizN = 0;
+  /* Google Sheets query (JSONP: works on GitHub Pages, any origin and file://) */
+  function gviz(sheetId, tab, tq, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      var cb = '__rtGviz' + (++gvizN) + '_' + Date.now().toString(36), s = doc.createElement('script'), done = false;
+      var t = setTimeout(function () { fin(); reject(new Error('timeout')); }, timeoutMs || 20000);
+      function fin() { done = true; clearTimeout(t); try { delete win[cb]; } catch (e) { win[cb] = undefined; } s.remove(); }
+      win[cb] = function (res) {
+        if (done) return; fin();
+        if (!res || res.status === 'error') return reject(new Error((res && res.errors && res.errors[0] && (res.errors[0].detailed_message || res.errors[0].message)) || 'sheet error'));
+        resolve(res.table || { cols: [], rows: [] });
+      };
+      s.onerror = function () { if (!done) { fin(); reject(new Error('network')); } };
+      s.src = 'https://docs.google.com/spreadsheets/d/' + encodeURIComponent(sheetId) + '/gviz/tq?tqx=responseHandler:' + cb +
+        '&sheet=' + encodeURIComponent(tab) + '&headers=1' + (tq ? '&tq=' + encodeURIComponent(tq) : '');
+      doc.head.appendChild(s);
+    });
+  }
+  function cellVal(c) { if (!c) return ''; if (c.f != null && typeof c.v !== 'string') return String(c.f); return c.v == null ? '' : String(c.v); }
+  function driveImg(u, size) {
+    var m = String(u || '').match(/(?:\/d\/|[?&]id=)([A-Za-z0-9_-]{20,})/);
+    return m ? 'https://drive.google.com/thumbnail?id=' + m[1] + '&sz=w' + (size || 400) : (/^https?:\/\//.test(u || '') ? u : '');
+  }
+  function jwtPayload(t) {
+    try { var p = t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'); while (p.length % 4) p += '=';
+      var bin = atob(p), bytes = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return JSON.parse(new TextDecoder().decode(bytes)); } catch (e) { return null; }
+  }
+  var headCache = {};
+  function sheetHeads(cfg) {
+    var k = cfg.sheetId + '|' + cfg.tab;
+    if (!headCache[k]) headCache[k] = gviz(cfg.sheetId, cfg.tab, 'select * limit 0').then(function (tb) {
+      var map = {}; (tb.cols || []).forEach(function (c) { if (c.label != null && c.label !== '') { var n = normHead(c.label); if (!(n in map)) map[n] = { id: c.id, label: String(c.label) }; } });
+      return map;
+    }, function (e) { delete headCache[k]; throw e; });
+    return headCache[k];
+  }
+  function findCol(map, names) { for (var i = 0; i < names.length; i++) { var n = normHead(names[i]); if (map[n]) return map[n]; } for (var j = 0; j < names.length; j++) { var nn = normHead(names[j]); for (var key in map) if (key.indexOf(nn) > -1 && nn.length > 2) return map[key]; } return null; }
+  /* look up one email → user object (or a reason why not) */
+  function lookupUser(email, cfg) {
+    email = String(email || '').trim().toLowerCase();
+    if (!email) return Promise.reject(new Error('no-email'));
+    return sheetHeads(cfg).then(function (map) {
+      var cols = {}, picks = [], seen = {};
+      Object.keys(USER_COLS).forEach(function (f) { var c = findCol(map, USER_COLS[f]); if (c) { cols[f] = c; if (!seen[c.id]) { seen[c.id] = 1; picks.push(c); } } });
+      (cfg.fields || []).forEach(function (h) { var c = findCol(map, [h]); if (c && !seen[c.id]) { seen[c.id] = 1; picks.push(c); } });
+      if (!cols.email) throw new Error('no-email-column');
+      var safe = email.replace(/'/g, '');
+      var tq = 'select ' + picks.map(function (c) { return c.id; }).join(',') + " where lower(" + cols.email.id + ") contains '" + safe + "'";
+      return gviz(cfg.sheetId, cfg.tab, tq).then(function (tb) {
+        var ids = (tb.cols || []).map(function (c) { return c.id; });
+        var rows = (tb.rows || []).map(function (r) { var o = {}; ids.forEach(function (id, i) { o[id] = cellVal(r.c && r.c[i]); }); return o; })
+          .filter(function (o) { return String(o[cols.email.id] || '').trim().toLowerCase() === email; });
+        if (!rows.length) return { ok: false, reason: 'not-found' };
+        function get(o, f) { return cols[f] ? String(o[cols[f].id] || '').trim() : ''; }
+        var active = rows.filter(function (o) { var st = get(o, 'status'); return (!st || /^active$/i.test(st)) && !get(o, 'resigned'); });
+        if (!active.length) return { ok: false, reason: 'inactive' };
+        active.sort(function (a, b) { return (parseInt(get(b, 'role'), 10) || 0) - (parseInt(get(a, 'role'), 10) || 0); });
+        var o = active[0], raw = {};
+        picks.forEach(function (c) { raw[c.label] = String(o[c.id] == null ? '' : o[c.id]).trim(); });
+        var roleN = parseInt(get(o, 'role'), 10);
+        var u = {
+          email: email, name: get(o, 'name'), title: get(o, 'title'), nickname: get(o, 'nickname'),
+          empId: get(o, 'empId'), w: get(o, 'w').toUpperCase(), shipW: (get(o, 'shipW') || get(o, 'w')).toUpperCase(),
+          role: isNaN(roleN) ? (cfg.defaultRole == null ? null : cfg.defaultRole) : roleN,
+          lineUserId: get(o, 'lineUserId'), photoUrl: get(o, 'photo'), photo: driveImg(get(o, 'photo')),
+          department: get(o, 'department'), company: get(o, 'company'), salesCode: get(o, 'salesCode'),
+          raw: raw, rows: active.length
+        };
+        u.displayName = get(o, 'displayName') || (u.name + (u.nickname ? ' (' + u.nickname + ')' : '')) || email;
+        return { ok: true, user: u };
+      });
+    });
+  }
+  function userKey() { return 'rattana-user:' + userCfg.sheetId; }
+  function saveSession(u, google) { store(userKey(), JSON.stringify({ u: u, g: google || null, at: Date.now() })); }
+  function readSession() { try { var s = JSON.parse(store(userKey()) || 'null'); if (!s || !s.u || Date.now() - s.at > userCfg.sessionDays * 864e5) return null; return s; } catch (e) { return null; } }
+  var gsiP = null;
+  function loadGSI() {
+    if (win.google && win.google.accounts && win.google.accounts.id) return Promise.resolve(win.google);
+    if (gsiP) return gsiP;
+    gsiP = new Promise(function (resolve, reject) {
+      var s = doc.createElement('script'); s.src = 'https://accounts.google.com/gsi/client'; s.async = true;
+      s.onload = function () { if (win.google && win.google.accounts) resolve(win.google); else { gsiP = null; reject(new Error('gsi')); } };
+      s.onerror = function () { gsiP = null; reject(new Error('gsi')); };
+      doc.head.appendChild(s);
+    });
+    return gsiP;
+  }
+  function initials(u) { var n = (u && (u.nickname || u.name || u.email)) || '?'; return n.replace(/^(นาย|นางสาว|นาง|น\.ส\.)\s*/, '').trim().replace(/^[เแโใไ]+/, '').slice(0, 1).toUpperCase() || '?'; }
+  function avatarNode(u, size) {
+    var a = el('span', 'rt-avatar'); a.style.setProperty('--rt-av', (size || 36) + 'px');
+    var ini = el('span', 'rt-avatar-ini', initials(u)); a.appendChild(ini);
+    var srcs = [u && u.photo, u && u.googlePicture].filter(Boolean);
+    (function next() {
+      if (!srcs.length) return; var im = new Image(); im.alt = ''; im.referrerPolicy = 'no-referrer'; im.decoding = 'async';
+      im.onload = function () { a.classList.add('has-img'); a.appendChild(im); }; im.onerror = next; im.src = srcs.shift();
+    })();
+    return a;
+  }
+  var ROLE_HINT = { 7: 'ผู้บริหาร', 6: 'สำนักงานใหญ่', 5: 'หัวหน้า' };
+  var userState = { user: null, ready: null, readyResolve: null };
+  userState.ready = new Promise(function (r) { userState.readyResolve = r; });
+  function setUser(u) {
+    userState.user = u;
+    root.classList.toggle('rt-signed-in', !!u);
+    if (u) userState.readyResolve(u);
+    [].forEach.call(doc.querySelectorAll('[data-rt-user]'), paintUserChip);
+    root.dispatchEvent(new CustomEvent('rt:user', { detail: u }));
+    doc.dispatchEvent(new CustomEvent('rt:user', { detail: u }));
+  }
+  function paintUserChip(b) {
+    var u = userState.user; if (!b) return;
+    b.innerHTML = ''; b.classList.add('rt-user-chip'); if (b.tagName === 'BUTTON' && !b.type) b.type = 'button';
+    if (!u) { b.hidden = true; return; }
+    b.hidden = false; b.appendChild(avatarNode(u, 34));
+    if (!b.hasAttribute('data-rt-user-compact')) { var t = el('span', 'rt-user-chip-text'); t.appendChild(el('b', null, u.nickname || u.name || u.email)); t.appendChild(el('small', null, [u.w, u.empId].filter(Boolean).join(' · '))); b.appendChild(t); }
+    b.setAttribute('aria-label', (UI.getLang() === 'en' ? 'Account: ' : 'บัญชีผู้ใช้: ') + u.displayName);
+    if (!b._rtUser) { b._rtUser = 1; b.addEventListener('click', function () { UI.user.menu(b); }); }
+  }
+  function loginScreen(cfg) {
+    var en = UI.getLang() === 'en';
+    var wrap = el('div', 'rt-login'); wrap.setAttribute('role', 'dialog'); wrap.setAttribute('aria-modal', 'true'); wrap.setAttribute('aria-labelledby', 'rt-login-title');
+    var bg = el('div', 'rt-bg'); bg.appendChild(el('div', 'rt-bg-arc')); bg.appendChild(el('div', 'rt-bg-arc')); wrap.appendChild(bg);
+    var card = el('div', 'rt-glass rt-login-card');
+    var logo = el('div', 'rt-login-logo'), l1 = el('img', 'rt-logo-light'), l2 = el('img', 'rt-logo-dark');
+    l1.src = BASE + 'rattana-logo-navy.png'; l2.src = BASE + 'rattana-logo-transparent.png'; l1.alt = l2.alt = 'RATTANA'; logo.appendChild(l1); logo.appendChild(l2);
+    var h = el('h1', 'rt-login-title', cfg.appName || (en ? 'Sign in' : 'เข้าสู่ระบบ')); h.id = 'rt-login-title';
+    var sub = el('p', 'rt-login-sub', en ? 'Sign in with your company Google account' : 'เข้าสู่ระบบด้วยอีเมลบริษัท (บัญชี Google)');
+    var slot = el('div', 'rt-login-gbtn'), msg = el('div', 'rt-login-msg'); msg.setAttribute('role', 'status'); msg.setAttribute('aria-live', 'polite');
+    var foot = el('p', 'rt-login-foot', en ? 'For RATTANA staff only' : 'สำหรับพนักงาน RATTANA เท่านั้น');
+    [logo, h, sub, slot, msg, foot].forEach(function (n) { card.appendChild(n); });
+    wrap.appendChild(card);
+    return { el: wrap, card: card, slot: slot, msg: msg, sub: sub };
+  }
+  function loginMsg(L, kind, title, text, actions) {
+    L.msg.innerHTML = ''; L.msg.className = 'rt-login-msg is-' + kind;
+    if (kind === 'busy') { L.msg.appendChild(el('span', 'rt-login-spin')); L.msg.appendChild(el('span', null, title)); return; }
+    var b = el('div', 'rt-login-note'); b.appendChild(el('b', null, title)); if (text) b.appendChild(el('span', null, text)); L.msg.appendChild(b);
+    (actions || []).forEach(function (a) { var x = el('button', 'rt-btn rt-btn-glass rt-btn-sm', a.label); x.type = 'button'; x.addEventListener('click', a.onClick); L.msg.appendChild(x); });
+  }
+
+  UI.user = {
+    /* RattanaUI.user.config({ appName, minRole, defaultRole, fields, sessionDays, clientId, sheetId, tab }) */
+    config: function (o) { Object.keys(o || {}).forEach(function (k) { if (k in USER_DEFAULTS && o[k] !== undefined) userCfg[k] = o[k]; }); return userCfg; },
+    current: function () { return userState.user; },
+    get ready() { return userState.ready; },
+    /* true when the signed-in person's User Role is at least `min` */
+    can: function (min) { var u = userState.user; return !!u && (u.role || 0) >= (min || 0); },
+    /* look someone up without signing in (admin tools) → Promise<{ok, user|reason}> */
+    lookup: function (email, o) { var c = {}; Object.keys(userCfg).forEach(function (k) { c[k] = userCfg[k]; }); Object.keys(o || {}).forEach(function (k) { c[k] = o[k]; }); return lookupUser(email, c); },
+    /* sign in (shows the Rattana sign-in screen when needed) → Promise<user> */
+    signIn: function (o) {
+      if (o) UI.user.config(o);
+      var cfg = userCfg, en = UI.getLang() === 'en';
+      if (userState.user) return Promise.resolve(userState.user);
+      if (UI.user._p) return UI.user._p;
+      var sess = readSession();
+      if (sess && (!cfg.minRole || (sess.u.role || 0) >= cfg.minRole)) {
+        var u0 = sess.u; if (sess.g && sess.g.picture) u0.googlePicture = sess.g.picture;
+        setUser(u0);
+        /* re-check the row quietly: removed, resigned or role changed → act on it */
+        lookupUser(u0.email, cfg).then(function (r) {
+          if (!r.ok) { UI.user.signOut({ reason: r.reason }); return; }
+          r.user.googlePicture = u0.googlePicture; saveSession(r.user, sess.g);
+          if (JSON.stringify(r.user) !== JSON.stringify(u0)) setUser(r.user);
+        }, function () {});
+        return Promise.resolve(u0);
+      }
+      root.classList.add('rt-auth-wait');
+      var L = loginScreen(cfg); doc.body.appendChild(L.el); lockScroll();
+      UI.user._p = new Promise(function (resolve) {
+        function finishOk(u, g) {
+          if (g && g.picture) u.googlePicture = g.picture;
+          saveSession(u, g); setUser(u); UI.haptic('success');
+          L.card.innerHTML = ''; L.card.classList.add('is-welcome');
+          L.card.appendChild(avatarNode(u, 84)); L.card.appendChild(el('h1', 'rt-login-title', (en ? 'Welcome, ' : 'สวัสดี ') + (u.nickname || u.name)));
+          L.card.appendChild(el('p', 'rt-login-sub', [u.w, u.empId ? (en ? 'ID ' : 'รหัส ') + u.empId : '', u.role != null ? 'Role ' + u.role : ''].filter(Boolean).join(' · ')));
+          setTimeout(function () { L.el.classList.add('is-closing'); root.classList.remove('rt-auth-wait'); setTimeout(function () { L.el.remove(); unlockScroll(); }, 420); }, 900);
+          UI.user._p = null; resolve(u);
+        }
+        function onCredential(resp) {
+          var g = jwtPayload(resp && resp.credential);
+          if (!g || !g.email) return loginMsg(L, 'error', en ? 'Could not read the Google account' : 'อ่านข้อมูลบัญชี Google ไม่ได้', en ? 'Please try again.' : 'ลองกดเข้าสู่ระบบอีกครั้ง');
+          if (g.email_verified === false) return loginMsg(L, 'error', en ? 'Email not verified' : 'อีเมลนี้ยังไม่ได้ยืนยันกับ Google', '');
+          loginMsg(L, 'busy', en ? 'Checking your account…' : 'กำลังตรวจสอบรายชื่อผู้ใช้…');
+          var gg = { email: g.email, name: g.name, picture: g.picture };
+          lookupUser(g.email, cfg).then(function (r) {
+            if (!r.ok) {
+              var t = r.reason === 'inactive' ? (en ? 'This account is no longer active' : 'บัญชีนี้ไม่ได้ใช้งานแล้ว') : (en ? 'This email is not in the user list' : 'ยังไม่มีอีเมลนี้ในรายชื่อผู้ใช้');
+              return loginMsg(L, 'error', t, (en ? 'Signed in as ' : 'อีเมลที่ใช้: ') + g.email + (en ? ' — ask HR/admin to add it to “Rattana Users for apps”, or use another account.' : ' — แจ้ง HR/แอดมินให้เพิ่มในชีท "Rattana Users for apps" หรือใช้บัญชีอื่น'));
+            }
+            if (cfg.minRole && (r.user.role || 0) < cfg.minRole) return loginMsg(L, 'error', en ? 'No access to this app' : 'บัญชีนี้ไม่มีสิทธิ์ใช้แอปนี้', (en ? 'Needs User Role ' : 'ต้องมี User Role ') + cfg.minRole + (en ? ' or higher (yours: ' : ' ขึ้นไป (ของคุณ: ') + (r.user.role == null ? '-' : r.user.role) + ')');
+            finishOk(r.user, gg);
+          }, function (e) {
+            loginMsg(L, 'error', en ? 'Could not reach the user list' : 'เชื่อมต่อรายชื่อผู้ใช้ไม่ได้', (en ? 'Check the internet connection. ' : 'ตรวจอินเทอร์เน็ตแล้วลองใหม่ ') + '(' + (e && e.message) + ')', [{ label: en ? 'Try again' : 'ลองใหม่', onClick: function () { onCredential(resp); } }]);
+          });
+        }
+        UI.user._onCredential = onCredential; /* for tests and custom sign-in buttons */
+        loginMsg(L, 'busy', en ? 'Loading Google sign-in…' : 'กำลังโหลดปุ่มเข้าสู่ระบบ…');
+        loadGSI().then(function (google) {
+          google.accounts.id.initialize({ client_id: cfg.clientId, callback: onCredential, auto_select: true, cancel_on_tap_outside: false, use_fedcm_for_prompt: true, itp_support: true, context: 'signin' });
+          L.msg.innerHTML = ''; L.msg.className = 'rt-login-msg';
+          var w = Math.min(320, Math.max(220, L.slot.clientWidth || 300));
+          google.accounts.id.renderButton(L.slot, { type: 'standard', theme: UI.getTheme() === 'dark' ? 'filled_black' : 'outline', size: 'large', text: 'signin_with', shape: 'pill', logo_alignment: 'left', width: w, locale: UI.getLang() === 'en' ? 'en' : 'th' });
+          try { google.accounts.id.prompt(); } catch (e) {}
+          setTimeout(function () { if (!L.slot.querySelector('iframe, div[role=button]') && !userState.user) loginMsg(L, 'error', en ? 'Google sign-in did not load' : 'ปุ่ม Google ไม่ขึ้น', en ? 'This web address may need to be added to the company Google sign-in settings.' : 'เว็บนี้อาจยังไม่ได้รับอนุญาตในระบบเข้าสู่ระบบของบริษัท (ต้องเพิ่มที่อยู่เว็บใน Google Cloud) — แจ้งแอดมิน'); }, 8000);
+        }, function () {
+          loginMsg(L, 'error', en ? 'Google sign-in did not load' : 'โหลดระบบเข้าสู่ระบบ Google ไม่ได้', en ? 'Check the internet connection.' : 'ตรวจอินเทอร์เน็ตแล้วรีเฟรชหน้า', [{ label: en ? 'Reload' : 'รีเฟรช', onClick: function () { location.reload(); } }]);
+        });
+      });
+      return UI.user._p;
+    },
+    /* sign out → clears the session and (by default) shows the sign-in screen again */
+    signOut: function (o) {
+      o = o || {};
+      var u = userState.user; store(userKey(), '');
+      try { localStorage.removeItem(userKey()); } catch (e) {}
+      try { if (win.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect(); } catch (e) {}
+      setUser(null);
+      userState.ready = new Promise(function (r) { userState.readyResolve = r; });
+      if (o.reason && u) UI.toast(o.reason === 'inactive' ? 'บัญชีนี้ไม่ได้ใช้งานแล้ว — ออกจากระบบ' : 'ไม่พบบัญชีในรายชื่อผู้ใช้แล้ว — ออกจากระบบ', { type: 'warning', duration: 6000 });
+      if (o.reload) { location.reload(); return; }
+      if (o.signIn !== false && (doc.body.hasAttribute('data-rt-login') || o.signIn)) UI.user.signIn();
+    },
+    /* account menu (opened by the avatar chip) */
+    menu: function (anchor) {
+      var u = userState.user, en = UI.getLang() === 'en'; if (!u) return;
+      var box = el('div', 'rt-user-card'); box.appendChild(avatarNode(u, 64));
+      var t = el('div', 'rt-user-card-text'); t.appendChild(el('b', null, u.displayName));
+      t.appendChild(el('span', null, u.email));
+      var chips = el('div', 'rt-user-card-chips');
+      [[en ? 'ID' : 'รหัส', u.empId], ['W', u.w], [en ? 'Ships from' : 'คลังส่ง', u.shipW], ['Role', u.role == null ? '' : u.role + (ROLE_HINT[u.role] && !en ? ' · ' + ROLE_HINT[u.role] : '')], [en ? 'Dept' : 'แผนก', u.department]].forEach(function (c) { if (c[1] !== '' && c[1] != null) { var s = el('span', 'rt-badge rt-badge-neutral'); s.textContent = c[0] + ' ' + c[1]; chips.appendChild(s); } });
+      t.appendChild(chips); box.appendChild(t);
+      return UI.popup({ title: en ? 'Account' : 'บัญชีผู้ใช้', content: box, size: 'sm',
+        actions: [{ label: en ? 'Close' : 'ปิด', variant: 'glass', value: null }, { label: en ? 'Sign out' : 'ออกจากระบบ', variant: 'reject', value: 'out' }] })
+        .then(function (v) { if (v === 'out') UI.user.signOut({ signIn: true }); });
+    },
+    avatar: function (u, size) { return avatarNode(u || userState.user, size); },
+    photoUrl: driveImg
+  };
+
+  /* ---------- Company holidays ("วันหยุดนขัต") ---------- */
+  var holP = null, holSet = null;
+  function ymd(d) { d = d instanceof Date ? d : new Date(d); var b = new Date(d.getTime() + 7 * 3600e3); return b.toISOString().slice(0, 10); }
+  UI.holidays = {
+    /* → Promise<[{ date: 'YYYY-MM-DD', name }]> — live from the sheet, falls back to the copy bundled with Rattana CI */
+    list: function (force) {
+      if (holP && !force) return holP;
+      holP = gviz(userCfg.sheetId, userCfg.holidayTab, 'select *', 15000).then(function (tb) {
+        var out = []; (tb.rows || []).forEach(function (r) {
+          var c0 = r.c && r.c[0], c1 = r.c && r.c[1], d = '';
+          if (c0 && typeof c0.v === 'string' && /^Date\(/.test(c0.v)) { var m = c0.v.match(/Date\((\d+),(\d+),(\d+)/); if (m) d = m[1] + '-' + ('0' + (+m[2] + 1)).slice(-2) + '-' + ('0' + m[3]).slice(-2); }
+          else if (c0 && c0.v) { var s = String(c0.f || c0.v).replace(/\//g, '-'); if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(s)) { var p = s.split('-'); d = p[0] + '-' + ('0' + p[1]).slice(-2) + '-' + ('0' + p[2]).slice(-2); } }
+          if (d) out.push({ date: d, name: cellVal(c1) });
+        });
+        if (!out.length) throw new Error('empty');
+        return out;
+      }).catch(function () {
+        return fetch(BASE + 'holidays.json', { cache: 'no-cache' }).then(function (r) { return r.json(); }).then(function (j) { return j.holidays || j; });
+      }).then(function (list) { list.sort(function (a, b) { return a.date < b.date ? -1 : 1; }); holSet = {}; list.forEach(function (h) { holSet[h.date] = h.name; }); return list; },
+        function (e) { holP = null; throw e; });
+      return holP;
+    },
+    /* after list() has loaded: holiday name for a date, or '' */
+    is: function (d) { return (holSet && holSet[ymd(d)]) || ''; },
+    /* the next holiday on/after a date → Promise<{date,name}|null> */
+    next: function (d) { var from = ymd(d || new Date()); return UI.holidays.list().then(function (l) { for (var i = 0; i < l.length; i++) if (l[i].date >= from) return l[i]; return null; }); },
+    /* working day = not Sunday (and not Saturday when opts.saturday === false) and not a company holiday */
+    isWorkday: function (d, o) { var x = d instanceof Date ? d : new Date(d), wd = new Date(x.getTime() + 7 * 3600e3).getUTCDay(); if (wd === 0) return false; if (wd === 6 && o && o.saturday === false) return false; return !UI.holidays.is(x); },
+    /* add N working days → Promise<Date> */
+    addWorkdays: function (d, n, o) { return UI.holidays.list().then(function () { var x = new Date(d instanceof Date ? d.getTime() : d), k = 0; while (k < n) { x = new Date(x.getTime() + 864e5); if (UI.holidays.isWorkday(x, o)) k++; } return x; }); }
+  };
+
+  /* hide a sign-in-only app until someone is signed in (no flash of the app behind the sign-in screen) */
+  if (doc.body && doc.body.hasAttribute('data-rt-login') && !readSession()) root.classList.add('rt-auth-wait');
+
   /* search box: X that clears everything (+ optional barcode/QR button) */
   function enhanceSearch(box) {
     if (box._rtSearch) return;
@@ -1145,6 +1460,12 @@
     var saved = store(KEY_LANG); if (saved && saved !== UI.getLang()) UI.setLang(saved);
     UI.setTheme(UI.getTheme());
     setupToTop();
+    /* <body data-rt-login="ชื่อแอป" data-rt-login-role="5"> → sign-in screen before the app shows */
+    if (doc.body && doc.body.hasAttribute('data-rt-login')) { /* (early hide happens at load, below) */
+      var b = doc.body, mr = parseInt(b.getAttribute('data-rt-login-role'), 10), dr = parseInt(b.getAttribute('data-rt-login-default-role'), 10);
+      UI.user.config({ appName: b.getAttribute('data-rt-login') || doc.title, minRole: isNaN(mr) ? 0 : mr, defaultRole: isNaN(dr) ? null : dr });
+      UI.user.signIn();
+    }
     /* pick up anything an app renders later */
     if ('MutationObserver' in win && doc.body) {
       var pending = [], scheduled = false;

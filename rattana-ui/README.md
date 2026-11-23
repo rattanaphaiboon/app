@@ -1,4 +1,4 @@
-# Rattana CI v1.5.0
+# Rattana CI v1.6.0
 
 UI กลางของบริษัท — Crystal Luxury (โหมดสว่าง) + Luxury Dark (โหมดมืด)
 ใช้ได้ทั้ง iOS · Android · Laptop พร้อม popup และโมชันแบบพรีเมียม
@@ -11,6 +11,7 @@ UI กลางของบริษัท — Crystal Luxury (โหมดส�
 - `index.html` — หน้า demo + คู่มือ (คัดลอกโค้ดได้)
 - `sample/` — รูปสินค้าตัวอย่างสำหรับหน้า demo (ข้อมูลตัวอย่าง)
 - `rattana-sw.js` — ตัวช่วยแสดงการแจ้งเตือนนอกแอป (โหลดเองเมื่อแจ้งเตือนครั้งแรก ไม่ได้แคชหน้าเว็บ)
+- `holidays.json` — วันหยุดบริษัท (สำรองจากชีท วันหยุดนขัต)
 - `vendor/` — ตัวอ่านบาร์โค้ด/QR (ZXing, MIT) โหลดเฉพาะตอนเปิดสแกนบนเครื่องที่ไม่มีตัวอ่านในตัว
 - `tokens.json` — ค่าสีและขนาดต้นฉบับ (ตรงกับ Design System "Rattana CI" บน Claude)
 
@@ -51,6 +52,39 @@ Sidebar สีกรมท่า: `<img class="rt-logo-on-navy" src=".../rattana
 6. กระดิ่งแจ้งเตือนใช้ `rt-btn rt-btn-glass rt-btn-icon rt-bell` + `<span class="rt-count">` และอัปเดตตัวเลขด้วย `RattanaUI.setBadge(n)`
 7. ช่องค้นหาใช้ `<label class="rt-search">` (มีปุ่ม X ให้เอง) · หน้าที่เกี่ยวกับสินค้าใส่ `data-rt-scan` ให้มีปุ่มสแกน
 8. อย่าทำปุ่มกลับขึ้นบนสุดเอง — Rattana CI ใส่ให้ทุกหน้า
+9. แอปที่ต้องรู้ว่าใครใช้: `<body class="rt-app" data-rt-login="ชื่อแอป">` + `<button data-rt-user></button>` แล้วรอ `RattanaUI.user.ready` — อย่าทำหน้าเข้าสู่ระบบเอง
+
+## ใหม่ใน v1.6 — ผู้ใช้ในองค์กร (User for app)
+ข้อมูลจากชีท **Rattana Users for apps › Sheet1** · เข้าสู่ระบบด้วยอีเมลบริษัท (บัญชี Google)
+```html
+<body class="rt-app" data-rt-login="ชื่อแอป" data-rt-login-role="3">   <!-- role ไม่ใส่ = ทุกคนในชีท -->
+  …
+  <button data-rt-user></button>   <!-- รูป + ชื่อเล่น + W มุมขวาบน · กดแล้วดูบัญชี/ออกจากระบบ -->
+```
+```js
+RattanaUI.user.ready.then(u => {
+  // u.name ชื่อ-สกุล · u.nickname · u.empId รหัสพนักงาน · u.w คลัง W · u.email · u.shipW คลังส่ง (ว่าง = ใช้ W)
+  // u.role User Role (ตัวเลข / null ถ้าว่าง) · u.lineUserId · u.photo (ลิงก์รูปที่แสดงได้) · u.department · u.raw (ค่าดิบทุกคอลัมน์ที่ดึง)
+});
+RattanaUI.user.can(5);       // User Role ≥ 5 ไหม
+RattanaUI.user.signOut();
+RattanaUI.user.config({ defaultRole: 3, fields: ['รหัสขาย Bplus'] });   // role ว่างให้เป็น 3 · ขอคอลัมน์เพิ่ม
+```
+- หน้าเข้าสู่ระบบสวยแบบ Rattana ขึ้นเองก่อนแอป (แอปไม่โผล่ให้เห็นก่อน login) · จำการเข้าสู่ระบบไว้ 30 วัน
+- **ดึงเฉพาะแถวของคนที่ login และเฉพาะคอลัมน์ที่ต้องใช้** — ไม่โหลดทั้งชีท
+- ทุกครั้งที่เปิดแอป ตรวจชีทซ้ำเงียบๆ: ถูกลบออก / Status ไม่ใช่ Active / มีวันลาออก → ออกจากระบบให้เอง · role เปลี่ยน → อัปเดตเอง
+- อีเมลซ้ำหลายแถว → ใช้แถวที่ Active และ role สูงสุด
+- หาคอลัมน์จากชื่อหัว ไม่ใช่ตำแหน่ง — ย้าย/เพิ่มคอลัมน์ในชีทได้ไม่พัง
+- รูปจาก Google Drive แสดงได้เลย (ไฟล์ต้องแชร์ "ทุกคนที่มีลิงก์") ไม่มีรูป → ใช้รูปบัญชี Google → ตัวอักษรแรก
+- เว็บที่ไม่ได้อยู่บน rattanaphaiboon.github.io ต้องเพิ่มที่อยู่เว็บใน Google Cloud (OAuth client ของบริษัท) ก่อน ปุ่ม Google ถึงจะขึ้น
+
+### วันหยุดบริษัท (ชีท วันหยุดนขัต)
+```js
+RattanaUI.holidays.list();                       // [{ date: '2026-12-05', name: 'วันพ่อแห่งชาติ' }, …] อ่านจากชีทสด ไม่ได้ → ใช้ holidays.json
+RattanaUI.holidays.is(new Date());               // ชื่อวันหยุด หรือ '' (เรียกหลัง list())
+RattanaUI.holidays.next();                       // วันหยุดถัดไป
+RattanaUI.holidays.addWorkdays(new Date(), 2);   // +2 วันทำการ (ข้ามวันอาทิตย์และวันหยุด · { saturday: false } = ข้ามเสาร์ด้วย)
+```
 
 ## ใหม่ใน v1.5
 ### แก้บั๊ก: ตัวเลขแจ้งเตือนโดนตัด
