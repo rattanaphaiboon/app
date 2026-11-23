@@ -3315,7 +3315,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-23 · 166';
+const BUILD = '2026-11-23 · 167';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -11632,6 +11632,24 @@ function w1LoadBills(force, day) {
   p.from = from;
   return W1D.billsP = p;
 }
+/** หัวบิลเก่ากว่า 3 วัน ไว้ค้นหาอย่างเดียว (BUILD 167 · ผู้ใช้ 23/11 "w1 ค้นหาบิลที่ 19/11 ไม่เจอ ร้านเจริญสุข")
+ *  W1D.bills มีแค่ 3 วัน (ใบจัด/หน้ารายการใช้) — ค้นชื่อร้านบิลวันก่อนนั้นไม่เจอ · อันนี้ = แถวละบิล (group by) ย้อนหลัง W1_OLD_DAYS วัน ก่อนวันแรกของ W1D.bills
+ *  แตะผลค้น = w1OpenCode → w1DocJob อ่านชีต D ของบิลนั้นตรง ๆ เหมือนพิมพ์เลขที่ */
+const W1_OLD_DAYS = 14;
+function w1LoadOld(force) {
+  const to = w1Slash(isoAdd(todayISO(), -3)), from = w1Slash(isoAdd(todayISO(), -W1_OLD_DAYS));   // to = วันแรกของ W1D.bills (w1LoadBills ย้อน 3 วัน)
+  if (!force && W1D.old && W1D.oldTo === to && Date.now() - W1D.oldAt < 15 * 60e3) return Promise.resolve();
+  if (W1D.oldP) return W1D.oldP;
+  const sel = q => w1Gv(W1.doc, { sheet:'D', tq:`select A,B,C,D,O${q ? ',Q' : ''},count(H) where A >= '${from}' and A < '${to}' group by A,B,C,D,O${q ? ',Q' : ''}` }, 120000);
+  const p = sel(true).then(d => [d, true]).catch(() => sel(false).then(d => [d, false])).then(([d, q]) => {
+    W1D.old = w1Rows(d).filter(r => r[1]).map(r => { const refer = q ? String(r[5] || '').trim() : '';
+      return { day:r[0], bill:String(r[1]).trim(), ar:r[2], shop:String(r[3] || '').trim(), remark:r[4], refer, book:w1BillBook(r[4], refer), n:w1n(r[q ? 6 : 5]) }; });
+    Object.assign(W1D, { oldAt:Date.now(), oldTo:to });
+  }).finally(() => { W1D.oldP = null; });
+  return W1D.oldP = p;
+}
+/** แถวบิล (หัวบิล) ทั้ง 3 วันล่าสุด + เก่ากว่า (W1D.old) — ใช้หาใบจอง→บิล / ชื่อร้าน · ใบจองจัดรถวันนี้แต่บิลออกก่อน 3 วัน (BK04691118/033 บิล 19/11 ส่ง 24/11) ไม่งั้นขึ้นรอออกบิล */
+const w1BillRows = () => (W1D.bills || []).concat(W1D.old || []);
 async function w1LoadKeep() {
   // B วันส่ง · C ใบจอง · O ทะเบียน · X อัปเดต · E ร้าน · Z คลัง · P เที่ยว — ใบจองเดียวกันหลายแถว เอาแถวที่อัปเดตล่าสุด
   // + D รหัสร้าน · Q ชื่อเล่นคนขับ · S ประเภทรถ · W สถานะ (BUILD 107 หน้ารถ — จัดร้านตามรถ)
@@ -11772,7 +11790,8 @@ function w1Prime(force) {
   for (const k in S.done) if ((S.done[k].ts || 0) < cut) delete S.done[k];
   if (W1D.loading && !force) return;
   W1D.loading = true; renderW1Stat();
-  Promise.all([w1BatchData(force), w1LoadDone(force), w1LoadRT(force).catch(e => console.warn('W1 RTDM', e))])   // ขอโอนย้าย (BUILD 156) พลาดไม่ล้มทั้งหน้า
+  Promise.all([w1BatchData(force), w1LoadDone(force), w1LoadRT(force).catch(e => console.warn('W1 RTDM', e)),   // ขอโอนย้าย (BUILD 156) พลาดไม่ล้มทั้งหน้า
+               w1LoadOld(force).catch(e => console.warn('W1 บิลเก่า', e))])     // บิลเก่าไว้ค้นหา (BUILD 167)
     .then(() => { W1D.err = ''; })
     .catch(e => { W1D.err = String(e.message || e); console.warn('W1', e); })
     .finally(() => { W1D.loading = false; if (onScreen('scr-w1')) { renderW1(); if (document.activeElement === $('w1Q')) w1RenderSugg(); }
@@ -11971,7 +11990,7 @@ async function w1DocJob(no) {
 /** ใบจอง BK → บิลของใบจองนั้น (หมายเหตุบิลในชีต D = เลขที่ใบจอง) — แบบแอป picking v3.11 ขายส่งหยิบตามบิล */
 async function w1BillsOfBook(book) {
   await w1LoadBills();
-  const loc = [...new Set((W1D.bills || []).filter(r => r.book === book).map(r => r.bill))];
+  const loc = [...new Set(w1BillRows().filter(r => r.book === book).map(r => r.bill))];   // + บิลเก่ากว่า 3 วัน (BUILD 167)
   if (loc.length) return loc.sort();
   const q = s => w1Gv(W1.doc, { sheet:'D', tq:s }, 60000);           // + REFER (BUILD 160) — หมายเหตุไม่มีเลขใบจอง ก็หาเจอจาก Q
   const rows = w1Rows(await q(`select B,O,Q where O contains '${book}' or Q contains '${book}'`).catch(() => q(`select B,O where O contains '${book}'`)));
@@ -12068,7 +12087,7 @@ async function w1Discard(k) {
 /* ── ค้นหางาน + คำแนะนำตอนพิมพ์ (port ของ searchIndex / searchJobs) ──
    บิล (ชีต D 3 วันย้อนหลัง) · ใบจองที่ยังไม่ส่ง (Keepdata คลัง W1) · ใบจัดวันนี้ */
 function w1Index() {
-  const key = `${W1D.billsAt}|${W1D.keepAt}|${W1D.rtAt || 0}|${Object.keys(W1D.batchCache).length}|${CATALOG.length}`;
+  const key = `${W1D.billsAt}|${W1D.keepAt}|${W1D.rtAt || 0}|${W1D.oldAt || 0}|${Object.keys(W1D.batchCache).length}|${CATALOG.length}`;
   if (W1D.sidx && W1D.sidxKey === key) return W1D.sidx;
   const out = [], today = todayISO(), bookBills = {}, seen = {};
   (W1D.bills || []).forEach(r => { if (seen[r.bill]) return; seen[r.bill] = 1;
@@ -12076,6 +12095,12 @@ function w1Index() {
     if (bk) (bookBills[bk] ||= []).push(r.bill);
     out.push({ type:'bill', code:r.bill, title:r.shop || '-', book:bk, reg:(k && k.reg) || '', day:(k && k.sday) || w1Iso(r.day),
       sub:[`บิล ${r.bill}`, bk && `จอง ${bk}`, k && k.reg, k && k.sday && `ส่ง ${w1Dm(k.sday)}${k.trip ? ` · เที่ยว ${k.trip}` : ''}`].filter(Boolean).join(' · ') }); });
+  // บิลเก่ากว่า 3 วัน (BUILD 167) — ค้นชื่อร้าน/เลขที่เจอ บอกวันที่บิล
+  (W1D.old || []).forEach(r => { if (seen[r.bill]) return; seen[r.bill] = 1;
+    const bk = r.book, k = bk && W1D.keep[bk], d = w1Iso(r.day);
+    if (bk) (bookBills[bk] ||= []).push(r.bill);
+    out.push({ type:'bill', code:r.bill, title:r.shop || '-', book:bk, reg:(k && k.reg) || '', day:(k && k.sday) || d,
+      sub:[`บิล ${r.bill}`, `บิลวันที่ ${w1Dm(d)}`, bk && `จอง ${bk}`, k && k.reg, k && k.sday && `ส่ง ${w1Dm(k.sday)}`, r.n && `${fmtN(r.n)} รายการ`].filter(Boolean).join(' · ') }); });
   Object.entries(W1D.keep).forEach(([bk, k]) => { if (!k.sday || k.sday < today || (k.wh && k.wh !== 'W1')) return;
     const bs = bookBills[bk] || [];
     out.push({ type:'book', code:bk, title:k.shop || '-', reg:k.reg || '', day:k.sday, nb:bs.length,
@@ -12193,7 +12218,7 @@ function w1Trucks() {
 }
 const w1TripName = (sday, trip) => `${sday === todayISO() ? 'ส่งวันนี้' : sday === isoAdd(todayISO(), 1) ? 'ส่งพรุ่งนี้' : 'ส่ง ' + thaiDate(sday)} · เที่ยว ${trip}`;
 /** บิลของใบจอง (หมายเหตุบิล = เลขใบจอง) จากบิลที่โหลดไว้ */
-const w1BillsLoc = book => [...new Set((W1D.bills || []).filter(r => r.book === book).map(r => r.bill))].sort();
+const w1BillsLoc = book => [...new Set(w1BillRows().filter(r => r.book === book).map(r => r.bill))].sort();   // + บิลเก่ากว่า 3 วัน (BUILD 167)
 /** สถานะใบจองหนึ่งใบในหน้ารถ: { done, short, run, wait, txt, bills } — ออกบิลแล้ว (BK/BV) ดูบิลทุกใบ · BV ยังไม่ออกบิล / เช็คตามใบจองไปแล้ว ดูตัวใบจอง */
 function w1BookSt(book) {
   const S = W1S(), bills = w1BillsLoc(book), d = w1DoneOf(book);
@@ -12356,7 +12381,7 @@ const W1_MULTI_RE = /^รวม [A-Z]{2,4}\d{4,}\/\d{2,}$/;
 const w1IsGrpKey = k => W1_TRUCK_RE.test(k) || W1_MULTI_RE.test(k);
 const w1BusyJobOf = doc => W1S().jobs[doc] ? doc : (w1TruckOfDoc(doc) || [])[0] || '';
 const w1ShopOf = doc => { if (w1IsRt(doc)) return w1RtShop(doc);   // ขอโอนย้าย = เส้นทาง (BUILD 156)
-  const r = (W1D.bills || []).find(x => x.bill === doc); return r ? String(r.shop || '').trim() : ((W1D.keep[doc] || {}).shop || ''); };
+  const r = w1BillRows().find(x => x.bill === doc); return r ? String(r.shop || '').trim() : ((W1D.keep[doc] || {}).shop || ''); };
 /** คำเรียกเอกสารในงานรวม: ใบขอโอนย้ายล้วน = "ใบขอโอนย้าย" ไม่งั้น "บิล" */
 const w1DocsNoun = docs => (docs || []).length && docs.every(d => w1IsRt(d.doc)) ? 'ใบขอโอนย้าย' : 'บิล';
 /** เลขบิล/ใบจอง → เอกสารที่จะเช็ค [{doc, book, shop}] (ใบจอง = บิลของใบจอง ตามกติกาเดิมของ w1OpenCode) */
@@ -12371,7 +12396,7 @@ async function w1ResolveDocs(raw) {
     if (/^BK/.test(code)) return { docs:[], msg:`ใบจอง ${code} ยังไม่ออกบิล — เช็คได้เมื่อออกบิลแล้ว` };
     return { docs:[{ doc:code, book:code, shop:w1ShopOf(code) }] };
   }
-  const r = (W1D.bills || []).find(x => x.bill === code);
+  const r = w1BillRows().find(x => x.bill === code);
   return { docs:[{ doc:code, book:r ? r.book : '', shop:r ? String(r.shop || '').trim() : '' }] };
 }
 function w1MultiMeta(job) {
@@ -12447,9 +12472,11 @@ function w1LRows(t) {
   } else if (t === 'bill') {
     const yd = w1Yday(), seen = {}, nl = {};
     (W1D.bills || []).forEach(r => { if (r.qty + r.free > 0) nl[r.bill] = (nl[r.bill] || 0) + 1; });
-    (W1D.bills || []).forEach(r => {
+    (W1D.old || []).forEach(r => { if (r.n) nl[r.bill] = r.n; });   // บิลเก่า (BUILD 167) — นับรายการจาก group by
+    w1BillRows().forEach(r => {
       if (seen[r.bill]) return; seen[r.bill] = 1;
       const bk = r.book, k = W1D.keep[bk]; let grp, grpName, ord;
+      if (r.n != null && !w1KeepOk(k)) return;                      // บิลเก่าที่ไม่ได้จัดรถ = ไม่เอา (เหมือนเดิม: เก่ากว่าเมื่อวาน)
       if (w1KeepOk(k)) { if (!w1KeepLive(k)) return; grp = `${k.sday}|${k.trip}`; grpName = w1TripName(k.sday, k.trip); ord = `1|${k.sday}|${k.trip}|${String(k.n).padStart(6, '0')}`; }
       else { const d = w1Iso(r.day); if (!d || d < yd) return; grp = 'D' + d; grpName = `บิลวันที่ ${thaiDate(d).slice(0, 5)} · ยังไม่จัดรถ`;
              ord = `2|${99999999 - +d.replace(/-/g, '')}|${r.bill}`; }
@@ -12622,7 +12649,7 @@ function w1LScan(raw) {
 async function w1LStart() {
   const t = state.w1type, sel = w1Sel(t).slice(); if (!sel.length || W1D.busy) return;
   let docs = [];
-  if (t === 'bill') docs = sel.map(b => { const r = (W1D.bills || []).find(x => x.bill === b); return { doc:b, book:r ? r.book : '', shop:r ? String(r.shop || '').trim() : '' }; });
+  if (t === 'bill') docs = sel.map(b => { const r = w1BillRows().find(x => x.bill === b); return { doc:b, book:r ? r.book : '', shop:r ? String(r.shop || '').trim() : '' }; });
   else if (t === 'rt') docs = sel.map(b => ({ doc:b, book:'', shop:w1RtShop(b) }));   // ขอโอนย้าย (BUILD 156)
   else {
     const bad = [];
@@ -12790,7 +12817,7 @@ function w1DoneLabel(k, L) {
     const cig = uc === '00' || /^C/.test(uc), u = s ? s[1] : uc && uc !== '00' ? 'P' + uc.replace(/\D/g, '') : '';
     return cig ? (u ? 'บุหรี่ ' + u : 'บุหรี่') : u;
   }
-  const b = (W1D.bills || []).find(r => r.bill === k), kp = (W1D.keep || {})[k];
+  const b = w1BillRows().find(r => r.bill === k), kp = (W1D.keep || {})[k];
   return String(cf.store || (w1IsRt(k) ? w1RtShop(k) : '') || (L && L.title) || (b && b.shop) || (kp && kp.shop) || '').trim();   // ขอโอนย้าย = เส้นทาง
 }
 const w1DoneRowHtml = (k, d, chip) => { const x = w1DoneLabel(k, W1S().done[k]);
