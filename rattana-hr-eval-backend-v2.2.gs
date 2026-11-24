@@ -1,7 +1,10 @@
 /* ========================================================================
    Rattana HR Eval — Backend (Apps Script Web App)
-   v2.1 — 2026-07-17
+   v2.2 — 2026-11-24
    ========================================================================
+   v2.2 = เพิ่ม action=health (GET, อ่านอย่างเดียว ไม่ต้อง token) คืน version +
+          เช็คว่าเจอแท็บ Users/V.1/New salary/Calibration จริง — ใช้ยืนยันการดีพอย
+          และ debug ชื่อแท็บ (ไม่คืนข้อมูลพนักงาน คืนแค่ชื่อแท็บ/จำนวนแถว/boolean)
    v2.1 = fix "Users tab not found": ชีท Users ไม่มีแท็บ "Rattana Users for apps"
           ข้อมูลจริงอยู่แท็บ "Sheet1" (gviz เดิมส่งแท็บแรกให้เงียบๆ เวลาชื่อไม่ตรง)
           → ชี้ Sheet1 ตรงๆ + เพิ่ม sheetByName_ หาแบบ normalize + fallback แท็บแรก
@@ -23,6 +26,7 @@
    ======================================================================== */
 
 const CFG = {
+  VERSION:        '2.2',
   EVAL_SHEET_ID:  '1LCruX-0Du0cndCFrCbUdsYPxxFXuxJx34TJ44kFshe0',
   USERS_SHEET_ID: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   EVAL_TAB:       'V.1',
@@ -44,6 +48,7 @@ const SERVER_HR_EMAILS = [
 function doGet(e) {
   try {
     const action = (e.parameter.action || '').toLowerCase();
+    if (action === 'health') return health_();
     if (action === 'latest' || action === 'history') {
       const email = verifyToken_(e.parameter.token || '');
       if (!email) return json_({ ok: false, error: 'UNAUTHORIZED', code: 401 });
@@ -72,6 +77,28 @@ function doPost(e) {
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message || err) });
   }
+}
+
+/* action=health — อ่านอย่างเดียว ไม่ต้อง token ใช้ยืนยันการดีพอย + เช็คชื่อแท็บ
+   คืนแค่ชื่อแท็บ/จำนวนแถว/boolean ไม่คืนข้อมูลพนักงาน จึงเปิด public ได้ */
+function health_() {
+  const out = { ok: true, app: 'Rattana HR Eval', version: CFG.VERSION, time: new Date().toISOString() };
+  try {
+    const uSh = sheetByName_(SpreadsheetApp.openById(CFG.USERS_SHEET_ID), CFG.USERS_TAB, true);
+    out.usersTab = uSh ? uSh.getName() : null;
+    if (uSh) {
+      const idx = headerIndex_(uSh.getDataRange().getDisplayValues()[0] || []);
+      out.usersEmailCol = idx[normKey_('E-mail')] !== undefined;
+      out.usersRows = Math.max(0, uSh.getLastRow() - 1);
+    }
+  } catch (e) { out.usersError = String(e && e.message || e); }
+  try {
+    const ss = SpreadsheetApp.openById(CFG.EVAL_SHEET_ID);
+    out.evalTab = !!sheetByName_(ss, CFG.EVAL_TAB, false);
+    out.salaryTab = !!sheetByName_(ss, CFG.SALARY_TAB, false);
+    out.calTab = !!sheetByName_(ss, CFG.CAL_TAB, false);
+  } catch (e) { out.evalError = String(e && e.message || e); }
+  return json_(out);
 }
 
 /* รันมือหนึ่งครั้งหลังวางโค้ด — สร้าง secret + trigger permission prompt */
