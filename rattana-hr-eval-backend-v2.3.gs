@@ -1,7 +1,10 @@
 /* ========================================================================
    Rattana HR Eval — Backend (Apps Script Web App)
-   v2.2 — 2026-11-24
+   v2.3 — 2026-11-24
    ========================================================================
+   v2.3 = HR เห็นทุกสาขา: เพิ่ม patcha.ruk ใน SERVER_HR_EMAILS (Role 5 ไม่เข้า
+          เงื่อนไข role≥7 อัตโนมัติ · HR ต้องมาร์คตรงๆ) — ภายหลังเพิ่ม HR คนอื่นได้
+          ด้วยคอลัมน์ EvalAccess=all ในชีท Users (ไม่ต้อง redeploy)
    v2.2 = เพิ่ม action=health (GET, อ่านอย่างเดียว ไม่ต้อง token) คืน version +
           เช็คว่าเจอแท็บ Users/V.1/New salary/Calibration จริง — ใช้ยืนยันการดีพอย
           และ debug ชื่อแท็บ (ไม่คืนข้อมูลพนักงาน คืนแค่ชื่อแท็บ/จำนวนแถว/boolean)
@@ -26,7 +29,7 @@
    ======================================================================== */
 
 const CFG = {
-  VERSION:        '2.2',
+  VERSION:        '2.3',
   EVAL_SHEET_ID:  '1LCruX-0Du0cndCFrCbUdsYPxxFXuxJx34TJ44kFshe0',
   USERS_SHEET_ID: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   EVAL_TAB:       'V.1',
@@ -40,6 +43,7 @@ const CFG = {
 /* HR override ฝั่ง server (เทียบเท่า HR_EMAILS ในแอพ — แต่ตัวนี้คือของจริงที่คุมข้อมูล)
    แนะนำ: จัดการสิทธิ์ผ่านคอลัมน์ EvalAccess ใน Users sheet แทน จะได้ไม่ต้องแก้โค้ด */
 const SERVER_HR_EMAILS = [
+  'patcha.ruk@rattanaphaiboon.com',   // HR (พัชชา) — เห็นทุกสาขา (v2.3)
   // 'surat.rat@rattanaphaiboon.com',
 ];
 
