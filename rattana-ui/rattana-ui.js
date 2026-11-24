@@ -1,4 +1,4 @@
-/* Rattana CI v1.6.1 — behaviour helpers (no dependencies). window.RattanaUI */
+/* Rattana CI v1.7.0 — behaviour helpers (no dependencies). window.RattanaUI */
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement, win = window;
@@ -19,6 +19,8 @@
   var EN_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   var EN_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   var uid = 0;
+  /* switch automatic features off: <html data-rt-off="totop select search lightbox ripple"> (or on <body>) */
+  function off(name) { var v = ((root.getAttribute('data-rt-off') || '') + ' ' + ((doc.body && doc.body.getAttribute('data-rt-off')) || '')).toLowerCase(); return new RegExp('(^|[\\s,])' + name + '($|[\\s,])').test(v); }
   var ICON_SCAN = 'M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 8v8M10.5 8v8M14 8v8M17 8v8';
   /* where rattana-ui.js was loaded from — the scanner engine, service worker and logo sit next to it */
   var BASE = (function () { try { var c = doc.currentScript && doc.currentScript.src; if (c && /rattana-ui(\.min)?\.js/.test(c)) return c.replace(/[^/]*$/, ''); } catch (e) {} return 'https://rattanaphaiboon.github.io/app/rattana-ui/'; })();
@@ -140,7 +142,7 @@
   }
 
   var UI = {
-    version: '1.6.1',
+    version: '1.7.0',
     icons: ICON,
     platform: platform,
 
@@ -552,7 +554,7 @@
         if (visible || o.force) UI.toast(title + (o.body ? ' — ' + o.body : ''), { type: o.type || 'info' });
         return Promise.resolve(false);
       }
-      var opts = { body: o.body || '', icon: o.icon || BASE + 'rattana-logo-navy.png', tag: o.tag || undefined, renotify: !!o.tag, silent: !!o.silent,
+      var ai = appLogo({}); var opts = { body: o.body || '', icon: o.icon || (ai && ai !== 'rattana' ? ai : (ai === 'rattana' ? BASE + 'rattana-logo-navy.png' : undefined)), tag: o.tag || undefined, renotify: !!o.tag, silent: !!o.silent,
         requireInteraction: !!o.requireInteraction, data: { url: o.url || location.href }, vibrate: [80, 40, 80], lang: UI.getLang(), timestamp: Date.now() };
       if (o.badgeIcon) opts.badge = o.badgeIcon;
       return UI._sw().then(function (reg) {
@@ -945,7 +947,8 @@
       q('[data-rt-theme-toggle]').forEach(function (b) { if (b._rt) return; b._rt = 1; b.addEventListener('click', function () { UI.toggleTheme(); }); });
       q('[data-rt-lang]').forEach(function (b) { if (b._rt) return; b._rt = 1; b.addEventListener('click', function () { UI.setLang(b.getAttribute('data-rt-lang')); }); });
       q('.rt-seg').forEach(function (s) { if (s._rt) return; s._rt = 1; UI.segmented(s); });
-      q('.rt-search').forEach(enhanceSearch);
+      if (!off('search')) q('.rt-search').forEach(enhanceSearch);
+      q('.rt-app-brand').forEach(paintBrand);
       q('[data-rt-user]').forEach(function (b) { if (b._rtUserPaint) return; b._rtUserPaint = 1; paintUserChip(b); });
       q('[data-rt-scan]:not(.rt-search)').forEach(function (b) {
         if (b._rtScan || b.tagName === 'INPUT') return; b._rtScan = 1;
@@ -1010,7 +1013,7 @@
 
   /* <select class="rt-select">: on laptops open the Rattana dropdown instead of the plain OS list (data-rt-native keeps the OS list) */
   /* any <select> inside .rt-app (or with class rt-select) gets the Rattana dropdown */
-  function rtSelect(n) { return n && n.tagName === 'SELECT' && (n.classList.contains('rt-select') || !!n.closest('.rt-app')) && !n.multiple && !(n.size > 1) && !n.hasAttribute('data-rt-native') && !n.closest('[data-rt-native]') && mq('(pointer: fine)'); }
+  function rtSelect(n) { return !off('select') && n && n.tagName === 'SELECT' && (n.classList.contains('rt-select') || !!n.closest('.rt-app')) && !n.multiple && !(n.size > 1) && !n.hasAttribute('data-rt-native') && !n.closest('[data-rt-native]') && mq('(pointer: fine)'); }
   doc.addEventListener('mousedown', function (e) {
     if (e.button !== 0 || !rtSelect(e.target)) return;
     e.preventDefault(); var s = e.target;
@@ -1033,6 +1036,7 @@
       sub: img.getAttribute('data-rt-sub') || (priceEl ? priceEl.textContent.trim() : '') };
   }
   doc.addEventListener('click', function (e) {
+    if (off('lightbox')) return;
     var img = e.target.closest && e.target.closest('img');
     if (!zoomable(img) || e.defaultPrevented || e.metaKey || e.ctrlKey) return;
     e.preventDefault(); e.stopPropagation();
@@ -1043,7 +1047,7 @@
 
   /* press ripple on buttons, chips, nav and menu items */
   doc.addEventListener('pointerdown', function (e) {
-    if (reducedMotion() || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    if (off('ripple') || reducedMotion() || (e.pointerType === 'mouse' && e.button !== 0)) return;
     var b = e.target.closest && e.target.closest('.rt-btn, .rt-chip, .rt-nav-item, .rt-menu-item, .rt-bottom-nav a, [data-rt-ripple]');
     if (!b || b.disabled || b.classList.contains('is-loading')) return;
     var r = b.getBoundingClientRect(), d = Math.max(r.width, r.height) * 2.4, s = el('span', 'rt-ripple');
@@ -1222,8 +1226,11 @@
     var card = el('div', 'rt-glass rt-login-card');
     var logo = el('div', 'rt-login-logo');
     function ciLogo() { logo.innerHTML = ''; logo.classList.remove('is-app'); var l1 = el('img', 'rt-logo-light'), l2 = el('img', 'rt-logo-dark'); l1.src = BASE + 'rattana-logo-navy.png'; l2.src = BASE + 'rattana-logo-transparent.png'; l1.alt = l2.alt = 'RATTANA'; logo.appendChild(l1); logo.appendChild(l2); }
+    function mono() { logo.innerHTML = ''; logo.classList.add('is-app'); logo.appendChild(appMonogram(cfg.appName || doc.title, 88)); }
     var own = appLogo(cfg);
-    if (own) { var im = el('img', 'rt-login-applogo'); im.alt = cfg.appName || doc.title || ''; im.onerror = ciLogo; im.src = own; logo.classList.add('is-app'); logo.appendChild(im); } else ciLogo();
+    if (own === 'rattana') ciLogo();
+    else if (own) { var im = el('img', 'rt-login-applogo'); im.alt = cfg.appName || doc.title || ''; im.onerror = mono; im.src = own; logo.classList.add('is-app'); logo.appendChild(im); }
+    else mono();
     var h = el('h1', 'rt-login-title', cfg.appName || (en ? 'Sign in' : 'เข้าสู่ระบบ')); h.id = 'rt-login-title';
     var sub = el('p', 'rt-login-sub', en ? 'Sign in with your company Google account' : 'เข้าสู่ระบบด้วยอีเมลบริษัท (บัญชี Google)');
     var slot = el('div', 'rt-login-gbtn'), msg = el('div', 'rt-login-msg'); msg.setAttribute('role', 'status'); msg.setAttribute('aria-live', 'polite');
@@ -1234,8 +1241,11 @@
   }
   /* the app's own logo if it has one, else none (→ Rattana CI logo):
      config({ logo }) / <body data-rt-login-logo="url"> → [data-rt-app-logo] → apple-touch-icon → a large <link rel="icon"> */
+  /* the app's own icon: config({ logo }) / data-rt-login-logo / [data-rt-app-logo] / apple-touch-icon / big link rel=icon.
+     'rattana' = use the RATTANA logo (only when an app asks for it). '' = none found → monogram of the app name */
   function appLogo(cfg) {
-    var b = doc.body, u = cfg.logo || (b && b.getAttribute('data-rt-login-logo')) || '';
+    var b = doc.body, u = (cfg && cfg.logo) || (b && b.getAttribute('data-rt-login-logo')) || '';
+    if (/^rattana$/i.test(u)) return 'rattana';
     if (!u) { var n = doc.querySelector('[data-rt-app-logo]'); if (n) u = n.getAttribute('data-rt-app-logo') || n.currentSrc || n.src || ''; }
     if (!u) {
       var best = null, bs = -1;
@@ -1247,6 +1257,19 @@
       u = best || '';
     }
     try { return u ? new URL(u, location.href).href : ''; } catch (e) { return ''; }
+  }
+  /* letter tile for apps without an icon: 'Rattana Pre-Book' → PB, 'Rattana Online Order' → OO, Thai → first consonant */
+  function appInitials(name) {
+    var n = String(name || '').replace(/\bv?\d+(\.\d+)*\b/g, '').replace(/^\s*(rattana|รัตนะ?|รัตน)\s*/i, '').trim();
+    var words = n.split(/[\s\-–—·|/]+/).filter(Boolean);
+    if (!words.length) return 'R';
+    if (/^[A-Za-z]/.test(words[0])) return (words.length > 1 ? words[0][0] + words[1][0] : words[0].slice(0, 2)).toUpperCase();
+    return words[0].replace(/^[เแโใไ]+/, '').slice(0, 1);
+  }
+  function appMonogram(name, size) {
+    var t = el('span', 'rt-app-icon'), ini = (doc.body && doc.body.getAttribute('data-rt-app-initials')) || appInitials(name);
+    t.textContent = ini; t.setAttribute('aria-hidden', 'true'); t.style.setProperty('--rt-ai', (size || 40) + 'px'); if (ini.length > 1) t.classList.add('is-2');
+    return t;
   }
   function loginMsg(L, kind, title, text, actions) {
     L.msg.innerHTML = ''; L.msg.className = 'rt-login-msg is-' + kind;
@@ -1387,6 +1410,18 @@
     addWorkdays: function (d, n, o) { return UI.holidays.list().then(function () { var x = new Date(d instanceof Date ? d.getTime() : d), k = 0; while (k < n) { x = new Date(x.getTime() + 864e5); if (UI.holidays.isWorkday(x, o)) k++; } return x; }); }
   };
 
+  /* <a class="rt-app-brand"><b>ชื่อแอป</b><small>v1.0</small></a> → adds the app's own icon (or a letter tile) in front */
+  function paintBrand(b) {
+    if (b._rtBrand) return; b._rtBrand = 1;
+    if (b.querySelector('img, .rt-app-icon')) return;
+    var name = (b.querySelector('b, strong') || b).textContent.trim() || doc.title, u = appLogo({});
+    var node;
+    if (u === 'rattana') { node = el('img'); node.src = BASE + 'rattana-logo-navy.png'; node.alt = ''; }
+    else if (u) { node = el('img'); node.src = u; node.alt = ''; node.onerror = function () { node.replaceWith(appMonogram(name, 40)); }; }
+    else node = appMonogram(name, 40);
+    b.insertBefore(node, b.firstChild);
+  }
+
   /* hide a sign-in-only app until someone is signed in (no flash of the app behind the sign-in screen) */
   if (doc.body && doc.body.hasAttribute('data-rt-login') && !readSession()) root.classList.add('rt-auth-wait');
 
@@ -1423,7 +1458,9 @@
 
   /* back-to-top floating button on every Rattana page */
   function setupToTop() {
-    if (!doc.body || doc.body.hasAttribute('data-rt-no-top') || root.hasAttribute('data-rt-no-top') || doc.querySelector('.rt-totop')) return;
+    if (!doc.body || doc.body.hasAttribute('data-rt-no-top') || root.hasAttribute('data-rt-no-top') || off('totop') || doc.querySelector('.rt-totop')) return;
+    /* full Rattana pages (body.rt-app) get it automatically; pages that only borrow parts ask for it with <body data-rt-totop> */
+    if (!doc.body.classList.contains('rt-app') && !doc.body.hasAttribute('data-rt-totop')) return;
     /* the app already has its own back-to-top button → don't add a second one */
     var OWN = '[id*="backtotop" i],[id*="back-to-top" i],[id*="totop" i],[id*="to-top" i],[id*="scrolltop" i],[id*="gotop" i],[class*="back-to-top" i],[class*="backtotop" i],[class*="scroll-top" i],[class*="gotop" i],[class*="go-top" i],[class*="to-top" i]';
     function hasOwn() { var n = doc.querySelectorAll(OWN); for (var i = 0; i < n.length; i++) if (!n[i].classList.contains('rt-totop') && !n[i].closest('.rt-totop')) return true; return false; }

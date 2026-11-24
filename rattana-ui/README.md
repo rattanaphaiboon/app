@@ -1,4 +1,4 @@
-# Rattana CI v1.6.1
+# Rattana CI v1.7.0
 
 UI กลางของบริษัท — Crystal Luxury (โหมดสว่าง) + Luxury Dark (โหมดมืด)
 ใช้ได้ทั้ง iOS · Android · Laptop พร้อม popup และโมชันแบบพรีเมียม
@@ -31,17 +31,50 @@ UI กลางของบริษัท — Crystal Luxury (โหมดส�
   <meta name="mobile-web-app-capable" content="yes">
   <link rel="stylesheet" href="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.css">
   <script src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.js" defer></script>
+  <title>Rattana ชื่อแอป v1.0</title>
+  <link rel="apple-touch-icon" href="icons/ชื่อแอป-180.png">   <!-- ไอคอนของแอปนี้เอง -->
 </head>
 <body class="rt-app">
   <div class="rt-bg"><div class="rt-bg-arc"></div><div class="rt-bg-arc"></div></div>
-  <a class="rt-logo" href="/">
-    <img class="rt-logo-light" src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-logo-navy.png" alt="RATTANA">
-    <img class="rt-logo-dark" src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-logo-transparent.png" alt="RATTANA">
-  </a>
-  <main class="rt-container rt-page">...</main>
+  <main class="rt-container rt-page">
+    <header class="rt-glass rt-topbar">
+      <a class="rt-app-brand" href="./"><span><b>Rattana ชื่อแอป</b><small>v1.0</small></span></a>   <!-- ไอคอนแอปขึ้นข้างหน้าให้เอง -->
+      …
+    </header>
+  </main>
 </body>
 ```
-Sidebar สีกรมท่า: `<img class="rt-logo-on-navy" src=".../rattana-logo-transparent.png" alt="RATTANA">`
+### ไอคอน/โลโก้: แต่ละแอปใช้ของตัวเอง
+- หัวแอป (`.rt-app-brand`) หน้าเข้าสู่ระบบ และการแจ้งเตือน ใช้ **ไอคอนของแอปนั้น** (`<link rel="apple-touch-icon">`) อัตโนมัติ
+- แอปที่ยังไม่มีไอคอน → ขึ้นป้ายตัวอักษรจากชื่อแอป (เช่น Rattana Pre-Book → **PB**) กำหนดเองได้ `<body data-rt-app-initials="ROO">`
+- **โลโก้ RATTANA ใช้เฉพาะเมื่อสั่ง:** `<body data-rt-login-logo="rattana">` หรือวางเองด้วย `<a class="rt-logo">` (ไฟล์ `rattana-logo-navy.png` บนพื้นสว่าง · `rattana-logo-transparent.png` บนพื้นกรมท่า/โหมดมืด · Sidebar สีกรมท่า: `<img class="rt-logo-on-navy">`)
+
+## เลือกใช้เฉพาะบางส่วน (ไม่ต้องเอาทั้งชุด)
+แอปที่มีหน้าตาของตัวเองอยู่แล้ว เลือกเอาเฉพาะส่วนที่อยากได้ — ไม่ต้องใส่ `rt-app` ที่ body และหน้าตาเดิมของแอปไม่เปลี่ยน
+```html
+<!-- ตัวอย่าง: เอาแค่ปุ่ม + กระดิ่งแจ้งเตือน + ป๊อปอัป -->
+<link rel="stylesheet" href="https://rattanaphaiboon.github.io/app/rattana-ui/parts/buttons.css">
+<link rel="stylesheet" href="https://rattanaphaiboon.github.io/app/rattana-ui/parts/notify.css">
+<link rel="stylesheet" href="https://rattanaphaiboon.github.io/app/rattana-ui/parts/popups.css">
+<script src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.js" defer></script>   <!-- ใส่เมื่อใช้ป๊อปอัป/แจ้งเตือน/สแกน -->
+```
+| ไฟล์ `parts/…` | ได้อะไร |
+|---|---|
+| `buttons.css` | ปุ่มทุกแบบ (ทอง/อนุมัติ/ไม่อนุมัติ/กระจก) แถบปุ่มบันทึก |
+| `notify.css` | กระดิ่ง + ตัวเลขแจ้งเตือน (`RattanaUI.setBadge`) |
+| `background.css` | พื้นหลังแบบ Crystal Luxury / Luxury Dark (ใส่ `rt-app` ที่ body + `<div class="rt-bg">`) |
+| `forms.css` | ช่องกรอก ดรอปดาวน์ ช่องค้นหามี X ตัวเลือกแบบปุ่มแบ่ง |
+| `cards.css` | การ์ดกระจก KPI ตาราง ป้าย ไทล์ไอคอน การ์ดสินค้า |
+| `layout.css` | แถบหัว เมนูข้าง เมนูล่าง ปุ่มขึ้นบนสุด หัวแอป+ไอคอน |
+| `popups.css` | ป๊อปอัป ยืนยัน เมนู แผงข้าง toast รายการดรอปดาวน์ ซูมรูป สแกน |
+| `motion.css` | โผล่ตอนเลื่อน การ์ดเอียง เปลี่ยนหน้าแบบลื่น |
+| `user.css` | หน้าเข้าสู่ระบบ รูปโปรไฟล์ ปุ่มบัญชี |
+| `base.css` | สี ฟอนต์ อนิเมชัน (ทุกไฟล์ดึงให้เองแล้ว ไม่ต้องใส่) |
+
+`rattana-ui.css` = ทุกส่วนรวมกัน (เหมือนเดิม) · ลิงก์ CI **ก่อน** `<style>` ของแอป เพื่อให้ค่าสีของแอปเองชนะ
+
+**ปิดลูกเล่นอัตโนมัติบางอย่าง:** `<html data-rt-off="totop select search lightbox ripple">`
+- หน้าที่ไม่มี `rt-app` (เลือกบางส่วน) จะไม่มีลูกเล่นอัตโนมัติเลย ยกเว้นขอเอง เช่น `<body data-rt-totop>` = ขอปุ่มขึ้นบนสุด
 
 ## ทำให้แอปหน้าตาเหมือนต้นฉบับ (เช็กลิสต์ — ส่งให้ AI ที่ช่วยสร้างแอปได้เลย)
 1. ใส่ **ทั้ง 2 บรรทัด** ใน `<head>`: `rattana-ui.css` **และ** `rattana-ui.js` (ไม่มี .js = ไม่มี popup ดรอปดาวน์ใหม่ ซูมรูป และโมชัน)
@@ -51,8 +84,14 @@ Sidebar สีกรมท่า: `<img class="rt-logo-on-navy" src=".../rattana
 5. ฟอร์ม/ปุ่ม/รายการ ดูตัวอย่างและกด "คัดลอกโค้ด" จากหน้า demo
 6. กระดิ่งแจ้งเตือนใช้ `rt-btn rt-btn-glass rt-btn-icon rt-bell` + `<span class="rt-count">` และอัปเดตตัวเลขด้วย `RattanaUI.setBadge(n)`
 7. ช่องค้นหาใช้ `<label class="rt-search">` (มีปุ่ม X ให้เอง) · หน้าที่เกี่ยวกับสินค้าใส่ `data-rt-scan` ให้มีปุ่มสแกน
-8. อย่าทำปุ่มกลับขึ้นบนสุดเอง — Rattana CI ใส่ให้ทุกหน้า
+8. อย่าทำปุ่มกลับขึ้นบนสุดเอง — Rattana CI ใส่ให้ทุกหน้า (`rt-app`)
+10. หัวแอปใช้ `.rt-app-brand` + ไอคอนแอปของตัวเอง (`apple-touch-icon`) — ใช้โลโก้ RATTANA เฉพาะเมื่อสั่ง
 9. แอปที่ต้องรู้ว่าใครใช้: `<body class="rt-app" data-rt-login="ชื่อแอป">` + `<button data-rt-user></button>` แล้วรอ `RattanaUI.user.ready` — อย่าทำหน้าเข้าสู่ระบบเอง
+
+## ใหม่ใน v1.7
+- **แต่ละแอปมีหน้าตาของตัวเอง:** หัวแอป หน้าเข้าสู่ระบบ และการแจ้งเตือนใช้ไอคอนของแอปนั้น ไม่มีไอคอน → ป้ายตัวอักษรจากชื่อแอป · โลโก้ RATTANA ใช้เมื่อสั่งเท่านั้น
+- **เลือกใช้บางส่วนได้:** `parts/buttons.css`, `parts/notify.css`, `parts/background.css` … (ดูหัวข้อ "เลือกใช้เฉพาะบางส่วน")
+- ปิดลูกเล่นอัตโนมัติทีละอย่างด้วย `data-rt-off` · ปุ่มขึ้นบนสุดขึ้นเองเฉพาะหน้า `rt-app`
 
 ## ใหม่ใน v1.6 — ผู้ใช้ในองค์กร (User for app)
 ข้อมูลจากชีท **Rattana Users for apps › Sheet1** · เข้าสู่ระบบด้วยอีเมลบริษัท (บัญชี Google)
