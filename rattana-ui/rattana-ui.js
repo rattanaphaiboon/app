@@ -1,4 +1,4 @@
-/* Rattana CI v1.7.0 — behaviour helpers (no dependencies). window.RattanaUI */
+/* Rattana CI v1.8.0 — behaviour helpers (no dependencies). window.RattanaUI */
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement, win = window;
@@ -142,7 +142,7 @@
   }
 
   var UI = {
-    version: '1.7.0',
+    version: '1.8.0',
     icons: ICON,
     platform: platform,
 
@@ -554,10 +554,11 @@
         if (visible || o.force) UI.toast(title + (o.body ? ' — ' + o.body : ''), { type: o.type || 'info' });
         return Promise.resolve(false);
       }
-      var ai = appLogo({}); var opts = { body: o.body || '', icon: o.icon || (ai && ai !== 'rattana' ? ai : (ai === 'rattana' ? BASE + 'rattana-logo-navy.png' : undefined)), tag: o.tag || undefined, renotify: !!o.tag, silent: !!o.silent,
+      var ai = appLogo({}); var opts = { body: o.body || '', icon: o.icon || (ai && ai !== 'rattana' ? ai : (ai === 'rattana' ? BASE + 'rattana-logo-navy.png' : UI._iconPng)), tag: o.tag || undefined, renotify: !!o.tag, silent: !!o.silent,
         requireInteraction: !!o.requireInteraction, data: { url: o.url || location.href }, vibrate: [80, 40, 80], lang: UI.getLang(), timestamp: Date.now() };
       if (o.badgeIcon) opts.badge = o.badgeIcon;
-      return UI._sw().then(function (reg) {
+      var pre = (!opts.icon && !ai) ? appIconPNG({}, 192).then(function (d) { UI._iconPng = opts.icon = d; }, function () {}) : Promise.resolve();
+      return pre.then(function () { return UI._sw(); }).then(function (reg) {
         if (reg && reg.showNotification) return reg.showNotification(title, opts).then(function () { return true; });
         var n = new Notification(title, opts);
         n.onclick = function () { try { win.focus(); } catch (e) {} if (o.url && o.url !== location.href) location.href = o.url; n.close(); };
@@ -1266,9 +1267,78 @@
     if (/^[A-Za-z]/.test(words[0])) return (words.length > 1 ? words[0][0] + words[1][0] : words[0].slice(0, 2)).toUpperCase();
     return words[0].replace(/^[เแโใไ]+/, '').slice(0, 1);
   }
+  /* ---------- App icons designed per app (v1.8) ----------
+     An app without its own icon gets one drawn for it: a glyph that fits what the app does
+     (picked from its name, or data-rt-app-glyph) on a tone of its own (data-rt-app-tone),
+     gold on a deep gradient — every app looks different but still RATTANA. */
+  var APP_GLYPHS = {
+    cart: 'M8 21a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM19 21a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12',
+    store: 'M3 9l1.5-5h15L21 9M3 9v11h18V9M3 9a3 3 0 0 0 6 0 3 3 0 0 0 6 0 3 3 0 0 0 6 0M9 20v-6h6v6',
+    tag: 'M12.59 2.59A2 2 0 0 0 11.17 2H4a2 2 0 0 0-2 2v7.17a2 2 0 0 0 .59 1.41l8.7 8.7a2.43 2.43 0 0 0 3.42 0l6.58-6.58a2.43 2.43 0 0 0 0-3.42zM7.5 7.5h.01',
+    truck: 'M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2M15 18H9M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.62l-3.48-4.35A1 1 0 0 0 17.52 8H14M7 20a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM17 20a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
+    car: 'M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9L18 10l-2.7-3.6A2 2 0 0 0 13.7 5H7.3a2 2 0 0 0-1.6.8L3 9.5l-.5.5A2 2 0 0 0 2 11.3V16c0 .6.4 1 1 1h2M9 17h6M7 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM17 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
+    fuel: 'M3 22h12M4 9h10M14 22V4a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v18M14 13h2a2 2 0 0 1 2 2v2a2 2 0 0 0 4 0V9.83a2 2 0 0 0-.59-1.42L18 5',
+    map: 'M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0zM12 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+    box: 'M21 8 12 3 3 8v8l9 5 9-5zM3 8l9 5 9-5M12 13v8M7.5 5.5l9 5',
+    scan: ICON_SCAN,
+    chart: 'M3 3v18h18M7 14l4-4 3 3 5-6M15 7h4v4',
+    receipt: 'M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1zM8 8h8M8 12h8M8 16h5',
+    wallet: 'M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4',
+    ticket: 'M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2zM13 5v2M13 17v2M13 11v2',
+    phone: 'M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z',
+    calendar: 'M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM9 16l2 2 4-4',
+    users: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75',
+    check: 'M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 3h6v4H9zM9 14l2 2 4-4',
+    layers: 'M12 2 2 7l10 5 10-5zM2 17l10 5 10-5M2 12l10 5 10-5'
+  };
+  var APP_TONES = { navy: ['#1F4E82', '#011E3E'], blue: ['#2B6CD8', '#122E6E'], teal: ['#14988B', '#08443F'], green: ['#1C9A4E', '#0B3D20'],
+    plum: ['#8B3FD1', '#33105A'], wine: ['#C2334F', '#4A0A1B'], charcoal: ['#55657C', '#141C2B'] };
+  var APP_KEYS = [
+    [/(fuel|น้ำมัน|ปั๊ม)/i, 'fuel', 'green'], [/(\bcars?\b|fleet|รถ|ทะเบียน)/i, 'car', 'green'],
+    [/(deli|ship|ขนส่ง|จัดส่ง|ส่งของ|d-?man|route|เส้นทาง)/i, 'truck', 'green'], [/(\bmap\b|แผนที่|location|พิกัด)/i, 'map', 'green'],
+    [/(scan|barcode|สแกน|บาร์โค้ด)/i, 'scan', 'teal'], [/(stock|สต็อก|สต๊อก|inventory|คลัง|warehouse|pick|หยิบ|pack|แพ็ค|clear)/i, 'box', 'teal'],
+    [/(pre-?book|จอง)/i, 'calendar', 'charcoal'], [/(order|สั่ง|cart|ตะกร้า|\broo\b|online)/i, 'cart', 'blue'], [/(shop|store|ร้าน|customer|ลูกค้า|member|สมาชิก)/i, 'store', 'blue'],
+    [/(price|ราคา|promo|โปร|\btag\b|product|สินค้า)/i, 'tag', 'blue'], [/(sale|ขาย|report|รายงาน|dashboard|\bom\b|kpi|ยอด)/i, 'chart', 'navy'],
+    [/(bill|บิล|invoice|receipt|check-?out|ใบเสร็จ|ใบกำกับ|\bpo\b|ใบสั่ง)/i, 'receipt', 'plum'], [/(expense|เบิก|money|เงิน|บัญชี|account|debt|หนี้|wallet|pay|ชำระ)/i, 'wallet', 'plum'],
+    [/(ticket|แจ้งปัญหา|issue|helpdesk|ซ่อม)/i, 'ticket', 'wine'], [/(call|โทร|phone)/i, 'phone', 'wine'],
+    [/(attend|ลงเวลา|calendar|ปฏิทิน|วันหยุด|leave|\bลา\b|booking|นัด)/i, 'calendar', 'charcoal'], [/(\bhr\b|staff|พนักงาน|\busers?\b|people|ทีม|team)/i, 'users', 'charcoal'],
+    [/(check|ตรวจ|approve|อนุมัติ|audit|\bqc\b)/i, 'check', 'teal'], [/(\bhub\b|design|\bci\b|system)/i, 'layers', 'navy']
+  ];
+  function appIconSpec(o) {
+    o = o || {}; var b = doc.body, name = o.name || (b && b.getAttribute('data-rt-login')) || doc.title || '';
+    var clean = String(name).replace(/^\s*(rattana|รัตนะ?|รัตน)\s*/i, '');
+    var glyph = o.glyph || (b && b.getAttribute('data-rt-app-glyph')) || '', tone = o.tone || (b && b.getAttribute('data-rt-app-tone')) || '';
+    if (!glyph || glyph === 'auto') { glyph = ''; for (var i = 0; i < APP_KEYS.length; i++) if (APP_KEYS[i][0].test(clean)) { glyph = APP_KEYS[i][1]; if (!tone || tone === 'auto') tone = APP_KEYS[i][2]; break; } }
+    if (glyph === 'letters') glyph = '';
+    if (!tone || tone === 'auto' || !APP_TONES[tone]) { var h = 0; for (var k = 0; k < clean.length; k++) h = (h * 31 + clean.charCodeAt(k)) >>> 0; var tk = Object.keys(APP_TONES); tone = APP_TONES[tone] ? tone : tk[h % tk.length]; }
+    return { name: name, glyph: APP_GLYPHS[glyph] ? glyph : '', tone: tone, initials: o.initials || (b && b.getAttribute('data-rt-app-initials')) || appInitials(name) };
+  }
+  var iconN = 0;
+  /* → SVG markup (512×512) of the designed icon for an app */
+  function appIconSVG(o) {
+    var s = appIconSpec(o), c = APP_TONES[s.tone], u = 'rai' + (++iconN), mark;
+    if (s.glyph) mark = '<g transform="translate(118 118) scale(11.5)" fill="none" stroke="url(#' + u + 'g)" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="' + APP_GLYPHS[s.glyph] + '"/></g>';
+    else { var t = String(s.initials).slice(0, 2), two = t.length > 1; mark = '<text x="256" y="' + (two ? 330 : 342) + '" text-anchor="middle" font-family="Inter, \'IBM Plex Sans Thai\', \'Noto Sans Thai\', Arial, sans-serif" font-weight="800" font-size="' + (two ? 196 : 240) + '" letter-spacing="-6" fill="url(#' + u + 'g)">' + t.replace(/[&<>]/g, '') + '</text>'; }
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="' + String(s.name).replace(/["<>&]/g, '') + '"><defs>' +
+      '<linearGradient id="' + u + 'b" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="' + c[0] + '"/><stop offset="1" stop-color="' + c[1] + '"/></linearGradient>' +
+      '<linearGradient id="' + u + 'g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE7A3"/><stop offset=".5" stop-color="#FCB70F"/><stop offset="1" stop-color="#D99400"/></linearGradient>' +
+      '<radialGradient id="' + u + 'h" cx=".22" cy=".08" r=".95"><stop offset="0" stop-color="#fff" stop-opacity=".30"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/></radialGradient>' +
+      '<clipPath id="' + u + 'c"><rect width="512" height="512" rx="116"/></clipPath></defs>' +
+      '<g clip-path="url(#' + u + 'c)"><rect width="512" height="512" fill="url(#' + u + 'b)"/><circle cx="470" cy="500" r="210" fill="#FCB70F" opacity=".05"/><circle cx="60" cy="-20" r="260" fill="url(#' + u + 'h)"/></g>' +
+      mark + '<rect x="5" y="5" width="502" height="502" rx="111" fill="none" stroke="#FCB70F" stroke-opacity=".5" stroke-width="5"/></svg>';
+  }
+  /* → Promise<PNG data URL> of the designed icon (for downloads and system notifications) */
+  function appIconPNG(o, size) {
+    size = size || 512;
+    return new Promise(function (resolve, reject) {
+      var img = new Image(); img.onload = function () { try { var c = doc.createElement('canvas'); c.width = c.height = size; c.getContext('2d').drawImage(img, 0, 0, size, size); resolve(c.toDataURL('image/png')); } catch (e) { reject(e); } };
+      img.onerror = reject; img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(appIconSVG(o));
+    });
+  }
+
   function appMonogram(name, size) {
-    var t = el('span', 'rt-app-icon'), ini = (doc.body && doc.body.getAttribute('data-rt-app-initials')) || appInitials(name);
-    t.textContent = ini; t.setAttribute('aria-hidden', 'true'); t.style.setProperty('--rt-ai', (size || 40) + 'px'); if (ini.length > 1) t.classList.add('is-2');
+    var t = el('span', 'rt-app-icon'); t.setAttribute('aria-hidden', 'true'); t.style.setProperty('--rt-ai', (size || 40) + 'px');
+    t.innerHTML = appIconSVG({ name: name });
     return t;
   }
   function loginMsg(L, kind, title, text, actions) {
@@ -1381,6 +1451,10 @@
   /* ---------- Company holidays ("วันหยุดนขัต") ---------- */
   var holP = null, holSet = null;
   function ymd(d) { d = d instanceof Date ? d : new Date(d); var b = new Date(d.getTime() + 7 * 3600e3); return b.toISOString().slice(0, 10); }
+  /* RattanaUI.appIcon.svg({ name, glyph, tone }) · .png(o, size) → Promise<dataURL> · .glyphs · .tones · .spec(o) */
+  UI.appIcon = { svg: appIconSVG, png: appIconPNG, spec: appIconSpec, glyphs: Object.keys(APP_GLYPHS), tones: Object.keys(APP_TONES),
+    element: function (o, size) { var t = el('span', 'rt-app-icon'); t.style.setProperty('--rt-ai', (size || 40) + 'px'); t.innerHTML = appIconSVG(o); return t; } };
+
   UI.holidays = {
     /* → Promise<[{ date: 'YYYY-MM-DD', name }]> — live from the sheet, falls back to the copy bundled with Rattana CI */
     list: function (force) {

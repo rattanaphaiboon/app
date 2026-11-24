@@ -46,7 +46,11 @@ UI กลางของบริษัท — Crystal Luxury (โหมดส�
 ```
 ### ไอคอน/โลโก้: แต่ละแอปใช้ของตัวเอง
 - หัวแอป (`.rt-app-brand`) หน้าเข้าสู่ระบบ และการแจ้งเตือน ใช้ **ไอคอนของแอปนั้น** (`<link rel="apple-touch-icon">`) อัตโนมัติ
-- แอปที่ยังไม่มีไอคอน → ขึ้นป้ายตัวอักษรจากชื่อแอป (เช่น Rattana Pre-Book → **PB**) กำหนดเองได้ `<body data-rt-app-initials="ROO">`
+- แอปที่ยังไม่มีไอคอน → CI **ออกแบบไอคอนให้ตามงานของแอป** (รูปตามชื่อแอป + สีพื้นของแอป + ขอบทอง) เช่น Fuel = หัวจ่ายน้ำมัน/เขียว, Call Card = โทรศัพท์/แดงไวน์, Checkout = บิล/ม่วง
+- เลือกเองได้: `<body data-rt-app-glyph="truck" data-rt-app-tone="green">`
+  - รูป: cart store tag truck car fuel map box scan chart receipt wallet ticket phone calendar users check layers หรือ `letters` (ตัวอักษรจากชื่อ, กำหนดเองด้วย `data-rt-app-initials="ROO"`)
+  - สี: navy blue teal green plum wine charcoal
+- ดาวน์โหลดเป็นไฟล์ PNG (512 / 180) ได้ที่หน้า demo → "เอาไปใช้ · สร้างพรอมต์" → ข้อ 5 ไอคอนแอป · หรือ `RattanaUI.appIcon.png({name, glyph, tone}, 512)` (คืน data URL) · `RattanaUI.appIcon.svg(...)` · `RattanaUI.appIcon.element(..., 40)`
 - **โลโก้ RATTANA ใช้เฉพาะเมื่อสั่ง:** `<body data-rt-login-logo="rattana">` หรือวางเองด้วย `<a class="rt-logo">` (ไฟล์ `rattana-logo-navy.png` บนพื้นสว่าง · `rattana-logo-transparent.png` บนพื้นกรมท่า/โหมดมืด · Sidebar สีกรมท่า: `<img class="rt-logo-on-navy">`)
 
 ## เลือกใช้เฉพาะบางส่วน (ไม่ต้องเอาทั้งชุด)
@@ -90,6 +94,11 @@ UI กลางของบริษัท — Crystal Luxury (โหมดส�
 8. อย่าทำปุ่มกลับขึ้นบนสุดเอง — Rattana CI ใส่ให้ทุกหน้า (`rt-app`)
 10. หัวแอปใช้ `.rt-app-brand` + ไอคอนแอปของตัวเอง (`apple-touch-icon`) — ใช้โลโก้ RATTANA เฉพาะเมื่อสั่ง
 9. แอปที่ต้องรู้ว่าใครใช้: `<body class="rt-app" data-rt-login="ชื่อแอป">` + `<button data-rt-user></button>` แล้วรอ `RattanaUI.user.ready` — อย่าทำหน้าเข้าสู่ระบบเอง
+
+## ใหม่ใน v1.8 — ไอคอนแอปออกแบบให้ตามงานของแต่ละแอป
+- แอปที่ไม่มีไอคอนของตัวเองได้ไอคอนที่ออกแบบให้ (รูปตามงาน + สีของแอป + ขอบทอง) ใช้ทั้งหัวแอป หน้าเข้าสู่ระบบ และการแจ้งเตือนนอกแอป
+- ตัวช่วยสร้างพรอมต์มีข้อ "ไอคอนแอป": ออกแบบให้ / ใช้ไอคอนเดิม / ใช้โลโก้ RATTANA พร้อมดูตัวอย่าง เลือกรูป เลือกสี และดาวน์โหลด PNG
+- แอปที่มีไอคอนอยู่แล้ว (`apple-touch-icon`) ยังใช้ของเดิมเหมือนเดิม
 
 ## ใหม่ใน v1.7
 - **แต่ละแอปมีหน้าตาของตัวเอง:** หัวแอป หน้าเข้าสู่ระบบ และการแจ้งเตือนใช้ไอคอนของแอปนั้น ไม่มีไอคอน → ป้ายตัวอักษรจากชื่อแอป · โลโก้ RATTANA ใช้เมื่อสั่งเท่านั้น
