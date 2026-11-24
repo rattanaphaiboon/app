@@ -1165,6 +1165,13 @@ body.dark .tp-st.ok{color:#7be0a3} body.dark .tp-st.part{color:#ffc56b}
 .tp-bar{flex:0 0 64px;height:6px;border-radius:999px;background:var(--row-alt);border:1px solid var(--border);overflow:hidden}
 .tp-bar i{display:block;height:100%;background:var(--success)}
 .truck.wait .tp-pg{display:none}
+/* BUILD 174 ป้ายผลต้นทุนเที่ยว + ตัวที่ขาด */
+.tp-hr{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.tp-cost{flex:0 0 auto;font-style:normal;font-weight:800;font-size:12px;padding:2px 10px;border-radius:999px;color:#fff;cursor:help;white-space:nowrap;
+  box-shadow:0 0 0 1.5px rgba(255,255,255,.55)}
+.tp-cost.ok{background:#1f9d55}
+.tp-cost.bad{background:#d63a2c}
+.tp-miss{flex-basis:100%;color:var(--danger);font-size:11px;line-height:1.4}
 @media print{
   header,nav.tab-nav,#tripBar,.totop,.newver,.toast,.gas-ov{display:none!important}
   body,.content{background:#fff!important}
@@ -3322,7 +3329,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-24 · 173';
+const BUILD = '2026-11-24 · 174';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -8262,20 +8269,23 @@ async function loadKeep() {
   keepBusy = true;
   const key = routeKey(), day = TODAY;
   try {
-    const sel = 'select A, B, C, D, E, O, P, Q, S, W, X, Z, AB';
+    /* + Y ลำดับร้าน · AD ระยะไป-กลับ · AJ ต้นทุนรวม · AK ยอดขายขั้นต่ำ · AL ยอดขายเที่ยวนี้ · AM ผลต้นทุน · AN รายละเอียด (BUILD 174)
+       ต้นทุนคิดต่อเที่ยว — ลงไว้แถวเดียวของ ทะเบียน+วันส่ง+เที่ยว (แถวร้านลำดับ 1) ที่เหลือว่าง */
+    const sel = 'select A, B, C, D, E, O, P, Q, S, W, X, Z, AB, Y, AD, AJ, AK, AL, AM, AN';
     let res = await gvizJsonp(KEEP_SRC.id, { gid:KEEP_SRC.gid, headers:'1',
       tq:`${sel} where Z = '${WAREHOUSE}' and B >= date '${day}' and B <= date '${isoAdd(day, 7)}'` });
     if (res.status === 'error')                    // คอลัมน์วันที่ส่งไม่ใช่ชนิดวันที่ → ดึงทั้งคลังแล้วกรองเอง
       res = await gvizJsonp(KEEP_SRC.id, { gid:KEEP_SRC.gid, headers:'1', tq:`${sel} where Z = '${WAREHOUSE}'` });
     if (res.status === 'error') throw new Error((res.errors || [{}])[0].detailed_message || 'อ่าน Keepdata ไม่ได้');
     if (key !== routeKey()) return;                // เปลี่ยนวัน/คลังระหว่างอ่าน รอบหน้าค่อยเอา
-    const all = [];
+    const all = [], cost = {};
     ((res.table && res.table.rows) || []).forEach(r => {
       const c = r.c || [], t = i => cellTxt(c[i]);
       const ship = martDay(c[1]), plate = t(5).replace(/\s+/g, ''), trip = parseInt(t(6), 10) || 0;
       if (!ship || ship < day || ship > isoAdd(day, 7) || !plate || /ยกเลิก/.test(t(9))) return;
       all.push({ ref:t(2), code:t(3), name:t(4), ship, trip, plate, driver:t(7), type:t(8), at:t(10),
-                 by:'Keepdata' + (t(12) ? ' · ' + t(12) : ''), keep:true });
+                 by:'Keepdata' + (t(12) ? ' · ' + t(12) : ''), keep:true, seq:parseInt(t(13), 10) || 0 });
+      if (t(18)) cost[`${plate}|${ship}|${trip}`] = tripCostOf(t, 14);
     });
     const next = all.filter(e => e.ship > day).map(e => e.ship).sort()[0] || '';
     const ref = {}, store = {}, odd = [];
@@ -8286,7 +8296,7 @@ async function loadKeep() {
       if (e.type && !(VEH_INFO[e.plate] || {}).type) VEH_INFO[e.plate] = Object.assign(VEH_INFO[e.plate] || {}, { type:e.type });
     });
     const sig = JSON.stringify([key, next, all.map(e => [e.ref, e.code, e.ship, e.trip, e.plate])]), changed = sig !== KEEP.sig;
-    KEEP = { key, ref, store, next, n:all.length, odd, err:'', at:Date.now(), ver:KEEP.ver + (changed ? 1 : 0), sig };
+    KEEP = { key, ref, store, next, n:all.length, odd, err:'', at:Date.now(), ver:KEEP.ver + (changed ? 1 : 0), sig, cost };
     if (changed) {
       /* งานส่งยึดตามจัดรถ (BUILD 90): รอบของบิลส่งเปลี่ยน → สร้างงาน/ร้าน/รายการบิลจัดรถใหม่ทั้งชุด */
       const was = JSON.stringify([...KEEP_RND]);
@@ -8301,6 +8311,8 @@ async function loadKeep() {
   } catch(e) { KEEP.err = String(e.message || e).slice(0, 90); console.warn('loadKeep', e); }
   finally { keepBusy = false; refreshRouteViews(false); }
 }
+/** ต้นทุนเที่ยว (BUILD 174) จากคอลัมน์ ระยะไป-กลับ · ต้นทุนรวม · ขั้นต่ำ · ยอดขายเที่ยวนี้ · ผลต้นทุน · รายละเอียด ที่เรียงติดกันใน select (i = ตัวแรก) */
+const tripCostOf = (t, i) => ({ km:numOf(t(i)), cost:numOf(t(i + 1)), min:numOf(t(i + 2)), sales:numOf(t(i + 3)), res:t(i + 4).trim(), detail:t(i + 5) });
 /** { "รหัสร้าน#รอบ": แถว Keepdata } ของวันทำงานนี้ — เลขบิลตรงก่อน แล้วค่อยรหัสร้าน+ช่วงส่ง */
 function keepMap() {
   if (KEEP.key !== routeKey()) return {};
@@ -8326,21 +8338,23 @@ async function loadRetail() {
   retailBusy = true;
   const key = routeKey(), day = TODAY;
   try {
-    const sel = 'select A, B, D, K, L, M, O, X, Y, Z, AM';
+    const sel = 'select A, B, D, K, L, M, O, X, Y, Z, AM, P, AB, AH, AI, AJ, AK, AL';   // + ลำดับร้าน · ต้นทุนเที่ยว (BUILD 174)
     let res = await gvizJsonp(RETAIL_SRC.id, { gid:RETAIL_SRC.gid, headers:'1',
       tq:`${sel} where V = '${WAREHOUSE}' and A >= date '${isoAdd(day, -7)}'` });
     if (res.status === 'error')                    // คอลัมน์วันที่ไม่ใช่ชนิดวันที่ → ดึงทั้งคลัง
       res = await gvizJsonp(RETAIL_SRC.id, { gid:RETAIL_SRC.gid, headers:'1', tq:`${sel} where V = '${WAREHOUSE}'` });
     if (res.status === 'error') throw new Error((res.errors || [{}])[0].detailed_message || 'อ่านแท็บ พรีปลีก ไม่ได้');
     if (key !== routeKey()) return;
-    const ref = {};
+    const ref = {}, cost = {};
     ((res.table && res.table.rows) || []).forEach(r => {
       const c = r.c || [], t = i => cellTxt(c[i]);
       const bill = t(2).toUpperCase(), plate = t(3).replace(/\s+/g, '');
       if (!bill || !plate || /เอาออก|ยกเลิก/.test(t(9))) return;
       const e = { ref:bill, ship:martDay(c[1]), trip:parseInt(t(4), 10) || 0, plate, driver:t(5), type:t(6),
-                  ts:gvTime(c[7]), book:t(8), unit:t(10) };
+                  ts:gvTime(c[7]), book:t(8), unit:t(10), seq:parseInt(t(11), 10) || 0 };
       const o = ref[bill]; if (!o || e.ts >= o.ts) ref[bill] = e;                 // บิลเดียวหลายแถว = อัปเดตล่าสุด
+      if (t(16)) { const k = `${plate}|${e.ship}|${e.trip}`, x = Object.assign(tripCostOf(t, 12), { ts:e.ts });
+                   if (!cost[k] || x.ts >= cost[k].ts) cost[k] = x; }
       if (e.type && !(VEH_INFO[plate] || {}).type) VEH_INFO[plate] = Object.assign(VEH_INFO[plate] || {}, { type:e.type });
     });
     /* ปลีกรอบ 1 เสมอ (BUILD 151 — 142–150 รอบตามช่วงส่ง: วันส่งถัดไปเที่ยว 1 = รอบ 2 ทุกใบ) · rndOf ไม่ใช้ e.rnd แล้ว
@@ -8348,7 +8362,7 @@ async function loadRetail() {
     const next = Object.values(ref).map(e => e.ship).filter(s => s && s > day).sort()[0] || '';
     Object.values(ref).forEach(e => { e.rnd = RETAIL_R1; });
     const sig = JSON.stringify([key, next, Object.values(ref).map(e => [e.ref, e.plate, e.ship, e.trip])]), changed = sig !== RETAIL.sig;
-    RETAIL = { key, ref, next, err:'', at:Date.now(), sig };
+    RETAIL = { key, ref, next, err:'', at:Date.now(), sig, cost };
     if (changed) {
       const was = JSON.stringify([...RETAIL_RND]);
       RETAIL_RND.clear();
@@ -8357,7 +8371,7 @@ async function loadRetail() {
       refreshRouteViews(true);
     }
   } catch(e) { RETAIL.err = String(e.message || e).slice(0, 90); console.warn('loadRetail', e); }
-  finally { retailBusy = false; }
+  finally { retailBusy = false; if (onScreen('scr-trip')) renderTrip(); }   // สรุปเที่ยวส่งมีรถปลีกด้วย (BUILD 174)
 }
 /** ชีต ใบจัด ของ Pre-order-picker (BUILD 162) → PICK.ref { เลขใบจอง: { rnd, day, at, plate, trip, ship, ch } } · เปลี่ยน = สร้างงานใหม่ */
 async function loadPick() {
@@ -8574,8 +8588,10 @@ function refreshRouteViews(changed) {
    ═══════════════════════════════════════════════════════════════ */
 /* BUILD 173 (ผู้ใช้สั่ง 24/11 "w4 ตัดจัดเที่ยวส่งออก แล้วหน้าสรุปเพิ่มดีเทลที่จำเป็นให้หน่อย") — แท็บจัดเที่ยวส่งเอาออก
    รถมาจากไฟล์จัดรถส่งสินค้า (Keepdata) · ที่เคยจ่ายในแอป (ชีต จัดรถ) ยังอ่านอยู่ แต่จ่ายเพิ่มในแอปไม่ได้แล้ว
-   การ์ดรถ: ทะเบียน · ประเภท · คนขับ · ร้าน/บิล/ลัง/ยอดเงิน · แถบ เช็คแล้ว x/y บิล · ขาด N บรรทัด
-   ร้าน → แถวละบิล: เลขที่ · ยอดเงิน · N รายการ · ลัง · สถานะเช็คจากชีต ยืนยันเช็ค (ทุกเครื่องเห็นเหมือนกัน) */
+   BUILD 174 (ผู้ใช้ 24/11 "เอายังไม่จัดรถออก เพิ่มปลีกเข้าไป ตัดจำนวนรายการออก คำว่าบรรทัดเปลี่ยนเป็นรายการ … เพิ่มหัวการ์ดเรื่อง ระยะทาง และมีสัญลักษณ์ผลต้นทุน"):
+   หัวข้อ = วันส่ง·เที่ยว จริง (ส่ง: รอบ 1 = วันนี้ เที่ยว 2 · รอบ 2 = วันส่งถัดไป เที่ยว 1 · ปลีก: วันส่ง/เที่ยวในแท็บ พรีปลีก)
+   การ์ดรถ: ทะเบียน + ป้ายผลต้นทุน (คุ้ม/ขาด) · ประเภท · คนขับ · ระยะไป-กลับ · ร้าน/บิล/ลัง/ยอดเงิน · ปิดงานแล้ว x/y บิล · ขาด N รายการ
+   ร้านเรียงตามลำดับร้านในไฟล์จัดรถ → แถวละบิล: เลขที่ · ยอดเงิน · ลัง · สถานะจากชีต ยืนยันเช็ค + ตัวที่ขาด */
 function renderTrip() {
   $('hdDate7').textContent = thaiDate(TODAY);
   $('hdWh7').textContent   = WAREHOUSE;
@@ -8584,92 +8600,117 @@ function renderTrip() {
   const keep = SRC !== 'real' ? 'ชุดตัวอย่าง'
     : KEEP.err ? `<b class="txt-danger">⚠ อ่านไฟล์จัดรถส่งสินค้า (Keepdata) ไม่ได้: ${esc(KEEP.err)}</b>`
     : KEEP.key !== routeKey() ? 'กำลังอ่านไฟล์จัดรถส่งสินค้า…'
-    : `🚚 รถจากไฟล์จัดรถส่งสินค้า (Keepdata) · อ่าน ${hm(KEEP.at)} น.`;
-  const conf = confReady() ? 'สถานะเช็คจากชีต ยืนยันเช็ค (ทุกเครื่องเห็นเหมือนกัน)' : 'กำลังอ่านผลเช็คจากชีต…';
-  const st = tripBillStats();
-  $('tripBody').innerHTML = returnsBanner() + ROUNDS.map(r => tripHtml(r.n, st)).join('') +
+    : `🚚 รถจากไฟล์จัดรถส่งสินค้า (Keepdata · พรีปลีก) · อ่าน ${hm(KEEP.at)} น.` +
+      (RETAIL.err ? ` · <b class="txt-danger">อ่านแท็บ พรีปลีก ไม่ได้: ${esc(RETAIL.err)}</b>` : '');
+  const conf = confReady() ? 'สถานะจากชีต ยืนยันเช็ค (ทุกเครื่องเห็นเหมือนกัน)' : 'กำลังอ่านผลเช็คจากชีต…';
+  const secs = tripSecs();
+  $('tripBody').innerHTML = returnsBanner() +
+    (secs.length ? secs.map(tripHtml).join('') : '<div class="empty">ยังไม่มีรถที่จัดแล้วในไฟล์จัดรถส่งสินค้า</div>') +
     `<div class="trip-foot">${keep} · ${conf} · อัปเดต ${thaiDate(now)} ${t2(now.getHours())}:${t2(now.getMinutes())}:${t2(now.getSeconds())}</div>`;
 }
-/** ต่อบิล: n บรรทัด · รายการ (สินค้าไม่ซ้ำ) · ลัง (บรรทัดหน่วย CS จำนวน+แถม) · conf บรรทัดที่ยืนยันแล้ว · short ได้ไม่ครบ · zero ไม่ได้เลย */
-function tripBillStats() {
-  const m = {}, refs = new Set(ROUTE_BILLS.map(b => b.ref));
+/** ต่อบิล: n บรรทัด · ลัง (บรรทัดหน่วย CS จำนวน+แถม) · conf บรรทัดที่ยืนยันแล้ว · short ได้ไม่ครบ (+ ตัวที่ขาด) */
+function tripBillStats(refs) {
+  const m = {};
   ORDERS.forEach(x => {
     if (!refs.has(x.ref)) return;
     const h = byCode[String(x.code)]; if (!h) return;
     const qty = x.isFree ? (x.free || 0) : (x.qty || 0); if (qty <= 0) return;
-    const s = m[x.ref] ||= { n:0, items:new Set(), cs:0, conf:0, short:0, zero:0 };
-    s.n++; s.items.add(h.p.id);
+    const s = m[x.ref] ||= { n:0, cs:0, conf:0, short:0, miss:[] };
+    s.n++;
     if (h.u.lv === 'CS') s.cs += qty;
     const l = Object.assign({}, x, { needEA:qty * h.u.qtyEA, erpFree:!!x.isFree }), cf = confOf(l);
     if (!cf || cf.partial) return;
     s.conf++;
     const cap = lineCap(l), got = Math.min(cap, cf.given);
-    if (got < cap) { s.short++; if (got <= 0) s.zero++; }
+    if (got < cap) { s.short++; s.miss.push(`${h.p.name}${x.isFree ? ' (แถม)' : ''} ${fmtUnitsTxt(cap - got, h.p.units)}`); }
   });
   return m;
 }
-/** ป้ายสถานะเช็คของบิล */
+/** ป้ายสถานะของบิล — ปิดงานแล้ว = ทุกรายการของบิลลงชีต ยืนยันเช็ค แล้ว (จากหน้าไหนก็ได้) */
 function tripSt(ref, s) {
   if (!s) return '';
-  if (s.conf >= s.n) return s.short ? `<em class="tp-st bad">✓ ขาด ${fmtN(s.short)} บรรทัด</em>` : '<em class="tp-st ok">✓ ครบ</em>';
+  if (s.conf >= s.n) return s.short ? `<em class="tp-st bad">ปิดงานแล้ว · ขาด ${fmtN(s.short)} รายการ</em>` : '<em class="tp-st ok">✓ ปิดงานแล้ว · ครบ</em>';
   if (!confReady()) return '<em class="tp-st">กำลังอ่าน…</em>';
-  if (s.conf) return `<em class="tp-st part">ยืนยันแล้ว ${fmtN(s.conf)}/${fmtN(s.n)} บรรทัด</em>`;
+  if (s.conf) return `<em class="tp-st part">ปิดแล้ว ${fmtN(s.conf)}/${fmtN(s.n)} รายการ</em>`;
   if (pickWait(ref)) return '<em class="tp-st wait">📋 ยังไม่ออกใบจัด</em>';
-  return '<em class="tp-st">ยังไม่ยืนยัน</em>';
+  return '<em class="tp-st">ยังไม่ปิดงาน</em>';
 }
-function tripHtml(rnd, st) {
-  const d = tripDate(rnd);
-  const wd = new Date(d + 'T00:00:00').toLocaleDateString('th-TH', { weekday:'long' });
-  const bills = ROUTE_BILLS.filter(b => b.round === rnd);
-  const trucks = {}, wait = { stores:{}, amt:0, bills:0, cs:0, done:0, short:0, drivers:new Set() };
-  let amtAll = 0, csAll = 0, doneAll = 0;
-  for (const b of bills) {                     // ROUTE_BILLS เรียงเลขที่เอกสารแล้ว — ร้านในรถเรียงตามนั้น
-    const e = routeEntry(b.code, rnd) || {}, plate = e.plate || '';
-    const t = plate ? (trucks[plate] ||= { stores:{}, amt:0, bills:0, cs:0, done:0, short:0, drivers:new Set() }) : wait;
-    const s = t.stores[b.code] ||= { name:b.name, code:b.code, bills:[] };
-    const x = st[b.ref] || { n:0, items:new Set(), cs:0, conf:0, short:0 };
-    const odd = e.keep && e.rnd !== rnd ? `ไฟล์จัดรถ: ส่ง ${thaiDate(e.ship).slice(0, 5)} เที่ยว ${e.trip}` : '';
-    s.bills.push({ b, x, odd });
-    if (e.driver) t.drivers.add(e.driver);
-    t.amt += b.amt; t.bills++; t.cs += x.cs; t.short += x.short;
-    const done = x.n > 0 && x.conf >= x.n; if (done) t.done++;
-    amtAll += b.amt; csAll += x.cs; if (done) doneAll++;
-  }
-  const plates = Object.keys(trucks).sort((a,b) => a.localeCompare(b, 'th'));
-  const waitN = Object.keys(wait.stores).length;
+/** รถที่จัดแล้ว แยกหัวข้อตามวันส่ง·เที่ยว — บิลส่ง (BK/SM) จาก Keepdata/ชีต จัดรถ · บิลปลีก (BV) จากแท็บ พรีปลีก · ไม่มีรถ = ไม่ขึ้น */
+function tripSecs() {
+  const secs = {}, refs = new Set(), add = [];
+  const sec = (ship, trip) => secs[ship + '|' + trip] ||= { ship, trip, rnds:new Set(), trucks:{} };
+  ROUTE_BILLS.forEach(b => {
+    const e = routeEntry(b.code, b.round) || {}; if (!e.plate) return;
+    const S = sec(tripDate(b.round), tripOf(b.round).no); S.rnds.add(b.round);
+    const odd = e.keep && e.rnd !== b.round ? `ไฟล์จัดรถ: ส่ง ${thaiDate(e.ship).slice(0, 5)} เที่ยว ${e.trip}` : '';
+    add.push({ S, plate:e.plate, b, seq:(KEEP.ref[b.ref] || {}).seq || e.seq || 0, odd, kind:'ส่ง', driver:e.driver, rnd:b.round });
+    refs.add(b.ref);
+  });
+  const rb = {};
+  ORDERS.forEach(o => {
+    const r = retailOf(o.ref); if (!r) return;
+    const qty = o.isFree ? (o.free || 0) : (o.qty || 0); if (qty <= 0) return;
+    (rb[o.ref] ||= { ref:o.ref, code:o.storeCode, name:o.store, slmn:o.slmn, amt:0, r }).amt += o.amt || 0;
+  });
+  Object.values(rb).forEach(b => {
+    const r = b.r, S = sec(r.ship || tripDate(2), r.trip || 1);
+    add.push({ S, plate:r.plate, b, seq:r.seq || 0, odd:'', kind:'ปลีก', driver:r.driver, unit:r.unit, rnd:0 });
+    refs.add(b.ref);
+  });
+  const st = tripBillStats(refs);
+  add.forEach(a => {
+    const t = a.S.trucks[a.plate] ||= { plate:a.plate, kinds:new Set(), stores:{}, amt:0, bills:0, cs:0, done:0, short:0,
+                                         drivers:new Set(), units:new Set(), rnds:new Set() };
+    const x = st[a.b.ref] || { n:0, cs:0, conf:0, short:0, miss:[] };
+    const s = t.stores[a.b.code] ||= { name:a.b.name, code:a.b.code, seq:1e6, bills:[] };
+    s.seq = Math.min(s.seq, a.seq || 1e6); s.bills.push({ b:a.b, x, odd:a.odd });
+    t.kinds.add(a.kind); t.rnds.add(a.rnd);
+    if (a.driver) t.drivers.add(a.driver);
+    if (a.unit) t.units.add(a.unit);
+    t.amt += a.b.amt; t.bills++; t.cs += x.cs; t.short += x.short;
+    if (x.n > 0 && x.conf >= x.n) t.done++;
+  });
+  return Object.values(secs).sort((a, b) => a.ship.localeCompare(b.ship) || a.trip - b.trip);
+}
+function tripHtml(S) {
+  const tw = todayISO(), w = S.ship === tw ? 'วันนี้' : S.ship === isoAdd(tw, 1) ? 'พรุ่งนี้' : S.ship === isoAdd(tw, -1) ? 'เมื่อวาน' : thaiDate(S.ship);
+  const wd = new Date(S.ship + 'T00:00:00').toLocaleDateString('th-TH', { weekday:'long' });
+  const cost = { ...(RETAIL.cost || {}), ...(KEEP.cost || {}) };
+  const trucks = Object.values(S.trucks).sort((a, b) => (a.kinds.has('ส่ง') ? 0 : 1) - (b.kinds.has('ส่ง') ? 0 : 1) || a.plate.localeCompare(b.plate, 'th'));
+  const sum = k => trucks.reduce((n, t) => n + t[k], 0);
   const billRow = ({ b, x, odd }) => `<div class="tp-b">
       <span class="tp-ref">${esc(b.ref)}</span>
-      <span class="tp-m">฿${fmtN(b.amt)} · ${fmtN(x.items.size)} รายการ${x.cs ? ` · ${fmtN(x.cs)} ลัง` : ''}</span>
-      ${tripSt(b.ref, x)}${odd ? `<span class="tp-odd">⚠ ${esc(odd)}</span>` : ''}
+      <span class="tp-m">฿${fmtN(b.amt)}${x.cs ? ` · ${fmtN(x.cs)} ลัง` : ''}</span>
+      ${tripSt(b.ref, x)}
+      ${x.miss.length ? `<span class="tp-miss">ขาด: ${x.miss.slice(0, 3).map(esc).join(' · ')}${x.miss.length > 3 ? ` · …อีก ${fmtN(x.miss.length - 3)} รายการ` : ''}</span>` : ''}
+      ${odd ? `<span class="tp-odd">⚠ ${esc(odd)}</span>` : ''}
     </div>`;
-  const prog = t => { const p = t.bills ? Math.round(t.done / t.bills * 100) : 0;
-    return `<div class="tp-pg"><div class="tp-bar"><i style="width:${p}%"></i></div>
-      <span>เช็คแล้ว <b>${fmtN(t.done)}/${fmtN(t.bills)}</b> บิล${t.short ? ` · <b class="txt-danger">ขาด ${fmtN(t.short)} บรรทัด</b>` : ''}</span></div>`; };
-  const card = (title, l1, t, cls, extra) => `<div class="truck ${cls || ''}">
-      <div class="truck-h"><b>${title}</b>${l1 ? `<span>${l1}</span>` : ''}
-        <span>${fmtN(Object.keys(t.stores).length)} ร้าน · ${fmtN(t.bills)} บิล${t.cs ? ` · ${fmtN(t.cs)} ลัง` : ''} · ฿${fmtN(t.amt)}</span></div>
-      ${prog(t)}
-      <ol>${Object.values(t.stores).map(s =>
-        `<li title="รหัสร้าน ${esc(s.code)}"><span class="tp-n">${esc(s.name)}</span>${s.bills.map(billRow).join('')}</li>`).join('')}</ol>${extra || ''}
+  const card = t => {
+    const info = VEH_INFO[t.plate] || {}, c = cost[`${t.plate}|${S.ship}|${S.trip}`];
+    const p = t.bills ? Math.round(t.done / t.bills * 100) : 0;
+    const badge = c && c.res ? `<em class="tp-cost ${/คุ้ม/.test(c.res) ? 'ok' : 'bad'}" title="${esc(`ผลต้นทุน ${c.res} · ต้นทุนเที่ยว ฿${fmtN(Math.round(c.cost))} · ยอดขายขั้นต่ำ ฿${fmtN(Math.round(c.min))} · ยอดขายเที่ยวนี้ ฿${fmtN(Math.round(c.sales))}${c.detail ? ' · ' + c.detail : ''}`)}">${/คุ้ม/.test(c.res) ? '✓' : '✕'} ${esc(c.res)}</em>` : '';
+    const l1 = [t.kinds.has('ปลีก') ? 'ปลีก' : '', info.type, t.drivers.size ? 'คนขับ ' + [...t.drivers].join(', ') : '',
+                [...t.units].join(', '), c && c.km ? `ไป-กลับ ${fmtN(Math.round(c.km * 10) / 10)} กม.` : ''].filter(Boolean).map(esc).join(' · ');
+    const stores = Object.values(t.stores).sort((a, b) => a.seq - b.seq);
+    const rets = returnsList().filter(x => x.plate === t.plate && t.rnds.has(x.rnd));   // ของแถมที่ต้องเอาคืนจากรถคันนี้
+    return `<div class="truck">
+      <div class="truck-h"><div class="tp-hr"><b>${esc(fmtPlate(t.plate))}</b>${badge}</div>${l1 ? `<span>${l1}</span>` : ''}
+        <span>${fmtN(stores.length)} ร้าน · ${fmtN(t.bills)} บิล${t.cs ? ` · ${fmtN(t.cs)} ลัง` : ''} · ฿${fmtN(t.amt)}</span></div>
+      <div class="tp-pg"><div class="tp-bar"><i style="width:${p}%"></i></div>
+        <span>ปิดงานแล้ว <b>${fmtN(t.done)}/${fmtN(t.bills)}</b> บิล${t.short ? ` · <b class="txt-danger">ขาด ${fmtN(t.short)} รายการ</b>` : ''}</span></div>
+      <ol>${stores.map(s => `<li title="รหัสร้าน ${esc(s.code)}"><span class="tp-n">${esc(s.name)}</span>${s.bills.map(billRow).join('')}</li>`).join('')}</ol>${rets.length
+        ? `<div class="note">↩ เอาของแถมคืนคลัง: ${rets.map(x => `<b>${esc(x.p.name)} ${fmtUnits(x.ea, x.p.units)}</b> (${esc(x.store)}${x.ref ? ' · ' + esc(x.ref) : ''})`).join(' · ')}</div>` : ''}
     </div>`;
-  const rets = returnsList().filter(x => x.plate && x.rnd === rnd);   // ของแถมที่ต้องเอาคืนจากรถคันนี้
-  const cards = plates.map(p => {
-    const t = trucks[p], info = VEH_INFO[p] || {};
-    const l1 = [info.type, t.drivers.size ? 'คนขับ ' + [...t.drivers].join(', ') : ''].filter(Boolean).map(esc).join(' · ');
-    const r = rets.filter(x => x.plate === p);
-    return card(esc(fmtPlate(p)), l1, t, '', r.length
-      ? `<div class="note">↩ เอาของแถมคืนคลัง: ${r.map(x => `<b>${esc(x.p.name)} ${fmtUnits(x.ea, x.p.units)}</b> (${esc(x.store)}${x.ref ? ' · ' + esc(x.ref) : ''})`).join(' · ')}</div>` : '');
-  });
-  if (waitN) cards.push(card('ยังไม่จัดรถ', 'ยังไม่มีในไฟล์จัดรถส่งสินค้า', wait, 'wait'));
+  };
+  const nRt = trucks.filter(t => t.kinds.has('ปลีก')).length, nBk = trucks.length - nRt;
+  const src = [S.rnds.size ? `ส่ง ${fmtN(nBk)} คัน (บิลรอบ ${[...S.rnds].sort().join(', ')} ของ ${thaiDate(TODAY)})` : '', nRt ? `ปลีก ${fmtN(nRt)} คัน` : ''].filter(Boolean).join(' · ');
   return `<section class="trip">
     <div class="trip-head">
-      <h2>${esc(tripName(rnd))}</h2>
-      <span>${esc(wd)} ${esc(thaiDate(d))} · บิลรอบ ${rnd} ของวันที่ ${esc(thaiDate(TODAY))}
-        · ${fmtN(plates.length)} คัน · ${fmtN(bills.length)} บิล${csAll ? ` · ${fmtN(csAll)} ลัง` : ''} · ฿${fmtN(amtAll)}
-        · เช็คแล้ว ${fmtN(doneAll)}/${fmtN(bills.length)} บิล</span>
+      <h2>${esc(w)} เที่ยว ${S.trip}</h2>
+      <span>${esc(wd)} ${esc(thaiDate(S.ship))} · ${src} · ${fmtN(sum('bills'))} บิล${sum('cs') ? ` · ${fmtN(sum('cs'))} ลัง` : ''} · ฿${fmtN(sum('amt'))}
+        · ปิดงานแล้ว ${fmtN(sum('done'))}/${fmtN(sum('bills'))} บิล</span>
     </div>
-    ${cards.length ? `<div class="trip-grid">${cards.join('')}</div>`
-                   : `<div class="empty">ไม่มีบิลส่ง (BK/SM) รอบ ${rnd}</div>`}
+    <div class="trip-grid">${trucks.map(card).join('')}</div>
   </section>`;
 }
 
