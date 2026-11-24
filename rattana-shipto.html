@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#F4F7FB">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
-  <title>Rattana ShipTo v1.0</title>
+  <title>Rattana ShipTo v1.1</title>
   <link rel="stylesheet" href="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.css">
   <script src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.js" defer></script>
   <style>
@@ -41,7 +41,7 @@
   <div class="rt-bg"><div class="rt-bg-arc"></div><div class="rt-bg-arc"></div></div>
   <main class="rt-container rt-page stack">
     <header class="rt-glass rt-topbar rt-sticky-top">
-      <a class="rt-app-brand" href="./"><span><b>Rattana ShipTo</b><small>v1.0</small></span></a>
+      <a class="rt-app-brand" href="./"><span><b>Rattana ShipTo</b><small>v1.1</small></span></a>
       <div class="rt-topbar-end">
         <button class="rt-btn rt-btn-glass rt-btn-icon" id="btnRefresh" type="button" aria-label="โหลดข้อมูลใหม่"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/></svg></button>
         <button class="rt-btn rt-btn-glass rt-btn-icon" data-rt-theme-toggle aria-label="สลับธีม"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg></button>
@@ -92,7 +92,7 @@
       </section>
 
       <div class="rt-actions rt-glass cart-bar" id="cartBar" hidden>
-        <div class="rt-actions-info"><span class="rt-cell-main" id="cartSum"></span><span class="rt-cell-sub">ราคา S00 · ยังไม่รวมส่วนลด</span></div>
+        <div class="rt-actions-info"><span class="rt-cell-main" id="cartSum"></span><span class="rt-cell-sub" id="cartCust">ราคา S00 · ยังไม่รวมส่วนลด</span></div>
         <button class="rt-btn rt-btn-glass" id="btnClear" type="button">ล้าง</button>
         <button class="rt-btn rt-btn-gold" id="btnCart" type="button">ดูตะกร้า</button>
       </div>
@@ -106,9 +106,10 @@ const CONFIG = {
   pddtSheetId: '16mYDqAqqJma-_0vCIAajy6bcjdOZ7F6VagxkdkqAB2I',  // ชีท PDDT: สินค้า
   priceTier:   'S00',                                            // ราคาที่ใช้: PRICE S00 EA / PRICE S00 CS
   orderEndpoint: '',   // URL Apps Script Web App (apps-script/Code.gs) — ว่าง = เก็บออเดอร์ไว้ในเครื่องอย่างเดียว
+  customerSheet: 'Customer',                                    // ชีทร้านค้า (ไฟล์เดียวกับ Set): ชื่อร้านค้า · รหัส บีพลัส · CAT VENDOR
   cacheMinutes: 5,
 };
-const APP_VERSION = '1.0';
+const APP_VERSION = '1.1';
 
 /* ================= Sheets ================= */
 const gviz = (id, sheet, tq) => `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv&headers=1&sheet=${encodeURIComponent(sheet)}` + (tq ? `&tq=${encodeURIComponent(tq)}` : '');
@@ -141,6 +142,15 @@ async function loadSet() {
   const rows = parseCsv(await fetchText(gviz(CONFIG.setSheetId, 'Set')));
   return rows.map(r => ({ vendor: r['CAT VENDOR'], sales: r['ชื่อเซลล์'], email: normEmail(r['E-mail']) })).filter(r => r.vendor && r.email);
 }
+/** ร้านค้าจากชีท Customer เฉพาะที่ CAT VENDOR ตรงกับ vendor ของเซลล์ในชีท Set */
+async function loadCustomers(vendors) {
+  const vs = new Set(vendors);
+  const rows = parseCsv(await fetchText(gviz(CONFIG.setSheetId, CONFIG.customerSheet)));
+  const seen = new Set();
+  return rows.map(r => ({ code: String(r['รหัส บีพลัส'] || '').trim(), name: r['ชื่อร้านค้า'] || '', vendor: r['CAT VENDOR'] || '' }))
+    .filter(c => c.name && vs.has(c.vendor) && !seen.has(c.code + '|' + c.name) && seen.add(c.code + '|' + c.name))
+    .sort((a, b) => a.name.localeCompare(b.name, 'th'));
+}
 /** PDDT กรองตาม CAT VENDOR ฝั่ง Google (ไม่โหลดทั้งชีท) · หาคอลัมน์จากชื่อหัว ไม่ใช่ตำแหน่ง */
 async function loadProducts(vendors) {
   const head = await fetchText(gviz(CONFIG.pddtSheetId, 'PDDT', 'select * limit 0'));
@@ -162,11 +172,12 @@ async function loadProducts(vendors) {
 }
 
 /* ================= State ================= */
-const S = { me: null, vendors: [], products: [], byKey: {}, group: 'ทั้งหมด', q: '', view: 'shop', cart: {}, customer: '', note: '' };
+const S = { me: null, vendors: [], products: [], byKey: {}, customers: [], group: 'ทั้งหมด', q: '', view: 'shop', cart: {}, customer: '', note: '' };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const money = n => RattanaUI.formatMoney(n);
 const LS = { cart: () => 'rs-cart-' + S.me.email, orders: () => 'rs-orders-' + S.me.email, prod: () => 'rs-prod-' + S.vendors.join('|') };
+const custOf = code => S.customers.find(c => c.code === code) || null;
 const csPrice = p => p.priceCS || p.priceEA * p.perCS;
 const lineTotal = (p, c) => (c.ea || 0) * p.priceEA + (c.cs || 0) * csPrice(p);
 const cartKeys = () => Object.keys(S.cart).filter(k => S.byKey[k] && (S.cart[k].ea || S.cart[k].cs));
@@ -201,6 +212,8 @@ function renderCartBar() {
   const keys = cartKeys();
   $('cartBar').hidden = !keys.length || S.view !== 'shop';
   $('cartSum').textContent = `${keys.length} รายการ · ${money(cartTotal())}`;
+  const c = custOf(S.customer);
+  $('cartCust').textContent = c ? `ร้าน: ${c.name}` : `ยังไม่เลือกร้านค้า · ราคา ${CONFIG.priceTier}`;
 }
 
 /* ================= ตะกร้า ================= */
@@ -217,7 +230,8 @@ function openCart() {
   RattanaUI.popup({
     icon: 'gold', title: 'ตะกร้าสินค้า',
     content: `
-      <label class="rt-field"><span class="rt-label">ลูกค้า / Ship-to <span class="rt-req">*</span></span><input class="rt-input" id="fCustomer" placeholder="ชื่อร้าน หรือรหัสลูกค้า" value="${esc(S.customer)}"></label>
+      <label class="rt-field"><span class="rt-label">ร้านค้า / Ship-to <span class="rt-req">*</span></span>
+        <select class="rt-select" id="fCustomer"><option value="">— เลือกร้านค้า (${S.customers.length} ร้าน) —</option>${S.customers.map(c => `<option value="${esc(c.code)}"${c.code === S.customer ? ' selected' : ''}>${esc(c.name)} · ${esc(c.code)}</option>`).join('')}</select></label>
       <label class="rt-field" style="margin-top:8px"><span class="rt-label">หมายเหตุ</span><input class="rt-input" id="fNote" placeholder="เช่น ส่งก่อน 10 โมง" value="${esc(S.note)}"></label>
       <div id="cartBody" style="margin-top:8px">${cartBodyHtml()}</div>`,
     actions: [{ label: 'ปิด', variant: 'glass', value: false }, { label: 'ส่งออเดอร์', variant: 'gold', value: true }],
@@ -228,12 +242,13 @@ function openCart() {
 async function submitOrder() {
   const keys = cartKeys();
   if (!keys.length) return RattanaUI.toast('ตะกร้าว่าง', { type: 'warning' });
-  if (!S.customer.trim()) { RattanaUI.toast('กรุณาใส่ชื่อลูกค้า / Ship-to', { type: 'warning' }); return openCart(); }
+  const cust = custOf(S.customer);
+  if (!cust) { RattanaUI.toast('กรุณาเลือกร้านค้า', { type: 'warning' }); return openCart(); }
   const now = new Date(), pad = n => String(n).padStart(2, '0');
   const order = {
     orderNo: `SO${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${S.me.empId || 'X'}`,
     createdAt: now.toISOString(), salesEmail: S.me.email, salesName: S.me.sales, empId: S.me.empId || '',
-    customer: S.customer.trim(), note: S.note.trim(), priceTier: CONFIG.priceTier, appVersion: APP_VERSION,
+    customerCode: cust.code, customer: cust.name, note: S.note.trim(), priceTier: CONFIG.priceTier, appVersion: APP_VERSION,
     lines: keys.map(k => { const p = S.byKey[k], c = S.cart[k]; return {
       codeEA: p.codeEA, codeCS: p.codeCS, name: p.name, vendor: p.vendor, cs: c.cs || 0, ea: c.ea || 0,
       priceEA: p.priceEA, priceCS: csPrice(p), total: lineTotal(p, c) }; }),
@@ -275,7 +290,7 @@ function renderHist() {
   $('histCap').textContent = `${orders.length} ออเดอร์ · ใหม่สุดอยู่บน`;
   $('histBody').innerHTML = orders.length ? orders.map(o => `<tr data-no="${esc(o.orderNo)}" style="cursor:pointer">
     <td><div class="rt-cell-main">${esc(o.orderNo)}</div><div class="rt-cell-sub">${RattanaUI.formatDate(new Date(o.createdAt), 'short')} ${RattanaUI.formatTime(new Date(o.createdAt))}</div></td>
-    <td><div class="rt-cell-main">${esc(o.customer)}</div><div class="rt-cell-sub">${o.lines.length} รายการ${o.note ? ' · ' + esc(o.note) : ''}</div></td>
+    <td><div class="rt-cell-main">${esc(o.customer)}</div><div class="rt-cell-sub">${o.customerCode ? esc(o.customerCode) + ' · ' : ''}${o.lines.length} รายการ${o.note ? ' · ' + esc(o.note) : ''}</div></td>
     <td class="rt-right rt-cell-main">${money(o.total)}</td>
     <td>${STATUS[o.status] || ''}</td></tr>`).join('')
     : '<tr><td colspan="4"><div class="rt-empty" style="padding:32px;text-align:center">ยังไม่มีออเดอร์</div></td></tr>';
@@ -286,7 +301,7 @@ function showOrder(no) {
   if (o.status !== 'sent' && CONFIG.orderEndpoint) actions.push({ label: 'ส่งซ้ำ', variant: 'gold', value: 'resend' });
   RattanaUI.popup({
     title: o.orderNo,
-    content: `<p class="rt-body-sm" style="margin:0 0 8px"><b>${esc(o.customer)}</b><br><span class="rt-muted">${RattanaUI.formatDate(new Date(o.createdAt), 'long')} ${RattanaUI.formatTime(new Date(o.createdAt))}${o.note ? ' · ' + esc(o.note) : ''}</span></p>
+    content: `<p class="rt-body-sm" style="margin:0 0 8px"><b>${esc(o.customer)}</b>${o.customerCode ? ' · ' + esc(o.customerCode) : ''}<br><span class="rt-muted">${RattanaUI.formatDate(new Date(o.createdAt), 'long')} ${RattanaUI.formatTime(new Date(o.createdAt))}${o.note ? ' · ' + esc(o.note) : ''}</span></p>
       ${o.lines.map(l => `<div class="cart-line"><div class="grow"><div class="rt-cell-main">${esc(l.name)}</div><div class="rt-cell-sub">${l.cs ? l.cs + ' ลัง ' : ''}${l.ea ? l.ea + ' ชิ้น' : ''}</div></div><b class="rt-num">${money(l.total)}</b></div>`).join('')}
       <div class="rt-actions-info" style="margin-top:12px"><span class="rt-cell-main">รวม ${money(o.total)}</span>${STATUS[o.status] || ''}</div>`,
     actions,
@@ -304,7 +319,7 @@ async function exportExcel(orders) {
     await loadXlsx();
     const rows = orders.flatMap(o => o.lines.map(l => ({
       'เลขที่': o.orderNo, 'วันที่': RattanaUI.formatDate(new Date(o.createdAt), 'short'), 'เวลา': RattanaUI.formatTime(new Date(o.createdAt)),
-      'เซลล์': o.salesName, 'ลูกค้า/Ship-to': o.customer, 'หมายเหตุ': o.note,
+      'เซลล์': o.salesName, 'รหัสร้านค้า': o.customerCode || '', 'ร้านค้า/Ship-to': o.customer, 'หมายเหตุ': o.note,
       'CODE EA': l.codeEA, 'CODE CS': l.codeCS, 'PRODUCT NAME': l.name, 'ลัง': l.cs, 'ชิ้น': l.ea,
       'ราคา/ชิ้น': l.priceEA, 'ราคา/ลัง': l.priceCS, 'รวม': l.total })));
     const ws = XLSX.utils.json_to_sheet(rows), wb = XLSX.utils.book_new();
@@ -339,7 +354,10 @@ async function start(user) {
     S.vendors = [...new Set(mine.map(r => r.vendor))];
     try { const c = JSON.parse(localStorage.getItem(LS.cart())) || {}; S.cart = c.cart || {}; S.customer = c.customer || ''; S.note = c.note || ''; } catch {}
     $('app').hidden = false;
-    setProducts(await loadProductsCached(false));
+    const [prods, custs] = await Promise.all([loadProductsCached(false), loadCustomers(S.vendors)]);
+    S.customers = custs;
+    if (!custOf(S.customer)) S.customer = '';
+    setProducts(prods);
   } catch (e) {
     RattanaUI.alert({ type: 'error', title: 'โหลดข้อมูลไม่ได้', message: e.message });
   }
@@ -368,9 +386,11 @@ document.addEventListener('click', e => {
   const tr = e.target.closest('#histBody tr[data-no]');
   if (tr) showOrder(tr.dataset.no);
 });
+document.addEventListener('change', e => {
+  if (e.target.id === 'fCustomer') { S.customer = e.target.value; saveCart(); renderCartBar(); }
+});
 document.addEventListener('input', e => {
-  if (e.target.id === 'fCustomer') { S.customer = e.target.value; saveCart(); }
-  if (e.target.id === 'fNote') { S.note = e.target.value; saveCart(); }
+    if (e.target.id === 'fNote') { S.note = e.target.value; saveCart(); }
 });
 $('q').addEventListener('input', e => { S.q = e.target.value.trim(); renderShop(); });
 $('q').addEventListener('rt:scan', e => { S.q = e.target.value.trim(); renderShop(); });
@@ -391,7 +411,7 @@ $('btnDenyOut').onclick = () => RattanaUI.user.signOut();
 $('btnRefresh').onclick = async () => {
   if (!S.me) return;
   const b = $('btnRefresh'); RattanaUI.setLoading(b, true);
-  try { setProducts(await loadProductsCached(true)); RattanaUI.toast('อัปเดตข้อมูลแล้ว', { type: 'success' }); }
+  try { const [prods, custs] = await Promise.all([loadProductsCached(true), loadCustomers(S.vendors)]); S.customers = custs; setProducts(prods); RattanaUI.toast('อัปเดตข้อมูลแล้ว', { type: 'success' }); }
   catch (e) { RattanaUI.toast(e.message, { type: 'error' }); }
   finally { RattanaUI.setLoading(b, false); }
 };
