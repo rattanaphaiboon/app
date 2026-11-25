@@ -1,4 +1,4 @@
-/* Rattana CI v1.9.0 — behaviour helpers (no dependencies). window.RattanaUI */
+/* Rattana CI v1.10.0 — behaviour helpers (no dependencies). window.RattanaUI */
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement, win = window;
@@ -142,7 +142,7 @@
   }
 
   var UI = {
-    version: '1.9.0',
+    version: '1.10.0',
     icons: ICON,
     platform: platform,
 
@@ -999,6 +999,7 @@
         });
         n.addEventListener('pointerleave', function () { n.classList.remove('is-tilting'); n.style.setProperty('--rt-rx', '0deg'); n.style.setProperty('--rt-ry', '0deg'); });
       });
+      q('[data-rt-skeleton]').forEach(autoSkeleton);
       q('[data-rt-date]').forEach(function (n) { if (!n.textContent.trim()) n.textContent = UI.formatDate(new Date(), n.getAttribute('data-rt-date') || 'long'); });
     }
   };
@@ -1584,12 +1585,203 @@
     update();
   }
 
+  /* ---------- v1.10: loading skeletons · empty / error states · offline ---------- */
+  ICON.wifiOff = 'M12 20h.01M8.5 16.43a5 5 0 0 1 7 0M2 8.82a15 15 0 0 1 4.17-2.65M10.66 5c4.01-.36 8.14.9 11.34 3.76M16.85 11.25a10 10 0 0 1 2.22 1.68M5 13a10 10 0 0 1 5.24-2.76M2 2l20 20';
+  ICON.wifi = 'M12 20h.01M2 8.82a15 15 0 0 1 20 0M5 12.86a10 10 0 0 1 14 0M8.5 16.43a5 5 0 0 1 7 0';
+  ICON.inbox = 'M22 12h-6l-2 3h-4l-2-3H2M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z';
+  ICON.search = 'M11 3a8 8 0 1 0 0 16a8 8 0 1 0 0-16M21 21l-4.3-4.3';
+  ICON.alert = 'M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20M12 8v4M12 16h.01';
+  ICON.refresh = 'M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5';
+  function tx(th, en) { return UI.getLang() === 'en' ? en : th; }
+  function pick(n) { return typeof n === 'string' ? doc.querySelector(n) : n; }
+  function sk(cls, w) { var s = el('div', 'rt-skeleton ' + cls); if (w) s.style.width = w; return s; }
+  var SKEL = {
+    cards: function (o) {
+      var g = el('div', 'rt-skel-grid');
+      for (var i = 0; i < (o.count || 6); i++) { var c = el('div', 'rt-skel-card'); c.style.setProperty('--rt-i', i); c.appendChild(sk('rt-skel-media')); c.appendChild(sk('rt-skel-line', '86%')); c.appendChild(sk('rt-skel-line is-sm', '58%')); c.appendChild(sk('rt-skel-line is-lg', '44%')); g.appendChild(c); }
+      return g;
+    },
+    list: function (o) {
+      var g = el('div', 'rt-skel-list'), W = ['72%', '58%', '80%', '64%', '50%'];
+      for (var i = 0; i < (o.count || o.rows || 5); i++) {
+        var r = el('div', 'rt-skel-row'), t = el('div', 'rt-skel-lines'); r.style.setProperty('--rt-i', i);
+        r.appendChild(sk(o.square ? 'rt-skel-square' : 'rt-skel-circle')); t.appendChild(sk('rt-skel-line', W[i % 5])); t.appendChild(sk('rt-skel-line is-sm', '38%')); r.appendChild(t); r.appendChild(sk('rt-skel-pill')); g.appendChild(r);
+      }
+      return g;
+    },
+    table: function (o) {
+      var g = el('div', 'rt-skel-table'), cols = o.cols || 4, W = ['78%', '54%', '66%', '42%', '60%'];
+      g.style.setProperty('--rt-cols', cols);
+      for (var i = 0; i <= (o.rows || o.count || 6); i++) {
+        var tr = el('div', 'rt-skel-tr' + (i ? '' : ' is-head')); tr.style.setProperty('--rt-i', i);
+        for (var c = 0; c < cols; c++) { var cell = sk('rt-skel-line' + (i ? '' : ' is-sm'), i ? W[(i + c) % 5] : '48%'); if (c === cols - 1) cell.style.justifySelf = 'end'; tr.appendChild(cell); }
+        g.appendChild(tr);
+      }
+      return g;
+    },
+    kpi: function (o) {
+      var g = el('div', 'rt-skel-kpis');
+      for (var i = 0; i < (o.count || 4); i++) { var c = el('div', 'rt-skel-kpi'); c.style.setProperty('--rt-i', i); c.appendChild(sk('rt-skel-line is-sm', '52%')); c.appendChild(sk('rt-skel-line is-lg', '72%')); c.appendChild(sk('rt-skel-line is-sm', '36%')); g.appendChild(c); }
+      return g;
+    },
+    text: function (o) {
+      var g = el('div', 'rt-skel-text'), W = ['96%', '88%', '92%', '70%'];
+      g.appendChild(sk('rt-skel-line is-lg', '46%'));
+      for (var i = 0; i < (o.count || o.rows || 4); i++) g.appendChild(sk('rt-skel-line', W[i % 4]));
+      return g;
+    }
+  };
+  function skelNode(type, o) {
+    var w = el('div', 'rt-skel-wrap'); w.setAttribute('aria-hidden', 'true'); w._rtSkel = 1;
+    w.appendChild((SKEL[type] || SKEL.cards)(o || {})); return w;
+  }
+  /* RattanaUI.skeleton(target, 'cards' | 'list' | 'table' | 'kpi' | 'text', {count, rows, cols}) → { done() } */
+  UI.skeleton = function (target, type, o) {
+    target = pick(target); o = o || {}; if (!target) return { done: function () {} };
+    type = type || target.getAttribute('data-rt-skeleton') || 'cards';
+    ['count', 'rows', 'cols'].forEach(function (k) { var v = target.getAttribute('data-rt-' + k); if (v && o[k] == null) o[k] = +v; });
+    var w = skelNode(type, o);
+    target.replaceChildren(w); target.setAttribute('aria-busy', 'true');
+    return { el: w, done: function () { if (w.isConnected) w.remove(); target.removeAttribute('aria-busy'); } };
+  };
+  /* <div data-rt-skeleton="cards"></div> left empty → shows the skeleton until the app puts its content in */
+  function autoSkeleton(n) {
+    if (n._rtSk || n.children.length || n.textContent.trim()) return; n._rtSk = 1;
+    var s = UI.skeleton(n, n.getAttribute('data-rt-skeleton') || 'cards');
+    if (!('MutationObserver' in win)) return;
+    var mo = new MutationObserver(function (ms) {
+      var other = ms.some(function (m) { return [].some.call(m.addedNodes, function (a) { return !a._rtSkel && !(a.nodeType === 3 && !a.textContent.trim()); }); });
+      if (other || !s.el.isConnected) { mo.disconnect(); s.done(); }
+    });
+    mo.observe(n, { childList: true });
+  }
+
+  var STATE = {
+    empty: ['rt-tile-blue', 'inbox', ['ยังไม่มีข้อมูล', 'Nothing here yet'], ['เมื่อมีรายการใหม่จะแสดงที่นี่', 'New items will show up here.']],
+    search: ['rt-tile-gold', 'search', ['ไม่พบรายการที่ค้นหา', 'No matches'], ['ลองคำอื่น หรือล้างตัวกรองแล้วค้นหาใหม่', 'Try another word or clear the filters.']],
+    error: ['rt-tile-red', 'alert', ['โหลดข้อมูลไม่สำเร็จ', 'Could not load the data'], ['เชื่อมต่อระบบไม่ได้ กด "ลองใหม่" อีกครั้ง', 'The connection failed. Tap "Try again".']],
+    offline: ['rt-tile-amber', 'wifiOff', ['ออฟไลน์อยู่', 'You are offline'], ['ต่ออินเทอร์เน็ตแล้วจะโหลดให้เองอัตโนมัติ', 'This will load by itself once you are back online.']]
+  };
+  /* RattanaUI.state(target, 'empty' | 'search' | 'error' | 'offline', {title, message, icon, retry, action:{label,onClick}, detail, compact}) */
+  UI.state = function (target, kind, o) {
+    target = pick(target); o = o || {}; kind = STATE[kind] ? kind : 'empty';
+    if (kind === 'error' && !UI.online()) kind = 'offline';
+    var d = STATE[kind], en = UI.getLang() === 'en';
+    var box = el('div', 'rt-empty rt-state is-' + kind + (o.compact ? ' is-compact' : ''));
+    box.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+    var ic = el('div', 'rt-state-icon rt-tile ' + (o.tone ? 'rt-tile-' + o.tone : d[0])); ic.appendChild(svg(ICON[o.icon] || o.icon || ICON[d[1]], null, true)); box.appendChild(ic);
+    box.appendChild(el('p', 'rt-state-title', o.title || d[2][en ? 1 : 0]));
+    var msg = o.message != null ? o.message : d[3][en ? 1 : 0]; if (msg) box.appendChild(el('p', 'rt-state-msg', msg));
+    var acts = el('div', 'rt-state-actions');
+    if (o.retry) {
+      var rb = el('button', 'rt-btn rt-btn-gold rt-btn-sm'); rb.type = 'button'; rb.appendChild(svg(ICON.refresh, 16)); rb.appendChild(el('span', null, o.retryText || tx('ลองใหม่', 'Try again')));
+      rb.addEventListener('click', function () { UI.setLoading(rb, true); Promise.resolve().then(o.retry).then(function () { UI.setLoading(rb, false); }, function () { UI.setLoading(rb, false); }); });
+      acts.appendChild(rb);
+    }
+    if (o.action) { var ab = el('button', 'rt-btn rt-btn-glass rt-btn-sm', o.action.label); ab.type = 'button'; ab.addEventListener('click', function () { if (o.action.onClick) o.action.onClick(); }); acts.appendChild(ab); }
+    if (acts.children.length) box.appendChild(acts);
+    if (o.detail) box.appendChild(el('div', 'rt-state-detail', String(o.detail).slice(0, 240)));
+    if (kind === 'offline' && o.retry) { var h = function () { win.removeEventListener('online', h); if (box.isConnected) o.retry(); }; win.addEventListener('online', h); }
+    if (target) { target.replaceChildren(box); target.removeAttribute('aria-busy'); }
+    return box;
+  };
+  /* RattanaUI.load(target, () => fetch(...), { skeleton: 'cards', render(data, target), isEmpty(data), empty: {...}, error: {...} })
+     skeleton while waiting → render, or the empty state, or the error state with "ลองใหม่" */
+  UI.load = function (target, fetcher, o) {
+    target = pick(target); o = o || {};
+    var s = UI.skeleton(target, o.skeleton, o), token = {}; target._rtLoad = token;
+    var stale = function () { return target._rtLoad !== token; };
+    var again = function () { return UI.load(target, fetcher, o); };
+    return Promise.resolve().then(fetcher).then(function (data) {
+      if (stale()) return data;
+      s.done();
+      var empty = o.isEmpty ? o.isEmpty(data) : (data == null || (Array.isArray(data) && !data.length));
+      if (empty) { UI.state(target, 'empty', o.empty); return data; }
+      if (o.render) { var r = o.render(data, target); if (typeof r === 'string') target.innerHTML = r; else if (r && r.nodeType) target.replaceChildren(r); }
+      return data;
+    }, function (err) {
+      if (stale()) return null;
+      s.done();
+      UI.state(target, 'error', Object.assign({ retry: again, detail: err && (err.message || String(err)) }, o.error || {}));
+      if (o.onError) o.onError(err);
+      return null;
+    });
+  };
+
+  /* offline: banner at the top, and a warning before anything is saved while offline */
+  var forcedOff = false;
+  UI.online = function () { return !forcedOff && navigator.onLine !== false; };
+  var offlineOkUntil = 0;
+  UI.guardOnline = function (o) {
+    o = o || {};
+    if (UI.online() || Date.now() < offlineOkUntil) return Promise.resolve(true);
+    return UI.popup({
+      className: 'rt-offline-guard', center: true, size: 'sm', cancelValue: false, icon: ICON.wifiOff,
+      title: o.title || tx('ตอนนี้ออฟไลน์อยู่', 'You are offline'),
+      message: o.message || tx('ยังไม่มีอินเทอร์เน็ต ถ้าบันทึกตอนนี้ข้อมูลอาจส่งไม่ถึงระบบ รอให้เน็ตกลับมาแล้วค่อยกดอีกครั้งจะปลอดภัยกว่า', 'There is no internet. Saving now may not reach the system — wait until you are back online and try again.'),
+      actions: [{ label: tx('รอเน็ตก่อน', 'Wait'), variant: 'gold', value: false }, { label: tx('บันทึกต่อ', 'Save anyway'), variant: 'glass', value: true }]
+    }).then(function (r) { if (r === true) offlineOkUntil = Date.now() + 60000; return r === true; });
+  };
+  var SAVE_RE = /^(บันทึก|ส่ง|ยืนยัน|อนุมัติ|ไม่อนุมัติ|สั่ง|ชำระ|เพิ่ม|แก้ไข|ลบ|อัปเดต|อัพเดต|อัปโหลด|อัพโหลด|save|submit|send|confirm|approve|reject|update|upload|delete|place order|pay)/i;
+  function isSaveButton(b) {
+    if (b.closest('[data-rt-offline-ok], .rt-offline-guard')) return false;
+    if (b.hasAttribute('data-rt-save')) return true;
+    if (b.disabled || b.closest('.rt-search, .rt-seg, .rt-select-pop, .rt-popover, .rt-menu-list')) return false;
+    if (!(b.type === 'submit' && b.form) && !b.classList.contains('rt-btn')) return false;
+    return SAVE_RE.test((b.getAttribute('aria-label') || b.textContent || '').trim());
+  }
+  function setupOffline() {
+    if (off('offline')) return;
+    var bar = null, wasOff = false, hideT = 0;
+    function paint(on) {
+      if (!bar) {
+        bar = el('div', 'rt-offline'); bar.setAttribute('role', 'status'); bar.setAttribute('aria-live', 'polite');
+        bar.appendChild(el('span', 'rt-offline-icon')); var t = el('span', 'rt-offline-text'); t.appendChild(el('b')); t.appendChild(el('small')); bar.appendChild(t);
+      }
+      bar.className = 'rt-offline' + (on ? ' is-back' : '');
+      bar.firstChild.replaceChildren(svg(on ? ICON.wifi : ICON.wifiOff));
+      bar.querySelector('b').textContent = on ? tx('กลับมาออนไลน์แล้ว', 'Back online') : tx('ออฟไลน์อยู่', 'You are offline');
+      bar.querySelector('small').textContent = on ? tx('บันทึกได้ตามปกติ', 'Saving works again') : tx('ข้อมูลที่บันทึกตอนนี้จะยังไม่ถูกส่ง', 'Anything saved now will not be sent yet');
+      if (!bar.isConnected) doc.body.appendChild(bar);
+      /* sit just under a top bar that stays on screen, so the menu stays usable */
+      var top = 0; [].forEach.call(doc.querySelectorAll('.rt-topbar'), function (t) { var cs = getComputedStyle(t), r = t.getBoundingClientRect(); if ((cs.position === 'sticky' || cs.position === 'fixed') && r.height && r.top < 60 && r.bottom > 0 && r.bottom < 160) top = Math.max(top, r.bottom); });
+      bar.style.top = top ? (top + 8) + 'px' : '';
+      requestAnimationFrame(function () { if (bar.isConnected) root.style.setProperty('--rt-offline-bottom', (bar.getBoundingClientRect().bottom + 8) + 'px'); });
+    }
+    function set(isOff) {
+      clearTimeout(hideT);
+      root.classList.toggle('rt-is-offline', isOff);
+      if (isOff) { wasOff = true; paint(false); UI.haptic('warning'); return; }
+      if (!wasOff || !bar) return;
+      wasOff = false; paint(true); UI.haptic('success');
+      hideT = setTimeout(function () { bar.classList.add('is-leaving'); hideT = setTimeout(function () { if (bar && !wasOff) bar.remove(); }, 320); }, 2600);
+    }
+    win.addEventListener('offline', function () { set(true); });
+    win.addEventListener('online', function () { set(false); });
+    if (!UI.online()) set(true);
+    /* RattanaUI.simulateOffline(true) — try the offline banner, states and save warning without unplugging */
+    UI.simulateOffline = function (on) { forcedOff = !!on; win.dispatchEvent(new Event(on ? 'offline' : 'online')); };
+    doc.addEventListener('click', function (e) {
+      if (UI.online() || Date.now() < offlineOkUntil || off('offline-guard')) return;
+      var b = e.target.closest && e.target.closest('button, [data-rt-save], input[type="submit"]');
+      if (!b || b._rtOfflinePass || !isSaveButton(b)) return;
+      e.preventDefault(); e.stopImmediatePropagation();
+      UI.guardOnline().then(function (go) { if (!go) return; b._rtOfflinePass = 1; try { b.click(); } finally { b._rtOfflinePass = 0; } });
+    }, true);
+    doc.addEventListener('submit', function (e) {
+      var f = e.target; if (UI.online() || Date.now() < offlineOkUntil || off('offline-guard') || f._rtOfflinePass || f.closest('[data-rt-offline-ok]')) return;
+      e.preventDefault(); e.stopImmediatePropagation();
+      UI.guardOnline().then(function (go) { if (!go) return; f._rtOfflinePass = 1; try { if (f.requestSubmit) f.requestSubmit(); else f.submit(); } finally { f._rtOfflinePass = 0; } });
+    }, true);
+  }
+
   function boot() {
     if (!root.getAttribute('data-theme')) UI.setTheme(store(KEY_THEME) || 'light');
     UI.init();
     var saved = store(KEY_LANG); if (saved && saved !== UI.getLang()) UI.setLang(saved);
     UI.setTheme(UI.getTheme());
     setupToTop();
+    setupOffline();
     /* <body data-rt-login="ชื่อแอป" data-rt-login-role="5"> → sign-in screen before the app shows */
     if (doc.body && doc.body.hasAttribute('data-rt-login')) { /* (early hide happens at load, below) */
       var b = doc.body, mr = parseInt(b.getAttribute('data-rt-login-role'), 10), dr = parseInt(b.getAttribute('data-rt-login-default-role'), 10);
