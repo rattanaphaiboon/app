@@ -3328,7 +3328,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-25 · 178';
+const BUILD = '2026-11-25 · 179';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -3403,11 +3403,19 @@ const pickKey  = () => `${WAREHOUSE}|${TODAY}`;
 const pickOf   = ref => PICK.key === pickKey() ? PICK.ref[ref] || null : null;
 /** ใบจองที่ยังไม่มีใบจัด — ไม่เข้าเช็คตามทีม (หน้าร้านไม่เกี่ยว) */
 const pickWait = ref => pickGate() && !HR_REFS.has(ref) && !pickOf(ref);
+/* BUILD 179 ช่องทาง ปลีก/ส่ง ยึดตามจัดรถก่อน (ผู้ใช้ 25/11 "w4 ถ้าใบจองbk แต่จัดรถไปในปลีก เทอเอาจำนวนเข้าปลีกให้เรามั้ย" → "ยึดตามจัดรถเป็นหลักก่อน")
+   ใบจอง BK/BV ที่อยู่ในไฟล์จัดรถส่งสินค้า แท็บ Keepdata (รถส่ง) = ส่ง · แท็บ พรีปลีก (รถปลีก) = ปลีก · อยู่ทั้งสองแท็บ = Keepdata (แบบ Pre-order-picker v7.03)
+   ยังไม่ได้อ่านไฟล์จัดรถ = ช่องทางในชีต ใบจัด (ส่ง/ปลีก) · ไม่มีทั้งหมด = ตามเลขที่ (BK ส่ง · BV ปลีก) เหมือนเดิม
+   CHAN_FIX = เฉพาะใบที่ช่องทางต่างจากเลขที่ { เลขที่: 'BK' | 'BV' } · SM / หน้าร้าน / ออนไลน์ / มาร์ท ไม่แตะ · W4 ข้อมูลจริงเท่านั้น
+   คิดใหม่ใน tagOrders (ทุกครั้งที่ใบจอง/จัดรถเปลี่ยน) · เปิดใช้หลังประกาศ KEEP/RETAIL/routeKey (CHAN_FIX_ON) */
+const CHAN_FIX = new Map();
+let CHAN_FIX_SIG = '', CHAN_FIX_ON = false;
 const smBranch = remark => { const m = String(remark || '').match(/สาขา\s*([^·\n]+?)\s*·/) || String(remark || '').match(/สาขา\s*([^·\n]+?)\s*$/m);
                               return m ? cln(m[1]) : ''; };
 function tagOrders() {
   SM_REFS.clear(); HR_REFS.clear();
   ORDERS.forEach((o, i) => { o.lid = i; if (o.chan === 'SM') SM_REFS.add(o.ref); if (o.chan === 'HR') HR_REFS.add(o.ref); });
+  if (CHAN_FIX_ON) chanFixUpd();                 // ช่องทางตามจัดรถ (BUILD 179)
   ORDERS.ver = (ORDERS.ver || 0) + 1;            // ใบจองชุดใหม่ (ORDERS แก้ในที่เดิม เทียบตัวแปรไม่ได้) — codeAlias/confLines คิดใหม่
 }
 tagOrders();
@@ -3452,6 +3460,7 @@ const CHAN_ORDER = ['BV','BK','BO','SM','MT','HR'];              // หน้า
 const chanOf = ref => {
   if (HR_REFS.has(ref)) return { key:'HR', name:'หน้าร้าน' };    // หน้าร้าน — บิล BV/BK/อื่น ๆ ที่หมายเหตุมีคำว่าหน้าร้าน
   if (SM_REFS.has(ref)) return { key:'SM', name:'SM' };          // สยามมิตร — บิล BK แต่เป็นช่องทางของตัวเอง
+  const fx = CHAN_FIX.get(ref); if (fx) return { key:fx, name:CHAN_NAME[fx] };   // ตามจัดรถ (BUILD 179)
   const h = String(ref || '').slice(0,2).toUpperCase();
   return { key: h || '-', name: CHAN_NAME[h] || h || 'อื่น ๆ' }; };
 const chanRank = k => { const i = CHAN_ORDER.indexOf(k); return i < 0 ? 99 : i; };
@@ -3463,8 +3472,12 @@ function custOf(line) {
   if (SM_REFS.has(line.ref))                                       // SM: สาขา = ร้าน (จ่ายรถรายสาขา)
                       return { key:'s|'+line.storeCode, name:'SM ' + (line.branch || line.ref), kind:'sm',
                                code:line.storeCode, rnd:rndOf(line) };
-  if (hd === 'BK')    return { key:'s|'+line.storeCode, name:line.store || '(ไม่มีชื่อร้าน)', kind:'store',
+  const fx = CHAN_FIX.get(line.ref);                               // ช่องทางตามจัดรถ (BUILD 179)
+  if ((hd === 'BK' && fx !== 'BV') || fx === 'BK')                 // ส่ง (รวม BV ที่จัดขึ้นรถส่ง) = ร้าน + ทะเบียน
+                      return { key:'s|'+line.storeCode, name:line.store || '(ไม่มีชื่อร้าน)', kind:'store',
                                code:line.storeCode, rnd:rndOf(line) };
+  if (fx === 'BV') { const sg = slmnGroup(line.slmn) || bk;         // BK ที่จัดขึ้นรถปลีก = ป้ายเซลแบบปลีก + รถจากพรีปลีก
+                      return { key:'p|'+sg, name:sg, kind:'code' }; }
   if (PRE_HEAD[hd])   return { key:'h|'+hd,  name:PRE_HEAD[hd], kind:'ch' };
   if (PRE_BOOK[bk])   return { key:'p|'+bk,  name:PRE_BOOK[bk], kind:'code' };
   return { key:'b|'+bk, name:bk, kind:'unknown' };
@@ -8310,12 +8323,13 @@ async function loadKeep() {
     });
     const sig = JSON.stringify([key, next, all.map(e => [e.ref, e.code, e.ship, e.trip, e.plate])]), changed = sig !== KEEP.sig;
     KEEP = { key, ref, store, next, n:all.length, odd, err:'', at:Date.now(), ver:KEEP.ver + (changed ? 1 : 0), sig, cost };
-    if (changed) {
+    const fx = chanFixUpd();                       // ช่องทางตามจัดรถ (BUILD 179) — BV ที่ขึ้นรถส่ง = ส่ง
+    if (changed || fx) {
       /* งานส่งยึดตามจัดรถ (BUILD 90): รอบของบิลส่งเปลี่ยน → สร้างงาน/ร้าน/รายการบิลจัดรถใหม่ทั้งชุด */
       const was = JSON.stringify([...KEEP_RND]);
       KEEP_RND.clear();
       Object.values(ref).forEach(e => { if (e.rnd) KEEP_RND.set(e.ref, e.rnd); });
-      if (JSON.stringify([...KEEP_RND]) !== was) {
+      if (JSON.stringify([...KEEP_RND]) !== was || fx) {
         tagOrders(); ROUTE_BILLS = buildRouteBills(); keepCache = null;
         rebuildStores(); CHANS = buildChans(); promoVer++;
       }
@@ -8376,11 +8390,14 @@ async function loadRetail() {
     Object.values(ref).forEach(e => { e.rnd = RETAIL_R1; });
     const sig = JSON.stringify([key, next, Object.values(ref).map(e => [e.ref, e.plate, e.ship, e.trip])]), changed = sig !== RETAIL.sig;
     RETAIL = { key, ref, next, err:'', at:Date.now(), sig, cost };
-    if (changed) {
+    const fx = chanFixUpd();                       // ช่องทางตามจัดรถ (BUILD 179) — BK ที่ขึ้นรถปลีก = ปลีก
+    if (changed || fx) {
       const was = JSON.stringify([...RETAIL_RND]);
       RETAIL_RND.clear();
       Object.values(ref).forEach(e => { if (e.rnd) RETAIL_RND.set(e.ref, e.rnd); });
-      if (JSON.stringify([...RETAIL_RND]) !== was && retailGate()) { tagOrders(); rebuildStores(); CHANS = buildChans(); promoVer++; }
+      if ((JSON.stringify([...RETAIL_RND]) !== was && retailGate()) || fx) {
+        tagOrders(); rebuildStores(); CHANS = buildChans(); promoVer++;
+        if (fx) { ROUTE_BILLS = buildRouteBills(); keepCache = null; } }
       refreshRouteViews(true);
     }
   } catch(e) { RETAIL.err = String(e.message || e).slice(0, 90); console.warn('loadRetail', e); }
@@ -8406,12 +8423,32 @@ async function loadPick() {
       const e = { rnd, day:t(0), at:t(1), plate:t(3).replace(/\s+/g, ''), trip:parseInt(t(4), 10) || 0, ship:t(5), ch:t(6) };
       const o = ref[doc]; if (!o || e.at >= o.at) ref[doc] = e;                 // ออกใบจัดซ้ำ = ล่าสุด
     });
-    const sig = JSON.stringify([key, Object.entries(ref).map(([k, e]) => [k, e.rnd])].sort()), changed = sig !== PICK.sig;
+    const sig = JSON.stringify([key, Object.entries(ref).map(([k, e]) => [k, e.rnd, e.ch])].sort()), changed = sig !== PICK.sig;
     PICK = { key, ref, err:'', at:Date.now(), sig };
     LSset(PICK_LS, JSON.stringify(PICK));
-    if (changed && pickGate()) { tagOrders(); rebuildStores(); CHANS = buildChans(); ROUTE_BILLS = buildRouteBills(); promoVer++; refreshRouteViews(true); }
+    const fx = chanFixUpd();                                    // ช่องทางตามจัดรถ (BUILD 179)
+    if ((changed && pickGate()) || fx) { tagOrders(); rebuildStores(); CHANS = buildChans(); ROUTE_BILLS = buildRouteBills(); keepCache = null; promoVer++; refreshRouteViews(true); }
   } catch(e) { PICK.err = String(e.message || e).slice(0, 90); console.warn('loadPick', e); if (pickGate() && onScreen('scr-jobs')) renderJobs(); }
   finally { pickBusy = false; }
+}
+/** ช่องทาง ปลีก/ส่ง ตามจัดรถ (BUILD 179) → CHAN_FIX · คืน true เมื่อเปลี่ยน (ผู้เรียกสร้างงาน/ร้าน/รายการบิลใหม่) */
+function chanFixUpd() {
+  const m = new Map();
+  if (SRC === 'real' && WAREHOUSE === 'W4') {
+    const kOk = KEEP.key === routeKey(), rOk = RETAIL.key === routeKey(), pk = pickGate();
+    new Set(ORDERS.map(o => o.ref)).forEach(ref => {
+      if (!ref || HR_REFS.has(ref) || SM_REFS.has(ref)) return;
+      const u = String(ref).toUpperCase(), h = u.slice(0, 2);
+      if (h !== 'BK' && h !== 'BV') return;
+      let c = kOk && (KEEP.ref[ref] || KEEP.ref[u]) ? 'BK' : rOk && RETAIL.ref[u] ? 'BV' : '';
+      if (!c && pk) { const p = pickOf(ref); c = !p ? '' : p.ch === 'ส่ง' ? 'BK' : p.ch === 'ปลีก' ? 'BV' : ''; }
+      if (c && c !== h) m.set(ref, c);
+    });
+  }
+  const sig = JSON.stringify([...m].sort());
+  if (sig === CHAN_FIX_SIG) return false;
+  CHAN_FIX.clear(); m.forEach((v, k) => CHAN_FIX.set(k, v)); CHAN_FIX_SIG = sig;
+  return true;
 }
 /** แถบบนหน้าเช็คตามทีม/สรุปงาน — ใบจองที่ยังไม่ออกใบจัด (ไม่อยู่ในเช็คตามทีม) */
 function pickNote() {
@@ -8485,6 +8522,8 @@ function routeEntry(code, rnd) {
 }
 const vehicleOf = (code, rnd) => (routeEntry(code, rnd) || {}).plate || '';
 hasPlate = (code, rnd) => !!vehicleOf(code, rnd);
+CHAN_FIX_ON = true;                            // ช่องทางตามจัดรถ (BUILD 179) — KEEP/RETAIL/PICK/routeKey พร้อมแล้ว
+if (chanFixUpd()) { tagOrders(); ROUTE_BILLS = buildRouteBills(); rebuildStores(); CHANS = buildChans(); }
 JOBS = buildJobs();                            // งานที่สร้างตอนโหลดไฟล์ยังไม่เห็นทะเบียน สร้างใหม่
 
 /** ทะเบียนของร้านนี้ทุกเที่ยว สำหรับหน้าเช็คตามร้าน (ร้านไม่แยกรอบ) — "🚚80-7447" หรือ "🚚 รอบ1 80-7447 · รอบ2 90-3106" */
