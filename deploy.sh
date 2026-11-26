@@ -104,6 +104,12 @@ APPS=(
   rattana-manpower-team.html
   rattana-line-register.html
   rattana-coffee.html
+  rattana-coffee.webmanifest
+  coffee-icon-32.png
+  coffee-icon-180.png
+  coffee-icon-192.png
+  coffee-icon-512.png
+  rattana-coffee-poster.html
   rattana-truck-advance.html
 )
 
