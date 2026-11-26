@@ -266,7 +266,7 @@ function act_(a, b, u) {
 function doGet(e) {
   var p = (e && e.parameter) || {};
   try {
-    if (!e) return json_({ ok: true, note: 'run from editor' });
+    if (!e) return json_({ ok: true, setup: setup() });   // กด Run doGet ในตัวแก้ไข = ติดตั้ง/ขอสิทธิ์
     if (p.action === 'boot') return json_(boot_(need_(p.t)));
     return json_({ ok: true, app: 'Rattana Zone', installed: !!props_().getProperty('SHEET_ID') });
   } catch (err) { return json_({ ok: false, auth: !!err.auth, error: err.message || String(err) }); }
