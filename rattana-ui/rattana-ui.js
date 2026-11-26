@@ -1,4 +1,4 @@
-/* Rattana CI v1.10.0 — behaviour helpers (no dependencies). window.RattanaUI */
+/* Rattana CI v1.10.1 — behaviour helpers (no dependencies). window.RattanaUI */
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement, win = window;
@@ -78,7 +78,7 @@
   /* on-screen keyboard height → --rt-kb (keeps sheets above the keyboard on iOS/Android) */
   if (win.visualViewport) {
     var vv = win.visualViewport;
-    var onVV = function () { var kb = Math.max(0, win.innerHeight - vv.height - vv.offsetTop); root.style.setProperty('--rt-kb', (kb > 80 ? Math.round(kb) : 0) + 'px'); };
+    var lastKb = -1, onVV = function () { var kb = Math.max(0, win.innerHeight - vv.height - vv.offsetTop); kb = kb > 80 ? Math.round(kb) : 0; if (kb === lastKb) return; lastKb = kb; root.style.setProperty('--rt-kb', kb + 'px'); };
     vv.addEventListener('resize', onVV); vv.addEventListener('scroll', onVV);
   }
   /* remember where the user last pressed: popups grow from there, theme reveal starts there */
@@ -142,7 +142,7 @@
   }
 
   var UI = {
-    version: '1.10.0',
+    version: '1.10.1',
     icons: ICON,
     platform: platform,
 
@@ -948,6 +948,11 @@
       q('[data-rt-theme-toggle]').forEach(function (b) { if (b._rt) return; b._rt = 1; b.addEventListener('click', function () { UI.toggleTheme(); }); });
       q('[data-rt-lang]').forEach(function (b) { if (b._rt) return; b._rt = 1; b.addEventListener('click', function () { UI.setLang(b.getAttribute('data-rt-lang')); }); });
       q('.rt-seg').forEach(function (s) { if (s._rt) return; s._rt = 1; UI.segmented(s); });
+      /* glass that stays on screen while content scrolls under it keeps the frosted blur (see CSS) */
+      q('.rt-glass').forEach(function (g) {
+        if (g._rtG) return; g._rtG = 1;
+        for (var n = g, i = 0; n && n !== doc.body && i < 3; n = n.parentElement, i++) { var p = getComputedStyle(n).position; if (p === 'sticky' || p === 'fixed') { g.classList.add('rt-float'); break; } }
+      });
       if (!off('search')) q('.rt-search').forEach(enhanceSearch);
       q('.rt-app-brand').forEach(paintBrand);
       q('[data-rt-user]').forEach(function (b) { if (b._rtUserPaint) return; b._rtUserPaint = 1; paintUserChip(b); });
@@ -1547,40 +1552,46 @@
     c1.setAttribute('class', 'rt-ring-bg'); c2.setAttribute('class', 'rt-ring-fg'); c2.style.strokeDasharray = C; c2.style.strokeDashoffset = C;
     var ar = svg('M12 19V5M5 12l7-7 7 7', 22); ar.setAttribute('class', 'rt-totop-arrow'); ar.setAttribute('stroke-width', '2.4');
     b.appendChild(ring); b.appendChild(ar); doc.body.appendChild(b);
-    var ticking = false;
+    var ticking = false, lastT = null, shown = false, lastLift = -1, placeT = 0, ownAt = 0, lastOff = -1;
     function metrics() {
       var s = UI._scroller && UI._scroller.isConnected ? UI._scroller : null;
       var top = s ? s.scrollTop : (win.scrollY || root.scrollTop), max = s ? s.scrollHeight - s.clientHeight : Math.max(root.scrollHeight, doc.body.scrollHeight) - win.innerHeight;
       return { top: top, max: Math.max(1, max) };
     }
-    function update() {
-      ticking = false; var m = metrics(), show = m.top > Math.max(320, win.innerHeight * 0.6) && !root.classList.contains('rt-locked');
-      b.classList.toggle('is-on', show);
-      c2.style.strokeDashoffset = String(C * (1 - Math.min(1, m.top / m.max)));
-      /* sit above a visible bottom nav */
+    /* where to sit: above a bottom nav and the app's own floating buttons. Reads layout, so it runs only
+       when the button appears, after scrolling stops, or on resize — never on every scroll frame */
+    function place() {
+      placeT = 0; if (!shown) return;
       var lift = 0;
-      [].forEach.call(doc.querySelectorAll('.rt-bottom-nav'), function (nav) { var r = nav.getBoundingClientRect(), cs = getComputedStyle(nav); if (cs.position === 'fixed' && cs.display !== 'none' && cs.visibility !== 'hidden' && r.height && r.bottom > win.innerHeight - 60 && r.top < win.innerHeight) lift = Math.max(lift, win.innerHeight - r.top + 4 - 16); });
-      /* never sit on top of the app's own floating buttons (cart, add, chat…) */
-      if (show) {
-        var x = win.innerWidth - 42, guard = 0;
-        while (guard++ < 4) {
-          var y = win.innerHeight - 42 - lift, hit = null, list = doc.elementsFromPoint ? doc.elementsFromPoint(x, y) : [];
-          for (var i = 0; i < list.length; i++) { var n = list[i]; if (n === b || b.contains(n) || n === doc.body || n === root) continue; var f = n; while (f && f !== doc.body) { var p = getComputedStyle(f).position; if (p === 'fixed' || p === 'sticky') break; f = f.parentElement; } if (f && f !== doc.body && !f.classList.contains('rt-toast-stack') && !f.closest('.rt-toast-stack')) { hit = f; break; } }
-          if (!hit) break; var hr = hit.getBoundingClientRect(); if (hr.height > win.innerHeight * 0.5) break; lift = Math.max(lift, win.innerHeight - hr.top + 8 - 16);
-        }
+      [].forEach.call(doc.querySelectorAll('.rt-bottom-nav'), function (nav) { var r = nav.getBoundingClientRect(); if (!r.height || r.top >= win.innerHeight || r.bottom <= win.innerHeight - 60) return; var cs = getComputedStyle(nav); if (cs.position === 'fixed' && cs.display !== 'none' && cs.visibility !== 'hidden') lift = Math.max(lift, win.innerHeight - r.top + 4 - 16); });
+      var x = win.innerWidth - 42, guard = 0;
+      while (guard++ < 4) {
+        var y = win.innerHeight - 42 - lift, hit = null, list = doc.elementsFromPoint ? doc.elementsFromPoint(x, y) : [];
+        for (var i = 0; i < list.length && i < 12; i++) { var n = list[i]; if (n === b || b.contains(n) || n === doc.body || n === root) continue; var f = n, found = null, depth = 0; while (f && f !== doc.body && depth++ < 8) { var p = getComputedStyle(f).position; if (p === 'fixed' || p === 'sticky') { found = f; break; } f = f.parentElement; } if (found && !found.closest('.rt-toast-stack')) { hit = found; break; } }
+        if (!hit) break; var hr = hit.getBoundingClientRect(); if (hr.height > win.innerHeight * 0.5) break; lift = Math.max(lift, win.innerHeight - hr.top + 8 - 16);
       }
-      lift = Math.max(0, Math.min(lift, win.innerHeight * 0.45));
-      b.style.setProperty('--rt-totop-lift', lift + 'px');
-      if (show && hasOwn()) { b.remove(); doc.removeEventListener('scroll', onScroll, true); }
+      lift = Math.round(Math.max(0, Math.min(lift, win.innerHeight * 0.45)));
+      if (lift !== lastLift) { lastLift = lift; b.style.setProperty('--rt-totop-lift', lift + 'px'); }
+      /* the app added its own back-to-top later → step aside (checked at most every 3 s) */
+      if (Date.now() - ownAt > 3000) { ownAt = Date.now(); if (hasOwn()) { b.remove(); doc.removeEventListener('scroll', onScroll, true); } }
+    }
+    function schedulePlace(ms) { clearTimeout(placeT); placeT = setTimeout(place, ms); }
+    function update() {
+      ticking = false;
+      var t = lastT; lastT = null;
+      if (t && t.nodeType === 1 && t !== root && t !== doc.body) { if (t !== UI._scroller && !t.closest('.rt-overlay, .rt-popover, .rt-lightbox, .rt-scan') && t.clientHeight > win.innerHeight * 0.5 && t.scrollHeight > t.clientHeight + 200) UI._scroller = t; }
+      else if (t && (win.scrollY || root.scrollTop) > 0) UI._scroller = null;
+      var m = metrics(), show = m.top > Math.max(320, win.innerHeight * 0.6) && !root.classList.contains('rt-locked');
+      if (show !== shown) { shown = show; b.classList.toggle('is-on', show); if (show) place(); }
+      if (shown) { var off = Math.round(C * (1 - Math.min(1, m.top / m.max))); if (off !== lastOff) { lastOff = off; c2.style.strokeDashoffset = String(off); } }
+      if (shown) schedulePlace(180);
     }
     function onScroll(e) {
-      var t = e && e.target;
-      if (t && t.nodeType === 1 && t !== doc.documentElement && t !== doc.body && !t.closest('.rt-overlay, .rt-popover, .rt-lightbox, .rt-scan') && t.clientHeight > win.innerHeight * 0.5 && t.scrollHeight > t.clientHeight + 200) UI._scroller = t;
-      else if (t === doc || t === doc.documentElement || t === doc.body) { if ((win.scrollY || root.scrollTop) > 0) UI._scroller = null; }
+      lastT = e && e.target === doc ? root : (e && e.target);
       if (!ticking) { ticking = true; requestAnimationFrame(update); }
     }
     doc.addEventListener('scroll', onScroll, { capture: true, passive: true });
-    win.addEventListener('resize', function () { if (!ticking) { ticking = true; requestAnimationFrame(update); } });
+    win.addEventListener('resize', function () { if (!ticking) { ticking = true; requestAnimationFrame(update); } schedulePlace(120); });
     b.addEventListener('click', function () { b.classList.remove('is-flying'); void b.offsetWidth; b.classList.add('is-flying'); UI.haptic('light'); UI.scrollTop(); });
     update();
   }
@@ -1793,7 +1804,16 @@
       var pending = [], scheduled = false;
       new MutationObserver(function (ms) {
         ms.forEach(function (m) { m.addedNodes.forEach(function (n) { if (n.nodeType === 1 && !(n.classList && (n.classList.contains('rt-ripple') || n.classList.contains('rt-fx')))) pending.push(n); }); });
-        if (pending.length && !scheduled) { scheduled = true; requestAnimationFrame(function () { scheduled = false; var list = pending; pending = []; list.forEach(function (n) { if (n.isConnected) UI.init(n); }); }); }
+        if (pending.length && !scheduled) { scheduled = true; requestAnimationFrame(function () {
+          scheduled = false; var list = pending; pending = [];
+          var byParent = new Map(), roots = [];
+          list.forEach(function (n) { if (!n.isConnected) return; var p = n.parentNode; byParent.set(p, (byParent.get(p) || 0) + 1); });
+          var big = new Set(); byParent.forEach(function (c, p) { if (c > 12 && p && p.nodeType === 1) big.add(p); });
+          big.forEach(function (p) { roots.push(p); });
+          list.forEach(function (n) { if (n.isConnected && !big.has(n.parentNode) && roots.indexOf(n) < 0) roots.push(n); });
+          roots = roots.filter(function (n) { for (var i = 0; i < roots.length; i++) if (roots[i] !== n && roots[i].contains(n)) return false; return true; });
+          roots.forEach(function (n) { UI.init(n); });
+        }); }
       }).observe(doc.body, { childList: true, subtree: true });
     }
   }
