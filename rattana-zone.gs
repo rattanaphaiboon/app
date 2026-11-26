@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '1.5';
+var VERSION = '1.6';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -20,8 +20,8 @@ var EMP_TTL_DAYS = 90, GOOGLE_TTL_DAYS = 30;
 var T = {
   SITES:  { name: 'สถานที่', head: ['id', 'ศูนย์', 'ชื่อสถานที่', 'พื้นที่ (JSON)', 'รหัสพื้นที่ (JSON)'] },
   GRANTS: { name: 'สิทธิ์ผู้ดูแล', head: ['รหัสพนักงาน', 'ชื่อ', 'สิทธิ์ (mgr=หัวหน้างาน, hr=HR)', 'ให้โดย', 'เวลา'] },
-  ZONES:  { name: 'โซน', head: ['id', 'สถานที่', 'พื้นที่', 'ไอคอน', 'ชื่อโซน', 'รายการเช็ก (JSON)', 'เจ้าของโซน', 'คนสำรอง', 'ตรวจก่อน', 'รอบตรวจ', 'เวร (JSON)', 'รูปก่อน/หลัง', 'ใช้งาน', 'แก้ไขล่าสุด', 'แก้ไขโดย', 'รูปโซน'] },
-  CHECKS: { name: 'ผลตรวจ', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'รหัสผู้ตรวจ', 'ผู้ตรวจ', 'ผล (JSON)', 'รูปหลังทำ', 'รูปก่อนทำ', 'หมายเหตุ', 'สแกนหน้างาน', 'ทำแทน', 'ทำแทนใคร', 'เวลาบันทึก'] },
+  ZONES:  { name: 'โซน', head: ['id', 'สถานที่', 'พื้นที่', 'ไอคอน', 'ชื่อโซน', 'รายการเช็ก (JSON)', 'เจ้าของโซน', 'คนสำรอง', 'ตรวจก่อน', 'รอบตรวจ', 'เวร (JSON)', 'รูปก่อน/หลัง', 'ใช้งาน', 'แก้ไขล่าสุด', 'แก้ไขโดย', 'รูปโซน', 'พิกัด (lat,lng,±ม.)'] },
+  CHECKS: { name: 'ผลตรวจ', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'รหัสผู้ตรวจ', 'ผู้ตรวจ', 'ผล (JSON)', 'รูปหลังทำ', 'รูปก่อนทำ', 'หมายเหตุ', 'สแกนหน้างาน', 'ทำแทน', 'ทำแทนใคร', 'เวลาบันทึก', 'ระยะจากจุดโซน (ม.)'] },
   AUDITS: { name: 'คะแนน5ส', head: ['id', 'โซน', 'วันที่', 'ผู้ตรวจ', 'คะแนน (JSON)', 'คำแนะนำ', 'รูป', 'เฉลี่ย'] },
   ISSUES: { name: 'ปัญหา', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'ผู้แจ้ง', 'ปัญหา', 'รูป', 'สถานะ', 'วิธีแก้', 'วันที่แก้', 'ผู้ปิดงาน'] }
 };
@@ -45,6 +45,15 @@ function sh_(t) {
 }
 // รหัสพื้นที่มาตรฐาน — ใช้ประกอบรหัสโซน เช่น W1-WH01
 var AREA_CODE = { 'คลังสินค้า': 'WH', 'ลาน/ท่ารถ': 'YD', 'สำนักงาน': 'OF', 'ส่วนกลาง': 'CM', 'หน้าร้าน': 'FR', 'หลังร้าน': 'BK', 'ภายนอก': 'OT', 'ห้องน้ำ': 'WC', 'ห้องเย็น': 'CL' };
+// พิกัดโซน เก็บเป็นข้อความ "lat,lng,ความแม่นยำ(ม.)"
+function locS_(l) {
+  if (!l || !isFinite(+l.lat) || !isFinite(+l.lng) || Math.abs(+l.lat) > 90 || Math.abs(+l.lng) > 180) return '';
+  return (+l.lat).toFixed(6) + ',' + (+l.lng).toFixed(6) + ',' + Math.round(+l.acc || 0);
+}
+function locP_(s) {
+  var p = String(s || '').split(','); if (p.length < 2 || !isFinite(+p[0]) || !isFinite(+p[1]) || p[0] === '') return null;
+  return { lat: +p[0], lng: +p[1], acc: +(p[2] || 0) };
+}
 function rows_(t) {
   var s = sh_(t), n = s.getLastRow();
   return n < 2 ? [] : s.getRange(2, 1, n - 1, t.head.length).getValues();
@@ -235,11 +244,11 @@ function boot_(u) {
   var sites = rows_(T.SITES).map(function (r) { return { id: String(r[0]), w: String(r[1]), name: String(r[2]), areas: pj_(r[3], []), codes: pj_(r[4], {}) }; });
   var zones = rows_(T.ZONES).filter(function (r) { return r[0] && r[12] !== false && String(r[12]) !== 'FALSE'; }).map(function (r) {
     return { id: String(r[0]), site: String(r[1]), area: String(r[2]), icon: String(r[3]), name: String(r[4]), items: pj_(r[5], []),
-      owner: String(r[6]), backup: String(r[7]), due: clean_(r[8]) || '10.00', freq: String(r[9] || 'ทุกวัน'), rota: pj_(r[10], null), before: r[11] === true || String(r[11]) === 'TRUE', photo: String(r[15] || '') };
+      owner: String(r[6]), backup: String(r[7]), due: clean_(r[8]) || '10.00', freq: String(r[9] || 'ทุกวัน'), rota: pj_(r[10], null), before: r[11] === true || String(r[11]) === 'TRUE', photo: String(r[15] || ''), loc: locP_(r[16]) };
   });
   var checks = rows_(T.CHECKS).filter(function (r) { return dstr_(r[2]) >= from; }).map(function (r) {
     return { id: String(r[0]), zoneId: String(r[1]), date: dstr_(r[2]), time: +r[3], by: String(r[5]), res: pj_(r[6], []), photo: String(r[7]), before: String(r[8]),
-      note: String(r[9]), scan: r[10] === true || String(r[10]) === 'TRUE', proxy: r[11] === true || String(r[11]) === 'TRUE' };
+      note: String(r[9]), scan: r[10] === true || String(r[10]) === 'TRUE', proxy: r[11] === true || String(r[11]) === 'TRUE', dist: r[14] === '' || r[14] == null ? null : +r[14] };
   });
   var audits = rows_(T.AUDITS).filter(function (r) { return dstr_(r[2]) >= fromA; }).map(function (r) {
     return { id: String(r[0]), zoneId: String(r[1]), date: dstr_(r[2]), by: String(r[3]), sc: pj_(r[4], {}), note: String(r[5]), photo: String(r[6]) };
@@ -263,7 +272,8 @@ function act_(a, b, u) {
       centerOfZone_(b.zoneId);
       var id = nextId_('C'), photo = savePhoto_(b.photo, b.zoneId + '_' + id), before = savePhoto_(b.before, b.zoneId + '_' + id + '_before');
       if (!photo) throw new Error('ต้องมีรูปหลังทำ');
-      sh_(T.CHECKS).appendRow([id, b.zoneId, d, Date.now(), u.c, u.n, JSON.stringify(b.res || []), photo, before, clean_(b.note), !!b.scan, !!b.proxy, clean_(b.for), now]);
+      sh_(T.CHECKS).appendRow([id, b.zoneId, d, Date.now(), u.c, u.n, JSON.stringify(b.res || []), photo, before, clean_(b.note), !!b.scan, !!b.proxy, clean_(b.for), now,
+        (b.dist === '' || b.dist == null || !isFinite(+b.dist)) ? '' : Math.round(+b.dist)]);
       if (b.issue) sh_(T.ISSUES).appendRow([nextId_('I'), b.zoneId, d, Date.now(), u.n, clean_(b.issueText) || 'ต้องแก้', photo, 'open', '', '', '']);
       return { id: id };
     }
@@ -289,7 +299,8 @@ function act_(a, b, u) {
       if (!clean_(z.name)) throw new Error('ไม่มีชื่อโซน');
       var row = [z.id, z.site, clean_(z.area), clean_(z.icon) || '🧹', clean_(z.name), JSON.stringify(z.items || []), clean_(z.owner), clean_(z.backup),
                  clean_(z.due) || '10.00', clean_(z.freq) || 'ทุกวัน', z.rota ? JSON.stringify(z.rota) : '', !!z.before, true, now, u.n,
-                 z.photoNew ? savePhoto_(z.photoNew, 'zone_' + (z.id || z.code || 'new') + '_' + Date.now()) : (/^https:\/\//.test(String(z.photo || '')) ? z.photo : '')];
+                 z.photoNew ? savePhoto_(z.photoNew, 'zone_' + (z.id || z.code || 'new') + '_' + Date.now()) : (/^https:\/\//.test(String(z.photo || '')) ? z.photo : ''),
+                 locS_(z.loc)];
       var zr = z.id ? findRow_(T.ZONES, z.id) : -1;
       if (zr > 0) { row[0] = z.id; sh_(T.ZONES).getRange(zr, 1, 1, row.length).setValues([row]); }
       else {
