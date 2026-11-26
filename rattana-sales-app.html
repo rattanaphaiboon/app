@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.772</title>
+<title>Rattana Sales — v8.773</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -7244,7 +7244,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.772 · 2026-11-26</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.773 · 2026-11-26</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -7255,7 +7255,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.772</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.773</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -8749,7 +8749,65 @@ function _ordersScopeTq() {
   return `where ${dateCond}`;
 }
 function fetchOrdersScoped() {
+  if (_ordSbOn()) return _fetchOrdersSb().catch(function (e) {
+    console.warn('[ordSB] อ่าน Supabase ไม่ได้ → กลับไปอ่านชีท:', e && e.message);
+    window._ordSrc = 'sheet(fallback)';
+    return fetchSheet(CONFIG.backendSheetId, CONFIG.tabs.order, null, _ordersScopeTq());
+  });
+  window._ordSrc = 'sheet';
   return fetchSheet(CONFIG.backendSheetId, CONFIG.tabs.order, null, _ordersScopeTq());
+}
+/* v8.773 เฟส A (Surat 26/11): อ่านออเดอร์จาก Supabase ผ่านหลังบ้าน (action sbOrders · Code.gs v8.352) แทน gviz แท็บ Order
+   ทำไม: ทุกเครื่องดึงแท็บ Order ทั้งแท็บ (มี JSON ~1KB/แถว) ทำไฟล์หลังบ้านช้าทั้งไฟล์ → ออเดอร์/เยี่ยมร้านรอคิว
+   แถวที่ได้หัวคอลัมน์ไทยเหมือนชีท · confirmed บน SB = ลงชีทแล้ว (หลังบ้าน confirm หลังเขียนชีทสำเร็จ) → กระทบยอดใบค้างได้เหมือนเดิม
+   สวิตช์: ?ordsb=1 เปิด · ?ordsb=0 ปิด (จำในเครื่อง) · ค่าเริ่ม = ปิด · พลาด = กลับไปอ่านชีทเองทันที */
+function _ordSbOn() {
+  try {
+    const q = new URLSearchParams(location.search).get('ordsb');
+    if (q === '1' || q === '0') localStorage.setItem('rsa_ord_sb', q);
+    return localStorage.getItem('rsa_ord_sb') === '1';
+  } catch (e) { return false; }
+}
+let _ordSbMemo = null, _ordSbInflight = null;
+function _ordSbPayload() {
+  const role = Number((currentUser && currentUser.role) || (typeof SALESMAN !== 'undefined' && SALESMAN.level) || 0);
+  const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - 2);
+  const since = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`;
+  if (role <= 4) {
+    const email = String((currentUser && currentUser.email) || SALESMAN.email || '').toLowerCase().trim();
+    const code = String((currentUser && currentUser.salesmanCode) || SALESMAN.code || '').trim();
+    const name = String((currentUser && currentUser.name) || SALESMAN.name || '').trim();
+    if (!email && !code && !name) return null;
+    return { action: 'sbOrders', scope: 'sm', email: email, smCode: code, smName: name, since: since };
+  }
+  if (role === 5) {
+    const wh = String((typeof _resolveMyWarehouse === 'function' && _resolveMyWarehouse()) || (currentUser && currentUser.warehouse) || SALESMAN.warehouseId || '').trim().toUpperCase();
+    if (wh) return { action: 'sbOrders', scope: 'wh', warehouse: wh, since: since };
+  }
+  return { action: 'sbOrders', scope: 'all', since: since };
+}
+async function _fetchOrdersSb() {
+  const p = _ordSbPayload();
+  if (!p) throw new Error('ไม่มีตัวตนผู้ใช้');
+  const k = JSON.stringify(p), now = Date.now();
+  if (_ordSbMemo && _ordSbMemo.k === k && now - _ordSbMemo.at < 60000) return _ordSbMemo.rows.slice();
+  if (_ordSbInflight && _ordSbInflight.k === k) return (await _ordSbInflight.p).slice();
+  const pr = (async function () {
+    const t0 = Date.now();
+    const res = await postToAppsScript(p, 1);
+    let rows = null;
+    if (res && res.ok === true && Array.isArray(res.cols) && Array.isArray(res.data)) {   // แบบตาราง (Code.gs v8.353)
+      const cols = res.cols;
+      rows = res.data.map(function (a) { const o = {}; for (let i = 0; i < cols.length; i++) o[cols[i]] = (a[i] == null ? '' : String(a[i])); return o; });
+    } else if (res && res.ok === true && Array.isArray(res.rows)) rows = res.rows;   // แบบแถว (v8.352)
+    if (!rows) throw new Error((res && res.error) || 'sbOrders ไม่ตอบ');
+    _ordSbMemo = { k: k, at: Date.now(), rows: rows };
+    window._ordSrc = 'supabase';
+    console.log('[ordSB]', rows.length, 'แถว ·', (Date.now() - t0), 'ms', res.cached ? '(แคชหลังบ้าน)' : '');
+    return rows;
+  })();
+  _ordSbInflight = { k: k, p: pr };
+  try { return (await pr).slice(); } finally { if (_ordSbInflight && _ordSbInflight.p === pr) _ordSbInflight = null; }
 }
 
 // v8.234: scope visits = วันนี้เท่านั้น (Visits col A 'วัน' = TEXT 'YYYY/MM/DD' ตรงกับ _todayISO)
