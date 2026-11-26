@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '1.6';
+var VERSION = '1.7';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -54,6 +54,12 @@ function locP_(s) {
   var p = String(s || '').split(','); if (p.length < 2 || !isFinite(+p[0]) || !isFinite(+p[1]) || p[0] === '') return null;
   return { lat: +p[0], lng: +p[1], acc: +(p[2] || 0) };
 }
+// คิวออฟไลน์: แอปเก็บผลตรวจไว้ในเครื่องตอนไม่มีสัญญาณ แล้วส่งทีหลัง
+// cid = รหัสรายการจากเครื่อง (กันบันทึกซ้ำถ้าส่งสำเร็จแต่คำตอบหาย) · at = เวลาที่ตรวจจริง
+function dupOf_(b) { return b.cid ? CacheService.getScriptCache().get('cid_' + String(b.cid).slice(0, 60)) : null; }
+function markDup_(b, id) { if (b.cid) CacheService.getScriptCache().put('cid_' + String(b.cid).slice(0, 60), String(id), 21600); }
+function atOf_(b) { var at = +b.at; return at && at <= Date.now() + 6e5 && Date.now() - at < 4 * 864e5 ? at : Date.now(); }
+function dayOf_(b, d) { var at = atOf_(b); return Utilities.formatDate(new Date(at), 'Asia/Bangkok', 'yyyy-MM-dd') || d; }
 function rows_(t) {
   var s = sh_(t), n = s.getLastRow();
   return n < 2 ? [] : s.getRange(2, 1, n - 1, t.head.length).getValues();
@@ -240,7 +246,7 @@ function savePhoto_(dataUrl, name) {
 
 // ───────────────────────── อ่านข้อมูลทั้งหมด (boot) ─────────────────────────
 function boot_(u) {
-  var from = daysAgo_(35), fromA = daysAgo_(70);
+  var from = daysAgo_(65), fromA = daysAgo_(70);   // 65 วัน = ครอบคลุมเดือนที่แล้วทั้งเดือน (หน้า 🏆 ดีเด่น)
   var sites = rows_(T.SITES).map(function (r) { return { id: String(r[0]), w: String(r[1]), name: String(r[2]), areas: pj_(r[3], []), codes: pj_(r[4], {}) }; });
   var zones = rows_(T.ZONES).filter(function (r) { return r[0] && r[12] !== false && String(r[12]) !== 'FALSE'; }).map(function (r) {
     return { id: String(r[0]), site: String(r[1]), area: String(r[2]), icon: String(r[3]), name: String(r[4]), items: pj_(r[5], []),
@@ -270,16 +276,22 @@ function act_(a, b, u) {
   switch (a) {
     case 'check': {
       centerOfZone_(b.zoneId);
+      var dupC = dupOf_(b); if (dupC) return { id: dupC, dup: true };   // ส่งซ้ำจากคิวออฟไลน์
+      d = dayOf_(b, d); var tmC = atOf_(b);
       var id = nextId_('C'), photo = savePhoto_(b.photo, b.zoneId + '_' + id), before = savePhoto_(b.before, b.zoneId + '_' + id + '_before');
       if (!photo) throw new Error('ต้องมีรูปหลังทำ');
-      sh_(T.CHECKS).appendRow([id, b.zoneId, d, Date.now(), u.c, u.n, JSON.stringify(b.res || []), photo, before, clean_(b.note), !!b.scan, !!b.proxy, clean_(b.for), now,
+      sh_(T.CHECKS).appendRow([id, b.zoneId, d, tmC, u.c, u.n, JSON.stringify(b.res || []), photo, before, clean_(b.note), !!b.scan, !!b.proxy, clean_(b.for), now,
         (b.dist === '' || b.dist == null || !isFinite(+b.dist)) ? '' : Math.round(+b.dist)]);
-      if (b.issue) sh_(T.ISSUES).appendRow([nextId_('I'), b.zoneId, d, Date.now(), u.n, clean_(b.issueText) || 'ต้องแก้', photo, 'open', '', '', '']);
+      if (b.issue) sh_(T.ISSUES).appendRow([nextId_('I'), b.zoneId, d, tmC, u.n, clean_(b.issueText) || 'ต้องแก้', photo, 'open', '', '', '']);
+      markDup_(b, id);
       return { id: id };
     }
     case 'issue': {
       centerOfZone_(b.zoneId);
-      var iid = nextId_('I'); sh_(T.ISSUES).appendRow([iid, b.zoneId, d, Date.now(), u.n, clean_(b.text), savePhoto_(b.photo, 'issue_' + iid), 'open', '', '', '']);
+      var dupI = dupOf_(b); if (dupI) return { id: dupI, dup: true };
+      d = dayOf_(b, d);
+      var iid = nextId_('I'); sh_(T.ISSUES).appendRow([iid, b.zoneId, d, atOf_(b), u.n, clean_(b.text), savePhoto_(b.photo, 'issue_' + iid), 'open', '', '', '']);
+      markDup_(b, iid);
       return { id: iid };
     }
     case 'fixIssue': {
