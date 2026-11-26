@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '1.0';
+var VERSION = '1.1';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -17,7 +17,8 @@ var CENTER_OF = { W1: 'W1', W2: 'W2', W3: 'W3', W4: 'W4', C4: 'W4' };   // ส�
 var EMP_TTL_DAYS = 90, GOOGLE_TTL_DAYS = 30;
 
 var T = {
-  SITES:  { name: 'สถานที่', head: ['id', 'ศูนย์', 'ชื่อสถานที่', 'พื้นที่ (JSON)'] },
+  SITES:  { name: 'สถานที่', head: ['id', 'ศูนย์', 'ชื่อสถานที่', 'พื้นที่ (JSON)', 'รหัสพื้นที่ (JSON)'] },
+  GRANTS: { name: 'สิทธิ์ผู้ดูแล', head: ['รหัสพนักงาน', 'ชื่อ', 'สิทธิ์ (mgr=หัวหน้างาน, hr=HR)', 'ให้โดย', 'เวลา'] },
   ZONES:  { name: 'โซน', head: ['id', 'สถานที่', 'พื้นที่', 'ไอคอน', 'ชื่อโซน', 'รายการเช็ก (JSON)', 'เจ้าของโซน', 'คนสำรอง', 'ตรวจก่อน', 'รอบตรวจ', 'เวร (JSON)', 'รูปก่อน/หลัง', 'ใช้งาน', 'แก้ไขล่าสุด', 'แก้ไขโดย'] },
   CHECKS: { name: 'ผลตรวจ', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'รหัสผู้ตรวจ', 'ผู้ตรวจ', 'ผล (JSON)', 'รูปหลังทำ', 'รูปก่อนทำ', 'หมายเหตุ', 'สแกนหน้างาน', 'ทำแทน', 'ทำแทนใคร', 'เวลาบันทึก'] },
   AUDITS: { name: 'คะแนน5ส', head: ['id', 'โซน', 'วันที่', 'ผู้ตรวจ', 'คะแนน (JSON)', 'คำแนะนำ', 'รูป', 'เฉลี่ย'] },
@@ -35,7 +36,14 @@ function pj_(s, d) { try { return s ? JSON.parse(s) : d; } catch (e) { return d;
 function ss_() {
   return SpreadsheetApp.openById(DATA_SHEET_ID);
 }
-function sh_(t) { return ss_().getSheetByName(t.name); }
+function sh_(t) {
+  var ss = ss_(), s = ss.getSheetByName(t.name);
+  if (!s) { s = ss.insertSheet(t.name); s.getRange(1, 1, 1, t.head.length).setValues([t.head]).setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff'); s.setFrozenRows(1); }
+  else if (s.getLastColumn() < t.head.length) s.getRange(1, 1, 1, t.head.length).setValues([t.head]).setFontWeight('bold').setBackground('#0d1b3e').setFontColor('#ffffff');
+  return s;
+}
+// รหัสพื้นที่มาตรฐาน — ใช้ประกอบรหัสโซน เช่น W1-WH01
+var AREA_CODE = { 'คลังสินค้า': 'WH', 'ลาน/ท่ารถ': 'YD', 'สำนักงาน': 'OF', 'ส่วนกลาง': 'CM', 'หน้าร้าน': 'FR', 'หลังร้าน': 'BK', 'ภายนอก': 'OT', 'ห้องน้ำ': 'WC', 'ห้องเย็น': 'CL' };
 function rows_(t) {
   var s = sh_(t), n = s.getLastRow();
   return n < 2 ? [] : s.getRange(2, 1, n - 1, t.head.length).getValues();
@@ -50,7 +58,7 @@ function dstr_(v) { return v instanceof Date ? Utilities.formatDate(v, 'Asia/Ban
 
 // ───────────────────────── ทะเบียนพนักงาน ─────────────────────────
 function getRegistry_() {
-  var cache = CacheService.getScriptCache(), hit = cache.get('zreg_v1');
+  var cache = CacheService.getScriptCache(), hit = cache.get('zreg_v2');
   if (hit) { try { return JSON.parse(hit); } catch (e) {} }
   var sheets = SpreadsheetApp.openById(REG_SHEET_ID).getSheets(), sheet = null, H = {};
   for (var i = 0; i < sheets.length; i++) {
@@ -60,16 +68,21 @@ function getRegistry_() {
   if (!sheet) throw new Error('ไม่พบแท็บทะเบียนพนักงาน');
   var f = function (re) { for (var k in H) if (re.test(k)) return H[k]; return -1; };
   var iCode = H['รหัสพนักงาน'], iName = f(/^ชื่อ - สกุล$/), iNick = f(/^ชื่อเล่น$/), iW = f(/^W$/), iDept = f(/^แผนก$/),
-      iEmail = H['E-mail'], iStatus = f(/^Status$/), iRole = f(/^User Role$/), iBirth = f(/วันเดือนปีเกิด/), iQuit = f(/ลาออก/);
+      iEmail = H['E-mail'], iStatus = f(/^Status$/), iRole = f(/^User Role$/), iBirth = f(/วันเดือนปีเกิด/), iQuit = f(/ลาออก/),
+      iBoss = f(/ชื่อหัวหน้างาน/);
   var vals = sheet.getRange(2, 1, Math.max(sheet.getLastRow() - 1, 1), sheet.getLastColumn()).getValues(), out = [];
+  // ใครถูกระบุเป็น "ชื่อหัวหน้างาน" ของพนักงานคนอื่น = หัวหน้างาน (ได้สิทธิ์จัดการพื้นที่ของศูนย์ตัวเอง)
+  var bossTxt = iBoss >= 0 ? vals.map(function (r) { return clean_(r[iBoss]).replace(/\s/g, ''); }).filter(String).join('|') : '';
   vals.forEach(function (r) {
     var code = clean_(r[iCode]); if (!/^\d+$/.test(code)) return;
     out.push({ code: code, name: clean_(r[iName]), nick: iNick >= 0 ? clean_(r[iNick]) : '', w: clean_(r[iW]).toUpperCase(),
       dept: iDept >= 0 ? clean_(r[iDept]) : '', email: norm_(r[iEmail]), status: iStatus >= 0 ? norm_(r[iStatus]) : '',
       role: iRole >= 0 ? (parseInt(r[iRole], 10) || 1) : 1, birth: iBirth >= 0 ? birthKeys_(r[iBirth]) : [],
       active: !(iQuit >= 0 && clean_(r[iQuit])) });
+    var me = out[out.length - 1], key = me.name.replace(/\s/g, '');
+    me.sup = !!(key && bossTxt.indexOf(key) >= 0);
   });
-  try { var s = JSON.stringify(out); if (s.length < 95000) cache.put('zreg_v1', s, 600); } catch (e) {}
+  try { var s = JSON.stringify(out); if (s.length < 95000) cache.put('zreg_v2', s, 600); } catch (e) {}
   return out;
 }
 // วันเกิด → ชุดตัวเลข 8 หลัก ddmmyyyy ทั้ง พ.ศ. และ ค.ศ. (พนักงานพิมพ์แบบไหนก็ได้)
@@ -88,7 +101,14 @@ function birthKeys_(v) {
 }
 function people_() {
   return getRegistry_().filter(function (e) { return e.active && CENTER_OF[e.w] && e.name; })
-    .map(function (e) { return { name: e.name, site: e.w }; });
+    .map(function (e) { return { name: e.name, site: e.w, code: e.code }; });
+}
+function findEmp_(code) { var e = null; getRegistry_().forEach(function (x) { if (x.code === String(code)) e = x; }); return e; }
+function grants_() {
+  var c = CacheService.getScriptCache(), hit = c.get('zgr');
+  if (hit) { try { return JSON.parse(hit); } catch (e) {} }
+  var g = {}; rows_(T.GRANTS).forEach(function (r) { if (r[0]) g[String(r[0])] = String(r[2]); });
+  c.put('zgr', JSON.stringify(g), 120); return g;
 }
 
 // ───────────────────────── token (ลงลายเซ็น HMAC ไม่ต้องเก็บ session) ─────────────────────────
@@ -114,13 +134,18 @@ function verify_(tok) {
 function need_(tok, minRole) {
   var u = verify_(tok);
   if (!u) throw { auth: true, message: 'กรุณาเข้าสู่ระบบใหม่' };
+  var e = findEmp_(u.c);                       // สิทธิ์คิดใหม่ทุกครั้ง: ให้/ถอนสิทธิ์แล้วมีผลทันที ไม่ต้องล็อกอินใหม่
+  if (e && !e.active) throw { auth: true, message: 'บัญชีพ้นสภาพแล้ว' };
+  if (e) { u.r = roleOf_(e); u.w = CENTER_OF[e.w] || 'ALL'; u.s = CENTER_OF[e.w] ? e.w : ''; }
   var rank = { emp: 1, mgr: 2, hr: 3 };
   if (minRole && rank[u.r] < rank[minRole]) throw new Error('สิทธิ์ไม่พอสำหรับคำสั่งนี้');
   return u;
 }
+// hr = เห็น/จัดการทุกศูนย์ · mgr = หัวหน้างาน/ผู้จัดการ จัดการพื้นที่ของศูนย์ตัวเอง · emp = พนักงาน
 function roleOf_(e) {
-  if (e.role >= 5 || /บุคคล|HR|บริหาร/i.test(e.dept)) return 'hr';
-  if (e.role >= 4) return CENTER_OF[e.w] ? 'mgr' : 'hr';
+  var g = grants_()[e.code] || '';
+  if (g === 'hr' || e.role >= 5 || /บุคคล|HR|บริหาร/i.test(e.dept)) return 'hr';
+  if (g === 'mgr' || e.role >= 4 || e.sup) return CENTER_OF[e.w] ? 'mgr' : 'hr';
   return 'emp';
 }
 function userOut_(e, r, days) {
@@ -136,7 +161,7 @@ function empLogin_(b) {
   if (!e.birth.length) throw new Error('ไม่มีวันเกิดในทะเบียน — ใช้ปุ่ม Google หรือติดต่อฝ่ายบุคคล');
   if (e.birth.indexOf(birth) < 0) { c.put(k, String(fails + 1), 900); throw new Error('วันเกิดไม่ตรงกับทะเบียน (พิมพ์ วว ดด ปปปป พ.ศ. 8 หลัก)'); }
   c.remove(k);
-  return userOut_(e, 'emp', EMP_TTL_DAYS);
+  return userOut_(e, roleOf_(e), EMP_TTL_DAYS);
 }
 function googleLogin_(b) {
   var res = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(b.credential), { muteHttpExceptions: true });
@@ -172,7 +197,7 @@ function savePhoto_(dataUrl, name) {
 // ───────────────────────── อ่านข้อมูลทั้งหมด (boot) ─────────────────────────
 function boot_(u) {
   var from = daysAgo_(35), fromA = daysAgo_(70);
-  var sites = rows_(T.SITES).map(function (r) { return { id: String(r[0]), w: String(r[1]), name: String(r[2]), areas: pj_(r[3], []) }; });
+  var sites = rows_(T.SITES).map(function (r) { return { id: String(r[0]), w: String(r[1]), name: String(r[2]), areas: pj_(r[3], []), codes: pj_(r[4], {}) }; });
   var zones = rows_(T.ZONES).filter(function (r) { return r[0] && r[12] !== false && String(r[12]) !== 'FALSE'; }).map(function (r) {
     return { id: String(r[0]), site: String(r[1]), area: String(r[2]), icon: String(r[3]), name: String(r[4]), items: pj_(r[5], []),
       owner: String(r[6]), backup: String(r[7]), due: clean_(r[8]) || '10.00', freq: String(r[9] || 'ทุกวัน'), rota: pj_(r[10], null), before: r[11] === true || String(r[11]) === 'TRUE' };
@@ -188,7 +213,10 @@ function boot_(u) {
     return { id: String(r[0]), zoneId: String(r[1]), date: dstr_(r[2]), time: +r[3], by: String(r[4]), text: String(r[5]), photo: String(r[6]),
       status: String(r[7]), fixNote: String(r[8]), fixDate: dstr_(r[9]) };
   });
-  return { ok: true, today: today_(), user: u, sites: sites, zones: zones, people: people_(), checks: checks, audits: audits, issues: issues };
+  var grants = u.r === 'emp' ? [] : rows_(T.GRANTS).filter(function (r) { return r[0]; }).map(function (r) {
+    var e = findEmp_(r[0]); return { code: String(r[0]), name: String(r[1]), r: String(r[2]), site: e ? e.w : '', by: String(r[3]) };
+  });
+  return { ok: true, today: today_(), user: u, sites: sites, zones: zones, people: people_(), checks: checks, audits: audits, issues: issues, grants: grants };
 }
 
 // ───────────────────────── เขียนข้อมูล ─────────────────────────
@@ -228,8 +256,12 @@ function act_(a, b, u) {
       var zr = z.id ? findRow_(T.ZONES, z.id) : -1;
       if (zr > 0) { row[0] = z.id; sh_(T.ZONES).getRange(zr, 1, 1, row.length).setValues([row]); }
       else {
-        var max = 0; rows_(T.ZONES).forEach(function (x) { var n = parseInt(String(x[0]).slice(1), 10); if (n > max) max = n; });
-        row[0] = 'Z' + ('00' + (max + 1)).slice(-Math.max(2, String(max + 1).length)); sh_(T.ZONES).appendRow(row);
+        var all = rows_(T.ZONES).map(function (x) { return String(x[0]).toUpperCase(); }), code = clean_(z.code).toUpperCase();
+        if (code) {
+          if (!/^[A-Z0-9][A-Z0-9-]{1,19}$/.test(code)) throw new Error('รหัสโซนใช้ได้เฉพาะ A-Z 0-9 และ - (2–20 ตัว)');
+          if (all.indexOf(code) >= 0) throw new Error('รหัสโซน ' + code + ' มีอยู่แล้ว');
+        } else code = nextZoneCode_(z.site, z.area, all);
+        row[0] = code; sh_(T.ZONES).appendRow(row);
       }
       sh_(T.ZONES).getRange(zr > 0 ? zr : sh_(T.ZONES).getLastRow(), 9).setNumberFormat('@').setValue(clean_(z.due) || '10.00');
       return { id: row[0] };
@@ -256,10 +288,39 @@ function act_(a, b, u) {
     case 'setAreas': {
       need_(b.t, 'mgr'); canCenter_(u, siteCenter_(b.site));
       var sr = findRow_(T.SITES, b.site); if (sr < 0) throw new Error('ไม่พบสถานที่');
-      sh_(T.SITES).getRange(sr, 4).setValue(JSON.stringify(b.areas || [])); return {};
+      sh_(T.SITES).getRange(sr, 4).setValue(JSON.stringify(b.areas || []));
+      if (b.codes) sh_(T.SITES).getRange(sr, 5).setValue(JSON.stringify(b.codes));
+      return {};
+    }
+    case 'grant': {
+      need_(b.t, 'mgr');
+      var ge = findEmp_(b.code); if (!ge || !ge.active) throw new Error('ไม่พบพนักงานรหัส ' + b.code);
+      var gr = b.r === 'hr' ? 'hr' : 'mgr';
+      if (gr === 'hr' && u.r !== 'hr') throw new Error('ให้สิทธิ์ HR ได้เฉพาะ HR');
+      canCenter_(u, CENTER_OF[ge.w] || 'ALL');
+      var gRow = findRow_(T.GRANTS, ge.code), vals2 = [ge.code, ge.name, gr, u.n, now];
+      if (gRow > 0) sh_(T.GRANTS).getRange(gRow, 1, 1, 5).setValues([vals2]); else sh_(T.GRANTS).appendRow(vals2);
+      CacheService.getScriptCache().remove('zgr'); return {};
+    }
+    case 'ungrant': {
+      need_(b.t, 'mgr');
+      var ue = findEmp_(b.code); if (ue) canCenter_(u, CENTER_OF[ue.w] || 'ALL');
+      var uRow = findRow_(T.GRANTS, b.code); if (uRow > 0) sh_(T.GRANTS).deleteRow(uRow);
+      CacheService.getScriptCache().remove('zgr'); return {};
     }
   }
   throw new Error('ไม่รู้จักคำสั่ง ' + a);
+}
+
+function areaCode_(site, area) {
+  var ac = '', idx = -1;
+  rows_(T.SITES).forEach(function (x) { if (String(x[0]) === String(site)) { ac = (pj_(x[4], {}) || {})[area] || ''; idx = pj_(x[3], []).indexOf(area); } });
+  return (ac || AREA_CODE[area] || ('A' + (idx + 1 || 9))).toUpperCase();
+}
+function nextZoneCode_(site, area, all) {
+  var pre = String(site).toUpperCase() + '-' + areaCode_(site, area), max = 0;
+  all.forEach(function (id) { if (id.indexOf(pre) === 0) { var n = parseInt(id.slice(pre.length), 10); if (n > max) max = n; } });
+  return pre + ('0' + (max + 1)).slice(-2);
 }
 
 // ───────────────────────── Web App ─────────────────────────
@@ -268,6 +329,7 @@ function doGet(e) {
   try {
     if (!e) return json_({ ok: true, setup: setup() });   // กด Run doGet ในตัวแก้ไข = ติดตั้ง/ขอสิทธิ์
     if (p.action === 'boot') return json_(boot_(need_(p.t)));
+    if (p.action === 'nextCode') { var nu = need_(p.t, 'mgr'); return json_({ ok: true, code: nextZoneCode_(p.site, p.area, rows_(T.ZONES).map(function (x) { return String(x[0]).toUpperCase(); })) }); }
     return json_({ ok: true, app: 'Rattana Zone', installed: !!props_().getProperty('SHEET_ID') });
   } catch (err) { return json_({ ok: false, auth: !!err.auth, error: err.message || String(err) }); }
 }
