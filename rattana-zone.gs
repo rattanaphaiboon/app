@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '1.2';
+var VERSION = '1.4';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -19,7 +19,7 @@ var EMP_TTL_DAYS = 90, GOOGLE_TTL_DAYS = 30;
 var T = {
   SITES:  { name: 'สถานที่', head: ['id', 'ศูนย์', 'ชื่อสถานที่', 'พื้นที่ (JSON)', 'รหัสพื้นที่ (JSON)'] },
   GRANTS: { name: 'สิทธิ์ผู้ดูแล', head: ['รหัสพนักงาน', 'ชื่อ', 'สิทธิ์ (mgr=หัวหน้างาน, hr=HR)', 'ให้โดย', 'เวลา'] },
-  ZONES:  { name: 'โซน', head: ['id', 'สถานที่', 'พื้นที่', 'ไอคอน', 'ชื่อโซน', 'รายการเช็ก (JSON)', 'เจ้าของโซน', 'คนสำรอง', 'ตรวจก่อน', 'รอบตรวจ', 'เวร (JSON)', 'รูปก่อน/หลัง', 'ใช้งาน', 'แก้ไขล่าสุด', 'แก้ไขโดย'] },
+  ZONES:  { name: 'โซน', head: ['id', 'สถานที่', 'พื้นที่', 'ไอคอน', 'ชื่อโซน', 'รายการเช็ก (JSON)', 'เจ้าของโซน', 'คนสำรอง', 'ตรวจก่อน', 'รอบตรวจ', 'เวร (JSON)', 'รูปก่อน/หลัง', 'ใช้งาน', 'แก้ไขล่าสุด', 'แก้ไขโดย', 'รูปโซน'] },
   CHECKS: { name: 'ผลตรวจ', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'รหัสผู้ตรวจ', 'ผู้ตรวจ', 'ผล (JSON)', 'รูปหลังทำ', 'รูปก่อนทำ', 'หมายเหตุ', 'สแกนหน้างาน', 'ทำแทน', 'ทำแทนใคร', 'เวลาบันทึก'] },
   AUDITS: { name: 'คะแนน5ส', head: ['id', 'โซน', 'วันที่', 'ผู้ตรวจ', 'คะแนน (JSON)', 'คำแนะนำ', 'รูป', 'เฉลี่ย'] },
   ISSUES: { name: 'ปัญหา', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'ผู้แจ้ง', 'ปัญหา', 'รูป', 'สถานะ', 'วิธีแก้', 'วันที่แก้', 'ผู้ปิดงาน'] }
@@ -101,7 +101,40 @@ function birthKeys_(v) {
 }
 function people_() {
   return getRegistry_().filter(function (e) { return e.active && CENTER_OF[e.w] && e.name; })
-    .map(function (e) { return { name: e.name, site: e.w, code: e.code }; });
+    .map(function (e) { var ph = photos_()[e.code] || ''; return { name: e.name, site: e.w, code: e.code, photo: ph }; });
+}
+// รูปพนักงาน: คอลัมน์ "รูป" ใน Sheet1 ก่อน → รูปที่ส่งตอนลงทะเบียน LINE (Drive) → รูปโปรไฟล์ LINE
+// คืนค่า "d:<Drive id>" หรือ "u:<URL>" ตามรหัสพนักงาน
+function driveId_(u) { var m = /[?&]id=([\w-]{20,})/.exec(u || '') || /\/d\/([\w-]{20,})/.exec(u || ''); return m ? m[1] : ''; }
+function photos_() {
+  if (photos_.memo) return photos_.memo;
+  var c = CacheService.getScriptCache(), hit = c.get('zph_v1');
+  if (hit) { try { return (photos_.memo = JSON.parse(hit)); } catch (e) {} }
+  var out = {}, ss = SpreadsheetApp.openById(REG_SHEET_ID);
+  try {
+    var lu = ss.getSheetByName('LINE_USERS');
+    if (lu && lu.getLastRow() > 1) {
+      var h = lu.getRange(1, 1, 1, lu.getLastColumn()).getValues()[0].map(clean_);
+      var iC = h.indexOf('รหัสพนักงาน'), iD = h.indexOf('รูปที่ส่ง (Drive)'), iL = h.indexOf('รูปโปรไฟล์ LINE');
+      lu.getRange(2, 1, lu.getLastRow() - 1, lu.getLastColumn()).getValues().forEach(function (r) {
+        var code = clean_(r[iC]); if (!code) return;
+        var d = iD >= 0 ? driveId_(String(r[iD])) : '', l = iL >= 0 ? clean_(r[iL]) : '';
+        if (d) out[code] = 'd:' + d; else if (/^https:\/\//.test(l)) out[code] = 'u:' + l;
+      });
+    }
+  } catch (e) {}
+  try {
+    var s1 = null; ss.getSheets().forEach(function (s) { if (!s1) { var hh = s.getRange(1, 1, 1, s.getLastColumn()).getValues()[0].map(clean_); if (hh.indexOf('รหัสพนักงาน') >= 0 && hh.indexOf('E-mail') >= 0) s1 = s; } });
+    if (s1) {
+      var h1 = s1.getRange(1, 1, 1, s1.getLastColumn()).getValues()[0].map(clean_), jC = h1.indexOf('รหัสพนักงาน'), jP = h1.indexOf('รูป');
+      if (jP < 0) h1.forEach(function (x, k) { if (jP < 0 && /^รูปพนักงาน/.test(x)) jP = k; });
+      if (jP >= 0) s1.getRange(2, 1, s1.getLastRow() - 1, s1.getLastColumn()).getValues().forEach(function (r) {
+        var code = clean_(r[jC]), d = driveId_(String(r[jP])); if (code && d) out[code] = 'd:' + d;
+      });
+    }
+  } catch (e) {}
+  try { var js = JSON.stringify(out); if (js.length < 95000) c.put('zph_v1', js, 1800); } catch (e) {}
+  return (photos_.memo = out);
 }
 function findEmp_(code) { var e = null; getRegistry_().forEach(function (x) { if (x.code === String(code)) e = x; }); return e; }
 function grants_() {
@@ -200,7 +233,7 @@ function boot_(u) {
   var sites = rows_(T.SITES).map(function (r) { return { id: String(r[0]), w: String(r[1]), name: String(r[2]), areas: pj_(r[3], []), codes: pj_(r[4], {}) }; });
   var zones = rows_(T.ZONES).filter(function (r) { return r[0] && r[12] !== false && String(r[12]) !== 'FALSE'; }).map(function (r) {
     return { id: String(r[0]), site: String(r[1]), area: String(r[2]), icon: String(r[3]), name: String(r[4]), items: pj_(r[5], []),
-      owner: String(r[6]), backup: String(r[7]), due: clean_(r[8]) || '10.00', freq: String(r[9] || 'ทุกวัน'), rota: pj_(r[10], null), before: r[11] === true || String(r[11]) === 'TRUE' };
+      owner: String(r[6]), backup: String(r[7]), due: clean_(r[8]) || '10.00', freq: String(r[9] || 'ทุกวัน'), rota: pj_(r[10], null), before: r[11] === true || String(r[11]) === 'TRUE', photo: String(r[15] || '') };
   });
   var checks = rows_(T.CHECKS).filter(function (r) { return dstr_(r[2]) >= from; }).map(function (r) {
     return { id: String(r[0]), zoneId: String(r[1]), date: dstr_(r[2]), time: +r[3], by: String(r[5]), res: pj_(r[6], []), photo: String(r[7]), before: String(r[8]),
@@ -253,7 +286,8 @@ function act_(a, b, u) {
       var z = b.zone || {}; if (z.id) need_(b.t, 'mgr'); canCenter_(u, siteCenter_(z.site));
       if (!clean_(z.name)) throw new Error('ไม่มีชื่อโซน');
       var row = [z.id, z.site, clean_(z.area), clean_(z.icon) || '🧹', clean_(z.name), JSON.stringify(z.items || []), clean_(z.owner), clean_(z.backup),
-                 clean_(z.due) || '10.00', clean_(z.freq) || 'ทุกวัน', z.rota ? JSON.stringify(z.rota) : '', !!z.before, true, now, u.n];
+                 clean_(z.due) || '10.00', clean_(z.freq) || 'ทุกวัน', z.rota ? JSON.stringify(z.rota) : '', !!z.before, true, now, u.n,
+                 z.photoNew ? savePhoto_(z.photoNew, 'zone_' + (z.id || z.code || 'new') + '_' + Date.now()) : (/^https:\/\//.test(String(z.photo || '')) ? z.photo : '')];
       var zr = z.id ? findRow_(T.ZONES, z.id) : -1;
       if (zr > 0) { row[0] = z.id; sh_(T.ZONES).getRange(zr, 1, 1, row.length).setValues([row]); }
       else {
