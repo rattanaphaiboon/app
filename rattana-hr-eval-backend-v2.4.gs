@@ -1,7 +1,10 @@
 /* ========================================================================
    Rattana HR Eval — Backend (Apps Script Web App)
-   v2.3 — 2026-11-24
+   v2.4 — 2026-11-26
    ========================================================================
+   v2.4 = ฝ่าย HR (แผนก "ทรัพยากรบุคคล") เห็นทุกสาขาอัตโนมัติ — isHrDept_ ใน
+          computeScope_ (ฝนทิพย์/เจนจิรา Role 5-6 ไม่ถึง 7 เลยไม่เห็นข้อมูล) ·
+          คุมที่แผนกในชีท Users ไม่ต้องตั้งรายคน
    v2.3 = HR เห็นทุกสาขา: เพิ่ม patcha.ruk ใน SERVER_HR_EMAILS (Role 5 ไม่เข้า
           เงื่อนไข role≥7 อัตโนมัติ · HR ต้องมาร์คตรงๆ) — ภายหลังเพิ่ม HR คนอื่นได้
           ด้วยคอลัมน์ EvalAccess=all ในชีท Users (ไม่ต้อง redeploy)
@@ -29,7 +32,7 @@
    ======================================================================== */
 
 const CFG = {
-  VERSION:        '2.3',
+  VERSION:        '2.4',
   EVAL_SHEET_ID:  '1LCruX-0Du0cndCFrCbUdsYPxxFXuxJx34TJ44kFshe0',
   USERS_SHEET_ID: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   EVAL_TAB:       'V.1',
@@ -210,10 +213,17 @@ function loadProfile_(email) {
 /* Priority เดียวกับแอพ: SERVER_HR_EMAILS → EvalAccess → role (≥7 all, 4-6 warehouse, <4 self) */
 function computeScope_(p) {
   if (SERVER_HR_EMAILS.map(normEmail_).indexOf(p.email) >= 0) return 'all';
+  if (isHrDept_(p.dept)) return 'all';          // v2.4: ฝ่าย HR (ทรัพยากรบุคคล) เห็นทุกสาขา
   if (p.evalAccess) return p.evalAccess;
   if (p.role >= 7) return 'all';
   if (p.role >= 4) return 'warehouse';
   return 'self';
+}
+
+// v2.4: แผนก HR → เห็นข้อมูลทุกสาขา (คุมที่แผนกในชีท Users ไม่ต้องตั้งรายคน)
+function isHrDept_(dept) {
+  const d = normKey_(dept);
+  return d.indexOf('ทรัพยากรบุคคล') >= 0 || d === 'hr' || d.indexOf('human resource') >= 0;
 }
 
 function normEvalAccess_(v) {
