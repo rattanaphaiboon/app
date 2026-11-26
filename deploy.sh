@@ -111,6 +111,8 @@ APPS=(
   coffee-icon-512.png
   rattana-coffee-poster.html
   rattana-truck-advance.html
+  rattana-zone.html
+  rattana-zone.gs
 )
 
 DRY=0
