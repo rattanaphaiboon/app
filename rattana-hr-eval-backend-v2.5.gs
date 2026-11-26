@@ -1,7 +1,9 @@
 /* ========================================================================
    Rattana HR Eval — Backend (Apps Script Web App)
-   v2.4 — 2026-11-26
+   v2.5 — 2026-11-26
    ========================================================================
+   v2.5 = เพิ่มแผนก "บริหาร" (ผู้บริหาร) เข้ากฎเห็นทุกตำแหน่ง — isFullAccessDept_
+          (เดิม isHrDept_ ครอบแค่ HR) · HR + ผู้บริหาร เห็นทุกตำแหน่ง ไม่ขึ้นกับ role
    v2.4 = ฝ่าย HR (แผนก "ทรัพยากรบุคคล") เห็นทุกสาขาอัตโนมัติ — isHrDept_ ใน
           computeScope_ (ฝนทิพย์/เจนจิรา Role 5-6 ไม่ถึง 7 เลยไม่เห็นข้อมูล) ·
           คุมที่แผนกในชีท Users ไม่ต้องตั้งรายคน
@@ -32,7 +34,7 @@
    ======================================================================== */
 
 const CFG = {
-  VERSION:        '2.4',
+  VERSION:        '2.5',
   EVAL_SHEET_ID:  '1LCruX-0Du0cndCFrCbUdsYPxxFXuxJx34TJ44kFshe0',
   USERS_SHEET_ID: '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ',
   EVAL_TAB:       'V.1',
@@ -213,17 +215,18 @@ function loadProfile_(email) {
 /* Priority เดียวกับแอพ: SERVER_HR_EMAILS → EvalAccess → role (≥7 all, 4-6 warehouse, <4 self) */
 function computeScope_(p) {
   if (SERVER_HR_EMAILS.map(normEmail_).indexOf(p.email) >= 0) return 'all';
-  if (isHrDept_(p.dept)) return 'all';          // v2.4: ฝ่าย HR (ทรัพยากรบุคคล) เห็นทุกสาขา
+  if (isFullAccessDept_(p.dept)) return 'all';  // v2.5: HR + ผู้บริหาร เห็นทุกตำแหน่ง
   if (p.evalAccess) return p.evalAccess;
   if (p.role >= 7) return 'all';
   if (p.role >= 4) return 'warehouse';
   return 'self';
 }
 
-// v2.4: แผนก HR → เห็นข้อมูลทุกสาขา (คุมที่แผนกในชีท Users ไม่ต้องตั้งรายคน)
-function isHrDept_(dept) {
+// v2.5: แผนก HR + ผู้บริหาร → เห็นทุกตำแหน่ง (คุมที่แผนกในชีท Users ไม่ต้องตั้งรายคน)
+function isFullAccessDept_(dept) {
   const d = normKey_(dept);
-  return d.indexOf('ทรัพยากรบุคคล') >= 0 || d === 'hr' || d.indexOf('human resource') >= 0;
+  return d.indexOf('ทรัพยากรบุคคล') >= 0 || d === 'hr' || d.indexOf('human resource') >= 0  // HR
+      || d === 'บริหาร' || d.indexOf('ผู้บริหาร') >= 0;                                        // ผู้บริหาร
 }
 
 function normEvalAccess_(v) {
