@@ -242,9 +242,13 @@
           render: (rows) => rows.map((g) => genRow(g)).join(''),
         });
         const kpi = (icon, tone, label, n, sub) => `<div class="rt-glass rt-kpi"><div class="rt-kpi-head"><span class="rt-tile rt-tile-sm rt-tile-${tone}">${ico(icon, 16)}</span>${label}</div><div class="rt-kpi-value"><b data-rt-count="${n}"></b> <small class="rt-subtle">ไฟล์</small></div><div class="rt-kpi-trend"><small>${sub}</small></div></div>`;
+        if (s.quota) S.quota = s.quota;
+        const q = s.quota;
+        const qTone = !q ? 'green' : q.left === 0 ? 'red' : q.left <= 5 ? 'amber' : 'green';
         return kpi('mic', 'navy', 'ไฟล์เสียงที่สร้างแล้ว', s.total, 'ทั้งหมดในระบบ')
           + kpi('library', 'gold', 'ในคลังเสียง', s.saved, 'ไฟล์ที่บันทึกไว้ใช้ซ้ำ')
-          + kpi('clock', 'blue', 'สร้างเดือนนี้', s.thisMonth, UI.formatDate(new Date(), 'short').replace(/^\d+\s/, ''));
+          + kpi('clock', 'blue', 'สร้างเดือนนี้', s.thisMonth, UI.formatDate(new Date(), 'short').replace(/^\d+\s/, ''))
+          + (q ? `<div class="rt-glass rt-kpi"><div class="rt-kpi-head"><span class="rt-tile rt-tile-sm rt-tile-${qTone}">${ico('voices', 16)}</span>สร้างเสียงฟรีได้อีกวันนี้</div><div class="rt-kpi-value"><b data-rt-count="${q.left}"></b> <small class="rt-subtle">/ ${q.total} ไฟล์</small></div><div class="rt-kpi-trend"><small>รีเซ็ต ${esc(UI.formatTime(new Date(q.resetsAt)))} · โดยประมาณ</small></div></div>` : '');
       },
       error: { title: 'โหลดข้อมูลหน้าหลักไม่สำเร็จ' },
     });
@@ -317,6 +321,25 @@
       if (await UI.confirm({ variant: 'reject', title: 'ล้างข้อมูลที่กรอก?', confirmText: 'ล้างข้อมูล', message: 'ข้อมูลโปรโมชั่นและสคริปต์ในหน้านี้จะถูกล้าง' })) resetCreate();
     });
     updateSteps();
+    refreshQuota();
+  }
+
+  // Free voice quota (estimate from our own history; Google does not report what is left).
+  async function refreshQuota(q) {
+    try { S.quota = q || await api('/api/quota'); } catch { /* keep last */ }
+    renderQuota();
+  }
+  function renderQuota() {
+    const q = S.quota, box = $('#quotaNote');
+    if (!q) { box.hidden = true; return; }
+    const reset = UI.formatTime(new Date(q.resetsAt));
+    const cls = q.left === 0 ? 'rt-badge-danger' : q.left <= 5 ? 'rt-badge-warning' : 'rt-badge-success';
+    const icon = q.left <= 5 ? 'alert' : 'check';
+    const msg = q.left === 0
+      ? `วันนี้น่าจะครบโควตาเสียงฟรีแล้ว (${q.total} ไฟล์) · สร้างได้อีกหลัง ${reset} · ระหว่างนี้ใช้ไฟล์ในคลังเสียงได้`
+      : `สร้างเสียงฟรีได้อีกประมาณ ${q.left} จาก ${q.total} ไฟล์วันนี้ · รีเซ็ต ${reset}`;
+    box.hidden = false;
+    box.innerHTML = `<span class="rt-badge ${cls}">${ico(icon, 13)}${esc(msg)}</span>`;
   }
 
   function resetCreate() {
@@ -480,11 +503,13 @@
       S.lastGen = r.generation;
       localStorage.setItem(LS.voice, voice.id);
       renderResult(r.generation, r.warning);
+      if (r.quota) refreshQuota(r.quota);
       UI.toast('สร้างเสียงสำเร็จ กดเล่นเพื่อฟังตัวอย่าง', { type: 'success' });
       UI.haptic?.('success');
     } catch (e) {
       $('#resultBox').innerHTML = '';
       UI.state($('#resultBox'), 'error', { title: 'สร้างเสียงไม่สำเร็จ', message: e.message, retry: () => speak(btn), compact: true });
+      refreshQuota();
     } finally {
       clearInterval(tick);
       UI.setLoading(btn, false);
