@@ -103,7 +103,7 @@ function birthKeys_(v) {
 }
 function people_() {
   return getRegistry_().filter(function (e) { return e.active && CENTER_OF[e.w] && e.name; })
-    .map(function (e) { var ph = photos_()[e.code] || ''; return { name: e.name, site: e.w, code: e.code, photo: ph }; });
+    .map(function (e) { var ph = photos_()[e.code] || ''; return { name: e.name, nick: e.nick, site: e.w, code: e.code, photo: ph }; });
 }
 // รูปพนักงาน: คอลัมน์ "รูป" ใน Sheet1 ก่อน → รูปที่ส่งตอนลงทะเบียน LINE (Drive) → รูปโปรไฟล์ LINE
 // คืนค่า "d:<Drive id>" หรือ "u:<URL>" ตามรหัสพนักงาน
