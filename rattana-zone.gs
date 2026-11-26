@@ -9,11 +9,12 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '1.4';
+var VERSION = '1.5';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
-var CENTER_OF = { W1: 'W1', W2: 'W2', W3: 'W3', W4: 'W4', C4: 'W4' };   // สถานที่ → ศูนย์
+var CENTER_OF = { W1: 'W1', W2: 'W2', W3: 'W3', W4: 'W4', C4: 'W4' };
+var SITE_ALIAS = { HQ: 'W1' };   // สำนักงานใหญ่ (HQ) นับรวมกับศูนย์สมุทรสงคราม   // สถานที่ → ศูนย์
 var EMP_TTL_DAYS = 90, GOOGLE_TTL_DAYS = 30;
 
 var T = {
@@ -58,7 +59,7 @@ function dstr_(v) { return v instanceof Date ? Utilities.formatDate(v, 'Asia/Ban
 
 // ───────────────────────── ทะเบียนพนักงาน ─────────────────────────
 function getRegistry_() {
-  var cache = CacheService.getScriptCache(), hit = cache.get('zreg_v2');
+  var cache = CacheService.getScriptCache(), hit = cache.get('zreg_v3');
   if (hit) { try { return JSON.parse(hit); } catch (e) {} }
   var sheets = SpreadsheetApp.openById(REG_SHEET_ID).getSheets(), sheet = null, H = {};
   for (var i = 0; i < sheets.length; i++) {
@@ -75,14 +76,15 @@ function getRegistry_() {
   var bossTxt = iBoss >= 0 ? vals.map(function (r) { return clean_(r[iBoss]).replace(/\s/g, ''); }).filter(String).join('|') : '';
   vals.forEach(function (r) {
     var code = clean_(r[iCode]); if (!/^\d+$/.test(code)) return;
-    out.push({ code: code, name: clean_(r[iName]), nick: iNick >= 0 ? clean_(r[iNick]) : '', w: clean_(r[iW]).toUpperCase(),
+    var w0 = clean_(r[iW]).toUpperCase();
+    out.push({ code: code, name: clean_(r[iName]), nick: iNick >= 0 ? clean_(r[iNick]) : '', w: SITE_ALIAS[w0] || w0,
       dept: iDept >= 0 ? clean_(r[iDept]) : '', email: norm_(r[iEmail]), status: iStatus >= 0 ? norm_(r[iStatus]) : '',
       role: iRole >= 0 ? (parseInt(r[iRole], 10) || 1) : 1, birth: iBirth >= 0 ? birthKeys_(r[iBirth]) : [],
       active: !(iQuit >= 0 && clean_(r[iQuit])) });
     var me = out[out.length - 1], key = me.name.replace(/\s/g, '');
     me.sup = !!(key && bossTxt.indexOf(key) >= 0);
   });
-  try { var s = JSON.stringify(out); if (s.length < 95000) cache.put('zreg_v2', s, 600); } catch (e) {}
+  try { var s = JSON.stringify(out); if (s.length < 95000) cache.put('zreg_v3', s, 600); } catch (e) {}
   return out;
 }
 // วันเกิด → ชุดตัวเลข 8 หลัก ddmmyyyy ทั้ง พ.ศ. และ ค.ศ. (พนักงานพิมพ์แบบไหนก็ได้)
