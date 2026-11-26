@@ -1,4 +1,4 @@
-/* Rattana CI v1.10.1 — behaviour helpers (no dependencies). window.RattanaUI */
+/* Rattana CI v1.10.2 — behaviour helpers (no dependencies). window.RattanaUI */
 (function () {
   'use strict';
   var doc = document, root = doc.documentElement, win = window;
@@ -70,6 +70,10 @@
   var ANDROID = /Android/i.test(ua);
   var platform = { os: IOS ? 'ios' : ANDROID ? 'android' : 'desktop', standalone: mq('(display-mode: standalone)') || navigator.standalone === true, touch: mq('(pointer: coarse)') };
   root.classList.add('rt-js');
+  /* the theme a person picked in THIS app wins over the page's default (data-theme="light" in the starter),
+     applied right away so a dark-mode user never sees a white flash. Kept per app: every app shares one origin */
+  var themeKey = KEY_THEME + ':' + location.pathname;
+  (function () { var t = null; try { t = localStorage.getItem(themeKey); } catch (e) {} if (t === 'dark' || t === 'light') root.setAttribute('data-theme', t); })();
   root.setAttribute('data-platform', platform.os);
   root.setAttribute('data-standalone', platform.standalone ? 'true' : 'false');
   function setInput() { platform.touch = mq('(pointer: coarse)'); root.setAttribute('data-input', platform.touch ? 'touch' : 'mouse'); }
@@ -141,16 +145,23 @@
     return w;
   }
 
+  /* '2026-11-26' means that calendar day here (new Date() would read it as UTC midnight); bad input → null */
+  function toDate(d) {
+    if (d == null || d === '') return null;
+    if (typeof d === 'string') { var m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/); if (m) d = new Date(+m[1], +m[2] - 1, +m[3]); }
+    d = d instanceof Date ? d : new Date(d);
+    return isNaN(d.getTime()) ? null : d;
+  }
   var UI = {
-    version: '1.10.1',
+    version: '1.10.2',
     icons: ICON,
     platform: platform,
 
     /* ---------- Theme ---------- */
     getTheme: function () { return root.getAttribute('data-theme') || 'light'; },
-    setTheme: function (t) {
+    setTheme: function (t, quiet) {  /* quiet: repaint only, don't remember it as the person's choice */
       t = t === 'dark' ? 'dark' : 'light';
-      root.setAttribute('data-theme', t); store(KEY_THEME, t);
+      root.setAttribute('data-theme', t); if (!quiet) { store(themeKey, t); store(KEY_THEME, t); }  /* KEY_THEME: last choice in any app (E-Book reads it) */
       var meta = doc.querySelector('meta[name="theme-color"]:not([media])');
       if (meta) meta.setAttribute('content', t === 'dark' ? '#06172b' : '#eef3f9');
       doc.querySelectorAll('[data-rt-theme-toggle]').forEach(function (b) {
@@ -188,21 +199,21 @@
       doc.querySelectorAll('[data-rt-lang]').forEach(function (b) { b.setAttribute('aria-pressed', b.getAttribute('data-rt-lang') === l ? 'true' : 'false'); });
       doc.querySelectorAll('[data-rt-date]').forEach(function (n) { n.textContent = UI.formatDate(new Date(), n.getAttribute('data-rt-date') || 'long'); });
       doc.querySelectorAll('.rt-seg').forEach(function (s) { if (s._rtPick) s._rtPick(); });
-      UI.setTheme(UI.getTheme());
+      UI.setTheme(UI.getTheme(), true);
       root.dispatchEvent(new CustomEvent('rt:lang', { detail: l }));
       return l;
     },
 
     /* ---------- Formatting ---------- */
     formatDate: function (d, style, lang) {
-      d = d instanceof Date ? d : new Date(d); lang = lang || UI.getLang();
+      d = toDate(d); if (!d) return ''; lang = lang || UI.getLang();
       var day = d.getDate(), m = d.getMonth(), y = d.getFullYear();
       if (lang === 'en') return style === 'short' ? day + ' ' + EN_MONTHS[m] + ' ' + y : EN_DAYS[d.getDay()] + ', ' + day + ' ' + EN_MONTHS[m] + ' ' + y;
       var be = y + 543;
       return style === 'short' ? day + ' ' + TH_MONTHS_SHORT[m] + ' ' + be : TH_DAYS[d.getDay()] + ' ' + day + ' ' + TH_MONTHS[m] + ' ' + be;
     },
     formatTime: function (d, lang) {
-      d = d instanceof Date ? d : new Date(d);
+      d = toDate(d); if (!d) return '';
       var t = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
       return (lang || UI.getLang()) === 'en' ? t : t + ' น.';
     },
@@ -329,6 +340,11 @@
 
     /* ---------- Menu: popover under the trigger on laptops, action sheet on phones ---------- */
     menu: function (anchor, items, o) {
+      /* forgiving: menu(items, o) without an anchor, a selector string, or a click event */
+      if (Array.isArray(anchor)) { o = items; items = anchor; anchor = null; }
+      if (typeof anchor === 'string') anchor = doc.querySelector(anchor);
+      if (anchor && !anchor.getBoundingClientRect) anchor = anchor.currentTarget || anchor.target || null;
+      if (anchor && !anchor.isConnected) anchor = null;
       o = o || {}; items = items || [];
       var en = UI.getLang() === 'en';
       function list(pick) {
@@ -420,14 +436,18 @@
       empty = el('div', 'rt-select-empty', en ? 'No matches' : 'ไม่พบรายการ'); empty.hidden = true; list.appendChild(empty);
       pop.appendChild(list); doc.body.appendChild(pop);
       /* position under (or above) the select, as wide as it */
-      var r = sel.getBoundingClientRect(), gap = 6, vw = win.innerWidth, vh = win.innerHeight;
-      var w = Math.min(Math.max(r.width, 220), vw - 24); pop.style.width = w + 'px'; pop.style.maxWidth = 'calc(100vw - 24px)';
-      var below = vh - r.bottom - gap - 12, above = r.top - gap - 12, up = below < 240 && above > below;
-      pop.style.maxHeight = Math.max(160, Math.min(380, up ? above : below)) + 'px';
-      var left = Math.min(Math.max(12, r.left), vw - 12 - w);
-      pop.style.left = Math.round(left) + 'px';
-      if (up) { pop.style.top = 'auto'; pop.style.bottom = Math.round(vh - r.top + gap) + 'px'; } else pop.style.top = Math.round(r.bottom + gap) + 'px';
-      pop.style.setProperty('--rt-origin', (up ? 'bottom' : 'top') + ' center');
+      var up = null;
+      function place() {
+        var r = sel.getBoundingClientRect(), gap = 6, vw = win.innerWidth, vh = win.innerHeight;
+        var w = Math.min(Math.max(r.width, 220), vw - 24); pop.style.width = w + 'px'; pop.style.maxWidth = 'calc(100vw - 24px)';
+        var below = vh - r.bottom - gap - 12, above = r.top - gap - 12;
+        if (up === null) up = below < 240 && above > below;  /* keep the side chosen at opening while following the page */
+        pop.style.maxHeight = Math.max(160, Math.min(380, up ? above : below)) + 'px';
+        pop.style.left = Math.round(Math.min(Math.max(12, r.left), vw - 12 - w)) + 'px';
+        if (up) { pop.style.top = 'auto'; pop.style.bottom = Math.round(vh - r.top + gap) + 'px'; } else { pop.style.bottom = ''; pop.style.top = Math.round(r.bottom + gap) + 'px'; }
+        pop.style.setProperty('--rt-origin', (up ? 'bottom' : 'top') + ' center');
+      }
+      place();
       function visible() { return rows.filter(function (b) { return !b.hidden && !b.disabled; }); }
       var cur = rows.filter(function (b) { return b.getAttribute('aria-selected') === 'true'; })[0];
       if (cur) cur.scrollIntoView({ block: 'center' });
@@ -450,7 +470,12 @@
       }
       function dismiss() { close(false); }
       sel._rtClose = dismiss;
-      function onScroll(e) { if (!pop.contains(e.target)) close(false); }
+      /* the page (or a list the app updates) scrolls: follow the select; close only when it leaves the screen */
+      var rafS = 0;
+      function onScroll(e) {
+        if (pop.contains(e.target) || rafS) return;
+        rafS = requestAnimationFrame(function () { rafS = 0; if (closed) return; var r = sel.getBoundingClientRect(); if (r.bottom < 0 || r.top > win.innerHeight || !sel.isConnected) close(false); else place(); });
+      }
       function outside(e) { if (!pop.contains(e.target) && e.target !== sel) close(false); }
       function filter() {
         var t = q.value.trim().toLowerCase(), any = false;
@@ -650,10 +675,10 @@
       }
       function pickEngine() {
         if ('BarcodeDetector' in win) {
-          return BarcodeDetector.getSupportedFormats().then(function (fm) {
+          return win.BarcodeDetector.getSupportedFormats().then(function (fm) {
             var want = ['qr_code', 'ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'itf', 'codabar', 'data_matrix', 'code_93', 'pdf417'].filter(function (f) { return fm.indexOf(f) > -1; });
             if (want.indexOf('qr_code') < 0 || want.indexOf('ean_13') < 0) throw new Error('weak');
-            var det = new BarcodeDetector({ formats: want });
+            var det = new win.BarcodeDetector({ formats: want });
             return function (c) { return det.detect(c).then(function (a) { return a && a[0] ? { v: a[0].rawValue, f: a[0].format } : null; }); };
           }).catch(zxing);
         }
@@ -948,6 +973,8 @@
       q('[data-rt-theme-toggle]').forEach(function (b) { if (b._rt) return; b._rt = 1; b.addEventListener('click', function () { UI.toggleTheme(); }); });
       q('[data-rt-lang]').forEach(function (b) { if (b._rt) return; b._rt = 1; b.addEventListener('click', function () { UI.setLang(b.getAttribute('data-rt-lang')); }); });
       q('.rt-seg').forEach(function (s) { if (s._rt) return; s._rt = 1; UI.segmented(s); });
+      /* a table that scrolls sideways can be reached and scrolled with the keyboard */
+      q('.rt-table-wrap').forEach(function (w) { if (w._rtTw || w.hasAttribute('tabindex')) return; w._rtTw = 1; w.tabIndex = 0; if (!w.getAttribute('role')) w.setAttribute('role', 'region'); if (!w.getAttribute('aria-label') && !w.getAttribute('aria-labelledby')) w.setAttribute('aria-label', UI.getLang() === 'en' ? 'Table' : 'ตาราง'); });
       /* glass that stays on screen while content scrolls under it keeps the frosted blur (see CSS) */
       q('.rt-glass').forEach(function (g) {
         if (g._rtG) return; g._rtG = 1;
@@ -1430,7 +1457,7 @@
       o = o || {};
       var u = userState.user; store(userKey(), '');
       try { localStorage.removeItem(userKey()); } catch (e) {}
-      try { if (win.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect(); } catch (e) {}
+      try { if (win.google && win.google.accounts && win.google.accounts.id) win.google.accounts.id.disableAutoSelect(); } catch (e) {}
       setUser(null);
       userState.ready = new Promise(function (r) { userState.readyResolve = r; });
       if (o.reason && u) UI.toast(o.reason === 'inactive' ? 'บัญชีนี้ไม่ได้ใช้งานแล้ว — ออกจากระบบ' : 'ไม่พบบัญชีในรายชื่อผู้ใช้แล้ว — ออกจากระบบ', { type: 'warning', duration: 6000 });
@@ -1700,6 +1727,7 @@
      skeleton while waiting → render, or the empty state, or the error state with "ลองใหม่" */
   UI.load = function (target, fetcher, o) {
     target = pick(target); o = o || {};
+    if (!target) { if (win.console) console.warn('RattanaUI.load: container not found'); return Promise.resolve().then(fetcher).catch(function () { return null; }); }
     var s = UI.skeleton(target, o.skeleton, o), token = {}; target._rtLoad = token;
     var stale = function () { return target._rtLoad !== token; };
     var again = function () { return UI.load(target, fetcher, o); };
@@ -1787,10 +1815,10 @@
   }
 
   function boot() {
-    if (!root.getAttribute('data-theme')) UI.setTheme(store(KEY_THEME) || 'light');
+    if (!root.getAttribute('data-theme')) UI.setTheme('light', true);
     UI.init();
     var saved = store(KEY_LANG); if (saved && saved !== UI.getLang()) UI.setLang(saved);
-    UI.setTheme(UI.getTheme());
+    UI.setTheme(UI.getTheme(), true);
     setupToTop();
     setupOffline();
     /* <body data-rt-login="ชื่อแอป" data-rt-login-role="5"> → sign-in screen before the app shows */
