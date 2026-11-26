@@ -10,7 +10,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="om-icon-192.png">
   <link rel="apple-touch-icon" sizes="192x192" href="om-icon-192.png">
   <link rel="manifest" href="om-manifest.json">
-  <title>Rattana OM Report v10.101.0</title>
+  <title>Rattana OM Report v10.102.0</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -521,7 +521,7 @@
 <header>
   <div class="header-row1">
     <button id="sidebarToggle" onclick="toggleSidebar()" title="ซ่อน/แสดง Sidebar">☰</button>
-    <div class="logo-text">Rattana <span>OM Report</span> <span class="ver-badge">v10.101.0 · 2026-11-26</span></div>
+    <div class="logo-text">Rattana <span>OM Report</span> <span class="ver-badge">v10.102.0 · 2026-11-26</span></div>
     <button class="icon-btn" id="btnRefresh" onclick="refreshData()" title="รีเฟรชข้อมูล">↻</button>
     <button class="icon-btn" id="btnDark" onclick="toggleDark()" title="Dark mode">🌙</button>
     <button class="icon-btn" onclick="exportExcel()" title="Export Excel">📥</button>
@@ -1174,7 +1174,8 @@
 // ── Config ──────────────────────────────────────
 const SHEET_ID        = '1R_08VOaWqChx9AbcvqMeXnJUbR0ir9PaVNCvc544icc';
 const BUDGET_SHEET_ID = '1R_08VOaWqChx9AbcvqMeXnJUbR0ir9PaVNCvc544icc';
-const CUST_MASTER_ID  = '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI';
+const CUST_MASTER_ID  = '1dAxF4Mz-zhJIVbuJ_Ql126gt08qvVS1wndJD50pqCZI'; // DistrictReco (ไฟล์เดิม)
+const CUST_SHEET_ID   = '1ijTvqCH_VEaTSfKfxd1yOAC_oo6BVFiEaav_KaaLTLE'; // ชีต Customer (ไฟล์ใหม่)
 const TTL             = 5 * 60 * 1000; // 5 min
 
 let budgetData   = {}; // normSale → Customer_Name → รวมส่วนต่าง
@@ -1224,30 +1225,61 @@ function normalizeBudgetKeys() {
 
 async function fetchCustMaster() {
   try {
-    const cacheKey = 'rattana_cust_master_v1';
+    const cacheKey = 'rattana_cust_master_v2';
     const cached = getCached(cacheKey);
-    const rows = cached || await (async () => {
-      const url = `https://docs.google.com/spreadsheets/d/${CUST_MASTER_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent('Customer')}`;
+    const rows = (cached && cached.length) ? cached : await (async () => {
+      const url = `https://docs.google.com/spreadsheets/d/${CUST_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent('Customer')}`;
       const res = await fetch(url); if (!res.ok) throw new Error(res.status);
       const d = parseCsv(await res.text());
+      if (!d.length || !('ชื่อร้านค้า' in d[0])) throw new Error('ไม่พบคอลัมน์ ชื่อร้านค้า');
       setCache(cacheKey, d); return d;
     })();
+    // ── รวมร้านเป็น 1 ร้าน: รหัส บีพลัส ↔ รหัสเดิม ↔ One-Customer-ID (union-find) ──
+    const par = {}, order = {}, oneIds = new Set(), hasOld = new Set(), nameOf = {};
+    const find = x => { if (!(x in par)) par[x] = x; while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+    const union = (a, b) => { par[find(a)] = find(b); };
+    const okCode = c => /^[0-9A-Za-z\-]+$/.test(c);
+    rows.forEach((r, i) => {
+      const bp = String(r['รหัส บีพลัส'] || '').trim();
+      if (!bp || !okCode(bp)) return;
+      if (!(bp in order)) order[bp] = i;
+      find(bp);
+      if (!(bp in nameOf)) nameOf[bp] = String(r['ชื่อร้านค้า'] || '').trim();
+      const olds = String(r['รหัสเดิม'] || '').split(/[,\s]+/).map(c => c.trim()).filter(c => c && okCode(c));
+      if (olds.length) hasOld.add(bp);
+      olds.forEach(o => { if (!(o in order)) order[o] = 1e6 + i; union(o, bp); });
+      const one = String(r['One-Customer-ID'] || '').trim();
+      if (one && okCode(one)) { oneIds.add(one); if (!(one in order)) order[one] = 1e6 + i; union(one, bp); }
+    });
+    const groups = {};
+    Object.keys(par).forEach(c => { (groups[find(c)] = groups[find(c)] || []).push(c); });
+    const mainOf = {}, canonName = {}; // รหัส → รหัสหลัก, รหัสหลัก → ชื่อร้านหลัก
+    Object.values(groups).forEach(g => {
+      const rank = c => oneIds.has(c) ? 0 : hasOld.has(c) ? 1 : 2;
+      const main = g.slice().sort((a, b) => rank(a) - rank(b) || (order[a] ?? 1e9) - (order[b] ?? 1e9))[0];
+      const firstNamed = g.filter(c => nameOf[c]).sort((a, b) => order[a] - order[b])[0];
+      canonName[main] = nameOf[main] || (firstNamed ? nameOf[firstNamed] : '');
+      g.forEach(c => { mainOf[c] = main; });
+    });
     window._custAllRows = rows;
+    window._custCanonName = {}; // ชื่อร้านในชีต → ชื่อร้านหลัก (หลังรวม)
     custMasterMap = {};
     custCodeMap = {};
     custNameByCode = {};
+    Object.keys(mainOf).forEach(c => {
+      const main = mainOf[c], nm = canonName[main];
+      if (nm) custNameByCode[c] = nm;
+      if (c !== main) custCodeMap[c] = { code: main, name: nm };
+    });
     rows.forEach(r => {
+      const bp = String(r['รหัส บีพลัส'] || '').trim();
+      const own = String(r['ชื่อร้านค้า'] || '').trim();
+      const cust = (bp && mainOf[bp] && canonName[mainOf[bp]]) || own;
+      if (own && cust !== own) window._custCanonName[own] = cust;
       const sale = normSale(r['เซลล์ผู้ดูแล'] || '');
-      const cust = String(r['ชื่อร้านค้า'] || '').trim();
       if (!sale || !cust) return;
       if (!custMasterMap[sale]) custMasterMap[sale] = new Set();
       custMasterMap[sale].add(cust);
-      const oldCode = String(r['รหัสเดิม'] || '').trim();
-      const newCode = String(r['รหัส บีพลัส'] || '').trim();
-      if (newCode && cust) custNameByCode[newCode] = cust;
-      if (oldCode && newCode && oldCode !== newCode) {
-        custCodeMap[oldCode] = { code: newCode, name: cust };
-      }
     });
   } catch(e) { console.warn('Customer master load failed:', e.message); }
   // Fetch DistrictReco sheet
