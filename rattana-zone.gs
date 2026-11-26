@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '1.1';
+var VERSION = '1.2';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -249,7 +249,8 @@ function act_(a, b, u) {
       return { id: aid };
     }
     case 'saveZone': {
-      need_(b.t, 'mgr'); var z = b.zone || {}; canCenter_(u, siteCenter_(z.site));
+      // ทุกคนเพิ่มโซนใหม่ในศูนย์ตัวเองได้ · แก้โซนเดิมต้องเป็นหัวหน้างานขึ้นไป
+      var z = b.zone || {}; if (z.id) need_(b.t, 'mgr'); canCenter_(u, siteCenter_(z.site));
       if (!clean_(z.name)) throw new Error('ไม่มีชื่อโซน');
       var row = [z.id, z.site, clean_(z.area), clean_(z.icon) || '🧹', clean_(z.name), JSON.stringify(z.items || []), clean_(z.owner), clean_(z.backup),
                  clean_(z.due) || '10.00', clean_(z.freq) || 'ทุกวัน', z.rota ? JSON.stringify(z.rota) : '', !!z.before, true, now, u.n];
@@ -286,8 +287,13 @@ function act_(a, b, u) {
       sh_(T.SITES).appendRow([sid, b.w, clean_(b.name), JSON.stringify(b.areas || [])]); return { id: sid };
     }
     case 'setAreas': {
-      need_(b.t, 'mgr'); canCenter_(u, siteCenter_(b.site));
+      canCenter_(u, siteCenter_(b.site));
       var sr = findRow_(T.SITES, b.site); if (sr < 0) throw new Error('ไม่พบสถานที่');
+      if (u.r === 'emp') {   // พนักงานเพิ่มพื้นที่ได้ แต่ลบ/เปลี่ยนรหัสพื้นที่เดิมไม่ได้
+        var cur = pj_(sh_(T.SITES).getRange(sr, 4).getValue(), []), curC = pj_(sh_(T.SITES).getRange(sr, 5).getValue(), {});
+        if (cur.some(function (a) { return (b.areas || []).indexOf(a) < 0; })) throw new Error('ลบพื้นที่ได้เฉพาะหัวหน้างานขึ้นไป');
+        Object.keys(curC).forEach(function (k) { if (b.codes && b.codes[k] !== curC[k]) throw new Error('แก้รหัสพื้นที่เดิมได้เฉพาะหัวหน้างานขึ้นไป'); });
+      }
       sh_(T.SITES).getRange(sr, 4).setValue(JSON.stringify(b.areas || []));
       if (b.codes) sh_(T.SITES).getRange(sr, 5).setValue(JSON.stringify(b.codes));
       return {};
@@ -315,7 +321,7 @@ function act_(a, b, u) {
 function areaCode_(site, area) {
   var ac = '', idx = -1;
   rows_(T.SITES).forEach(function (x) { if (String(x[0]) === String(site)) { ac = (pj_(x[4], {}) || {})[area] || ''; idx = pj_(x[3], []).indexOf(area); } });
-  return (ac || AREA_CODE[area] || ('A' + (idx + 1 || 9))).toUpperCase();
+  return (ac || AREA_CODE[area] || ('Z' + String.fromCharCode(65 + (Math.max(idx, 0) % 26)))).toUpperCase();
 }
 function nextZoneCode_(site, area, all) {
   var pre = String(site).toUpperCase() + '-' + areaCode_(site, area), max = 0;
