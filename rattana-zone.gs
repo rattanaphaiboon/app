@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '1.8';
+var VERSION = '1.9';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -25,6 +25,8 @@ var T = {
   AUDITS: { name: 'คะแนน5ส', head: ['id', 'โซน', 'วันที่', 'ผู้ตรวจ', 'คะแนน (JSON)', 'คำแนะนำ', 'รูป', 'เฉลี่ย'] },
   JOBS:   { name: 'งาน & แต้ม', head: ['id', 'ประเภท (job=โยนงาน, vol=อาสา)', 'โซน', 'หัวข้อ', 'รายละเอียด', 'รูปแจ้ง', 'แต้ม', 'กำหนดเสร็จ(ms)', 'ผู้โยนงาน', 'เวลาโยน(ms)',
                                     'สถานะ (open/taken/submitted/done/rejected/cancel)', 'ผู้รับงาน', 'รหัสผู้รับงาน', 'เวลารับ(ms)', 'รูปก่อนทำ', 'รูปหลังทำ', 'เวลาส่ง(ms)', 'ระยะจากจุด(ม.)', 'ผู้ตรวจ', 'เวลาตรวจ(ms)', 'หมายเหตุ'] },
+  REWARDS: { name: 'ของรางวัล', head: ['id', 'ชื่อรางวัล', 'รายละเอียด', 'แต้มที่ใช้', 'ไอคอน', 'รูป', 'เปิดให้แลก', 'จำนวนคงเหลือ (ว่าง=ไม่จำกัด)', 'แก้ไขล่าสุด', 'แก้ไขโดย'] },
+  REDEEMS: { name: 'แลกรางวัล', head: ['id', 'เวลาขอ(ms)', 'รหัสพนักงาน', 'ชื่อ', 'ศูนย์', 'รหัสรางวัล', 'ชื่อรางวัล', 'แต้ม', 'สถานะ (pending/given/rejected)', 'รหัสคูปอง', 'ผู้ดำเนินการ', 'เวลาดำเนินการ(ms)', 'หมายเหตุ'] },
   ISSUES: { name: 'ปัญหา', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'ผู้แจ้ง', 'ปัญหา', 'รูป', 'สถานะ', 'วิธีแก้', 'วันที่แก้', 'ผู้ปิดงาน'] }
 };
 
@@ -268,9 +270,42 @@ function boot_(u) {
   var grants = u.r === 'emp' ? [] : rows_(T.GRANTS).filter(function (r) { return r[0]; }).map(function (r) {
     var e = findEmp_(r[0]); return { code: String(r[0]), name: String(r[1]), r: String(r[2]), site: e ? e.w : '', by: String(r[3]) };
   });
+  var rFrom = Date.now() - 120 * 864e5;
+  var redeems = rows_(T.REDEEMS).filter(function (r) { return r[0] && (+r[1] >= rFrom || r[8] === 'pending') && (u.r === 'hr' || (u.r === 'mgr' ? String(r[4]) === u.w : String(r[2]) === String(u.c))); }).map(redeemObj_);
+  var rewards = rewards_().filter(function (x) { return u.r === 'hr' || x.on; });
   var jFrom = Date.now() - 70 * 864e5;
   var jobs = rows_(T.JOBS).filter(function (r) { return r[0] && (+r[9] >= jFrom || /open|taken|submitted/.test(r[10])); }).map(jobObj_);
-  return { ok: true, today: today_(), user: u, sites: sites, zones: zones, people: people_(), checks: checks, audits: audits, issues: issues, grants: grants, jobs: jobs };
+  return { ok: true, today: today_(), user: u, sites: sites, zones: zones, people: people_(), checks: checks, audits: audits, issues: issues, grants: grants, jobs: jobs, rewards: rewards, redeems: redeems, earned: earned_() };
+}
+// ───── 🎁 แต้มสะสมทั้งหมด (กติกาเดียวกับในแอป) · ของรางวัล · คำขอแลก ─────
+function minOf_(t) { var s = Utilities.formatDate(new Date(+t), 'Asia/Bangkok', 'H:m').split(':'); return +s[0] * 60 + +s[1]; }
+function toMin_(s) { var p = String(s || '10.00').replace(':', '.').split('.'); return +p[0] * 60 + (+p[1] || 0); }
+function ownerOn_(z, d) { if (z.rota) { var w = +Utilities.formatDate(new Date(d + 'T12:00:00+07:00'), 'Asia/Bangkok', 'u') % 7; if (z.rota[w] !== undefined) return z.rota[w]; } return z.owner; }
+function earned_() {
+  var c = CacheService.getScriptCache(), hit = c.get('earn_v1'); if (hit) return JSON.parse(hit);
+  var zones = {}; rows_(T.ZONES).forEach(function (r) { if (r[0]) zones[String(r[0])] = { owner: String(r[6]), rota: pj_(r[10], null), due: clean_(r[8]) || '10.00' }; });
+  var P = {}, add = function (n, k, v) { if (!n) return; P[n] = P[n] || { on: 0, vol: 0, job: 0, iss: 0, total: 0 }; P[n][k] += v; P[n].total += v; };
+  var first = {};   // ผลตรวจแรกของแต่ละโซน/วัน (ไม่นับทำแทน)
+  rows_(T.CHECKS).forEach(function (r) { if (!r[0] || r[11] === true || String(r[11]) === 'TRUE') return; var d = dstr_(r[2]), k = r[1] + '|' + d, t = +r[3];
+    if (!first[k] || t < first[k].t) first[k] = { t: t, by: String(r[5]), z: String(r[1]), d: d }; });
+  Object.keys(first).forEach(function (k) { var f = first[k], z = zones[f.z]; if (z && f.by && f.by === ownerOn_(z, f.d) && minOf_(f.t) <= toMin_(z.due)) add(f.by, 'on', 1); });
+  rows_(T.JOBS).forEach(function (r) { if (r[0] && r[10] === 'done' && r[11]) add(String(r[11]), r[1] === 'vol' ? 'vol' : 'job', +r[6] || 0); });
+  rows_(T.ISSUES).forEach(function (r) { if (r[0] && r[7] === 'done' && r[4]) add(String(r[4]), 'iss', 1); });
+  try { var s = JSON.stringify(P); if (s.length < 95000) c.put('earn_v1', s, 120); } catch (e) {}
+  return P;
+}
+function spent_(name) { return rows_(T.REDEEMS).reduce(function (s, r) { return s + (String(r[3]) === name && /pending|given/.test(r[8]) ? +r[7] || 0 : 0); }, 0); }
+function rewards_() {
+  var s = sh_(T.REWARDS);
+  if (s.getLastRow() < 2) s.appendRow(['RW1', 'Café Amazon เมนูเย็น 1 แก้ว', 'เลือกเมนูเย็นได้ 1 แก้ว', 100, '🧋', '', true, '', new Date(), 'ระบบ']);
+  return rows_(T.REWARDS).filter(function (r) { return r[0]; }).map(function (r) {
+    return { id: String(r[0]), name: String(r[1]), detail: String(r[2]), pts: +r[3] || 0, icon: String(r[4] || '🎁'), photo: String(r[5] || ''), on: r[6] === true || String(r[6]) === 'TRUE',
+      stock: r[7] === '' || r[7] == null ? null : +r[7] };
+  });
+}
+function redeemObj_(r) {
+  return { id: String(r[0]), at: +r[1] || 0, code: String(r[2]), name: String(r[3]), w: String(r[4]), rid: String(r[5]), rname: String(r[6]), pts: +r[7] || 0, status: String(r[8]),
+    coupon: String(r[9]), by: String(r[10]), byAt: +r[11] || 0, note: String(r[12]) };
 }
 function jobObj_(r) {
   return { id: String(r[0]), kind: String(r[1]), zoneId: String(r[2]), title: String(r[3]), detail: String(r[4]), photo: String(r[5]), pts: +r[6] || 0, due: +r[7] || 0,
@@ -377,6 +412,7 @@ function act_(a, b, u) {
     case 'jobReview': {
       need_(b.t, 'mgr'); var jr = jobRow_(b.id); canCenter_(u, centerOfZone_(jr.o.zoneId));
       if (jr.o.status !== 'submitted') throw new Error('งานนี้ไม่ได้รอตรวจแล้ว');
+      CacheService.getScriptCache().remove('earn_v1');
       if (b.ok) jobSet_(jr.r, 11, ['done']);
       else jobSet_(jr.r, 11, [jr.o.kind === 'vol' ? 'rejected' : 'taken']);
       jobSet_(jr.r, 19, [u.n, Date.now(), clean_(b.note) || (b.ok ? '' : 'ให้แก้ใหม่')]);
@@ -386,6 +422,38 @@ function act_(a, b, u) {
       need_(b.t, 'mgr'); var jc = jobRow_(b.id); canCenter_(u, centerOfZone_(jc.o.zoneId));
       if (!/open|taken/.test(jc.o.status)) throw new Error('ยกเลิกได้เฉพาะงานที่ยังไม่ส่ง');
       jobSet_(jc.r, 11, ['cancel']); jobSet_(jc.r, 19, [u.n, Date.now(), 'ยกเลิกงาน']); return {};
+    }
+    // ───── 🎁 แลกรางวัล: ขอแลก → แต้มถูกกันไว้ → หัวหน้า/HR ให้ของแล้ว (หรือปฏิเสธ = คืนแต้ม) ─────
+    case 'redeem': {
+      var rw = rewards_().filter(function (x) { return x.id === String(b.rid); })[0];
+      if (!rw || !rw.on) throw new Error('ของรางวัลนี้ปิดให้แลกแล้ว');
+      if (rw.stock !== null && rw.stock <= 0) throw new Error('ของรางวัลนี้หมดแล้ว');
+      var earnT = (earned_()[u.n] || { total: 0 }).total, bal = earnT - spent_(u.n);
+      if (bal < rw.pts) throw new Error('แต้มไม่พอ — มี ' + bal + ' แต้ม ต้องใช้ ' + rw.pts + ' แต้ม');
+      var cp = 'RZ-' + Array.apply(null, Array(4)).map(function () { return 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'.charAt(Math.floor(Math.random() * 31)); }).join('');
+      var rdid = nextId_('R');
+      sh_(T.REDEEMS).appendRow([rdid, Date.now(), u.c, u.n, u.w || '', rw.id, rw.name, rw.pts, 'pending', cp, '', '', '']);
+      if (rw.stock !== null) { var sr = findRow_(T.REWARDS, rw.id); sh_(T.REWARDS).getRange(sr, 8).setValue(rw.stock - 1); }
+      return { id: rdid, coupon: cp };
+    }
+    case 'redeemSet': {
+      need_(b.t, 'mgr'); var rr = findRow_(T.REDEEMS, b.id); if (rr < 0) throw new Error('ไม่พบคำขอ');
+      var ro = redeemObj_(sh_(T.REDEEMS).getRange(rr, 1, 1, T.REDEEMS.head.length).getValues()[0]);
+      if (u.r !== 'hr' && ro.w !== u.w) throw new Error('จัดการได้เฉพาะศูนย์ของคุณ');
+      if (ro.status !== 'pending') throw new Error('คำขอนี้ดำเนินการไปแล้ว');
+      sh_(T.REDEEMS).getRange(rr, 9).setValue(b.ok ? 'given' : 'rejected');
+      sh_(T.REDEEMS).getRange(rr, 11, 1, 3).setValues([[u.n, Date.now(), clean_(b.note)]]);
+      if (!b.ok) { var rw2 = rewards_().filter(function (x) { return x.id === ro.rid; })[0]; if (rw2 && rw2.stock !== null) sh_(T.REWARDS).getRange(findRow_(T.REWARDS, rw2.id), 8).setValue(rw2.stock + 1); }
+      return {};
+    }
+    case 'rewardSave': {
+      need_(b.t, 'hr'); var x = b.reward || {};
+      if (!clean_(x.name)) throw new Error('ใส่ชื่อรางวัล'); var xp = Math.round(+x.pts); if (!(xp > 0)) throw new Error('ใส่แต้มที่ใช้แลก');
+      var xid = x.id || nextId_('RW'), xr = x.id ? findRow_(T.REWARDS, x.id) : -1;
+      var photo = x.photoNew ? savePhoto_(x.photoNew, 'reward_' + xid) : (/^https:\/\//.test(String(x.photo || '')) ? x.photo : '');
+      var row = [xid, clean_(x.name), clean_(x.detail), xp, clean_(x.icon) || '🎁', photo, x.on !== false, x.stock === '' || x.stock == null ? '' : Math.max(0, Math.round(+x.stock)), new Date(), u.n];
+      if (xr > 0) sh_(T.REWARDS).getRange(xr, 1, 1, row.length).setValues([row]); else sh_(T.REWARDS).appendRow(row);
+      return { id: xid };
     }
     case 'delZone': {
       need_(b.t, 'mgr'); canCenter_(u, centerOfZone_(b.id));
