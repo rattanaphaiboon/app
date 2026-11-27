@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '1.7';
+var VERSION = '1.8';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -23,6 +23,8 @@ var T = {
   ZONES:  { name: 'โซน', head: ['id', 'สถานที่', 'พื้นที่', 'ไอคอน', 'ชื่อโซน', 'รายการเช็ก (JSON)', 'เจ้าของโซน', 'คนสำรอง', 'ตรวจก่อน', 'รอบตรวจ', 'เวร (JSON)', 'รูปก่อน/หลัง', 'ใช้งาน', 'แก้ไขล่าสุด', 'แก้ไขโดย', 'รูปโซน', 'พิกัด (lat,lng,±ม.)'] },
   CHECKS: { name: 'ผลตรวจ', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'รหัสผู้ตรวจ', 'ผู้ตรวจ', 'ผล (JSON)', 'รูปหลังทำ', 'รูปก่อนทำ', 'หมายเหตุ', 'สแกนหน้างาน', 'ทำแทน', 'ทำแทนใคร', 'เวลาบันทึก', 'ระยะจากจุดโซน (ม.)'] },
   AUDITS: { name: 'คะแนน5ส', head: ['id', 'โซน', 'วันที่', 'ผู้ตรวจ', 'คะแนน (JSON)', 'คำแนะนำ', 'รูป', 'เฉลี่ย'] },
+  JOBS:   { name: 'งาน & แต้ม', head: ['id', 'ประเภท (job=โยนงาน, vol=อาสา)', 'โซน', 'หัวข้อ', 'รายละเอียด', 'รูปแจ้ง', 'แต้ม', 'กำหนดเสร็จ(ms)', 'ผู้โยนงาน', 'เวลาโยน(ms)',
+                                    'สถานะ (open/taken/submitted/done/rejected/cancel)', 'ผู้รับงาน', 'รหัสผู้รับงาน', 'เวลารับ(ms)', 'รูปก่อนทำ', 'รูปหลังทำ', 'เวลาส่ง(ms)', 'ระยะจากจุด(ม.)', 'ผู้ตรวจ', 'เวลาตรวจ(ms)', 'หมายเหตุ'] },
   ISSUES: { name: 'ปัญหา', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'ผู้แจ้ง', 'ปัญหา', 'รูป', 'สถานะ', 'วิธีแก้', 'วันที่แก้', 'ผู้ปิดงาน'] }
 };
 
@@ -266,8 +268,18 @@ function boot_(u) {
   var grants = u.r === 'emp' ? [] : rows_(T.GRANTS).filter(function (r) { return r[0]; }).map(function (r) {
     var e = findEmp_(r[0]); return { code: String(r[0]), name: String(r[1]), r: String(r[2]), site: e ? e.w : '', by: String(r[3]) };
   });
-  return { ok: true, today: today_(), user: u, sites: sites, zones: zones, people: people_(), checks: checks, audits: audits, issues: issues, grants: grants };
+  var jFrom = Date.now() - 70 * 864e5;
+  var jobs = rows_(T.JOBS).filter(function (r) { return r[0] && (+r[9] >= jFrom || /open|taken|submitted/.test(r[10])); }).map(jobObj_);
+  return { ok: true, today: today_(), user: u, sites: sites, zones: zones, people: people_(), checks: checks, audits: audits, issues: issues, grants: grants, jobs: jobs };
 }
+function jobObj_(r) {
+  return { id: String(r[0]), kind: String(r[1]), zoneId: String(r[2]), title: String(r[3]), detail: String(r[4]), photo: String(r[5]), pts: +r[6] || 0, due: +r[7] || 0,
+    by: String(r[8]), at: +r[9] || 0, status: String(r[10]), taker: String(r[11]), takerC: String(r[12]), takenAt: +r[13] || 0, before: String(r[14]), after: String(r[15]),
+    subAt: +r[16] || 0, dist: r[17] === '' || r[17] == null ? null : +r[17], rev: String(r[18]), revAt: +r[19] || 0, note: String(r[20]) };
+}
+function jobRow_(id) { var r = findRow_(T.JOBS, id); if (r < 0) throw new Error('ไม่พบงานนี้ (อาจถูกยกเลิกแล้ว)'); return { r: r, o: jobObj_(sh_(T.JOBS).getRange(r, 1, 1, T.JOBS.head.length).getValues()[0]) }; }
+function jobSet_(r, col, vals) { sh_(T.JOBS).getRange(r, col, 1, vals.length).setValues([vals]); }
+function distV_(v) { return (v === '' || v == null || !isFinite(+v)) ? '' : Math.round(+v); }
 
 // ───────────────────────── เขียนข้อมูล ─────────────────────────
 function nextId_(p) { return p + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyMMddHHmmss') + Math.floor(Math.random() * 90 + 10); }
@@ -325,6 +337,55 @@ function act_(a, b, u) {
       }
       sh_(T.ZONES).getRange(zr > 0 ? zr : sh_(T.ZONES).getLastRow(), 9).setNumberFormat('@').setValue(clean_(z.due) || '10.00');
       return { id: row[0] };
+    }
+    // ───── 📋 กระดานงาน & 🙋 อาสา (แต้มนับเมื่อหัวหน้าตรวจรูปแล้ว) ─────
+    case 'jobPost': {
+      need_(b.t, 'mgr'); canCenter_(u, centerOfZone_(b.zoneId));
+      if (!clean_(b.title)) throw new Error('ใส่หัวข้องาน');
+      var jp = Math.max(1, Math.min(50, Math.round(+b.pts || 5))), jid = nextId_('J');
+      sh_(T.JOBS).appendRow([jid, 'job', b.zoneId, clean_(b.title), clean_(b.detail), b.photo ? savePhoto_(b.photo, 'job_' + jid) : '', jp, +b.due || '', u.n, Date.now(),
+                            'open', '', '', '', '', '', '', '', '', '', '']);
+      return { id: jid };
+    }
+    case 'jobTake': {
+      var jt = jobRow_(b.id); if (jt.o.status !== 'open') throw new Error(jt.o.status === 'taken' ? 'มีคนรับงานนี้ไปแล้ว (' + jt.o.taker + ')' : 'งานนี้ปิดแล้ว');
+      jobSet_(jt.r, 11, ['taken', u.n, u.c, Date.now()]); return {};
+    }
+    case 'jobDrop': {
+      var jd = jobRow_(b.id); if (jd.o.status !== 'taken' || jd.o.takerC !== String(u.c)) throw new Error('คืนได้เฉพาะงานที่คุณรับไว้');
+      jobSet_(jd.r, 11, ['open', '', '', '']); return {};
+    }
+    case 'jobSubmit': {
+      var js = jobRow_(b.id); if (js.o.status !== 'taken' || js.o.takerC !== String(u.c)) throw new Error('ส่งได้เฉพาะงานที่คุณรับไว้');
+      if (!b.before || !b.after) throw new Error('ต้องมีรูปก่อนทำและหลังทำ');
+      jobSet_(js.r, 11, ['submitted']);
+      jobSet_(js.r, 15, [savePhoto_(b.before, js.o.id + '_before'), savePhoto_(b.after, js.o.id + '_after'), Date.now(), distV_(b.dist)]);
+      if (clean_(b.note)) jobSet_(js.r, 21, [clean_(b.note)]);
+      return {};
+    }
+    case 'volunteer': {
+      centerOfZone_(b.zoneId);
+      if (!b.before || !b.after) throw new Error('ต้องมีรูปก่อนทำและหลังทำ');
+      var dayStart = new Date(today_() + 'T00:00:00+07:00').getTime();
+      var dupV = rows_(T.JOBS).some(function (r) { return r[1] === 'vol' && String(r[2]) === String(b.zoneId) && String(r[12]) === String(u.c) && +r[9] >= dayStart && r[10] !== 'rejected'; });
+      if (dupV) throw new Error('วันนี้คุณช่วยโซนนี้ไปแล้ว — ลองช่วยโซนอื่นนะ');
+      var vid = nextId_('V');
+      sh_(T.JOBS).appendRow([vid, 'vol', b.zoneId, 'อาสาช่วยทำความสะอาด', '', '', 3, '', u.n, Date.now(), 'submitted', u.n, u.c, Date.now(),
+                            savePhoto_(b.before, vid + '_before'), savePhoto_(b.after, vid + '_after'), Date.now(), distV_(b.dist), '', '', clean_(b.note)]);
+      return { id: vid };
+    }
+    case 'jobReview': {
+      need_(b.t, 'mgr'); var jr = jobRow_(b.id); canCenter_(u, centerOfZone_(jr.o.zoneId));
+      if (jr.o.status !== 'submitted') throw new Error('งานนี้ไม่ได้รอตรวจแล้ว');
+      if (b.ok) jobSet_(jr.r, 11, ['done']);
+      else jobSet_(jr.r, 11, [jr.o.kind === 'vol' ? 'rejected' : 'taken']);
+      jobSet_(jr.r, 19, [u.n, Date.now(), clean_(b.note) || (b.ok ? '' : 'ให้แก้ใหม่')]);
+      return {};
+    }
+    case 'jobCancel': {
+      need_(b.t, 'mgr'); var jc = jobRow_(b.id); canCenter_(u, centerOfZone_(jc.o.zoneId));
+      if (!/open|taken/.test(jc.o.status)) throw new Error('ยกเลิกได้เฉพาะงานที่ยังไม่ส่ง');
+      jobSet_(jc.r, 11, ['cancel']); jobSet_(jc.r, 19, [u.n, Date.now(), 'ยกเลิกงาน']); return {};
     }
     case 'delZone': {
       need_(b.t, 'mgr'); canCenter_(u, centerOfZone_(b.id));
