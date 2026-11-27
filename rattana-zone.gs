@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '2.1';
+var VERSION = '2.2';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -25,7 +25,7 @@ var T = {
   AUDITS: { name: 'คะแนน5ส', head: ['id', 'โซน', 'วันที่', 'ผู้ตรวจ', 'คะแนน (JSON)', 'คำแนะนำ', 'รูป', 'เฉลี่ย'] },
   JOBS:   { name: 'งาน & แต้ม', head: ['id', 'ประเภท (job=โยนงาน, vol=อาสา)', 'โซน', 'หัวข้อ', 'รายละเอียด', 'รูปแจ้ง', 'แต้ม', 'กำหนดเสร็จ(ms)', 'ผู้โยนงาน', 'เวลาโยน(ms)',
                                     'สถานะ (open/taken/submitted/done/rejected/cancel)', 'ผู้รับงาน', 'รหัสผู้รับงาน', 'เวลารับ(ms)', 'รูปก่อนทำ', 'รูปหลังทำ', 'เวลาส่ง(ms)', 'ระยะจากจุด(ม.)', 'ผู้ตรวจ', 'เวลาตรวจ(ms)', 'หมายเหตุ'] },
-  REWARDS: { name: 'ของรางวัล', head: ['id', 'ชื่อรางวัล', 'รายละเอียด', 'แต้มที่ใช้', 'ไอคอน', 'รูป', 'เปิดให้แลก', 'จำนวนคงเหลือ (ว่าง=ไม่จำกัด)', 'แก้ไขล่าสุด', 'แก้ไขโดย', 'เริ่มแลกได้ (ว่าง=ทันที)', 'แลกได้ถึง (ว่าง=ไม่หมดเขต)'] },
+  REWARDS: { name: 'ของรางวัล', head: ['id', 'ชื่อรางวัล', 'รายละเอียด', 'แต้มที่ใช้', 'ไอคอน', 'รูป', 'เปิดให้แลก', 'จำนวนคงเหลือ (ว่าง=ไม่จำกัด)', 'แก้ไขล่าสุด', 'แก้ไขโดย', 'เริ่มแลกได้ (ว่าง=ทันที)', 'แลกได้ถึง (ว่าง=ไม่หมดเขต)', 'ศูนย์ที่แลกได้ (เช่น W1,W2 · ว่าง=ทุกศูนย์)'] },
   REDEEMS: { name: 'แลกรางวัล', head: ['id', 'เวลาขอ(ms)', 'รหัสพนักงาน', 'ชื่อ', 'ศูนย์', 'รหัสรางวัล', 'ชื่อรางวัล', 'แต้ม', 'สถานะ (pending/given/rejected)', 'รหัสคูปอง', 'ผู้ดำเนินการ', 'เวลาดำเนินการ(ms)', 'หมายเหตุ'] },
   ISSUES: { name: 'ปัญหา', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'ผู้แจ้ง', 'ปัญหา', 'รูป', 'สถานะ', 'วิธีแก้', 'วันที่แก้', 'ผู้ปิดงาน', 'ติดต่อกลับ (ผู้แจ้งภายนอก)'] }
 };
@@ -298,7 +298,7 @@ function boot_(u) {
   });
   var rFrom = Date.now() - 120 * 864e5;
   var redeems = rows_(T.REDEEMS).filter(function (r) { return r[0] && (+r[1] >= rFrom || r[8] === 'pending') && (u.r === 'hr' || (u.r === 'mgr' ? String(r[4]) === u.w : String(r[2]) === String(u.c))); }).map(redeemObj_);
-  var rewards = rewards_().filter(function (x) { return u.r === 'hr' || x.on; });
+  var rewards = rewards_().filter(function (x) { return u.r === 'hr' || (x.on && (!x.ws.length || x.ws.indexOf(u.w) >= 0)); });
   var jFrom = Date.now() - 70 * 864e5;
   var jobs = rows_(T.JOBS).filter(function (r) { return r[0] && (+r[9] >= jFrom || /open|taken|submitted/.test(r[10])); }).map(jobObj_);
   return { ok: true, today: today_(), user: u, sites: sites, zones: zones, people: people_(), checks: checks, audits: audits, issues: issues, grants: grants, jobs: jobs, rewards: rewards, redeems: redeems, earned: earned_() };
@@ -326,7 +326,8 @@ function rewards_() {
   if (s.getLastRow() < 2) s.appendRow(['RW1', 'Café Amazon เมนูเย็น 1 แก้ว', 'เลือกเมนูเย็นได้ 1 แก้ว', 100, '🧋', '', true, '', new Date(), 'ระบบ']);
   return rows_(T.REWARDS).filter(function (r) { return r[0]; }).map(function (r) {
     return { id: String(r[0]), name: String(r[1]), detail: String(r[2]), pts: +r[3] || 0, icon: String(r[4] || '🎁'), photo: String(r[5] || ''), on: r[6] === true || String(r[6]) === 'TRUE',
-      stock: r[7] === '' || r[7] == null ? null : +r[7], from: dstr_(r[10]), to: dstr_(r[11]) };
+      stock: r[7] === '' || r[7] == null ? null : +r[7], from: dstr_(r[10]), to: dstr_(r[11]),
+      ws: String(r[12] || '').toUpperCase().split(/[,\s]+/).filter(function (w) { return /^W[1-4]$/.test(w); }) };
   });
 }
 function redeemObj_(r) {
@@ -462,6 +463,7 @@ function act_(a, b, u) {
       if (!rw || !rw.on) throw new Error('ของรางวัลนี้ปิดให้แลกแล้ว');
       if (rw.stock !== null && rw.stock <= 0) throw new Error('ของรางวัลนี้หมดแล้ว');
       if (rw.from && today_() < rw.from) throw new Error('ของรางวัลนี้ยังไม่เปิดให้แลก');
+      if (rw.ws.length && u.r !== 'hr' && rw.ws.indexOf(u.w) < 0) throw new Error('ของรางวัลนี้แลกได้เฉพาะศูนย์ ' + rw.ws.join(', '));
       if (rw.to && today_() > rw.to) throw new Error('ของรางวัลนี้หมดเขตแลกแล้ว');
       var earnT = (earned_()[u.n] || { total: 0 }).total, bal = earnT - spent_(u.n);
       if (bal < rw.pts) throw new Error('แต้มไม่พอ — มี ' + bal + ' แต้ม ต้องใช้ ' + rw.pts + ' แต้ม');
@@ -489,6 +491,7 @@ function act_(a, b, u) {
       var row = [xid, clean_(x.name), clean_(x.detail), xp, clean_(x.icon) || '🎁', photo, x.on !== false, x.stock === '' || x.stock == null ? '' : Math.max(0, Math.round(+x.stock)), new Date(), u.n,
                  /^\d{4}-\d\d-\d\d$/.test(x.from || '') ? x.from : '', /^\d{4}-\d\d-\d\d$/.test(x.to || '') ? x.to : ''];
       if (row[10] && row[11] && row[11] < row[10]) throw new Error('วันสิ้นสุดต้องไม่ก่อนวันเริ่ม');
+      row.push((x.ws || []).filter(function (w) { return /^W[1-4]$/.test(w); }).join(','));
       if (xr > 0) sh_(T.REWARDS).getRange(xr, 1, 1, row.length).setValues([row]); else sh_(T.REWARDS).appendRow(row);
       sh_(T.REWARDS).getRange(xr > 0 ? xr : sh_(T.REWARDS).getLastRow(), 11, 1, 2).setNumberFormat('@').setValues([[row[10], row[11]]]);
       return { id: xid };
