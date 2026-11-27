@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '1.9';
+var VERSION = '2.0';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -20,14 +20,14 @@ var EMP_TTL_DAYS = 90, GOOGLE_TTL_DAYS = 30;
 var T = {
   SITES:  { name: 'สถานที่', head: ['id', 'ศูนย์', 'ชื่อสถานที่', 'พื้นที่ (JSON)', 'รหัสพื้นที่ (JSON)'] },
   GRANTS: { name: 'สิทธิ์ผู้ดูแล', head: ['รหัสพนักงาน', 'ชื่อ', 'สิทธิ์ (mgr=หัวหน้างาน, hr=HR)', 'ให้โดย', 'เวลา'] },
-  ZONES:  { name: 'โซน', head: ['id', 'สถานที่', 'พื้นที่', 'ไอคอน', 'ชื่อโซน', 'รายการเช็ก (JSON)', 'เจ้าของโซน', 'คนสำรอง', 'ตรวจก่อน', 'รอบตรวจ', 'เวร (JSON)', 'รูปก่อน/หลัง', 'ใช้งาน', 'แก้ไขล่าสุด', 'แก้ไขโดย', 'รูปโซน', 'พิกัด (lat,lng,±ม.)'] },
+  ZONES:  { name: 'โซน', head: ['id', 'สถานที่', 'พื้นที่', 'ไอคอน', 'ชื่อโซน', 'รายการเช็ก (JSON)', 'เจ้าของโซน', 'คนสำรอง', 'ตรวจก่อน', 'รอบตรวจ', 'เวร (JSON)', 'รูปก่อน/หลัง', 'ใช้งาน', 'แก้ไขล่าสุด', 'แก้ไขโดย', 'รูปโซน', 'พิกัด (lat,lng,±ม.)', 'เจ้าของโซนตั้งแต่'] },
   CHECKS: { name: 'ผลตรวจ', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'รหัสผู้ตรวจ', 'ผู้ตรวจ', 'ผล (JSON)', 'รูปหลังทำ', 'รูปก่อนทำ', 'หมายเหตุ', 'สแกนหน้างาน', 'ทำแทน', 'ทำแทนใคร', 'เวลาบันทึก', 'ระยะจากจุดโซน (ม.)'] },
   AUDITS: { name: 'คะแนน5ส', head: ['id', 'โซน', 'วันที่', 'ผู้ตรวจ', 'คะแนน (JSON)', 'คำแนะนำ', 'รูป', 'เฉลี่ย'] },
   JOBS:   { name: 'งาน & แต้ม', head: ['id', 'ประเภท (job=โยนงาน, vol=อาสา)', 'โซน', 'หัวข้อ', 'รายละเอียด', 'รูปแจ้ง', 'แต้ม', 'กำหนดเสร็จ(ms)', 'ผู้โยนงาน', 'เวลาโยน(ms)',
                                     'สถานะ (open/taken/submitted/done/rejected/cancel)', 'ผู้รับงาน', 'รหัสผู้รับงาน', 'เวลารับ(ms)', 'รูปก่อนทำ', 'รูปหลังทำ', 'เวลาส่ง(ms)', 'ระยะจากจุด(ม.)', 'ผู้ตรวจ', 'เวลาตรวจ(ms)', 'หมายเหตุ'] },
-  REWARDS: { name: 'ของรางวัล', head: ['id', 'ชื่อรางวัล', 'รายละเอียด', 'แต้มที่ใช้', 'ไอคอน', 'รูป', 'เปิดให้แลก', 'จำนวนคงเหลือ (ว่าง=ไม่จำกัด)', 'แก้ไขล่าสุด', 'แก้ไขโดย'] },
+  REWARDS: { name: 'ของรางวัล', head: ['id', 'ชื่อรางวัล', 'รายละเอียด', 'แต้มที่ใช้', 'ไอคอน', 'รูป', 'เปิดให้แลก', 'จำนวนคงเหลือ (ว่าง=ไม่จำกัด)', 'แก้ไขล่าสุด', 'แก้ไขโดย', 'เริ่มแลกได้ (ว่าง=ทันที)', 'แลกได้ถึง (ว่าง=ไม่หมดเขต)'] },
   REDEEMS: { name: 'แลกรางวัล', head: ['id', 'เวลาขอ(ms)', 'รหัสพนักงาน', 'ชื่อ', 'ศูนย์', 'รหัสรางวัล', 'ชื่อรางวัล', 'แต้ม', 'สถานะ (pending/given/rejected)', 'รหัสคูปอง', 'ผู้ดำเนินการ', 'เวลาดำเนินการ(ms)', 'หมายเหตุ'] },
-  ISSUES: { name: 'ปัญหา', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'ผู้แจ้ง', 'ปัญหา', 'รูป', 'สถานะ', 'วิธีแก้', 'วันที่แก้', 'ผู้ปิดงาน'] }
+  ISSUES: { name: 'ปัญหา', head: ['id', 'โซน', 'วันที่', 'เวลา(ms)', 'ผู้แจ้ง', 'ปัญหา', 'รูป', 'สถานะ', 'วิธีแก้', 'วันที่แก้', 'ผู้ปิดงาน', 'ติดต่อกลับ (ผู้แจ้งภายนอก)'] }
 };
 
 // ───────────────────────── util ─────────────────────────
@@ -64,6 +64,32 @@ function dupOf_(b) { return b.cid ? CacheService.getScriptCache().get('cid_' + S
 function markDup_(b, id) { if (b.cid) CacheService.getScriptCache().put('cid_' + String(b.cid).slice(0, 60), String(id), 21600); }
 function atOf_(b) { var at = +b.at; return at && at <= Date.now() + 6e5 && Date.now() - at < 4 * 864e5 ? at : Date.now(); }
 function dayOf_(b, d) { var at = atOf_(b); return Utilities.formatDate(new Date(at), 'Asia/Bangkok', 'yyyy-MM-dd') || d; }
+// ───── 📱 คนนอก (ลูกค้า/คนขับรถ/ซัพพลายเออร์) สแกนป้ายแล้วแจ้งปัญหาได้ ไม่ต้องล็อกอิน ─────
+// ส่งเฉพาะข้อมูลโซน (ไม่มีชื่อพนักงาน) · กันสแปม: ช่องดักบอท + จำกัด 5 เรื่อง/โซน/ชม. และ 60 เรื่อง/ชม. ทั้งระบบ · ไม่ได้แต้ม
+function zoneInfo_(id) {
+  id = clean_(id).toUpperCase(); var r = id ? findRow_(T.ZONES, id) : -1; if (r < 0) return { ok: false, error: 'ไม่พบโซน ' + id };
+  var v = sh_(T.ZONES).getRange(r, 1, 1, T.ZONES.head.length).getValues()[0];
+  if (v[12] === false || String(v[12]) === 'FALSE') return { ok: false, error: 'โซนนี้ปิดใช้งานแล้ว' };
+  var st = rows_(T.SITES).filter(function (s) { return String(s[0]) === String(v[1]); })[0];
+  return { ok: true, zone: { id: String(v[0]), name: String(v[4]), icon: String(v[3]), area: String(v[2]), site: st ? String(st[2]) : String(v[1]), photo: String(v[15] || '') } };
+}
+function guestIssue_(b) {
+  if (b.hp) return { ok: true, id: '-' };
+  var zid = clean_(b.zoneId).toUpperCase(), text = clean_(b.text).slice(0, 500), who = clean_(b.who).slice(0, 40), name = clean_(b.name).slice(0, 60);
+  var tel = String(b.tel || '').replace(/[^\d+]/g, '').slice(0, 15);
+  if (text.length < 3) throw new Error('พิมพ์ปัญหาที่พบอย่างน้อย 3 ตัวอักษร');
+  if (!zid || findRow_(T.ZONES, zid) < 0) throw new Error('ไม่พบโซนนี้');
+  if (b.photo && String(b.photo).length > 1500000) throw new Error('รูปใหญ่เกินไป');
+  var c = CacheService.getScriptCache(), kz = 'gi_' + zid, nz = +(c.get(kz) || 0), ng = +(c.get('gi_all') || 0);
+  if (nz >= 5 || ng >= 60) throw new Error('มีการแจ้งเข้ามามากแล้ว — ลองใหม่ภายหลัง หรือแจ้งพนักงานในพื้นที่');
+  var lock = LockService.getScriptLock(); if (!lock.tryLock(20000)) throw new Error('ระบบกำลังยุ่ง ลองใหม่อีกครั้ง');
+  try {
+    var iid = nextId_('I'), by = 'ภายนอก · ' + (who || 'ไม่ระบุ') + (name ? ' · ' + name : '');
+    sh_(T.ISSUES).appendRow([iid, zid, today_(), Date.now(), by, text, b.photo ? savePhoto_(b.photo, 'guest_' + iid) : '', 'open', '', '', '', tel]);
+  } finally { lock.releaseLock(); }
+  c.put(kz, String(nz + 1), 3600); c.put('gi_all', String(ng + 1), 3600);
+  return { ok: true, id: iid };
+}
 function rows_(t) {
   var s = sh_(t), n = s.getLastRow();
   return n < 2 ? [] : s.getRange(2, 1, n - 1, t.head.length).getValues();
@@ -254,7 +280,7 @@ function boot_(u) {
   var sites = rows_(T.SITES).map(function (r) { return { id: String(r[0]), w: String(r[1]), name: String(r[2]), areas: pj_(r[3], []), codes: pj_(r[4], {}) }; });
   var zones = rows_(T.ZONES).filter(function (r) { return r[0] && r[12] !== false && String(r[12]) !== 'FALSE'; }).map(function (r) {
     return { id: String(r[0]), site: String(r[1]), area: String(r[2]), icon: String(r[3]), name: String(r[4]), items: pj_(r[5], []),
-      owner: String(r[6]), backup: String(r[7]), due: clean_(r[8]) || '10.00', freq: String(r[9] || 'ทุกวัน'), rota: pj_(r[10], null), before: r[11] === true || String(r[11]) === 'TRUE', photo: String(r[15] || ''), loc: locP_(r[16]) };
+      owner: String(r[6]), backup: String(r[7]), due: clean_(r[8]) || '10.00', freq: String(r[9] || 'ทุกวัน'), rota: pj_(r[10], null), before: r[11] === true || String(r[11]) === 'TRUE', photo: String(r[15] || ''), loc: locP_(r[16]), ownerSince: r[17] instanceof Date ? r[17].getTime() : (+r[17] || 0) };
   });
   var checks = rows_(T.CHECKS).filter(function (r) { return dstr_(r[2]) >= from; }).map(function (r) {
     return { id: String(r[0]), zoneId: String(r[1]), date: dstr_(r[2]), time: +r[3], by: String(r[5]), res: pj_(r[6], []), photo: String(r[7]), before: String(r[8]),
@@ -265,7 +291,7 @@ function boot_(u) {
   });
   var issues = rows_(T.ISSUES).filter(function (r) { return r[7] === 'open' || dstr_(r[2]) >= from; }).map(function (r) {
     return { id: String(r[0]), zoneId: String(r[1]), date: dstr_(r[2]), time: +r[3], by: String(r[4]), text: String(r[5]), photo: String(r[6]),
-      status: String(r[7]), fixNote: String(r[8]), fixDate: dstr_(r[9]) };
+      status: String(r[7]), fixNote: String(r[8]), fixDate: dstr_(r[9]), guest: /^ภายนอก/.test(String(r[4])), contact: u.r === 'emp' ? '' : String(r[11] || '') };
   });
   var grants = u.r === 'emp' ? [] : rows_(T.GRANTS).filter(function (r) { return r[0]; }).map(function (r) {
     var e = findEmp_(r[0]); return { code: String(r[0]), name: String(r[1]), r: String(r[2]), site: e ? e.w : '', by: String(r[3]) };
@@ -290,7 +316,7 @@ function earned_() {
     if (!first[k] || t < first[k].t) first[k] = { t: t, by: String(r[5]), z: String(r[1]), d: d }; });
   Object.keys(first).forEach(function (k) { var f = first[k], z = zones[f.z]; if (z && f.by && f.by === ownerOn_(z, f.d) && minOf_(f.t) <= toMin_(z.due)) add(f.by, 'on', 1); });
   rows_(T.JOBS).forEach(function (r) { if (r[0] && r[10] === 'done' && r[11]) add(String(r[11]), r[1] === 'vol' ? 'vol' : 'job', +r[6] || 0); });
-  rows_(T.ISSUES).forEach(function (r) { if (r[0] && r[7] === 'done' && r[4]) add(String(r[4]), 'iss', 1); });
+  rows_(T.ISSUES).forEach(function (r) { if (r[0] && r[7] === 'done' && r[4] && !/^ภายนอก/.test(String(r[4]))) add(String(r[4]), 'iss', 1); });
   try { var s = JSON.stringify(P); if (s.length < 95000) c.put('earn_v1', s, 120); } catch (e) {}
   return P;
 }
@@ -300,7 +326,7 @@ function rewards_() {
   if (s.getLastRow() < 2) s.appendRow(['RW1', 'Café Amazon เมนูเย็น 1 แก้ว', 'เลือกเมนูเย็นได้ 1 แก้ว', 100, '🧋', '', true, '', new Date(), 'ระบบ']);
   return rows_(T.REWARDS).filter(function (r) { return r[0]; }).map(function (r) {
     return { id: String(r[0]), name: String(r[1]), detail: String(r[2]), pts: +r[3] || 0, icon: String(r[4] || '🎁'), photo: String(r[5] || ''), on: r[6] === true || String(r[6]) === 'TRUE',
-      stock: r[7] === '' || r[7] == null ? null : +r[7] };
+      stock: r[7] === '' || r[7] == null ? null : +r[7], from: dstr_(r[10]), to: dstr_(r[11]) };
   });
 }
 function redeemObj_(r) {
@@ -361,6 +387,9 @@ function act_(a, b, u) {
                  z.photoNew ? savePhoto_(z.photoNew, 'zone_' + (z.id || z.code || 'new') + '_' + Date.now()) : (/^https:\/\//.test(String(z.photo || '')) ? z.photo : ''),
                  locS_(z.loc)];
       var zr = z.id ? findRow_(T.ZONES, z.id) : -1;
+      // เจ้าของโซนตั้งแต่: เปลี่ยนเจ้าของ = เริ่มนับใหม่ · เจ้าของเดิม = คงวันเดิม
+      var oldO = zr > 0 ? String(sh_(T.ZONES).getRange(zr, 7).getValue()) : '', oldS = zr > 0 ? sh_(T.ZONES).getRange(zr, 18).getValue() : '';
+      row.push(clean_(z.owner) ? (oldO === clean_(z.owner) && oldS ? oldS : now) : '');
       if (zr > 0) { row[0] = z.id; sh_(T.ZONES).getRange(zr, 1, 1, row.length).setValues([row]); }
       else {
         var all = rows_(T.ZONES).map(function (x) { return String(x[0]).toUpperCase(); }), code = clean_(z.code).toUpperCase();
@@ -428,6 +457,8 @@ function act_(a, b, u) {
       var rw = rewards_().filter(function (x) { return x.id === String(b.rid); })[0];
       if (!rw || !rw.on) throw new Error('ของรางวัลนี้ปิดให้แลกแล้ว');
       if (rw.stock !== null && rw.stock <= 0) throw new Error('ของรางวัลนี้หมดแล้ว');
+      if (rw.from && today_() < rw.from) throw new Error('ของรางวัลนี้ยังไม่เปิดให้แลก');
+      if (rw.to && today_() > rw.to) throw new Error('ของรางวัลนี้หมดเขตแลกแล้ว');
       var earnT = (earned_()[u.n] || { total: 0 }).total, bal = earnT - spent_(u.n);
       if (bal < rw.pts) throw new Error('แต้มไม่พอ — มี ' + bal + ' แต้ม ต้องใช้ ' + rw.pts + ' แต้ม');
       var cp = 'RZ-' + Array.apply(null, Array(4)).map(function () { return 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'.charAt(Math.floor(Math.random() * 31)); }).join('');
@@ -451,8 +482,11 @@ function act_(a, b, u) {
       if (!clean_(x.name)) throw new Error('ใส่ชื่อรางวัล'); var xp = Math.round(+x.pts); if (!(xp > 0)) throw new Error('ใส่แต้มที่ใช้แลก');
       var xid = x.id || nextId_('RW'), xr = x.id ? findRow_(T.REWARDS, x.id) : -1;
       var photo = x.photoNew ? savePhoto_(x.photoNew, 'reward_' + xid) : (/^https:\/\//.test(String(x.photo || '')) ? x.photo : '');
-      var row = [xid, clean_(x.name), clean_(x.detail), xp, clean_(x.icon) || '🎁', photo, x.on !== false, x.stock === '' || x.stock == null ? '' : Math.max(0, Math.round(+x.stock)), new Date(), u.n];
+      var row = [xid, clean_(x.name), clean_(x.detail), xp, clean_(x.icon) || '🎁', photo, x.on !== false, x.stock === '' || x.stock == null ? '' : Math.max(0, Math.round(+x.stock)), new Date(), u.n,
+                 /^\d{4}-\d\d-\d\d$/.test(x.from || '') ? x.from : '', /^\d{4}-\d\d-\d\d$/.test(x.to || '') ? x.to : ''];
+      if (row[10] && row[11] && row[11] < row[10]) throw new Error('วันสิ้นสุดต้องไม่ก่อนวันเริ่ม');
       if (xr > 0) sh_(T.REWARDS).getRange(xr, 1, 1, row.length).setValues([row]); else sh_(T.REWARDS).appendRow(row);
+      sh_(T.REWARDS).getRange(xr > 0 ? xr : sh_(T.REWARDS).getLastRow(), 11, 1, 2).setNumberFormat('@').setValues([[row[10], row[11]]]);
       return { id: xid };
     }
     case 'delZone': {
@@ -462,6 +496,7 @@ function act_(a, b, u) {
     case 'setOwner': {
       need_(b.t, 'mgr'); canCenter_(u, centerOfZone_(b.zoneId));
       var or = findRow_(T.ZONES, b.zoneId); sh_(T.ZONES).getRange(or, b.k === 'backup' ? 8 : 7).setValue(clean_(b.v));
+      if (b.k !== 'backup') sh_(T.ZONES).getRange(or, 18).setValue(clean_(b.v) ? now : '');
       sh_(T.ZONES).getRange(or, 14, 1, 2).setValues([[now, u.n]]); return {};
     }
     case 'saveRota': {
@@ -523,6 +558,7 @@ function doGet(e) {
   try {
     if (!e) return json_({ ok: true, setup: setup() });   // กด Run doGet ในตัวแก้ไข = ติดตั้ง/ขอสิทธิ์
     if (p.action === 'boot') return json_(boot_(need_(p.t)));
+    if (p.action === 'zoneInfo') return json_(zoneInfo_(p.zone));   // สาธารณะ: คนนอกสแกนป้าย QR
     if (p.action === 'nextCode') { var nu = need_(p.t, 'mgr'); return json_({ ok: true, code: nextZoneCode_(p.site, p.area, rows_(T.ZONES).map(function (x) { return String(x[0]).toUpperCase(); })) }); }
     return json_({ ok: true, app: 'Rattana Zone', installed: !!props_().getProperty('SHEET_ID') });
   } catch (err) { return json_({ ok: false, auth: !!err.auth, error: err.message || String(err) }); }
@@ -533,6 +569,7 @@ function doPost(e) {
   try {
     if (b.action === 'empLogin') return json_(empLogin_(b));
     if (b.action === 'googleLogin') return json_(googleLogin_(b));
+    if (b.action === 'guestIssue') return json_(guestIssue_(b));    // สาธารณะ: คนนอกแจ้งปัญหา ไม่ต้องล็อกอิน
     var u = need_(b.t), lock = LockService.getScriptLock();
     if (!lock.tryLock(20000)) throw new Error('ระบบกำลังยุ่ง ลองใหม่อีกครั้ง');
     try { var out = act_(b.action, b, u); out.ok = true; return json_(out); } finally { lock.releaseLock(); }
