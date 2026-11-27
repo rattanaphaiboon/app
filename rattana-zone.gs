@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '2.0';
+var VERSION = '2.1';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -351,6 +351,10 @@ function act_(a, b, u) {
       centerOfZone_(b.zoneId);
       var dupC = dupOf_(b); if (dupC) return { id: dupC, dup: true };   // ส่งซ้ำจากคิวออฟไลน์
       d = dayOf_(b, d); var tmC = atOf_(b);
+      // 1 คน ตรวจโซนเดิมได้วันละ 1 ครั้ง (ดู 800 แถวล่าสุดก็พอ)
+      var sC = sh_(T.CHECKS), nC = sC.getLastRow(), kC = Math.min(800, nC - 1);
+      if (kC > 0 && sC.getRange(nC - kC + 1, 1, kC, 5).getValues().some(function (r) { return String(r[1]) === String(b.zoneId) && dstr_(r[2]) === d && String(r[4]) === String(u.c); }))
+        throw new Error('วันนี้คุณตรวจโซนนี้ไปแล้ว — 1 คนตรวจโซนเดิมได้วันละ 1 ครั้ง');
       var id = nextId_('C'), photo = savePhoto_(b.photo, b.zoneId + '_' + id), before = savePhoto_(b.before, b.zoneId + '_' + id + '_before');
       if (!photo) throw new Error('ต้องมีรูปหลังทำ');
       sh_(T.CHECKS).appendRow([id, b.zoneId, d, tmC, u.c, u.n, JSON.stringify(b.res || []), photo, before, clean_(b.note), !!b.scan, !!b.proxy, clean_(b.for), now,
