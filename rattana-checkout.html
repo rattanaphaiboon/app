@@ -3333,7 +3333,7 @@ let CHECKER = LSget('rattana_checker') || '';
 /* ที่อยู่ Apps Script — เก็บไว้ในเครื่อง ตั้งจากในแอปได้เลย (ปุ่ม "ตั้งค่าการบันทึก")
    เก็บใน localStorage ไม่ใช่ฝังในไฟล์ พออัปเดตไฟล์ใหม่ค่าที่ตั้งไว้จะไม่หาย */
 /* รุ่นของไฟล์ — ไว้ดูว่าที่เปิดอยู่เป็นไฟล์ล่าสุด หรือไฟล์เก่าที่ยังค้างในเครื่อง */
-const BUILD = '2026-11-26 · 186';
+const BUILD = '2026-11-27 · 187';
 const GAS_DEFAULT = 'https://script.google.com/macros/s/AKfycbyveXQsN0hK_nd5gUWZZUfDzztpdwxPhSrSITZ9-yZ41KT7bHbNLbTjZDNReKhtffcw/exec';
 let GAS_URL = LSget('rattana_gas_url') || GAS_DEFAULT;
 /* เปิดจากเครื่องทดสอบ (localhost) = ห้ามเขียนชีตจริง — ตอนเปิดหน้า แอปส่งคิวค้างขึ้นชีตทันที
@@ -12584,6 +12584,7 @@ function w1TruckInfo(job) {
   if ((sk.wait || []).length) out.push(`⏳ รอออกบิล ${fmtN(sk.wait.length)} ใบจอง (${sk.wait.join(', ')}) — ออกบิลแล้วเปิดงานนี้จากหน้ารถ จะเพิ่มให้เอง`);
   if ((sk.bad || []).length) out.push(`⚠ โหลดไม่ได้ ${fmtN(sk.bad.length)} ใบ: ${sk.bad.join(', ')}`);
   if ((sk.gone || []).length) out.push(`⚠ ไม่พบใน Doc ${W1WH} แล้ว — เอาออกจากงานนี้: ${sk.gone.join(', ')}`);   // BUILD 143
+  if ((sk.moved || []).length) out.push(`🚚 จัดรถเอาออกจากเที่ยวนี้แล้ว — เอาออกจากงานนี้: ${sk.moved.join(' · ')}`);   // BUILD 187
   return out.map(s => `<br><span class="txt-muted">${esc(s)}</span>`).join('');
 }
 /* ── รวมหลายบิลเป็นงานเดียว (BUILD 126 · ผู้ใช้ถาม 19/11 "w1 เลือกหลายบิลเช็คเป็น1งาน ทำได้มั้ย" — ตอบ: ทั้งสองแบบ)
@@ -13193,7 +13194,7 @@ function w1DiffMaps(a, b) {
   return out;
 }
 /** รายการของงานนี้ตาม Doc W1 ตอนนี้ → { lines, missing:[เลขที่ที่ไม่มีแล้ว], bills?, sub? } · null = เทียบไม่ได้ · throw = อ่านไม่ได้ */
-async function w1FreshOf(job) {
+async function w1FreshOf(job, force) {
   await Promise.all([w1LoadBills(), w1MasterReady()]);
   if (job.kind === 'batch') {
     const um = job.key.match(W1_UNIT_RE), bm = job.key.match(W1_BATCH_RE);
@@ -13207,28 +13208,52 @@ async function w1FreshOf(job) {
               : { lines:[], missing:[job.key] };
   }
   if (!job.docs) { const fj = await w1DocJob(job.key); return fj && fj.lines.length ? { lines:fj.lines, missing:[] } : { lines:[], missing:[job.key] }; }
-  const res = await Promise.all(job.docs.map(d => w1DocJob(d.doc)));       // อ่านไม่ได้ใบเดียว = เทียบไม่ได้ทั้งงาน (throw)
-  const lines = [], missing = [];
-  res.forEach((fj, i) => { const d = job.docs[i];
-    if (!fj || !fj.lines.length) { missing.push(d.doc); return; }
+  // งานรถ: ร้านในเที่ยวตามไฟล์จัดรถตอนนี้ (BUILD 187) — ใบที่จัดรถเอาออกจากเที่ยวนี้ = moved · ใบที่จัดรถเพิ่มเข้ามา = added
+  let docs = job.docs, moved = [], added = [];
+  const T = job.kind === 'truck' ? await w1TruckPlan(job, force) : null;
+  if (T) {
+    moved = job.docs.filter(d => !T.books.has(d.book)).map(d => d.doc);
+    docs = job.docs.filter(d => T.books.has(d.book));
+    const S = W1S(), has = new Set(job.docs.map(d => d.doc)), books = new Set(job.books);
+    added = T.docs.filter(d => !d.wait && !books.has(d.book) && !has.has(d.doc) && !S.jobs[d.doc] && !w1DoneOf(d.doc));   // กติกาเดียวกับ w1TruckAdd
+  }
+  const res = await Promise.all([...docs.map(d => w1DocJob(d.doc)),         // อ่านไม่ได้ใบเดียว = เทียบไม่ได้ทั้งงาน (throw)
+                                 ...added.map(d => w1DocJob(d.doc).catch(() => null))]);
+  const lines = [], missing = [], addOk = [];
+  res.forEach((fj, i) => { const add = i >= docs.length, d = add ? added[i - docs.length] : docs[i];
+    if (!fj || !fj.lines.length) { if (!add) missing.push(d.doc); return; }
+    if (add) addOk.push({ book:d.book, doc:d.doc, shop:fj.store || d.shop || d.ar || '-', ar:d.ar || fj.storeCode || '' });
     fj.lines.forEach(l => lines.push(Object.assign(l, { store:l.store || d.shop || '' }))); });
-  return { lines, missing };
+  return { lines, missing, moved, added:addOk };
+}
+/** เที่ยวของงานรถในไฟล์จัดรถตอนนี้ → { books:Set ใบจองในเที่ยว, docs:เอกสารของเที่ยว } · ไม่เจอเที่ยวนี้ (พ้นงานวันนี้ / อ่านไฟล์จัดรถไม่ได้) = null ไม่เทียบ */
+async function w1TruckPlan(job, force) {
+  const D = W1D;
+  if (force || Date.now() - D.keepAt > 180e3) await (D.keepP ||= w1LoadKeep().catch(e => console.warn('W1 Keepdata', e)).finally(() => { D.keepP = null; }));
+  if (!D.keepAt) return null;
+  const t = w1Trucks()[job.reg], g = t && t.trips.find(x => x.sday === job.sday && +x.trip === +job.trip);
+  if (!g || !g.stores.length) return null;
+  return { books:new Set(g.stores.flatMap(s => s.books)), docs:w1TripDocs(g) };
 }
 /** เทียบงานที่เปิดอยู่กับ Doc W1 (กันถี่ 1 นาที · force = อ่านใหม่) */
 function w1ChkJob(J, force) {
   const key = J.job.key, C = W1CHG[key] ||= { at:0, diff:[], missing:[] };
   if (C.p) return C.p;
   if (!force && Date.now() - C.at < 60000) return Promise.resolve(C);
-  C.p = w1FreshOf(J.job).then(f => {
+  C.p = w1FreshOf(J.job, force).then(f => {
     if (W1S().jobs[key] !== J) return C;
-    if (!f) return Object.assign(C, { at:Date.now(), diff:[], missing:[], fresh:null, err:'' });
-    const diff = w1DiffMaps(w1LineMap(J.job.lines, w1LKey), w1LineMap(f.lines, w1LKey)).filter(d => !f.missing.includes(d.ref));
-    return Object.assign(C, { at:Date.now(), diff, missing:f.missing, fresh:f, err:'' });
+    if (!f) return Object.assign(C, { at:Date.now(), diff:[], missing:[], moved:[], added:[], fresh:null, err:'' });
+    const moved = f.moved || [], added = f.added || [], skip = new Set([...f.missing, ...moved, ...added.map(d => d.doc)]);   // ใบที่ออก/เข้า บอกเป็นใบ ไม่แตกรายบรรทัด
+    const diff = w1DiffMaps(w1LineMap(J.job.lines, w1LKey), w1LineMap(f.lines, w1LKey)).filter(d => !skip.has(d.ref));
+    return Object.assign(C, { at:Date.now(), diff, missing:f.missing, moved, added, fresh:f, err:'' });
   }).catch(e => Object.assign(C, { at:Date.now(), err:String(e.message || e) })).finally(() => { C.p = null; });
   return C.p;
 }
-const w1ChgSig = C => C ? JSON.stringify([(C.diff || []).map(d => [d.ref, d.pid, d.isF, d.from, d.to]), C.missing || []]) : '';
-const w1HasChg = C => !!C && ((C.diff || []).length > 0 || (C.missing || []).length > 0);
+const w1ChgSig = C => C ? JSON.stringify([(C.diff || []).map(d => [d.ref, d.pid, d.isF, d.from, d.to]), C.missing || [], C.moved || [], (C.added || []).map(d => d.doc)]) : '';
+const w1HasChg = C => !!C && ((C.diff || []).length > 0 || (C.missing || []).length > 0 || (C.moved || []).length > 0 || (C.added || []).length > 0);
+/** ใบที่จัดรถเอาออก / เพิ่มเข้าเที่ยวนี้ "ร้าน (บิล) · …" (BUILD 187) */
+const w1DocsTxt = (J, docs) => docs.map(d => { const x = typeof d === 'string' ? (J.job.docs || []).find(y => y.doc === d) || { doc:d } : d;
+  return x.shop && x.shop !== '-' ? `${x.shop} (${x.doc})` : x.doc; }).join(' · ');
 /** บรรทัดบอกการเปลี่ยน "ร้าน · <b>สินค้า</b> (แถม) 5 ลัง → 3 ลัง" */
 function w1DiffTxt(d, showRef) {
   const p = w1Prod(d.pid, d), u = x => fmtUnitsTxt(x, p.units) || fmtN(x);
@@ -13239,16 +13264,20 @@ function w1DiffList(diff, showRef, max = 8) {
   return diff.length ? `<ul>${diff.slice(0, max).map(d => `<li>${w1DiffTxt(d, showRef)}</li>`).join('')}${diff.length > max ? `<li>…อีก ${fmtN(diff.length - max)} บรรทัด</li>` : ''}</ul>` : '';
 }
 /** หัวข้อเตือน — ใบจัดเปลี่ยนได้ทั้งจาก Doc W1 และไฟล์จัดรถ (ช่องทางตามจัดรถ BUILD 183) */
-const w1ChgTitle = J => J && J.job && J.job.kind === 'batch' ? `ใบจัดเปลี่ยนหลังเปิดงาน (Doc ${W1WH} / จัดรถ)` : `Doc ${W1WH} ถูกแก้หลังเปิดงาน`;
-/** กล่องส้มบนหน้าเช็ค/สรุป — Doc W1 ถูกแก้หลังเปิดงาน */
+const w1ChgTitle = J => !J || !J.job ? `Doc ${W1WH} ถูกแก้หลังเปิดงาน`
+  : J.job.kind === 'batch' ? `ใบจัดเปลี่ยนหลังเปิดงาน (Doc ${W1WH} / จัดรถ)`
+  : J.job.kind === 'truck' ? `งานรถเปลี่ยนหลังเปิดงาน (Doc ${W1WH} / จัดรถ)` : `Doc ${W1WH} ถูกแก้หลังเปิดงาน`;
+/** กล่องส้มบนหน้าเช็ค/สรุป — Doc W1 ถูกแก้หลังเปิดงาน · งานรถ: จัดรถเอาออก/เพิ่มร้าน (BUILD 187) */
 function w1ChgHtml(J) {
   const C = W1CHG[J.job.key]; if (!w1HasChg(C)) return '';
-  const miss = C.missing || [], one = !J.job.docs && miss.length;
+  const miss = C.missing || [], one = !J.job.docs && miss.length, mv = C.moved || [], ad = C.added || [];
   return `<div class="w1-chg"><b>⚠ ${w1ChgTitle(J)}${C.diff.length ? ` — ${fmtN(C.diff.length)} บรรทัดเปลี่ยน` : ''}</b>
     ${one ? `<div class="gone">ไม่พบ${esc(J.job.typeLabel)}นี้ใน Doc ${W1WH} แล้ว (ถูกลบ/ยกเลิก?) — สอบถามหัวหน้าก่อนเช็คต่อ</div>`
           : miss.length ? `<div class="gone">ไม่พบใน Doc ${W1WH} แล้ว: ${esc(miss.join(', '))} — อัปเดตแล้วจะเอาออกจากงานนี้</div>` : ''}
+    ${mv.length ? `<div class="gone">🚚 จัดรถเอาออกจากเที่ยวนี้แล้ว ${fmtN(mv.length)} ใบ: ${esc(w1DocsTxt(J, mv))} — อัปเดตแล้วจะเอาออกจากงานนี้ (ของที่ยิงไว้ของร้านนี้ = เกิน ไม่ต้องขึ้นรถ)</div>` : ''}
+    ${ad.length ? `<div>🚚 จัดรถเพิ่มเข้าเที่ยวนี้ ${fmtN(ad.length)} ใบ: ${esc(w1DocsTxt(J, ad))} — อัปเดตแล้วจะเพิ่มเข้างานนี้</div>` : ''}
     ${w1DiffList(C.diff, !!J.job.docs)}
-    ${one ? '' : `<button type="button" class="btn btn-gold btn-sm" onclick="w1ApplyFresh()">อัปเดตรายการ${J.job.kind === 'batch' ? '' : ' ตาม Doc ' + W1WH}</button>
+    ${one ? '' : `<button type="button" class="btn btn-gold btn-sm" onclick="w1ApplyFresh()">อัปเดตรายการ${J.job.kind === 'batch' || J.job.kind === 'truck' ? '' : ' ตาม Doc ' + W1WH}</button>
       <small>รายการที่ยิงไว้อยู่ครบ — เปลี่ยนแค่ยอดที่ต้องออก · ต้องอัปเดตก่อนถึงยืนยันได้</small>`}</div>`;
 }
 /** อัปเดตรายการของงานตาม Doc W1 — รายการที่ยิงไม่แตะ · แถวหมุด "อัปเดตรายการ" ในชีต กำลังเช็ค */
@@ -13264,19 +13293,31 @@ async function w1ApplyFresh() {
   job.lines.forEach(l => { if (!keep.has(l.pid) && (J.got || {})[l.pid])          // ยิงไว้แล้วแต่ถูกเอาออก = นอกเอกสาร (กรอบแดงในหน้าสรุป)
     (J.extra ||= {})[l.pid] = Object.assign({ name:l.name, code:l.code, label:l.label, uq:l.uq }, J.extra[l.pid], { gone:true }); });
   job.lines = f.lines;
-  if (job.docs && miss.length) {
-    job.docs = job.docs.filter(d => !miss.includes(d.doc));
-    (job.skip ||= {}).gone = [...new Set([...(job.skip.gone || []), ...miss])];
+  const mv = (C.moved || []).slice(), ad = (C.added || []).slice();      // งานรถ: จัดรถเอาออก / เพิ่ม (BUILD 187)
+  const mvTxt = mv.map(d => w1DocsTxt(J, [d]));                         // ชื่อร้านก่อนเอาใบออก
+  if (job.docs && (miss.length || mv.length || ad.length)) {
+    const out = new Set([...miss, ...mv]);
+    job.docs = job.docs.filter(d => !out.has(d.doc)).concat(ad);
+    job.skip ||= {};
+    if (miss.length) job.skip.gone = [...new Set([...(job.skip.gone || []), ...miss])];
+    if (mv.length) job.skip.moved = [...new Set([...(job.skip.moved || []), ...mvTxt])];
     job.shops = [...new Set(job.docs.map(d => d.shop))]; job.books = [...new Set(job.docs.map(d => d.book))];
     if (job.kind === 'multi') w1MultiMeta(job); else job.sub = w1TruckSub(job);
   }
+  if (ad.length) {                                     // ยิงไว้นอกงาน แต่ร้านที่จัดรถเพิ่มสั่งตัวนั้น = ในงานแล้ว
+    const inL = new Set(f.lines.map(l => l.pid));
+    (J.entries || []).forEach(e => { if (!e.inDoc && inL.has(e.pid)) e.inDoc = true; });
+    if (J.extra) inL.forEach(pid => { if (J.extra[pid] && !J.extra[pid].unknown) delete J.extra[pid]; });
+  }
   if (job.kind === 'batch') { if (f.bills) job.bills = f.bills; if (f.sub) job.sub = f.sub; }
-  (job.upd ||= []).push({ ts:Date.now(), by:CHECKER, n, miss });
+  (job.upd ||= []).push({ ts:Date.now(), by:CHECKER, n, miss, moved:mv, added:ad.map(d => d.doc) });
   J.last = Date.now();
-  w1MarkRow(J, 'อัปเดตรายการ', `อัปเดตรายการจาก Doc ${W1WH} · ${fmtN(n)} บรรทัดเปลี่ยน${miss.length ? ' · เอาออก ' + miss.join(', ') : ''}`); w1FlushLive();
-  Object.assign(C, { diff:[], missing:[], at:Date.now() }); C.told = '';
+  w1MarkRow(J, 'อัปเดตรายการ', `อัปเดตรายการ${job.kind === 'truck' ? ' (Doc ' + W1WH + ' / จัดรถ)' : ' จาก Doc ' + W1WH} · ${fmtN(n)} บรรทัดเปลี่ยน${miss.length ? ' · เอาออก ' + miss.join(', ') : ''}`
+    + `${mv.length ? ' · จัดรถเอาออก ' + mv.join(', ') : ''}${ad.length ? ' · จัดรถเพิ่ม ' + ad.map(d => d.doc).join(', ') : ''}`); w1FlushLive();
+  Object.assign(C, { diff:[], missing:[], moved:[], added:[], at:Date.now() }); C.told = '';
   save(); w1ReRender();
-  toast(`อัปเดตรายการตาม Doc ${W1WH} แล้ว — ${fmtN(n)} บรรทัดเปลี่ยน`, 'success');
+  toast(`อัปเดตรายการแล้ว — ${[n && `${fmtN(n)} บรรทัดเปลี่ยน`, mv.length && `จัดรถเอาออก ${fmtN(mv.length)} ใบ`, ad.length && `จัดรถเพิ่ม ${fmtN(ad.length)} ใบ`,
+    miss.length && `ไม่พบใน Doc ${W1WH} ${fmtN(miss.length)} ใบ`].filter(Boolean).join(' · ') || 'ไม่มีบรรทัดเปลี่ยน'}`, 'success');
 }
 function w1ReRender() { if (onScreen('scr-w1sum')) renderW1Sum(); else if (onScreen('scr-w1job')) renderW1Job(); }
 
@@ -13746,7 +13787,7 @@ function renderW1Sum() {
       const unk = x.extra && ((J.extra || {})[x.pid] || {}).unknown, gone = x.extra && ((J.extra || {})[x.pid] || {}).gone;
       const right = x.extra ? `<span class="lo">${fmtUnitsTxt(x.got, units) || fmtN(x.got)}</span>` : x.st === 'short' ? `<span class="lo">ขาด ${fmtUnitsTxt(-d, units)}</span>` : x.st === 'over' ? `<span class="w1-ov">เกิน ${fmtUnitsTxt(d, units)}</span>` : '<span class="w1-okt">ครบ</span>';
       return hdr(i, x) + `<div class="w1-sr ${x.st}${x.extra ? ' xtra' : ''}" onclick="w1SumPick('${esc(x.pid)}')">
-        <div class="w1-em">${x.extra ? `<span class="w1-xt">⚠ ${unk ? 'ไม่พบสินค้าในระบบ' : gone ? 'ถูกลบจาก Doc ' + W1WH + ' หลังเปิดงาน' : `ไม่อยู่ใน${esc(job.typeLabel)}นี้`}</span>` : ''}<b>${x.free ? '<span class="badge badge-gold">แถม</span> ' : ''}${esc(x.p.name)}</b>
+        <div class="w1-em">${x.extra ? `<span class="w1-xt">⚠ ${unk ? 'ไม่พบสินค้าในระบบ' : gone ? (job.kind === 'truck' || job.kind === 'batch' ? `ถูกเอาออกหลังเปิดงาน (Doc ${W1WH} / จัดรถ)` : 'ถูกลบจาก Doc ' + W1WH + ' หลังเปิดงาน') : `ไม่อยู่ใน${esc(job.typeLabel)}นี้`}</span>` : ''}<b>${x.free ? '<span class="badge badge-gold">แถม</span> ' : ''}${esc(x.p.name)}</b>
           <small>${x.extra ? (unk ? `บาร์โค้ด ${esc((J.extra[x.pid] || {}).code || '')} · ` : '') : `สั่ง ${fmtUnitsTxt(x.needEA, units)} · `}ได้ ${x.got ? fmtUnitsTxt(x.got, units) : '0'}${refs ? ` (${refs})` : ''}${x.peer ? ` · 👥 คนอื่น ${fmtUnitsTxt(x.peer, units)}` : ''}</small>${job.docs && !x.extra ? w1SumStores(J, x) : ''}</div>
         <div class="w1-sv">${right}<button type="button" class="w1-sed" onclick="event.stopPropagation();w1SumEdit('${esc(x.pid)}')">✎ แก้ยอด</button></div></div>`; }).join('')
     : '<div class="w1-empty">ไม่มีรายการ</div>';
@@ -14009,6 +14050,7 @@ async function w1Confirm() {
     const ok = await askBox({ title:w1ChgTitle(J), ok:one ? 'ยืนยันต่อ' : 'อัปเดตรายการ', cancel:'กลับไปก่อน', tone:'danger', wide:true,
       body:one ? `<b>${esc(J.job.key)}</b><br>ไม่พบ${esc(J.job.typeLabel)}นี้ใน Doc ${W1WH} แล้ว (ถูกลบ/ยกเลิก?)<br><br>สอบถามหัวหน้าก่อน — ยืนยันต่อ = ลงชีตตามรายการเดิม`
                : `<b>${esc(J.job.key)}</b> — รายการในงานไม่ตรงกับเอกสารตอนนี้${C.missing.length ? `<br>ไม่พบแล้ว: ${esc(C.missing.join(', '))}` : ''}
+                  ${(C.moved || []).length ? `<br>🚚 จัดรถเอาออกจากเที่ยวนี้: ${esc(w1DocsTxt(J, C.moved))}` : ''}${(C.added || []).length ? `<br>🚚 จัดรถเพิ่มเข้าเที่ยวนี้: ${esc(w1DocsTxt(J, C.added))}` : ''}
                   <div class="w1-chg">${w1DiffList(C.diff, !!J.job.docs, 12)}</div><br>อัปเดตรายการก่อน แล้วดูสรุปอีกครั้งก่อนยืนยัน (รายการที่ยิงไว้อยู่ครบ)` });
     if (w1Cur() !== J) return;
     if (!one) { if (ok) await w1ApplyFresh(); return; }
