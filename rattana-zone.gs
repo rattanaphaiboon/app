@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '2.2';
+var VERSION = '2.3';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -335,7 +335,7 @@ function redeemObj_(r) {
     coupon: String(r[9]), by: String(r[10]), byAt: +r[11] || 0, note: String(r[12]) };
 }
 function jobObj_(r) {
-  return { id: String(r[0]), kind: String(r[1]), zoneId: String(r[2]), title: String(r[3]), detail: String(r[4]), photo: String(r[5]), pts: +r[6] || 0, due: +r[7] || 0,
+  return { id: String(r[0]), kind: String(r[1]), zoneId: String(r[2]), title: String(r[3]), detail: String(r[4]), photo: String(r[5]).split('\n')[0], photos: String(r[5] || '').split('\n').filter(String), pts: +r[6] || 0, due: +r[7] || 0,
     by: String(r[8]), at: +r[9] || 0, status: String(r[10]), taker: String(r[11]), takerC: String(r[12]), takenAt: +r[13] || 0, before: String(r[14]), after: String(r[15]),
     subAt: +r[16] || 0, dist: r[17] === '' || r[17] == null ? null : +r[17], rev: String(r[18]), revAt: +r[19] || 0, note: String(r[20]) };
 }
@@ -412,7 +412,10 @@ function act_(a, b, u) {
       need_(b.t, 'mgr'); canCenter_(u, centerOfZone_(b.zoneId));
       if (!clean_(b.title)) throw new Error('ใส่หัวข้องาน');
       var jp = Math.max(1, Math.min(50, Math.round(+b.pts || 5))), jid = nextId_('J');
-      sh_(T.JOBS).appendRow([jid, 'job', b.zoneId, clean_(b.title), clean_(b.detail), b.photo ? savePhoto_(b.photo, 'job_' + jid) : '', jp, +b.due || '', u.n, Date.now(),
+      // รูปได้หลายรูป (สูงสุด 8) เก็บในช่องเดียว คั่นด้วยขึ้นบรรทัด
+      var jph = (Array.isArray(b.photos) ? b.photos : (b.photo ? [b.photo] : [])).slice(0, 8)
+        .map(function (p, i) { return savePhoto_(p, 'job_' + jid + '_' + (i + 1)); }).filter(String).join('\n');
+      sh_(T.JOBS).appendRow([jid, 'job', b.zoneId, clean_(b.title), clean_(b.detail), jph, jp, +b.due || '', u.n, Date.now(),
                             'open', '', '', '', '', '', '', '', '', '', '']);
       return { id: jid };
     }
