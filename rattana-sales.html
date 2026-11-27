@@ -1,6 +1,92 @@
 <!DOCTYPE html>
 <html lang="th">
 <head>
+<script id="rs-nsls">
+/* v3.37 แยกที่เก็บในเครื่องของแอปใหม่ (Surat 2026-11-27 "ของใครของมัน")
+   ต้นเหตุ: แอปเก่า rattana-sales-app.html กับแอปใหม่อยู่เว็บเดียวกัน → ใช้ localStorage/IndexedDB ก้อนเดียวกัน
+            คิวรอส่ง · ตะกร้า · ใบค้าง · เช็คอินที่เปิดค้าง ข้ามแอปกันได้ (เซลเปิดสองแอป = ของไปโผล่อีกฝั่ง · แถบแดง 0/1 เตือนผิด)
+   ทางแก้: ทุกคีย์ของแอปใหม่ขึ้นต้น "rsn:" อัตโนมัติ (โค้ดเดิมไม่ต้องแก้สักบรรทัด) ยกเว้น
+            · ล็อกอิน/ด่านลงทะเบียน/ธีม = ใช้ร่วม (ล็อกอินครั้งเดียว)
+            · ข้อมูลตั้งค่าที่อ่านจากชีตเก่า (สินค้า · โปร · EA · ราคา · เป้า ...) = ใช้ร่วม ไม่เก็บซ้ำสองก้อน (เครื่องเต็มง่าย)
+            IndexedDB ของแอปใหม่ใช้ชื่อขึ้นต้น "rsn_" (แคชชีตแยกกัน)
+   เปิดครั้งแรก: ก๊อปงานในเครื่องมาไว้ฝั่งแอปใหม่ — ตัดของที่เป็นของแอปเก่าออกจากคิว (ใบ/เช็คอิน/CN ที่แอปใหม่ไม่ได้ออกเลข)
+            ของฝั่งแอปเก่าไม่แตะเลย (แอปเก่าส่งของตัวเองต่อได้ตามเดิม) */
+(function () {
+  try {
+    var R = window.localStorage; if (!R) return;
+    var NS = 'rsn:';
+    var SH_EXACT = { rattanaUser: 1, rattanaSalesUser: 1, rattanaDark: 1, rf_session: 1, rk_tweak_dock: 1 };
+    var SH_PRE = ['rattana_', 'rsa_custHist', 'rsa_dreco_'];
+    var SH_CACHE = { products: 1, promotion: 1, promotions: 1, priceOverrides: 1, groupTargets: 1, focusRules: 1, factoryShortage: 1, dataCenter: 1,
+      dashConfig: 1, users: 1, vendorDataV1: 1, subGroups: 1, skuSwap: 1, skuClosed: 1, holidays: 1, eaAllow: 1, debtData: 1, debtAppr: 1,
+      boFactoryNotes: 1, syncStatus: 1, returnPolicy: 1, kpiCfg: 1, specAppr: 1, paySlips: 1 };
+    function shared(k) {
+      if (SH_EXACT[k]) return true;
+      for (var i = 0; i < SH_PRE.length; i++) if (k.indexOf(SH_PRE[i]) === 0) return true;
+      return k.indexOf('rsa_') === 0 && !!SH_CACHE[k.slice(4)];
+    }
+    function pk(k) { k = String(k); return shared(k) ? k : NS + k; }
+    var kc = null;
+    function keys() {
+      if (kc) return kc;
+      var out = [];
+      for (var i = 0; i < R.length; i++) { var k = R.key(i); if (k == null) continue; if (k.indexOf(NS) === 0) out.push(k.slice(NS.length)); else if (shared(k)) out.push(k); }
+      return (kc = out);
+    }
+    var API = {
+      getItem: function (k) { return R.getItem(pk(k)); },
+      setItem: function (k, v) { kc = null; R.setItem(pk(k), String(v)); },
+      removeItem: function (k) { kc = null; R.removeItem(pk(k)); },
+      key: function (i) { var a = keys(); return i >= 0 && i < a.length ? a[i] : null; },
+      clear: function () { keys().slice().forEach(function (k) { R.removeItem(pk(k)); }); kc = null; }
+    };
+    var PX = new Proxy(API, {
+      get: function (t, p) { if (p === 'length') return keys().length; if (typeof p === 'string' && Object.prototype.hasOwnProperty.call(API, p)) return API[p]; if (typeof p !== 'string') return undefined; return API.getItem(p); },
+      set: function (t, p, v) { API.setItem(p, v); return true; },
+      has: function (t, p) { return typeof p === 'string' && (Object.prototype.hasOwnProperty.call(API, p) || API.getItem(p) !== null); },
+      deleteProperty: function (t, p) { API.removeItem(p); return true; },
+      ownKeys: function () { return keys().slice(); },
+      getOwnPropertyDescriptor: function (t, p) { var v = typeof p === 'string' ? API.getItem(p) : null; return v === null ? undefined : { value: v, writable: true, enumerable: true, configurable: true }; }
+    });
+    /* เปิดครั้งแรก: ย้ายงานในเครื่องมาฝั่งแอปใหม่ (ทำครั้งเดียวต่อเครื่อง) */
+    if (R.getItem(NS + '__mig') !== '1') {
+      var marks = {};
+      ['rs_b2_oids', 'rs_b2_vids', 'rs_b2_cids'].forEach(function (mk) { try { marks[mk] = JSON.parse(R.getItem(mk) || '{}') || {}; } catch (e) { marks[mk] = {}; } });
+      var OA = { appendOrderBatch: 1, appendOrder: 1, verifyOrder: 1 }, VA = { appendVisit: 1, attachVisitPhoto: 1, attachCheckinSelfie: 1, attachRandomPhoto: 1 }, CA = { appendCN: 1, appendCNBatch: 1, attachCNPhoto: 1 };
+      var oldOwned = function (p) {   // true = ของแอปเก่า (แอปใหม่ไม่ได้ออกเลขนี้) → ไม่ย้ายมา
+        if (!p || typeof p !== 'object') return false;
+        var a = String(p.action || ''), rows = (Array.isArray(p.rows) ? p.rows : []).concat(p.row ? [p.row] : []);
+        if (OA[a]) { var ids = {}; rows.forEach(function (r) { if (r && r.orderId) ids[String(r.orderId).trim()] = 1; }); if (p.orderId) ids[String(p.orderId).trim()] = 1; var ks = Object.keys(ids); return !ks.length || !ks.every(function (o) { return marks.rs_b2_oids[o]; }); }
+        if (VA[a]) { var v = String((p.row && p.row.visitId) || p.visitId || '').trim(); return !v || !marks.rs_b2_vids[v]; }
+        if (CA[a]) { var r0 = rows[0] || {}, c = String(p.cnId || r0.cnId || '').trim() || String(p.cnLineId || r0.cnLineId || '').trim().replace(/-\d+$/, ''); return !c || !marks.rs_b2_cids[c]; }
+        return false;
+      };
+      var moved = 0, dropped = 0;
+      var all = []; for (var i0 = 0; i0 < R.length; i0++) all.push(R.key(i0));   // เก็บรายชื่อก่อน (ระหว่างก๊อป ลำดับคีย์เปลี่ยน)
+      for (var i = 0; i < all.length; i++) {
+        var k = all[i];
+        if (k == null || k.indexOf(NS) === 0 || shared(k) || R.getItem(NS + k) !== null) continue;
+        if (/^rsa_(orders|visits|customer|all|cnDman|cnApp|kpiAck|kpiTeam)/.test(k)) continue;   // แคชชีต → แอปใหม่ดึงใหม่จากหลังบ้านใหม่
+        var v = R.getItem(k);
+        if (k === 'rsa_write_queue') {
+          try { var q = JSON.parse(v); if (Array.isArray(q)) { var q2 = q.filter(function (it) { return !oldOwned(it && it.payload); }); dropped += q.length - q2.length; v = JSON.stringify(q2); } } catch (e) { }
+        }
+        try { R.setItem(NS + k, v); moved++; } catch (e) { }
+      }
+      try { R.setItem(NS + '__mig', '1'); R.setItem(NS + '__mig_info', JSON.stringify({ at: new Date().toISOString(), moved: moved, droppedOld: dropped })); } catch (e) { }
+    }
+    Object.defineProperty(window, 'localStorage', { configurable: true, enumerable: true, get: function () { return PX; } });
+    window.RS_NSLS = { ns: NS, raw: R };
+    /* IndexedDB: แคชชีตของแอปใหม่แยกชื่อ */
+    try {
+      var IDB = window.indexedDB, _open = IDB.open.bind(IDB), _del = IDB.deleteDatabase.bind(IDB);
+      IDB.open = function (n, v) { return v === undefined ? _open('rsn_' + n) : _open('rsn_' + n, v); };
+      IDB.deleteDatabase = function (n) { return _del('rsn_' + n); };
+    } catch (e) { }
+  } catch (e) { try { console.warn('[nsls]', e && e.message); } catch (e2) { } }
+})();
+</script>
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -17,7 +103,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v3.36</title>
+<title>Rattana Sales — v3.37</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" media="print" onload="this.media='all'">
@@ -8463,7 +8549,7 @@ body.dark .rs-resend-all { background: #2a1606; border-color: #7c2d12; color: #f
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v3.36 · 2026-11-26 · ฐาน v8.771</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v3.37 · 2026-11-26 · ฐาน v8.771</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -8474,7 +8560,7 @@ body.dark .rs-resend-all { background: #2a1606; border-color: #7c2d12; color: #f
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v3.36</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v3.37</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -62620,7 +62706,7 @@ window._rtSetDay = function (d) {
 </script>
 <!-- v8.750 ด่านกลาง: ต้องลงทะเบียน LINE OA + PDPA ก่อนใช้แอปภายใน (Surat 2026-11-22) -->
 <script id="rs-deltas">
-window.RS_VER='v3.36';window.RS_BASE='v8.771';window.RS_PILOT=true;
+window.RS_VER='v3.37';window.RS_BASE='v8.771';window.RS_PILOT=true;
 /* ===== Rattana Sales · deltas — กติกา/หน้าตาที่ต่างจากแอปเดิม (Rattana Sales App) =====
    วางท้ายไฟล์ หลังโค้ดแอปเดิมทั้งหมด · ทับฟังก์ชันเดิมแบบห่อ (wrap) ไม่แก้ข้างใน · ไม่เปลี่ยนหลังบ้าน/คีย์ในเครื่อง
    ทุกข้อเขียนเหตุผล + วันที่ Surat สั่ง */
@@ -62863,9 +62949,43 @@ window.RS_VER='v3.36';window.RS_BASE='v8.771';window.RS_PILOT=true;
       var w = myWh();
       return !!w && b2wh.indexOf(w) >= 0;
     }
+    /* v3.37: จำคำตอบ ping ไว้ในเครื่อง → เปิดแอปรอบถัดไปรู้ทันทีว่าใช้หลังบ้านใหม่ (เดิม 2 วิแรกไปดึงชีตเก่าทั้งแท็บ: Visits 5.7 MB · CN · DebtApproval) */
+    var PING_KEY = 'rs_b2_ping', allowList = null;
+    try { var pc = JSON.parse(localStorage.getItem(PING_KEY) || 'null'); if (pc) { b2wh = String(pc.b2wh || '').toUpperCase().split(/[\s,]+/).filter(Boolean); allowList = pc.allow == null ? null : String(pc.allow); } } catch (e) { }
     _f0(URL2 + '?action=ping').then(function (r) { return r.json(); }).then(function (j) {
       b2wh = String((j && j.b2wh) || '').toUpperCase().split(/[\s,]+/).filter(Boolean);
-    }).catch(function () { b2wh = []; });
+      allowList = String((j && j.allow) || '');
+      try { localStorage.setItem(PING_KEY, JSON.stringify({ b2wh: (j && j.b2wh) || '', allow: allowList, at: Date.now() })); } catch (e) { }
+      checkAllow();
+    }).catch(function () { if (!b2wh) b2wh = []; });
+
+    /* v3.37 (Surat 27/11 "ล็อกแอปใหม่ให้เปิดได้เฉพาะคนที่อนุญาต"): รายชื่อ = หลังบ้านใหม่ Script Property NEW_APP_USERS (อีเมล/รหัสเซล)
+       ว่าง = ทุกคน · Role 7 ผ่านเสมอ · ไม่อยู่ในรายชื่อ = แจ้งแล้วพาไปแอปขายเดิม (ของในเครื่องฝั่งแอปเดิมไม่ถูกแตะ ส่งต่อได้ตามเดิม) */
+    var OLD_APP = 'rattana-sales-app.html';
+    function checkAllow() {
+      try {
+        if (allowList === null || allowList === '' || /(^|,)\*(,|$)/.test(allowList)) return;
+        var u = (typeof currentUser !== 'undefined' && currentUser) || null;
+        if (!u || !u.email) return setTimeout(checkAllow, 800);
+        if (Number(u.role || 0) >= 7) return;
+        var list = allowList.toLowerCase().split(',');
+        var ids = [String(u.email || '').toLowerCase(), String(u.salesmanCode || '').toLowerCase(), String(u.bplusCode || '').toLowerCase()];
+        try { if (typeof SALESMAN !== 'undefined' && SALESMAN) ids.push(String(SALESMAN.code || SALESMAN.salesmanCode || '').toLowerCase()); } catch (e) { }
+        if (ids.some(function (x) { return x && list.indexOf(x) >= 0; })) return;
+        if (document.getElementById('rsAllowGate')) return;
+        var d = document.createElement('div');
+        d.id = 'rsAllowGate';
+        d.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:rgba(8,20,46,.97);display:flex;align-items:center;justify-content:center;padding:24px';
+        d.innerHTML = '<div style="max-width:340px;width:100%;background:#fff;border-radius:18px;padding:22px 20px;text-align:center;font-family:inherit">'
+          + '<div style="font-size:18px;font-weight:800;color:#011e3e;margin-bottom:6px">แอปนี้ยังเปิดเฉพาะทีมทดลอง</div>'
+          + '<div style="font-size:13.5px;color:#475569;line-height:1.55;margin-bottom:16px">กำลังพาไปแอปขายที่ใช้อยู่ · งานที่ค้างส่งในแอปเดิมอยู่ครบ</div>'
+          + '<a href="' + OLD_APP + '" style="display:block;padding:14px;border-radius:12px;background:#ffc21a;color:#011e3e;font-size:16px;font-weight:800;text-decoration:none">ไปแอปขาย</a></div>';
+        document.body.appendChild(d);
+        setTimeout(function () { location.replace(OLD_APP); }, 2500);
+      } catch (e) { }
+    }
+    setTimeout(checkAllow, 300);
+    window.RS_B2_allow = function () { return allowList; };
     window.RS_B2 = { url: URL2, post: post, on: on };
     /* หลังบ้านส่งแบบบีบอัด (ออเดอร์ทั้งบริษัท 3 วัน 6.8 MB → ~1.3 MB) · เครื่องที่ไม่มี DecompressionStream ขอแบบปกติ */
     var GZ = typeof DecompressionStream === 'function';
