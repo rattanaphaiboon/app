@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin-allow-popups">
-<title>Rattana ยอดหนี้คงค้าง v6.59</title>
+<title>Rattana ยอดหนี้คงค้าง v6.60</title>
 <link rel="icon" type="image/svg+xml" href="rattana-debt-icon.svg?v=2">
 <link rel="icon" type="image/png" sizes="192x192" href="rattana-debt-icon-192.png?v=2">
 <link rel="apple-touch-icon" sizes="180x180" href="rattana-debt-icon-180.png?v=2">
@@ -936,7 +936,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
   <header>
     <div class="logo">
       <div class="logo-text">RATTA<span>NA</span></div>
-      <span class="app-ver">v6.59</span>
+      <span class="app-ver">v6.60</span>
       <button type="button" class="co-btn" id="btnCompany" onclick="switchCompany()" title="เปลี่ยนบริษัท">Bplus ⇄</button>
     </div>
     <div class="title">
@@ -1236,7 +1236,7 @@ body.dark #debugPanel .actions button:hover{background:var(--navy-light)}
     </div>
     <div class="match-header">
       <h3>บิลขายเชื่อที่ซุปอนุมัติแล้ว</h3>
-      <span id="crCount" class="dcr-sub">กำลังโหลด...</span>
+      <span id="crTabCount" class="dcr-sub">กำลังโหลด...</span>
     </div>
     <div id="crList" class="match-list">
       <div class="match-empty">กำลังโหลดข้อมูล...</div>
@@ -1709,13 +1709,13 @@ function parseCsv(text){
     });
 }
 
-async function loadFromSheets(sheetId, sheetName, captureD = false){
+async function loadFromSheets(sheetId, sheetName, captureD = false, timeoutMs = 0){
   const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
   if (captureD){ _diag.fetchUrl = url; _diag.fetchError = ''; }
 
   // Fetch with retry: gviz endpoint sometimes returns 503 / HTML redirect on cold first hit.
   // Retry once with a small delay before failing.
-  const FETCH_TIMEOUT = 30000;   // v5.25: SQL Data 6,300+ แถว เดิม 12 วิ ไม่พอ พอ timeout = allRows ว่าง = การ์ดขายเชื่อไม่มีวงเงิน/เครดิต/ธง
+  const FETCH_TIMEOUT = timeoutMs || 30000;   // v6.60: ส่งค่ามาได้ (ชีท Sales App ตอบ 20–25 วิ) · v5.25: SQL Data 6,300+ แถว เดิม 12 วิ ไม่พอ พอ timeout = allRows ว่าง = การ์ดขายเชื่อไม่มีวงเงิน/เครดิต/ธง
   const MAX_ATTEMPTS = 2;
   let res, lastErr, text;
 
@@ -3650,6 +3650,8 @@ let creditLoading = false;
 let crQuery       = '';
 let crSt          = 'รอบัญชี';   // ชิปสถานะ — เริ่มที่คิวของบัญชีเสมอ
 let crDay         = '';
+let crCachedAt    = 0;            // v6.60: >0 = ตอนนี้โชว์ชุดที่เก็บในเครื่อง (ยังดึงของใหม่ไม่เสร็จ)
+const CR_CACHE_KEY = 'creditRows_v1';
 const crExpanded  = new Set();
 const crOrderCache = {};          // billId → รายการสินค้า (โหลดตอนกางเท่านั้น)
 
@@ -3667,9 +3669,21 @@ async function loadCreditBills(force){
   if (creditLoading) return;
   if (creditLoaded && !force) { renderCreditList(); return; }
   creditLoading = true;
-  if ($('crCount') && !creditRows.length) $('crCount').textContent = 'กำลังโหลด...';
+  // v6.60: ชีท Sales App (DebtApproval) ตอบช้า 20–25 วิ (เช็ค 27/11) → โชว์ชุดล่าสุดที่เก็บในเครื่องก่อน แล้วดึงใหม่เบื้องหลัง
+  if (!creditRows.length){
+    try {
+      const c = await idbGet(CR_CACHE_KEY);
+      if (c && Array.isArray(c.rows) && c.rows.length){
+        creditRows = c.rows;
+        creditRows.forEach(a => { a._s = crSearchable(a); });
+        crCachedAt = c.at || 0;
+        renderCreditChips(); renderCreditList(); updateCreditBadge();
+      }
+    } catch(_){}
+  }
+  if ($('crTabCount') && !creditRows.length) $('crTabCount').textContent = 'กำลังโหลด... (ชีทขายเชื่อตอบช้า ~20 วิ)';
   try {
-    const raw = await loadFromSheets(CONFIG.backendSheetId, CONFIG.debtApprovalTab);
+    const raw = await loadFromSheets(CONFIG.backendSheetId, CONFIG.debtApprovalTab, false, 90000);
     const cutoff = new Date(Date.now() - (CONFIG.creditDays - 1) * 86400000)
                      .toLocaleDateString('sv-SE').replace(/-/g, '/');
     creditRows = raw.map(r => {
@@ -3699,11 +3713,13 @@ async function loadCreditBills(force){
     creditRows.sort((x, y) => y.apprTs.localeCompare(x.apprTs));   // ล่าสุดอยู่บน
     creditRows.forEach(a => { a._s = crSearchable(a); });
     creditLoaded = true;
+    crCachedAt = 0;
+    idbSet(CR_CACHE_KEY, { at: Date.now(), rows: creditRows.map(({ _s, ...a }) => a) }).catch(() => {});   // v6.60
   } catch(e){
     creditLoading = false;
     if (!creditRows.length){
       $('crList').innerHTML = `<div class="match-empty">โหลดไม่สำเร็จ: ${escapeHtml(e.message)}</div>`;
-      $('crCount').textContent = 'โหลดไม่สำเร็จ';
+      $('crTabCount').textContent = 'โหลดไม่สำเร็จ';
     } else {
       showToast('ดึงคิวขายเชื่อล่าสุดไม่สำเร็จ — แสดงของเดิม', 'warning');
       renderCreditList();
@@ -3920,11 +3936,15 @@ function renderCreditList(){
   if (crDay) rows = rows.filter(a => a.apprTs.slice(0, 10) === crDay);
   // v6.3: แยกเลข 2 กองให้ชัด — ไม่งั้นตอนดูชิป "ยังไม่คีย์บิล" จะอ่านเหมือนว่านั่นคือคิวจริง
   const _nNb = creditRows.filter(crNoBill).length;
-  $('crCount').textContent = rows.length
-    ? `${rows.length} ใบ · รอบัญชีตัดสิน ${creditRows.filter(crPending).length}` + (_nNb ? ` · ยังไม่คีย์บิล ${_nNb}` : '')
+  // v6.60: เดิมใช้ id 'crCount' ซ้ำกับหน้าสรุป → เลขของแท็บนี้ไม่เคยขึ้น ค้าง "กำลังโหลด..." ตลอด
+  const _stale = crCachedAt
+    ? ` · ข้อมูลเมื่อ ${new Date(crCachedAt).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}${creditLoading ? ' กำลังอัปเดต...' : ''}`
     : '';
+  $('crTabCount').textContent = rows.length
+    ? `${rows.length} ใบ · รอบัญชีตัดสิน ${creditRows.filter(crPending).length}` + (_nNb ? ` · ยังไม่คีย์บิล ${_nNb}` : '') + _stale
+    : (creditLoading && !creditRows.length ? 'กำลังโหลด... (ชีทขายเชื่อตอบช้า ~20 วิ)' : _stale.replace(/^ · /, ''));
   if (!rows.length){
-    $('crList').innerHTML = `<div class="match-empty">${crQuery ? 'ไม่พบรายการที่ตรงกับคำค้น' : 'ไม่มีใบในสถานะนี้'}</div>`;
+    $('crList').innerHTML = `<div class="match-empty">${creditLoading && !creditRows.length ? 'กำลังโหลดข้อมูล... ชีทขายเชื่อตอบช้า รอประมาณ 20 วินาที' : crQuery ? 'ไม่พบรายการที่ตรงกับคำค้น' : 'ไม่มีใบในสถานะนี้'}</div>`;
     return;
   }
   $('crList').innerHTML = rows.map(crCardHtml).join('');
