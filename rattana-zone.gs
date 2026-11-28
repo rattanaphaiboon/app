@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '2.4';
+var VERSION = '2.5';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -425,7 +425,20 @@ function act_(a, b, u) {
     }
     case 'jobDrop': {
       var jd = jobRow_(b.id); if (jd.o.status !== 'taken' || jd.o.takerC !== String(u.c)) throw new Error('คืนได้เฉพาะงานที่คุณรับไว้');
+      if (jd.o.kind === 'vol') { jobSet_(jd.r, 11, ['cancel']); return {}; }   // อาสาที่เริ่มแล้วกดยกเลิก = ยกเลิกทั้งรายการ
       jobSet_(jd.r, 11, ['open', '', '', '']); jobSet_(jd.r, 15, ['', '', '', '']); return {};
+    }
+    // อาสา 2 ขั้น: ขั้นที่ 1 ถ่ายรูปก่อนทำ → สร้างแถว vol สถานะ taken (กำลังทำ) · ขั้นที่ 2 ส่งรูปหลังทำผ่าน jobSubmit
+    case 'volStart': {
+      centerOfZone_(b.zoneId);
+      if (!b.before) throw new Error('ต้องมีรูปก่อนทำ');
+      var dayS = new Date(today_() + 'T00:00:00+07:00').getTime();
+      var dupS = rows_(T.JOBS).some(function (r) { return r[1] === 'vol' && String(r[2]) === String(b.zoneId) && String(r[12]) === String(u.c) && +r[9] >= dayS && !/rejected|cancel/.test(r[10]); });
+      if (dupS) throw new Error('วันนี้คุณช่วยโซนนี้ไปแล้ว — ลองช่วยโซนอื่นนะ');
+      var sid = nextId_('V'), now = Date.now();
+      sh_(T.JOBS).appendRow([sid, 'vol', b.zoneId, 'อาสาช่วยทำความสะอาด', '', '', 3, '', u.n, now, 'taken', u.n, u.c, now,
+                            savePhoto_(b.before, sid + '_before'), '', now, distV_(b.dist), '', '', '']);
+      return { id: sid };
     }
     // ขั้นที่ 1 หลังรับงาน: ส่งรูปก่อนทำ → สถานะยังเป็น taken แต่มีรูปก่อน = "กำลังทำ" (เก็บเวลาเริ่มไว้ช่องเวลาส่งชั่วคราว)
     case 'jobStart': {
@@ -447,7 +460,7 @@ function act_(a, b, u) {
       centerOfZone_(b.zoneId);
       if (!b.before || !b.after) throw new Error('ต้องมีรูปก่อนทำและหลังทำ');
       var dayStart = new Date(today_() + 'T00:00:00+07:00').getTime();
-      var dupV = rows_(T.JOBS).some(function (r) { return r[1] === 'vol' && String(r[2]) === String(b.zoneId) && String(r[12]) === String(u.c) && +r[9] >= dayStart && r[10] !== 'rejected'; });
+      var dupV = rows_(T.JOBS).some(function (r) { return r[1] === 'vol' && String(r[2]) === String(b.zoneId) && String(r[12]) === String(u.c) && +r[9] >= dayStart && !/rejected|cancel/.test(r[10]); });
       if (dupV) throw new Error('วันนี้คุณช่วยโซนนี้ไปแล้ว — ลองช่วยโซนอื่นนะ');
       var vid = nextId_('V');
       sh_(T.JOBS).appendRow([vid, 'vol', b.zoneId, 'อาสาช่วยทำความสะอาด', '', '', 3, '', u.n, Date.now(), 'submitted', u.n, u.c, Date.now(),
