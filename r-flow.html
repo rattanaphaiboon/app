@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>R-Flow — ติดตามงานทีม v5.2</title>
+<title>R-Flow — ติดตามงานทีม v5.3</title>
 <link rel="icon" type="image/png" href="r-flow-icon.png">
 <link rel="manifest" href="r-flow.webmanifest">
 <link rel="apple-touch-icon" href="r-flow-icon.png">
@@ -1869,7 +1869,7 @@ body.dark .rf-upnext{border:1px solid var(--border)}
    Design:  Claude Design "Team Task Tracker" (task-tracker/design/) */
 
 const CFG = {
-  version: '5.1',
+  version: (String(document.title).match(/ติดตามงานทีม v([\d.]+)/) || [])[1] || '0',   // v5.3: อ่านจาก <title> ที่เดียว — v5.2 แก้ title แต่ลืมแก้ตรงนี้ ทุกเครื่องเลยขึ้น "มีเวอร์ชันใหม่" ตลอด
   exec: 'https://script.google.com/macros/s/AKfycbx3lmJqh1WYDhKFE-0Il4A4ihdcCsbbHYN6c9JuAXWj3TU-oWHGvate7NmxSAwDYdWfww/exec',
   clientId: '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com',
   hubUrl: 'https://rattanaphaiboon.github.io/app/rattana-hub.html',
@@ -2883,15 +2883,59 @@ function initWarehouseFilter(){
    (ลายเซ็นเซ็นไม่ได้ · เช็คลิสต์มอบหมายแล้วหาย · หัวหน้ากดตรวจผ่านไม่ได้ — ทั้ง 3 เคสคือเรื่องนี้)
    วิธี: ขอแค่ 600 ไบต์แรกของไฟล์ตัวเอง (Range request) แล้วอ่านเลขเวอร์ชันจาก <title>
          ❌ ไม่โหลดทั้งไฟล์ (~1MB) · เช็คแค่ตอนโหลดข้อมูลสำเร็จ ไม่ได้ยิงถี่ */
-function checkAppUpdate(){
+/* ══ v5.3 บังคับอัปเดต (Surat สั่ง 2026-11-28) ══
+   เดิมขึ้นแถบ "มีเวอร์ชันใหม่" ให้กดเอง → คนไม่กด = ใช้ของเก่าค้างไปเรื่อยๆ
+   + v5.2 เลขใน <title> กับ CFG.version ไม่ตรงกัน → ทุกเครื่องขึ้นแถบตลอด กดอัปเดตแล้วก็ยังขึ้น (CFG.version อ่านจาก <title> แล้ว ไม่มีทางไม่ตรงอีก)
+   ตอนนี้: เจอเวอร์ชันใหม่ → โหลดใหม่เองทันทีที่ปลอดภัย (ไม่เปิดฟอร์ม · ไม่พิมพ์ค้าง · ไม่มีบันทึกกำลังส่ง)
+           ยังไม่ปลอดภัย → แถบบอกว่า "จะอัปเดตเองเมื่อบันทึกเสร็จ" แล้วลองใหม่ทุก 5 วิ
+   เช็คเมื่อ: เปิดแอป · โหลดข้อมูลสำเร็จ · กลับเข้าแอป · ทุก 10 นาทีที่เปิดค้าง (ห่างกันอย่างน้อย 60 วิ)
+   กันวนรีโหลดไม่จบ (เช่น CDN ยังส่งไฟล์เก่า): เวอร์ชันเดียวกันบังคับได้ 2 ครั้งต่อแท็บ เกินนั้นเหลือแถบให้กดเอง
+   ของที่รอส่ง (wq) อยู่ใน localStorage อยู่แล้ว โหลดใหม่ไม่หาย */
+let _updChkAt = 0, _updTryT = null, _updGiveUp = false;
+function checkAppUpdate(force){
+  const now = Date.now();
+  if (!force && now - _updChkAt < 60000) return;
+  _updChkAt = now;
   try {
-    fetch(location.pathname + '?vchk=' + Date.now(), { cache: 'no-store', headers: { 'Range': 'bytes=0-600' } })
+    fetch(location.pathname + '?vchk=' + now, { cache: 'no-store', headers: { 'Range': 'bytes=0-600' } })
       .then(function(r){ return r.text(); })
       .then(function(txt){
         const m = String(txt).match(/ติดตามงานทีม v([\d.]+)/);
-        if (m && m[1] && m[1] !== CFG.version && !S.newVer) { S.newVer = m[1]; render(); }
+        if (!m || !m[1] || m[1] === CFG.version) return;
+        const first = S.newVer !== m[1];
+        S.newVer = m[1];
+        forceUpdateSoon();
+        // ❌ ไม่ render ตอนติดฟอร์ม/พิมพ์อยู่ (กติกาเดียวกับ sync) — แถบขึ้นเองรอบวาดถัดไป
+        if (first && _updGiveUp && SESSION.email && canSyncNow()) render();
       }).catch(function(){});
   } catch(e){}
+}
+function canUpdateNow(){
+  return !formBusy() && _pendingWrites === 0 && !hasPendingClSave() && !typingNow();
+}
+function forceUpdateSoon(){
+  if (_updTryT || _updGiveUp || !S.newVer) return;
+  const key = 'rf_force_upd_' + S.newVer;
+  let n = 0; try { n = +sessionStorage.getItem(key) || 0; } catch(e){}
+  if (n >= 2) { _updGiveUp = true; return; }    // บังคับมา 2 รอบแล้วยังได้ของเก่า → ไม่วนต่อ เหลือแถบให้กดเอง
+  (function tryNow(){
+    _updTryT = null;
+    if (!canUpdateNow()) { _updTryT = setTimeout(tryNow, 5000); return; }
+    try { sessionStorage.setItem(key, String(n + 1)); } catch(e){}
+    try { flushClSaves(); } catch(e){}
+    appReload();
+  })();
+}
+// โหลดหน้าใหม่แบบไม่เอาของในแคช · กลับมาที่เดิม: เปิดงานอยู่ → เปิดงานนั้นต่อ (?t=)
+// ลิงก์นอติเก่าใน URL (t/task/routine/rejects/sched/c) ตัดทิ้ง ไม่งั้นโหลดใหม่แล้วเด้งไปงานที่ปิดไปแล้ว
+function appReload(){
+  try {
+    const qs = String(location.search || '').replace(/^\?/, '').split('&')
+      .filter(function(p){ return p && !/^(r|vchk|t|task|routine|rejects|sched|c)=/.test(p); });
+    if (S.detailId) qs.push('t=' + encodeURIComponent(S.detailId));
+    qs.push('r=' + Date.now());
+    location.replace(location.pathname + '?' + qs.join('&') + (location.hash || ''));
+  } catch(e){ location.reload(); }
 }
 // ⚠️ ตัวปุ่ม (RF.appUpdate) อยู่ล่างไฟล์ — ตรงนี้อยู่เหนือ `const RF = {}` เขียนไม่ได้ (TDZ จอขาว v4.44)
 let _reloadT = null;
@@ -3088,8 +3132,10 @@ function startPolling(){
     if (document.visibilityState !== 'visible') { flushClSaves(); return; }   // สลับออกจากแอป → ส่งที่ค้างก่อน
     updateAppBadge();                    // กลับเข้าแอป → เลขแดงบนไอคอนตรงกับที่ยังไม่ได้อ่านจริง
     wqFlush();                           // กลับมาแล้วเน็ตอาจติดแล้ว → ส่งของที่ค้างก่อน
+    checkAppUpdate();                    // v5.3: กลับเข้าแอป → เช็คเวอร์ชัน (มีของใหม่ = โหลดใหม่เอง)
     if (canSync()) loadAll(true);
   });
+  setInterval(function(){ checkAppUpdate(); }, 10 * 60 * 1000);   // v5.3: เปิดค้างทั้งวันบนคอม ก็ได้ของใหม่ภายใน 10 นาที
 }
 
 /* v4.74: "ตอนนี้ดึงข้อมูลสดได้ไหม" — ตัวเดียวใช้ทั้ง sync 75 วิ · poll คอมเม้น · ดึงซ้ำหลังอนุมัติ
@@ -3539,9 +3585,11 @@ function bannerHtml(){
      เดิมพลาดแล้วแถบยังหมุนบอก "กำลังดึงของล่าสุด" ทั้งที่ไม่ได้ดึงอะไรอยู่เลย = โกหกผู้ใช้ */
   /* v4.71: มีเวอร์ชันใหม่บนเซิร์ฟเวอร์แล้ว แต่เครื่องนี้ยังใช้ของเก่าอยู่
      วางไว้บนสุดของทุกหน้า เพราะบั๊คที่แก้ไปแล้วจะยังกวนผู้ใช้อยู่จนกว่าจะโหลดใหม่ */
-  if (S.newVer) {
+  if (S.newVer) {   // v5.3: ปกติโหลดใหม่เองจนไม่ทันเห็นแถบนี้ — เห็นเมื่อรอฟอร์ม/บันทึกค้าง หรือบังคับ 2 รอบแล้วยังได้ของเก่า
     h += '<div class="rf-stalebar err"><span class="dot"></span>' +
-      '<span class="tx">มีเวอร์ชันใหม่ v' + esc(S.newVer) + ' แล้ว — เครื่องนี้ยังเป็น v' + esc(CFG.version) + '</span>' +
+      '<span class="tx">' + (_updGiveUp
+        ? 'มีเวอร์ชันใหม่ v' + esc(S.newVer) + ' แล้ว — เครื่องนี้ยังเป็น v' + esc(CFG.version)
+        : 'อัปเดตเป็น v' + esc(S.newVer) + ' ให้เองเมื่อบันทึก/ปิดฟอร์มนี้เสร็จ') + '</span>' +
       '<button onclick="RF.appUpdate()">อัปเดตเลย</button></div>';
   }
   if (_loadErr && S.tasks.length) {
@@ -10024,7 +10072,7 @@ RF.retryLoad = () => {
   loadAll(!!S.tasks.length);
 };
 // v4.71: โหลดใหม่แบบไม่เอาของในแคช — ต่อ query กันเบราว์เซอร์หยิบไฟล์เดิมมาให้อีก
-RF.appUpdate = () => { try { location.replace(location.pathname + '?r=' + Date.now()); } catch(e){ location.reload(); } };
+RF.appUpdate = () => { try { flushClSaves(); } catch(e){} appReload(); };   // v5.3: คงพารามิเตอร์เดิม (ตัวจริงอยู่ที่ appReload ใต้ checkAppUpdate)
 /* ══ v4.68 ตั้ง/เปลี่ยนรูปโปรไฟล์เองในแอป (Surat สั่ง 2026-08-06) ═══════════════
    เดิมรูปมาจากคอลัมน์ "รูปพนักงาน" ในชีท Users ที่มีแต่ HR แก้ได้ → คนส่วนใหญ่เลยไม่มีรูป
    คนที่มีรูปอยู่แล้วกดเปลี่ยนทับได้เหมือนกัน (หลังบ้านเขียนทับเซลล์เดิมของแถวตัวเอง)
@@ -13330,6 +13378,7 @@ function loadLastView(){
     initSession();
   }
   else showLogin();
+  checkAppUpdate(true);   // v5.3: เช็คตั้งแต่เปิดแอป (ไม่ต้องรอข้อมูลโหลดเสร็จ 5-7 วิ) — เก่า = โหลดใหม่ก่อนเริ่มใช้งาน
 })();
 </script>
 <script>
