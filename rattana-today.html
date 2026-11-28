@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#F4F7FB">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
-  <title>Rattana งานวันนี้ v1.1</title>
+  <title>Rattana งานวันนี้ v1.2</title>
   <link rel="stylesheet" href="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.css">
   <script src="https://rattanaphaiboon.github.io/app/rattana-ui/rattana-ui.js" defer></script>
   <style>
@@ -38,7 +38,7 @@
   <div class="rt-bg"><div class="rt-bg-arc"></div><div class="rt-bg-arc"></div></div>
   <main class="rt-container rt-page">
     <header class="rt-glass rt-topbar rt-sticky-top">
-      <a class="rt-app-brand" href="./"><span><b>Rattana งานวันนี้</b><small>v1.1</small></span></a>
+      <a class="rt-app-brand" href="./"><span><b>Rattana งานวันนี้</b><small>v1.2</small></span></a>
       <div class="rt-topbar-end">
         <button class="rt-btn rt-btn-glass rt-btn-icon" id="btnRefresh" type="button" aria-label="โหลดข้อมูลใหม่">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/></svg>
@@ -110,7 +110,8 @@ const DAYS = ['อาทิตย์','จันทร์','อังคาร',
 const LS = { sales:'rtToday.sales', wh:'rtToday.wh', visited:'rtToday.visited.' };
 
 /* ===== State ===== */
-const S = { user:null, userApplied:false, shops:[], sales:new Map(), dataDate:null, mode:'visit', day:new Date().getDay(), status:'', sort:'seq' };
+const S = { user:null, userApplied:false, shops:[], sales:new Map(), dataDate:null, mode:'visit', day:'all', status:'', sort:'seq', limit:200 };
+const PAGE = 200;   // cards drawn at a time (all stores ≈ 4,500)
 
 /* ===== Helpers ===== */
 const $ = s => document.querySelector(s);
@@ -178,13 +179,17 @@ async function loadSales() {
   // Read the header row only, then let Google sum the 80k+ rows per customer (≈100 KB instead of 60 MB)
   const head = (await gviz(BP_ID, 'select * limit 0'))[0] || [];
   const L = k => { const i = head.indexOf(k); if (i < 0) throw new Error('ไม่พบคอลัมน์ "' + k + '" ในชีท BP'); return colLetter(i); };
-  const cCode = L('Customer_Code'), cAmt = L('TotalBaht'), cDate = L('Doc_Date');
-  const rows = await gviz(BP_ID, `select ${cCode}, sum(${cAmt}), max(${cDate}) where ${cCode} is not null group by ${cCode} label sum(${cAmt}) 'amt', max(${cDate}) 'last'`);
+  const cCode = L('Customer_Code'), cName = L('Customer_Name'), cAmt = L('TotalBaht'), cDate = L('Doc_Date');
+  const rows = await gviz(BP_ID, `select ${cCode}, ${cName}, sum(${cAmt}), max(${cDate}) where ${cCode} is not null group by ${cCode}, ${cName} label sum(${cAmt}) 'amt', max(${cDate}) 'last'`);
   const map = new Map(); let maxD = null;
   rows.slice(1).forEach(r => {
-    const d = parseYmd(r[2]);
+    const code = String(r[0]); if (!code) return;
+    const d = parseYmd(r[3]);
     if (d && (!maxD || d > maxD)) maxD = d;
-    map.set(String(r[0]), { amt: num(r[1]), last: d });
+    const cur = map.get(code) || { amt: 0, last: null, name: r[1] };
+    cur.amt += num(r[2]);
+    if (d && (!cur.last || d > cur.last)) cur.last = d;
+    map.set(code, cur);
   });
   return { map, maxD };
 }
@@ -194,6 +199,12 @@ async function loadAll(manual) {
   if (manual && window.RattanaUI) RattanaUI.setLoading(btn, true);
   try {
     const [shops, sales] = await Promise.all([loadCustomers(), loadSales()]);
+    // stores that bought this month but are not in the Customer sheet yet
+    const known = new Set(shops.map(s => s.code));
+    sales.map.forEach((v, code) => {
+      if (!known.has(code)) shops.push({ name: v.name || code, code, area: '', phone: '', loc: '', type: '', wh: '', routes: [], delivers: [],
+        zone: '', sales: '', seq: 9999, f: '', avg: 0, contact: '', line: '', bpOnly: true });
+    });
     S.shops = shops; S.sales = sales.map; S.dataDate = sales.maxD;
     fillFilters();
     applyUser();
@@ -241,7 +252,7 @@ function fillFilters() {
 function buildDaySeg() {
   const today = new Date().getDay();
   // Monday..Saturday, then Sunday
-  $('#segDay').innerHTML = [1,2,3,4,5,6,0].map(d =>
+  $('#segDay').innerHTML = `<button type="button" aria-pressed="${S.day==='all'}" data-v="all">ทุกร้าน</button>` + [1,2,3,4,5,6,0].map(d =>
     `<button type="button" aria-pressed="${d===S.day}" data-v="${d}">${d===today ? 'วันนี้ · ' : ''}${DAYS[d].replace('พฤหัสบดี','พฤหัสฯ')}</button>`).join('');
 }
 
@@ -276,23 +287,24 @@ function enrich(s, prog, visited, todayIso) {
 
 /* ===== Render ===== */
 function render() {
-  const dayName = DAYS[S.day];
+  const all = S.day === 'all', dayName = all ? '' : DAYS[S.day];
   const salesF = $('#fSales').value, whF = $('#fWh').value, q = $('#fQ').value.trim().toLowerCase();
   const prog = monthProgress(), visited = getVisited(), todayIso = iso(new Date());
 
-  let base = S.shops.filter(s => (S.mode === 'visit' ? s.routes : s.delivers).includes(dayName));
+  let base = all ? S.shops.slice() : S.shops.filter(s => (S.mode === 'visit' ? s.routes : s.delivers).includes(dayName));
   if (salesF) base = base.filter(s => s.sales === salesF);
   if (whF) base = base.filter(s => s.wh === whF);
   base = base.map(s => enrich(s, prog, visited, todayIso));
 
   // KPIs (before status/search filter)
   const n = base.length, nVisited = base.filter(s => s.visited).length;
-  const sumAmt = base.reduce((a,s) => a + s.amt, 0), sumAvg = base.reduce((a,s) => a + s.avg, 0);
+  // a store code can sit on several Customer rows (one per salesperson/route) — count its sales once
+  const sumAmt = [...new Map(base.map(s => [s.code, s.amt])).values()].reduce((a,v) => a + v, 0), sumAvg = base.reduce((a,s) => a + s.avg, 0);
   const nNone = base.filter(s => s.st === 'none').length, nLow = base.filter(s => s.st === 'low').length;
   const sumGap = base.reduce((a,s) => a + s.gap, 0);
   const pctMonth = sumAvg ? sumAmt / sumAvg : 0;
   $('#kpis').innerHTML = `
-    ${kpi('gold', icoCheck, S.mode === 'visit' ? 'เยี่ยมแล้ว' : 'ส่งแล้ว (ติ๊ก)', `${nVisited}/${n} ร้าน`, n ? `เหลืออีก ${n - nVisited} ร้าน` : 'ไม่มีร้านในวันนี้')}
+    ${kpi('gold', icoCheck, S.mode === 'visit' ? 'เยี่ยมแล้ว' : 'ส่งแล้ว (ติ๊ก)', `${nVisited}/${n} ร้าน`, n ? `เหลืออีก ${n - nVisited} ร้าน` : 'ไม่มีร้าน')}
     ${kpi('red', icoAlert, 'ยังไม่สั่งเดือนนี้', `${nNone} ร้าน`, `ต่ำกว่าเป้าอีก ${nLow} ร้าน`)}
     ${kpi('navy', icoChart, 'ยอดเดือนนี้ (ร้านในรายการ)', money(sumAmt), `${Math.round(pctMonth*100)}% ของยอดเฉลี่ย 3 เดือน ${money(sumAvg)}`)}
     ${kpi('amber', icoTarget, 'ยอดที่ควรตามเพิ่ม', money(sumGap), `เทียบเป้าถึงวันนี้ (${Math.round(prog*100)}% ของเดือน)`)}`;
@@ -304,14 +316,15 @@ function render() {
   else if (S.status) rows = rows.filter(s => s.st === S.status);
   if (q) rows = rows.filter(s => [s.name, s.code, s.area, s.zone, s.phone, s.contact].join(' ').toLowerCase().includes(q));
   const sorters = {
-    seq: (a,b) => a.visited - b.visited || a.seq - b.seq || a.name.localeCompare(b.name,'th'),
+    seq: (a,b) => a.visited - b.visited || (all ? dayRank(a) - dayRank(b) : 0) || a.seq - b.seq || a.name.localeCompare(b.name,'th'),
     gap: (a,b) => a.visited - b.visited || b.gap - a.gap || a.seq - b.seq,
     avg: (a,b) => a.visited - b.visited || b.avg - a.avg
   };
   rows.sort(sorters[S.sort]);
 
   const isToday = S.day === new Date().getDay();
-  $('#listTitle').textContent = `${S.mode === 'visit' ? 'ร้านในรูท' : 'ร้านที่ส่งของ'}วัน${dayName}${isToday ? ' (วันนี้)' : ''} · ${rows.length} ร้าน`;
+  $('#listTitle').textContent = all ? `ร้านค้าทั้งหมด · ${rows.length.toLocaleString('th-TH')} ร้าน`
+    : `${S.mode === 'visit' ? 'ร้านในรูท' : 'ร้านที่ส่งของ'}วัน${dayName}${isToday ? ' (วันนี้)' : ''} · ${rows.length} ร้าน`;
 
   const list = $('#list');
   if (!rows.length) {
@@ -320,7 +333,9 @@ function render() {
     else list.textContent = msg;
     return;
   }
-  list.innerHTML = rows.map(shopHtml).join('');
+  const shown = rows.slice(0, S.limit);
+  list.innerHTML = shown.map(shopHtml).join('') + (rows.length > shown.length
+    ? `<button type="button" class="rt-btn rt-btn-glass rt-btn-block" id="btnMore">แสดงเพิ่ม (เหลืออีก ${(rows.length - shown.length).toLocaleString('th-TH')} ร้าน)</button>` : '');
   $('#srcInfo').textContent = `ยอดขายจากชีท BP ถึงวันที่ ${fmtDate(S.dataDate)} · ร้านค้าจากชีท Customer · เป้า = ยอดเฉลี่ย 3 เดือน × ${Math.round(prog*100)}% ของเดือน`;
 }
 
@@ -353,7 +368,7 @@ function shopHtml(s) {
         <div><div class="rt-cell-sub">สั่งล่าสุด</div><div class="rt-cell-main">${s.last ? fmtDate(s.last) : '-'}</div></div>
       </div>
       ${s.avg ? `<div class="rt-progress ${barCls}" title="${pctW}% ของยอดเฉลี่ย"><span style="width:${pctW}%"></span></div>` : ''}
-      <div class="rt-cell-sub" style="margin-top:6px">${esc(s.area)}${s.contact ? ' · ติดต่อ ' + esc(s.contact) : ''}${!$('#fSales').value && s.sales ? ' · ' + esc(s.sales) : ''}</div>
+      <div class="rt-cell-sub" style="margin-top:6px">${S.day === 'all' ? (s.bpOnly ? 'ไม่มีในชีท Customer · ' : `รูท ${esc((S.mode === 'visit' ? s.routes : s.delivers).join(', ') || 'ไม่ระบุวัน')} · `) : ''}${esc(s.area)}${s.contact ? ' · ติดต่อ ' + esc(s.contact) : ''}${!$('#fSales').value && s.sales ? ' · ' + esc(s.sales) : ''}</div>
       <div class="shop-act">
         <button type="button" class="rt-btn rt-btn-sm ${s.visited ? 'rt-btn-glass' : 'rt-btn-gold'}" data-visit="${esc(s.code)}">${s.visited ? 'ยกเลิกติ๊ก' : (S.mode === 'visit' ? 'เยี่ยมแล้ว' : 'ส่งแล้ว')}</button>
         ${tel ? `<a class="rt-btn rt-btn-sm rt-btn-glass" href="tel:${tel}">โทร ${tel}</a>` : ''}
@@ -363,6 +378,8 @@ function shopHtml(s) {
   </div>`;
 }
 
+// order stores by their first route day (Mon..Sat, Sun, then no day)
+const dayRank = s => { const d = (S.mode === 'visit' ? s.routes : s.delivers).map(x => DAYS.indexOf(x)).filter(i => i >= 0).map(i => i || 7); return d.length ? Math.min(...d) : 8; };
 const svg = d => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
 const icoCheck = svg('M22 11.1V12a10 10 0 1 1-5.9-9.1M22 4 12 14l-3-3');
 const icoAlert = svg('m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3M12 9v4M12 17h.01');
@@ -378,12 +395,15 @@ function segPick(el, e) {
 document.addEventListener('DOMContentLoaded', () => {
   buildDaySeg();
   $('#segMode').addEventListener('click', e => { const v = segPick($('#segMode'), e); if (v) { S.mode = v; render(); } });
-  $('#segDay').addEventListener('click', e => { const v = segPick($('#segDay'), e); if (v != null) { S.day = +v; render(); } });
+  $('#segDay').addEventListener('click', e => { const v = segPick($('#segDay'), e); if (v != null) { S.day = v === 'all' ? 'all' : +v; S.limit = PAGE; render(); } });
   $('#chips').addEventListener('click', e => { const v = segPick($('#chips'), e); if (v != null) { S.status = v; render(); } });
   $('#fSales').addEventListener('change', e => { localStorage.setItem(LS.sales, e.target.value); render(); });
   $('#fWh').addEventListener('change', e => { localStorage.setItem(LS.wh, e.target.value); render(); });
   $('#fSort').addEventListener('change', e => { S.sort = e.target.value; render(); });
-  $('#fQ').addEventListener('input', () => render());
+  $('#fQ').addEventListener('input', () => { S.limit = PAGE; render(); });
+  ['#fSales','#fWh','#fSort'].forEach(id => $(id).addEventListener('change', () => { S.limit = PAGE; }, true));
+  $('#chips').addEventListener('click', () => { S.limit = PAGE; }, true);
+  $('#list').addEventListener('click', e => { if (e.target.closest('#btnMore')) { S.limit += PAGE; render(); } });
   $('#list').addEventListener('click', e => { const b = e.target.closest('[data-visit]'); if (b) toggleVisited(b.dataset.visit); });
   $('#btnRefresh').addEventListener('click', () => loadAll(true));
   loadAll(false);
