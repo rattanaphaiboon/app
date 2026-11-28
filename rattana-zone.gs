@@ -9,7 +9,7 @@
  *  4) เอา URL /exec ไปใส่ CONFIG.gasUrl ในแอป
  * แก้โค้ดครั้งต่อไป: Deploy ▸ Manage deployments ▸ ✏️ ▸ New version (URL เดิม)
  */
-var VERSION = '2.3';
+var VERSION = '2.4';
 var DATA_SHEET_ID = '1dfC9rOa4_jsiINEMSn6MDYrgh-wWH7ZnoruRRjnz3f0'; // ชีต "พื้นที่รับผิดชอบ" (หลังบ้านแอปนี้)
 var REG_SHEET_ID = '1M6HdISsLN684qRWyQ73CA4AmUzmYtZaOlffDJXZZIXQ'; // ทะเบียนพนักงาน
 var CLIENT_ID = '615875645128-gasjjvkt6lu8g449cbnhl40k1pu25r0b.apps.googleusercontent.com';
@@ -425,13 +425,21 @@ function act_(a, b, u) {
     }
     case 'jobDrop': {
       var jd = jobRow_(b.id); if (jd.o.status !== 'taken' || jd.o.takerC !== String(u.c)) throw new Error('คืนได้เฉพาะงานที่คุณรับไว้');
-      jobSet_(jd.r, 11, ['open', '', '', '']); return {};
+      jobSet_(jd.r, 11, ['open', '', '', '']); jobSet_(jd.r, 15, ['', '', '', '']); return {};
+    }
+    // ขั้นที่ 1 หลังรับงาน: ส่งรูปก่อนทำ → สถานะยังเป็น taken แต่มีรูปก่อน = "กำลังทำ" (เก็บเวลาเริ่มไว้ช่องเวลาส่งชั่วคราว)
+    case 'jobStart': {
+      var jg = jobRow_(b.id); if (jg.o.status !== 'taken' || jg.o.takerC !== String(u.c)) throw new Error('เริ่มได้เฉพาะงานที่คุณรับไว้');
+      if (!b.before) throw new Error('ต้องมีรูปก่อนทำ');
+      jobSet_(jg.r, 15, [savePhoto_(b.before, jg.o.id + '_before')]); jobSet_(jg.r, 17, [Date.now(), distV_(b.dist)]);
+      return {};
     }
     case 'jobSubmit': {
       var js = jobRow_(b.id); if (js.o.status !== 'taken' || js.o.takerC !== String(u.c)) throw new Error('ส่งได้เฉพาะงานที่คุณรับไว้');
-      if (!b.before || !b.after) throw new Error('ต้องมีรูปก่อนทำและหลังทำ');
+      var bUrl = b.before ? savePhoto_(b.before, js.o.id + '_before') : js.o.before;
+      if (!bUrl || !b.after) throw new Error('ต้องมีรูปก่อนทำและหลังทำ');
       jobSet_(js.r, 11, ['submitted']);
-      jobSet_(js.r, 15, [savePhoto_(b.before, js.o.id + '_before'), savePhoto_(b.after, js.o.id + '_after'), Date.now(), distV_(b.dist)]);
+      jobSet_(js.r, 15, [bUrl, savePhoto_(b.after, js.o.id + '_after'), Date.now(), distV_(b.dist !== '' && b.dist != null ? b.dist : js.o.dist)]);
       if (clean_(b.note)) jobSet_(js.r, 21, [clean_(b.note)]);
       return {};
     }
