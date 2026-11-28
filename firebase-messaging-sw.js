@@ -34,7 +34,8 @@ const firebaseConfig = {
 //    urlFrag ใช้เทียบ client.url (เลือกโฟกัสแท็บที่เปิดอยู่ให้ตรงแอป) · msgType ใช้ postMessage บอกแอปที่เปิดอยู่
 const APPS = {
   rflow: { icon: 'r-flow-icon-192.png', urlFrag: 'r-flow', defaultLink: 'r-flow.html', msgType: 'rf-open' },
-  sales: { icon: 'rattana-sales-icon-192.png', urlFrag: 'rattana-sales-app', defaultLink: 'rattana-sales-app.html', msgType: 'sales-open' }
+  sales: { icon: 'rattana-sales-icon-192.png', urlFrag: 'rattana-sales-app', defaultLink: 'rattana-sales-app.html', msgType: 'sales-open' },
+  billfix: { icon: 'bill-fix-badge-192.png', urlFrag: 'rattana-bill-fix', defaultLink: 'rattana-bill-fix.html', msgType: 'bf-open' }
 };
 function appCfgFor(key) { return APPS[key] || APPS.rflow; }
 
