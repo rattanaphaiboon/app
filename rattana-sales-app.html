@@ -17,7 +17,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Rattana Sales — v8.786</title>
+<title>Rattana Sales — v8.787</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -7244,7 +7244,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 
     <div id="loginError" style="background:rgba(231,76,60,.15);border:1px solid #e74c3c;color:#ff8a7e;padding:10px;border-radius:8px;margin-top:4px;font-size:12px;display:none;text-align:left"></div>
   </div>
-  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.786 · 2026-11-28</div>
+  <div style="margin-top:18px;font-size:10px;opacity:.5;text-align:center">v8.787 · 2026-11-28</div>
 </div>
 
 <!-- ════════════════ APP SCREEN ════════════════ -->
@@ -7255,7 +7255,7 @@ body.dark .rt-shop .amt { color: #5ee0a8; }
 <header>
   <button class="icon-btn" onclick="openDrawer()" id="hamburgerBtn" title="เมนู">☰</button>
   <div class="logo-text">RATTANA <span>SALES</span></div>
-  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.786</span>
+  <span class="demo-tag" onclick="if(window._plDiag)_plDiag()" style="cursor:pointer" title="แตะดูสถานะจอสินค้า (เวลาค้าง/ว่าง)">v8.787</span>
   <button class="icon-btn" onclick="globalRefresh()" id="refreshBtn" title="อัพเดทสต็อกล่าสุด">🔄</button>
   <button class="icon-btn" onclick="toggleDark()" id="darkBtn">🌙</button>
   <div class="bell-wrap" id="bellWrap">
@@ -15306,6 +15306,9 @@ async function _reportStuckToBackend(force) {
         const t = new Date(String(o.date || '').replace(/\//g, '-') + 'T' + String(o.time || '00:00').replace('.', ':') + ':00').getTime();
         const ageMs = isNaN(t) ? OLD_MS + 1 : (now - t);
         if (ageMs < OLD_MS) return;
+        /* v8.787: รายงานหัวหน้าเฉพาะใบที่หลังบ้านยืนยันว่ายังไม่ลง (เคยรายงานตอนเปิดแอปก่อนรายการโหลด = เตือนผิด) */
+        const _vv = _swV[o.id];
+        if (!_vv || _vv.busy || _vv.landed !== false) { _swVerifyMany([o.id]); return; }
         const id = 'ORD:' + o.id;
         known[id] = 1; live[id] = 1;
         items.push({ itemId: id, smCode: SALESMAN.code || '', smName: SALESMAN.name || '', wh: SALESMAN.warehouseId || '',
@@ -50292,6 +50295,32 @@ function _swAll(){
   keys.forEach(k => { const r = _swGet(k.slice(11)); if (!r) return; if (r.ts && new Date(r.ts).getTime() < cutoff){ _swClear(r.orderId); return; } out.push(r); });   // purge >3 วัน
   return out;
 }
+/* v8.787 (Surat 28/11 "ทำไมชอบขึ้นหน้าแอปเซลว่า ออเดอร์ยังส่งไม่ไป"): ก่อนเด้งแถบแดง/รายงานหัวหน้า ถามหลังบ้านก่อนว่าลงจริงไหม
+   เหตุ: เซลกดส่งแล้วสลับแอป/ล็อกจอทันที → เครื่องไม่ทันติด "ลงแล้ว" · เปิดแอปรอบหน้า แถบแดงเด้ง+รายงานก่อนรายการออเดอร์โหลดเสร็จ
+   (28/11 ORD0613575 · ORD3509408 ลงชีทภายใน 1 วิ แต่เครื่องรายงานว่าไม่ลงอีก 1–2.5 ชม.)
+   verifyOrder = ถาม Supabase (ไม่เข้าคิว · < 1 วิ) · ลงแล้ว = ปิดเงียบ · ยังไม่ลง/ถามไม่ได้ = เตือนตามเดิม */
+const _swV = {};   // orderId → { at, landed: true/false/null }
+function _swVerifyMany(ids) {
+  (ids || []).forEach(function (id) {
+    const v = _swV[id];
+    if (v && (v.busy || Date.now() - v.at < 60000)) return;
+    const rec = _swGet(id), o = (submittedOrders || []).find(function (x) { return x && x.id === id; });
+    const expect = (rec && rec.rows && rec.rows.length) || (o && o.items && o.items.length) || 0;
+    if (!expect) { _swV[id] = { at: Date.now(), landed: null }; return; }
+    _swV[id] = { at: Date.now(), landed: v ? v.landed : null, busy: true };
+    postToAppsScript({ action: 'verifyOrder', orderId: id, expectedCount: expect }, 1).then(function (r) {
+      const ok = !!(r && r.actualCount != null && Number(r.actualCount) >= expect);
+      _swV[id] = { at: Date.now(), landed: (r && r.actualCount != null) ? ok : null };
+      if (ok) {
+        if (o) { o.synced = true; o.isPushing = false; o._sheetConfirmed = true; }
+        _swClear(id);
+        try { _persistPendingOrders(); } catch (e) {}
+        try { if (typeof _injectSubmittedOrdersIntoSheetData === 'function') _injectSubmittedOrdersIntoSheetData(); } catch (e) {}
+      }
+      try { _renderSubmitWatch(); } catch (e) {}
+    }).catch(function () { _swV[id] = { at: Date.now(), landed: null }; try { _renderSubmitWatch(); } catch (e) {} });
+  });
+}
 // คืนใบเสร็จที่ "ยังไม่ครบ" — เทียบ lineId ที่ส่ง กับที่ลงจริงใน SHEET_DATA.orders
 function _swPending(){
   const out = [];
@@ -50317,7 +50346,10 @@ function _swPending(){
 // เด้งแบนเนอร์บนสุด (ทุกจอ) — เรียกจาก showScreen
 function _renderSubmitWatch(){
   let el = document.getElementById('submitWatch');
-  const pending = _swPending();
+  /* v8.787: โชว์เฉพาะใบที่หลังบ้านยืนยันว่ายังไม่ลง (หรือถามไม่ได้) · ใบที่ยังไม่ได้ถาม → ถามก่อน ยังไม่เด้ง */
+  const _pAll = _swPending();
+  _swVerifyMany(_pAll.filter(function (p) { const v = _swV[p.orderId]; return !v || (Date.now() - v.at >= 60000 && !v.busy); }).map(function (p) { return p.orderId; }));
+  const pending = _pAll.filter(function (p) { const v = _swV[p.orderId]; return v && !v.busy && v.landed !== true; });
   if (!pending.length) { if (el) el.remove(); return; }
   if (!el) { el = document.createElement('div'); el.id = 'submitWatch'; document.body.appendChild(el); }
   el.setAttribute('style', 'position:fixed;left:8px;right:8px;top:8px;z-index:99999;display:flex;flex-direction:column;gap:6px;max-width:520px;margin:0 auto');
